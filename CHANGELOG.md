@@ -2000,8 +2000,10 @@ user-visible change, added in the same commit as the change. The format follows
   `CommittedLog::poll(handler, fragment_limit)` hands over every committed entry, in
   order, each once, with its position; `position()` is where to open the log again,
   `commit_position()` the bound of the last read, and `is_ended()` says that the
-  member closed or left its log. The same call serves the leader's service and a
-  follower's, and a service may start before, with or after its member. The member's
+  member closed or left its log and that every entry below the last bound has been
+  delivered, so a service stops on it and not on a poll of 0. The same call serves
+  the leader's service and a follower's, and a service may start before, with or
+  after its member. The member's
   consensus module names its recording of the log in a new counter,
   `cluster.log_recording_id`, and a service takes a commit position as its bound only
   while that counter still names the recording it replays, so a record the driver gave

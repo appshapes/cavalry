@@ -71,8 +71,12 @@ its services read what it appends in the same way.
    calls it again after a pause. `log.poll(handler, fragment_limit)` hands each
    committed entry to the handler with its position and returns how many it read.
    `log.position()` is the next position, the one to keep for the next start.
-   `log.is_ended()` says that the member closed or left its log: when a poll then
-   returns 0, open the log again from `log.position()`.
+   `log.is_ended()` says that the member closed or left its log and that every
+   committed entry the service may read from this handle has been delivered. Stop
+   reading when `log.is_ended()` returns true, not when a poll returns 0. Then open the
+   log again from `log.position()`. A poll can return 0 while committed entries are
+   still on their way: the service reads only what the member's recorder has synced,
+   and the recorder syncs once a second.
 
 ## How to verify it worked
 
@@ -114,7 +118,8 @@ its services read what it appends in the same way.
   Each service holds one while it runs. Stop the services that are not needed.
 - `cluster-service: the member's log ended`: the member closed or left its log while
   the service read it. The service has read every committed entry up to the position
-  in the message. Start it again with `--from` that position once the member runs.
+  in the message: it read on after the member stopped, up to the last commit position
+  it had taken. Start it again with `--from` that position once the member runs.
   When the member's driver stopped with it, as `cavalry run` stops both, the program's
   last line is `client closed (driver-closed)` and it exits 1: the position in the
   line before it still holds.

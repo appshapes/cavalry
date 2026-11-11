@@ -633,11 +633,16 @@ type Read = Vec<(i64, Vec<u8>)>;
 /// Polls `log` once into `read`, and holds the poll to the service's rule: every entry
 /// it was given begins below the commit position the poll took as its bound.
 fn poll_log(log: &mut CommittedLog, read: &mut Read) -> usize {
+    poll_log_at_most(log, read, 64)
+}
+
+/// [`poll_log`] with a fragment limit of the caller's.
+fn poll_log_at_most(log: &mut CommittedLog, read: &mut Read, fragment_limit: usize) -> usize {
     let before = read.len();
     let delivered = log
         .poll(
             |entry, _, position| read.push((position, entry.to_vec())),
-            64,
+            fragment_limit,
         )
         .expect("the committed log polls");
     assert_eq!(delivered, read.len() - before);
@@ -894,6 +899,122 @@ fn a_service_reads_the_committed_log_on_every_member_and_nothing_past_the_commit
     for client in clients {
         client.close().expect("the client closes");
     }
+    for member in members {
+        member.module.close().expect("the member closes");
+        member.driver.close().expect("the driver closes");
+    }
+}
+
+/// Whether `counters` holds a counter of `type_id` whose key begins with `member_id`.
+fn has_member_counter(counters: &CountersReader, member_id: i32, type_id: i32) -> bool {
+    let key = member_id.to_le_bytes();
+    (0..counters.capacity()).any(|id| {
+        matches!(
+            counters.record(id),
+            Ok(Some(record)) if record.type_id() == type_id && record.key().starts_with(&key)
+        )
+    })
+}
+
+/// A service whose member's consensus module closes while entries below the bound the
+/// service took are still to be read (`spec/cluster.md`, "The service"). The handle
+/// stops taking the member's commit position at the first poll after the member's
+/// counters go, and it is not ended until it has delivered every entry below the bound
+/// it took: a service that stops reading once its handle is ended, as
+/// `Cavalry::committed_log`'s example and the how-to's step 4 do, has then read every
+/// entry its bound covered, and opens the log again at that bound. The same holds for a
+/// member that leaves the log, which stores −1 as its recording's id once the recording
+/// has stopped: the bound stops, and the replay plays on to the stop.
+#[test]
+fn a_service_is_ended_only_once_it_has_read_every_entry_below_its_bound() {
+    let dir = TestDir::new("service-ended");
+    let members_string = members_string();
+    let mut members = start(dir.path(), &members_string);
+    run_until(&mut members, "every election closed", |members| {
+        members
+            .iter()
+            .all(|m| m.module.election_state() == ElectionState::Closed)
+    });
+    let mut client = Cavalry::connect_to(&members[2].dir).expect("the service's client connects");
+    let mut opened = None;
+    run_until(&mut members, "the service opened its log", |_| {
+        if opened.is_none() {
+            opened = client.committed_log(0).expect("the driver answers");
+        }
+        opened.is_some()
+    });
+    let mut log = opened.expect("the member has its log");
+
+    // A thousand entries, committed and synced on every member, before the service
+    // reads any.
+    const ENTRIES: i64 = 1000;
+    offer_entries(&mut members, ENTRIES);
+    let end = 96 + ENTRIES * 96;
+    run_until(
+        &mut members,
+        "every member committed every entry",
+        |members| {
+            members
+                .iter()
+                .all(|m| m.module.commit_position() == end && m.module.append_position() == end)
+        },
+    );
+
+    // The service takes the member's commit position as its bound and reads at most
+    // one entry under it.
+    let mut read = Read::new();
+    let deadline = Instant::now() + Duration::from_secs(30);
+    while log.commit_position() < end {
+        assert!(
+            Instant::now() < deadline,
+            "the service took its bound: {log:?}"
+        );
+        poll_log_at_most(&mut log, &mut read, 1);
+    }
+    assert_eq!(log.commit_position(), end);
+    assert!(log.position() <= 96, "{log:?}");
+    assert!(!log.is_ended());
+
+    // The member's consensus module closes, and the driver frees its counters.
+    let Member {
+        driver,
+        module,
+        dir: driver_dir,
+        ..
+    } = members.remove(2);
+    module.close().expect("the member closes");
+    let counters = CountersReader::open(&driver_dir).expect("the counters file opens");
+    let deadline = Instant::now() + Duration::from_secs(30);
+    while has_member_counter(&counters, 2, CLUSTER_COMMIT_POSITION.0) {
+        assert!(Instant::now() < deadline, "the member's counters went");
+        std::thread::sleep(Duration::from_millis(1));
+    }
+
+    // The next poll finds the counter gone and keeps the bound it took. The handle
+    // ends only once it has delivered every entry below that bound, and delivers
+    // nothing after.
+    let deadline = Instant::now() + Duration::from_secs(30);
+    while !log.is_ended() {
+        assert!(
+            Instant::now() < deadline,
+            "the service's log ended: {log:?}"
+        );
+        poll_log(&mut log, &mut read);
+    }
+    assert_eq!(
+        (log.position(), log.commit_position()),
+        (end, end),
+        "an ended handle has delivered every entry below its bound"
+    );
+    assert_eq!(poll_log(&mut log, &mut read), 0);
+    assert_eq!(read.len(), usize::try_from(ENTRIES).expect("a count") + 1);
+    for (index, (position, _)) in read.iter().enumerate() {
+        assert_eq!(*position, 96 * i64::try_from(index).expect("an index"));
+    }
+    log.close(&mut client).expect("the log closes");
+    client.close().expect("the client closes");
+    driver.close().expect("the driver closes");
+
     for member in members {
         member.module.close().expect("the member closes");
         member.driver.close().expect("the driver closes");

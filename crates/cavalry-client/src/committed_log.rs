@@ -155,9 +155,11 @@ impl Bound {
 /// `cluster.log_recording_id` is still this recording's id, and from the first check
 /// that fails it reads the counter no more and keeps the highest position it took. A
 /// record the driver has given to another counter, or to a later member, is never a
-/// bound. From then on, and once the recording has stopped, the handle
-/// [is ended](Self::is_ended): it delivers what is left below its bound and nothing
-/// after it, and the service opens the log again from [`position`](Self::position).
+/// bound. From then on the handle delivers what is left below its bound, as the replay
+/// plays it, and nothing after it. Once it has delivered all of that, or all the replay
+/// played up to the recording's stop when that is lower, the handle
+/// [is ended](Self::is_ended), and the service opens the log again from
+/// [`position`](Self::position).
 pub struct CommittedLog {
     subscription: Subscription,
     replay: Replay,
@@ -289,14 +291,42 @@ impl CommittedLog {
         self.bound.commit_position
     }
 
-    /// Whether this handle has come to its end: the member no longer names the
-    /// recording it replays or the member's counters are gone, as the last poll found;
-    /// the recording stopped and the replay ended with it; or the replay's image
-    /// failed a check. An ended handle delivers what is left below
-    /// [`commit_position`](Self::commit_position) and then nothing: once a poll
-    /// returns 0, open the log again from [`position`](Self::position).
+    /// Whether this handle has come to its end: no poll will deliver another entry.
+    /// That is so once the polls have read the replay's image to
+    /// [`commit_position`](Self::commit_position) after the member stopped naming the
+    /// recording this handle replays, or its counters went; once the replay has ended,
+    /// its recording stopped, and the image has been read to where the replay ended; or
+    /// once the replay's image failed a check. An ended handle has delivered every entry
+    /// below the bound it took, or below the recording's stop when that is lower: open
+    /// the log again from [`position`](Self::position) when the member names a
+    /// recording again.
+    ///
+    /// Until then a poll that returns 0 says only that nothing below the bound has
+    /// arrived yet. A replay plays no further than what the member's recorder has
+    /// synced, once a second, and a follower's commit position comes from its leader,
+    /// so the bound may be ahead of the replay by a second's entries; and when the
+    /// member leaves the log or closes, the replay plays on to the recording's stop.
+    ///
+    /// The image's position is the one compared, not [`position`](Self::position): a
+    /// padding frame at a term's end moves it and is handed to no handler. A call
+    /// scans at most the subscription's images for this replay's.
     pub fn is_ended(&self) -> bool {
-        self.bound.lost || self.faulted || self.replay.ended().is_some()
+        if self.faulted {
+            return true;
+        }
+        let image = self
+            .subscription
+            .images()
+            .iter()
+            .find(|image| image.session_id() == self.session_id);
+        if self.positions.is_some() && image.is_none() {
+            // The image joined and has gone: the replay ended and its image was read to
+            // the end or lingered out, and nothing more arrives through it.
+            return true;
+        }
+        let read = image.map_or(self.position, Image::position);
+        (self.bound.lost && read >= self.bound.commit_position)
+            || self.replay.ended().is_some_and(|(end, _)| read >= end)
     }
 
     /// Where the driver's replay of the member's recording failed, when it did: a
@@ -307,7 +337,9 @@ impl CommittedLog {
     /// ends so at once, at that position, with nothing delivered, since the bytes
     /// there are no frame; a log that read entries before it failed is a recording
     /// whose files are damaged, which `cavalry doctor` names. Either way no entry past
-    /// the position is delivered, and none is skipped.
+    /// the position is delivered, and none is skipped. The entries below it may still
+    /// be on their way when this first says so: read it once
+    /// [`is_ended`](Self::is_ended) does, when they have all been delivered.
     pub fn failed_at(&self) -> Option<i64> {
         match self.replay.ended() {
             Some((position, Some(ReplayStopReason::Failed))) => Some(position),

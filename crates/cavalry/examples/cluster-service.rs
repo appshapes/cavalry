@@ -144,7 +144,10 @@ fn run(args: &Args) -> Result<(), Box<dyn std::error::Error>> {
         if args.entries.is_some_and(|wanted| read >= wanted) {
             break;
         }
-        if entries == 0 {
+        // Ended, and not merely a poll of 0: a poll returns 0 while entries below the
+        // bound are still on their way from the replay, and the handle is ended only
+        // once every one of them has been delivered.
+        if log.is_ended() {
             if let Some(position) = log.failed_at() {
                 // The driver could not play the member's recording on from here.
                 return Err(format!(
@@ -158,15 +161,15 @@ fn run(args: &Args) -> Result<(), Box<dyn std::error::Error>> {
                 )
                 .into());
             }
-            if log.is_ended() {
-                // The member left its log or closed: nothing more comes from this
-                // handle. What was read stays read; the next run starts here.
-                eprintln!(
-                    "cluster-service: the member's log ended; read to position {}",
-                    log.position()
-                );
-                break;
-            }
+            // The member left its log or closed, and every entry below the last commit
+            // position the handle took has been read: the next run starts here.
+            eprintln!(
+                "cluster-service: the member's log ended; read to position {}",
+                log.position()
+            );
+            break;
+        }
+        if entries == 0 {
             std::thread::sleep(Duration::from_millis(1));
         }
     }

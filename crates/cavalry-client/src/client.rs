@@ -1096,6 +1096,12 @@ impl Cavalry {
     /// reads no more of that member's log (`spec/cluster.md`, "The service" and "Out
     /// of this version").
     ///
+    /// A service reads a handle until [`CommittedLog::is_ended`] says that no poll will
+    /// deliver another entry, and not until a poll returns 0: when its member closes or
+    /// leaves the log, entries below the bound the handle took may still be on their
+    /// way from the replay, and a service that stopped short of them would start again
+    /// at a position the member's next recording does not hold.
+    ///
     /// ```
     /// use cavalry_client::{Cavalry, CommittedLog};
     ///
@@ -1117,13 +1123,15 @@ impl Cavalry {
     ///             },
     ///             64,
     ///         )?;
+    ///         if log.is_ended() {
+    ///             // The member closed or left its log, and every entry below the last
+    ///             // commit position the handle took has been delivered.
+    ///             let next = log.position();
+    ///             log.close(client)?;
+    ///             return Ok(next);
+    ///         }
     ///         if entries == 0 {
-    ///             if log.is_ended() {
-    ///                 // The member closed or left its log: what was read stays read.
-    ///                 let next = log.position();
-    ///                 log.close(client)?;
-    ///                 return Ok(next);
-    ///             }
+    ///             // Nothing below the bound has arrived yet.
     ///             std::thread::yield_now();
     ///         }
     ///     }
