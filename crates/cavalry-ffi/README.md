@@ -13,7 +13,11 @@ The `extern "C"` ABI and its cbindgen header. Data plane, and the other crate wh
   log of the member on the client's driver, `cavalry_committed_log_poll` hands the
   fragment handler the entries a quorum has committed and none past the commit
   position, and `cavalry_committed_log_entry_position` gives the handler each entry's
-  position in the log (`spec/cluster.md`, "The service"; ADR 0070).
+  position in the log. Once `cavalry_committed_log_is_ended` returns `true`,
+  `cavalry_committed_log_failed_at` and `cavalry_committed_log_withdrawn_at` say
+  whether the handle ended short of what it was owed, and where: a service is never
+  left to take a short end for a whole one (`spec/cluster.md`, "The service"; ADR
+  0070).
 - Carries every non-Rust client's messages: a claim, a commit, an offer and a poll
   cross this boundary per message, which is why it is on the data plane.
 - Is the one surface frozen between releases. Rust-to-Rust integration goes through

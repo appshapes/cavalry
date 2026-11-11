@@ -2089,8 +2089,11 @@ user-visible change, added in the same commit as the change. The format follows
   has committed, none past the commit position, and
   `cavalry_committed_log_entry_position(header)` gives the handler the entry's position
   in the log; `cavalry_committed_log_position` is where a service that has applied
-  every entry opens the log again. The Python, Node, Go, JVM and .NET packages are
-  regenerated from the version 2 header and refuse a version 1 library; each gets its
-  own committed log object in a later change
+  every entry opens the log again; and once `cavalry_committed_log_is_ended` is true,
+  `cavalry_committed_log_failed_at` and `cavalry_committed_log_withdrawn_at` say
+  whether the handle ended short of the entries it was owed, and where. The Python,
+  Node, Go, JVM and .NET packages are regenerated from the version 2 header and
+  refuse a version 1 library; each gets its own committed log object in a later
+  change
   ([ADR 0070](docs/decisions/0070-take-the-c-abi-to-version-2-with-the-committed-log.md);
   card 227).

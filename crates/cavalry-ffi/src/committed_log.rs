@@ -319,7 +319,11 @@ pub unsafe extern "C" fn cavalry_committed_log_commit_position(
     }
 }
 
-/// Whether the handle has come to its end.
+/// Whether the handle has come to its end: no poll will deliver another entry. What
+/// an ended handle has delivered is said by `cavalry_committed_log_failed_at` and
+/// `cavalry_committed_log_withdrawn_at`, read after this returns `true`: it has
+/// delivered every entry it was owed only when both return `false`. In every case
+/// what it delivered ends at `cavalry_committed_log_position`.
 ///
 /// # Safety
 ///
@@ -340,9 +344,11 @@ pub unsafe extern "C" fn cavalry_committed_log_is_ended(
 }
 
 /// Whether the driver's replay of the member's recording failed; when it did, the
-/// position after the last frame it played is written through `position`. A null
-/// `position` is refused as any null required pointer is, with `CAVALRY_ERR_NULL` and
-/// `false`.
+/// position after the last frame it played is written through `position`, and no
+/// entry from that position on is delivered. The entries below it may still be on
+/// their way when this first returns `true`: read it once
+/// `cavalry_committed_log_is_ended` does. A null `position` is refused as any null
+/// required pointer is, with `CAVALRY_ERR_NULL` and `false`.
 ///
 /// # Safety
 ///
@@ -371,6 +377,52 @@ pub unsafe extern "C" fn cavalry_committed_log_failed_at(
         )
     };
     let Some(at) = failed else {
+        return false;
+    };
+    // SAFETY: `position` is non-null, checked above, and writable, by the caller's
+    // convention.
+    unsafe { *position = at };
+    true
+}
+
+/// Whether the driver withdrew the replay's image before the polls had read it to
+/// its end; when it did, the position at which the entries the handle was not given
+/// begin is written through `position`. The driver keeps a replay's image for the
+/// publication linger, 5 s, after the replay ends, and then withdraws it, read or
+/// not: a service that did not poll for that long after its member closed or left
+/// the log ends so. The entries from that position on were played and not
+/// delivered. A replay that failed is withdrawn so too, and both functions then
+/// return `true`, with this position the lower. Read it once
+/// `cavalry_committed_log_is_ended` returns `true`. A null `position` is refused as
+/// any null required pointer is, with `CAVALRY_ERR_NULL` and `false`.
+///
+/// # Safety
+///
+/// `log` is null or a live handle not in use by another call; `position` is null or
+/// writable.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn cavalry_committed_log_withdrawn_at(
+    log: *const cavalry_committed_log_t,
+    position: *mut i64,
+) -> bool {
+    if log.is_null() {
+        error::null("cavalry_committed_log_withdrawn_at", "log");
+        return false;
+    }
+    if position.is_null() {
+        error::null("cavalry_committed_log_withdrawn_at", "position");
+        return false;
+    }
+    // SAFETY: the caller's convention above.
+    let withdrawn = unsafe {
+        read(
+            "cavalry_committed_log_withdrawn_at",
+            log,
+            None,
+            CommittedLog::withdrawn_at,
+        )
+    };
+    let Some(at) = withdrawn else {
         return false;
     };
     // SAFETY: `position` is non-null, checked above, and writable, by the caller's

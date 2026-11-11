@@ -95,9 +95,14 @@ its services read what it appends in the same way.
    while the driver has no member with a log yet. `cavalry_committed_log_poll(log,
    handler, clientd, fragment_limit)` hands each committed entry to the fragment
    handler, and inside the handler `cavalry_committed_log_entry_position(header)` is
-   the entry's position. `cavalry_committed_log_position(log)` is the next position,
-   `cavalry_committed_log_is_ended(log)` says that the member closed or left its log,
-   and `cavalry_committed_log_close(log, client)` ends the read.
+   the entry's position. `cavalry_committed_log_position(log)` is the next position.
+   `cavalry_committed_log_is_ended(log)` says that no poll will deliver another
+   entry, and then `cavalry_committed_log_failed_at(log, &position)` and
+   `cavalry_committed_log_withdrawn_at(log, &position)` are `log.failed_at()` and
+   `log.withdrawn_at()` above: each returns `true` and writes the position when the
+   entries from it on were not delivered, and both return `false` when the member
+   closed or left its log and the handle delivered every committed entry it may
+   read. `cavalry_committed_log_close(log, client)` ends the read.
 
 ## How to verify it worked
 

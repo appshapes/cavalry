@@ -177,6 +177,7 @@ FUNCTIONS = [
     fn("int64_t", "cavalry_committed_log_commit_position", CLOG),
     fn("bool", "cavalry_committed_log_is_ended", CLOG),
     fn("bool", "cavalry_committed_log_failed_at", CLOG, ("int64_t *", "position")),
+    fn("bool", "cavalry_committed_log_withdrawn_at", CLOG, ("int64_t *", "position")),
     fn("int", "cavalry_committed_log_constants", CLOG,
        ("cavalry_committed_log_constants_t *", "constants")),
     fn("int", "cavalry_committed_log_close", LOG, CLIENT),
