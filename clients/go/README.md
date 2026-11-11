@@ -73,9 +73,10 @@ and its `Err` when it gets them: nothing reports them later, and without them th
 end reads as a whole one. In every case what the log delivered ends at
 `log.Position()`.
 
-A committed log is polled through the trampoline a subscription is polled through, so
-an open log holds one slot of the table of 4,096 ("Threads"), which its `Close` frees,
-and `Registered` counts it. A handler's panic goes where a subscription's goes ("The
+A committed log is found by its poll's call-back as a subscription is, by its slot in
+the table, so an open log holds one slot of the table of 4,096 ("Threads"), which its
+`Close` frees, and `Registered` counts it; its trampoline is its own ("The call-back,
+by construction"). A handler's panic goes where a subscription's goes ("The
 panic"): every entry the ABI delivers reaches the handler, and `Poll` returns a
 `*HandlerError` once the ABI has returned, with the poll's count as its `Fragments`,
 the −1 of a fault included. An entry whose handler call panicked was delivered and is
@@ -125,18 +126,20 @@ entry, and the service decides after each.
   error"). `just lint` fails a function that reads the error without the lock.
 - Never lose a handle the ABI keeps open. Every close frees its handle, whatever it
   returns, so `Close` forgets the handle once the ABI's close has returned. The one
-  exception is a subscription's close from inside a handler of its own poll, which the
-  ABI refuses with `ErrPolling`, leaving the subscription open (`spec/c-abi.md`,
-  "Calls during a claim or a poll"). `Close` then returns the `*Error` and keeps the
-  handle, so the subscription can be polled and closed after the poll. A `Client`'s
-  `Close` does not close the handles it made: each `Publication`, `Subscription`,
-  `Recording` and `Replay` is freed by its own `Close` and by nothing else, and a
-  publication or a subscription answers as closed from the client's close until then
-  (`spec/c-abi.md`, "Lifetimes"). An unclosed `Subscription` also keeps its slot in
-  the table ("Threads"), so a program that closes only its clients fills the table
-  and `AddSubscription` returns `ErrSubscriptionsFull`. The close zeroes the claim struct too, so `Commit`, `Abort` and `SetReservedValue` after it answer -1 with
-  `ErrNoClaim` in `Err` and the ABI reads no freed handle through the struct's
-  `publication` (`spec/c-abi.md`, "Which claim a struct names").
+  exception is the close of a subscription or of a committed log from inside a handler
+  of its own poll, which the ABI refuses with `ErrPolling`, leaving it open
+  (`spec/c-abi.md`, "Calls during a claim or a poll"). `Close` then returns the
+  `*Error` and keeps the handle, so the subscription or the log can be polled and
+  closed after the poll. A `Client`'s `Close` does not close the handles it made: each
+  `Publication`, `Subscription`, `Recording`, `Replay` and `CommittedLog` is freed by
+  its own `Close` and by nothing else, and a publication or a subscription answers as
+  closed from the client's close until then (`spec/c-abi.md`, "Lifetimes"). An
+  unclosed `Subscription` or `CommittedLog` also keeps its slot in the table
+  ("Threads"), so a program that closes only its clients fills the table, and
+  `AddSubscription` and `CommittedLog` return `ErrSubscriptionsFull`. A publication's
+  close zeroes the claim struct too, so `Commit`, `Abort` and `SetReservedValue`
+  after it answer -1 with `ErrNoClaim` in `Err` and the ABI reads no freed handle
+  through the struct's `publication` (`spec/c-abi.md`, "Which claim a struct names").
 - Never read a refusal as an answer. A `Poll` from inside a handler of the same
   subscription returns −1 with `ErrPolling` in `Err`, and the poll in progress goes
   on. A committed log's handler is held to the same rule. From inside it, a `Poll` of
@@ -315,10 +318,13 @@ Go's stack copier ends the process on a value below 4,096 in a pointer's place. 
 makes the body's `[]byte` over the log's bytes with `unsafe.Slice`, no copy and no
 allocation, points the subscription's one `Header` at the frame, and calls the
 handler inside a function that recovers a panic ("The panic"). By construction, no
-object per received message. For a committed log's entry the Go trampoline makes one
-cgo call more before the handler: `cavalry_committed_log_entry_position` on the
-header, for the position it hands the handler. That call is not through `shim.c`, and
-it allocates nothing.
+object per received message. A committed log's poll has a C trampoline of its own in
+`shim.c`. It reads the entry's position from the header with
+`cavalry_committed_log_entry_position`, a C call inside the ABI's call-back, and
+calls the exported Go function `cavalryGoEntry` with it, so an entry crosses into Go
+once, as a fragment does, and the Go side makes no cgo call for the position. Until
+card 260 the Go trampoline made that call itself, one cgo call more for each entry,
+at what "The call" says one costs.
 
 Each call-back crosses the boundary twice more, in Go's runtime (`cgocallbackg` in
 `runtime/cgocall.go`). The runtime first holds the goroutine to the polling thread
@@ -328,9 +334,9 @@ goroutine's P, the runtime's processor, which Go code needs in order to run and 
 the poll's cgo call gave up in `entersyscall`. After the handler, `reentersyscall`
 gives the P up again for the rest of the poll. A poll of n fragments is therefore one
 `entersyscall` and `exitsyscall` pair for the call and n more for the call-backs. A
-committed log's poll of n entries has n more again, for the position's call inside
-each call-back. The client's own `runtime.LockOSThread` ("The thread's error") is on
-none of them.
+committed log's poll of n entries is the same: the position is read in C, inside the
+call-back, and crosses nothing. The client's own `runtime.LockOSThread` ("The
+thread's error") is on none of them.
 
 `exitsyscall` has a fast path and a slow one (`runtime/proc.go`):
 

@@ -46,6 +46,18 @@ public sealed unsafe class CommittedLog : IDisposable
         }
         catch
         {
+            // The log is open and no object will hold it: it is closed here, as the Go
+            // client closes one it cannot return. The exception already holds the
+            // constants' error, read before this close set the thread's own, and it is
+            // the one to report whatever the close does.
+            try
+            {
+                client.CloseCommittedLog(handle);
+            }
+            catch
+            {
+            }
+            this.handle = 0;
             self.Free();
             throw;
         }

@@ -6,12 +6,14 @@
 //     CommittedLog <the member's driver directory> <the member's id>
 //
 // A cluster started with `cavalry run` holds one entry, the first of its leader's term, 56
-// bytes in a frame of 88 at position 0, so the log's next position is 96. The round reads
-// that entry through the handler, with its position, its header and the handle's reads;
-// makes each call the ABI refuses from inside the log's own handler, each after it has set
-// the thread's error to another code, so that a refusal that answers what a live log
-// answers is told from an answer; checks where a handler's exception goes and that its
-// entry is not delivered again; opens the log again at 96, where nothing is committed yet,
+// bytes in a frame of 88 at position 0, so the log's next position is 96. The round opens
+// twenty logs and closes each with no poll between, which leaves its client open (ADR
+// 0078); reads that entry through the handler, with its position, its header and the
+// handle's reads; makes each of the eight calls the ABI refuses from inside the log's own
+// handler, each after it has set the thread's error to another code, so that a refusal
+// that answers what a live log answers is told from an answer; checks where a handler's
+// exception goes and that its entry is not delivered again; opens the log again at 96,
+// where nothing is committed yet,
 // beside a log at 0 that it reads the entry through meanwhile, so that the log at 96 has
 // had the time a replay's image takes to join; closes twice; and closes a log after its
 // client. Every wait is bounded at 30 s and sleeps a millisecond after a poll that
@@ -93,30 +95,22 @@ public static class CommittedLogRound
         // A closed log, for the refusals below: its Position() hands the ABI a null handle,
         // which answers -1 with ERR_NULL. The package's bindings of the ABI are internal, so
         // the round cannot ask for the position of a null header: this is its call that sets
-        // the thread's error to another code. The log reads its entry before it is closed,
-        // as every log of this round does: a log closed at once after its open, before its
-        // replay's image had joined, closed its client as corrupt in 8 of 60 tries on the
-        // laptop, which is not this round's check.
+        // the thread's error to another code. It is closed with no poll between, and so are
+        // nineteen more: a log's replay's image may not have joined when it closes, and the
+        // client's conductor then reads of an image whose log is gone. The client stays open
+        // (ADR 0078; before it, card 241, this closed the client as corrupt in 8 of 60
+        // tries), which the rest of the round shows.
         CommittedLog spent = OpenLog(client, 0);
-        int spentEntries = 0;
-        long until = Deadline();
-        while (spentEntries == 0)
-        {
-            int count = spent.Poll((body, header, position) => spentEntries++, 16);
-            if (count < 0)
-            {
-                Fail($"the first log's poll stopped on fault {spent.GetFault()}");
-            }
-            if (Stopwatch.GetTimestamp() > until)
-            {
-                Fail($"the first log read no entry within {WAIT_SECONDS} s");
-            }
-            if (count == 0)
-            {
-                Thread.Sleep(IDLE_MILLISECONDS);
-            }
-        }
         spent.Close();
+        for (int i = 0; i < 19; i++)
+        {
+            OpenLog(client, 0).Close();
+        }
+        if (client.IsClosed())
+        {
+            Fail($"a log opened and closed with no poll between closed its client: {client.Closed()}");
+        }
+        Say("twenty logs opened and closed with no poll between left the client open");
         CommittedLog log = OpenLog(client, 0);
         if (log.MemberId != memberId || log.RecordingId != 0)
         {
@@ -168,6 +162,16 @@ public static class CommittedLogRound
             setAnotherError();
             try
             {
+                log.GetFault();
+                refusals.Add($"GetFault 0 {Abi.Errcode()}");
+            }
+            catch (CavalryException error)
+            {
+                refusals.Add($"GetFault -1 {error.Code}");
+            }
+            setAnotherError();
+            try
+            {
                 log.Close();
                 refusals.Add($"Close 0 {Abi.Errcode()}");
             }
@@ -176,7 +180,7 @@ public static class CommittedLogRound
                 refusals.Add($"Close -1 {error.Code}");
             }
         };
-        until = Deadline();
+        long until = Deadline();
         while (entries.Count == 0)
         {
             int count = log.Poll(onEntry, 16);
@@ -206,7 +210,8 @@ public static class CommittedLogRound
         string[] expected =
         {
             $"Poll -1 {polling}", $"Position -1 {polling}", $"CommitPosition -1 {polling}", $"IsEnded False {polling}",
-            $"FailedAt null {polling}", $"WithdrawnAt null {polling}", $"Close -1 {polling}",
+            $"FailedAt null {polling}", $"WithdrawnAt null {polling}", $"GetFault -1 {polling}",
+            $"Close -1 {polling}",
         };
         if (string.Join("; ", refusals) != string.Join("; ", expected))
         {
@@ -236,7 +241,7 @@ public static class CommittedLogRound
             Fail("the refused poll, or a later one, delivered more: " + string.Join("; ", entries));
         }
         Say($"member {log.MemberId}'s entry at position 0 read once, next position {log.Position()}, commit position " +
-            $"{log.CommitPosition()}; seven calls from inside the handler refused with ERR_POLLING, each made " +
+            $"{log.CommitPosition()}; eight calls from inside the handler refused with ERR_POLLING, each made " +
             "with the thread's error at ERR_NULL");
         log.Close();
         log.Close(); // idempotent

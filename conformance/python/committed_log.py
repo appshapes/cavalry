@@ -8,10 +8,12 @@
 A cluster started with `cavalry run` holds one entry, the first of its leader's term, 56
 bytes in a frame of 88 at position 0, so the log's next position is 96. The round reads
 that entry through the handler, with its position, its header and the handle's reads;
-makes each call the ABI refuses from inside the log's own handler, each after it has set
-the thread's error to another code, so that a refusal that answers what a live log
-answers is told from an answer; checks where a handler's exception goes and that its
-entry is not delivered again; opens the log again at 96, where nothing is committed yet,
+makes each of the eight calls the ABI refuses from inside the log's own handler, each
+after it has set the thread's error to another code, so that a refusal that answers what
+a live log answers is told from an answer; opens a log and closes it with no poll
+between, which leaves its client open (ADR 0078); checks where a handler's exception
+goes and that its entry is not delivered again; opens the log again at 96, where nothing
+is committed yet,
 beside a log at 0 that it reads the entry through meanwhile, so that the log at 96 has
 had the time a replay's image takes to join; closes twice; and closes a log after its
 client. Every wait is bounded at 30 s and sleeps a millisecond after a poll that
@@ -100,12 +102,13 @@ def main():
                            ("failed_at", log.failed_at), ("withdrawn_at", log.withdrawn_at)):
             set_another_error()
             refusals.append((name, call(), abi.cavalry_errcode()))
-        set_another_error()
-        try:
-            log.close()
-            refusals.append(("close", 0, abi.cavalry_errcode()))
-        except cavalry.CavalryError as error:
-            refusals.append(("close", -1, error.code))
+        for name, call in (("fault", log.fault), ("close", log.close)):
+            set_another_error()
+            try:
+                call()
+                refusals.append((name, 0, abi.cavalry_errcode()))
+            except cavalry.CavalryError as error:
+                refusals.append((name, -1, error.code))
 
     poll_until(log, on_entry, lambda: entries, "the term's first entry")
     if entries != [(0, ENTRY_FRAME - 32, ENTRY_FRAME, _abi.CAVALRY_FLAGS_UNFRAGMENTED, _abi.CAVALRY_FRAME_TYPE_DATA)]:
@@ -116,7 +119,7 @@ def main():
     polling = _abi.CAVALRY_ERR_POLLING
     expected = [("poll", -1, polling), ("position", -1, polling), ("commit_position", -1, polling),
                 ("is_ended", False, polling), ("failed_at", None, polling), ("withdrawn_at", None, polling),
-                ("close", -1, polling)]
+                ("fault", -1, polling), ("close", -1, polling)]
     if refusals != expected:
         fail(f"the calls from inside the log's own handler answered {refusals}, not {expected}")
     if (log.position(), log.commit_position()) != (NEXT, NEXT):
@@ -131,10 +134,19 @@ def main():
     if len(entries) != 1:
         fail(f"the refused poll, or a later one, delivered more: {entries}")
     print(f"conformance/python: committed log: member {log.member_id}'s entry at position 0 read once, next "
-          f"position {log.position()}, commit position {log.commit_position()}; seven calls from inside the handler "
+          f"position {log.position()}, commit position {log.commit_position()}; eight calls from inside the handler "
           f"refused with CAVALRY_ERR_POLLING, each made with the thread's error at CAVALRY_ERR_NULL")
     log.close()
     log.close()  # idempotent
+
+    # A log opened and closed with no poll between: its replay's image may not have joined
+    # yet, and the client's conductor then reads of an image whose log is gone. The client
+    # stays open (ADR 0078; before it, card 241, this closed the client as corrupt in 8 of
+    # 60 tries), which twenty in a row and a log opened after them show.
+    for _ in range(20):
+        open_log(client, 0).close()
+    if client.is_closed:
+        fail(f"a log opened and closed with no poll between closed its client: {client.closed()}")
 
     # A handler that raises: the entry was delivered, the exception is raised after the
     # ABI has returned, and the log's position is past the entry, so it is not delivered
@@ -210,8 +222,9 @@ def main():
     if rest.poll(on_entry, 16) != -1 or rest.fault()[0] != _abi.CAVALRY_ERR_FAULT_CLOSED:
         fail(f"a poll after the client's close did not stop on the closed fault: {rest.fault()}")
     rest.close()
-    print(f"conformance/python: committed log: a raising handler's entry is not delivered again; nothing at "
-          f"position {NEXT} while a log at 0 beside it read the entry at 0; a log closed after its client")
+    print(f"conformance/python: committed log: twenty logs opened and closed with no poll between left the "
+          f"client open; a raising handler's entry is not delivered again; nothing at position {NEXT} while a "
+          f"log at 0 beside it read the entry at 0; a log closed after its client")
     return 0
 
 

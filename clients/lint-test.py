@@ -603,6 +603,21 @@ class Clients(unittest.TestCase):
         self.assertIn("trampoline.go", finding)
         self.assertIn("panics", finding)
 
+    def test_a_panic_in_the_go_entry_trampoline_fails(self):
+        self.edit_go("\ts.deliverEntry(body, int64(position))\n",
+                     "\tpanic(\"x\")\n\ts.deliverEntry(body, int64(position))\n", file=self.go_trampoline)
+        [finding] = lint.findings(self.tmp)
+        self.assertIn("cavalryGoEntry", finding)
+        self.assertIn("trampoline.go", finding)
+        self.assertIn("panics", finding)
+
+    def test_a_lock_in_the_go_shims_entry_trampoline_fails(self):
+        call = "  cavalryGoEntry((uintptr_t) clientd, (uint8_t *) buffer, length, (cavalry_header_t *) header,\n"
+        self.edit_go(call, "  pthread_mutex_lock(&lock);\n" + call, file=self.go_shim)
+        [finding] = lint.findings(self.tmp)
+        self.assertIn("cavalry_go_entry_trampoline", finding)
+        self.assertIn("pthread_mutex_*", finding)
+
     def test_a_lock_in_the_go_shim_fails(self):
         call = "  cavalryGoFragment((uintptr_t) clientd, (uint8_t *) buffer, length, (cavalry_header_t *) header);\n"
         self.edit_go(call, "  pthread_mutex_lock(&lock);\n" + call, file=self.go_shim)
