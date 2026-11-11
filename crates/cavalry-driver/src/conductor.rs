@@ -13022,6 +13022,102 @@ mod replay {
         assert_eq!(h.recorder.live_recordings(), 0);
         drop(appender);
     }
+
+    /// A `sync recording` for a recording that the recorder gave up after a sync
+    /// failed is `operation success` with nothing done, and that success claims
+    /// nothing past the position last synced (invariant 1; ADR 0065, ADR 0069). Ten
+    /// frames are synced, 640 bytes, and ten more written and not synced, 1,280. The
+    /// recording is marked as a failed sync marks it, and the recorder's duty cycle
+    /// alone runs, so the recorder gives the recording up while the conductor still
+    /// holds it. A command taken then goes to the recorder, which no longer holds the
+    /// recording; one taken once the conductor has read the stop is answered at once.
+    /// Both are `operation success`, both come after `recording stopped` at 640, and
+    /// the synced position stays 640 with 1,280 written: a client that acknowledges
+    /// up to `synced_position` after `Ok`, as `Recording::sync` says, acknowledges
+    /// nothing a sync did not cover, and one that reads the events in order has the
+    /// stop before the answer.
+    #[test]
+    fn a_sync_recording_after_a_failed_sync_gave_the_recording_up_is_success_after_its_stop() {
+        let (mut h, mut appender) = recorded("sync-recording-after-giving-up");
+        offer(&mut h, &mut appender, 0, 10);
+        sync(&mut h);
+        let position = h.conductor.recordings[0]
+            .position
+            .clone()
+            .expect("attached");
+        let synced = h.conductor.recordings[0].synced.clone().expect("attached");
+        assert_eq!(synced.load_acquire(), 640, "ten frames synced");
+        offer(&mut h, &mut appender, 10, 10);
+        for _ in 0..20 {
+            h.cycle();
+        }
+        assert_eq!(position.load_acquire(), 1280, "written");
+        assert_eq!(synced.load_acquire(), 640, "not synced");
+        let _ = events(&mut h);
+
+        // The recorder alone runs: it gives the recording up, and the conductor has
+        // not read its reply.
+        h.recorder.fail_sync(0);
+        h.now += MS;
+        h.recorder.duty_cycle(h.now);
+        assert_eq!(h.recorder.live_recordings(), 0, "given up");
+        assert_eq!(
+            h.conductor.recordings.len(),
+            1,
+            "the conductor holds it still"
+        );
+
+        // Taken while the conductor holds the recording: handed to the recorder.
+        h.conductor.sync_recording(70, 0);
+        assert_eq!(
+            h.conductor.recorder.requests.len(),
+            1,
+            "handed to the recorder"
+        );
+        h.cycle();
+        assert!(
+            h.conductor.recordings.is_empty(),
+            "the conductor read the stop"
+        );
+
+        // Taken once the conductor has read the stop: answered at once.
+        h.conductor.sync_recording(71, 0);
+        assert_eq!(
+            h.conductor.recorder.requests.len(),
+            0,
+            "nothing handed over"
+        );
+
+        let events = events(&mut h);
+        let order: Vec<String> = events
+            .iter()
+            .filter_map(|(type_id, message)| match Event::parse(*type_id, message) {
+                Ok(Event::RecordingStopped {
+                    recording_id,
+                    stop_position,
+                }) => Some(format!(
+                    "recording {recording_id} stopped at {stop_position}"
+                )),
+                Ok(Event::OperationSuccess { correlation_id }) => {
+                    Some(format!("success {correlation_id}"))
+                }
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            order,
+            ["recording 0 stopped at 640", "success 70", "success 71"],
+            "the stop at the position last synced, then the two answers"
+        );
+        assert_eq!(errors(&events), Vec::new());
+        assert_eq!(synced.load_acquire(), 640, "no sync was made");
+        assert_eq!(position.load_acquire(), 1280);
+        assert_eq!(
+            h.counter(cavalry_shm::counters::generated::RECORDING_WRITE_FAILED),
+            1
+        );
+        drop(appender);
+    }
 }
 
 #[cfg(test)]
