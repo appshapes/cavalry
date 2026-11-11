@@ -63,6 +63,9 @@ struct Client {
     producer: Producer,
     receiver: Receiver,
     buffer: Vec<u8>,
+    /// How long the client waits for the answer to an add, for an image and for an
+    /// error: 5 s, which a test that asks a driver for thousands of them raises.
+    patience: Duration,
 }
 
 impl Client {
@@ -77,6 +80,7 @@ impl Client {
             producer,
             receiver,
             buffer: vec![0u8; 8192],
+            patience: Duration::from_secs(5),
         }
     }
 
@@ -145,7 +149,7 @@ impl Client {
             }
         };
         self.send(&command);
-        self.wait(Duration::from_secs(5), |event| match *event {
+        self.wait(self.patience, |event| match *event {
             Event::PublicationReady {
                 correlation_id: id,
                 registration_id,
@@ -180,7 +184,7 @@ impl Client {
             stream_id,
             channel: IPC_CHANNEL,
         });
-        self.wait(Duration::from_secs(5), |event| match *event {
+        self.wait(self.patience, |event| match *event {
             Event::SubscriptionReady {
                 correlation_id: id, ..
             } if id == correlation_id => Some(id),
@@ -189,7 +193,7 @@ impl Client {
     }
 
     fn wait_error(&mut self, correlation_id: i64) -> (i32, String) {
-        self.wait(Duration::from_secs(5), |event| match *event {
+        self.wait(self.patience, |event| match *event {
             Event::Error {
                 offending_correlation_id,
                 error_code,
@@ -1137,7 +1141,7 @@ fn poison_counter(dir: &Path, counter_id: i32, value: i64) {
 }
 
 fn wait_image(client: &mut Client, subscription_id: i64) -> (i64, i32) {
-    client.wait(Duration::from_secs(5), |event| match *event {
+    client.wait(client.patience, |event| match *event {
         Event::AvailableImage {
             correlation_id,
             subscriber_registration_id,
@@ -1403,6 +1407,13 @@ fn the_image_registry_is_bounded_and_says_so() {
     let dir = TestDir::new("images");
     let driver = Driver::start(dir.path(), dir.path().join("log")).expect("starts");
     let mut client = Client::attach(dir.path());
+    // This test waits for 2,146 answers and events, one after another, beside the 26
+    // other tests of this file and their drivers. On the CI's Linux runner it has
+    // finished 12 s, 36 s and 52 s after the file's tests began, in three runs of one
+    // day that passed, and in two runs one of its waits passed 5 s and failed it with
+    // "no event within 5s". What it tests is the registry's bound and its error, not
+    // how soon a driver answers on a loaded runner, so each of its waits has 30 s.
+    client.patience = Duration::from_secs(30);
     // 64 exclusive publications times 32 subscriptions: 2048 images, the capacity.
     let publications = 64;
     let subscriptions = spec::MAX_IMAGES / publications;
