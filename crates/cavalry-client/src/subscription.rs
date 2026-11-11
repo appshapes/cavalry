@@ -10,7 +10,7 @@
 use std::fmt;
 use std::sync::Arc;
 
-use cavalry_proto::client_protocol::Command;
+use cavalry_proto::client_protocol::{Command, NULL_POSITION};
 use cavalry_proto::frame::DataFrameHeader;
 use cavalry_shm::command_ring::Producer;
 use cavalry_shm::counters::Counter;
@@ -45,6 +45,9 @@ pub(crate) enum ImageEvent {
     },
     /// `unavailable image`, by the image's correlation id.
     Unavailable { correlation_id: i64 },
+    /// `available image` for an image whose log or position counter was gone when the
+    /// conductor read the event (ADR 0078): nothing to map, and a fault to report.
+    Gone { session_id: i32 },
 }
 
 /// A mapping the subscription no longer reads, for the conductor to drop.
@@ -70,10 +73,19 @@ pub enum Fault {
     /// A frame of the image failed a check of `spec/frame.md`, or the join position was
     /// outside the log: nothing from it on is delivered, and the image is retired. A
     /// stream that cannot be read is not guessed at (invariant 1).
+    ///
+    /// With the reason [`Fault::GONE`] the image was never read: the driver had removed
+    /// its log, or freed its position counter, before this client's conductor read the
+    /// image's announcement. The driver keeps both for the counter reuse timeout, 1 s,
+    /// after the announcement, so the conductor was more than that behind
+    /// (`spec/client-protocol.md`, "Events"; ADR 0078). Frames its publisher published
+    /// after the join, if any, were not delivered to this subscription, and this fault
+    /// is their report. The subscription and its client go on.
     Image {
         /// The image's session id.
         session_id: i32,
-        /// The reader's position when the check failed.
+        /// The reader's position when the check failed; `NULL_POSITION`, −1, for an
+        /// image that was [`Fault::GONE`], which had no reader.
         position: i64,
         /// The check that failed, as the log page names it.
         reason: &'static str,
@@ -92,6 +104,11 @@ pub enum Fault {
 }
 
 impl Fault {
+    /// The reason of a [`Fault::Image`] for an image whose log or position counter was
+    /// gone when the conductor read its announcement (`spec/log-buffer.md`, "What a
+    /// reader rejects").
+    pub const GONE: &'static str = "gone";
+
     /// The fault's name: `image`, `images-full` or `closed`.
     pub const fn reason(&self) -> &'static str {
         match self {
@@ -107,6 +124,22 @@ impl fmt::Display for Fault {
         const DOC: &str = "docs/reference/log-buffer.md#reading";
         let reason = self.reason();
         match self {
+            Fault::Image {
+                session_id,
+                reason: Fault::GONE,
+                ..
+            } => write!(
+                f,
+                "poll stopped ({reason}): the image of session {session_id} was gone before \
+                 this client read its announcement: the driver had removed its log or freed \
+                 its position counter, so nothing from it is delivered, and frames published \
+                 after the join, if any, were missed; the subscription and the client go on. \
+                 The driver keeps both for the counter reuse timeout after it announces an \
+                 image, so this client's conductor read the announcement later than that: \
+                 look for what stopped this process, and if the stream was a replay, start \
+                 it again from the position you hold; see \
+                 docs/reference/client-protocol.md#liveness-and-timeouts"
+            ),
             Fault::Image {
                 session_id,
                 position,
@@ -479,6 +512,13 @@ impl Subscription {
                         let image = self.images.swap_remove(index);
                         self.retire(image);
                     }
+                }
+                ImageEvent::Gone { session_id } => {
+                    return Err(Fault::Image {
+                        session_id,
+                        position: NULL_POSITION,
+                        reason: Fault::GONE,
+                    });
                 }
             }
         }

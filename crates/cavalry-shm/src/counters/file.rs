@@ -439,6 +439,16 @@ impl CountersWriter {
         Counter::new(Arc::clone(&self.mapped), id)
     }
 
+    /// The metadata of counter `id`, as [`CountersReader::record`], with its refusals:
+    /// `None` when the record holds no counter. A client checks with it that the
+    /// record an event names is still the counter the event meant, by its type id and
+    /// its key, before it takes [`CountersWriter::counter`]: the driver may have freed
+    /// the record since, and after the counter reuse timeout allocated it again
+    /// (`spec/client-protocol.md`, "Events"; ADR 0078).
+    pub fn record(&self, id: u32) -> Result<Option<RecordFields>, CountersError> {
+        self.mapped.record(id)?.read()
+    }
+
     /// A reader's handle on counter `id`'s value, as [`CountersReader::value`], with its
     /// refusals.
     pub fn value(&self, id: u32) -> Result<CounterValue, CountersError> {

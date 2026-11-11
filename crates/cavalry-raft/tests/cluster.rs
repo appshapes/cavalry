@@ -898,6 +898,51 @@ fn a_service_reads_the_committed_log_on_every_member_and_nothing_past_the_commit
     });
     assert_eq!(late_read, reads[0]);
     assert_eq!(returned_read[..], reads[0][250..]);
+
+    // A log opened where no entry begins: an entry here is 96 bytes, so 32 past one is
+    // inside it. The driver's replay finds no frame there and fails at once, with
+    // nothing played. The handle ends, delivers nothing and says where, and its client
+    // is open. Before ADR 0078 the client closed as `corrupt`: the driver freed the
+    // failed replay's image before the client's conductor had read its announcement.
+    let inside = middle + 32;
+    let mut failed = late_client
+        .committed_log(inside)
+        .expect("the driver answers")
+        .expect("the member has its log");
+    let mut nothing = Read::new();
+    run_until(&mut members, "the log opened inside an entry ended", |_| {
+        poll_log(&mut failed, &mut nothing);
+        failed.is_ended()
+    });
+    assert!(nothing.is_empty(), "nothing was delivered");
+    assert_eq!(
+        (failed.failed_at(), failed.withdrawn_at(), failed.position()),
+        (Some(inside), None, inside),
+        "{failed:?}"
+    );
+    assert_eq!(late_client.closed(), None);
+    failed.close(&mut late_client).expect("the log closes");
+
+    // A log closed straight after its open, with no poll between, sixty times over. The
+    // close stops the replay and removes the subscription, and the client's conductor
+    // may read the image's announcement only after that, when the image's position
+    // counter is freed. The client stays open, where it closed one time in eight.
+    for round in 0..60 {
+        let log = late_client
+            .committed_log(0)
+            .expect("the driver answers")
+            .expect("the member has its log");
+        log.close(&mut late_client)
+            .unwrap_or_else(|error| panic!("round {round}: {error}"));
+        assert_eq!(late_client.closed(), None, "round {round}");
+        // Every log open on this driver hears each replay's image come and go on the
+        // stream they share, so each is polled, as a service polls: a subscription
+        // that is not polled while a queue's worth of images is announced closes its
+        // client as `overrun` (ADR 0021).
+        poll_log(&mut late, &mut late_read);
+        poll_log(&mut returned, &mut returned_read);
+        poll_log(&mut logs[1], &mut reads[1]);
+    }
     assert_eq!(reads[1], reads[0], "the first service read nothing twice");
     late.close(&mut late_client).expect("the log closes");
     returned.close(&mut late_client).expect("the log closes");

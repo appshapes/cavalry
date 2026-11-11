@@ -667,3 +667,66 @@ fn a_service_whose_replay_the_driver_withdrew_unread_is_told_where_its_entries_s
         driver.close().expect("the driver closes");
     }
 }
+
+/// A log opened at a position where no entry begins (`spec/c-abi.md`, "Functions",
+/// committed log). The driver's replay finds no frame there and fails at once, at that
+/// position, with nothing played. The handle is ended with nothing delivered, and it
+/// says why through the ABI: `cavalry_committed_log_failed_at` writes the position,
+/// and `cavalry_committed_log_withdrawn_at` stays `false`, since nothing that was
+/// played went unread. Before ADR 0078 the first poll found the client closed as
+/// `corrupt`: the driver had freed the replay's image before the client's conductor
+/// read its announcement.
+#[test]
+fn a_log_opened_where_no_entry_begins_fails_there_and_says_so() {
+    let mut cluster = Cluster::start("service-failed");
+    const ENTRIES: u32 = 10;
+    cluster.offer(0, ENTRIES);
+    let end = 96 + i64::from(ENTRIES) * 96;
+    // Every member has recorded the entries, so the position asked for is below the
+    // extent of the follower's recording and the driver takes the replay.
+    cluster.commit(end);
+
+    let (context, client) = connect(&cluster.members[1].2);
+    // SAFETY: the ABI's conventions, held by this test.
+    unsafe {
+        // Position 32 is inside the term's first entry, which is 96 bytes from 0.
+        let mut log: *mut cavalry_committed_log_t = ptr::null_mut();
+        assert_eq!(
+            cavalry_committed_log(&mut log, client, 32),
+            0,
+            "{}",
+            errmsg()
+        );
+        assert!(!log.is_null(), "member 1 has a recording of the log");
+        let mut collected = Collected::default();
+        let clientd = ptr::addr_of_mut!(collected).cast::<c_void>();
+        let deadline = Instant::now() + Duration::from_secs(30);
+        while !cavalry_committed_log_is_ended(log) {
+            assert!(Instant::now() < deadline, "the log ended");
+            let delivered = cavalry_committed_log_poll(log, Some(collect), clientd, 16);
+            assert_eq!(
+                delivered,
+                0,
+                "{}; the client closed with {}",
+                errmsg(),
+                cavalry_closed(client)
+            );
+            cluster.work();
+        }
+        assert!(collected.entries.is_empty(), "nothing was delivered");
+        assert_eq!(cavalry_committed_log_position(log), 32);
+        let mut at = -7;
+        assert!(
+            cavalry_committed_log_failed_at(log, &mut at),
+            "a replay that failed says where: {}",
+            errmsg()
+        );
+        assert_eq!(at, 32);
+        let mut withdrawn = -7;
+        assert!(!cavalry_committed_log_withdrawn_at(log, &mut withdrawn));
+        assert_eq!(withdrawn, -7, "nothing played went unread");
+        assert_eq!(cavalry_committed_log_close(log, client), 0, "{}", errmsg());
+        assert_eq!(cavalry_close(client), 0);
+        assert_eq!(cavalry_context_close(context), 0);
+    }
+}
