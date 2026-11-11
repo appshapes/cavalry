@@ -144,8 +144,10 @@ the step that builds it (ADR 0081):
   0085, ADR 0086).
 - A leader answers a member for the term the member reports, and does not check that
   its own record of terms holds that term. A member that recorded a term which fewer
-  than a quorum recorded keeps it in its record under a leader whose record has none
-  (card 267).
+  than a quorum recorded keeps it in its record under a leader whose record has none.
+  When that member leads, it can ask another for a truncation below a commit position
+  that member knows, which is refused at every election: the member does not join
+  (card 267, with a test that makes the history).
 - Leader ready waits for every member the leader has heard, as the appointed leader's
   does, since a follower that misses a term's first entry cannot catch up with it.
 - A member starts with no term: its record of terms and its candidate term are not

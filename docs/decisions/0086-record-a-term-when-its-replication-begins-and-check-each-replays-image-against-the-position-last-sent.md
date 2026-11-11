@@ -219,10 +219,15 @@ speaks of bytes a member has not reported.
   once; its canvass position takes it out of the leader's count, and it joins at the
   base before the leader appends.
 - A member in state 9 knows a commit position above its own append position. ADR
-  0083's guard then refuses any truncation below it. One history is known, by
-  reading and not yet by a test, in which a leader asks for such a truncation of
-  bytes that are the cluster's: a leader whose record holds a term that fewer than a
-  quorum recorded (card 267). It is a failure to join, not a wrong byte.
+  0083's guard then refuses any truncation below it. One history is known in which
+  a leader asks for such a truncation of bytes that are the cluster's: a leader
+  whose record holds a term that fewer than a quorum recorded, which it kept while
+  it replicated from a leader whose record has none. A test of five members in
+  memory makes it, on the branch of card 267 and not in this change: the member
+  told to truncate refuses 295 times in 30 s, and the leader, with two members
+  stopped, has no quorum. It is a failure to join, not a wrong byte: the check that
+  no committed entry is lost passes at every step. The fix is card 267's, a leader
+  that answers for a term its own record holds.
 - `Io` has four more operations, twenty. `Counts` has twenty-one counts, and a
   member's module adds twenty-one client counters; ten of them stay 0 while the
   module's leader is appointed.
