@@ -1994,6 +1994,20 @@ user-visible change, added in the same commit as the change. The format follows
   in `cavalry` is its program
   ([ADR 0052](docs/decisions/0052-build-raft-on-the-durable-log-fifth.md), feature 3;
   [Run a cluster of three members](docs/how-to/run-a-cluster.md); card 227).
+- A client that connects while its driver is still starting now waits for it. A
+  driver takes a few milliseconds to create its three files, and a client started in
+  that time, a program run right after `cavalry run` or after `cavalry doctor` first
+  passes, was refused with `not-ready`, a message that told the operator to wait and
+  try again. `Cavalry::connect`, and so every `cavalry` command and every client over
+  the C ABI, now reads the driver directory again every 10 ms while the command ring
+  is there and one of the files is missing, empty or `not-ready`, for up to the
+  driver timeout, 10 s. A driver that died while it created its files is refused at
+  that bound with `driver-gone`, which says to start one. A directory with no command
+  ring is `not-found` at once and one a stopped driver left is `driver-gone` at once,
+  as before, so a program that starts a driver and a client together still waits for
+  `cavalry doctor` to pass
+  ([ADR 0072](docs/decisions/0072-wait-in-a-clients-connect-for-a-driver-that-is-creating-its-files.md);
+  card 243).
 - A service reads a cluster's committed log through the Rust client.
   `Cavalry::committed_log(position)` opens the log of the cluster member on the
   client's driver, or returns `None` while the driver has no member with a log, and
