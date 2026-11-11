@@ -76,8 +76,8 @@ its services read what it appends in the same way.
    it may read, unless `log.withdrawn_at()` names a position. Stop reading when
    `log.is_ended()` returns true, not when a poll returns 0. Then read
    `log.withdrawn_at()`: `None` means every entry was delivered, and a position means
-   that the entries from that position on were not (see "When it does not work",
-   below). Either way, open the log again from `log.position()`. A poll can return 0
+   that the entries from that position on were not delivered (see "When it does not
+   work", below). Either way, open the log again from `log.position()`. A poll can return 0
    while committed entries are still on their way: the service reads only what the
    member's recorder has synced, and the recorder syncs once a second. Keep polling
    until `log.is_ended()` is true: when the member closes or leaves the log, the
@@ -135,12 +135,12 @@ its services read what it appends in the same way.
   within 5 s. The driver keeps a replay's image for that long after the replay ends
   and then removes it, read or not. The service has read every entry below the
   position in the message and none from it on. In your own program,
-  `log.withdrawn_at()` returns that position. Start the service again with `--from`
-  the position in the message once the member runs. If the member left the log and
-  joined it again, the driver refuses that position with code 23, as the entry for
-  code 23 above says. Read those entries on a member that has not left the log. To
-  avoid this, keep the service polling until `log.is_ended()` is true, and make each
-  poll's work much shorter than 5 s: a handler that blocks, or a service that is
+  `log.withdrawn_at()` returns that position. Start the service again with the
+  `--from` value the message gives once the member runs. If the member left the log
+  and joined it again, the driver refuses that position with code 23, as the entry
+  for code 23 above says. Read those entries on a member that has not left the log.
+  To avoid this, keep the service polling until `log.is_ended()` is true, and make
+  each poll's work much shorter than 5 s: a handler that blocks, or a service that is
   paused or throttled for 5 s after its member stops, ends this way.
 - A service is given entries later than the cluster commits them, by up to a second:
   an entry reaches a service once the member's recorder has synced it, and the

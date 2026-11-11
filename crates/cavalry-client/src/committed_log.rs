@@ -163,8 +163,8 @@ impl Bound {
 ///
 /// The driver keeps the replay's image for the publication linger, 5 s, after the
 /// replay ends, and then withdraws it, read or not (`spec/client-protocol.md`,
-/// "Events"). A service that has not read the image to its end by then is ended short
-/// of its bound, and [`withdrawn_at`](Self::withdrawn_at) says where the entries it
+/// "Events"). A service that has not read the entries below its bound by then is ended
+/// short of them, and [`withdrawn_at`](Self::withdrawn_at) says where the entries it
 /// was not given begin.
 pub struct CommittedLog {
     subscription: Subscription,
