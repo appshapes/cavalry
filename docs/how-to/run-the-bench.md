@@ -897,11 +897,14 @@ shared runner is
   why. An entry is renamed `cavalry-bench-<pid>-swept-<n>`, under this run's process
   id, before it is removed, so that is the name it has now when the removal failed.
   The next run tries it again; remove it by hand once the error's cause is gone.
-- The same line with `N entries under /dev/shm are named for other bench processes,
-  and whether those have ended cannot be told here`: the run found neither a `/proc`
-  with its own process in it nor a `ps -p` that finds its own process, so it could
-  not tell a killed bench from a running one and removed nothing. Remove what a
-  killed one left by hand, as above.
+- The same line with `N entries under /dev/shm are named for other bench processes
+  and none was removed`, and then the reason. `which of them have ended cannot be
+  told here`: the run found neither a `/proc` with its own process in it nor a
+  `ps -p` that finds its own process, so it could not tell a killed bench from a
+  running one. `this process's user could not be read`: `/proc/self/status` had no
+  `Uid:` line, or `ps -o uid=` printed none, so the run could not tell its own
+  entries from another user's. Either way it removed nothing: remove what a killed
+  bench left by hand, as above.
 - `the recorded_purging benchmark failed: the purge removed no file of the pile in 60 s`:
   the replayer admitted the purge but removed nothing in a minute. Listing the largest
   pile takes the replayer a few seconds and no more; a replayer that removes nothing in
