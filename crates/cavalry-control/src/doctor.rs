@@ -1389,8 +1389,12 @@ impl LogPath {
 
 /// The election states, by their codes in `spec/cluster.md`, in which this version's
 /// member has taken a leader and joins its log before it closes: follower replay,
-/// follower log init, follower log await and follower ready. Each lasts at most the
-/// leader heartbeat timeout before the election fails.
+/// follower log init, follower log await and follower ready. The leader heartbeat
+/// timeout bounds the last two: past it, the election fails. Follower log init lasts
+/// one step. Follower replay has no timeout of its own in the spec; in this version it
+/// too is one step, which replays nothing and fails the election where the member's
+/// log is behind the leader's (`cavalry-raft`'s `follower_replay`), so `doctor` finds a
+/// member in either of the first two only by chance.
 const JOINING_STATES: [i64; 4] = [10, 14, 15, 16];
 
 /// What `cluster-joining` says of member `id`, its election in `state`: the leader it
