@@ -156,10 +156,11 @@ committed once a quorum, two of three, has it on disk.
   The message names what is still to come in the state the member is in, and the
   network path that needs. In `follower replay` the member replays its own log
   first, which no timeout bounds; a log that then ends behind the leader's fails
-  the election, the second case of `cluster-joined-late` below. Then, and in
-  `follower log await`, both steps and their path, the same path as that entry's
-  first case. In `follower ready` the image has arrived, and the message names the
-  append position alone and the way to the leader's consensus endpoint.
+  the election, which `cluster-joined-late` below reports with none on such an
+  image, its second cause. Then, and in `follower log await`, both steps and their
+  path, the same path as that entry's first cause, the network. In `follower ready`
+  the image has arrived, and the message names the append position alone and the
+  way to the leader's consensus endpoint.
 - `WARN cluster-joined-late`: the member's elections fail one after another, and the
   cluster runs without it. The message says how many failed, and how many of them on
   an image of the leader's log that joined past the member's append position.
