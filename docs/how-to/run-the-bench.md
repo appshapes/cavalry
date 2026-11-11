@@ -210,7 +210,9 @@ shared runner is
    `scripts/bench-needed.py` answers `bench=false` only when every one of them is on
    its list of paths known not to matter: `docs/`, `spec/`, `.claude/`, `.github/`
    other than `ci.yml`, `scripts/` other than the scripts the bench jobs and the
-   decision run, `clients/`, `conformance/`, and the root's markdown. Then
+   decision run, `clients/`, `conformance/`, `changelog.d/`
+   ([ADR 0075](../decisions/0075-keep-each-changes-changelog-entry-in-a-file-of-its-own.md)),
+   and the root's markdown. Then
    `bench (linux)`, `bench (grip)`, `bench (udp)` and `bench (udp peer)` keep their
    names, run on a hosted runner, print `bench-needed answered bench=false for this
    change` and pass in seconds, and the `changes` job's log names each file with its

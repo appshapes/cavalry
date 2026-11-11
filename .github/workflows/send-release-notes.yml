@@ -7,7 +7,8 @@
 # 1. The email covers COMMITS, not releases: Cavalry has no release yet (ADR 0003, `publish =
 #    false`). `scripts/release-notes.py window` takes the commits on master after the last email
 #    and up to this run's commit, merge commits left out, and lays out the writer's sources: the
-#    lines the window added to CHANGELOG.md, every commit message, the ADRs added or changed,
+#    changelog lines the window added (the entry files of changelog.d/ and CHANGELOG.md, ADR
+#    0075), every commit message, the ADRs added or changed,
 #    the pages touched. "The last email" is the newest successful run in which the step named
 #    "Send to the recipients" concluded `success`, so a preview, a run with nothing to send and
 #    a failed run all leave the mark where it was. The step's name is retyped in the script and

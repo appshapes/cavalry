@@ -11,6 +11,7 @@ use std::ffi::{CStr, CString, c_void};
 use std::net::UdpSocket;
 use std::path::{Path, PathBuf};
 use std::ptr;
+use std::sync::atomic::{AtomicU32, Ordering};
 use std::time::{Duration, Instant};
 
 use cavalry_driver::Driver;
@@ -59,11 +60,38 @@ fn connect(dir: &Path) -> (*mut cavalry_context_t, *mut cavalry_t) {
     }
 }
 
-/// Free loopback ports, each held until all are chosen so that none repeats.
+/// Loopback ports for a cluster's endpoints, from 20000 to 31999, as `cavalry-raft`'s
+/// `tests/cluster.rs` takes its own and for its reason: below the range the operating
+/// system gives a socket bound to port 0, which starts at 32768 on Linux and at 49152
+/// on macOS. A follower binds its `log` endpoint only when it joins the log, and
+/// meanwhile every publication of the drivers in this process has a send socket bound
+/// to port 0, which could be given a port that was chosen by binding port 0 and
+/// releasing it: the member's bind then fails with `Address already in use`, and it
+/// never joins. Each port is free when it is chosen, and each is chosen once in this
+/// process, so that tests that run at once never share one. The process id picks
+/// where the choice starts, so that two test processes on one host start apart.
 fn free_ports(count: usize) -> Vec<u16> {
-    let sockets: Vec<UdpSocket> = (0..count)
-        .map(|_| UdpSocket::bind("127.0.0.1:0").expect("a loopback socket"))
-        .collect();
+    const FIRST: u32 = 20_000;
+    const SPAN: u32 = 12_000;
+    static NEXT: AtomicU32 = AtomicU32::new(0);
+    let start = (std::process::id() % 60) * 200;
+    let mut sockets = Vec::with_capacity(count);
+    for _ in 0..SPAN {
+        if sockets.len() == count {
+            break;
+        }
+        let offset = (start + NEXT.fetch_add(1, Ordering::Relaxed)) % SPAN;
+        let port = u16::try_from(FIRST + offset).expect("below 32000");
+        if let Ok(socket) = UdpSocket::bind(("127.0.0.1", port)) {
+            sockets.push(socket);
+        }
+    }
+    assert_eq!(
+        sockets.len(),
+        count,
+        "free loopback ports from {FIRST} to {}",
+        FIRST + SPAN - 1
+    );
     sockets
         .iter()
         .map(|socket| socket.local_addr().expect("bound").port())
@@ -141,13 +169,19 @@ impl Cluster {
         }
     }
 
-    /// Runs the members until every one has committed up to `position`.
+    /// Runs the members until every one has committed up to `position` and recorded
+    /// up to it. A commit needs a quorum alone, and since each member asks for its
+    /// sync a quorum is quick: the leader and one follower commit an entry while the
+    /// other follower has yet to record it, or to name its recording at all. A service
+    /// reads through its own member's recording, and nothing runs a member here but
+    /// this loop, so a test that opens a log waits for the recording it will read:
+    /// without that the open answers a null handle, no log yet, or refuses a position
+    /// past the recording's extent.
     fn commit(&mut self, position: i64) {
-        self.run_until("every member committed", |cluster| {
-            cluster
-                .members
-                .iter()
-                .all(|(_, module, _)| module.commit_position() == position)
+        self.run_until("every member committed and recorded", |cluster| {
+            cluster.members.iter().all(|(_, module, _)| {
+                module.commit_position() == position && module.append_position() == position
+            })
         });
     }
 }
