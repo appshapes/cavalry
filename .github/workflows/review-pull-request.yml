@@ -170,6 +170,11 @@ jobs:
           # Public repository: run logs are world readable. Keep the agent's output out,
           # but for the bounded excerpts "Verify a review was submitted" prints below.
           show_full_output: false
+          # The submit form and the paragraph on CI are card 247's: the misses read in this
+          # workflow's own log were sessions that ended their turn to wait for CI, and a
+          # body given as `--body '...'` is denied when a line of it begins with `#`.
+          # `.claude/agents/reviewer.md` has both in full; scripts/claude-workflow-test.py
+          # reads the two texts and runs the form.
           prompt: |
             You are the reviewer agent. Read `.claude/agents/reviewer.md` for your
             operating instructions and review pull request
@@ -180,14 +185,35 @@ jobs:
             changed files and their surroundings there. `gh pr view`, `gh pr diff`
             and `gh pr checks` work from the working directory.
 
-            You MUST end your session by actually executing
-            `gh pr review ${{ inputs.pr_number }} --approve --body "<summary>"`
-            or
-            `gh pr review ${{ inputs.pr_number }} --request-changes --body "<findings>"`.
+            You MUST end your session by actually executing `gh pr review` with
+            the body on standard input, in a quoted heredoc. These three lines
+            start at the first column, the last one too:
+
+            ```
+            gh pr review ${{ inputs.pr_number }} --approve --body-file - <<'EOF'
+            <summary>
+            EOF
+            ```
+
+            For findings, the same command with `--request-changes` in place of
+            `--approve`. Use that form and no other: a body given as
+            `--body "..."` is refused by this session's permissions when a line
+            of it begins with `#`.
             Your final text response is discarded: a verdict not submitted via
             `gh pr review` does not exist, and this job fails if no review lands.
             If the submission command errors, retry it, and surface a persistent
             failure with `gh pr comment` before ending the session.
+
+            Do not wait for CI. It started when you did, so its checks may still
+            be queued or running when your verdict is ready: submit then, and say
+            in the body what the checks read. This session is one turn and
+            nothing resumes it: no watch, no monitor and no background command
+            brings it back, and a session that ends to wait for a check has
+            submitted nothing. Among the checks, a check that has failed is a
+            blocker, and so is a pull request that conflicts with `master`; a
+            check in any other state is not, and the operating instructions say
+            how to read each. GitHub merges an approved pull request only once
+            the required checks pass.
 
             When requesting changes, end the review body with the following
             line, written as plain text on its own line. Do NOT wrap it in
