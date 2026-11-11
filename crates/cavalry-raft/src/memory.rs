@@ -13,7 +13,10 @@
 //! leader's own append position rises by its own sync, like any member's; and every
 //! member holds the bytes that reached it and no others, so two members can hold
 //! different bytes at one position, which a test of the cluster's safety must be able
-//! to find.
+//! to find. A leader's replay of its own log reaches a member that subscribed on its
+//! catch-up endpoint, an entry after another from the position asked, and ends by
+//! itself at its end, when it is stopped, or when it has had no subscriber for the
+//! replay connect timeout.
 //!
 //! Its bounds, and what it does at each:
 //!
@@ -62,6 +65,10 @@ pub const MAX_DELAY_MS: u64 = LEADER_HEARTBEAT_TIMEOUT_NS / STEP_NS;
 /// liveness timeout (`spec/udp.md`).
 const IMAGE_LIVENESS_TIMEOUT_NS: u64 = 10_000_000_000;
 
+/// How long a replay runs with no subscriber before it ends: the driver's replay
+/// connect timeout (`spec/client-protocol.md`, "Values").
+const REPLAY_CONNECT_TIMEOUT_NS: u64 = 5_000_000_000;
+
 /// One consensus message between two members.
 struct Flight {
     deliver_at_ns: u64,
@@ -103,6 +110,27 @@ struct Image {
     next: usize,
 }
 
+/// A replay of a member's own log to another member's catch-up subscription: what
+/// [`Io::start_replay`] makes. One at most from one member to another.
+struct Replay {
+    /// The member that replays and the one it replays to, by their places.
+    from: usize,
+    to: usize,
+    /// Where it began, the join position of its image.
+    start: i64,
+    /// Where the next entry it sends begins, and where it ends.
+    position: i64,
+    end: i64,
+    /// Since when it has had no subscriber it reaches.
+    unheard_since_ns: Option<u64>,
+    /// Whether its image has reached the member's subscription.
+    joined: bool,
+    /// Asked to stop: it stops on the next step.
+    stopping: bool,
+    /// How it ended, until the member that started it has asked.
+    stopped: Option<ReplayStopped>,
+}
+
 /// A partition between two members, by their places among the members.
 struct Cut {
     a: usize,
@@ -139,6 +167,10 @@ struct Disk {
     halted: bool,
     /// Its consensus module stands still while its driver runs ([`Cluster::stall`]).
     stalled: bool,
+    /// Subscribed on its catch-up endpoint, with a recording armed.
+    catchup: bool,
+    /// The join position of the replay's image now on that subscription.
+    catchup_image: Option<i64>,
 }
 
 impl Disk {
@@ -158,6 +190,8 @@ impl Disk {
             image_lost: false,
             halted: false,
             stalled: false,
+            catchup: false,
+            catchup_image: None,
         }
     }
 }
@@ -176,6 +210,9 @@ struct World {
     publications: Vec<Publication>,
     /// The partitions between two members that are set now.
     cuts: Vec<Cut>,
+    /// The replays started and not yet asked about after they stopped: one at most
+    /// from one member to another.
+    replays: Vec<Replay>,
     back_pressured: bool,
     loss_one_in: u64,
     max_delay_ms: u64,
@@ -409,25 +446,102 @@ impl Io for MemberIo<'_> {
         base_above(record.into_iter().flatten().copied(), position)
     }
 
-    /// Nothing is started: this cluster has no replays yet, so a leader in it answers
-    /// a catch-up position as one whose recordings do not hold the position. They
-    /// come with the member's side of a replication, state 9 (ADR 0085), and until
-    /// then no member in this cluster asks.
-    fn start_replay(
-        &mut self,
-        _member: i32,
-        _position: i64,
-        _end: i64,
-    ) -> Result<bool, Self::Fault> {
-        Ok(false)
+    fn start_replay(&mut self, member: i32, position: i64, end: i64) -> Result<bool, Self::Fault> {
+        let Some(to) = self.world.disks.iter().position(|disk| disk.id == member) else {
+            return Ok(false);
+        };
+        // The member's log holds the position when an entry of it begins there. A log
+        // that does not is one whose recordings were purged, or one that differs from
+        // the asker's below the position: nothing is started.
+        let held = self.world.disks.get(self.own).is_some_and(|disk| {
+            disk.log
+                .iter()
+                .any(|entry| entry.position == position && entry.position_after <= end)
+        });
+        if !held {
+            return Ok(false);
+        }
+        // How an earlier replay to the member ended is forgotten.
+        let from = self.own;
+        self.world
+            .replays
+            .retain(|replay| !(replay.from == from && replay.to == to));
+        self.world.replays.push(Replay {
+            from,
+            to,
+            start: position,
+            position,
+            end,
+            unheard_since_ns: None,
+            joined: false,
+            stopping: false,
+            stopped: None,
+        });
+        Ok(true)
     }
 
-    fn stop_replay(&mut self, _member: i32) -> Result<(), Self::Fault> {
+    fn stop_replay(&mut self, member: i32) -> Result<(), Self::Fault> {
+        let to = self.world.disks.iter().position(|disk| disk.id == member);
+        for replay in &mut self.world.replays {
+            if replay.from == self.own && Some(replay.to) == to && replay.stopped.is_none() {
+                replay.stopping = true;
+            }
+        }
         Ok(())
     }
 
-    fn replay_stopped(&mut self, _member: i32) -> Result<Option<ReplayStopped>, Self::Fault> {
-        Ok(None)
+    fn replay_stopped(&mut self, member: i32) -> Result<Option<ReplayStopped>, Self::Fault> {
+        let to = self.world.disks.iter().position(|disk| disk.id == member);
+        let place = self.world.replays.iter().position(|replay| {
+            replay.from == self.own && Some(replay.to) == to && replay.stopped.is_some()
+        });
+        Ok(place.and_then(|place| self.world.replays.swap_remove(place).stopped))
+    }
+
+    fn add_catchup(&mut self) -> Result<(), Self::Fault> {
+        if let Some(disk) = self.world.disks.get_mut(self.own) {
+            disk.catchup = true;
+            disk.catchup_image = None;
+            // The recording armed here begins where the member's log ends, its append
+            // position. What it received above that and never synced, which needs a
+            // sync that was paused, it never reported and no leader knows of: it is
+            // not in its log from here (ADR 0086). A member over a driver holds no
+            // such bytes: its recording's stop is where its log ends.
+            let synced = disk.synced;
+            disk.log.retain(|entry| entry.position_after <= synced);
+            disk.received = synced;
+        }
+        Ok(())
+    }
+
+    fn send_catchup_position(&mut self, leader: i32, term: i64, position: i64) -> bool {
+        let follower_member_id = self.world.disks.get(self.own).map_or(-1, |disk| disk.id);
+        // This cluster has no endpoints: a replay reaches the member by its place.
+        self.send(
+            leader,
+            &Message::CatchupPosition {
+                leadership_term_id: term,
+                log_position: position,
+                follower_member_id,
+                catchup_endpoint: b"memory:0",
+            },
+        )
+    }
+
+    fn catchup_image(&mut self) -> Result<Option<i64>, Self::Fault> {
+        Ok(self
+            .world
+            .disks
+            .get(self.own)
+            .and_then(|disk| disk.catchup_image))
+    }
+
+    fn remove_catchup(&mut self) -> Result<(), Self::Fault> {
+        if let Some(disk) = self.world.disks.get_mut(self.own) {
+            disk.catchup = false;
+            disk.catchup_image = None;
+        }
+        Ok(())
     }
 
     fn append(&mut self, entry: &Message<'_>) -> Result<bool, Self::Fault> {
@@ -531,6 +645,7 @@ impl Cluster {
                 full_queue_losses: 0,
                 publications: Vec::new(),
                 cuts: Vec::new(),
+                replays: Vec::new(),
                 back_pressured: false,
                 loss_one_in: 0,
                 max_delay_ms: 0,
@@ -553,6 +668,7 @@ impl Cluster {
     pub fn step(&mut self) {
         self.world.clock.now_ns = self.world.clock.now_ns.saturating_add(STEP_NS);
         self.world.clock.time_ms = self.world.clock.time_ms.saturating_add(1);
+        self.replay();
         for index in 0..self.world.disks.len() {
             // The image a recording extends the member's log from. A recording holds
             // the image from its join position: only one that joined at or below the
@@ -667,6 +783,91 @@ impl Cluster {
                 own,
             };
             let Ok(_) = core.do_work(clock, &mut io);
+        }
+    }
+
+    /// One step of every replay: a replay asked to stop stops; one whose member is
+    /// subscribed on its catch-up endpoint and hears the replaying member brings it
+    /// every entry from where it stands to its end, and ends by itself on the step
+    /// after; one with no such subscriber for the replay connect timeout ends where
+    /// it stands. A replay from a halted member stands still, as its host does.
+    fn replay(&mut self) {
+        let now_ns = self.world.clock.now_ns;
+        let World {
+            disks,
+            cuts,
+            replays,
+            ..
+        } = &mut self.world;
+        for replay in replays.iter_mut() {
+            if replay.stopped.is_some() || disks.get(replay.from).is_none_or(|disk| disk.halted) {
+                continue;
+            }
+            let heard = unheard_since(disks, cuts, replay.from, replay.to).is_none();
+            let subscribed = heard
+                && disks
+                    .get(replay.to)
+                    .is_some_and(|disk| disk.catchup && !disk.halted);
+            let mut ended = None;
+            if replay.stopping {
+                ended = Some(false);
+            } else if replay.joined && replay.position >= replay.end {
+                // At its end, a step after its last entry, so that the member sees
+                // the image it came on; with or without its subscriber by now.
+                ended = Some(true);
+            } else if !subscribed {
+                let since = *replay.unheard_since_ns.get_or_insert(now_ns);
+                if now_ns.saturating_sub(since) >= REPLAY_CONNECT_TIMEOUT_NS {
+                    ended = Some(false);
+                }
+            } else {
+                replay.unheard_since_ns = None;
+                // The entries of the replaying member's log from where the replay
+                // stands to its end. The image joined at the replay's start, and its
+                // recording extends the member's log only where it is contiguous
+                // with it: an entry that begins where the member's log ends.
+                let entries: Vec<Entry> = disks
+                    .get(replay.from)
+                    .map(|disk| {
+                        disk.log
+                            .iter()
+                            .filter(|entry| {
+                                entry.position >= replay.position
+                                    && entry.position_after <= replay.end
+                            })
+                            .cloned()
+                            .collect()
+                    })
+                    .unwrap_or_default();
+                if replay.joined && entries.is_empty() {
+                    // The end of what the replaying member holds below the replay's
+                    // end: its recording's end.
+                    ended = Some(true);
+                } else if let Some(disk) = disks.get_mut(replay.to) {
+                    replay.joined = true;
+                    disk.catchup_image = Some(replay.start);
+                    for entry in entries {
+                        replay.position = entry.position_after;
+                        if entry.position == disk.received {
+                            disk.received = entry.position_after;
+                            disk.log.push(entry);
+                        }
+                    }
+                }
+            }
+            if let Some(ended) = ended {
+                replay.stopped = Some(ReplayStopped {
+                    position: replay.position,
+                    ended,
+                });
+                // The replay's image goes with it.
+                if replay.joined
+                    && let Some(disk) = disks.get_mut(replay.to)
+                    && disk.catchup_image == Some(replay.start)
+                {
+                    disk.catchup_image = None;
+                }
+            }
         }
     }
 
@@ -915,6 +1116,11 @@ impl Cluster {
         if let Some(disk) = self.world.disks.get_mut(index) {
             *disk = Disk::empty(member);
         }
+        // Its replays are gone with its recordings, and the ones to it with its
+        // subscription.
+        self.world
+            .replays
+            .retain(|replay| replay.from != index && replay.to != index);
         if led {
             for publication in &mut self.world.publications {
                 if publication.leader == index {

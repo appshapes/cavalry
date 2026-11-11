@@ -131,3 +131,4 @@ under `docs/` is listed here; `just lint-docs` fails on one that is not.
 - [0082. Give up the lead on a higher term or a lost quorum, and count a follower's election on a higher term](decisions/0082-give-up-the-lead-on-a-higher-term-or-a-lost-quorum.md)
 - [0083. Truncate to the next term's base, never below the commit position, and count both](decisions/0083-truncate-to-the-next-terms-base-and-never-below-the-commit-position.md)
 - [0085. Serve a replication from the leader's core, one replay a member, to the endpoint the members string names](decisions/0085-serve-a-replication-from-the-leaders-core-to-the-endpoint-the-members-string-names.md)
+- [0086. Record a term when its replication begins, and check each replay's image against the position last sent](decisions/0086-record-a-term-when-its-replication-begins-and-check-each-replays-image-against-the-position-last-sent.md)

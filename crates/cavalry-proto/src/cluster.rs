@@ -2836,10 +2836,12 @@ pub fn replay_end(terms: &[TermSpan], position: i64) -> ReplayEnd {
     }
 }
 
-/// The terms a follower records when its replication reaches its stop position.
+/// The terms a follower's record holds when its replication has reached its stop
+/// position.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub struct RecordedTerms {
-    /// The term replicated and its base, always recorded.
+    /// The term replicated and its base, always in the record: the follower's own
+    /// log term, or a term it recorded at that base when it began to replicate it.
     pub replicated: (i64, i64),
     /// The leader's term and its base, recorded after it when the stop position is
     /// the leader's term base log position; `None` otherwise.
@@ -2848,10 +2850,11 @@ pub struct RecordedTerms {
     pub log_leadership_term_id: i64,
 }
 
-/// What a follower records when its replication of `term_replicated`, based at
+/// What a follower's record holds when its replication of `term_replicated`, based at
 /// `term_base`, reaches `stop_position` under a leader of `leader_term` based at
 /// `leader_base` (`spec/cluster.md`, "follower log replication"): the term replicated,
-/// and the leader's term at the leader's base after it when the stop is that base.
+/// which it holds before the stop, and the leader's term at the leader's base after
+/// it, recorded at the stop, when the stop is that base.
 pub const fn replication_record(
     term_replicated: i64,
     term_base: i64,

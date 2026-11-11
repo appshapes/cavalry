@@ -410,8 +410,11 @@ pub const CLUSTER_LOG_TRUNCATIONS: CounterId = CounterId(133);
 /// `cluster.truncations_refused`, a client counter: Times one cluster member was told, by a new leadership term, to truncate its log to a position below the commit position it knows, and did not: it kept its log and failed its election, counted in cluster.elections_failed too. A committed entry is never truncated, and a leader that holds what was committed names no such position (spec/cluster.md, Messages during an election, and Counters; ADR 0083); key: member id (i32), little-endian; label text: the member id in decimal.
 pub const CLUSTER_TRUNCATIONS_REFUSED: CounterId = CounterId(134);
 
-/// `cluster.log_replications`, a client counter: Times one cluster member replicated, or served, a span of the log below the leader's term base log position, a term the member missed: on a follower, a catch-up position it sent from follower log replication; on the leader, a replay of its own recordings that it started for such a member, once for each replay where the span lies in several recordings (spec/cluster.md, follower log replication, Messages outside an election, and Counters; ADR 0085). A member of this version counts the leader's replays alone; key: member id (i32), little-endian; label text: the member id in decimal.
+/// `cluster.log_replications`, a client counter: Times one cluster member replicated, or served, a span of the log below the leader's term base log position, a term the member missed: on a follower, a catch-up position it sent from follower log replication; on the leader, a replay of its own recordings that it started for such a member, once for each replay where the span lies in several recordings (spec/cluster.md, follower log replication, Messages outside an election, and Counters; ADR 0085, ADR 0086); key: member id (i32), little-endian; label text: the member id in decimal.
 pub const CLUSTER_LOG_REPLICATIONS: CounterId = CounterId(135);
+
+/// `cluster.log_replications_unavailable`, a client counter: Times one cluster member failed its election in follower log replication because its append position stayed below its stop position without moving for the leader heartbeat timeout: the leader's recordings do not hold the span, purged by retention, a replay stopped for a fault, or the replay never reached the member's catchup endpoint. Counted in cluster.elections_failed too (spec/cluster.md, follower log replication, and Counters; ADR 0086); key: member id (i32), little-endian; label text: the member id in decimal.
+pub const CLUSTER_LOG_REPLICATIONS_UNAVAILABLE: CounterId = CounterId(136);
 
 /// Every entry of `counters.toml`, in the file's order.
 pub const COUNTERS: &[CounterDef] = &[
@@ -1500,7 +1503,15 @@ pub const COUNTERS: &[CounterDef] = &[
         name: "cluster.log_replications",
         kind: Kind::Counter,
         scope: Scope::Client,
-        doc: "Times one cluster member replicated, or served, a span of the log below the leader's term base log position, a term the member missed: on a follower, a catch-up position it sent from follower log replication; on the leader, a replay of its own recordings that it started for such a member, once for each replay where the span lies in several recordings (spec/cluster.md, follower log replication, Messages outside an election, and Counters; ADR 0085). A member of this version counts the leader's replays alone; key: member id (i32), little-endian; label text: the member id in decimal.",
+        doc: "Times one cluster member replicated, or served, a span of the log below the leader's term base log position, a term the member missed: on a follower, a catch-up position it sent from follower log replication; on the leader, a replay of its own recordings that it started for such a member, once for each replay where the span lies in several recordings (spec/cluster.md, follower log replication, Messages outside an election, and Counters; ADR 0085, ADR 0086); key: member id (i32), little-endian; label text: the member id in decimal.",
         doctor: "A member that was down or cut off while the cluster elected a leader replicates the terms it missed from the new leader's recordings, and this rises on both by one for each span. It is how such a member returns, and nothing to act on. If it rises on a leader again and again for one member while that member's cluster.append_position does not move, the member cannot receive the replay: check that its catchup endpoint in the members string is the one its host listens on and that the leader's host can reach it.",
+    },
+    CounterDef {
+        id: CLUSTER_LOG_REPLICATIONS_UNAVAILABLE,
+        name: "cluster.log_replications_unavailable",
+        kind: Kind::Counter,
+        scope: Scope::Client,
+        doc: "Times one cluster member failed its election in follower log replication because its append position stayed below its stop position without moving for the leader heartbeat timeout: the leader's recordings do not hold the span, purged by retention, a replay stopped for a fault, or the replay never reached the member's catchup endpoint. Counted in cluster.elections_failed too (spec/cluster.md, follower log replication, and Counters; ADR 0086); key: member id (i32), little-endian; label text: the member id in decimal.",
+        doctor: "This member asked its leader for a term it missed and nothing arrived for 10 s. Check, on the leader's host, that its recordings still hold the log from this member's cluster.append_position: a retention that purged it leaves this member no way back but a snapshot. Check that this member's catchup endpoint in the members string is the same on both hosts and that the leader's host can reach it: a leader replays to the endpoint its own members string names. If cluster.log_replications rises on the leader for this member each time, the replays start and do not arrive.",
     },
 ];
