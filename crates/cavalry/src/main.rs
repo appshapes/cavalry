@@ -686,16 +686,28 @@ fn run(config: &Config) -> ExitCode {
         (None, None) => None,
         (Some(members), Some(id)) => Some((members.as_str(), id)),
         (members, _) => {
-            let (set, unset) = if members.is_some() {
-                ("CAVALRY_CLUSTER_MEMBERS", "CAVALRY_CLUSTER_MEMBER_ID")
+            // A member id of -1, its default, is read as unset (`Config::from_vars`).
+            // The anchor is the missing key's, as doctor's finding for the same case.
+            let (set, unset, missing, anchor) = if members.is_some() {
+                (
+                    "CAVALRY_CLUSTER_MEMBERS",
+                    "CAVALRY_CLUSTER_MEMBER_ID",
+                    "is unset or -1, no member",
+                    "clustermemberid",
+                )
             } else {
-                ("CAVALRY_CLUSTER_MEMBER_ID", "CAVALRY_CLUSTER_MEMBERS")
+                (
+                    "CAVALRY_CLUSTER_MEMBER_ID",
+                    "CAVALRY_CLUSTER_MEMBERS",
+                    "is not",
+                    "clustermembers",
+                )
             };
             eprintln!(
-                "cavalry run: {set} is set and {unset} is not, so the driver did not start: a \
-                 cluster member needs both, the cluster's members string and this host's id \
-                 in it; set {unset}, or unset {set} for a driver in no cluster; `cavalry \
-                 doctor` checks both; see docs/reference/config.md#clustermembers"
+                "cavalry run: {set} is set and {unset} {missing}, so the driver did not \
+                 start: a cluster member needs both, the cluster's members string and this \
+                 host's id in it; set {unset}, or unset {set} for a driver in no cluster; \
+                 `cavalry doctor` checks both; see docs/reference/config.md#{anchor}"
             );
             return ExitCode::FAILURE;
         }
@@ -817,10 +829,15 @@ fn start_member(
 ) -> Result<std::thread::JoinHandle<()>, String> {
     let mut module =
         ConsensusModule::start(dir, log_dir, members, id).map_err(|error| error.to_string())?;
+    // Where the member's state is: the file and the labels a client reads the two
+    // counters by, and doctor's note, which explains the member from them.
     eprintln!(
         "cavalry run: cluster member {id} started: it follows or leads as \
-         docs/reference/cluster.md#roles-and-the-election says, and `cavalry doctor` shows \
-         cluster.role and cluster.election_state"
+         docs/reference/cluster.md#roles-and-the-election says; its role and its election \
+         state are the counters labelled `cluster.role {id}` and `cluster.election_state \
+         {id}` in {}, as docs/reference/counters.md describes them, and `cavalry doctor` \
+         explains the member from them in its `cluster-member` note",
+        dir.join("counters").display()
     );
     std::thread::Builder::new()
         .name("cavalry-consensus".to_string())

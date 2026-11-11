@@ -29,11 +29,14 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use cavalry_client::{Cavalry, Offer, Publication, Subscription};
 use cavalry_driver::{Driver, DriverThread, IdleStrategy, ThreadStart, spec};
 use cavalry_ffi::harness;
+use cavalry_log::catalog::CatalogWriter;
 use cavalry_log::dir::LogDir;
-use cavalry_log::layout::Recording;
+use cavalry_log::layout::{
+    IndexHeader, Recording, SEGMENT_FILE_LENGTH, index_file_name, segment_file_name,
+};
 use cavalry_shm::counters::generated::{
     CHANNEL_PUBLICATIONS, IMAGE_ENDED, IMAGE_TIMED_OUT, PUBLICATION_LIMIT, PUBLICATION_POSITION,
-    SUBSCRIPTION_POSITION,
+    RECORDING_SEGMENTS_PURGED, SUBSCRIPTION_POSITION,
 };
 use cavalry_shm::counters::{CountersFile, CountersReader};
 use cavalry_shm::log::{ClaimError, HeaderFields, LogBuffers, LogType};
@@ -210,6 +213,10 @@ struct Options {
     /// appended, so it is never compared as a full run. A value no row's name contains
     /// is an error from `parse`, which lists the rows.
     only: Option<String>,
+    /// `--purging`: the recorded rows run again as `recorded_purging`, while one `purge
+    /// segments` removes a stopped recording's segment files on the driver's replayer,
+    /// one file per duty cycle, for the whole run (card 177; ADR 0031's Evidence).
+    purging: bool,
 }
 
 /// One benchmark of a pass, with the rows it writes to the table and the result.
@@ -227,9 +234,15 @@ enum Benchmark {
         log_type: LogType,
         name: &'static str,
     },
-    /// The client path through a real driver, with the recorder on when `recorded`:
-    /// the same two rows under `name`, `client` or `recorded`.
-    Client { recorded: bool, name: &'static str },
+    /// The client path through a real driver, with the recorder on when `recorded`, and
+    /// with `purging` a purge of a stopped recording's segment files running on the
+    /// driver's replayer throughout (card 177): the same two rows under `name`,
+    /// `client`, `recorded` or `recorded_purging`.
+    Client {
+        recorded: bool,
+        purging: bool,
+        name: &'static str,
+    },
     /// The client path over `cavalry:udp` on the loopback, through the driver's sender
     /// and receiver, one message in flight (ADR 0044): the same two rows under `udp`.
     Udp,
@@ -266,10 +279,12 @@ impl Benchmark {
         },
         Benchmark::Client {
             recorded: false,
+            purging: false,
             name: "client",
         },
         Benchmark::Client {
             recorded: true,
+            purging: false,
             name: "recorded",
         },
         Benchmark::Udp,
@@ -280,6 +295,14 @@ impl Benchmark {
         Benchmark::Slot { spacing: 128 },
         Benchmark::Record,
     ];
+
+    /// The recorded rows with a purge running on the replayer (card 177), which
+    /// `--purging` adds after the recorded rows.
+    const PURGING: Benchmark = Benchmark::Client {
+        recorded: true,
+        purging: true,
+        name: "recorded_purging",
+    };
 
     /// The rows this benchmark writes, named as the table and the result name them for
     /// a body of `body` bytes, in the order `run_pass` has their summaries: the claim
@@ -319,11 +342,25 @@ impl Options {
         self.only.as_deref().is_none_or(|only| name.contains(only))
     }
 
-    /// The benchmarks of a pass, in the order they run: all of [`Benchmark::ALL`]
+    /// Every benchmark this run can admit, in the order they run: [`Benchmark::ALL`],
+    /// with [`Benchmark::PURGING`] after the recorded rows under `--purging`.
+    fn all(&self) -> Vec<Benchmark> {
+        let mut all = Benchmark::ALL.to_vec();
+        if self.purging {
+            let after = all
+                .iter()
+                .position(|benchmark| matches!(benchmark, Benchmark::Client { recorded: true, .. }))
+                .map_or(all.len(), |index| index + 1);
+            all.insert(after, Benchmark::PURGING);
+        }
+        all
+    }
+
+    /// The benchmarks of a pass, in the order they run: all of [`Options::all`]
     /// without `--only`, else those with a row `--only` admits. Empty when `--only`
     /// names no row, which `parse` refuses.
     fn benchmarks(&self) -> Vec<Benchmark> {
-        Benchmark::ALL
+        self.all()
             .into_iter()
             .filter(|benchmark| benchmark.rows(self.body).iter().any(|row| self.wanted(row)))
             .collect()
@@ -332,7 +369,7 @@ impl Options {
     /// Every row a full pass writes, in the order the benchmarks run: what `--only` is
     /// matched against, and what the error lists when it matches none.
     fn rows(&self) -> Vec<String> {
-        Benchmark::ALL
+        self.all()
             .into_iter()
             .flat_map(|benchmark| benchmark.rows(self.body))
             .collect()
@@ -373,6 +410,15 @@ Options:
   --only NAME       run only the benchmarks whose name contains NAME, for a profile of
                     one row; the result goes under the profile with -only appended, and
                     a NAME that no row's name contains is an error listing the rows
+  --purging         run the recorded rows again as claim_commit_<body>_recorded_purging and
+                    one_way_<body>_recorded_purging, with one `purge segments` of a stopped
+                    recording's sparse segment files running on the driver's replayer, one
+                    file per duty cycle, from before the warm-up until past the measured
+                    loop; the recording has as many files as the bench directory's file
+                    system removes in about 2.5 s, measured before each run (8,192 at
+                    least, 1,000,000 at most); the lines under the table say how many
+                    files went during the loop and whether the purge outlasted it; the
+                    rows are reported until a baseline holds them
   --help            this text
 
 Exit code 1 when a measured loop allocated, or a benchmark could not run.";
@@ -393,6 +439,7 @@ fn parse(args: &[String]) -> Result<Options, String> {
         link: None,
         repeat: 1,
         only: None,
+        purging: false,
     };
     let mut link_here: Option<String> = None;
     let mut link_peer: Option<String> = None;
@@ -437,6 +484,7 @@ fn parse(args: &[String]) -> Result<Options, String> {
                     .map_err(|e| format!("--repeat: {e}"))?
             }
             "--only" => options.only = Some(value("--only")?.clone()),
+            "--purging" => options.purging = true,
             "--link-here" => link_here = Some(value("--link-here")?.clone()),
             "--link-peer" => link_peer = Some(value("--link-peer")?.clone()),
             "--echo" => echo = true,
@@ -965,6 +1013,47 @@ struct LogRun {
     /// the measured run, for the log rows: about one every two milliseconds of the run (ADR
     /// 0022; card 161). The client rows run the driver's conductor, which is not counted.
     producer_position_loads: Option<u64>,
+    /// The purge that ran through the loop, under `--purging` (card 177).
+    purged: Option<Purged>,
+}
+
+/// What a purge running through a measured loop did (card 177), for one run or, after
+/// [`merge_purged`], over a benchmark's runs.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct Purged {
+    /// The segment files the replayer removed while the loop ran, read from
+    /// `recording.segments_purged` at the loop's two ends; over the runs, the fewest.
+    during: u64,
+    /// The files the purge had to remove, the run's pile; over the runs, the pile of
+    /// the run that removed the fewest, since each run sizes its pile by its own probe.
+    pile: u64,
+    /// Whether the purge was still removing files when the loop ended; over the runs,
+    /// whether it was in every one.
+    outlasted: bool,
+}
+
+impl Purged {
+    /// The figures over the runs so far, `self`, and the next run, `run`: the fewer
+    /// files removed during a loop with the pile of the run that removed them, the
+    /// earlier run's on a tie, and whether the purge outlasted both.
+    fn and_run(self, run: Purged) -> Purged {
+        let fewest = if run.during < self.during { run } else { self };
+        Purged {
+            outlasted: self.outlasted && run.outlasted,
+            ..fewest
+        }
+    }
+}
+
+/// Adds a pass's purge figures to those of the runs before it, by benchmark name, as
+/// the line under the table and the result's `segments_purged` report them (card 177).
+fn merge_purged(by_benchmark: &mut BTreeMap<String, Purged>, pass: BTreeMap<String, Purged>) {
+    for (name, run) in pass {
+        by_benchmark
+            .entry(name)
+            .and_modify(|runs| *runs = runs.and_run(run))
+            .or_insert(run);
+    }
 }
 
 /// A publisher, a subscriber and a conductor over a real log buffer and counters file
@@ -1163,6 +1252,7 @@ fn run_log(options: &Options, log_type: LogType, dir: &std::path::Path) -> Resul
         retries,
         allocations,
         producer_position_loads: Some(producer_position_loads),
+        purged: None,
     })
 }
 
@@ -1176,13 +1266,226 @@ fn run_log(options: &Options, log_type: LogType, dir: &std::path::Path) -> Resul
 /// is the driver's, 64 MiB terms (`spec/client-protocol.md`,
 /// "Sizes"), so the warm-up is one rotation of that log, not of `--term-length`'s, for the
 /// same reason as the log rows': no measured message first-touches a page.
-fn bench_client(options: &Options, recorded: bool) -> Result<LogRun, String> {
-    let name = if recorded { "recorded" } else { "client" };
-    with_bench_dir(name, |dir| run_client(options, dir, recorded))
+fn bench_client(
+    options: &Options,
+    recorded: bool,
+    purging: bool,
+    name: &str,
+) -> Result<LogRun, String> {
+    with_bench_dir(name, |dir| run_client(options, dir, recorded, purging))
+}
+
+/// How long the purge of a pile is sized to last, in seconds. The pile has as many
+/// files as the bench directory's file system removes in this long, by a probe made
+/// before the pile is built ([`removal_rate`]), because the rate is the file system's
+/// and no one number of files serves two of them: a laptop's disk removed about
+/// 22,000 sparse files a second through the replayer and a Linux host's `/dev/shm`
+/// about 590,000 (card 177), so a pile that lasts the laptop five seconds is gone from
+/// `/dev/shm` before the warm-up ends. The purge must outlast the warm-up and the
+/// measured loop, about half a second for 5,000,000 messages on a bench host, and one
+/// `purge segments` removes the whole pile, so its reply must come inside the client's
+/// 10 s response timeout: the replayer removes a file per duty cycle and never faster
+/// than the probe, which leaves it up to four times slower before the timeout.
+const PILE_SECONDS: f64 = 2.5;
+/// The sparse files the probe creates and removes to measure the rate.
+const PILE_PROBE: u64 = 4_096;
+/// The fewest files in a pile, for a file system slower than any measured.
+const PILE_LEAST: u64 = 8_192;
+/// The most files in a pile: on a memory-backed file system each file is an inode held
+/// in memory, about a kibibyte, so a million are about 1 GiB for the seconds the pile
+/// lives, and a `/dev/shm` holds as many inodes as half the host's memory has pages:
+/// about two million on `grip`'s 16 GB, which a larger pile would run out of. A million
+/// last `/dev/shm` about 1.7 s at the rate above, three times a bench host's row.
+const PILE_MOST: u64 = 1_000_000;
+/// The pile's term length, the smallest the durable log admits: nothing reads its
+/// bytes, and a segment file is at least a term.
+const PILE_TERM_LENGTH: i32 = 64 * 1024;
+
+/// The pile `--purging` purges (card 177): a stopped recording in the log directory,
+/// in the driver's catalog before the driver opens it, with `segments` segment files.
+struct Pile {
+    recording_id: i64,
+    segments: u64,
+    segment_length: i64,
+}
+
+impl Pile {
+    /// The position past every file: what `purge segments` is asked to retain from.
+    fn stop_position(&self) -> i64 {
+        self.segment_length.saturating_mul(self.segments as i64)
+    }
+}
+
+/// The sparse files a second the file system that will hold `log_dir` removes: the
+/// probe creates [`PILE_PROBE`] files of a segment's length beside it, never written,
+/// as the pile's are, and times their removal alone. The replayer removes the pile's
+/// files with the same call, one per duty cycle, so this is the most it can do. The
+/// probe's directory is removed whatever the probe returns: a failure part way leaves
+/// up to [`PILE_PROBE`] files, on `/dev/shm` inodes held in memory, and the next run's
+/// process id names another directory.
+fn removal_rate(log_dir: &std::path::Path) -> Result<f64, String> {
+    let probe = log_dir.with_extension("probe");
+    let _ = std::fs::remove_dir_all(&probe);
+    let measured = (|| -> Result<f64, String> {
+        std::fs::create_dir_all(&probe)
+            .map_err(|e| format!("creating {}: {e}", probe.display()))?;
+        let length = SEGMENT_FILE_LENGTH as u64;
+        let paths: Vec<PathBuf> = (0..PILE_PROBE).map(|k| probe.join(k.to_string())).collect();
+        for path in &paths {
+            std::fs::File::create(path)
+                .and_then(|file| file.set_len(length))
+                .map_err(|e| format!("creating the probe's {}: {e}", path.display()))?;
+        }
+        let started = Instant::now();
+        for path in &paths {
+            std::fs::remove_file(path)
+                .map_err(|e| format!("removing the probe's {}: {e}", path.display()))?;
+        }
+        let seconds = started.elapsed().as_secs_f64();
+        Ok(PILE_PROBE as f64 / seconds.max(f64::EPSILON))
+    })();
+    let _ = std::fs::remove_dir_all(&probe);
+    measured
+}
+
+/// The files of a pile for a file system that removes `rate` files a second: what it
+/// removes in [`PILE_SECONDS`], within [`PILE_LEAST`] and [`PILE_MOST`].
+fn pile_segments(rate: f64) -> u64 {
+    ((rate * PILE_SECONDS) as u64).clamp(PILE_LEAST, PILE_MOST)
+}
+
+/// Builds a pile of `segments` segment files in `log_dir` before any driver opens it: a
+/// recording added to the catalog and stopped at the end of its last file, its index
+/// header, and each file created at the segment length and never written, so it is
+/// sparse and costs no block; the driver's recovery pass leaves a stopped slot whose
+/// checksums hold alone, and a purge removes files without reading them
+/// (`spec/durable-log.md`, "Recovery", "The driver").
+fn build_pile(log_dir: &std::path::Path, segments: u64) -> Result<Pile, String> {
+    let now = realtime_nanos() as i64;
+    let (log, _) = LogDir::open(log_dir, now).map_err(|e| e.to_string())?;
+    // The directory's lock goes with it; the catalog is written below without one,
+    // since no driver has the directory yet.
+    drop(log);
+    let mut catalog = CatalogWriter::open(log_dir, now).map_err(|e| e.to_string())?;
+    let recording_id = catalog
+        .add(&Recording {
+            recording_id: 0,
+            start_timestamp: now,
+            start_position: 0,
+            initial_term_id: 0,
+            term_length: PILE_TERM_LENGTH,
+            mtu_length: MTU as i32,
+            session_id: 0,
+            stream_id: STREAM_ID,
+            channel: "cavalry:ipc",
+            source_identity: "cavalry:ipc",
+        })
+        .map_err(|e| e.to_string())?;
+    let pile = Pile {
+        recording_id,
+        segments,
+        segment_length: i64::from(SEGMENT_FILE_LENGTH),
+    };
+    catalog
+        .stop(recording_id, pile.stop_position(), now)
+        .map_err(|e| e.to_string())?;
+    drop(catalog);
+    let index = log_dir.join(index_file_name(recording_id));
+    let header = IndexHeader::new(recording_id).map_err(|e| e.to_string())?;
+    std::fs::write(&index, header.encode())
+        .map_err(|e| format!("writing {}: {e}", index.display()))?;
+    for k in 0..segments {
+        let base = pile.segment_length.saturating_mul(k as i64);
+        let path = log_dir.join(segment_file_name(recording_id, base));
+        std::fs::File::create(&path)
+            .and_then(|file| file.set_len(pile.segment_length as u64))
+            .map_err(|e| format!("creating the pile's {}: {e}", path.display()))?;
+    }
+    Ok(pile)
+}
+
+/// The purge of the pile, on a thread and a client of its own: one `purge segments`
+/// for every file, sent before the warm-up and answered once the replayer has removed
+/// the last file, so no command is admitted while the loop runs and nothing allocates
+/// for one (the replayer lists a command's files once, when it is admitted). The
+/// thread keeps its client open after the reply and closes it only once it is
+/// released, which the publisher does after its counting window: a client that closes
+/// sends the driver's conductor a command, and what the conductor does for a command
+/// allocates and would be counted (card 176). A purge that failed ends the thread at
+/// once, so that its message is the run's and not a wait's timeout.
+struct Purger {
+    thread: Option<JoinHandle<Result<(), String>>>,
+    release: Arc<AtomicBool>,
+}
+
+impl Purger {
+    fn spawn(
+        dir: &std::path::Path,
+        pile: &Pile,
+        housekeeping: Option<usize>,
+    ) -> Result<Self, String> {
+        let dir = dir.to_path_buf();
+        let recording_id = pile.recording_id;
+        let position = pile.stop_position();
+        let release = Arc::new(AtomicBool::new(false));
+        let released = Arc::clone(&release);
+        let thread = thread::Builder::new()
+            .name("bench-purger".into())
+            .spawn(move || {
+                pin_to(housekeeping)?;
+                let mut client = Cavalry::connect_to(&dir).map_err(|e| e.to_string())?;
+                // A purge that failed, refused or unanswered, ends the thread here and
+                // not at the release, its client closing as it drops: before the loop
+                // `failed` then has the refusal's own message while the run waits for
+                // the first file, and inside it `finish` has it after the loop, so the
+                // run fails with it and never reports the window that close was in.
+                client
+                    .purge_segments(recording_id, position)
+                    .map_err(|e| format!("purging the pile: {e}"))?;
+                while !released.load(Ordering::Acquire) {
+                    thread::sleep(Duration::from_millis(1));
+                }
+                client.close().map_err(|e| e.to_string())
+            })
+            .map_err(|e| format!("spawning the purger: {e}"))?;
+        Ok(Self {
+            thread: Some(thread),
+            release,
+        })
+    }
+
+    /// The purger's own error when its thread has ended, which before the release is
+    /// only ever a failure: a connect, or a purge the driver refused or did not answer.
+    fn failed(&mut self) -> Option<String> {
+        if !self.thread.as_ref().is_some_and(JoinHandle::is_finished) {
+            return None;
+        }
+        self.finish().err()
+    }
+
+    /// Releases the thread, which closes its client, and waits for it: the purge's
+    /// own result, once the reply has come.
+    fn finish(&mut self) -> Result<(), String> {
+        self.release.store(true, Ordering::Release);
+        match self.thread.take().map(JoinHandle::join) {
+            Some(Ok(result)) => result,
+            Some(Err(_)) => Err("the purger thread panicked".to_string()),
+            None => Ok(()),
+        }
+    }
+}
+
+impl Drop for Purger {
+    /// On an early return the thread is released and waited for here, while the driver
+    /// it talks to is still up: locals drop in reverse, and the driver is declared
+    /// before the purger.
+    fn drop(&mut self) {
+        let _ = self.finish();
+    }
 }
 
 /// The client rows, and with `recorded` the same rows while the driver's recorder writes
-/// the stream to the log directory under the bench directory (ADR 0025): the recorder is
+/// the stream to the log directory beside the bench directory (ADR 0025): the recorder is
 /// one more reader of the log, whose position the publisher's limit respects, and its
 /// writes run on the driver's recorder thread. Under `--pin` the driver's conductor has
 /// the third CPU to itself, and the recorder, the replayer, the sender, the receiver
@@ -1192,7 +1495,12 @@ fn bench_client(options: &Options, recorded: bool) -> Result<LogRun, String> {
 /// no endpoint and park too. The recording must reach the publisher's final
 /// position before the run counts, so a recorder that lost a byte or fell behind fails
 /// the run, never a row.
-fn run_client(options: &Options, dir: &std::path::Path, recorded: bool) -> Result<LogRun, String> {
+fn run_client(
+    options: &Options,
+    dir: &std::path::Path,
+    recorded: bool,
+    purging: bool,
+) -> Result<LogRun, String> {
     let housekeeping = options.housekeeping;
     let conductor_cpu = options.pin.map(|pin| pin.conductor);
     // A pin a driver thread could not take is reported through `pins`, since the hook
@@ -1226,9 +1534,21 @@ fn run_client(options: &Options, dir: &std::path::Path, recorded: bool) -> Resul
     };
     // This thread's affinity is what the client's conductor inherits.
     pin_to(housekeeping)?;
-    let driver =
-        Driver::start_with_threads(dir, dir.join("log"), IdleStrategy::Backoff, on_thread_start)
-            .map_err(|e| e.to_string())?;
+    // The log directory is the bench directory's sibling, not under it: the driver
+    // removes a directory of its own that has no command ring before it starts
+    // (`conductor::prepare_dir`), which would take a log directory under it, and the
+    // pile is built there before the driver opens it. `with_bench_dir` removes both.
+    let log_dir = dir.with_extension("log");
+    let pile = if purging {
+        Some(build_pile(
+            &log_dir,
+            pile_segments(removal_rate(&log_dir)?),
+        )?)
+    } else {
+        None
+    };
+    let driver = Driver::start_with_threads(dir, &log_dir, IdleStrategy::Backoff, on_thread_start)
+        .map_err(|e| e.to_string())?;
     let mut client = Cavalry::connect_to(dir).map_err(|e| e.to_string())?;
     let mut subscription = client
         .add_subscription("cavalry:ipc", STREAM_ID)
@@ -1247,6 +1567,41 @@ fn run_client(options: &Options, dir: &std::path::Path, recorded: bool) -> Resul
     } else {
         None
     };
+    // The purge starts here, before the warm-up, and runs on the driver's replayer
+    // through the loop; the counter says how much of the pile went during it.
+    let mut purger = pile
+        .as_ref()
+        .map(|pile| Purger::spawn(dir, pile, housekeeping))
+        .transpose()?;
+    let counters = pile
+        .as_ref()
+        .map(|_| CountersReader::open(dir).map_err(|e| e.to_string()))
+        .transpose()?;
+    let purged_at = |counters: &Option<CountersReader>| {
+        counters.as_ref().map_or(Ok(0), |reader| {
+            reader
+                .read_acquire(RECORDING_SEGMENTS_PURGED.record())
+                .map_err(|e| e.to_string())
+        })
+    };
+    let mut purged_before: u64 = 0;
+    // The replayer lists the pile's files once, when the command is admitted, which
+    // allocates and takes a while for a large pile; the loop starts once the first file
+    // has gone, so the listing is behind it and only removals run through it.
+    if counters.is_some() {
+        let deadline = Instant::now() + Duration::from_secs(60);
+        while purged_at(&counters)? == 0 {
+            if let Some(message) = purger.as_mut().and_then(Purger::failed) {
+                return Err(message);
+            }
+            if Instant::now() > deadline {
+                return Err("the purge removed no file of the pile in 60 s; see \
+                            docs/how-to/run-the-bench.md#when-it-does-not-work"
+                    .to_string());
+            }
+            thread::sleep(Duration::from_micros(200));
+        }
+    }
     pin_to(options.pin.map(|pin| pin.publisher))?;
     let deadline = Instant::now() + Duration::from_secs(10);
     while !subscription.is_connected() {
@@ -1310,6 +1665,7 @@ fn run_client(options: &Options, dir: &std::path::Path, recorded: bool) -> Resul
     let mut start = Instant::now();
     for i in 0..total {
         if i == warmup {
+            purged_before = purged_at(&counters)? as u64;
             counting = Some(Counting::open());
             start = Instant::now();
         }
@@ -1349,10 +1705,27 @@ fn run_client(options: &Options, dir: &std::path::Path, recorded: bool) -> Resul
         }
     }
     let elapsed = start.elapsed();
+    // The counter at the loop's end, read before the window closes so that it is the
+    // loop's and not the close's: files of the pile still to go mean the purge outlasted
+    // the loop, exactly, where the reply's arrival would say so a duty cycle or two late.
+    let purged_after = purged_at(&counters)? as u64;
     let allocations = counting.as_ref().map_or(0, Counting::close);
     let (subscription, one_way) = match subscriber.join() {
         Ok(Ok(returned)) => returned,
         failed => return Err(subscriber_failure(failed)),
+    };
+    // The window is closed, so the purger may close its client; its result is the
+    // purge's own, the reply that the replayer has removed the last file.
+    let purged = match (purger.as_mut(), pile.as_ref()) {
+        (Some(purger), Some(pile)) => {
+            purger.finish()?;
+            Some(Purged {
+                during: purged_after.saturating_sub(purged_before),
+                pile: pile.segments,
+                outlasted: purged_after < pile.segments,
+            })
+        }
+        _ => None,
     };
     if let Some(recording) = recording {
         // The recorder's lag is bounded by the window; it reaches the publisher within
@@ -1387,6 +1760,7 @@ fn run_client(options: &Options, dir: &std::path::Path, recorded: bool) -> Resul
         retries,
         allocations,
         producer_position_loads: None,
+        purged,
     })
 }
 
@@ -1542,6 +1916,7 @@ fn run_ffi(options: &Options, dir: &std::path::Path) -> Result<LogRun, String> {
         retries,
         allocations,
         producer_position_loads: None,
+        purged: None,
     })
 }
 
@@ -1779,10 +2154,16 @@ fn with_bench_dir<T>(
     benchmark: impl FnOnce(&std::path::Path) -> Result<T, String>,
 ) -> Result<T, String> {
     let dir = bench_dir().join(format!("cavalry-bench-{}-{suffix}", std::process::id()));
+    // The client rows alone keep the driver's log directory beside the bench
+    // directory, as `dir.with_extension("log")`, so that goes too; the other rows with
+    // a driver keep theirs under it, as `dir.join("log")`, which goes with `dir`.
+    let log_dir = dir.with_extension("log");
     let _ = std::fs::remove_dir_all(&dir);
+    let _ = std::fs::remove_dir_all(&log_dir);
     std::fs::create_dir_all(&dir).map_err(|e| format!("creating {}: {e}", dir.display()))?;
     let result = benchmark(&dir);
     let _ = std::fs::remove_dir_all(&dir);
+    let _ = std::fs::remove_dir_all(&log_dir);
     result
 }
 
@@ -2218,6 +2599,7 @@ fn mdc_rows(
         retries: published.retries,
         allocations: published.allocations,
         producer_position_loads: None,
+        purged: None,
     })
 }
 
@@ -2314,6 +2696,7 @@ fn run_udp(options: &Options, dir: &std::path::Path) -> Result<LogRun, String> {
         retries: published.retries,
         allocations: published.allocations,
         producer_position_loads: None,
+        purged: None,
     })
 }
 
@@ -2875,6 +3258,8 @@ struct Pass {
     /// `--messages` for each of the two log rows and the two client rows in a full
     /// pass, a tenth of that for the UDP row ([`UDP_SHARE`]), fewer under `--only`.
     messages_measured: u64,
+    /// What the purge running through a benchmark's loop did, under its name (card 177).
+    purged: BTreeMap<String, Purged>,
 }
 
 impl Pass {
@@ -2908,6 +3293,9 @@ impl Pass {
             self.producer_position_loads.insert(name.into(), loads);
         }
         self.allocations.insert(name.into(), run.allocations);
+        if let Some(purged) = run.purged {
+            self.purged.insert(name.into(), purged);
+        }
         self.messages_measured += messages;
     }
 }
@@ -2928,8 +3316,12 @@ fn run_pass(options: &Options) -> Result<Pass, String> {
                     .map_err(|message| format!("the {name} log benchmark failed: {message}"))?;
                 pass.insert_message_run(benchmark, name, options.body, run, options.messages);
             }
-            Benchmark::Client { recorded, name } => {
-                let run = bench_client(options, recorded)
+            Benchmark::Client {
+                recorded,
+                purging,
+                name,
+            } => {
+                let run = bench_client(options, recorded, purging, name)
                     .map_err(|message| format!("the {name} benchmark failed: {message}"))?;
                 pass.insert_message_run(benchmark, name, options.body, run, options.messages);
             }
@@ -3069,6 +3461,9 @@ fn main() -> ExitCode {
     // Each benchmark's allocations under its name, summed over the runs, `link` for the
     // link rows; the sum over the names is the count the exit code is decided on.
     let mut allocations_by_benchmark: BTreeMap<String, usize> = BTreeMap::new();
+    // The purge's figures over the runs: the fewest files removed during a loop, of
+    // that run's pile, and whether it outlasted every loop (card 177; `merge_purged`).
+    let mut purged_by_benchmark: BTreeMap<String, Purged> = BTreeMap::new();
     let mut messages_measured: u64 = 0;
     let mut below_zero: u64 = 0;
     if let Some(link) = &options.link {
@@ -3136,6 +3531,7 @@ fn main() -> ExitCode {
         for (name, count) in pass.allocations {
             *allocations_by_benchmark.entry(name).or_insert(0) += count;
         }
+        merge_purged(&mut purged_by_benchmark, pass.purged);
         messages_measured += pass.messages_measured;
     }
     let mut benchmarks: BTreeMap<String, Summary> = BTreeMap::new();
@@ -3204,6 +3600,18 @@ fn main() -> ExitCode {
             "  one-way samples below zero, the peer's clock behind this host's by more than the path, recorded as 0, the most of any run: {below_zero}"
         );
     }
+    for (name, purged) in &purged_by_benchmark {
+        println!(
+            "  segment files the replayer removed during {name}'s measured loop, the fewest of any run: {} of that run's pile of {}; the purge {} the loop in every run",
+            purged.during,
+            purged.pile,
+            if purged.outlasted {
+                "outlasted"
+            } else {
+                "did not outlast"
+            }
+        );
+    }
 
     let mut out = String::new();
     let _ = writeln!(out, "{{");
@@ -3262,6 +3670,23 @@ fn main() -> ExitCode {
         allocations_per_message.map_or_else(|| "null".to_string(), |ratio| ratio.to_string())
     );
     let _ = writeln!(out, "  \"clock_step_ns\": {clock_step},");
+    let purged_json: BTreeMap<String, String> = purged_by_benchmark
+        .iter()
+        .map(|(name, purged)| {
+            (
+                name.clone(),
+                format!(
+                    "{{\"during_least\": {}, \"pile_of_that_run\": {}, \"outlasted_every_run\": {}}}",
+                    purged.during, purged.pile, purged.outlasted
+                ),
+            )
+        })
+        .collect();
+    let _ = writeln!(
+        out,
+        "  \"segments_purged\": {{{}}},",
+        json_object(&purged_json)
+    );
     let _ = writeln!(out, "  \"benchmarks\": {{");
     let entries: Vec<String> = benchmarks
         .iter()
@@ -3621,6 +4046,7 @@ mod tests {
                 retries: 0,
                 allocations,
                 producer_position_loads: None,
+                purged: None,
             }
         };
         let mut pass = Pass::default();
@@ -3628,6 +4054,7 @@ mod tests {
         pass.insert_message_run(
             Benchmark::Client {
                 recorded: false,
+                purging: false,
                 name: "client",
             },
             "client",
@@ -3732,6 +4159,280 @@ mod tests {
         assert!(
             counted >= GROWS,
             "counted {counted} in {GROWS} reallocations"
+        );
+    }
+
+    /// A pile is a stopped recording the driver's open leaves alone: its slot holds
+    /// the stop at the end of its last file, every file is there at the segment length
+    /// and sparse, the recovery pass finds nothing to repair, and the next recording
+    /// takes the next slot.
+    #[test]
+    fn a_pile_is_a_stopped_recording_the_driver_leaves_alone() {
+        use cavalry_log::catalog::CatalogReader;
+        use cavalry_log::dir::Recovery;
+        let dir = std::env::temp_dir().join(format!("cavalry-bench-pile-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let pile = build_pile(&dir, 8).expect("the pile");
+        assert_eq!((pile.recording_id, pile.segments), (0, 8));
+        let reader = CatalogReader::open(&dir).expect("the catalog");
+        assert_eq!(reader.slots().expect("slots"), 1);
+        let slot = reader.get(0).expect("slot 0").expect("the pile's slot");
+        assert_eq!(slot.stop_position(), pile.stop_position());
+        assert!(!slot.is_live());
+        for k in 0..8 {
+            let path = dir.join(segment_file_name(0, k * pile.segment_length));
+            let length = std::fs::metadata(&path).expect("the file").len();
+            assert_eq!(length, pile.segment_length as u64, "{}", path.display());
+        }
+        drop(reader);
+        // The driver's open: recovery leaves the slot as it is, and a recording added
+        // next takes slot 1.
+        let now = realtime_nanos() as i64;
+        let (mut log, recovery) = LogDir::open(&dir, now).expect("the driver's open");
+        assert_eq!(recovery, Recovery::default());
+        assert_eq!(log.catalog().slots(), 1);
+        let writer = log
+            .start(
+                &Recording {
+                    recording_id: 0,
+                    start_timestamp: now,
+                    start_position: 0,
+                    initial_term_id: 7,
+                    term_length: 64 * 1024,
+                    mtu_length: MTU as i32,
+                    session_id: 1,
+                    stream_id: STREAM_ID,
+                    channel: "cavalry:ipc",
+                    source_identity: "cavalry:ipc",
+                },
+                now,
+            )
+            .expect("the next recording");
+        assert_eq!(writer.recording_id(), 1);
+        drop(writer);
+        drop(log);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A pile is what the file system removes in the pile's seconds, within its
+    /// bounds: the laptop's and the Linux host's measured rates, and both ends.
+    #[test]
+    fn a_pile_is_sized_by_the_removal_rate_within_its_bounds() {
+        assert_eq!(pile_segments(0.0), PILE_LEAST);
+        assert_eq!(pile_segments(f64::NAN), PILE_LEAST);
+        assert_eq!(pile_segments(22_000.0), 55_000);
+        assert_eq!(pile_segments(300_000.0), 750_000);
+        assert_eq!(pile_segments(590_000.0), PILE_MOST);
+        assert_eq!(pile_segments(5_000_000.0), PILE_MOST);
+        assert_eq!(pile_segments(f64::INFINITY), PILE_MOST);
+    }
+
+    /// The probe measures a rate above zero, in a directory of its own beside the log
+    /// directory, and leaves neither it nor the log directory behind.
+    #[test]
+    fn the_probe_measures_a_removal_rate_and_leaves_nothing_behind() {
+        let log_dir =
+            std::env::temp_dir().join(format!("cavalry-bench-probe-{}.log", std::process::id()));
+        let rate = removal_rate(&log_dir).expect("the probe");
+        assert!(rate.is_finite() && rate > 0.0, "{rate}");
+        assert!(!log_dir.with_extension("probe").exists());
+        assert!(!log_dir.exists());
+    }
+
+    /// A purge the driver refuses ends the purger at once: while the run waits for the
+    /// first file, `failed` has the refusal's own code and message, and not nothing
+    /// until the release, which would have the run report a stuck replayer after a
+    /// minute. A recording the catalog does not hold is code 21.
+    #[test]
+    fn a_purge_the_driver_refuses_is_the_purgers_failure_at_once() {
+        let dir =
+            std::env::temp_dir().join(format!("cavalry-bench-refused-{}", std::process::id()));
+        let log_dir = dir.with_extension("log");
+        let _ = std::fs::remove_dir_all(&dir);
+        let _ = std::fs::remove_dir_all(&log_dir);
+        let driver = Driver::start(&dir, &log_dir).expect("the driver");
+        // The log directory is new, so its catalog holds no recording 7.
+        let pile = Pile {
+            recording_id: 7,
+            segments: 1,
+            segment_length: i64::from(SEGMENT_FILE_LENGTH),
+        };
+        let mut purger = Purger::spawn(&dir, &pile, None).expect("the purger");
+        let deadline = Instant::now() + Duration::from_secs(5);
+        let message = loop {
+            if let Some(message) = purger.failed() {
+                break message;
+            }
+            assert!(
+                Instant::now() < deadline,
+                "the refused purge is not the purger's failure after 5 s"
+            );
+            thread::sleep(Duration::from_millis(1));
+        };
+        assert!(
+            message.starts_with("purging the pile: command refused"),
+            "{message}"
+        );
+        assert!(message.contains("error code 21"), "{message}");
+        drop(purger);
+        drop(driver);
+        let _ = std::fs::remove_dir_all(&dir);
+        let _ = std::fs::remove_dir_all(&log_dir);
+    }
+
+    /// The recorded benchmark of [`Benchmark::ALL`], wherever it stands there.
+    fn recorded_benchmark() -> Benchmark {
+        *Benchmark::ALL
+            .iter()
+            .find(|benchmark| {
+                matches!(
+                    benchmark,
+                    Benchmark::Client {
+                        recorded: true,
+                        purging: false,
+                        ..
+                    }
+                )
+            })
+            .expect("the recorded benchmark")
+    }
+
+    /// `--purging` adds the recorded rows with a purge running, right after the
+    /// recorded rows, and the rows grow by its two.
+    #[test]
+    fn purging_adds_the_recorded_purging_benchmark_after_recorded() {
+        let without = options(&[]).rows().len();
+        let options = options(&["--purging"]);
+        let recorded = Benchmark::ALL
+            .iter()
+            .position(|benchmark| *benchmark == recorded_benchmark())
+            .expect("the recorded benchmark");
+        let mut expected = Benchmark::ALL.to_vec();
+        expected.insert(recorded + 1, Benchmark::PURGING);
+        assert_eq!(options.benchmarks(), expected);
+        assert_eq!(options.rows().len(), without + 2);
+        assert!(
+            options
+                .rows()
+                .contains(&"one_way_32_recorded_purging".to_string())
+        );
+    }
+
+    /// `--only recorded_purging` runs that benchmark alone under `--purging`, and is
+    /// an error without the flag, since no row of such a run has the name; `--only
+    /// recorded` under the flag admits both recorded benchmarks.
+    #[test]
+    fn only_recorded_purging_needs_purging() {
+        assert_eq!(
+            options(&["--only", "recorded_purging", "--purging"]).benchmarks(),
+            vec![Benchmark::PURGING]
+        );
+        assert!(parsed(&["--only", "recorded_purging"]).is_err());
+        assert_eq!(
+            options(&["--only", "recorded", "--purging"]).benchmarks(),
+            vec![recorded_benchmark(), Benchmark::PURGING]
+        );
+    }
+
+    /// A pass keeps the purge's figures under the benchmark's name, and a run without
+    /// a purge leaves none.
+    #[test]
+    fn a_pass_keeps_the_purge_figures_by_benchmark() {
+        let empty = Summary {
+            count: 0,
+            p50_ns: 0,
+            p99_ns: 0,
+            p99_99_ns: 0,
+            max_ns: 0,
+            rate_per_s: 0.0,
+        };
+        let run = |purged| LogRun {
+            claim_commit: empty.clone(),
+            one_way: empty.clone(),
+            retries: 0,
+            allocations: 0,
+            producer_position_loads: None,
+            purged,
+        };
+        let purged = Purged {
+            during: 3107,
+            pile: 100_000,
+            outlasted: true,
+        };
+        let mut pass = Pass::default();
+        pass.insert_message_run(
+            Benchmark::PURGING,
+            "recorded_purging",
+            32,
+            run(Some(purged)),
+            10,
+        );
+        pass.insert_message_run(recorded_benchmark(), "recorded", 32, run(None), 10);
+        assert_eq!(
+            pass.purged,
+            BTreeMap::from([("recorded_purging".to_string(), purged)])
+        );
+    }
+
+    /// Over runs whose piles differ, the figures are the fewest files any run removed
+    /// during its loop with that run's own pile, never another run's, the earlier
+    /// run's on a tie, and whether the purge outlasted the loop in every run.
+    #[test]
+    fn the_purge_figures_over_runs_keep_the_pile_of_the_run_that_removed_fewest() {
+        let over = |runs: &[Purged]| {
+            let mut by_benchmark = BTreeMap::new();
+            for run in runs {
+                merge_purged(
+                    &mut by_benchmark,
+                    BTreeMap::from([("recorded_purging".to_string(), *run)]),
+                );
+            }
+            by_benchmark
+                .remove("recorded_purging")
+                .expect("the figures")
+        };
+        let purged = |during, pile, outlasted| Purged {
+            during,
+            pile,
+            outlasted,
+        };
+        assert_eq!(
+            over(&[
+                purged(60_000, 509_189, true),
+                purged(51_009, 498_000, true),
+                purged(70_000, 520_000, true),
+            ]),
+            purged(51_009, 498_000, true)
+        );
+        // A later run that did not outlast its loop is every run's, whichever removed
+        // fewest; a tie keeps the earlier run's pile.
+        assert_eq!(
+            over(&[
+                purged(51_009, 509_189, true),
+                purged(60_000, 498_000, false),
+                purged(51_009, 520_000, true),
+            ]),
+            purged(51_009, 509_189, false)
+        );
+        // Another benchmark's figures stay its own.
+        let mut by_benchmark = BTreeMap::new();
+        merge_purged(
+            &mut by_benchmark,
+            BTreeMap::from([
+                ("a".to_string(), purged(1, 10, true)),
+                ("b".to_string(), purged(2, 20, true)),
+            ]),
+        );
+        merge_purged(
+            &mut by_benchmark,
+            BTreeMap::from([("b".to_string(), purged(1, 30, true))]),
+        );
+        assert_eq!(
+            by_benchmark,
+            BTreeMap::from([
+                ("a".to_string(), purged(1, 10, true)),
+                ("b".to_string(), purged(1, 30, true)),
+            ])
         );
     }
 }

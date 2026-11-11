@@ -122,7 +122,9 @@ conflict: a conflict is resolved in place, as step 4 says.
 Read the state in one go, then wait. A review lands up to thirty minutes after a push,
 most inside fifteen, the longest on an ADR with reviews behind it, and its run is
 cancelled at sixty (card 213); a fix run takes up to thirty minutes; the `bench (linux)` and `bench (grip)` jobs each
-have their host, `bench` and `grip`, to themselves. Poll no more often than every five
+have their host, `bench` and `grip`, to themselves, and take it only for a change
+that can move the bench: for a page or an ADR they pass in seconds on a hosted runner
+(ADR 0071). Poll no more often than every five
 minutes, and touch nothing a rule below does not name. Every wait here is the loop's own work in progress; the stalls are the rules.
 
 ```
@@ -151,6 +153,16 @@ gh pr checks <number>
   yet, or if the fix was an edit to the pull request body alone (`claude.yml`, "Ask for
   the review of the agent's push"), so a `dispatch review` run appears within a minute
   of the run's end. Add `review` yourself only when a minute has passed and none has.
+
+- **A `claude` run failed in "Approve the runs GitHub held on the fixer's push".** The
+  fixer pushed and its push has no gates: the step found no `ci` run at the branch's
+  tip on a pull request that does not conflict, or the held run refused the approval,
+  and the step that asks for the review was skipped (card 215). The step's last line names the commands: `gh run list
+  --workflow ci.yml --branch <branch>`, `gh api -X POST
+  repos/{owner}/{repo}/actions/runs/<id>/approve` on the run that reads
+  `action_required`, then `gh pr edit <number> --add-label review`; with no held run,
+  a push of yours raises one and its review (`docs/how-to/ask-the-agent.md`, "The
+  fixer's push has no gates").
 
 - **"Autonomous fix cap reached".** The fourth changes-requested review ends the fixer's
   part (`claude.yml`, `MAX_ATTEMPTS: 3`). The pull request is the author's now: fix,

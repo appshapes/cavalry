@@ -5,7 +5,7 @@ It enforces the parts of CLAUDE.md that rustc and clippy cannot see on their own
 Every crate's Cargo.toml declares `[package.metadata.cavalry] data_plane = true|false`.
 "Data plane" is the CLAUDE.md definition: code a message passes through between
 `try_claim` on the publisher and the fragment handler on the subscriber. This script
-reads `cargo metadata` and runs eight checks:
+reads `cargo metadata` and runs nine checks:
 
   1. flags       every crate declares data_plane; a data-plane crate also declares
                  allowed-dependencies.
@@ -32,6 +32,13 @@ reads `cargo metadata` and runs eight checks:
                  holds an atomic: a field one party writes and another reads in its
                  hot loop gets a 128-byte slot, `align(128)` (ADR 0011;
                  .claude/rules/data-plane.md, "Memory and layout").
+  9. allocations a Rust file of any crate that counts with `stats_alloc` and reads a
+                 region's `allocations` reads its `reallocations` as well. `stats_alloc`
+                 counts a `realloc`, a buffer grown past a capacity it already had,
+                 apart from an allocation, and the bench's gate counts it as one (ADR
+                 0047), so an allocation test that reads `allocations` alone passes a
+                 `Vec` that grows on the per-message path (CLAUDE.md, invariant 2;
+                 card 211).
 
 Python 3.9 standard library only, so it runs on a laptop and on both CI runners
 without anything to install.
@@ -310,6 +317,28 @@ def main():
                         "slot, `#[repr(C, align(128))]` (ADR 0011; .claude/rules/data-plane.md)",
                     )
 
+    # 9. allocations
+    for name in sorted(members):
+        crate_dir = manifest(name).parent
+        for path in sorted(crate_dir.rglob("*.rs")):
+            if "target" in path.relative_to(crate_dir).parts:
+                continue
+            clean = strip_rust(path.read_text(encoding="utf-8"))
+            if not re.search(r"\bstats_alloc\b", clean):
+                continue
+            reads = re.search(r"\.\s*allocations\b", clean)
+            if reads and not re.search(r"\.\s*reallocations\b", clean):
+                find(
+                    rel(path),
+                    line_of(clean, reads.start()),
+                    "reads `allocations` of a `stats_alloc` region and never its "
+                    "`reallocations`: a buffer grown past a capacity it already had is a "
+                    "reallocation, which this test would pass and the bench's gate counts "
+                    "as an allocation (ADR 0047). Assert that `allocations + "
+                    "reallocations` is 0 (docs/how-to/run-the-bench.md, \"When it does "
+                    "not work\")",
+                )
+
     if findings:
         print("\n".join(findings))
         print(
@@ -319,7 +348,7 @@ def main():
         )
         return 1
     data_plane_count = sum(1 for dp in flags.values() if dp)
-    print(f"lint-workspace: {len(packages)} crates, {data_plane_count} data plane, 8 checks, ok")
+    print(f"lint-workspace: {len(packages)} crates, {data_plane_count} data plane, 9 checks, ok")
     return 0
 
 

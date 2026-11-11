@@ -340,7 +340,9 @@ a `&mut self` one:
   beside `cavalry_close`; a program that watches a client from a second thread holds
   its own lock around every call on the client handle.
 - `cavalry_init` reads the context, so it counts as a call on the context as well as on
-  the new client.
+  the new client. It returns when the client is attached or refused, which takes up to
+  the driver timeout, 10 s, while the driver is still creating its files
+  (`spec/client-protocol.md`, "The driver directory"; ADR 0072).
 - An image is part of its subscription, so a call on an image counts as a call on its
   subscription.
 - `cavalry_add_destination` and `cavalry_remove_destination` count as calls on the
