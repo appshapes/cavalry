@@ -16,11 +16,14 @@ const DOC: &str = "docs/reference/client-protocol.md#the-driver-directory";
 /// Why [`crate::Driver::start`] or [`crate::Driver::close`] failed.
 #[derive(Debug)]
 pub enum DriverError {
-    /// The directory holds a driver whose heartbeat is fresh.
+    /// The directory is another driver's: one holds the lock on it, running or starting
+    /// there, or one of an earlier version, which holds none, has a fresh heartbeat.
     Active {
         /// The directory.
         dir: PathBuf,
-        /// The creator pid its command ring names.
+        /// The holder's pid, as its `pid` file there says, or for a driver of an
+        /// earlier version the creator pid its command ring names; 0 when no pid could
+        /// be read.
         pid: i64,
     },
     /// The operating system refused a step on the directory or a thread.
@@ -99,10 +102,17 @@ impl DriverError {
 impl fmt::Display for DriverError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
+            DriverError::Active { dir, pid: 0 } => write!(
+                f,
+                "driver refused (driver-active): another driver holds {}, running or starting \
+                 there; its pid could not be read from the `pid` file there; stop that driver, \
+                 or start this one on another directory; see {DOC}",
+                dir.display()
+            ),
             DriverError::Active { dir, pid } => write!(
                 f,
-                "driver refused (driver-active): {} holds a driver whose heartbeat is fresh, \
-                 created by pid {pid}; stop that driver, or start this one on another directory; \
+                "driver refused (driver-active): another driver holds {}, running or starting \
+                 there, pid {pid}; stop that driver, or start this one on another directory; \
                  see {DOC}",
                 dir.display()
             ),

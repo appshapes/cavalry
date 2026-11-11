@@ -21,6 +21,7 @@
 //! publication's limit paces the replayer as it paces a publisher (ADR 0030).
 
 use std::collections::VecDeque;
+use std::fs::{File, TryLockError};
 use std::net::{SocketAddr, ToSocketAddrs};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -126,16 +127,57 @@ pub(crate) fn now_nanos() -> i64 {
         })
 }
 
-/// The directory protocol of `spec/client-protocol.md`, "The driver directory": a live
-/// driver is `driver-active`; a dead one, a half-created one, or none, and the
-/// directory is removed and created anew with create-new semantics.
-pub(crate) fn prepare_dir(dir: &Path) -> Result<(), DriverError> {
+/// The name of the file in which a driver writes its pid, for the starter it refuses.
+const PID_FILE_NAME: &str = "pid";
+
+/// How long a starter that was refused the lock waits before it reads the holder's pid
+/// from the file: a holder that had only just taken the lock has written it by then.
+const LOCK_PID_WAIT: Duration = Duration::from_millis(10);
+
+/// A driver's hold on its directory: an exclusive advisory lock of the operating
+/// system on the directory itself, taken before the directory is read and dropped
+/// with this value, or with the process however it ends (`spec/client-protocol.md`,
+/// "The driver directory"; ADR 0079).
+#[derive(Debug)]
+pub(crate) struct DirLock {
+    _dir: File,
+}
+
+/// The directory protocol of `spec/client-protocol.md`, "The driver directory". The
+/// starter creates the directory when it is not there and tries the lock on it once:
+/// held by another, a driver runs or is starting there, and the answer is
+/// `driver-active` with nothing changed. With the lock, the `pid` file says whose the
+/// directory was. A pid there is a driver of this version, which held this lock and
+/// has gone, whatever its heartbeat says. No pid is a directory that is new, or a
+/// driver of an earlier version, which holds no lock and is told by the command
+/// ring's heartbeat as before. Then the starter writes its own pid and removes
+/// everything else in the directory, for the files it is about to create with
+/// create-new semantics. The lock it returns is the driver's for its life.
+pub(crate) fn prepare_dir(dir: &Path) -> Result<DirLock, DriverError> {
     let io = |what: &'static str, source: std::io::Error| DriverError::Io {
         what,
         path: dir.to_path_buf(),
         source,
     };
-    if dir.exists() {
+    std::fs::create_dir_all(dir).map_err(|source| io("create the directory", source))?;
+    let lock = File::open(dir).map_err(|source| io("open the directory to lock it", source))?;
+    let pid_path = dir.join(PID_FILE_NAME);
+    match lock.try_lock() {
+        Ok(()) => {}
+        Err(TryLockError::WouldBlock) => {
+            std::thread::sleep(LOCK_PID_WAIT);
+            return Err(DriverError::Active {
+                dir: dir.to_path_buf(),
+                pid: holder_pid(&pid_path),
+            });
+        }
+        Err(TryLockError::Error(source)) => {
+            return Err(io("lock the directory", source));
+        }
+    }
+    if holder_pid(&pid_path) == 0 {
+        // No driver of this version left its pid here: one of an earlier version, which
+        // holds no lock, may run here, and its heartbeat says whether it does.
         let deadline = now_nanos().saturating_add(spec::nanos(spec::DRIVER_TIMEOUT));
         loop {
             match CommandRing::open(dir, false) {
@@ -158,14 +200,41 @@ pub(crate) fn prepare_dir(dir: &Path) -> Result<(), DriverError> {
                 Err(_) => break,
             }
         }
-        std::fs::remove_dir_all(dir)
-            .map_err(|source| io("remove the dead driver's directory", source))?;
     }
-    if let Some(parent) = dir.parent() {
-        std::fs::create_dir_all(parent)
-            .map_err(|source| io("create the parent directory", source))?;
+    // The directory is this driver's: its pid, for the starter it will refuse, and for
+    // the next one to know that a driver of this version was here.
+    std::fs::write(&pid_path, format!("{}\n", std::process::id()))
+        .map_err(|source| io("write the directory's pid file", source))?;
+    // What the driver that has gone left: everything but the pid file just written.
+    let entries =
+        std::fs::read_dir(dir).map_err(|source| io("read the driver's directory", source))?;
+    for entry in entries {
+        let entry = entry.map_err(|source| io("read the driver's directory", source))?;
+        if entry.file_name() == PID_FILE_NAME {
+            continue;
+        }
+        let path = entry.path();
+        let is_dir = entry
+            .file_type()
+            .map_err(|source| io("read the driver's directory", source))?
+            .is_dir();
+        if is_dir {
+            std::fs::remove_dir_all(&path)
+        } else {
+            std::fs::remove_file(&path)
+        }
+        .map_err(|source| io("remove what the last driver left in the directory", source))?;
     }
-    std::fs::create_dir(dir).map_err(|source| io("create the directory", source))
+    Ok(DirLock { _dir: lock })
+}
+
+/// The pid in the directory's pid file, or 0 when the file is not there or holds no
+/// number.
+fn holder_pid(pid_path: &Path) -> i64 {
+    std::fs::read_to_string(pid_path)
+        .ok()
+        .and_then(|text| text.trim().parse().ok())
+        .unwrap_or(0)
 }
 
 /// One client the driver knows: its id and when it last sent a command.
@@ -6898,6 +6967,50 @@ mod tests {
         fn drop(&mut self) {
             let _ = std::fs::remove_dir_all(&self.0);
         }
+    }
+
+    /// The pid a starter names when it is refused the lock: what the holder wrote, or 0
+    /// for a file the holder has not written yet, or that holds no number.
+    #[test]
+    fn the_holders_pid_is_read_from_the_lock_file_or_is_zero() {
+        let dir = TestDir::new("lock-pid");
+        std::fs::create_dir_all(dir.path()).expect("the directory");
+        let lock = dir.path().join(PID_FILE_NAME);
+        assert_eq!(holder_pid(&lock), 0, "no file");
+        std::fs::write(&lock, b"").expect("writes");
+        assert_eq!(holder_pid(&lock), 0, "an empty file");
+        std::fs::write(&lock, b"4242\n").expect("writes");
+        assert_eq!(holder_pid(&lock), 4242);
+        std::fs::write(&lock, b"not a pid\n").expect("writes");
+        assert_eq!(holder_pid(&lock), 0, "no number");
+    }
+
+    /// Two starters on one directory: the second is refused while the first holds the
+    /// lock, with the first's pid and nothing removed, and takes the directory once
+    /// the first has let go, removing what it left but the lock.
+    #[test]
+    fn a_starter_is_refused_while_another_holds_the_lock_and_takes_over_when_it_lets_go() {
+        let dir = TestDir::new("lock-held");
+        let held = prepare_dir(dir.path()).expect("the first takes the directory");
+        std::fs::write(dir.path().join("counters"), b"the first's file").expect("writes");
+        match prepare_dir(dir.path()) {
+            Err(DriverError::Active { pid, .. }) => {
+                assert_eq!(pid, i64::from(std::process::id()));
+            }
+            other => panic!("refused as driver-active: {other:?}"),
+        }
+        assert!(dir.path().join("counters").is_file(), "nothing was removed");
+        drop(held);
+        let taken = prepare_dir(dir.path()).expect("the second takes the directory");
+        assert!(
+            !dir.path().join("counters").exists(),
+            "what the first left is gone"
+        );
+        assert_eq!(
+            holder_pid(&dir.path().join(PID_FILE_NAME)),
+            i64::from(std::process::id())
+        );
+        drop(taken);
     }
 
     /// `spec/client-protocol.md`, "Commands": a driver's session ids start at a random

@@ -63,25 +63,46 @@ otherwise, where `<tmp>` is the system's temporary directory (`/tmp` on macOS) a
 
 | Path | Page | Created |
 | --- | --- | --- |
+| `pid` | below | when a driver has taken the directory, before its other files |
 | `counters` | `spec/counters-file.md` | when the driver starts, first |
 | `command-ring` | `spec/command-ring.md` | when the driver starts, second |
 | `broadcast-buffer` | `spec/broadcast-buffer.md` | when the driver starts, last |
 | `publications/<registration id>.logbuffer` | `spec/log-buffer.md` | when a publication is added, named by the publication's registration id; when a replay starts, named by the replay session id |
 | `images/<registration id>.logbuffer` | `spec/log-buffer.md`, type 2 | when a setup frame creates an image over UDP (`spec/udp.md`, "The receiver"), named by the image's own registration id, taken from the correlation id counter as a publication's is |
 
-A driver that starts and finds the directory loads the command ring's consumer heartbeat
-with an acquire load: a heartbeat fresher than the driver timeout is `driver-active`, and
-the driver refuses to start, naming the directory and the creator pid; a heartbeat of −1
-or older than the driver timeout is a dead driver, and the starting driver removes the
-directory and creates it anew. A directory whose `command-ring` is missing, or fails a
-check of its page other than `not-ready`, is a dead driver's too: one that stopped while
-creating it. A `command-ring` that is `not-ready` is a driver creating it now: the
-starter waits up to the driver timeout for the magic, then treats the file as a dead
-driver's. The driver creates the directory and each file with create-new semantics, so
-that of two drivers starting at the same moment the second finds the first's directory
-and waits or refuses as above; it never removes a file whose creator is alive. A driver
-that stops stores −1 in the consumer heartbeat and leaves the directory in place, so
-that `doctor` can read the counters of a driver that has gone; the next driver removes it.
+A driver holds the directory by an exclusive advisory lock of the operating system on
+the directory itself, from before it reads or changes anything in it until it stops.
+The operating system drops the lock when the driver's process ends, however it ends,
+so the lock is never stale, and a driver whose process is stopped or slow still holds
+it. A driver that starts creates the directory when it is not there and tries the lock
+once, without waiting. When another holds it, a driver is running there or starting
+there, and the starter refuses with `driver-active`, naming the directory and the
+process id in `pid`; it changes nothing. So of two drivers started at the same moment
+exactly one takes the lock, and the other is refused, at any offset between them (ADR
+0079).
+
+`pid` holds the pid of the driver that took the directory, in decimal, and a line
+break. With the lock taken, it tells the starter whose the directory was. A pid there
+is a driver of this version, which held this lock and has gone, whatever its heartbeat
+says: one that was killed leaves a heartbeat that is fresh for the driver timeout, and
+the starter does not wait for it. No `pid` is a directory that is new, or a driver of
+an earlier version, which holds no lock and is told as it was before this file. The
+starter loads the command ring's consumer heartbeat with an acquire load: a heartbeat
+fresher than the driver timeout is `driver-active`, and the starter lets go of the
+lock and refuses, naming the directory and the ring's creator pid, with nothing
+written; a heartbeat of −1 or older than the driver timeout is a dead driver. A
+`command-ring` that is missing, or fails a check of its page other than `not-ready`, is
+a dead driver's too. A `command-ring` that is `not-ready` is a driver of an earlier
+version creating it now: the starter waits up to the driver timeout for the magic,
+then treats the file as a dead driver's.
+
+The starter then writes its pid in `pid`, removes everything else in the directory and
+creates its files, each with create-new semantics. A driver of this version never
+removes a file whose creator is alive: a creator that is alive holds the lock. A
+driver that stops stores −1 in the consumer heartbeat, lets go of the lock and leaves
+the directory in place, so that `doctor` can read the counters of a driver that has
+gone; the next driver removes them. A driver of an earlier version that starts in the
+directory removes it whole, `pid` with it, as it always did.
 
 A client attaches by opening the command ring writable and loading the consumer
 heartbeat, which is `driver-closed` or `driver-timeout` as the ring page says; then the
