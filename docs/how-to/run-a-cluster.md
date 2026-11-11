@@ -75,7 +75,8 @@ committed once a quorum, two of three, has it on disk.
    cluster member 0, the leader in term 0, election closed: append position 96,
    commit position 96`. For members 1 and 2, with their own id and directories in the
    command, the line says `a follower in term 0, election closed`, with the same two
-   positions once their recorders have synced, which they do once a second.
+   positions once their recorders have synced, which each member asks its recorder
+   for as soon as an entry is written.
 
 5. Stop a member with Ctrl-C or SIGTERM. It prints `cavalry run: stopping` and
    `cavalry run: closed`. The other two are a quorum and go on.
@@ -197,6 +198,7 @@ committed once a quorum, two of three, has it on disk.
   stream and began its election again. Check the network path from the leader's log
   endpoint to this host, and the image counters of stream 100 on this member's driver.
 - `note cluster-commit-waits`: the leader has appended more than a quorum has
-  recorded. Up to a second of entries waits at any moment, since a recorder syncs once
-  a second. If the commit position stays where it is while the append position moves,
-  run `doctor` on each follower's host.
+  recorded. Each member asks its recorder to sync an entry as soon as it is written,
+  so what waits at any moment is what was appended since the syncs now running began.
+  If the commit position stays where it is while the append position moves, run
+  `doctor` on each follower's host.

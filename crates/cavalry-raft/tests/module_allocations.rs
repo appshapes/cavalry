@@ -70,7 +70,7 @@ fn three_members_run_their_duty_cycles_without_an_allocation() {
     }
     // The first entries and their commit, so that every path has run once: the
     // segment files are there, the counters have moved, the heartbeats are under way.
-    // A commit waits for the recorders' sync, once a second.
+    // A commit waits for one sync on a quorum, which each member asks its recorder for.
     let deadline = Instant::now() + Duration::from_secs(30);
     let mut cycles = 0;
     while cycles < 3_000 || cluster[2].1.commit_position() < 20 * 96 {
@@ -110,9 +110,9 @@ fn three_members_run_their_duty_cycles_without_an_allocation() {
     }
 
     // Twenty thousand cycles of all three members and their services, an entry offered
-    // in each, over more than two seconds, so that the recorders sync, the append
-    // positions and the commit position move, every heartbeat falls due, and each
-    // service reads what was committed.
+    // in each, over more than two seconds, so that the members ask for their syncs,
+    // the recorders sync, the append positions and the commit position move, every
+    // heartbeat falls due, and each service reads what was committed.
     let before = cluster[0].1.commit_position();
     let mut offered = 0u32;
     let mut read = [0usize; 3];

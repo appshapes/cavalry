@@ -337,6 +337,59 @@ fn three_members_replicate_a_hundred_thousand_entries_and_their_recordings_are_e
     }
 }
 
+/// A commit waits for one sync on a quorum, not for the recorders' next second
+/// (`spec/cluster.md`, "The log"; ADR 0060, ADR 0069). Ten entries are appended one
+/// after another, each once every member has committed the one before. A recorder
+/// syncs a recording by itself once a second, counted from its last sync, and the
+/// leader's own append position bounds the commit position, so without the members'
+/// sync requests two commits are at least a second apart and the ten take nine
+/// seconds or more. The test allows five, and prints what they took.
+#[test]
+fn ten_entries_each_appended_once_the_last_was_committed_do_not_wait_a_second_each() {
+    let dir = TestDir::new("commit-on-sync");
+    let members_string = members_string();
+    let mut members = start(dir.path(), &members_string);
+    run_until(&mut members, "every election closed", |members| {
+        members
+            .iter()
+            .all(|m| m.module.election_state() == ElectionState::Closed)
+    });
+    // The term event, 56 bytes in a frame of 96, then each entry in a frame of 96.
+    let mut end = 96;
+    run_until(
+        &mut members,
+        "the term's first entry committed",
+        |members| members.iter().all(|m| m.module.commit_position() == end),
+    );
+
+    const ENTRIES: u32 = 10;
+    let started = Instant::now();
+    for i in 0..ENTRIES {
+        offer(&mut members, &[0, 1, 2], i, 1);
+        end += 96;
+        run_until(
+            &mut members,
+            "every member committed the entry",
+            |members| members.iter().all(|m| m.module.commit_position() == end),
+        );
+    }
+    let took = started.elapsed();
+    println!("{ENTRIES} entries, each appended once the last was committed: {took:?}");
+    assert!(
+        took < Duration::from_secs(5),
+        "{ENTRIES} commits one after another took {took:?}: each waited for a recorder's \
+         sync of its own, once a second, so the members' sync requests are not reaching \
+         their recorders"
+    );
+    // A quorum committed each entry; the member outside it syncs the entry a moment
+    // later, and its append position follows.
+    run_until(
+        &mut members,
+        "every member recorded every entry",
+        |members| members.iter().all(|m| m.module.append_position() == end),
+    );
+}
+
 /// A follower's host is lost while the cluster runs: its module and its driver stop
 /// at once. The leader and the other follower are a quorum, so entries offered after
 /// it are committed all the same, once the leader's log is no longer held back by the

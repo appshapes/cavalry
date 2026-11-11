@@ -2072,6 +2072,16 @@ user-visible change, added in the same commit as the change. The format follows
   purge outlasted it, and the rows are reported until a baseline holds them. The client
   rows' log directory now sits beside the bench directory, as `cavalry-client`'s
   doctest places it ([Run the bench](docs/how-to/run-the-bench.md); card 177).
+- A cluster commits an entry after one sync on a quorum, not at the recorders' next
+  second. A member's append position is what its recorder has synced, and a recorder
+  syncs a recording by itself once a second, so an entry was committed up to a second
+  after it was appended, with every member idle in between. Each member's consensus
+  module now asks its driver to sync its recording of the log as soon as the recorder
+  has written an entry. On three members on a macOS laptop, ten entries, each
+  appended once the last was committed, took 10.0 s before and take from 186 ms to
+  228 ms now, over twenty runs
+  ([ADR 0069](docs/decisions/0069-sync-a-recording-on-command-as-client-protocol-version-8.md);
+  card 227).
 - `just bench` removes, before its first row, the directories that bench processes
   killed before their end left under `/dev/shm`, and says how many: a CI job cancelled
   by a newer push left its rows' files there, 11 G on one gate host and nearly half
