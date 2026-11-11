@@ -153,8 +153,13 @@ committed once a quorum, two of three, has it on disk.
   position must reach the leader, each within 10 s. Once both have, the election
   closes, and the next `doctor` shows `election closed` and no `cluster-joining`. If
   either takes longer, the election fails, and `doctor` reports `cluster-joined-late`.
-  The message names the network path the two steps need, the same path as the first
-  case of `cluster-joined-late` below.
+  The message names what is still to come in the state the member is in, and the
+  network path that needs. In `follower replay` the member replays its own log
+  first, which no timeout bounds; a log that then ends behind the leader's fails
+  the election, the second case of `cluster-joined-late` below. Then, and in
+  `follower log await`, both steps and their path, the same path as that entry's
+  first case. In `follower ready` the image has arrived, and the message names the
+  append position alone and the way to the leader's consensus endpoint.
 - `WARN cluster-joined-late`: the member's elections fail one after another, and the
   cluster runs without it. The message says how many failed, and how many of them on
   an image of the leader's log that joined past the member's append position.
@@ -203,4 +208,5 @@ committed once a quorum, two of three, has it on disk.
   A request that a member's driver refused, its recorder's queue of requests full,
   leaves the entry to the recorder's own sync, within a second; `driver.registry_full`
   on that member's driver counts the refusals. If the commit position stays where it
-  is while the append position moves, run `doctor` on each follower's host.
+  is while the append position moves, run `doctor` on each member's host: the leader's
+  own disk is one of the quorum's.
