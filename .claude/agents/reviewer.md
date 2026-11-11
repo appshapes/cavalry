@@ -87,7 +87,11 @@ and `--request-changes` in place of `--approve` for findings.
 2. **Correctness.** Does it do what the pull request says? Boundary cases, error paths that
    swallow, behaviour the spec does not state (that is a bug in the spec, not a freedom).
 3. **The gates.** A check that has failed on the head you are reviewing is a blocker; one
-   that has not finished is not yours to wait for ("How to review", above). A gate that
+   that has not finished is not yours to wait for ("How to review", above). A pull
+   request has no macOS check: `gates (macos)` runs for `master`'s commit after the
+   merge (ADR 0073). So for a change to code that differs by platform, a `cfg` on the
+   target, a path under `/proc` or `/dev/shm`, a call to `ps`, read the macOS side
+   yourself, since no check on the pull request will. A gate that
    prints `not built yet` is a to-do, not a pass: if the change touches what that gate
    would check, building the gate is part of the change (CLAUDE.md, "Gates"). The recipe
    in `pr-head/justfile` shows whether a gate prints it, so this needs no finished run.

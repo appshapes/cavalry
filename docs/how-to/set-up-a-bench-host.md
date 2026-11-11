@@ -140,7 +140,7 @@ the harness and read its table is [Run the bench](run-the-bench.md).
    runs on `[self-hosted, bench-linux]` and pins to the CPUs from step 4; change the
    `--pin` list and the `check.sh` list together when the host's sets differ. Then add
    `bench (linux)` to the required checks of `master` in the repository's branch
-   protection, beside `gates (linux)` and `gates (macos)`. The second host, `grip`, has
+   protection, beside `gates (linux)`. The second host, `grip`, has
    a job of its own in the same file, `bench (grip)`, on `[self-hosted, grip-linux]`
    with its own lists, `4,5,6,7`, and its own profiles, `grip-linux` and
    `grip-linux-unchecked`, and is a required check too since ADR 0034's acceptance on
