@@ -1017,15 +1017,43 @@ struct LogRun {
     purged: Option<Purged>,
 }
 
-/// What a purge running through a measured loop did (card 177): the segment files it
-/// removed while the loop ran, read from `recording.segments_purged` at the loop's two
-/// ends, the files it had to remove, and whether it was still removing them when the
-/// loop ended.
+/// What a purge running through a measured loop did (card 177), for one run or, after
+/// [`merge_purged`], over a benchmark's runs.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 struct Purged {
+    /// The segment files the replayer removed while the loop ran, read from
+    /// `recording.segments_purged` at the loop's two ends; over the runs, the fewest.
     during: u64,
+    /// The files the purge had to remove, the run's pile; over the runs, the pile of
+    /// the run that removed the fewest, since each run sizes its pile by its own probe.
     pile: u64,
+    /// Whether the purge was still removing files when the loop ended; over the runs,
+    /// whether it was in every one.
     outlasted: bool,
+}
+
+impl Purged {
+    /// The figures over the runs so far, `self`, and the next run, `run`: the fewer
+    /// files removed during a loop with the pile of the run that removed them, the
+    /// earlier run's on a tie, and whether the purge outlasted both.
+    fn and_run(self, run: Purged) -> Purged {
+        let fewest = if run.during < self.during { run } else { self };
+        Purged {
+            outlasted: self.outlasted && run.outlasted,
+            ..fewest
+        }
+    }
+}
+
+/// Adds a pass's purge figures to those of the runs before it, by benchmark name, as
+/// the line under the table and the result's `segments_purged` report them (card 177).
+fn merge_purged(by_benchmark: &mut BTreeMap<String, Purged>, pass: BTreeMap<String, Purged>) {
+    for (name, run) in pass {
+        by_benchmark
+            .entry(name)
+            .and_modify(|runs| *runs = runs.and_run(run))
+            .or_insert(run);
+    }
 }
 
 /// A publisher, a subscriber and a conductor over a real log buffer and counters file
@@ -3425,8 +3453,8 @@ fn main() -> ExitCode {
     // Each benchmark's allocations under its name, summed over the runs, `link` for the
     // link rows; the sum over the names is the count the exit code is decided on.
     let mut allocations_by_benchmark: BTreeMap<String, usize> = BTreeMap::new();
-    // The purge's figures over the runs: the fewest files removed during a loop, and
-    // whether it outlasted every loop (card 177).
+    // The purge's figures over the runs: the fewest files removed during a loop, of
+    // that run's pile, and whether it outlasted every loop (card 177; `merge_purged`).
     let mut purged_by_benchmark: BTreeMap<String, Purged> = BTreeMap::new();
     let mut messages_measured: u64 = 0;
     let mut below_zero: u64 = 0;
@@ -3495,15 +3523,7 @@ fn main() -> ExitCode {
         for (name, count) in pass.allocations {
             *allocations_by_benchmark.entry(name).or_insert(0) += count;
         }
-        for (name, purged) in pass.purged {
-            purged_by_benchmark
-                .entry(name)
-                .and_modify(|worst| {
-                    worst.during = worst.during.min(purged.during);
-                    worst.outlasted &= purged.outlasted;
-                })
-                .or_insert(purged);
-        }
+        merge_purged(&mut purged_by_benchmark, pass.purged);
         messages_measured += pass.messages_measured;
     }
     let mut benchmarks: BTreeMap<String, Summary> = BTreeMap::new();
@@ -3574,7 +3594,7 @@ fn main() -> ExitCode {
     }
     for (name, purged) in &purged_by_benchmark {
         println!(
-            "  segment files the replayer removed during {name}'s measured loop, the fewest of any run: {} of a pile of {}; the purge {} the loop in every run",
+            "  segment files the replayer removed during {name}'s measured loop, the fewest of any run: {} of that run's pile of {}; the purge {} the loop in every run",
             purged.during,
             purged.pile,
             if purged.outlasted {
@@ -3648,7 +3668,7 @@ fn main() -> ExitCode {
             (
                 name.clone(),
                 format!(
-                    "{{\"during_least\": {}, \"pile\": {}, \"outlasted_every_run\": {}}}",
+                    "{{\"during_least\": {}, \"pile_of_that_run\": {}, \"outlasted_every_run\": {}}}",
                     purged.during, purged.pile, purged.outlasted
                 ),
             )
@@ -4343,6 +4363,68 @@ mod tests {
         assert_eq!(
             pass.purged,
             BTreeMap::from([("recorded_purging".to_string(), purged)])
+        );
+    }
+
+    /// Over runs whose piles differ, the figures are the fewest files any run removed
+    /// during its loop with that run's own pile, never another run's, the earlier
+    /// run's on a tie, and whether the purge outlasted the loop in every run.
+    #[test]
+    fn the_purge_figures_over_runs_keep_the_pile_of_the_run_that_removed_fewest() {
+        let over = |runs: &[Purged]| {
+            let mut by_benchmark = BTreeMap::new();
+            for run in runs {
+                merge_purged(
+                    &mut by_benchmark,
+                    BTreeMap::from([("recorded_purging".to_string(), *run)]),
+                );
+            }
+            by_benchmark
+                .remove("recorded_purging")
+                .expect("the figures")
+        };
+        let purged = |during, pile, outlasted| Purged {
+            during,
+            pile,
+            outlasted,
+        };
+        assert_eq!(
+            over(&[
+                purged(60_000, 509_189, true),
+                purged(51_009, 498_000, true),
+                purged(70_000, 520_000, true),
+            ]),
+            purged(51_009, 498_000, true)
+        );
+        // A later run that did not outlast its loop is every run's, whichever removed
+        // fewest; a tie keeps the earlier run's pile.
+        assert_eq!(
+            over(&[
+                purged(51_009, 509_189, true),
+                purged(60_000, 498_000, false),
+                purged(51_009, 520_000, true),
+            ]),
+            purged(51_009, 509_189, false)
+        );
+        // Another benchmark's figures stay its own.
+        let mut by_benchmark = BTreeMap::new();
+        merge_purged(
+            &mut by_benchmark,
+            BTreeMap::from([
+                ("a".to_string(), purged(1, 10, true)),
+                ("b".to_string(), purged(2, 20, true)),
+            ]),
+        );
+        merge_purged(
+            &mut by_benchmark,
+            BTreeMap::from([("b".to_string(), purged(1, 30, true))]),
+        );
+        assert_eq!(
+            by_benchmark,
+            BTreeMap::from([
+                ("a".to_string(), purged(1, 10, true)),
+                ("b".to_string(), purged(1, 30, true)),
+            ])
         );
     }
 }

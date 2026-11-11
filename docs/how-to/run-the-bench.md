@@ -74,9 +74,13 @@ shared runner is
    pile was 87,885 files and the Linux host's the 1,000,000. One command removes the
    whole pile, so its reply must come inside the client's 10 s response timeout, and
    on `/dev/shm` each file is an inode held in memory, about 1 GiB for the largest
-   pile while it lives. The lines under the table say how many files went during the
-   loop and whether the purge outlasted it, and the result carries both as
-   `segments_purged`. The rows are reported until a baseline holds them.
+   pile while it lives. The line under the table says how many files went during the
+   loop and whether the purge outlasted it. Under `--repeat` it gives the fewest files
+   any run removed during its loop, with that run's own pile, since each run measures
+   the rate and sizes its pile anew, and says whether the purge outlasted the loop in
+   every run. The result carries the same three figures under the benchmark's name in
+   `segments_purged`, as `during_least`, `pile_of_that_run` and
+   `outlasted_every_run`. The rows are reported until a baseline holds them.
 
 2. Read the table. Every row is one benchmark with its count and its p50, p99, p99.99
    and max in nanoseconds, then its rate. No row is a mean: the data plane is judged at
