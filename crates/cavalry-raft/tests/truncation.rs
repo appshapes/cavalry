@@ -136,6 +136,7 @@ fn a_member_does_not_truncate_below_the_commit_position_it_knows() {
         .expect("no fault");
     assert_eq!(member.election_state(), ElectionState::Init);
     assert_eq!(member.counts().elections_failed, failed + 1);
+    assert_eq!(member.counts().truncations_refused, 1);
     assert_eq!(member.counts().log_truncations, 0);
     assert_eq!(member.append_position(), 128);
     assert_eq!(

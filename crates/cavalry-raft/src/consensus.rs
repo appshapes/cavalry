@@ -29,8 +29,8 @@ use cavalry_shm::counters::generated::{
     CLUSTER_ELECTION_STEPS, CLUSTER_ELECTIONS, CLUSTER_ELECTIONS_CLOSED, CLUSTER_ELECTIONS_FAILED,
     CLUSTER_HIGHER_TERMS_SEEN, CLUSTER_JOIN_POSITION_MISMATCHES, CLUSTER_LEADER_HEARTBEAT_TIMEOUTS,
     CLUSTER_LEADER_QUORUM_LOSSES, CLUSTER_LEADER_STEP_DOWNS, CLUSTER_LEADERSHIP_TERMS_IGNORED,
-    CLUSTER_LOG_IMAGES_LOST, CLUSTER_LOG_TRUNCATIONS, CLUSTER_TERMS_LED, CLUSTER_VOTES_AGAINST,
-    CLUSTER_VOTES_FOR,
+    CLUSTER_LOG_IMAGES_LOST, CLUSTER_LOG_TRUNCATIONS, CLUSTER_TERMS_LED,
+    CLUSTER_TRUNCATIONS_REFUSED, CLUSTER_VOTES_AGAINST, CLUSTER_VOTES_FOR,
 };
 
 /// The cluster session id of a session message of no session: one the leader's own
@@ -400,11 +400,15 @@ pub struct Counts {
     /// term its leader's record holds next after its own, on a new leadership term:
     /// the tail of an older term that no quorum recorded (ADR 0083).
     pub log_truncations: u64,
+    /// `cluster.truncations_refused`: a member told to truncate below the commit
+    /// position it knows, which it did not do: it failed its election and kept its
+    /// log (ADR 0083). No leader that holds what was committed asks it.
+    pub truncations_refused: u64,
 }
 
 impl Counts {
     /// How many counts a member keeps: one counter of `counters.toml` each.
-    pub const LEN: usize = 18;
+    pub const LEN: usize = 19;
 
     /// Each count with the id of its counter in `counters.toml`, the constant
     /// `cavalry-shm` generates from it: what the consensus module stores, each as a
@@ -454,6 +458,7 @@ impl Counts {
             (CLUSTER_LEADER_STEP_DOWNS, self.leader_step_downs),
             (CLUSTER_HIGHER_TERMS_SEEN, self.higher_terms_seen),
             (CLUSTER_LOG_TRUNCATIONS, self.log_truncations),
+            (CLUSTER_TRUNCATIONS_REFUSED, self.truncations_refused),
         ]
     }
 }
@@ -1174,7 +1179,8 @@ impl Consensus {
     /// the member goes on with that message. It does not while the truncation is under
     /// way, and it does not when the position is below the commit position it knows:
     /// a committed entry is never truncated, so no leader that holds what was
-    /// committed names such a base, and the member refuses and fails its election.
+    /// committed names such a base, and the member refuses, counted in
+    /// `cluster.truncations_refused`, and fails its election.
     /// Once truncated, its append position is the position and its log term the
     /// highest its record still holds, before anything is recorded or reported.
     fn truncate<I: Io>(
@@ -1184,6 +1190,7 @@ impl Consensus {
         io: &mut I,
     ) -> Result<bool, I::Fault> {
         if position < self.commit_position {
+            count(&mut self.counts.truncations_refused);
             self.fail(clock);
             return Ok(false);
         }

@@ -32,7 +32,11 @@ commit path runs per message.
   when a canvass position, a request vote or a commit position carries a term above
   its own, and it is a follower from that call on, its log publication given up in
   init. A follower holds an election on a request vote or a commit position of a
-  higher term too (ADR 0082). The consensus module does not use this path yet: a
+  higher term too (ADR 0082). A member told a next term whose base is below its
+  append position truncates to that base first, the tail of an older term that no
+  quorum recorded, and never below the commit position it knows: told to, it keeps
+  its log and fails its election (ADR 0083). The consensus module does not use this
+  path yet: a
   member over a driver is appointed until the election can do what the next section
   lists, and then the module moves to it in one change (ADR 0081).
 - Counts every move of the election. `ElectionState` is the state machine
@@ -54,9 +58,9 @@ commit path runs per message.
   `cluster.role`, `cluster.election_state`, `cluster.leadership_term_id`,
   `cluster.append_position`, `cluster.commit_position`, `cluster.messages_rejected`,
   `cluster.log_recording_id`, the recording that holds its log, which its service
-  replays, and the seventeen counts of `Counts::by_counter`, of which the four of the
-  ballot and the two of an election held on a higher term stay 0 while the leader is
-  appointed. The counters of sessions, of
+  replays, and the nineteen counts of `Counts::by_counter`, of which the four of the
+  ballot, the two of an election held on a higher term and the two of a truncation
+  stay 0 while the leader is appointed. The counters of sessions, of
   the service's version and of the catch-up in `spec/cluster.md`, "Counters", come
   with those features. One thread calls `do_work()`; the leader's process appends
   with `offer(payload)`, up to 1,344 bytes an entry. A follower that leaves the log
@@ -107,22 +111,23 @@ In Aeron, this is Cluster, with Cluster Standby as a paid component
 
 ### What the election does not do yet
 
-A member made with `Consensus::with_election` has nominate, the two ballots and the
-elections a leader holds of `spec/cluster.md`. Where the page's election does more,
-it does this instead, until the step that builds it (ADR 0081):
+A member made with `Consensus::with_election` has nominate, the two ballots, the
+elections a leader holds and the truncation of `spec/cluster.md`. Where the page's
+election does more, it does this instead, until the step that builds it (ADR 0081):
 
-- A member truncates nothing, replicates nothing and catches up with nothing. Where a
-  new leadership term asks it to, or its append position is behind the leader's log
-  position, it fails its election, counted in `cluster.elections_failed`, and
-  canvasses again. A leader whose followers are not level with its term's base waits
-  in leader log replication, with no quorum that has recorded its term. So a leader
-  that gave up the lead does not join the leader elected after it: it holds an entry
-  no quorum recorded, which it would truncate, or it is behind the new leader's log,
-  which it would catch up with. It fails an election every election status interval,
-  100 ms, until those steps, and the other members commit without it.
-- Over a driver a leader cannot give its log up: the module's `Io` refuses
-  `remove_log` as `unsupported`. The module's member is appointed and never asks
-  (ADR 0082).
+- A member replicates nothing and catches up with nothing. Where a new leadership
+  term leaves it below the leader's term base, or its append position is behind the
+  leader's log position, it fails its election, counted in
+  `cluster.elections_failed`, and canvasses again. A leader whose followers are not
+  level with its term's base waits in leader log replication, with no quorum that has
+  recorded its term. So a leader that gave up the lead does not join the leader
+  elected after it. It truncates an entry no quorum recorded and is then at the new
+  term's base, behind the new leader's log by what was appended since, which it would
+  catch up with. It fails an election every election status interval, 100 ms, until
+  that step, and the other members commit without it.
+- Over a driver a leader cannot give its log up and a member cannot truncate: the
+  module's `Io` refuses `remove_log` and `truncate_log` as `unsupported`. The
+  module's member is appointed and never asks (ADR 0082, ADR 0083).
 - Leader ready waits for every member the leader has heard, as the appointed leader's
   does, since a follower that misses a term's first entry cannot catch up with it.
 - A member starts with no term: its record of terms and its candidate term are not
