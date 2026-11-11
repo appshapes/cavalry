@@ -15,7 +15,12 @@
 # quorum; a driver started again on each member's directories replays that member's
 # recording of the log; the three members' lines must hash the same, positions and
 # bodies, and the payloads in them must be the payloads the leader was offered, in
-# order. An entry missing, repeated, out of order or changed on any member fails it.
+# order. Beside each member a service read the committed log while the entries were
+# committed, through a replay that follows the member's recording, no further than the
+# commit position (ADR 0066), and wrote a line for each entry: the lines of each
+# member's service must be the lines of that member's replay. An entry missing,
+# repeated, out of order or changed on any member, or read differently by a service
+# as it committed, fails it.
 set -euo pipefail
 
 cd "$(dirname "$0")/.."
@@ -117,6 +122,7 @@ for member in 0 1 2; do
     dir=$(printf '%s\n' "$line" | sed -n 's/.* dir=\([^ ]*\) .*/\1/p')
     log_dir=$(printf '%s\n' "$line" | sed -n 's/.* log_dir=\([^ ]*\) .*/\1/p')
     recording=$(printf '%s\n' "$line" | sed -n 's/.* recording=\([0-9]*\)$/\1/p')
+    printf '%s\n' "$line" | sed -n 's/.* service=\([^ ]*\) .*/\1/p' > "$work/service$member.path"
     "$cavalry" run --dir "$dir" --log-dir "$log_dir" &
     driver_pid=$!
     for _ in $(seq 1 100); do
@@ -138,7 +144,14 @@ zero=$(digest "$work/member0.body"); one=$(digest "$work/member1.body"); two=$(d
 printf 'member 0 %s\nmember 1 %s\nmember 2 %s\n' "$zero" "$one" "$two"
 [ "$zero" = "$one" ] && [ "$one" = "$two" ] || { echo "replay-check: the three members' hashes differ" >&2; exit 1; }
 
-step "9. the payloads of the replayed entries are the payloads the leader was offered"
+step "9. what the service beside each member read as the entries committed is that member's replay"
+for member in 0 1 2; do
+    service=$(digest "$(cat "$work/service$member.path")")
+    printf 'service %s %s\n' "$member" "$service"
+    [ "$service" = "$zero" ] || { echo "replay-check: member $member's service did not read what its member's recording replays" >&2; exit 1; }
+done
+
+step "10. the payloads of the replayed entries are the payloads the leader was offered"
 # A line is the entry's position and its body in hex; the payload is the body's last 16
 # bytes, 32 characters. The first line is the term's first entry, which no one offered.
 sed -e '1d' -e 's/.*\(.\{32\}\)$/\1/' "$work/member0.body" > "$work/replayed.txt"
@@ -146,4 +159,4 @@ offered=$(digest "$work/offered.txt"); replayed=$(digest "$work/replayed.txt")
 printf 'offered  %s\nreplayed %s\n' "$offered" "$replayed"
 [ "$offered" = "$replayed" ] || { echo "replay-check: the replayed payloads are not the offered ones" >&2; exit 1; }
 
-printf '\nreplay-check: three equal hashes of one recording, three equal hashes of three members, %s s\n' "$(( $(date +%s) - started ))"
+printf '\nreplay-check: three equal hashes of one recording, six equal hashes of three members and their services, %s s\n' "$(( $(date +%s) - started ))"

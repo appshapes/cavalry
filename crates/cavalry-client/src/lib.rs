@@ -2,6 +2,7 @@
 #![deny(missing_docs, rustdoc::broken_intra_doc_links)]
 
 mod client;
+mod committed_log;
 mod conductor;
 mod counter;
 mod error;
@@ -14,9 +15,11 @@ mod subscription;
 pub use cavalry_proto::client_protocol::{
     FOLLOW_LENGTH, NULL_LENGTH, NULL_POSITION, ReplayStopReason,
 };
+pub use cavalry_proto::cluster::SERVICE_LOG_STREAM_ID;
 pub use cavalry_proto::frame::{DataFrameHeader, Flags, FrameType};
 pub use cavalry_shm::log::{BufferClaim, Positions};
 pub use client::{Cavalry, DIR_ENV};
+pub use committed_log::CommittedLog;
 pub use counter::Counter;
 pub use error::{ClientError, Closed};
 pub use publication::{Offer, Publication};

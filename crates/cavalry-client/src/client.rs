@@ -17,6 +17,7 @@ use cavalry_shm::counters::{CounterValue, CountersError, CountersReader, Counter
 use cavalry_shm::log::LogBuffers;
 use cavalry_shm::spsc;
 
+use crate::committed_log::CommittedLog;
 use crate::conductor::{
     COMMAND_SCRATCH, Conductor, DRIVER_TIMEOUT, MAX_REPLAYS, MAX_SUBSCRIPTIONS, NO_PENDING,
     RECORDING_QUEUE, RECORDING_REGISTRY, REGISTRATION_QUEUE, REPLAY_QUEUE, RESPONSE_QUEUE,
@@ -1216,6 +1217,135 @@ impl Cavalry {
     /// The driver's counters file, read-only: what `doctor` reads, from the client.
     pub fn counters(&self) -> &CountersReader {
         &self.counters
+    }
+
+    /// The counters file as the handles that check a record before they trust its
+    /// value hold it ([`Recording`], [`CommittedLog`]).
+    pub(crate) fn shared_counters(&self) -> Arc<CountersReader> {
+        Arc::clone(&self.counters)
+    }
+
+    /// Opens the committed log of the cluster member on this client's driver at
+    /// `position`, for a service to read (`spec/cluster.md`, "The service"; ADR 0066):
+    /// it adds a subscription on `cavalry:ipc` and stream [`SERVICE_LOG_STREAM_ID`] and
+    /// starts a replay that follows the member's recording of the log from `position`.
+    /// `position` is where an entry begins: 0, or [`CommittedLog::position`] of an
+    /// earlier handle.
+    ///
+    /// Returns `None` while the driver hosts no member that has a recording of its
+    /// log: the member has not started, its election has not given it a log yet, or
+    /// it has closed. A service that starts before its member calls again, with a
+    /// pause between two calls: each reads the counters file's records to find the
+    /// member, which is not a call for a loop that spins. Nothing is sent to the
+    /// driver until a member is found.
+    ///
+    /// The refusals are those of [`Cavalry::add_subscription`] and
+    /// [`Cavalry::start_replay`]: a position that is not a multiple of 32, is past
+    /// what the member has recorded, or is below where the recording the member names
+    /// begins is [`ClientError::Refused`] with code 23, and a driver whose replays
+    /// registry is full, 64 replays, is code 10.
+    ///
+    /// The recording the member names begins at 0 on a member that has not left the
+    /// log. A member that left the log and joined it again records into a new
+    /// recording, which begins where it joined, and the entries below that are in the
+    /// recording it left, which this version names to no service. A service whose
+    /// position is below the new recording's start is refused here, with code 23, and
+    /// reads no more of that member's log (`spec/cluster.md`, "The service" and "Out
+    /// of this version").
+    ///
+    /// A service reads a handle until [`CommittedLog::is_ended`] says that no poll will
+    /// deliver another entry, and not until a poll returns 0: when its member closes or
+    /// leaves the log, entries below the bound the handle took may still be on their
+    /// way from the replay, and a service that stopped short of them would start again
+    /// at a position the member's next recording does not hold. It keeps polling until
+    /// then: the driver withdraws the replay's image 5 s after the replay ends, read or
+    /// not, and a handle whose image went before it was read is ended short, which
+    /// [`CommittedLog::withdrawn_at`] says. A handle is ended short too when the
+    /// driver's replay of the recording failed, which [`CommittedLog::failed_at`]
+    /// says. A service reads both once the handle is ended, and has been given every
+    /// entry it was owed only when both are `None`.
+    ///
+    /// ```
+    /// use cavalry_client::{Cavalry, CommittedLog};
+    ///
+    /// /// A service's loop: every committed entry from `position` on, in order, each
+    /// /// once, until the member's log ends. Returns where to open the log again, or
+    /// /// an error that says which entries it was not given.
+    /// fn apply(client: &mut Cavalry, position: i64) -> Result<i64, Box<dyn std::error::Error>> {
+    ///     // Ask until the member on this driver has its log.
+    ///     let mut log: CommittedLog = loop {
+    ///         if let Some(log) = client.committed_log(position)? {
+    ///             break log;
+    ///         }
+    ///         std::thread::sleep(std::time::Duration::from_millis(100));
+    ///     };
+    ///     loop {
+    ///         let entries = log.poll(
+    ///             |entry, _header, entry_position| {
+    ///                 // Apply `entry`, in `spec/cluster.md`'s encoding, at its position.
+    ///                 let _ = (entry, entry_position);
+    ///             },
+    ///             64,
+    ///         )?;
+    ///         if log.is_ended() {
+    ///             let next = log.position();
+    ///             let failed = log.failed_at();
+    ///             let withdrawn = log.withdrawn_at();
+    ///             log.close(client)?;
+    ///             if let Some(failed) = failed {
+    ///                 // The driver could not play the member's recording on from
+    ///                 // `failed`: the entries from there on were not delivered,
+    ///                 // though the member may have committed them.
+    ///                 return Err(format!(
+    ///                     "the replay of the member's recording failed at position \
+    ///                      {failed}: the log was not opened at the position of an entry, \
+    ///                      or the recording's files are damaged; run `cavalry doctor`, \
+    ///                      which names a damaged recording, and open the log again from \
+    ///                      position {next} if this handle read entries, or from 0; see \
+    ///                      docs/how-to/read-the-committed-log.md#when-it-does-not-work"
+    ///                 )
+    ///                 .into());
+    ///             }
+    ///             if let Some(unread) = withdrawn {
+    ///                 // The driver withdrew the replay's image before it was read: the
+    ///                 // entries from `unread` on were not delivered.
+    ///                 return Err(format!(
+    ///                     "entries from position {unread} were withdrawn unread, 5 s after \
+    ///                      the replay ended; open the log again from position {next}; see \
+    ///                      docs/how-to/read-the-committed-log.md#when-it-does-not-work"
+    ///                 )
+    ///                 .into());
+    ///             }
+    ///             // Neither: the member closed or left its log, and every entry below
+    ///             // the last commit position the handle took has been delivered.
+    ///             return Ok(next);
+    ///         }
+    ///         if entries == 0 {
+    ///             // Nothing below the bound has arrived yet.
+    ///             std::thread::yield_now();
+    ///         }
+    ///     }
+    /// }
+    ///
+    /// # fn main() -> Result<(), Box<dyn std::error::Error>> {
+    /// # let dir = std::env::temp_dir().join(format!("cavalry-doc-committed-{}", std::process::id()));
+    /// # let _ = std::fs::remove_dir_all(&dir);
+    /// # let driver = cavalry_driver::Driver::start(&dir, dir.join("log"))?;
+    /// let mut client = Cavalry::connect_to(&dir)?;
+    /// // A driver that hosts no cluster member has no committed log to open, and a
+    /// // service beside it asks again later, as `apply` does.
+    /// assert!(client.committed_log(0)?.is_none());
+    /// # let _ = apply;
+    /// # client.close()?;
+    /// # driver.close()?;
+    /// # let _ = std::fs::remove_dir_all(&dir);
+    /// # Ok(())
+    /// # }
+    /// ```
+    ///
+    /// [`SERVICE_LOG_STREAM_ID`]: crate::SERVICE_LOG_STREAM_ID
+    pub fn committed_log(&mut self, position: i64) -> Result<Option<CommittedLog>, ClientError> {
+        CommittedLog::open(self, position)
     }
 
     /// Sends `client close`, so the driver removes this client's publications and

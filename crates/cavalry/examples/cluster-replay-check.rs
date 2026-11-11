@@ -3,25 +3,31 @@
 //! driver with its consensus module beside it, has the leader append entries whose
 //! payloads carry a hash chain, and waits until every member has committed and synced
 //! every one. It prints each payload it offered on stdout, one line of hex an entry.
+//! Beside each member it runs a service, a client of the member's driver that reads
+//! the committed log as the entries commit (`spec/cluster.md`, "The service"; ADR
+//! 0066) and writes each entry to a file as `cavalry replay` prints a message, its
+//! position and its body in hex.
 //! It then closes the three modules, which ends the log's stream, and the three
 //! drivers, which leaves each member's recording stopped at its end, and prints on
-//! stderr what the script needs: each member's driver directory, log directory and
-//! recording id, and the end position. The script starts a driver on each member's
-//! directories, replays that member's recording with `cavalry replay`, and compares
-//! the three members' lines with each other and their payloads with the lines of this
-//! program. Each entry's payload is its number and a hash over every payload before
+//! stderr what the script needs: each member's driver directory, log directory,
+//! service file and recording id, and the end position. The script starts a driver on
+//! each member's directories, replays that member's recording with `cavalry replay`,
+//! and compares the three members' lines with each other, with the lines each
+//! member's service wrote, and their payloads with the lines of this program. Each
+//! entry's payload is its number and a hash over every payload before
 //! it, so a byte out of place or an entry missing on any member changes every line
 //! after it. `--messages <n>` sets the count, 100000 by default; `--dir <path>` is the
 //! directory the three members' directories are made under.
 
-use std::io::Write as _;
+use std::fs::File;
+use std::io::{BufWriter, Write as _};
 use std::net::UdpSocket;
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 use std::time::{Duration, Instant};
 
-use cavalry::Driver;
 use cavalry::cluster::{ConsensusModule, ElectionState, RaftError, Refused, Role};
+use cavalry::{Cavalry, CommittedLog, Driver};
 
 fn main() -> ExitCode {
     let (messages, dir) = match parse(std::env::args().skip(1)) {
@@ -142,22 +148,72 @@ fn members_string() -> Result<String, std::io::Error> {
         .join("|"))
 }
 
-/// One member: its driver, its consensus module until the module closes, and where
-/// its files are.
+/// The service beside a member: a client of the member's driver, the committed log
+/// once the member has one, the file its lines go to, and how many entries it read.
+struct Service {
+    client: Cavalry,
+    log: Option<CommittedLog>,
+    path: PathBuf,
+    lines: BufWriter<File>,
+    read: u64,
+    /// Cycles since the service last asked for the log: it asks once in 64, since
+    /// each ask reads the counters file's records.
+    asked: u32,
+}
+
+impl Service {
+    /// Opens the log when the member has one, and reads what has been committed since
+    /// the last cycle: one line an entry, the position and the body in hex, which is
+    /// how `cavalry replay` prints a body that is not text.
+    fn do_work(&mut self) -> Result<usize, Box<dyn std::error::Error>> {
+        let Some(log) = self.log.as_mut() else {
+            self.asked += 1;
+            if self.asked % 64 == 1 {
+                self.log = self.client.committed_log(0)?;
+            }
+            return Ok(0);
+        };
+        let (lines, read) = (&mut self.lines, &mut self.read);
+        let mut failed = None;
+        let entries = log.poll(
+            |entry, _, position| {
+                let mut line = write!(lines, "{position} ");
+                for byte in entry {
+                    line = line.and_then(|()| write!(lines, "{byte:02x}"));
+                }
+                if let Err(error) = line.and_then(|()| writeln!(lines)) {
+                    failed.get_or_insert(error);
+                }
+                *read += 1;
+            },
+            256,
+        )?;
+        match failed {
+            Some(error) => Err(error.into()),
+            None => Ok(entries),
+        }
+    }
+}
+
+/// One member: its driver, its consensus module until the module closes, the service
+/// beside it, and where its files are.
 struct Member {
     driver: Driver,
     module: Option<ConsensusModule>,
+    service: Service,
     dir: PathBuf,
     log_dir: PathBuf,
 }
 
-/// Runs every member's duty cycle once; sleeps a little when none had work.
-fn cycle(members: &mut [Member]) -> Result<(), RaftError> {
+/// Runs every member's duty cycle and every service's once; sleeps a little when none
+/// had work.
+fn cycle(members: &mut [Member]) -> Result<(), Box<dyn std::error::Error>> {
     let mut work = 0;
     for member in members.iter_mut() {
         if let Some(module) = member.module.as_mut() {
             work += module.do_work()?;
         }
+        work += member.service.do_work()?;
     }
     if work == 0 {
         std::thread::sleep(Duration::from_micros(100));
@@ -174,9 +230,20 @@ fn run(messages: u64, dir: &Path) -> Result<(), Box<dyn std::error::Error>> {
         let log_dir = dir.join(format!("member-{id}-log"));
         let driver = Driver::start(&driver_dir, &log_dir)?;
         let module = ConsensusModule::start(&driver_dir, &log_dir, &members_string, id)?;
+        // The service starts with its member, before the member has a log to read.
+        let path = dir.join(format!("service-{id}.txt"));
+        let service = Service {
+            client: Cavalry::connect_to(&driver_dir)?,
+            log: None,
+            lines: BufWriter::new(File::create(&path)?),
+            path,
+            read: 0,
+            asked: 0,
+        };
         members.push(Member {
             driver,
             module: Some(module),
+            service,
             dir: driver_dir,
             log_dir,
         });
@@ -262,6 +329,27 @@ fn run(messages: u64, dir: &Path) -> Result<(), Box<dyn std::error::Error>> {
         cycle(&mut members)?;
     }
 
+    // Every service has read every entry: all of them are committed, and each
+    // member's recording, which its service replays, holds them.
+    let entries = messages + 1;
+    let deadline = Instant::now() + Duration::from_secs(60);
+    while !members.iter().all(|member| member.service.read == entries) {
+        if Instant::now() > deadline {
+            let read: Vec<u64> = members.iter().map(|member| member.service.read).collect();
+            return Err(format!("the services read {read:?} of {entries} entries").into());
+        }
+        cycle(&mut members)?;
+    }
+    for member in &mut members {
+        member.service.lines.flush()?;
+        if let Some(log) = member.service.log.take() {
+            if log.position() != end || log.commit_position() != end {
+                return Err(format!("a service ended at {log:?}, not at {end}").into());
+            }
+            log.close(&mut member.service.client)?;
+        }
+    }
+
     // The modules close, which ends the log's publication and each follower's image
     // of it, and then the drivers, each of which stops what it still records. Every
     // member's recording is whole on its disk before either: its append position, what
@@ -280,18 +368,19 @@ fn run(messages: u64, dir: &Path) -> Result<(), Box<dyn std::error::Error>> {
     let mut lines = Vec::with_capacity(3);
     for (id, (member, recording)) in members.into_iter().zip(&recordings).enumerate() {
         lines.push(format!(
-            "member={id} dir={} log_dir={} recording={recording}",
+            "member={id} dir={} log_dir={} service={} recording={recording}",
             member.dir.display(),
-            member.log_dir.display()
+            member.log_dir.display(),
+            member.service.path.display()
         ));
+        member.service.client.close()?;
         member.driver.close()?;
     }
     for line in lines {
         eprintln!("{line}");
     }
     eprintln!(
-        "end={end} entries={} seconds={:.3}",
-        messages + 1,
+        "end={end} entries={entries} seconds={:.3}",
         started.elapsed().as_secs_f64()
     );
     Ok(())
