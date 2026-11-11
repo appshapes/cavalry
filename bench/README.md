@@ -146,6 +146,10 @@ nothing depends on it.
 - Add a knob to make a number pass. The options choose what to measure, not how well.
 - Run on the data plane. It measures `cavalry-shm`; it is not part of it, so its
   dependencies are its own and it may allocate outside the measured loops.
+- Leave its files behind, or remove another's. A row removes its directory when it
+  ends; what a killed process left under the bench directory is removed by the next
+  run of the same user, at its start. An entry of a process that still runs, and an
+  entry of another user's, is never touched.
 
 ## Example
 
