@@ -929,7 +929,10 @@ impl Consensus {
     }
 
     /// One duty cycle: what the member's state asks of it at `clock`. Returns how much
-    /// it did, 0 for nothing, so that the caller's idle strategy can back off.
+    /// it did, 0 for nothing, so that the caller's idle strategy can back off. A
+    /// leader that elects looks after the replays it serves after its state's own
+    /// work, so a fault of the state's work is returned before one of a replay, and
+    /// a replay's fault is returned once the state's work has run.
     pub fn do_work<I: Io>(&mut self, clock: Clock, io: &mut I) -> Result<usize, I::Fault> {
         self.append_position = self.append_position.max(io.append_position());
         let stepped = match self.state {
