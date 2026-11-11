@@ -95,6 +95,25 @@ acts on `client timeout`: a client that receives one with its own id closes, sin
 publications and subscriptions are gone. A first command that finds the client registry
 full is answered with error code 10 and registers nothing.
 
+A client that attaches while the driver is still creating its files waits for them (ADR
+0072). The driver creates each of the three files, sizes it and writes its magic last,
+so for a few milliseconds a client that has found the command ring can find one of the
+three unfinished: missing; empty, created and not yet sized, which its page calls
+`too-short`; or `not-ready`. Such a file is a driver creating it now, and the client
+reads the directory again from the command ring, every 10 ms, for up to the driver
+timeout from its first read, a time it measures on a clock that never goes back. A
+command ring still unfinished then is a dead driver's, as it is to a starting driver,
+and the client refuses with `driver-timeout`. So is a finished ring whose heartbeat
+has not been stored again since the client first read it: a driver that runs stores
+its heartbeat every heartbeat interval, and one that stopped after it made its ring
+never does. Another file still unfinished then, beside a heartbeat the driver has
+stored meanwhile, is refused with its own check: a driver that runs made its files
+before it ran, so the directory is damaged. The wait is for an unfinished file alone.
+A directory with no command ring is no driver, a ring that holds −1 is a driver that
+closed and a ring whose heartbeat is older than the driver timeout is a dead driver's,
+on the first read as on any other, and the client refuses each at once: it cannot tell
+a driver about to start there from none.
+
 ## Encoding
 
 A command is a command ring record whose type is the command's type id and whose message

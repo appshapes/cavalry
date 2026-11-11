@@ -26,11 +26,14 @@ test *ARGS: test-scripts
 # loopback, the latency gate's rule on made-up results (ADR 0029), and the udp pair's wait
 # for each other against a fake GitHub API and a fake clock (card 212), and the fixer
 # workflow's approval of the run GitHub held on its push, the step's own script against
-# a fake `gh` (card 215). Standard library only, no network.
+# a fake `gh` (card 215), and the list of what can move the bench, with the reading of a
+# change from its event against a fake GitHub API (ADR 0071). Standard library only, no
+# network.
 test-scripts:
     python3 scripts/release-notes-email-test.py
     python3 scripts/release-notes-test.py
     python3 scripts/bench-compare-test.py
+    python3 scripts/bench-needed-test.py
     python3 scripts/wait-for-partner-job-test.py
     python3 scripts/claude-workflow-test.py
     python3 clients/generate-test.py
@@ -92,8 +95,14 @@ conformance:
 # its own records 100,000 hash-chained messages while a live subscriber prints them,
 # `cavalry replay` plays the recording twice from the start and once from an instant,
 # and the script fails unless the live lines and both replays hash the same and the
-# replay from the instant starts where the time index says. What CI runs on Linux and
-# macOS. docs/how-to/replay-a-recording.md is the page.
+# replay from the instant starts where the time index says. Then a cluster (ADR 0052,
+# feature 3): three members on the loopback replicate and commit 100,000 hash-chained
+# entries while a service beside each reads the committed log (ADR 0066), a driver on
+# each member's directories replays that member's recording, and the script fails
+# unless the three members' lines hash the same, each service's lines are its
+# member's, and their payloads are the ones the leader was offered. What CI runs on
+# Linux and macOS. docs/how-to/replay-a-recording.md, docs/how-to/run-a-cluster.md and
+# docs/how-to/read-the-committed-log.md are the pages.
 replay-check:
     bash scripts/replay-check.sh
 

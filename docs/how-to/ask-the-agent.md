@@ -28,7 +28,9 @@ first one. Why the loop is built this way is in ADR 0004
      agent's commit messages and ending with `Closes #<issue>`;
    - a `dispatch review` run on the pull request starts a `review pr` run, listed on
      the Actions tab rather than among the pull request's checks because it runs on
-     `master`, which either approves or requests changes;
+     `master`, which either approves or requests changes. The reviewer starts when CI
+     does and does not wait for it: a check that has failed by then is a blocker, and
+     the review names the checks that had not finished;
    - on requested changes, a second `claude` run applies the blockers on the same
      branch, one commit per blocker, pushed as each lands; when it ends, the run
      approves the `ci` run GitHub held on its last push, deletes the runs held on its
@@ -39,7 +41,12 @@ first one. Why the loop is built this way is in ADR 0004
      times;
    - with `auto-merge`, an `auto merge` run arms the merge on the approval, and the
      pull request merges as one squash commit when `gates (linux)`, `gates (macos)`,
-     `bench (linux)` and `bench (grip)` pass, and the issue closes. A push after the
+     `bench (linux)`, `bench (grip)` and `bench (udp)` pass, and the issue closes, so
+     an approval given while a check still runs merges nothing that check would stop.
+     For a change no
+     file of which can move the bench, a page or an ADR, the bench checks pass in
+     seconds without their hosts
+     ([ADR 0071](../decisions/0071-run-the-bench-jobs-only-for-a-change-that-can-move-the-bench.md)). A push after the
      approval, yours or the agent's, or a review that requests changes on the approved
      head, disarms the merge; the reviewer's approval of the new head arms it again.
 
@@ -109,9 +116,20 @@ branch locally; GitHub has already deleted it on origin.
   once, on its own, and a comment on the pull request says so. When the review is more
   than thirty minutes late, run `gh run list --workflow "review pr"`: each run is named
   with its pull request number and attempt, a run `in_progress` is still working, a
-  `failure` is the second miss, with what the session did in its job summary, and a
-  run `cancelled` after sixty minutes hit the job's timeout, which runs nothing again
-  (card 213). Add the `review` label to the pull request to run it again. Pull requests from forks are not reviewed by the agent, only by a person.
+  `failure` is the second miss, with what the session did in its job summary and in
+  its log: `gh run view <run id> --log` prints the result, the denied tool calls and
+  the session's last text after the line `## Reviewer session, attempt 2 of 2`. The
+  first miss is the `attempt 1` run for the same pull request. It is listed below the
+  `failure` run, because the list is newest first. Its log holds the same lines after
+  the line `## Reviewer session, attempt 1 of 2` among the `review` job's lines: each
+  line of `gh run view --log` starts with its job's name, and the `retry` job's lines
+  hold that line again, in the script the runner prints before it runs it. That run
+  reads `success` or `cancelled` in the list, as its last job ended or was replaced by
+  the second attempt, and `gh run view <run id>` shows its `review` job as passed
+  either way. A
+  run whose `review` job itself reads `cancelled` held no finished session: the review
+  of a newer head took its place, or after sixty minutes it hit the job's timeout,
+  which runs nothing again (card 213). Add the `review` label to the pull request to run it again. Pull requests from forks are not reviewed by the agent, only by a person.
 - **The pull request is approved but not merged.** Either it has no `auto-merge`
   label, or a required check failed, or the merge was disarmed since the approval: a
   push, yours or the agent's, or a review that requested changes on the approved head,

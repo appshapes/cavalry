@@ -8,6 +8,14 @@ The client API implementation, re-exported by the `cavalry` crate. Data plane.
   handle for writing one stream) and subscriptions (a handle for reading one stream,
   possibly from several publishers) on channels such as `cavalry:udp?endpoint=host:port`
   and `cavalry:ipc`. IPC and UDP are the same API.
+- Waits for a driver that is still starting. `Cavalry::connect` on a directory whose
+  command ring is there while one of the driver's three files is missing, empty or
+  `not-ready` reads the directory again every 10 ms, for up to the driver timeout,
+  10 s, so a client started right after its driver connects with no retry of its own.
+  A driver that died while it created its files is `driver-gone` at that bound. The
+  wait is for an unfinished file alone: a directory with no command ring is
+  `not-found` at once, and one a stopped driver left is `driver-gone` at once (ADR
+  0072).
 - Publishes by claim and commit: claim a slice of the log buffer, write into it in
   place, commit it. Nothing is allocated per message, and a codec encodes straight into
   the claimed slice.
@@ -52,6 +60,21 @@ The client API implementation, re-exported by the `cavalry` crate. Data plane.
   records to other counters a second later, so each read checks that the record is
   still the recording's, and a position is never another counter's value. A client
   follows 1,024 recordings at most, the driver's own bound.
+- Reads a cluster's committed log for a service: `Cavalry::committed_log(position)`
+  returns a `CommittedLog` once the driver hosts a cluster member that has a recording
+  of its log, and `CommittedLog::poll` hands over every entry a quorum of members
+  holds, in order, each once, with its position. The log is read from the member's
+  own recording through a replay that follows it, on the leader and on a follower
+  alike, and no further than the member's commit position, which is taken only while
+  the member's counters say the log is still that recording (ADR 0066). A service may
+  start before its member, with it or after it, at position 0 or where it stopped.
+  It reads until `CommittedLog::is_ended()`, and then two calls say whether it was
+  given every entry below its bound: it was when both return `None`. If the driver's
+  replay of the recording failed, `CommittedLog::failed_at()` gives the position it
+  failed at, and the entries from there on were not delivered. If the driver removed
+  the replay's image, 5 s after the replay ended, before the service read it,
+  `CommittedLog::withdrawn_at()` gives the position where the undelivered entries
+  begin.
 - Holds a recording the driver arms: `Cavalry::arm_recording(channel, stream_id)`, on a
   `cavalry:udp` stream with a subscription and no publication or image yet, returns
   an `ArmedRecording`, and `ArmedRecording::poll()` returns the `Recording` once the

@@ -9,10 +9,29 @@ listing's rows are given as that filter prints them, `<id> <workflow file> <stat
 <conclusion>`. The choice of what is held and what is ci's, which the step makes in awk,
 is what runs here. Standard library only; `just test-scripts` runs it.
 
+And of the step of review-pull-request.yml that verifies a review was submitted and
+prints what the reviewer session did (card 247), run the same way, with `jq` as the step
+uses it and a fake `gh` that prints the reviews it is given. What is held is that the
+session's own text, which a pull request anyone can open may have shaped, reaches the
+step's log only between a `::stop-commands::` line and the line that ends it, so that no
+line of it is read by the runner as a workflow command, and that it reaches the job
+summary whole.
+
+And of the two texts a reviewer session reads, that workflow's prompt and
+`.claude/agents/reviewer.md` (card 247's fix). What is held: each gives one way to
+submit a review, three lines at the first column with the body on standard input in a
+quoted heredoc, and that form, run under bash as each text has it with a fake `gh`,
+hands over a body with a heading, a backtick and a substitution as written; and each
+says not to wait for CI and names the same two blockers among the checks. Whether a
+session's permissions allow the form is Claude Code's to decide and is not run here,
+and no test makes a session do as the texts say.
+
     python3 scripts/claude-workflow-test.py
 """
 import json
 import os
+import re
+import shutil
 import stat
 import subprocess
 import sys
@@ -23,7 +42,10 @@ from pathlib import Path
 sys.dont_write_bytecode = True
 ROOT = Path(__file__).resolve().parent.parent
 WORKFLOW = Path(os.environ.get("CLAUDE_WORKFLOW", ROOT / ".github" / "workflows" / "claude.yml"))
+REVIEW_WORKFLOW = ROOT / ".github" / "workflows" / "review-pull-request.yml"
+REVIEWER_BRIEF = ROOT / ".claude" / "agents" / "reviewer.md"
 STEP = "Approve the runs GitHub held on the fixer's push"
+VERIFY = "Verify a review was submitted"
 REPO = "example-owner/cavalry"
 HEAD = "bff0e77e3e3f31de105cc11c70e3abb65fca6eac"
 STALE = "5c1f0a2d9e3b47a6b8c0d1e2f3a4b5c6d7e8f901"   # what a lagging pull request object names
@@ -34,9 +56,9 @@ CI, CLAUDE, DISPATCH = (".github/workflows/ci.yml", ".github/workflows/claude.ym
                         ".github/workflows/dispatch-review.yml")
 
 
-def step_script(name):
+def step_script(name, workflow=None):
     """The `run: |` block of the step called `name`, with its indentation taken off."""
-    lines = WORKFLOW.read_text(encoding="utf-8").split("\n")
+    lines = (workflow or WORKFLOW).read_text(encoding="utf-8").split("\n")
     at = lines.index(f"      - name: {name}")
     run = next(i for i in range(at + 1, len(lines)) if lines[i].strip().startswith("run:"))
     if lines[run].strip() != "run: |":
@@ -326,6 +348,241 @@ class Workflow(unittest.TestCase):
         self.assertIn("if: needs.agent.result == 'success'", block)
         self.assertIn("GH_TOKEN: ${{ secrets.GH_ACTIONS_TOKEN }}", block)
         self.assertIn("PR_NUMBER: ${{ github.event.pull_request.number || github.event.issue.number }}", block)
+
+
+# What a reviewer session that was talked into it might leave as its last words and as a
+# command the settings denied: lines the runner would read as workflow commands.
+HOSTILE_TEXT = "\n".join([
+    "I could not finish the review.",
+    "::set-output name=reviewed::true",
+    "  ::error::forged by the session",
+    "::add-mask::what the log should show",
+    "::stop-commands::guess",
+    "::guess::",
+    "reviewed=true",
+])
+HOSTILE_COMMAND = "gh pr review 128 --approve\n::warning::forged in a command"
+# The fake `gh` of the verify step: the step's one call, the reviews at the head as its
+# filter prints them, one `STATE<TAB>has-trailer` to a line.
+FAKE_GH_REVIEWS = """#!/bin/sh
+[ "$1" = api ] && [ "$2" = --paginate ] && [ "$3" = "repos/$REPO/pulls/$PR_NUMBER/reviews" ] && [ "$4" = --jq ] \\
+  || { echo "fake gh: a call the step is not expected to make: $*" >&2; exit 9; }
+cat "$FAKE_REVIEWS"
+"""
+
+
+@unittest.skipUnless(shutil.which("jq"), "the step reads the session's record with jq, which is not installed here")
+class Verify(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        cls.script = step_script(VERIFY, REVIEW_WORKFLOW)
+
+    def run_step(self, reviews=(), before=0, attempt="1", execution=True, text=HOSTILE_TEXT, no_token=False):
+        """Runs the step: the exit code, the lines it printed, the job summary, the outputs."""
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp = Path(tmp)
+            (tmp / "bin").mkdir()
+            gh = tmp / "bin" / "gh"
+            gh.write_text(FAKE_GH_REVIEWS, encoding="utf-8")
+            gh.chmod(gh.stat().st_mode | stat.S_IXUSR)
+            if no_token:
+                od = tmp / "bin" / "od"
+                od.write_text("#!/bin/sh\nexit 1\n", encoding="utf-8")
+                od.chmod(od.stat().st_mode | stat.S_IXUSR)
+            (tmp / "reviews").write_text("".join(f"{state}\t{trailer}\n" for state, trailer in reviews), encoding="utf-8")
+            record = tmp / "execution.json"
+            record.write_text(json.dumps([
+                {"type": "assistant", "message": {"content": [{"type": "text", "text": "An earlier turn."}]}},
+                {"type": "assistant", "message": {"content": [{"type": "text", "text": text}]}},
+                {"type": "result", "subtype": "success", "is_error": False, "num_turns": 31, "duration_ms": 412000,
+                 "permission_denials": [{"tool_name": "Bash", "tool_input": {"command": HOSTILE_COMMAND}}]},
+            ]), encoding="utf-8")
+            summary, outputs = tmp / "summary.md", tmp / "outputs"
+            env = {"PATH": f"{tmp / 'bin'}{os.pathsep}{os.environ['PATH']}", "GH_TOKEN": "not-a-token",
+                   "PR_NUMBER": PR, "REPO": REPO, "HEAD_SHA": HEAD, "ATTEMPT": attempt,
+                   "REVIEW_OUTCOME": "success" if execution else "failure",
+                   "EXECUTION_FILE": str(record) if execution else "", "REVIEWS_BEFORE": str(before),
+                   "FAKE_REVIEWS": str(tmp / "reviews"), "GITHUB_STEP_SUMMARY": str(summary), "GITHUB_OUTPUT": str(outputs)}
+            done = subprocess.run(["bash", "-c", self.script], env=env, capture_output=True, text=True, timeout=120)
+            return (done.returncode, (done.stdout + done.stderr).split("\n"),
+                    summary.read_text(encoding="utf-8") if summary.exists() else "",
+                    outputs.read_text(encoding="utf-8") if outputs.exists() else "")
+
+    def stopped(self, lines):
+        """The lines printed with workflow commands stopped, and the lines printed outside."""
+        starts = [i for i, line in enumerate(lines) if re.fullmatch(r"::stop-commands::[0-9a-f]{32}", line)]
+        self.assertEqual(len(starts), 1, lines)
+        token = lines[starts[0]].rsplit("::", 1)[1]
+        end = lines.index(f"::{token}::", starts[0])
+        return lines[starts[0] + 1:end], lines[:starts[0]] + lines[end + 1:], token
+
+    def commands(self, lines):
+        """The lines the runner would read as workflow commands: it trims a line first."""
+        return [line for line in lines if line.lstrip().startswith("::")]
+
+    def test_a_miss_prints_the_sessions_words_with_workflow_commands_stopped_around_them(self):
+        code, lines, summary, outputs = self.run_step()
+        self.assertEqual(code, 0, lines)
+        self.assertEqual(outputs, "reviewed=false\n")
+        inside, outside, token = self.stopped(lines)
+        for line in HOSTILE_TEXT.split("\n") + HOSTILE_COMMAND.split("\n")[1:]:
+            self.assertIn(line, inside)
+            self.assertNotIn(line, outside)
+        self.assertNotIn(token, summary, "the token is made after the session ended")
+        own = self.commands(outside)
+        self.assertEqual(len(own), 1, own)
+        self.assertTrue(own[0].startswith("::warning::Reviewer session ended without submitting a formal review"), own)
+        self.assertIn(f"## Reviewer session, attempt 1 of 2, head {HEAD}", inside)
+        self.assertIn("- Verdict: none submitted (claude reviews at this head before the run: 0)", inside)
+        self.assertIn("- Result: success, is_error false, 31 turns, 412 s, 1 denied tool calls", inside)
+        self.assertEqual(summary.rstrip("\n").split("\n"), inside[:-1] if inside[-1] == "" else inside,
+                         "the job summary and the log hold the same lines")
+
+    def test_a_second_miss_fails_the_step_and_still_stops_commands_around_the_sessions_words(self):
+        code, lines, summary, outputs = self.run_step(attempt="2")
+        self.assertEqual(code, 1, lines)
+        self.assertEqual(outputs, "")
+        inside, outside, _ = self.stopped(lines)
+        self.assertIn("::set-output name=reviewed::true", inside)
+        own = self.commands(outside)
+        self.assertEqual(len(own), 1, own)
+        self.assertTrue(own[0].startswith("::error::Reviewer session ended without submitting a formal review"), own)
+        self.assertIn(f"## Reviewer session, attempt 2 of 2, head {HEAD}", inside)
+
+    def test_a_review_older_than_the_run_is_a_miss(self):
+        code, lines, _, outputs = self.run_step(reviews=[("CHANGES_REQUESTED", "true")], before=1)
+        self.assertEqual(code, 0, lines)
+        self.assertEqual(outputs, "reviewed=false\n")
+        inside, _, _ = self.stopped(lines)
+        self.assertIn("- Verdict: none submitted (claude reviews at this head before the run: 1)", inside)
+
+    def test_a_verdict_is_read_from_the_newest_review_and_the_sessions_last_text_is_left_out(self):
+        code, lines, summary, outputs = self.run_step(reviews=[("CHANGES_REQUESTED", "true"), ("APPROVED", "false")], before=1)
+        self.assertEqual(code, 0, lines)
+        self.assertEqual(outputs, "reviewed=true\n")
+        inside, outside, _ = self.stopped(lines)
+        self.assertIn("- Verdict: APPROVED", inside)
+        self.assertNotIn("::set-output name=reviewed::true", inside + outside, "the last text is printed on a miss alone")
+        self.assertIn("::warning::forged in a command", inside, "a denied command is printed either way")
+        self.assertEqual(self.commands(outside), [])
+
+    def test_no_record_of_the_session_says_so(self):
+        code, lines, summary, outputs = self.run_step(execution=False)
+        self.assertEqual(code, 0, lines)
+        inside, _, _ = self.stopped(lines)
+        self.assertIn("- No execution file; the Review step's outcome was 'failure'.", inside)
+        self.assertIn("- No execution file; the Review step's outcome was 'failure'.", summary)
+
+    def test_without_a_token_nothing_of_the_session_reaches_the_log_and_the_summary_has_it(self):
+        code, lines, summary, outputs = self.run_step(no_token=True)
+        self.assertEqual(code, 0, lines)
+        self.assertEqual(outputs, "reviewed=false\n")
+        self.assertFalse([line for line in lines if line.startswith("::stop-commands::")], lines)
+        for line in HOSTILE_TEXT.split("\n"):
+            self.assertNotIn(line, lines)
+            self.assertIn(line, summary)
+        own = self.commands(lines)
+        self.assertEqual(len(own), 2, own)
+        self.assertTrue(own[0].startswith("::warning::No token could be made to stop workflow commands"), own)
+
+
+class ReviewWorkflow(unittest.TestCase):
+    def test_the_retry_note_names_the_run_whose_log_holds_the_sessions_lines(self):
+        text = REVIEW_WORKFLOW.read_text(encoding="utf-8")
+        block = text[text.index("      - name: Dispatch attempt 2\n"):]
+        self.assertIn("RUN_ID: ${{ github.run_id }}", block)
+        self.assertIn("gh run view $RUN_ID --log", block)
+        self.assertIn('## Reviewer session, attempt 1 of 2', block)
+
+
+# A review body with everything in it that a shell or the session's permissions read:
+# a heading, which is what a body given as `--body '...'` is denied for, a backtick, an
+# apostrophe, a substitution, a variable, a redirect, and the fixer's line.
+REVIEW_BODY = "\n".join([
+    "## Findings",
+    "",
+    "The client's wait has no bound: `connect_to` loops; $(date) and $HOME and a > b stay as written.",
+    "",
+    "# A second heading",
+    "@claude Read `.claude/agents/developer.md`, then address every blocker in this review.",
+])
+# The fake `gh` of a submit: it keeps its arguments, one to a line, and its standard input.
+FAKE_GH_SUBMIT = """#!/bin/sh
+printf '%s\\n' "$@" > "$FAKE_ARGS"
+cat > "$FAKE_STDIN"
+"""
+
+
+class ReviewerInstructions(unittest.TestCase):
+    """The two texts a reviewer session reads, the workflow's prompt and its brief: how a
+    review is submitted and what is done about a check that still runs (card 247)."""
+
+    @classmethod
+    def setUpClass(cls):
+        workflow = REVIEW_WORKFLOW.read_text(encoding="utf-8")
+        start = workflow.index("          prompt: |\n") + len("          prompt: |\n")
+        block = workflow[start:workflow.index("          settings: |\n", start)]
+        # The prompt as the session reads it: a block scalar's lines without its indent.
+        indent = " " * 12
+        assert all(line.startswith(indent) or not line.strip() for line in block.split("\n")), "the prompt's indent"
+        cls.texts = {"the workflow's prompt": "\n".join(line[len(indent):] for line in block.split("\n")),
+                     "the brief": REVIEWER_BRIEF.read_text(encoding="utf-8")}
+
+    def submit_form(self, text):
+        """The command a text gives for an approval, as written: three lines that start at
+        the first column, the heredoc's last line among them, or bash never ends it."""
+        found = re.search(r"^gh pr review (?:<n>|\$\{\{ inputs\.pr_number \}\}) --approve --body-file - <<'EOF'\n"
+                          r"<summary>\nEOF\n", text, re.M)
+        self.assertIsNotNone(found, "no approval at the first column with its body on standard input, in a quoted heredoc")
+        return found.group(0)
+
+    def test_both_give_one_way_to_submit_and_it_is_the_body_on_standard_input(self):
+        for name, text in self.texts.items():
+            with self.subTest(name):
+                self.submit_form(text)
+                self.assertIn("`--request-changes` in place of", text)
+                self.assertNotRegex(text, r"gh pr review \S+(?: \S+ \}\})? --(?:approve|request-changes) --body ")
+
+    def test_the_form_hands_gh_a_body_with_a_heading_a_backtick_and_a_substitution_as_written(self):
+        for name, text in self.texts.items():
+            with self.subTest(name), tempfile.TemporaryDirectory() as tmp:
+                tmp = Path(tmp)
+                (tmp / "bin").mkdir()
+                gh = tmp / "bin" / "gh"
+                gh.write_text(FAKE_GH_SUBMIT, encoding="utf-8")
+                gh.chmod(gh.stat().st_mode | stat.S_IXUSR)
+                form = re.sub(r"<n>|\$\{\{ inputs\.pr_number \}\}", PR, self.submit_form(text))
+                env = {"PATH": f"{tmp / 'bin'}{os.pathsep}{os.environ['PATH']}", "HOME": "/a/home/that/must/not/appear",
+                       "FAKE_ARGS": str(tmp / "args"), "FAKE_STDIN": str(tmp / "stdin")}
+                done = subprocess.run(["bash", "-c", form.replace("<summary>", REVIEW_BODY)], env=env,
+                                      capture_output=True, text=True, timeout=60)
+                self.assertEqual((done.returncode, done.stderr), (0, ""))
+                self.assertEqual((tmp / "args").read_text(encoding="utf-8").split("\n")[:-1],
+                                 ["pr", "review", PR, "--approve", "--body-file", "-"])
+                self.assertEqual((tmp / "stdin").read_text(encoding="utf-8"), REVIEW_BODY + "\n")
+
+    def test_both_say_not_to_wait_and_name_the_same_two_blockers_among_the_checks(self):
+        said = {"not to wait": r"Do not wait for CI",
+                "that a check may still run": r"queued or\s+running",
+                "that the session is one turn": r"one turn",
+                "that nothing brings it back": r"nothing\s+(?:resumes|brings)\s+it",
+                "that a failed check is a blocker": r"check\s+that\s+has\s+\*{0,2}failed",
+                "that a conflict with master is a blocker": r"CONFLICTING|conflicts\s+with\s+`master`",
+                "that no other state of a check is one": r"no\s+other\s+state\s+of\s+a\s+check\s+is|check\s+in\s+any\s+other\s+state\s+is\s+not",
+                "what holds the merge": r"merges\s+(?:an\s+approved\s+pull\s+request\s+)?only\s+once\s+the\s+(?:required\s+checks|checks\s+that\s+branch\s+protection\s+requires)"}
+        for name, text in self.texts.items():
+            for what, pattern in said.items():
+                with self.subTest(f"{name} says {what}"):
+                    self.assertRegex(text, pattern)
+
+    def test_the_brief_says_how_to_read_a_failed_job_while_its_run_still_goes(self):
+        brief = self.texts["the brief"]
+        self.assertIn("gh run view <run id> --log-failed", brief)
+        self.assertIn("gh api repos/<owner>/<repo>/actions/jobs/<job id>/logs", brief)
+        self.assertIn("gh pr checks <n> --json name,bucket,link", brief)
+
+    def test_the_brief_no_longer_asks_for_a_green_ci_which_a_session_can_only_wait_for(self):
+        self.assertNotIn("CI must be green", self.texts["the brief"])
 
 
 if __name__ == "__main__":

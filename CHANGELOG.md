@@ -1932,6 +1932,118 @@ user-visible change, added in the same commit as the change. The format follows
   that has not yet stopped, its recorder behind, and a receiver thread starved of CPU
   ([ADR 0068](docs/decisions/0068-give-an-image-being-retired-to-no-new-subscription.md);
   card 227).
+- The soak samples its processes: each minute `scripts/soak.sh` adds one line for the
+  driver and one for the soak program to `samples/processes-<start>.txt`, one file
+  for each run, with the process's
+  resident memory, its three parts on Linux (heap and stacks, files on a disk, files
+  on a tmpfs, which is where the driver's mappings are), its virtual size, its
+  threads and its open descriptors, so that a week shows a course and not one
+  reading. [Set up a soak host](docs/how-to/set-up-a-soak-host.md), steps 5 and 6,
+  says what a line holds and how to tell growth from the mappings a driver brings
+  into RAM when it starts (card 240).
+- `cavalry doctor` explains a cluster member from its counters. On a driver that is a
+  member it prints `cluster-member`, a note with the member's id, whether it leads or
+  follows, its term, its election's state and its append and commit positions. It
+  warns when the member follows no leader (`cluster-no-leader`), saying from
+  `CAVALRY_CLUSTER_MEMBERS` whether it is the appointed leader and what it waits for,
+  or which member is and on whose host to look next. It notes a member that has
+  taken its leader and joins its log, with the network path that needs
+  (`cluster-joining`). It warns when the member's elections fail
+  (`cluster-joined-late`), because the leader's log does not reach it, which it names
+  first with the two endpoints to check before a new cluster, or because it started
+  late or lost its log; and when the leader has lost its quorum
+  (`cluster-quorum-lost`). It fails when the appointed leader found
+  members ahead of its own log and so does not lead, or leads and does not close its
+  election (`cluster-leader-behind`), and it notes a commit position behind the
+  leader's own append position (`cluster-commit-waits`). It warns too, with the
+  counter's own advice, when the member rejected consensus messages, as from a member
+  of another version (`cluster.messages_rejected`), stopped hearing its leader
+  (`cluster.leader_heartbeat_timeouts`) or lost the leader's log stream
+  (`cluster.log_images_lost`). Each names what to do. An armed recording that has
+  started, which every follower has, is no longer reported: `recording.armed` warns
+  only for recordings still waiting for their image. The new how-to,
+  [Run a cluster of three members](docs/how-to/run-a-cluster.md), starts three members
+  on one host and reads each finding (card 227).
+- CI takes the two bench hosts only for a change that can move the bench. A first
+  job reads the change's files, and when every one of them is on a list of paths known
+  not to matter, pages, ADRs, spec pages, other workflows, scripts the bench does not
+  run and the clients, the four bench checks keep their names and pass in seconds on a
+  hosted runner; anything under `crates/` or `bench/`, a manifest, the `justfile`,
+  `ci.yml` or a path nobody listed runs the bench as before, a run started by hand
+  always does, and so does a push onto a commit that has no green run of its own, so a
+  page never turns an unmeasured or red `master` green. 22 of the last 80 commits were
+  of the first kind and each had held the hosts for about 21 minutes a run
+  ([ADR 0071](docs/decisions/0071-run-the-bench-jobs-only-for-a-change-that-can-move-the-bench.md);
+  [Run the bench](docs/how-to/run-the-bench.md), step 3; card 246).
+- A reviewer session that ends without a review can now be read from its run's log as
+  well as from its job summary. The `review pr` run's log holds the session's result,
+  the tool calls the settings denied and, on a miss, the session's last text, after
+  the line `## Reviewer session, attempt 1 of 2` or `attempt 2 of 2`, and
+  `gh run view <run id> --log` prints them; before, only the job summary had them,
+  and `gh` prints no job summary. Workflow commands are stopped around these lines,
+  so nothing the session wrote can act as one. The note the run leaves on the pull
+  request after a first miss gives the command with the run's own id
+  ([Ask the agent to make a change](docs/how-to/ask-the-agent.md), "No review
+  arrived"; card 247).
+- `just replay-check` covers a cluster. After the recording it always checked, three
+  members on the loopback, each a driver with its consensus module, replicate and
+  commit 100,000 entries whose payloads carry a hash chain; a driver started on each
+  member's directories replays that member's recording of the log; and the gate fails
+  unless the three members' lines, positions and bodies, hash the same and their
+  payloads are the ones the leader was offered, in order. `examples/cluster-replay-check.rs`
+  in `cavalry` is its program
+  ([ADR 0052](docs/decisions/0052-build-raft-on-the-durable-log-fifth.md), feature 3;
+  [Run a cluster of three members](docs/how-to/run-a-cluster.md); card 227).
+- A client that connects while its driver is still starting now waits for it. A
+  driver takes a few milliseconds to create its three files, and a client started in
+  that time, a program run right after `cavalry run` or after `cavalry doctor` first
+  passes, was refused with `not-ready`, a message that told the operator to wait and
+  try again. `Cavalry::connect`, and so every `cavalry` command and every client over
+  the C ABI, now reads the driver directory again every 10 ms while the command ring
+  is there and one of the files is missing, empty or `not-ready`, for up to the
+  driver timeout, 10 s. A driver that died while it created its files is refused at
+  that bound with `driver-gone`, which says to start one. A directory with no command
+  ring is `not-found` at once and one a stopped driver left is `driver-gone` at once,
+  as before, so a program that starts a driver and a client together still waits for
+  `cavalry doctor` to pass
+  ([ADR 0072](docs/decisions/0072-wait-in-a-clients-connect-for-a-driver-that-is-creating-its-files.md);
+  card 243).
+- A service reads a cluster's committed log through the Rust client.
+  `Cavalry::committed_log(position)` opens the log of the cluster member on the
+  client's driver, or returns `None` while the driver has no member with a log, and
+  `CommittedLog::poll(handler, fragment_limit)` hands over every committed entry, in
+  order, each once, with its position; `position()` is where to open the log again,
+  `commit_position()` the bound of the last read, and `is_ended()` says that no poll
+  will deliver another entry, so a service stops on it and not on a poll of 0. Once it
+  is ended, `failed_at()` and `withdrawn_at()` are both `None` when every entry below
+  the last bound has been delivered. `failed_at()` is the position the driver's replay
+  of the recording failed at, and `withdrawn_at()` the position the undelivered
+  entries begin at when the driver withdrew the replay's image unread, 5 s after the
+  replay ended, from a service that had stopped polling. The same call serves the
+  leader's service and a follower's, and a service may start before, with or after
+  its member. The service finds the recording to replay in its member's
+  `cluster.log_recording_id` counter, which the consensus module already keeps, and
+  takes a commit position as its bound only while that counter still names the
+  recording it replays, so a record the driver gave to another counter, or a later
+  member's commit position, is never a bound. `cavalry` re-exports `CommittedLog`;
+  `examples/cluster-service.rs` is a service that prints each entry, and the how-to is
+  [Read a cluster's committed log from a service](docs/how-to/read-the-committed-log.md)
+  ([ADR 0066](docs/decisions/0066-feed-the-committed-log-to-a-service-through-a-replay-of-the-members-recording.md);
+  card 227).
+- `just replay-check` runs a service beside each of its three cluster members. Each
+  reads the committed log while the 100,000 entries are committed and writes a line
+  an entry, and the gate fails unless each service's lines are the lines of its
+  member's replay: six equal hashes where there were three (card 227).
+- The reviewer no longer waits for CI, and submits its review in a form its
+  permissions always allow. A review starts when CI does, and a reviewer session that
+  chose to wait for a check and ended its turn was never resumed: both sessions for
+  one head of pull request 185 ended that way, with no review. The reviewer now gives
+  its verdict on the change when it is ready, treats a check that has failed as a
+  blocker, and names in the review the checks that had not finished; GitHub merges an
+  approved pull request only once the required checks pass. It passes the review's
+  body on standard input, because a body given on the command line was refused when a
+  line of it began with `#`, as a heading does
+  ([Ask the agent to make a change](docs/how-to/ask-the-agent.md); card 247).
 - A client can have the recorder sync a recording at once. The recorder syncs a
   recording once a second, so a program that acknowledges what it recorded, a cluster
   member counting towards a commit for one, waited up to a second with nothing to do.
