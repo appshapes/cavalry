@@ -40,9 +40,12 @@ first one. Why the loop is built this way is in ADR 0004
      review of the unchanged head the same way; the label starts one, up to three
      times;
    - with `auto-merge`, an `auto merge` run arms the merge on the approval, and the
-     pull request merges as one squash commit when `gates (linux)`, `gates (macos)`,
-     `bench (linux)`, `bench (grip)` and `bench (udp)` pass, and the issue closes, so
-     an approval given while a check still runs merges nothing that check would stop.
+     pull request merges as one squash commit when `gates (linux)`, `bench (linux)`,
+     `bench (grip)` and `bench (udp)` pass, and the issue closes, so an approval
+     given while a check still runs merges nothing that check would stop. A pull
+     request has no `gates (macos)` check: that job runs for `master`'s commit after
+     the merge
+     ([ADR 0073](../decisions/0073-run-the-macos-gates-for-master-and-not-for-pull-requests.md)).
      For a change no
      file of which can move the bench, a page or an ADR, the bench checks pass in
      seconds without their hosts
@@ -50,9 +53,13 @@ first one. Why the loop is built this way is in ADR 0004
      approval, yours or the agent's, or a review that requests changes on the approved
      head, disarms the merge; the reviewer's approval of the new head arms it again.
 
-   The two `gates` jobs run `just lint`, `just test`, `just conformance`, `just loom`,
-   `just miri`, `just docs` and `just lint-docs`; `bench (linux)` and `bench (grip)`
-   run `just bench` and `just bench-compare` on the two gate hosts, `bench` and `grip`.
+   The `gates` job runs `just lint`, `just test`, `just conformance`, `just loom`,
+   `just miri`, `just docs` and `just lint-docs`, on Linux for a pull request and on
+   Linux and macOS for `master`; `bench (linux)` and `bench (grip)` run `just bench`
+   and `just bench-compare` on the two gate hosts, `bench` and `grip`. `master`'s run
+   at the merge does not take the hosts again when the pull request's own run
+   measured the same tree
+   ([ADR 0074](../decisions/0074-do-not-run-the-bench-on-master-for-a-tree-its-pull-request-measured.md)).
    The pull request body still carries what CI does not check: the bench figures, from
    the hosts' jobs, for a change under a data-plane crate, and the `just fuzz` result
    after a parser change.

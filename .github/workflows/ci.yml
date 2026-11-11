@@ -11,8 +11,15 @@
 # Blacksmith serves the GitHub Actions cache API from its own backend, so the Rust
 # cache action below works unchanged; the restore lines in a run's log are the proof.
 # The three cavalry-shm gates of CLAUDE.md's gate 1, `just conformance`, `just loom`
-# and `just miri`, run in the gates jobs too (GitHub issue 9), so the reviewer's rule
-# of ADR 0005, CI green on the head under review, covers them.
+# and `just miri`, run in the gates jobs too (GitHub issue 9). `gates (linux)` is a
+# required check, so no pull request merges without them, and a gates job that has
+# failed is a blocker in the reviewer's brief (`.claude/agents/reviewer.md`).
+# `gates (macos)` runs the same steps for pushes to master and runs by hand, not for
+# pull requests, and is not a required check (ADR 0073): in 92 runs it failed alone
+# twice, both times an intermittent failure no change caused, and it set the time of
+# every run that takes no bench host. A failure it finds on master is the landing
+# session's to fix forward, which the `pr` skill's last step, the wait for master's
+# run, is there to see.
 # The latency gate runs on the two dedicated bench hosts, bench and grip, self-hosted
 # runners, because a shared runner cannot tell a regression from its own noise (ADR 0016,
 # ADR 0034); kip ran it beside them from 2026-10-29 to 2026-10-31 and is the soak host.
@@ -20,13 +27,17 @@
 # meet over it once both single-host bench jobs are done (ADR 0039, ADR 0044).
 # The four bench jobs take their hosts only for a change that can move the bench: the
 # `changes` job reads the change's files, and when none of them can, the jobs keep
-# their names, run on a hosted runner and pass in seconds (ADR 0071).
+# their names, run on a hosted runner and pass in seconds (ADR 0071). They do the
+# same for a push to master that is the merge of a pull request whose own run
+# measured the same tree on the hosts, so that a landing takes the hosts once
+# (ADR 0074).
 #
-# The job names are stable on purpose: "gates (linux)", "gates (macos)", "bench (linux)"
-# and "bench (grip)" are the checks branch protection on master requires, and
-# "bench (udp)" joins them by hand once it has run green on master with its baseline
-# (its comment below); "bench (udp peer)" is never required, since bench (udp) fails
-# with it. Renaming a job means updating the protection rule in the same change, and,
+# The job names are stable on purpose: "gates (linux)", "bench (linux)", "bench (grip)"
+# and "bench (udp)" are the checks branch protection on master requires; "bench (udp)"
+# joined them by hand once it had run green on master with its baseline (its comment
+# below); "bench (udp peer)" is never required, since bench (udp) fails with it, and
+# "gates (macos)" is not, since ADR 0073. Renaming a job means updating the protection
+# rule in the same change, and,
 # for `bench (udp)` and `bench (udp peer)`, the partner name the other job's wait is
 # given (card 212); the `Workflow` test of scripts/wait-for-partner-job-test.py fails on
 # a missed rename.
@@ -59,6 +70,13 @@ jobs:
   # change it could not list, `workflow_dispatch`. The bench jobs below read
   # the answer as "run on the host" unless it is exactly `false`, and run when this job
   # failed too, so that no failure here can pass a change unmeasured.
+  #
+  # A push whose files can move the bench has one way to `bench=false` (ADR 0074): the
+  # pushed commit is the merge commit of one pull request into this branch, that pull
+  # request's head has the same tree and holds the commit before the push, and the
+  # head's run of this workflow is green with `bench (linux)`, `bench (grip)` and
+  # `bench (udp)` passed on the hosts. The tree was measured, by the run the answer
+  # names, and master's run does not take the hosts for it a second time.
   changes:
     name: changes
     runs-on: blacksmith-4vcpu-ubuntu-2404
@@ -91,12 +109,10 @@ jobs:
     timeout-minutes: 15
     strategy:
       fail-fast: false
-      matrix:
-        include:
-          - name: linux
-            runner: blacksmith-4vcpu-ubuntu-2404
-          - name: macos
-            runner: blacksmith-6vcpu-macos-latest
+      # Linux for every event; macOS as well for a push to master and a run by hand,
+      # and not for a pull request (ADR 0073). The names stay "gates (linux)" and
+      # "gates (macos)".
+      matrix: ${{ fromJSON(github.event_name == 'pull_request' && '{"include":[{"name":"linux","runner":"blacksmith-4vcpu-ubuntu-2404"}]}' || '{"include":[{"name":"linux","runner":"blacksmith-4vcpu-ubuntu-2404"},{"name":"macos","runner":"blacksmith-6vcpu-macos-latest"}]}') }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -154,15 +170,17 @@ jobs:
       - run: just lint
       - run: just test
       # The three cavalry-shm gates (CLAUDE.md, gate 1): the vector suites, the loom
-      # models and Miri, on both operating systems. The bench host runs none of them.
+      # models and Miri, on each operating system the job runs on. The bench host runs
+      # none of them.
       # When `just miri` passes about five minutes, it moves to a job of its own on Linux.
       - run: just conformance
       - run: just loom
       - run: just miri
       - run: just docs
       - run: just lint-docs
-      # The README's ten-minute path, end to end, on both operating systems (CLAUDE.md,
-      # gate 5; ADR 0007's acceptance test for the first slice).
+      # The README's ten-minute path, end to end (CLAUDE.md, gate 5; ADR 0007's
+      # acceptance test for the first slice): on Linux for every change, and on macOS
+      # too for every commit on master (ADR 0073).
       - run: just quickstart
       - run: just replay-check
       # The harness on a shared runner is a report, not a gate (ADR 0016): the table is
@@ -199,11 +217,13 @@ jobs:
     # a build: the first run compiled the workspace in release in under three minutes.
     timeout-minutes: 30
     steps:
-      # A change no file of which can move the bench is not sent to the host: the job
-      # says so here, on a hosted runner, and every step below is skipped (ADR 0071).
-      - name: Nothing in this change can move the bench
+      # A change no file of which can move the bench is not sent to the host, and
+      # neither is a merge whose tree its pull request's run measured there: the job
+      # says so here, on a hosted runner, and every step below is skipped (ADR 0071,
+      # ADR 0074).
+      - name: This change does not take the host
         if: env.SKIP == 'true'
-        run: echo "bench-needed answered bench=false for this change, so this job reports without its host; the changes job's log lists the files and why (ADR 0071; docs/how-to/run-the-bench.md, 'When the bench jobs run')"
+        run: echo "bench-needed answered bench=false for this change, so this job reports without its host. Either none of the change's files can move the bench (ADR 0071), or it is the merge of a pull request whose own run measured this tree on the hosts (ADR 0074), and that run holds the figures; the changes job's log says which, and names the files or the run (docs/how-to/run-the-bench.md, 'When the bench jobs run')"
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         if: env.SKIP != 'true'
       - uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8 # v1
@@ -263,11 +283,13 @@ jobs:
       SKIP: ${{ needs.changes.outputs.bench == 'false' }}
     timeout-minutes: 30
     steps:
-      # A change no file of which can move the bench is not sent to the host: the job
-      # says so here, on a hosted runner, and every step below is skipped (ADR 0071).
-      - name: Nothing in this change can move the bench
+      # A change no file of which can move the bench is not sent to the host, and
+      # neither is a merge whose tree its pull request's run measured there: the job
+      # says so here, on a hosted runner, and every step below is skipped (ADR 0071,
+      # ADR 0074).
+      - name: This change does not take the host
         if: env.SKIP == 'true'
-        run: echo "bench-needed answered bench=false for this change, so this job reports without its host; the changes job's log lists the files and why (ADR 0071; docs/how-to/run-the-bench.md, 'When the bench jobs run')"
+        run: echo "bench-needed answered bench=false for this change, so this job reports without its host. Either none of the change's files can move the bench (ADR 0071), or it is the merge of a pull request whose own run measured this tree on the hosts (ADR 0074), and that run holds the figures; the changes job's log says which, and names the files or the run (docs/how-to/run-the-bench.md, 'When the bench jobs run')"
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         if: env.SKIP != 'true'
       - uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8 # v1
@@ -328,11 +350,13 @@ jobs:
       contents: read
       actions: read             # the run's jobs, for the wait below
     steps:
-      # A change no file of which can move the bench is not sent to the host: the job
-      # says so here, on a hosted runner, and every step below is skipped (ADR 0071).
-      - name: Nothing in this change can move the bench
+      # A change no file of which can move the bench is not sent to the host, and
+      # neither is a merge whose tree its pull request's run measured there: the job
+      # says so here, on a hosted runner, and every step below is skipped (ADR 0071,
+      # ADR 0074).
+      - name: This change does not take the host
         if: env.SKIP == 'true'
-        run: echo "bench-needed answered bench=false for this change, so this job reports without its host; the changes job's log lists the files and why (ADR 0071; docs/how-to/run-the-bench.md, 'When the bench jobs run')"
+        run: echo "bench-needed answered bench=false for this change, so this job reports without its host. Either none of the change's files can move the bench (ADR 0071), or it is the merge of a pull request whose own run measured this tree on the hosts (ADR 0074), and that run holds the figures; the changes job's log says which, and names the files or the run (docs/how-to/run-the-bench.md, 'When the bench jobs run')"
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         if: env.SKIP != 'true'
       - uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8 # v1
@@ -398,11 +422,13 @@ jobs:
       contents: read
       actions: read             # the run's jobs, for the wait below
     steps:
-      # A change no file of which can move the bench is not sent to the host: the job
-      # says so here, on a hosted runner, and every step below is skipped (ADR 0071).
-      - name: Nothing in this change can move the bench
+      # A change no file of which can move the bench is not sent to the host, and
+      # neither is a merge whose tree its pull request's run measured there: the job
+      # says so here, on a hosted runner, and every step below is skipped (ADR 0071,
+      # ADR 0074).
+      - name: This change does not take the host
         if: env.SKIP == 'true'
-        run: echo "bench-needed answered bench=false for this change, so this job reports without its host; the changes job's log lists the files and why (ADR 0071; docs/how-to/run-the-bench.md, 'When the bench jobs run')"
+        run: echo "bench-needed answered bench=false for this change, so this job reports without its host. Either none of the change's files can move the bench (ADR 0071), or it is the merge of a pull request whose own run measured this tree on the hosts (ADR 0074), and that run holds the figures; the changes job's log says which, and names the files or the run (docs/how-to/run-the-bench.md, 'When the bench jobs run')"
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         if: env.SKIP != 'true'
       - uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8 # v1

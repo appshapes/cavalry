@@ -2072,6 +2072,26 @@ user-visible change, added in the same commit as the change. The format follows
   purge outlasted it, and the rows are reported until a baseline holds them. The client
   rows' log directory now sits beside the bench directory, as `cavalry-client`'s
   doctest places it ([Run the bench](docs/how-to/run-the-bench.md); card 177).
+- A cluster commits an entry after one sync on a quorum, not at the recorders' next
+  second. A member's append position is what its recorder has synced, and a recorder
+  syncs a recording by itself once a second, so an entry was committed up to a second
+  after it was appended, with every member idle in between. Each member's consensus
+  module now asks its driver to sync its recording of the log as soon as the recorder
+  has written an entry. On three members on a macOS laptop, ten entries, each
+  appended once the last was committed, took 10.0 s before and take from 186 ms to
+  228 ms now, over twenty runs
+  ([ADR 0069](docs/decisions/0069-sync-a-recording-on-command-as-client-protocol-version-8.md);
+  card 227).
+- A landing takes the bench hosts once, and a pull request no longer waits for macOS.
+  `master`'s run at a merge reports its bench jobs without the hosts when the pull
+  request's own run measured the same tree on them, and its `changes` job names that
+  run, whose figures are `master`'s
+  ([ADR 0074](docs/decisions/0074-do-not-run-the-bench-on-master-for-a-tree-its-pull-request-measured.md)).
+  `gates (macos)` runs for every commit on `master` and for runs by hand, not for pull
+  requests, and is no longer a required check: in 92 runs it failed alone twice, on an
+  intermittent failure no change caused
+  ([ADR 0073](docs/decisions/0073-run-the-macos-gates-for-master-and-not-for-pull-requests.md);
+  [Run the bench](docs/how-to/run-the-bench.md), "When the bench jobs run"; card 254).
 - A client's conductor no longer allocates for an image that is another client's.
   The driver announces every image to every client of its directory, and the
   conductor made a `String` of each one's source identity, `cavalry:ipc` for an image
