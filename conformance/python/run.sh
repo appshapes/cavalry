@@ -52,30 +52,41 @@ PYTHONPATH=clients/python python3 conformance/python/quickstart.py
 echo "conformance/python: run clients/python/README.md's example"
 python3 conformance/python/readme.py
 
-# The committed log: three members of one cluster, each with five free loopback ports,
-# its own driver directory and its own log directory, started together as
+# The committed log: three members of one cluster, each with five loopback ports, its own
+# driver directory and its own log directory, started together as
 # docs/how-to/run-a-cluster.md starts them. A member's output goes to a file beside its
-# directories, printed if the cluster does not form.
+# directories, printed if the cluster does not form or the round fails.
+#
+# The fifteen ports are counted out of 10000 to 19999, never bound to be chosen, as
+# `loopback_ports` in crates/cavalry/tests/cli.rs counts its own: a port found by binding
+# to port 0 is one of those the kernel gives each driver's own send sockets, so another
+# member could be given it before its owner binds it. The shell's process id picks where
+# the count starts, through that function's hash, so each runner starts elsewhere.
 echo "conformance/python: cavalry run, three cluster members, in the background, under $cluster"
 mkdir -p "$cluster"
-CAVALRY_CLUSTER_MEMBERS=$(python3 -c '
-import socket
-sockets = [socket.socket(socket.AF_INET, socket.SOCK_DGRAM) for _ in range(15)]
-for s in sockets:
-    s.bind(("127.0.0.1", 0))
-ports = [s.getsockname()[1] for s in sockets]
-print("|".join(str(m) + "," + ",".join("127.0.0.1:%d" % p for p in ports[m * 5:m * 5 + 5]) for m in range(3)))
-')
+start=$(( ($$ * 2654435761) % 10000 ))
+CAVALRY_CLUSTER_MEMBERS=""
+for id in 0 1 2; do
+    member="$id"
+    for i in 0 1 2 3 4; do
+        member="$member,127.0.0.1:$(( 10000 + (start + id * 5 + i) % 10000 ))"
+    done
+    CAVALRY_CLUSTER_MEMBERS="${CAVALRY_CLUSTER_MEMBERS:+$CAVALRY_CLUSTER_MEMBERS|}$member"
+done
 export CAVALRY_CLUSTER_MEMBERS
 for id in 0 1 2; do
     CAVALRY_CLUSTER_MEMBER_ID=$id target/release/cavalry run --dir "$cluster/member-$id" \
         --log-dir "$cluster/member-$id-log" >"$cluster/member-$id.out" 2>&1 &
     member_pids="$member_pids $!"
 done
+# Doctor's whole output first, then the match, as above: doctor exits 1 on any failed
+# finding, and a `grep -q` that ends at its match can fail doctor's write, so under
+# pipefail a pipe of the two could fail for a cluster whose election had closed.
 formed=""
 for _ in $(seq 1 600); do
-    if CAVALRY_CLUSTER_MEMBER_ID=1 target/release/cavalry doctor --dir "$cluster/member-1" \
-        --log-dir "$cluster/member-1-log" 2>/dev/null | grep -q 'election closed'; then formed=yes; break; fi
+    election=$(CAVALRY_CLUSTER_MEMBER_ID=1 target/release/cavalry doctor --dir "$cluster/member-1" \
+        --log-dir "$cluster/member-1-log" 2>/dev/null || true)
+    if grep -q 'election closed' <<<"$election"; then formed=yes; break; fi
     sleep 0.1
 done
 [ -n "$formed" ] || {
@@ -85,4 +96,8 @@ done
 }
 
 echo "conformance/python: run committed_log.py beside member 1"
-python3 conformance/python/committed_log.py "$cluster/member-1" 1
+python3 conformance/python/committed_log.py "$cluster/member-1" 1 || {
+    echo "conformance/python: committed_log.py failed beside member 1; the members said:" >&2
+    cat "$cluster"/member-*.out >&2 || true
+    exit 1
+}
