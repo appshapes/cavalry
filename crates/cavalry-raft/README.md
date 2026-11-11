@@ -25,20 +25,19 @@ commit path runs per message.
   nominated itself for and no other: one whose term another candidate's request raised
   asks for none in the raised term and does not lead it. A leader tells a member whose
   log is of an older term which term its own record of terms holds next, with that
-  term's base and its end, read through `Io::terms_after`: the member truncates what
-  it holds above that base, so the leader names the next term and never a later one,
-  over which the member would keep bytes of its own. A leader on this path gives up
-  the lead: it holds an election when its active members fall below a quorum, and
-  when a canvass position, a request vote or a commit position carries a term above
-  its own, and it is a follower from that call on, its log publication given up in
-  init. A follower holds an election on a request vote or a commit position of a
-  higher term too (ADR 0082). A member told a next term whose base is below its
-  append position truncates to that base first, the tail of an older term that no
-  quorum recorded, and never below the commit position it knows: told to, it keeps
-  its log and fails its election (ADR 0083). The consensus module does not use this
-  path yet: a
-  member over a driver is appointed until the election can do what the next section
-  lists, and then the module moves to it in one change (ADR 0081).
+  term's base and its end, read through `Io::terms_after`: the member truncates what it
+  holds above that base, so the leader names the next term and never a later one, over
+  which the member would keep bytes of its own. A leader on this path gives up the lead:
+  it holds an election when its active members fall below a quorum, and when a canvass
+  position, a request vote or a commit position carries a term above its own, and it is
+  a follower from that call on, its log publication given up in init. A follower holds
+  an election on a request vote or a commit position of a higher term too (ADR 0082). A
+  member told a next term whose base is below its append position truncates to that base
+  first, the tail of an older term that no quorum recorded, and never below the commit
+  position it knows: told to, it keeps its log and fails its election (ADR 0083). The
+  consensus module does not use this path yet: a member over a driver is appointed until
+  the election can do what the next section lists, and then the module moves to it in
+  one change (ADR 0081).
 - Counts every move of the election. `ElectionState` is the state machine
   `cluster_election` of `counters.toml`, and each of its transitions adds one to a
   count of `Counts`, the counter registered for it; `Counts::by_counter` pairs each

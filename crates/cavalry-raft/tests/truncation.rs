@@ -11,10 +11,10 @@ use cavalry_proto::cluster::Message;
 use cavalry_raft::{Consensus, ElectionState};
 use common::{Call, Stub, at, follow_term, leadership_term, lose_the_leader, new_leadership_term};
 
-/// Member 0 of `[0, 1, 2]`, electing, a follower of member 1's term 0 whose election
-/// has closed. Returns the millisecond it closed at.
-fn follower_of_term_zero(io: &mut Stub) -> (Consensus, u64) {
-    let mut member = Consensus::with_election(&[0, 1, 2], 0, 1).expect("a member");
+/// Member 0 of `members`, electing, a follower of member 1's term 0 whose election has
+/// closed. Returns the millisecond it closed at.
+fn follower_of_term_zero(members: &[i32], io: &mut Stub) -> (Consensus, u64) {
+    let mut member = Consensus::with_election(members, 0, 1).expect("a member");
     member.do_work(at(1), io).expect("no fault");
     let closed = follow_term(&mut member, io, 2, &new_leadership_term(1, 0), 0);
     (member, closed)
@@ -31,7 +31,7 @@ fn term_one_from_64() -> Message<'static> {
 #[test]
 fn a_member_truncates_to_the_next_terms_base_before_it_records_the_term() {
     let mut io = Stub::new();
-    let (mut member, closed) = follower_of_term_zero(&mut io);
+    let (mut member, closed) = follower_of_term_zero(&[0, 1, 2], &mut io);
     let ms = lose_the_leader(&mut member, &mut io, closed, 128);
     assert_eq!(member.append_position(), 128);
     io.clear();
@@ -65,7 +65,7 @@ fn a_member_truncates_to_the_next_terms_base_before_it_records_the_term() {
 #[test]
 fn a_member_at_the_next_terms_base_truncates_nothing() {
     let mut io = Stub::new();
-    let (mut member, closed) = follower_of_term_zero(&mut io);
+    let (mut member, closed) = follower_of_term_zero(&[0, 1, 2], &mut io);
     let ms = lose_the_leader(&mut member, &mut io, closed, 64);
     io.clear();
     member
@@ -82,7 +82,7 @@ fn a_member_at_the_next_terms_base_truncates_nothing() {
 #[test]
 fn a_truncation_under_way_moves_nothing_and_the_next_message_asks_again() {
     let mut io = Stub::new();
-    let (mut member, closed) = follower_of_term_zero(&mut io);
+    let (mut member, closed) = follower_of_term_zero(&[0, 1, 2], &mut io);
     let ms = lose_the_leader(&mut member, &mut io, closed, 128);
     io.clear();
 
@@ -112,7 +112,7 @@ fn a_truncation_under_way_moves_nothing_and_the_next_message_asks_again() {
 #[test]
 fn a_member_does_not_truncate_below_the_commit_position_it_knows() {
     let mut io = Stub::new();
-    let (mut member, closed) = follower_of_term_zero(&mut io);
+    let (mut member, closed) = follower_of_term_zero(&[0, 1, 2], &mut io);
     io.append_position = 128;
     member.do_work(at(closed + 1), &mut io).expect("no fault");
     member
@@ -147,16 +147,21 @@ fn a_member_does_not_truncate_below_the_commit_position_it_knows() {
 }
 
 /// A truncation takes out of the record every term recorded above it, and the member's
-/// log term is then the highest the record still holds. A member joined term 1 at 96,
-/// behind a leader that knew a commit position of 64, and holds none of term 1's
-/// entries: the 32 bytes from 64 are a tail of term 0 that this member and that leader
-/// alone held. A leader of term 2 whose record lacks term 1 names term 2 as the next,
-/// from 64. The member cuts its log to 64, its record loses term 1, and it records
-/// term 2 at 64 as a member whose log is of term 0.
+/// log term is then the highest the record still holds. The history is one of a
+/// cluster of five. Member 1 led term 0 and appended 32 bytes from 64 that members 0
+/// and 2 synced, that members 3 and 4 never received, and that its own recording had
+/// not synced when it stopped: two of five held them, so they were not committed.
+/// Member 2 then led term 1 from 96, and member 0 alone joined it, behind a commit
+/// position of 64: two of five recorded term 1, short of a quorum, so its leader
+/// appended nothing, and stopped. Member 1 is back with a log that ends at 64 and
+/// leads term 2 from there on the votes of members 3 and 4, whose logs end no higher.
+/// Its record lacks term 1, so it names term 2 as the next term of member 0, from 64.
+/// Member 0 cuts its log to 64, its record loses term 1, and it records term 2 at 64
+/// as a member whose log is of term 0.
 #[test]
 fn a_truncation_takes_the_terms_recorded_above_it_out_of_the_log_term() {
     let mut io = Stub::new();
-    let (mut member, closed) = follower_of_term_zero(&mut io);
+    let (mut member, closed) = follower_of_term_zero(&[0, 1, 2, 3, 4], &mut io);
     let ms = lose_the_leader(&mut member, &mut io, closed, 96);
     let mut term_one_from_96 = leadership_term(2, 1, 96, 96, 0, [1, 96, -1]);
     if let Message::NewLeadershipTerm {

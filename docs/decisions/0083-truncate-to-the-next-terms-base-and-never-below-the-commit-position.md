@@ -162,7 +162,10 @@ status interval, counted. The section "What the election does not do yet" of
   appointed fails where the election's member truncates, and calls nothing.
 - The guard caught a history that this change's author wrote wrong: a test in which
   a member had been told a commit position of 96, and was then told to cut to 64,
-  failed in the guard until its history was made a legitimate one.
+  failed in the guard. The review of the pull request found the same test's
+  history still not one a cluster can have: in a cluster of three, the term the
+  member loses had been recorded by a quorum. The test is now of a cluster of five,
+  with a commit position of 64 and that term recorded by two members.
 - `crates/cavalry-raft/tests/election.rs`, on three and on five members in memory,
   with the check after every step that no committed entry is lost. The leader that
   was cut off and appended an entry no quorum recorded cuts it when the cut ends,
@@ -184,6 +187,12 @@ status interval, counted. The section "What the election does not do yet" of
   exists.
 - `Counts` has nineteen counts, and a member's module adds nineteen client counters;
   eight of them stay 0 while the module's leader is appointed.
+- While a truncation is under way the core keeps the append position and the log
+  term it had, and a member in canvass reports them, may nominate itself on them
+  and votes with them. No `Io` of this change answers that a truncation is under
+  way, outside the tests' stub. The module's truncation is either one step, or the
+  core holds a member in canvass while one is pending: the step that builds the
+  module's I/O decides, and the review of this change asked that it does.
 - The in-memory cluster's `pause_sync` leaves a member holding bytes it received
   above its append position while it is out of the log. A member over a driver has
   no such bytes: its recording's stop is where its log ends. The step that makes a
