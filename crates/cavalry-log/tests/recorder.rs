@@ -325,6 +325,44 @@ fn sync_runs_once_per_second_while_bytes_are_unsynced_and_the_synced_position_fo
 }
 
 #[test]
+fn a_sync_now_syncs_what_is_unsynced_whatever_the_time_and_the_periodic_sync_waits_a_second_after_it()
+ {
+    let dir = TestDir::new("sync-now");
+    let (mut log, _) = LogDir::open(dir.path(), NOW).expect("opens");
+    let mut writer = log.start(&recording(1001, 0), NOW).expect("starts");
+    let found = writer.descriptor().clone();
+    assert!(!writer.sync_now(NOW).expect("syncs"), "nothing unsynced");
+    writer
+        .write(&data_block(&found, 0, 1), 64, NOW)
+        .expect("writes");
+    assert_eq!(writer.synced_position(), 0);
+    assert!(
+        writer.sync_now(NOW + 1).expect("syncs"),
+        "a nanosecond after the start, with 64 bytes unsynced"
+    );
+    assert_eq!((writer.position(), writer.synced_position()), (64, 64));
+    assert!(
+        !writer.sync_now(NOW + 2).expect("syncs"),
+        "nothing unsynced: a second request makes no sync"
+    );
+    writer
+        .write(&data_block(&found, 64, 2), 64, NOW + 2)
+        .expect("writes");
+    assert!(
+        !writer.sync(NOW + SYNC_INTERVAL).expect("syncs"),
+        "a second since the start, and not yet one since the sync on request"
+    );
+    assert_eq!(writer.synced_position(), 64);
+    assert!(
+        writer.sync(NOW + 1 + SYNC_INTERVAL).expect("syncs"),
+        "a second since the sync on request"
+    );
+    assert_eq!((writer.position(), writer.synced_position()), (128, 128));
+    assert!(!writer.sync_failed());
+    let _ = log.stop(writer, NOW + 3 * SYNC_INTERVAL).expect("stops");
+}
+
+#[test]
 fn a_stop_at_a_segment_boundary_removes_the_empty_next_segment() {
     let dir = TestDir::new("stop-at-boundary");
     let (mut log, _) = LogDir::open(dir.path(), NOW).expect("opens");

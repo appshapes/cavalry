@@ -290,6 +290,56 @@ impl Recording {
     pub fn stop(&self, client: &mut Cavalry) -> Result<(), ClientError> {
         client.stop_recording(self.recording_id)
     }
+
+    /// Has the recorder sync what it has written of this recording now, through
+    /// `client`, and waits for the driver's answer: [`Cavalry::sync_recording`] with
+    /// [`recording_id`], and the same answers (ADR 0069). What is durable after `Ok` is
+    /// what [`synced_position`] returns then, a position a sync that returned success
+    /// covered. A caller acknowledges up to that position, and never up to one that
+    /// [`position`] or an offer returned.
+    ///
+    /// While the recording is live, `Ok` makes [`synced_position`] at least what
+    /// [`position`] returned before the call. A recording that has stopped is `Ok` with
+    /// nothing done, since nothing is left to sync, and [`stop_position`] is `Some` once
+    /// this client has read `recording stopped`. [`synced_position`] is then the stop
+    /// position. That is below what [`position`] returned before when a sync of the
+    /// recording, or the stop's own writes or syncs, failed, on a failing or full disk:
+    /// what was written after the last sync that succeeded may not be on the disk (ADR
+    /// 0064, ADR 0065). `recording.write_failed` counts it, and `cavalry doctor`
+    /// reports it as `recording-write-failed`.
+    ///
+    /// [`recording_id`]: Recording::recording_id
+    /// [`synced_position`]: Recording::synced_position
+    /// [`position`]: Recording::position
+    /// [`stop_position`]: Recording::stop_position
+    pub fn sync(&self, client: &mut Cavalry) -> Result<(), ClientError> {
+        client.sync_recording(self.recording_id)
+    }
+
+    /// Asks for the same sync as [`sync`] and returns without waiting: the command is
+    /// written to the driver and its answer is dropped when it comes. For a caller
+    /// that must not wait in its duty cycle, a cluster member's consensus module for
+    /// one: it asks when [`position`] is past [`synced_position`], and watches
+    /// [`synced_position`] move. The call reads the clock once and writes one record
+    /// to the driver's command ring, and allocates nothing.
+    ///
+    /// Nothing is sent for a recording this handle has seen stop. An error is the
+    /// command not written: the client closed, or the driver's command ring full, and
+    /// the caller asks again on a later cycle. A refusal by the driver, the recorder's
+    /// request queue full among them, is not reported here, so a caller that asked
+    /// and sees [`synced_position`] stay behind asks again; a sync that failed shows
+    /// as [`stop_position`] becoming `Some` (ADR 0065).
+    ///
+    /// [`sync`]: Recording::sync
+    /// [`position`]: Recording::position
+    /// [`synced_position`]: Recording::synced_position
+    /// [`stop_position`]: Recording::stop_position
+    pub fn request_sync(&self, client: &mut Cavalry) -> Result<(), ClientError> {
+        if self.stop.get().is_some() {
+            return Ok(());
+        }
+        client.request_sync_recording(self.recording_id)
+    }
 }
 
 /// `recording ready` as a handle is made from it: the recording's id and session, the
