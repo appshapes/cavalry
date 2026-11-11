@@ -200,5 +200,7 @@ committed once a quorum, two of three, has it on disk.
 - `note cluster-commit-waits`: the leader has appended more than a quorum has
   recorded. Each member asks its recorder to sync an entry as soon as it is written,
   so what waits at any moment is what was appended since the syncs now running began.
-  If the commit position stays where it is while the append position moves, run
-  `doctor` on each follower's host.
+  A request that a member's driver refused, its recorder's queue of requests full,
+  leaves the entry to the recorder's own sync, within a second; `driver.registry_full`
+  on that member's driver counts the refusals. If the commit position stays where it
+  is while the append position moves, run `doctor` on each follower's host.

@@ -223,7 +223,24 @@ shared runner is
    waiting run's place, so a commit whose run was replaced that way, or whose bench
    failed, has none, and the push after it runs the bench over both, pages or not;
    the `changes` job's log says `the commit before the push, <commit>, has no
-   completed, successful run`. `python3 scripts/bench-needed.py --files <path>...`
+   completed, successful run`.
+
+   A push to `master` whose files can move the bench also reports without the hosts
+   when its tree was measured already
+   ([ADR 0074](../decisions/0074-do-not-run-the-bench-on-master-for-a-tree-its-pull-request-measured.md)):
+   the pushed commit is the merge of one pull request from a branch of this
+   repository, the pull request's head has the same tree and holds the commit
+   `master` had before the merge, no other pull request from that branch has another
+   base, and a run of the head passed `bench (linux)`, `bench (grip)` and
+   `bench (udp)` on the hosts. A landing then takes the hosts once. The `changes` job's log on `master` says `the
+   push is the merge of pull request <number>, whose head <commit> has this commit's
+   tree and whose run <run id> passed its bench jobs on the hosts`. That run holds
+   the figures of `master`'s tree: when a pull request body compares against `master`
+   and `master`'s own bench jobs printed none, read the "before" from the run that
+   line names, `gh run view <run id> --log`. A pull request that was behind `master`
+   when it merged has a tree of its own, so `master`'s run takes the hosts for it.
+
+   `python3 scripts/bench-needed.py --files <path>...`
    prints the answer for the paths you give it. To run the bench at a commit whose
    change it was skipped for, start the workflow by hand, which always runs it:
    `gh workflow run ci.yml --ref <branch>`. On `master` such a run takes the waiting
