@@ -467,7 +467,9 @@ pub struct Counts {
     /// position other than the member's append position, in follower log await; or,
     /// in follower log replication, a replay's image that joined at a position other
     /// than the one the member asked from, for the first image, or last sent its
-    /// leader, for each image after (ADR 0086).
+    /// leader, for each image after (ADR 0086); or, in follower catch-up await, the
+    /// image of a catch-up's replay that joined at a position other than the one the
+    /// member asked from (ADR 0088).
     pub join_position_mismatches: u64,
     /// `cluster.log_images_lost`: a follower whose image of the leader's log was no
     /// longer available, so that it began again at init.

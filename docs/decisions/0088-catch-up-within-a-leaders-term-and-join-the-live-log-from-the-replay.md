@@ -79,6 +79,12 @@ closes its election. It does not pass follower log await: that state checks that
 new image joins at the member's append position, and this member's live image
 joined at or past it by design, with the replay bringing the log up to it.
 
+**The texts of two counters.** `cluster.join_position_mismatches` rises in follower
+catch-up await too, and `cluster.elections_failed` in each of the three states: the
+`doc` and the `doctor` text of the first and the `doctor` text of the second say so,
+and what an operator does. That a member has no catch-up is said there of a member
+started with `cavalry run`, whose leader is appointed, and no longer of the version.
+
 **Counted, and registered.** The three states are in the machine `cluster_election`
 with nine rows: the steps from follower replay through the three states to follower
 log init, the step from follower log init to follower ready, and each state's
