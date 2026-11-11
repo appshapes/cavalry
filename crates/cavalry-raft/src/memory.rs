@@ -107,6 +107,9 @@ struct Cut {
     a: usize,
     b: usize,
     since_ns: u64,
+    /// Whether it cuts one way: nothing `a` sends reaches `b`, and what `b` sends
+    /// still reaches `a`.
+    one_way: bool,
 }
 
 /// What the world holds for one member: what its `terms` file and its recording would.
@@ -133,6 +136,8 @@ struct Disk {
     /// Its image of the log is gone, until it leaves the log and joins again.
     image_lost: bool,
     halted: bool,
+    /// Its consensus module stands still while its driver runs ([`Cluster::stall`]).
+    stalled: bool,
 }
 
 impl Disk {
@@ -151,6 +156,7 @@ impl Disk {
             cut_since_ns: None,
             image_lost: false,
             halted: false,
+            stalled: false,
         }
     }
 }
@@ -193,16 +199,19 @@ impl World {
     }
 }
 
-/// Since when nothing sent by one of the members at `a` and `b` reaches the other:
-/// the earliest of the cuts set now that part them, a cut of either from everyone
-/// or a partition between the two. `None` while they reach each other.
-fn parted_since(disks: &[Disk], cuts: &[Cut], a: usize, b: usize) -> Option<u64> {
-    let own = [a, b]
+/// Since when nothing the member at `from` sends reaches the one at `to`: the
+/// earliest of the cuts set now that stop it, a cut of either from everyone, a
+/// partition between the two, or one that cuts one way from `from` to `to`. `None`
+/// while `to` hears `from`.
+fn unheard_since(disks: &[Disk], cuts: &[Cut], from: usize, to: usize) -> Option<u64> {
+    let own = [from, to]
         .into_iter()
         .filter_map(|index| disks.get(index).and_then(|disk| disk.cut_since_ns));
     let between = cuts
         .iter()
-        .filter(|cut| (cut.a == a && cut.b == b) || (cut.a == b && cut.b == a))
+        .filter(|cut| {
+            (cut.a == from && cut.b == to) || (!cut.one_way && cut.a == to && cut.b == from)
+        })
         .map(|cut| cut.since_ns);
     own.chain(between).min()
 }
@@ -231,7 +240,7 @@ impl Io for MemberIo<'_> {
             .into_iter()
             .any(|index| self.world.disks.get(index).is_none_or(|disk| disk.halted));
         let cut =
-            halted || parted_since(&self.world.disks, &self.world.cuts, self.own, to).is_some();
+            halted || unheard_since(&self.world.disks, &self.world.cuts, self.own, to).is_some();
         let lost = self.world.loss_one_in > 0
             && self
                 .world
@@ -318,7 +327,7 @@ impl Io for MemberIo<'_> {
             publication.position,
             publication.entries.len(),
         );
-        let parted = parted_since(&self.world.disks, &self.world.cuts, self.own, leader);
+        let parted = unheard_since(&self.world.disks, &self.world.cuts, leader, self.own);
         let Some(disk) = self.world.disks.get_mut(self.own) else {
             return Ok(None);
         };
@@ -510,11 +519,11 @@ impl Cluster {
             });
             let reaches = image.and_then(|image| {
                 let publication = self.world.publications.get(image.publication)?;
-                let parted = parted_since(
+                let parted = unheard_since(
                     &self.world.disks,
                     &self.world.cuts,
-                    index,
                     publication.leader,
+                    index,
                 );
                 (!publication.closed && parted.is_none()).then_some(image)
             });
@@ -559,7 +568,16 @@ impl Cluster {
                 .net
                 .get(index)
                 .is_some_and(|flight| flight.deliver_at_ns <= now_ns);
-            if !due {
+            // A message for a member whose module stands still waits where it is, as
+            // it does in the image the member's driver holds for it, and is read in
+            // the order sent when the module runs again.
+            let waits = self.world.net.get(index).is_some_and(|flight| {
+                self.world
+                    .disks
+                    .get(flight.to)
+                    .is_some_and(|disk| disk.stalled)
+            });
+            if !due || waits {
                 index += 1;
                 continue;
             }
@@ -587,7 +605,12 @@ impl Cluster {
             }
         }
         for (own, core) in self.cores.iter_mut().enumerate() {
-            if self.world.disks.get(own).is_none_or(|disk| disk.halted) {
+            if self
+                .world
+                .disks
+                .get(own)
+                .is_none_or(|disk| disk.halted || disk.stalled)
+            {
                 continue;
             }
             let clock = self.world.clock;
@@ -683,7 +706,8 @@ impl Cluster {
         bytes
     }
 
-    /// The member that leads: the running member whose role is leader. When two are,
+    /// The member that leads: the running member whose role is leader, never one that
+    /// is halted or stalled. When two are,
     /// a leader that was cut off or stood still and has not yet given up the lead
     /// beside the one elected after it, it is the one of the higher term. `None`
     /// while no running member leads, during an election.
@@ -691,7 +715,7 @@ impl Cluster {
         self.cores
             .iter()
             .zip(&self.world.disks)
-            .filter(|(core, disk)| core.role() == Role::Leader && !disk.halted)
+            .filter(|(core, disk)| core.role() == Role::Leader && !disk.halted && !disk.stalled)
             .max_by_key(|(core, _)| core.leadership_term_id())
             .map(|(core, _)| core.member_id())
     }
@@ -760,18 +784,56 @@ impl Cluster {
         let (Some(a), Some(b)) = (self.index(member), self.index(other)) else {
             return;
         };
-        let parted = self
-            .world
-            .cuts
-            .iter()
-            .any(|cut| (cut.a == a && cut.b == b) || (cut.a == b && cut.b == a));
+        let parted =
+            self.world.cuts.iter().any(|cut| {
+                !cut.one_way && ((cut.a == a && cut.b == b) || (cut.a == b && cut.b == a))
+            });
         if a != b && !parted {
             let since_ns = self.world.clock.now_ns;
-            self.world.cuts.push(Cut { a, b, since_ns });
+            self.world.cuts.push(Cut {
+                a,
+                b,
+                since_ns,
+                one_way: false,
+            });
         }
     }
 
-    /// Ends the partition between two members.
+    /// Stops what `member` sends from reaching `other`, and nothing else: a partition
+    /// that cuts one way, as a host has when its packets out are dropped on one path.
+    /// `member`'s consensus messages to `other` arrive nowhere, and when `member`
+    /// leads, its log stops reaching `other`, whose image of it stays for the image
+    /// liveness timeout as it does in a [`Cluster::cut`]. `member` still hears
+    /// `other`, and each still reaches every other member. [`Cluster::heal_between`]
+    /// ends it. Naming one member twice, or an id no member has, does nothing.
+    ///
+    /// The UDP transport holds such a path for the connection timeout, 5 s, at most:
+    /// `other`, hearing no status message from `member`, disconnects its publications
+    /// to it (`spec/udp.md`). This cluster has no status messages and holds the cut
+    /// for as long as a test asks, which is how a test brings a member a message of a
+    /// term it took no part in.
+    pub fn cut_one_way(&mut self, member: i32, other: i32) {
+        let (Some(a), Some(b)) = (self.index(member), self.index(other)) else {
+            return;
+        };
+        let cut = self
+            .world
+            .cuts
+            .iter()
+            .any(|cut| cut.one_way && cut.a == a && cut.b == b);
+        if a != b && !cut {
+            let since_ns = self.world.clock.now_ns;
+            self.world.cuts.push(Cut {
+                a,
+                b,
+                since_ns,
+                one_way: true,
+            });
+        }
+    }
+
+    /// Ends every partition between two members, the ones that cut both ways and the
+    /// ones that cut one way, in either direction.
     pub fn heal_between(&mut self, member: i32, other: i32) {
         let (Some(a), Some(b)) = (self.index(member), self.index(other)) else {
             return;
@@ -839,6 +901,29 @@ impl Cluster {
     pub fn resume(&mut self, member: i32) {
         if let Some(disk) = self.disk_mut(member) {
             disk.halted = false;
+        }
+    }
+
+    /// Stops the member's consensus module and leaves its driver running, as a process
+    /// that stands still under a driver that does not: no duty cycle and no message
+    /// read, while the log still reaches the member's recording and syncs, and every
+    /// consensus message sent to the member waits, as it does in the image its driver
+    /// holds, and is read in the order sent when [`Cluster::unstall`] lets the module
+    /// run. A [`Cluster::halt`] is the host that stops, driver and module, and loses
+    /// what is sent to it. The messages that wait are in flight: they count toward
+    /// [`IN_FLIGHT_CAPACITY`], and one sent while that many are in flight is lost and
+    /// counted, as any is.
+    pub fn stall(&mut self, member: i32) {
+        if let Some(disk) = self.disk_mut(member) {
+            disk.stalled = true;
+        }
+    }
+
+    /// Lets a stalled member's module run again: on the next step it reads what
+    /// waited for it, the oldest first, and then runs its duty cycle.
+    pub fn unstall(&mut self, member: i32) {
+        if let Some(disk) = self.disk_mut(member) {
+            disk.stalled = false;
         }
     }
 
