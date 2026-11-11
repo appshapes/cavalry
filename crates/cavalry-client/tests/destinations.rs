@@ -3,12 +3,17 @@
 //! driver, every message reaches both once and in order, and the commands' refusals
 //! carry the codes `spec/client-protocol.md`, "Commands", gives them.
 
-use std::net::UdpSocket;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
 use cavalry_client::{Cavalry, ClientError, Publication, Subscription};
 use cavalry_driver::Driver;
+
+// This test's ports, from the one file that says how they are taken and why, which is
+// `cavalry-raft`'s: `crates/cavalry-raft/tests/ports/mod.rs`.
+#[path = "../../cavalry-raft/tests/ports/mod.rs"]
+mod ports;
+use ports::free_port;
 
 struct TestDir(PathBuf);
 
@@ -43,14 +48,6 @@ fn wait_until(timeout: Duration, mut condition: impl FnMut() -> bool) -> bool {
         std::thread::sleep(Duration::from_millis(1));
     }
     true
-}
-
-fn free_port() -> u16 {
-    UdpSocket::bind("127.0.0.1:0")
-        .expect("a loopback socket")
-        .local_addr()
-        .expect("bound")
-        .port()
 }
 
 /// Offers until the window lets the message through, within five seconds.

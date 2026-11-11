@@ -6943,6 +6943,14 @@ fn remove_image_log(dir: &Path, registration_id: i64) {
     let _ = std::fs::remove_file(dir.join(log_layout::image_file_name(registration_id)));
 }
 
+// The ports of this file's tests, from the one file that says how they are taken and
+// why, which is `cavalry-raft`'s: `crates/cavalry-raft/tests/ports/mod.rs`. A port taken
+// by binding port 0 and releasing it can be given to another socket before the
+// conductor binds it; a port from that file is kept from other sockets by its rule.
+#[cfg(test)]
+#[path = "../../cavalry-raft/tests/ports/mod.rs"]
+mod ports;
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -7841,13 +7849,10 @@ mod recording {
         assert!(h.conductor.replays.is_empty());
     }
 
-    /// A control channel of this test's own on a free loopback port.
+    /// A control channel of this test's own on a loopback port that is free now and
+    /// is this process's to bind ([`ports`](super::ports) has the rule).
     fn control_channel() -> String {
-        let port = std::net::UdpSocket::bind("127.0.0.1:0")
-            .expect("a loopback socket")
-            .local_addr()
-            .expect("bound")
-            .port();
+        let port = super::ports::free_port();
         format!("cavalry:udp?control=127.0.0.1:{port}|control-mode=manual")
     }
 
@@ -13509,6 +13514,8 @@ mod receiving {
     use cavalry_shm::log::LogBuffers;
     use cavalry_shm::log::layout::NOT_ENDED;
 
+    // A loopback port that is free now and is this process's to bind.
+    use super::ports::free_port;
     use super::recording::Harness;
     use super::*;
 
@@ -13518,15 +13525,6 @@ mod receiving {
     const INITIAL_TERM_ID: i32 = -5;
     /// The smallest term, so that an image's log is small in a test (ADR 0027).
     const TERM: u32 = MIN_TERM_LENGTH;
-
-    /// A port no socket holds at the moment it is read: bound and released.
-    fn free_port() -> u16 {
-        UdpSocket::bind("127.0.0.1:0")
-            .expect("a loopback socket")
-            .local_addr()
-            .expect("bound")
-            .port()
-    }
 
     /// A sender by hand: a socket of its own that sends setup frames, data and
     /// heartbeats to the receive endpoint and reads what the receiver answers.

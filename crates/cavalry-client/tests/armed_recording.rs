@@ -3,7 +3,6 @@
 //! (`spec/client-protocol.md`, "Commands", start recording; ADR 0059). The order is a
 //! cluster follower's: subscribe, arm, and only then does the publisher's image arrive.
 
-use std::net::UdpSocket;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
@@ -11,6 +10,12 @@ use cavalry_client::{Cavalry, ClientError, Offer, Publication, Recording};
 use cavalry_driver::Driver;
 use cavalry_log::catalog::CatalogReader;
 use cavalry_proto::client_protocol::ErrorCode;
+
+// This test's ports, from the one file that says how they are taken and why, which is
+// `cavalry-raft`'s: `crates/cavalry-raft/tests/ports/mod.rs`.
+#[path = "../../cavalry-raft/tests/ports/mod.rs"]
+mod ports;
+use ports::free_port;
 
 struct TestDir(PathBuf);
 
@@ -41,14 +46,6 @@ fn wait(what: &str, mut done: impl FnMut() -> bool) {
         assert!(Instant::now() < deadline, "{what}");
         std::thread::sleep(Duration::from_millis(1));
     }
-}
-
-fn free_port() -> u16 {
-    UdpSocket::bind("127.0.0.1:0")
-        .expect("a loopback socket")
-        .local_addr()
-        .expect("bound")
-        .port()
 }
 
 fn offer(publication: &mut Publication, message: &[u8]) {
