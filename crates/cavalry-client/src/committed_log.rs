@@ -296,10 +296,10 @@ impl CommittedLog {
     /// [`commit_position`](Self::commit_position) after the member stopped naming the
     /// recording this handle replays, or its counters went; once the replay has ended,
     /// its recording stopped, and the image has been read to where the replay ended; or
-    /// once the replay's image failed a check. An ended handle has delivered every entry
-    /// below the bound it took, or below the recording's stop when that is lower: open
-    /// the log again from [`position`](Self::position) when the member names a
-    /// recording again.
+    /// once the replay's image failed a check. An ended handle whose image passed every
+    /// check has delivered every entry below the bound it took, or below the recording's
+    /// stop when that is lower: open the log again from [`position`](Self::position)
+    /// when the member names a recording again.
     ///
     /// Until then a poll that returns 0 says only that nothing below the bound has
     /// arrived yet. A replay plays no further than what the member's recorder has
