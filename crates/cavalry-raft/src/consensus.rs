@@ -464,7 +464,8 @@ pub fn terms_above(
     record: impl IntoIterator<Item = (i64, i64)>,
     term: i64,
 ) -> [Option<(i64, i64)>; 2] {
-    let (mut lowest, mut next): (Option<(i64, i64)>, Option<(i64, i64)>) = (None, None);
+    let mut lowest: Option<(i64, i64)> = None;
+    let mut next: Option<(i64, i64)> = None;
     for recorded in record {
         if recorded.0 <= term {
             continue;
