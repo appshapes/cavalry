@@ -204,7 +204,7 @@ public sealed unsafe class CommittedLog : IDisposable
     /// <summary>The fault of the log's own image, the replay's, or null for a log whose image
     /// has not faulted. Its code is <see cref="Abi.ERR_FAULT_IMAGE"/> when a frame of the
     /// image failed a check, with the reader's position, or when the image was gone before
-    /// this client read of it, with <see cref="Abi.NULL_POSITION"/>; it is
+    /// this client read it, with <see cref="Abi.NULL_POSITION"/>; it is
     /// <see cref="Abi.ERR_FAULT_IMAGES_FULL"/> when the image could not join. The poll that
     /// meets the fault returns -1 once, <see cref="GetFault"/> answers it until the next
     /// poll, and this answers it from that poll on, for as long as the log is held: a

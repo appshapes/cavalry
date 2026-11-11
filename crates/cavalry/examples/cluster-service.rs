@@ -204,8 +204,8 @@ fn run(args: &Args) -> Result<(), Box<dyn std::error::Error>> {
                 let next = log.position();
                 let what = match fault {
                     Fault::Image { reason, .. } if reason == Fault::GONE => {
-                        "the replay's image was gone before this program's client read of \
-                         it, which takes the client being held for over a second"
+                        "the replay's image was gone before this program's client read it, \
+                         which takes the client being held for over a second"
                             .to_string()
                     }
                     Fault::Image {

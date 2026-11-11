@@ -1526,7 +1526,7 @@ func (l *CommittedLog) WithdrawnAt() (int64, bool) {
 // Faulted is the fault of the log's own image, the replay's, and true: the code, the
 // image's session and the position; or zeros and false for a log whose image has not
 // faulted. The code is ErrFaultImage when a frame of the image failed a check, with the
-// reader's position, or when the image was gone before this client read of it, with
+// reader's position, or when the image was gone before this client read it, with
 // NullPosition; it is ErrFaultImagesFull when the image could not join. The poll that
 // meets the fault returns -1 once, Fault answers it until the next poll and Err until the
 // log's next failure, and this answers it from that poll on, for as long as the log is

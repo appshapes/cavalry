@@ -1057,7 +1057,7 @@ class CommittedLog:
         """The fault of the log's own image, the replay's, as (code, session_id, position),
         or None for a log whose image has not faulted. The code is
         `CAVALRY_ERR_FAULT_IMAGE` when a frame of the image failed a check, with the
-        reader's position, or when the image was gone before this client read of it, with
+        reader's position, or when the image was gone before this client read it, with
         `NULL_POSITION`; it is `CAVALRY_ERR_FAULT_IMAGES_FULL` when the image could not
         join. The poll that meets the fault returns -1 once, `fault()` answers it until
         the next poll, and this answers it from that poll on, for as long as the log is

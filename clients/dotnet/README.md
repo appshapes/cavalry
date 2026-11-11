@@ -61,8 +61,8 @@ An ended log delivered every committed entry it may read only when three things 
   the service had read it.
 - `log.Faulted()` is `null`. A `Subscription.Fault` is where this client's read of the
   replay's image, the log's own, stopped: its `Code` is `Abi.ERR_FAULT_IMAGE` when a
-  frame of the image failed a check, or when the image was gone before the client
-  read of it, and `Abi.ERR_FAULT_IMAGES_FULL` when the image could not join. No entry
+  frame of the image failed a check, or when the image was gone before this client
+  read it, and `Abi.ERR_FAULT_IMAGES_FULL` when the image could not join. No entry
   from the fault on was delivered.
 
 Read the three reports once `log.IsEnded()` is true. The driver withdraws a replay

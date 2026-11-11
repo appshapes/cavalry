@@ -56,7 +56,7 @@ An ended log delivered every committed entry it may read only when three things 
 - `log.faulted()` is `null`. A fault, `{ code, sessionId, position }`, is where this
   client's read of the replay's image, the log's own, stopped: the code is
   `CAVALRY_ERR_FAULT_IMAGE` when a frame of the image failed a check, or when the
-  image was gone before the client read of it, and `CAVALRY_ERR_FAULT_IMAGES_FULL`
+  image was gone before this client read it, and `CAVALRY_ERR_FAULT_IMAGES_FULL`
   when the image could not join. No entry from the fault on was delivered.
 
 Read the three reports once `log.isEnded` is true. The driver withdraws a replay that

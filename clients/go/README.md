@@ -61,7 +61,7 @@ An ended log delivered every committed entry it may read only when three things 
 - `log.Faulted()` is zeros and `false`. A code, a session, a position and `true` is
   where this client's read of the replay's image, the log's own, stopped: the code is
   `ErrFaultImage` when a frame of the image failed a check, or when the image was gone
-  before the client read of it, and `ErrFaultImagesFull` when the image could not
+  before this client read it, and `ErrFaultImagesFull` when the image could not
   join. No entry from the fault on was delivered.
 
 Read the three reports once `log.IsEnded()` is true. The driver withdraws a replay

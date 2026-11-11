@@ -256,7 +256,7 @@ public final class CommittedLog implements AutoCloseable {
     /** The fault of the log's own image, the replay's, or empty for a log whose image has not
      * faulted. Its code is {@link Abi#ERR_FAULT_IMAGE} when a frame of the image failed a
      * check, with the reader's position, or when the image was gone before this client read
-     * of it, with {@link Abi#NULL_POSITION}; it is {@link Abi#ERR_FAULT_IMAGES_FULL} when the
+     * it, with {@link Abi#NULL_POSITION}; it is {@link Abi#ERR_FAULT_IMAGES_FULL} when the
      * image could not join. The poll that meets the fault returns -1 once, {@link #fault()}
      * answers it until the next poll, and this answers it from that poll on, for as long as
      * the log is held: a service that did not keep the poll's answer reads it here, once
