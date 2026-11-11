@@ -1,26 +1,31 @@
-//! Every move of the election, checked against `counters.toml` (CLAUDE.md, invariant 4;
-//! ADR 0067). One call into a core, a duty cycle or a message read, moves its election
-//! at most once. After every call the test checks that a move it made is a
-//! `[[transition]]` of the machine `cluster_election`, and that a counter registered
-//! for it rose, read through [`Counts::by_counter`]. The paths below make every
-//! registered transition, and the test fails on a row that none of them made, so the
-//! registry and the core cannot drift apart in either direction.
+//! Every move of the election and of the role, checked against `counters.toml`
+//! (CLAUDE.md, invariant 4; ADR 0067, ADR 0081). One call into a core, a duty cycle or
+//! a message read, moves its election at most once and its role at most once. After
+//! every call the test checks that each move it made is a `[[transition]]` of its
+//! machine, `cluster_election` or `cluster_role`, and that a counter registered for it
+//! rose, read through [`Counts::by_counter`]. The paths below make every registered
+//! transition of both machines, and the test fails on a row that none of them made, so
+//! the registry and the core cannot drift apart in either direction.
 
 mod common;
 
 use std::collections::BTreeSet;
+use std::fmt::Debug;
 
 use cavalry_proto::cluster::Message;
-use cavalry_raft::{Consensus, Counts, ElectionState};
+use cavalry_raft::{Consensus, Counts, ElectionState, Role};
 use cavalry_shm::counters::generated::COUNTERS;
 use common::{Stub, append_position, at, canvass_position, new_leadership_term};
 
-/// One `[[transition]]` row of `cluster_election`: from, to and counter.
+/// The two machines a core moves.
+const ELECTION: &str = "cluster_election";
+const ROLE: &str = "cluster_role";
+
+/// One `[[transition]]` row of a machine: from, to and counter.
 type Row = (String, String, String);
 
-/// The rows of `cluster_election` in `counters.toml`, the file `just lint-counters`
-/// checks.
-fn registered() -> Vec<Row> {
+/// The rows of `machine` in `counters.toml`, the file `just lint-counters` checks.
+fn registered(machine: &str) -> Vec<Row> {
     let path = concat!(env!("CARGO_MANIFEST_DIR"), "/../../counters.toml");
     let text = std::fs::read_to_string(path).expect("counters.toml at the workspace root");
     let mut tables: Vec<Vec<(String, String)>> = Vec::new();
@@ -49,7 +54,7 @@ fn registered() -> Vec<Row> {
     };
     tables
         .iter()
-        .filter(|table| field(table, "machine") == "cluster_election")
+        .filter(|table| field(table, "machine") == machine)
         .map(|table| {
             (
                 field(table, "from"),
@@ -62,7 +67,7 @@ fn registered() -> Vec<Row> {
 
 /// The state's name in `counters.toml`: the variant, lower-cased, with an underscore
 /// between words, as `just lint-counters` reads it.
-fn name(state: ElectionState) -> String {
+fn name(state: impl Debug) -> String {
     let mut out = String::new();
     for (index, ch) in format!("{state:?}").chars().enumerate() {
         if ch.is_ascii_uppercase() {
@@ -91,30 +96,31 @@ fn value(counts: Counts, counter: &str) -> u64 {
         .unwrap_or_else(|| panic!("{counter} is one of the core's counts"))
 }
 
-/// The registry, and the rows the calls so far have made.
-struct Watch {
+/// One machine's registry, and the rows the calls so far have made.
+struct Machine {
+    name: &'static str,
     rows: Vec<Row>,
     made: BTreeSet<Row>,
 }
 
-impl Watch {
-    fn new() -> Self {
-        let rows = registered();
-        assert!(!rows.is_empty(), "cluster_election has transitions");
+impl Machine {
+    fn new(name: &'static str) -> Self {
+        let rows = registered(name);
+        assert!(!rows.is_empty(), "{name} has transitions");
         Self {
+            name,
             rows,
             made: BTreeSet::new(),
         }
     }
 
-    /// Checks the move, if any, that one call made from `before` to `core`'s state.
-    fn check(&mut self, before: (ElectionState, Counts), core: &Consensus) {
-        let (from, counted) = before;
-        let to = core.election_state();
+    /// Checks the move, if any, from the state named `from` to the one named `to`, with
+    /// the counts before the call and after it.
+    fn check(&mut self, from: String, to: String, counted: Counts, counts: Counts) {
         if from == to {
             return;
         }
-        let (from, to) = (name(from), name(to));
+        let machine = self.name;
         let rows: Vec<Row> = self
             .rows
             .iter()
@@ -123,28 +129,63 @@ impl Watch {
             .collect();
         assert!(
             !rows.is_empty(),
-            "{from} -> {to} is no [[transition]] of cluster_election in counters.toml"
+            "{from} -> {to} is no [[transition]] of {machine} in counters.toml"
         );
         let mut rose = false;
         for row in rows {
-            if value(core.counts(), &row.2) > value(counted, &row.2) {
+            if value(counts, &row.2) > value(counted, &row.2) {
                 rose = true;
                 self.made.insert(row);
             }
         }
-        assert!(rose, "{from} -> {to} added one to none of its counters");
+        assert!(
+            rose,
+            "{from} -> {to} of {machine} added one to none of its counters"
+        );
+    }
+
+    /// The rows no call has made.
+    fn unmade(&self) -> Vec<Row> {
+        let rows: BTreeSet<Row> = self.rows.iter().cloned().collect();
+        rows.difference(&self.made).cloned().collect()
+    }
+}
+
+/// The registry of both machines, and the rows the calls so far have made.
+struct Watch {
+    election: Machine,
+    role: Machine,
+}
+
+impl Watch {
+    fn new() -> Self {
+        Self {
+            election: Machine::new(ELECTION),
+            role: Machine::new(ROLE),
+        }
+    }
+
+    /// Checks the moves, if any, that one call made from `before` to `core`'s state
+    /// and role.
+    fn check(&mut self, before: (ElectionState, Role, Counts), core: &Consensus) {
+        let (state, role, counted) = before;
+        let counts = core.counts();
+        self.election
+            .check(name(state), name(core.election_state()), counted, counts);
+        self.role
+            .check(name(role), name(core.role()), counted, counts);
     }
 
     /// One duty cycle at `ms`, checked.
     fn work(&mut self, core: &mut Consensus, io: &mut Stub, ms: u64) {
-        let before = (core.election_state(), core.counts());
+        let before = (core.election_state(), core.role(), core.counts());
         core.do_work(at(ms), io).expect("no fault");
         self.check(before, core);
     }
 
     /// One message read at `ms`, checked.
     fn read(&mut self, core: &mut Consensus, io: &mut Stub, ms: u64, message: &Message<'_>) {
-        let before = (core.election_state(), core.counts());
+        let before = (core.election_state(), core.role(), core.counts());
         core.on_message(at(ms), message, io).expect("no fault");
         self.check(before, core);
     }
@@ -189,8 +230,47 @@ fn to_follower_log_await(
     ms + 4
 }
 
+/// A member of `[0, 1, 2]` with id 0 that elects, taken from init to nominate by the
+/// other two members' canvass positions, neither ahead of it, from `ms` on; returns the
+/// next millisecond.
+fn to_nominate(watch: &mut Watch, member: &mut Consensus, io: &mut Stub, ms: u64) -> u64 {
+    watch.work(member, io, ms);
+    assert_eq!(member.election_state(), ElectionState::Canvass);
+    for other in [1, 2] {
+        watch.read(member, io, ms + 1, &canvass_position(other, -1, 0));
+    }
+    watch.work(member, io, ms + 2);
+    assert_eq!(member.election_state(), ElectionState::Nominate);
+    ms + 3
+}
+
+/// The same member taken on to candidate ballot: nominate's delay is below half the
+/// election timeout, 500 ms. Returns the millisecond its ballot began at.
+fn to_candidate_ballot(watch: &mut Watch, member: &mut Consensus, io: &mut Stub, ms: u64) -> u64 {
+    let ms = to_nominate(watch, member, io, ms) + 500;
+    watch.work(member, io, ms);
+    assert_eq!(member.election_state(), ElectionState::CandidateBallot);
+    ms
+}
+
+/// Member 1's request vote for `term`, with a log that holds no term.
+fn request_vote(term: i64) -> Message<'static> {
+    Message::RequestVote {
+        log_leadership_term_id: -1,
+        log_position: 0,
+        candidate_term_id: term,
+        candidate_member_id: 1,
+        protocol_version: 0,
+    }
+}
+
+/// A member that elects, with id 0 among `[0, 1, 2]` and a seed of its own.
+fn elector(seed: u64) -> Consensus {
+    Consensus::with_election(&[0, 1, 2], 0, seed).expect("a member")
+}
+
 #[test]
-fn every_transition_of_the_election_adds_one_to_a_counter_registered_for_it() {
+fn every_transition_of_the_election_and_the_role_adds_one_to_a_counter_registered_for_it() {
     let mut watch = Watch::new();
 
     // The leader of three: init, canvass, then leader log replication, replay, init and
@@ -302,10 +382,133 @@ fn every_transition_of_the_election_adds_one_to_a_counter_registered_for_it() {
     watch.work(&mut unheard, &mut io, ms + 10_000);
     assert_eq!(unheard.election_state(), ElectionState::Init);
 
-    let rows: BTreeSet<Row> = watch.rows.iter().cloned().collect();
-    let unmade: Vec<&Row> = rows.difference(&watch.made).collect();
-    assert!(
-        unmade.is_empty(),
-        "registered in counters.toml and made by no path of this test: {unmade:?}"
+    // A member that elects: canvass, nominate, candidate ballot, and the leader of term
+    // 0 on both votes, each from a member it heard.
+    let mut io = Stub::new();
+    let mut candidate = elector(1);
+    let ms = to_candidate_ballot(&mut watch, &mut candidate, &mut io, 1);
+    for voter in [1, 2] {
+        let vote = Message::Vote {
+            candidate_term_id: 0,
+            log_leadership_term_id: -1,
+            log_position: 0,
+            candidate_member_id: 0,
+            follower_member_id: voter,
+            vote: true,
+        };
+        watch.read(&mut candidate, &mut io, ms + 1, &vote);
+    }
+    watch.work(&mut candidate, &mut io, ms + 2);
+    assert_eq!(
+        candidate.election_state(),
+        ElectionState::LeaderLogReplication
     );
+
+    // A candidate with no vote but its own canvasses again at the election timeout.
+    let mut io = Stub::new();
+    let mut unanswered = elector(2);
+    let ms = to_candidate_ballot(&mut watch, &mut unanswered, &mut io, 1);
+    watch.work(&mut unanswered, &mut io, ms + 1_000);
+    assert_eq!(unanswered.election_state(), ElectionState::Canvass);
+
+    // A candidate that reads a request vote for a higher term from a log at least its
+    // own votes for it and waits for it; its new leadership term then takes it to
+    // follower replay.
+    let mut io = Stub::new();
+    let mut outbid = elector(3);
+    let ms = to_candidate_ballot(&mut watch, &mut outbid, &mut io, 1);
+    watch.read(&mut outbid, &mut io, ms + 1, &request_vote(1));
+    assert_eq!(outbid.election_state(), ElectionState::FollowerBallot);
+    let mut term_one = new_leadership_term(1, 0);
+    if let Message::NewLeadershipTerm {
+        leadership_term_id,
+        next_leadership_term_id,
+        ..
+    } = &mut term_one
+    {
+        *leadership_term_id = 1;
+        *next_leadership_term_id = 1;
+    }
+    watch.read(&mut outbid, &mut io, ms + 2, &term_one);
+    assert_eq!(outbid.election_state(), ElectionState::FollowerReplay);
+
+    // A candidate that reads the new leadership term of its own candidate term from
+    // another member follows it, a follower by the step to follower replay. Its ballot
+    // ended with a leader, so it counts no ballot lost.
+    let mut io = Stub::new();
+    let mut beaten = elector(4);
+    let ms = to_candidate_ballot(&mut watch, &mut beaten, &mut io, 1);
+    watch.read(&mut beaten, &mut io, ms + 1, &new_leadership_term(1, 0));
+    assert_eq!(beaten.election_state(), ElectionState::FollowerReplay);
+    assert_eq!(beaten.role(), Role::Follower);
+    assert_eq!(beaten.leader_member_id(), 1);
+    assert_eq!(beaten.counts().ballots_lost, 0);
+
+    // A candidate ahead of that leader's term base needs a truncation: it fails, a
+    // follower from the same call, and is one still when init begins its next
+    // election.
+    let mut io = Stub::new();
+    io.append_position = 64;
+    let mut ahead = elector(5);
+    let ms = to_candidate_ballot(&mut watch, &mut ahead, &mut io, 1);
+    watch.read(&mut ahead, &mut io, ms + 1, &new_leadership_term(1, 0));
+    assert_eq!(ahead.election_state(), ElectionState::Init);
+    assert_eq!(ahead.role(), Role::Follower);
+    watch.work(&mut ahead, &mut io, ms + 2);
+    assert_eq!(ahead.election_state(), ElectionState::Canvass);
+    assert_eq!(ahead.role(), Role::Follower);
+
+    // A member in canvass votes for a candidate and waits for it; with no new
+    // leadership term for the election timeout it canvasses again.
+    let mut io = Stub::new();
+    let mut voter = elector(6);
+    watch.work(&mut voter, &mut io, 1);
+    watch.read(&mut voter, &mut io, 2, &request_vote(0));
+    assert_eq!(voter.election_state(), ElectionState::FollowerBallot);
+    watch.work(&mut voter, &mut io, 2 + 1_000);
+    assert_eq!(voter.election_state(), ElectionState::Canvass);
+
+    // A member in nominate votes for a candidate, as one in canvass does.
+    let mut io = Stub::new();
+    let mut nominee = elector(7);
+    let ms = to_nominate(&mut watch, &mut nominee, &mut io, 1);
+    watch.read(&mut nominee, &mut io, ms, &request_vote(0));
+    assert_eq!(nominee.election_state(), ElectionState::FollowerBallot);
+
+    // A member in nominate reads a leader's term as canvass does: it follows, or
+    // fails where it would need a truncation.
+    let mut io = Stub::new();
+    let mut nominee = elector(8);
+    let ms = to_nominate(&mut watch, &mut nominee, &mut io, 1);
+    watch.read(&mut nominee, &mut io, ms, &new_leadership_term(1, 0));
+    assert_eq!(nominee.election_state(), ElectionState::FollowerReplay);
+    let mut io = Stub::new();
+    io.append_position = 64;
+    let mut nominee = elector(9);
+    let ms = to_nominate(&mut watch, &mut nominee, &mut io, 1);
+    watch.read(&mut nominee, &mut io, ms, &new_leadership_term(1, 0));
+    assert_eq!(nominee.election_state(), ElectionState::Init);
+
+    // A member in follower ballot ahead of its candidate's term base fails.
+    let mut io = Stub::new();
+    io.append_position = 64;
+    let mut voter = elector(10);
+    watch.work(&mut voter, &mut io, 1);
+    let mut longer = request_vote(0);
+    if let Message::RequestVote { log_position, .. } = &mut longer {
+        *log_position = 64;
+    }
+    watch.read(&mut voter, &mut io, 2, &longer);
+    assert_eq!(voter.election_state(), ElectionState::FollowerBallot);
+    watch.read(&mut voter, &mut io, 3, &new_leadership_term(1, 0));
+    assert_eq!(voter.election_state(), ElectionState::Init);
+
+    for machine in [&watch.election, &watch.role] {
+        let unmade = machine.unmade();
+        assert!(
+            unmade.is_empty(),
+            "registered for {} in counters.toml and made by no path of this test: {unmade:?}",
+            machine.name
+        );
+    }
 }
