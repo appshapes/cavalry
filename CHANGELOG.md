@@ -2044,6 +2044,12 @@ user-visible change, added in the same commit as the change. The format follows
   body on standard input, because a body given on the command line was refused when a
   line of it began with `#`, as a heading does
   ([Ask the agent to make a change](docs/how-to/ask-the-agent.md); card 247).
+- `cavalry doctor`'s `recording-write-failed` finding says where such a recording
+  stopped: at the position written after a write the disk refused, and at the position
+  last synced, with no stop in the catalog until the driver starts again, after a sync
+  or a stop that failed. It said "at the position written" for all of them. The
+  `recording.stopped` counter's description names a failed sync among the stops
+  (ADR 0064, ADR 0065; card 227).
 - A client can have the recorder sync a recording at once. The recorder syncs a
   recording once a second, so a program that acknowledges what it recorded, a cluster
   member counting towards a commit for one, waited up to a second with nothing to do.

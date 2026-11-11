@@ -2346,10 +2346,14 @@ fn recording_checks(
             check: "recording-write-failed",
             level: Level::Warn,
             message: format!(
-                "{failed} recording writes failed, each stopping its recording at the position \
-                 written: the log directory's filesystem is full, read-only or failing; free \
-                 space, or move the log directory with {}, then start the recording again; \
-                 what was written up to the stop is whole and replayable",
+                "{failed} of this driver's recordings stopped because a write or a sync of \
+                 theirs failed, or their stop's own writes did: after a write the disk refused, at the position \
+                 written; after a sync or a stop that failed, at the position last synced, \
+                 with no stop in the catalog until the driver starts again. The log \
+                 directory's filesystem is full, read-only or failing: free space, or move \
+                 the log directory with {}, start the driver again, then start the recording \
+                 again; a recording is whole and replayable up to the stop position its \
+                 `recording stopped` gave",
                 LOG_DIR_KEY.env
             ),
             doc: DOC_RECORDING_COMMANDS,
@@ -3830,7 +3834,9 @@ mod tests {
         let failed = finding(&report, "recording-write-failed");
         assert_eq!(failed.level, Level::Warn);
         assert!(
-            failed.message.starts_with("1 recording writes failed"),
+            failed
+                .message
+                .starts_with("1 of this driver's recordings stopped because a write"),
             "{}",
             failed.message
         );
