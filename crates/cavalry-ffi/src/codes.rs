@@ -8,11 +8,16 @@ use std::ffi::c_int;
 /// This page's version: the header's `CAVALRY_ABI_VERSION`, which
 /// `cavalry_context_init` passes to `cavalry_context_init_v` and the library compares
 /// with its own.
-pub const CAVALRY_ABI_VERSION: c_int = 1;
+pub const CAVALRY_ABI_VERSION: c_int = 2;
 /// The environment variable a context's default directory reads.
 pub const CAVALRY_DIR_ENV: &str = "CAVALRY_DIR";
 /// The images a subscription holds at most.
 pub const CAVALRY_MAX_IMAGES: usize = 256;
+/// The `cavalry:ipc` stream a committed log's replay is played into
+/// (`spec/cluster.md`, "Members and streams").
+pub const CAVALRY_SERVICE_LOG_STREAM_ID: i32 = 104;
+// The literal is what cbindgen writes in the header; this holds it to the Rust API's.
+const _: () = assert!(CAVALRY_SERVICE_LOG_STREAM_ID == cavalry_client::SERVICE_LOG_STREAM_ID);
 /// No position: a replay from the recording's start, a fault without one.
 pub const CAVALRY_NULL_POSITION: i64 = -1;
 /// A replay to the recording's extent as it stands.
@@ -122,6 +127,9 @@ pub const CAVALRY_ERR_ABI_VERSION: c_int = 135;
 pub const CAVALRY_ERR_NOT_UTF8: c_int = 136;
 /// An empty directory.
 pub const CAVALRY_ERR_EMPTY_DIR: c_int = 137;
+/// `cavalry_committed_log_entry_position` on a header that carries no position: one a
+/// subscription's poll handed its handler.
+pub const CAVALRY_ERR_NO_POSITION: c_int = 138;
 
 /// Why a client closed: `cavalry_close` was called.
 pub const CAVALRY_CLOSED_BY_USER: i32 = 1;

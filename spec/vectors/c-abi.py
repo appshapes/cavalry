@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Write spec/vectors/c-abi.json: the vectors for spec/c-abi.md, version 1.
+"""Write spec/vectors/c-abi.json: the vectors for spec/c-abi.md, version 2.
 
 This script is the page's reference, independent of the Rust code and of the committed
 header: it lists, from the page's own tables, every opaque type, every struct with its
@@ -17,11 +17,12 @@ and a reader checks a header against them (spec/README.md, "Conventions").
 import json
 from pathlib import Path
 
-ABI_VERSION = 1
+ABI_VERSION = 2
 
 OPAQUE_TYPES = [
     "cavalry_context_t", "cavalry_t", "cavalry_publication_t", "cavalry_subscription_t",
-    "cavalry_image_t", "cavalry_recording_t", "cavalry_replay_t", "cavalry_header_t",
+    "cavalry_image_t", "cavalry_recording_t", "cavalry_replay_t", "cavalry_committed_log_t",
+    "cavalry_header_t",
 ]
 
 # Every struct the caller owns, its fields in order, C's natural layout, no packing.
@@ -58,6 +59,8 @@ STRUCTS = {
         ("const char *", "channel"), ("int64_t", "replay_session_id"), ("int64_t", "recording_id"),
         ("int64_t", "start_position"), ("int32_t", "session_id"), ("int32_t", "stream_id"),
     ],
+    # Version 2: the committed log (ADR 0070).
+    "cavalry_committed_log_constants_t": [("int64_t", "recording_id"), ("int32_t", "member_id")],
 }
 
 TYPEDEFS = {
@@ -89,6 +92,8 @@ CLAIM = ("cavalry_buffer_claim_t *", "claim")
 IMAGE = ("const cavalry_image_t *", "image")
 REC = ("const cavalry_recording_t *", "recording")
 REPLAY = ("const cavalry_replay_t *", "replay")
+LOG = ("cavalry_committed_log_t *", "log")
+CLOG = ("const cavalry_committed_log_t *", "log")
 
 FUNCTIONS = [
     # context
@@ -161,6 +166,21 @@ FUNCTIONS = [
     fn("int64_t", "cavalry_replay_position", REPLAY),
     fn("bool", "cavalry_replay_ended", REPLAY, ("int64_t *", "position"), ("int32_t *", "reason")),
     fn("int", "cavalry_replay_close", ("cavalry_replay_t *", "replay")),
+    # Version 2: the committed log (ADR 0070).
+    fn("int", "cavalry_committed_log", ("cavalry_committed_log_t **", "log"), CLIENT,
+       ("int64_t", "position")),
+    fn("int", "cavalry_committed_log_poll", LOG, ("cavalry_fragment_handler_t", "handler"),
+       ("void *", "clientd"), ("size_t", "fragment_limit")),
+    fn("int64_t", "cavalry_committed_log_entry_position", ("const cavalry_header_t *", "header")),
+    fn("int", "cavalry_committed_log_fault", CLOG, ("cavalry_fault_t *", "fault")),
+    fn("int64_t", "cavalry_committed_log_position", CLOG),
+    fn("int64_t", "cavalry_committed_log_commit_position", CLOG),
+    fn("bool", "cavalry_committed_log_is_ended", CLOG),
+    fn("bool", "cavalry_committed_log_failed_at", CLOG, ("int64_t *", "position")),
+    fn("bool", "cavalry_committed_log_withdrawn_at", CLOG, ("int64_t *", "position")),
+    fn("int", "cavalry_committed_log_constants", CLOG,
+       ("cavalry_committed_log_constants_t *", "constants")),
+    fn("int", "cavalry_committed_log_close", LOG, CLIENT),
     # errors and version
     fn("int", "cavalry_errcode"),
     fn("const char *", "cavalry_errmsg"),
@@ -175,6 +195,7 @@ DEFINES = {
     "CAVALRY_ABI_VERSION": ABI_VERSION,
     "CAVALRY_DIR_ENV": "CAVALRY_DIR",
     "CAVALRY_MAX_IMAGES": 256,
+    "CAVALRY_SERVICE_LOG_STREAM_ID": 104,  # spec/cluster.md, "Members and streams"
     "CAVALRY_NULL_POSITION": -1,
     "CAVALRY_NULL_LENGTH": -1,
     "CAVALRY_FOLLOW_LENGTH": 9223372036854775807,  # INT64_MAX
@@ -230,6 +251,7 @@ DEFINES = {
     "CAVALRY_ERR_ABI_VERSION": 135,
     "CAVALRY_ERR_NOT_UTF8": 136,
     "CAVALRY_ERR_EMPTY_DIR": 137,
+    "CAVALRY_ERR_NO_POSITION": 138,
     # why a client closed, `Closed`'s reasons in order
     "CAVALRY_CLOSED_BY_USER": 1,
     "CAVALRY_CLOSED_DRIVER_CLOSED": 2,

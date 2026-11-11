@@ -23,8 +23,9 @@ public static unsafe partial class Abi
     internal const string Library = "cavalry_ffi";
 
     public const string DIR_ENV = "CAVALRY_DIR"; // CAVALRY_DIR_ENV
-    public const int ABI_VERSION = 1; // CAVALRY_ABI_VERSION
+    public const int ABI_VERSION = 2; // CAVALRY_ABI_VERSION
     public const int MAX_IMAGES = 256; // CAVALRY_MAX_IMAGES
+    public const int SERVICE_LOG_STREAM_ID = 104; // CAVALRY_SERVICE_LOG_STREAM_ID
     public const int NULL_POSITION = -1; // CAVALRY_NULL_POSITION
     public const int NULL_LENGTH = -1; // CAVALRY_NULL_LENGTH
     public const long FOLLOW_LENGTH = long.MaxValue; // CAVALRY_FOLLOW_LENGTH
@@ -76,6 +77,7 @@ public static unsafe partial class Abi
     public const int ERR_ABI_VERSION = 135; // CAVALRY_ERR_ABI_VERSION
     public const int ERR_NOT_UTF8 = 136; // CAVALRY_ERR_NOT_UTF8
     public const int ERR_EMPTY_DIR = 137; // CAVALRY_ERR_EMPTY_DIR
+    public const int ERR_NO_POSITION = 138; // CAVALRY_ERR_NO_POSITION
     public const int CLOSED_BY_USER = 1; // CAVALRY_CLOSED_BY_USER
     public const int CLOSED_DRIVER_CLOSED = 2; // CAVALRY_CLOSED_DRIVER_CLOSED
     public const int CLOSED_DRIVER_TIMEOUT = 3; // CAVALRY_CLOSED_DRIVER_TIMEOUT
@@ -93,6 +95,23 @@ public static unsafe partial class Abi
     public const int FLAGS_UNFRAGMENTED = 192; // CAVALRY_FLAGS_UNFRAGMENTED
     public const int FRAME_TYPE_PAD = 0; // CAVALRY_FRAME_TYPE_PAD
     public const int FRAME_TYPE_DATA = 1; // CAVALRY_FRAME_TYPE_DATA
+
+    /// <summary>`cavalry_fault_t` of spec/c-abi.md, "Structs": the caller's copy the ABI fills, laid out as C lays it out.</summary>
+    [StructLayout(LayoutKind.Sequential)]
+    public struct cavalry_fault_t
+    {
+        public int code;
+        public int session_id;
+        public long position;
+    }
+
+    /// <summary>`cavalry_committed_log_constants_t` of spec/c-abi.md, "Structs": the caller's copy the ABI fills, laid out as C lays it out.</summary>
+    [StructLayout(LayoutKind.Sequential)]
+    public struct cavalry_committed_log_constants_t
+    {
+        public long recording_id;
+        public int member_id;
+    }
 
     /// <summary>`cavalry_buffer_claim_t` of spec/c-abi.md, "Structs": the caller's copy the ABI fills, laid out as C lays it out.</summary>
     [StructLayout(LayoutKind.Sequential)]
@@ -137,15 +156,6 @@ public static unsafe partial class Abi
         public long start_position;
         public int session_id;
         public int stream_id;
-    }
-
-    /// <summary>`cavalry_fault_t` of spec/c-abi.md, "Structs": the caller's copy the ABI fills, laid out as C lays it out.</summary>
-    [StructLayout(LayoutKind.Sequential)]
-    public struct cavalry_fault_t
-    {
-        public int code;
-        public int session_id;
-        public long position;
     }
 
     /// <summary>`cavalry_image_constants_t` of spec/c-abi.md, "Structs": the caller's copy the ABI fills, laid out as C lays it out.</summary>
@@ -244,6 +254,42 @@ public static unsafe partial class Abi
 
     [LibraryImport(Library)]
     internal static partial int cavalry_stop_replay(nint client, long replay_session_id);
+
+    [LibraryImport(Library)]
+    internal static partial int cavalry_committed_log(out nint log, nint client, long position);
+
+    [LibraryImport(Library)]
+    internal static partial int cavalry_committed_log_poll(nint log, delegate* unmanaged[Cdecl]<void*, byte*, nuint, void*, void> handler, nint clientd, nuint fragment_limit);
+
+    [LibraryImport(Library)]
+    internal static partial long cavalry_committed_log_entry_position(nint header);
+
+    [LibraryImport(Library)]
+    internal static partial int cavalry_committed_log_fault(nint log, ref cavalry_fault_t fault);
+
+    [LibraryImport(Library)]
+    internal static partial long cavalry_committed_log_position(nint log);
+
+    [LibraryImport(Library)]
+    internal static partial long cavalry_committed_log_commit_position(nint log);
+
+    [LibraryImport(Library)]
+    [return: MarshalAs(UnmanagedType.U1)]
+    internal static partial bool cavalry_committed_log_is_ended(nint log);
+
+    [LibraryImport(Library)]
+    [return: MarshalAs(UnmanagedType.U1)]
+    internal static partial bool cavalry_committed_log_failed_at(nint log, out long position);
+
+    [LibraryImport(Library)]
+    [return: MarshalAs(UnmanagedType.U1)]
+    internal static partial bool cavalry_committed_log_withdrawn_at(nint log, out long position);
+
+    [LibraryImport(Library)]
+    internal static partial int cavalry_committed_log_constants(nint log, ref cavalry_committed_log_constants_t constants);
+
+    [LibraryImport(Library)]
+    internal static partial int cavalry_committed_log_close(nint log, nint client);
 
     [LibraryImport(Library)]
     internal static partial int cavalry_context_init_v(out nint context, int abi_version);

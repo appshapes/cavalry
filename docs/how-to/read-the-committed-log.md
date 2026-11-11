@@ -77,9 +77,11 @@ its services read what it appends in the same way.
    the member's recording past it, and the entries from it on were not delivered,
    though the member may have committed them. `log.withdrawn_at()`: a position means
    the driver withdrew the replay before the service had read it, and the entries
-   from that position on were not delivered. When both are `None`, the member closed
-   or left its log and the handle delivered every committed entry it may read. "When
-   it does not work", below, has an entry for each of the two that are not `None`. In
+   from that position on were not delivered. When both are `None`, and no poll
+   returned the fault of the log's own image, `Fault::Image` or `Fault::ImagesFull`,
+   the member closed or left its log and the handle delivered every committed entry
+   it may read. "When it does not work", below, has an entry for each of the two
+   that are not `None`. In
    every case `log.position()` is where to open the log again. A poll can return 0
    while committed entries are still on their way: the service reads only what the
    member's recorder has synced. The member asks its recorder to sync as soon as an
@@ -88,6 +90,24 @@ its services read what it appends in the same way.
    polling until `log.is_ended()` is true: when the member closes or leaves the log,
    the replay ends at the end of the member's recording, and the driver withdraws it
    5 s later, whether or not the service has read it.
+
+   A program in C does the same through `cavalry.h`
+   ([`spec/c-abi.md`, "Functions", committed log](../reference/c-abi.md#functions)).
+   `cavalry_committed_log(&log, client, position)` returns 0 and leaves `log` null
+   while the driver has no member with a log yet. `cavalry_committed_log_poll(log,
+   handler, clientd, fragment_limit)` hands each committed entry to the fragment
+   handler, and inside the handler `cavalry_committed_log_entry_position(header)` is
+   the entry's position. `cavalry_committed_log_position(log)` is the next position.
+   `cavalry_committed_log_is_ended(log)` says that no poll will deliver another
+   entry, and then `cavalry_committed_log_failed_at(log, &position)` and
+   `cavalry_committed_log_withdrawn_at(log, &position)` are `log.failed_at()` and
+   `log.withdrawn_at()` above: each returns `true` and writes the position when the
+   entries from it on were not delivered, and both return `false` when the member
+   closed or left its log and the handle delivered every committed entry it may
+   read, unless a poll returned −1 with `CAVALRY_ERR_FAULT_IMAGE` or
+   `CAVALRY_ERR_FAULT_IMAGES_FULL`: that poll is the one report that the replay's
+   image failed a check or could not join, and the handle is ended short of its
+   entries then too. `cavalry_committed_log_close(log, client)` ends the read.
 
 ## How to verify it worked
 

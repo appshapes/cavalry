@@ -5,10 +5,19 @@ The `extern "C"` ABI and its cbindgen header. Data plane, and the other crate wh
 
 ## What this does
 
-- Exposes the client API as a C ABI, `spec/c-abi.md` version 0, declared by the
+- Exposes the client API as a C ABI, `spec/c-abi.md` version 2, declared by the
   committed header `include/cavalry.h`, so one Rust core serves every language. The
   thin clients under `clients/` for Python, Node, Go, the JVM and .NET are generated
   over it and released together.
+- Feeds a cluster's committed log to a service in C: `cavalry_committed_log` opens the
+  log of the member on the client's driver, `cavalry_committed_log_poll` hands the
+  fragment handler the entries a quorum has committed and none past the commit
+  position, and `cavalry_committed_log_entry_position` gives the handler each entry's
+  position in the log. Once `cavalry_committed_log_is_ended` returns `true`,
+  `cavalry_committed_log_failed_at` and `cavalry_committed_log_withdrawn_at` say
+  whether the handle ended short of what it was owed, and where: a service is never
+  left to take a short end for a whole one (`spec/cluster.md`, "The service"; ADR
+  0070).
 - Carries every non-Rust client's messages: a claim, a commit, an offer and a poll
   cross this boundary per message, which is why it is on the data plane.
 - Is the one surface frozen between releases. Rust-to-Rust integration goes through
@@ -44,8 +53,9 @@ the only implementation and the C ABI is a thin layer over it
   functions a message passes through: `cavalry_publication_try_claim`,
   `cavalry_publication_offer`, `cavalry_buffer_claim_commit`,
   `cavalry_buffer_claim_abort`, `cavalry_buffer_claim_set_reserved_value`,
-  `cavalry_subscription_poll` and `cavalry_header_values`. The thread-local error is a
-  fixed buffer, and `tests/allocations.rs` counts across all seven.
+  `cavalry_subscription_poll`, `cavalry_header_values`, `cavalry_committed_log_poll`
+  and `cavalry_committed_log_entry_position`. The thread-local error is a fixed
+  buffer, and `tests/allocations.rs` counts across all nine.
 
 ## Where the data plane ends
 
@@ -150,7 +160,7 @@ Running it prints one line, such as `received "hello" from session -1716223105`.
 program built against another version of the header is refused at its first call:
 
 ```text
-cavalry_context_init refused (abi-version): the program was built against ABI version 1 and this library is version 0; rebuild the program against this library's header; see docs/reference/c-abi.md#versions-and-what-a-reader-rejects
+cavalry_context_init refused (abi-version): the program was built against ABI version 1 and this library is version 2; rebuild the program against this library's header; see docs/reference/c-abi.md#versions-and-what-a-reader-rejects
 ```
 
 ## What to read next

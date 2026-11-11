@@ -754,6 +754,116 @@ static napi_value fn_cavalry_stop_replay(napi_env env, napi_callback_info info) 
   return make_int32(env, (int32_t) result);
 }
 
+static napi_value fn_cavalry_committed_log(napi_env env, napi_callback_info info) {
+  size_t argc = 2; napi_value argv[2];
+  if (!read_args(env, info, 2, &argc, argv, "cavalry_committed_log")) return NULL;
+  cavalry_committed_log_t *log = NULL;
+  cavalry_t *client = (cavalry_t *) external_arg(env, argv[0], "client");
+  if (arg_failed) return NULL;
+  int64_t position = (int64_t) int64_arg(env, argv[1], "position");
+  if (arg_failed) return NULL;
+  int result = cavalry_committed_log(&log, client, position);
+  napi_value tuple; napi_create_array_with_length(env, 2, &tuple);
+  napi_set_element(env, tuple, 0, make_int32(env, (int32_t) result));
+  napi_set_element(env, tuple, 1, make_external(env, (void *) log));
+  return tuple;
+}
+
+static napi_value fn_cavalry_committed_log_entry_position(napi_env env, napi_callback_info info) {
+  size_t argc = 1; napi_value argv[1];
+  if (!read_args(env, info, 1, &argc, argv, "cavalry_committed_log_entry_position")) return NULL;
+  cavalry_header_t *header = (cavalry_header_t *) external_arg(env, argv[0], "header");
+  if (arg_failed) return NULL;
+  int64_t result = cavalry_committed_log_entry_position(header);
+  return make_int64(env, result);
+}
+
+static napi_value fn_cavalry_committed_log_fault(napi_env env, napi_callback_info info) {
+  size_t argc = 2; napi_value argv[2];
+  if (!read_args(env, info, 2, &argc, argv, "cavalry_committed_log_fault")) return NULL;
+  cavalry_committed_log_t *log = (cavalry_committed_log_t *) external_arg(env, argv[0], "log");
+  if (arg_failed) return NULL;
+  cavalry_fault_t *fault = (cavalry_fault_t *) struct_arg(env, argv[1], sizeof(cavalry_fault_t), _Alignof(cavalry_fault_t), "fault");
+  if (arg_failed) return NULL;
+  int result = cavalry_committed_log_fault(log, fault);
+  return make_int32(env, (int32_t) result);
+}
+
+static napi_value fn_cavalry_committed_log_position(napi_env env, napi_callback_info info) {
+  size_t argc = 1; napi_value argv[1];
+  if (!read_args(env, info, 1, &argc, argv, "cavalry_committed_log_position")) return NULL;
+  cavalry_committed_log_t *log = (cavalry_committed_log_t *) external_arg(env, argv[0], "log");
+  if (arg_failed) return NULL;
+  int64_t result = cavalry_committed_log_position(log);
+  return make_int64(env, result);
+}
+
+static napi_value fn_cavalry_committed_log_commit_position(napi_env env, napi_callback_info info) {
+  size_t argc = 1; napi_value argv[1];
+  if (!read_args(env, info, 1, &argc, argv, "cavalry_committed_log_commit_position")) return NULL;
+  cavalry_committed_log_t *log = (cavalry_committed_log_t *) external_arg(env, argv[0], "log");
+  if (arg_failed) return NULL;
+  int64_t result = cavalry_committed_log_commit_position(log);
+  return make_int64(env, result);
+}
+
+static napi_value fn_cavalry_committed_log_is_ended(napi_env env, napi_callback_info info) {
+  size_t argc = 1; napi_value argv[1];
+  if (!read_args(env, info, 1, &argc, argv, "cavalry_committed_log_is_ended")) return NULL;
+  cavalry_committed_log_t *log = (cavalry_committed_log_t *) external_arg(env, argv[0], "log");
+  if (arg_failed) return NULL;
+  bool result = cavalry_committed_log_is_ended(log);
+  return make_bool(env, result);
+}
+
+static napi_value fn_cavalry_committed_log_failed_at(napi_env env, napi_callback_info info) {
+  size_t argc = 1; napi_value argv[1];
+  if (!read_args(env, info, 1, &argc, argv, "cavalry_committed_log_failed_at")) return NULL;
+  cavalry_committed_log_t *log = (cavalry_committed_log_t *) external_arg(env, argv[0], "log");
+  if (arg_failed) return NULL;
+  int64_t position = 0;
+  bool result = cavalry_committed_log_failed_at(log, &position);
+  napi_value tuple; napi_create_array_with_length(env, 2, &tuple);
+  napi_set_element(env, tuple, 0, make_bool(env, result));
+  napi_set_element(env, tuple, 1, make_int64(env, position));
+  return tuple;
+}
+
+static napi_value fn_cavalry_committed_log_withdrawn_at(napi_env env, napi_callback_info info) {
+  size_t argc = 1; napi_value argv[1];
+  if (!read_args(env, info, 1, &argc, argv, "cavalry_committed_log_withdrawn_at")) return NULL;
+  cavalry_committed_log_t *log = (cavalry_committed_log_t *) external_arg(env, argv[0], "log");
+  if (arg_failed) return NULL;
+  int64_t position = 0;
+  bool result = cavalry_committed_log_withdrawn_at(log, &position);
+  napi_value tuple; napi_create_array_with_length(env, 2, &tuple);
+  napi_set_element(env, tuple, 0, make_bool(env, result));
+  napi_set_element(env, tuple, 1, make_int64(env, position));
+  return tuple;
+}
+
+static napi_value fn_cavalry_committed_log_constants(napi_env env, napi_callback_info info) {
+  size_t argc = 2; napi_value argv[2];
+  if (!read_args(env, info, 2, &argc, argv, "cavalry_committed_log_constants")) return NULL;
+  cavalry_committed_log_t *log = (cavalry_committed_log_t *) external_arg(env, argv[0], "log");
+  if (arg_failed) return NULL;
+  cavalry_committed_log_constants_t *constants = (cavalry_committed_log_constants_t *) struct_arg(env, argv[1], sizeof(cavalry_committed_log_constants_t), _Alignof(cavalry_committed_log_constants_t), "constants");
+  if (arg_failed) return NULL;
+  int result = cavalry_committed_log_constants(log, constants);
+  return make_int32(env, (int32_t) result);
+}
+
+static napi_value fn_cavalry_committed_log_close(napi_env env, napi_callback_info info) {
+  size_t argc = 2; napi_value argv[2];
+  if (!read_args(env, info, 2, &argc, argv, "cavalry_committed_log_close")) return NULL;
+  cavalry_committed_log_t *log = (cavalry_committed_log_t *) external_arg(env, argv[0], "log");
+  if (arg_failed) return NULL;
+  cavalry_t *client = (cavalry_t *) external_arg(env, argv[1], "client");
+  if (arg_failed) return NULL;
+  int result = cavalry_committed_log_close(log, client);
+  return make_int32(env, (int32_t) result);
+}
+
 static napi_value fn_cavalry_context_init_v(napi_env env, napi_callback_info info) {
   size_t argc = 1; napi_value argv[1];
   if (!read_args(env, info, 1, &argc, argv, "cavalry_context_init_v")) return NULL;
@@ -1165,6 +1275,16 @@ static napi_value init(napi_env env, napi_value exports) {
     { "cavalry_purge_recording", NULL, fn_cavalry_purge_recording, NULL, NULL, NULL, napi_default, NULL },
     { "cavalry_start_replay", NULL, fn_cavalry_start_replay, NULL, NULL, NULL, napi_default, NULL },
     { "cavalry_stop_replay", NULL, fn_cavalry_stop_replay, NULL, NULL, NULL, napi_default, NULL },
+    { "cavalry_committed_log", NULL, fn_cavalry_committed_log, NULL, NULL, NULL, napi_default, NULL },
+    { "cavalry_committed_log_entry_position", NULL, fn_cavalry_committed_log_entry_position, NULL, NULL, NULL, napi_default, NULL },
+    { "cavalry_committed_log_fault", NULL, fn_cavalry_committed_log_fault, NULL, NULL, NULL, napi_default, NULL },
+    { "cavalry_committed_log_position", NULL, fn_cavalry_committed_log_position, NULL, NULL, NULL, napi_default, NULL },
+    { "cavalry_committed_log_commit_position", NULL, fn_cavalry_committed_log_commit_position, NULL, NULL, NULL, napi_default, NULL },
+    { "cavalry_committed_log_is_ended", NULL, fn_cavalry_committed_log_is_ended, NULL, NULL, NULL, napi_default, NULL },
+    { "cavalry_committed_log_failed_at", NULL, fn_cavalry_committed_log_failed_at, NULL, NULL, NULL, napi_default, NULL },
+    { "cavalry_committed_log_withdrawn_at", NULL, fn_cavalry_committed_log_withdrawn_at, NULL, NULL, NULL, napi_default, NULL },
+    { "cavalry_committed_log_constants", NULL, fn_cavalry_committed_log_constants, NULL, NULL, NULL, napi_default, NULL },
+    { "cavalry_committed_log_close", NULL, fn_cavalry_committed_log_close, NULL, NULL, NULL, napi_default, NULL },
     { "cavalry_context_init_v", NULL, fn_cavalry_context_init_v, NULL, NULL, NULL, napi_default, NULL },
     { "cavalry_context_set_dir", NULL, fn_cavalry_context_set_dir, NULL, NULL, NULL, napi_default, NULL },
     { "cavalry_context_get_dir", NULL, fn_cavalry_context_get_dir, NULL, NULL, NULL, napi_default, NULL },
