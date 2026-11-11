@@ -121,6 +121,10 @@ In Aeron, this is the client, with `tryClaim` and `commit`
   its absence is reported to the subscriber.
 - Allocate, lock, make a syscall, await or panic per message (invariant 2). The path
   from claim to the fragment handler is judged at p99.99 and max, never at the mean.
+- Allocate for another client's image. The driver announces every image to every
+  client of its directory, and a client's conductor copies nothing from an `available
+  image` whose subscription is not its own, so one program's subscriptions cost its
+  neighbours no allocation (`tests/foreign_image_allocations.rs`).
 - Absorb back-pressure. It is explicit and returned to the caller, never hidden behind a
   growing buffer (invariant 3).
 - Rename a concept. Publication, subscription, image, session, position and back-
