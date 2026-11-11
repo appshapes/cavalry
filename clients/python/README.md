@@ -30,27 +30,58 @@ opens the log of the member on the client's driver at a position, 0 or the
 `position()` an earlier run reached, and returns `None` while the driver hosts no
 member with a log, so a service started before its member asks again. `log.poll(handler,
 fragment_limit)` calls `handler(body, header, position)` for each committed entry, in
-order, none at or past the member's commit position, and returns the entry count;
-`position` is the entry's position in the log. `log.position()` is the position after
-the last entry delivered, the one a service keeps for its next start, and
-`log.commit_position()` the bound of the last poll. `log.is_ended` says that no poll
-will deliver another entry: stop reading when it is true, not when a poll returns 0,
-then close the log and open another from `log.position()`. Two reports say whether the
-log ended short of the entries it was owed, each `None` or a position, read once
-`log.is_ended` is true: `log.failed_at()`, where the driver's replay of the member's
-recording failed, and `log.withdrawn_at()`, where the entries begin that the log was
-not given because the driver withdrew the replay, 5 s after it ended, before the
-service had read it. The log delivered every committed entry it may read only when
-both are `None`. `log.close()` stops the driver's replay and is idempotent;
-a log closed after its client is freed, and the driver ends the replay by itself.
-`log.member_id` and `log.recording_id` say whose log it is (`spec/c-abi.md`,
-"Functions", committed log; ADR 0070).
+order, none at or past the member's commit position; `position` is the entry's
+position in the log. It returns the entry count, or −1 when the ABI's poll stopped on
+a fault, which `log.fault()` gives as `(code, session_id, position)` until the next
+poll. `log.position()` is the position after the last entry delivered, the one a
+service keeps for its next start, and `log.commit_position()` the bound of the last
+poll. `log.is_ended` says that no poll will deliver another entry: stop reading when
+it is true, not when a poll returns 0, then close the log and open another from
+`log.position()`. `log.close()` stops the driver's replay and is idempotent; a log
+closed after its client is freed, and the driver ends the replay by itself. When the
+ABI could not stop the replay, `log.close()` raises `CavalryError` after it has freed
+the log, and a second close does nothing. `log.member_id` and `log.recording_id` say
+whose log it is (`spec/c-abi.md`, "Functions", committed log; ADR 0070).
+
+An ended log delivered every committed entry it may read only when three things hold:
+
+- `log.failed_at()` is `None`. A position is where the driver's replay of the member's
+  recording failed, and no entry from it on was delivered.
+- `log.withdrawn_at()` is `None`. A position is where the entries begin that the log
+  was not given, because the driver withdrew the replay, 5 s after it ended, before
+  the service had read it.
+- No `log.poll` returned −1 with the fault of the log's own image: a `log.fault()`
+  code of `CAVALRY_ERR_FAULT_IMAGE`, the replay's image failed a check, or of
+  `CAVALRY_ERR_FAULT_IMAGES_FULL`, the image could not join.
+
+Read the two reports once `log.is_ended` is true. The driver withdraws a replay that
+failed as it does any other, so both can be positions: `log.withdrawn_at()` is then
+the lower, and the entries from it on, those below `log.failed_at()` among them, were
+not delivered. The fault of the image is reported once. The poll that meets it returns
+−1, `log.fault()` answers it only until the next poll, the next poll returns 0 and
+clears it, and both reports are `None` for such a log. So a service keeps that −1 and
+its fault when it gets them: nothing reports them later, and without them this end
+reads as a whole one. In every case what the log delivered ends at `log.position()`.
 
 The handler's exceptions go where a subscription's go ("The exception"): every entry
 the ABI delivers reaches the handler, and `poll` raises `HandlerError` once the ABI has
-returned. An entry whose handler call raised was delivered and is not delivered again,
-so a service that must apply every entry catches its own exceptions and stops there,
-with the entry's `position` in hand to open the log at again.
+returned, with the poll's result as its `fragments`, the −1 of a fault included. An
+entry whose handler call raised was delivered and is not delivered again:
+`log.position()` is past it, and past every entry the same poll delivered after it. A
+handler cannot stop a poll: the ABI goes on handing it entries up to the fragment
+limit. So a service that must apply every entry, in order, does this:
+
+1. The handler catches its own exceptions. When it cannot apply an entry, it keeps
+   that entry's `position` and sets a flag.
+2. While the flag is set the handler applies nothing and returns at once, for the rest
+   of that poll: the poll still hands it the entries after the one that failed.
+3. After the poll, the service closes the log and opens a new one at the position it
+   kept.
+
+With entries at 0, 96 and 192 and a failure at 96, opening again at `log.position()`
+would lose the entry at 96, and applying 192 before opening again at 96 would apply
+192 twice. A `fragment_limit` of 1 is the simple form: a poll then delivers at most
+one entry, and the service decides after each.
 
 ## What it must never do
 
@@ -94,7 +125,13 @@ with the entry's `position` in hand to open the log at again.
   the outstanding claim's view until its `commit` or `abort` releases it. A `poll`
   from inside a handler of the same subscription returns −1 with
   `CAVALRY_ERR_POLLING`, and the poll in progress goes on with its own handler and
-  its own count of raises.
+  its own count of raises. A committed log's handler is held to the same rule. From
+  inside it, a `poll` of the same log, `log.position()` and `log.commit_position()`
+  return −1, `log.is_ended` is `False`, `log.failed_at()` and `log.withdrawn_at()` are
+  `None`, and `log.fault()` and `log.close()` raise `CavalryError`, each with
+  `CAVALRY_ERR_POLLING`, and the log stays open. The `False` and the two `None` are
+  refusals there, not answers: read the three after the poll has returned. The handler
+  has each entry's own `position`.
 - Never drop a fragment and never swallow the user's exception: the ABI's poll
   consumes every fragment it delivers, so every one reaches the handler, once and in
   order, even after a call raised; `poll` raises once the ABI has returned, the one
@@ -154,8 +191,9 @@ runners'.
 
 ### The call
 
-The package opens the library twice, which the loader maps once. The seven
-per-message functions of `crates/cavalry-ffi/README.md` come through `ctypes.PyDLL`,
+The package opens the library twice, which the loader maps once. The nine
+per-message functions of `crates/cavalry-ffi/README.md`, a committed log's poll and an
+entry's position among them, come through `ctypes.PyDLL`,
 which keeps the GIL held across the foreign call, so an offer, a claim, a commit or
 abort and a poll's call-backs run with no GIL release and re-acquire pair per message.
 `ctypes.CDLL` would release the GIL around each call and take it back in each
@@ -165,8 +203,10 @@ closes wait on the driver, for up to 10 s on a timeout (`spec/c-abi.md`, "Thread
 and with the GIL held every other Python thread of the process would stop for that
 long, one polling another subscription included. The cost is the pair on each of those
 calls, which are not per message. Every per-message function makes one call; `poll`'s
-call-backs are the ABI calling the trampoline, not calls of their own. The runner
-checks each function's loader.
+call-backs are the ABI calling the trampoline, not calls of their own. A committed
+log's trampoline makes one call of its own per entry,
+`cavalry_committed_log_entry_position`, for the position it hands the handler. The
+runner checks each function's loader.
 
 ### Threads
 
@@ -190,7 +230,9 @@ managed buffer CPython keeps behind a view, and that view cast to the native byt
 format. That is seven objects per received message, the runtime's three and the
 client's four, each freed before the next fragment, plus whatever `ctypes` makes inside
 its own steps, such as finding the array type for the length, which this list does not
-count.
+count. A committed log's trampoline builds the same seven and makes one ABI call more
+per entry, `cavalry_committed_log_entry_position` on the header, with what `ctypes`
+makes for a call and the `int` its result comes back as, the handler's third argument.
 
 The client's four cannot be one view kept per subscription, which ADR 0046 asks for
 where the runtime allows it: the ABI hands the handler an address, not a term buffer
@@ -259,7 +301,10 @@ direct cause of the following exception`, and that traceback ends at the handler
 line that raised. The fragments the poll delivered were all handed to the handler, so
 do not poll again to retry them: the next poll reads the fragments after them. A
 handler that must not lose a message to its own failure catches its own exceptions and
-copies the message with `bytes(body)` to handle later.
+copies the message with `bytes(body)` to handle later. A committed log's handler, which
+must apply its entries in order, does what "The committed log" says instead. For a
+committed log the `HandlerError` speaks of entries, and when `fragments` is −1 it names
+`log.fault()`, to read before the next poll.
 
 ## What to read next
 
