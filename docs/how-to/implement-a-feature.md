@@ -105,7 +105,15 @@ feature that followed this page, commit by commit.
    - When the feature's last commit is on `master`, comment the commit hashes on the
      card and archive it, and run `just tidy`: it retires every branch whose pull
      request merged, locally and on origin, with its worktree; `just tidy <branch>`
-     retires a working branch that never needed a pull request.
+     retires a working branch that never needed a pull request. It matches a merged
+     pull request to what is here by the head's name, and by the upstream of a local
+     branch that was pushed under another name, `git push -u origin <local>:<head>`.
+     It prints a line for each thing it removed, and for each thing it left with the
+     reason: a worktree with uncommitted changes; a branch under another name that
+     was made after its pull request was opened, which is a branch started from that
+     head, or that holds a commit its pull request did not; a branch on origin that
+     was pushed to again after its pull request merged; and a branch whose upstream
+     is gone and that no merged pull request accounts for.
 
 ## How to verify it worked
 
