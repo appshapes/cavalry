@@ -2082,3 +2082,13 @@ user-visible change, added in the same commit as the change. The format follows
   228 ms now, over twenty runs
   ([ADR 0069](docs/decisions/0069-sync-a-recording-on-command-as-client-protocol-version-8.md);
   card 227).
+- A landing takes the bench hosts once, and a pull request no longer waits for macOS.
+  `master`'s run at a merge reports its bench jobs without the hosts when the pull
+  request's own run measured the same tree on them, and its `changes` job names that
+  run, whose figures are `master`'s
+  ([ADR 0074](docs/decisions/0074-do-not-run-the-bench-on-master-for-a-tree-its-pull-request-measured.md)).
+  `gates (macos)` runs for every commit on `master` and for runs by hand, not for pull
+  requests, and is no longer a required check: in 92 runs it failed alone twice, on an
+  intermittent failure no change caused
+  ([ADR 0073](docs/decisions/0073-run-the-macos-gates-for-master-and-not-for-pull-requests.md);
+  [Run the bench](docs/how-to/run-the-bench.md), "When the bench jobs run"; card 254).

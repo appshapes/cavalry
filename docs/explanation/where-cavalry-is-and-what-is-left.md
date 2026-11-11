@@ -82,9 +82,9 @@ dedicated hosts (ADR 0016, ADR 0034, ADR 0044), and a weekly email of the change
   transition with a counter, in `counters.toml`.
 - **Configuration.** Three keys in `config.toml`. Zero configuration is the supported
   default.
-- **CI.** Six jobs on every push and pull request. Five are required checks of
-  `master`: `gates (linux)`, `gates (macos)`, `bench (linux)`, `bench (grip)` and
-  `bench (udp)`.
+- **CI.** Six jobs, which report seven checks on a push to `master` and six on a pull
+  request, which has no `gates (macos)`. Four are required checks of `master`:
+  `gates (linux)`, `bench (linux)`, `bench (grip)` and `bench (udp)`.
 
 The latency gate's baselines are in `bench/baseline.json`. The rows below are 32-byte
 messages on `grip`, an Intel Core i7-10700 with isolated cores. A sample is the time
