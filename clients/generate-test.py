@@ -112,7 +112,7 @@ class Parse(unittest.TestCase):
         expected = {fn["name"]: (flat(fn["returns"]), [(flat(t), n) for t, n in fn["params"]])
                     for fn in self.vectors["functions"]}
         self.assertEqual(parsed, expected)
-        self.assertEqual(len(self.header.functions), 71)
+        self.assertEqual(len(self.header.functions), 72)
 
     def test_the_defines_are_the_vectors(self):
         parsed = {name: gen.python_value(value) for name, value in self.header.defines if name != "CAVALRY_H"}
@@ -199,6 +199,12 @@ class Package(unittest.TestCase):
             body = log.split(f"    def {report}(self):\n", 1)[1].split("\n    def ", 1)[0]
             self.assertIn(f"self._abi.cavalry_committed_log_{report}(self._handle, ctypes.byref(position))", body)
             self.assertIn("return position.value if ", body)
+        # The third report, the lasting read of the image's fault (ADR 0080): the three
+        # fields when the ABI answered true, None when it answered false.
+        faulted = log.split("    def faulted(self):\n", 1)[1].split("\n    def ", 1)[0]
+        self.assertIn("if not self._abi.cavalry_committed_log_faulted(self._handle, ctypes.byref(fault)):\n"
+                      "            return None\n"
+                      "        return fault.code, fault.session_id, fault.position", faulted)
         # A log whose constants cannot be read is closed, as the Go client closes one it
         # cannot return, after its error is read and before the error is raised.
         opened = log.split("    def __init__(self, abi, handle, client):\n", 1)[1].split("\n    def ", 1)[0]
@@ -318,8 +324,8 @@ class Package(unittest.TestCase):
         for entries, delivered in ((1, "the entry handler raised on 1 of the 1 entry this poll delivered;"),
                                    (3, "the entry handler raised on 1 of the 3 entries this poll delivered;"),
                                    (-1, "before it stopped on a fault, which this CommittedLog's fault() reads until "
-                                        "its next poll and nothing reports after that, so read it and keep it "
-                                        "before polling again;")):
+                                        "its next poll, and its faulted() from then on when the fault is the log's "
+                                        "own image's;")):
             message = str(cavalry.HandlerError(entries, 1, cause, committed_log=True))
             self.assertIn(delivered, message)
             self.assertNotIn("Subscription", message)
@@ -785,6 +791,14 @@ class NodePackage(unittest.TestCase):
             self.assertLess(native.index("napi_set_element(env, tuple, 0, make_bool(env, result));"),
                             native.index("napi_set_element(env, tuple, 1, make_int64(env, position));"))
             self.assertIn(f"  {report}(): number | null;", files["index.d.ts"])
+        # The third report, the lasting read of the image's fault (ADR 0080).
+        faulted = log.split("  faulted() {\n", 1)[1].split("\n  }", 1)[0]
+        self.assertIn("if (!addon.cavalry_committed_log_faulted(this.handle, f.buffer)) return null;", faulted)
+        self.assertIn('return { code: f.int32("code"), sessionId: f.int32("session_id"), position: f.int64("position") };',
+                      faulted)
+        self.assertIn("  faulted(): { code: number; sessionId: number; position: number } | null;", files["index.d.ts"])
+        native = files["src/addon.c"].split("static napi_value fn_cavalry_committed_log_faulted(", 1)[1].split("\n}\n", 1)[0]
+        self.assertIn("bool result = cavalry_committed_log_faulted(log, fault);", native)
         opened = log.split("  constructor(handle, client) {\n", 1)[1].split("\n  }\n", 1)[0]
         read = opened.index('const failed = error("cavalry_committed_log_constants");')
         closed = opened.index("addon.cavalry_committed_log_close(handle, client.handle);")
@@ -864,8 +878,8 @@ class NodePackage(unittest.TestCase):
         # A committed log's poll names its own fault() and its entries: the fault of the
         # log's image is reported once, so the message must not send the reader to a
         # subscription's (clients/node/README.md, "The committed log").
-        self.assertIn("which this CommittedLog's fault() reads \" +\n      \"until its next poll and nothing reports "
-                      "after that, so read it and keep it before polling again", body)
+        self.assertIn("which this CommittedLog's fault() reads \" +\n      \"until its next poll, and its faulted() "
+                      "from then on when the fault is the log's own image's", body)
         log = files["index.js"].split("class CommittedLog {", 1)[1].split("\n}\n", 1)[0]
         self.assertIn("throw new HandlerError(result[0], result[1], result[2], result[3], true, result[4]);", log)
         subscription = files["index.js"].split("class Subscription {", 1)[1].split("\n}\n", 1)[0]
@@ -1086,6 +1100,14 @@ class GoPackage(unittest.TestCase):
                                    "\t\treturn 0, false\n"
                                    "\t}\n"
                                    "\treturn int64(position), true")
+        # The third report, the lasting read of the image's fault (ADR 0080).
+        faulted = code.split("func (l *CommittedLog) Faulted() (code int32, sessionID int32, position int64, "
+                             "faulted bool) {\n", 1)[1].split("\n}\n", 1)[0]
+        self.assertEqual(faulted, "\tvar f C.cavalry_fault_t\n"
+                                  "\tif !bool(C.cavalry_committed_log_faulted(l.handle, &f)) {\n"
+                                  "\t\treturn 0, 0, 0, false\n"
+                                  "\t}\n"
+                                  "\treturn int32(f.code), int32(f.session_id), int64(f.position), true")
         opened = code.split("func (c *Client) CommittedLog(position int64) (*CommittedLog, error) {\n", 1)[1]
         opened = opened.split("\n}\n", 1)[0]
         constants = opened.index('check("cavalry_committed_log_constants", C.cavalry_committed_log_constants(handle, &k))')
@@ -1253,7 +1275,7 @@ class GoPackage(unittest.TestCase):
         # subscription's (clients/go/README.md, "The committed log").
         self.assertIn('one, many = "entry", "entries"', body)
         self.assertIn("which this CommittedLog's Fault \" +\n\t\t\t\"reads until its next poll and its Err until its next "
-                      "failure, and nothing reports after that, so read \" +\n\t\t\t\"it and keep it before polling again", body)
+                      "failure, and its Faulted from then on when \" +\n\t\t\t\"the fault is the log's own image's", body)
         log = code.split("func (l *CommittedLog) Poll(", 1)[1].split("\n}\n", 1)[0]
         self.assertIn("&HandlerError{Fragments: count, Raised: s.raised, Cause: first, CommittedLog: true}", log)
         subscription = code.split("func (s *Subscription) Poll(", 1)[1].split("\n}\n", 1)[0]
@@ -1348,6 +1370,13 @@ class JvmPackage(unittest.TestCase):
             self.assertIn(f"boolean {answered} = (boolean) Abi.{abi}.invokeExact(handle, position);", body)
             self.assertIn(f"return {answered} ? OptionalLong.of(position.get(JAVA_LONG, 0)) : OptionalLong.empty();", body)
             self.assertIn(f'throw Abi.failed("{abi}", t);', body)
+        # The third report, the lasting read of the image's fault (ADR 0080).
+        faulted = log.split("    public Optional<Subscription.Fault> faulted() {\n", 1)[1].split("\n    }\n", 1)[0]
+        self.assertIn("boolean faulted = (boolean) Abi.cavalry_committed_log_faulted.invokeExact(handle, f);", faulted)
+        self.assertLess(faulted.index("return Optional.empty();"),
+                        faulted.index("return Optional.of(new Subscription.Fault(f.get(JAVA_INT, Abi.cavalry_fault_t_code),"))
+        self.assertIn('throw Abi.failed("cavalry_committed_log_faulted", t);', faulted)
+        self.assertIn("import java.util.Optional;\n", log)
         opened = log.split("    CommittedLog(MemorySegment handle, Client client) {\n", 1)[1].split("\n    }\n", 1)[0]
         # Three ways out, each closing the log before anything is thrown: the stub's two
         # and the constants', where `Abi.failed` throws an Error on and so comes after.
@@ -1463,8 +1492,8 @@ class JvmPackage(unittest.TestCase):
         # log's image is reported once, so the message must not send the reader to a
         # subscription's (clients/jvm/README.md, "The committed log").
         self.assertIn('String one = committedLog ? "entry" : "fragment";', body)
-        self.assertIn("which this CommittedLog's fault() reads\"\n                    + \" until its next poll and nothing "
-                      "reports after that, so read it and keep it before polling again\"", body)
+        self.assertIn("which this CommittedLog's fault() reads\"\n                    + \" until its next poll, and its "
+                      "faulted() from then on when the fault is the log's own image's\"", body)
         self.assertIn("throw new HandlerException(count, raised, cause, true);", files[self.BASE + "CommittedLog.java"])
         self.assertIn("throw new HandlerException(count, raised, cause);", files[self.BASE + "Subscription.java"])
         with open(os.path.join(gen.ROOT, "clients", "jvm", "README.md"), encoding="utf-8") as f:
@@ -1555,6 +1584,11 @@ class DotnetPackage(unittest.TestCase):
                             ("WithdrawnAt", "cavalry_committed_log_withdrawn_at")):
             body = log.split(f"    public long? {report}()\n    {{\n", 1)[1].split("\n    }\n", 1)[0]
             self.assertEqual(body.strip(), f"return Abi.{abi}(handle, out long position) ? position : null;")
+        # The third report, the lasting read of the image's fault (ADR 0080).
+        faulted = log.split("    public Subscription.Fault? Faulted()\n    {\n", 1)[1].split("\n    }\n", 1)[0]
+        self.assertLess(faulted.index("if (!Abi.cavalry_committed_log_faulted(handle, ref f))"),
+                        faulted.index("return null;"))
+        self.assertIn("return new Subscription.Fault(f.code, f.session_id, f.position);", faulted)
         opened = log.split("    internal CommittedLog(nint handle, Client client)\n    {\n", 1)[1].split("\n    }\n", 1)[0]
         caught = opened.split("        catch\n        {\n", 1)[1].split("\n        }\n", 1)[0]
         closed = caught.index("client.CloseCommittedLog(handle);")
@@ -1643,8 +1677,8 @@ class DotnetPackage(unittest.TestCase):
         # log's image is reported once, so the message must not send the reader to a
         # subscription's (clients/dotnet/README.md, "The committed log").
         self.assertIn('string one = committedLog ? "entry" : "fragment";', body)
-        self.assertIn("which this CommittedLog's GetFault() reads\"\n                    + \" until its next poll and nothing "
-                      "reports after that, so read it and keep it before polling again\"", body)
+        self.assertIn("which this CommittedLog's GetFault() reads\"\n                    + \" until its next poll, and its "
+                      "Faulted() from then on when the fault is the log's own image's\"", body)
         self.assertIn("    public Subscription.Fault GetFault()\n", files["CommittedLog.cs"])
         self.assertIn("throw new HandlerException(count, raised, cause, committedLog: true);", files["CommittedLog.cs"])
         self.assertIn("throw new HandlerException(count, raised, cause);", files["Subscription.cs"])

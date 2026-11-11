@@ -14,7 +14,7 @@ from ctypes import (CFUNCTYPE, POINTER, Structure, c_bool, c_char_p, c_int, c_in
 # The defines, the header's constants (spec/c-abi.md, "Constants", "Result codes",
 # "Error codes").
 CAVALRY_DIR_ENV = "CAVALRY_DIR"
-CAVALRY_ABI_VERSION = 2
+CAVALRY_ABI_VERSION = 3
 CAVALRY_MAX_IMAGES = 256
 CAVALRY_SERVICE_LOG_STREAM_ID = 104
 CAVALRY_NULL_POSITION = -1
@@ -245,6 +245,7 @@ FUNCTIONS = {
     "cavalry_committed_log_is_ended": (c_bool, [c_void_p]),
     "cavalry_committed_log_failed_at": (c_bool, [c_void_p, POINTER(c_int64)]),
     "cavalry_committed_log_withdrawn_at": (c_bool, [c_void_p, POINTER(c_int64)]),
+    "cavalry_committed_log_faulted": (c_bool, [c_void_p, POINTER(cavalry_fault_t)]),
     "cavalry_committed_log_constants": (c_int, [c_void_p, POINTER(cavalry_committed_log_constants_t)]),
     "cavalry_committed_log_close": (c_int, [c_void_p, c_void_p]),
     "cavalry_context_init_v": (c_int, [POINTER(c_void_p), c_int]),

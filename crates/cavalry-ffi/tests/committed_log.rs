@@ -223,6 +223,35 @@ unsafe extern "C" fn collect(
         let withdrawn = cavalry_committed_log_withdrawn_at(log, &mut at);
         assert_eq!(at, 7, "a refused call writes nothing");
         answers.push(("withdrawn_at", i64::from(withdrawn), cavalry_errcode()));
+        let mut kept = cavalry_fault_t {
+            code: 7,
+            session_id: 7,
+            position: 7,
+        };
+        let faulted = cavalry_committed_log_faulted(log, &mut kept);
+        assert_eq!(
+            (kept.code, kept.session_id, kept.position),
+            (7, 7, 7),
+            "a refused call writes nothing"
+        );
+        answers.push(("faulted", i64::from(faulted), cavalry_errcode()));
+        // A null pointer is refused first, as it is outside the handler.
+        for (name, refused) in [
+            (
+                "failed_at null",
+                cavalry_committed_log_failed_at(log, ptr::null_mut()),
+            ),
+            (
+                "withdrawn_at null",
+                cavalry_committed_log_withdrawn_at(log, ptr::null_mut()),
+            ),
+            (
+                "faulted null",
+                cavalry_committed_log_faulted(log, ptr::null_mut()),
+            ),
+        ] {
+            answers.push((name, i64::from(refused), cavalry_errcode()));
+        }
         answers.push((
             "close",
             i64::from(cavalry_committed_log_close(log, client)),
@@ -296,6 +325,13 @@ fn a_driver_with_no_member_answers_the_open_with_a_null_handle_and_no_error() {
         assert_eq!(at, 7);
         let mut fault = std::mem::zeroed::<cavalry_fault_t>();
         assert_eq!(cavalry_committed_log_fault(null, &mut fault), -1);
+        assert!(!cavalry_committed_log_faulted(null, &mut fault));
+        assert_eq!(cavalry_errcode(), CAVALRY_ERR_NULL);
+        assert_eq!(
+            (fault.code, fault.session_id, fault.position),
+            (0, 0, 0),
+            "a refused call writes nothing"
+        );
         let mut constants = std::mem::zeroed::<cavalry_committed_log_constants_t>();
         assert_eq!(cavalry_committed_log_constants(null, &mut constants), -1);
         assert_eq!(cavalry_committed_log_close(null, client), -1);
@@ -425,6 +461,10 @@ fn a_service_reads_the_committed_log_through_the_c_handler_with_each_entrys_posi
                 ("is_ended", 0, CAVALRY_ERR_POLLING),
                 ("failed_at", 0, CAVALRY_ERR_POLLING),
                 ("withdrawn_at", 0, CAVALRY_ERR_POLLING),
+                ("faulted", 0, CAVALRY_ERR_POLLING),
+                ("failed_at null", 0, CAVALRY_ERR_NULL),
+                ("withdrawn_at null", 0, CAVALRY_ERR_NULL),
+                ("faulted null", 0, CAVALRY_ERR_NULL),
                 ("close", -1, CAVALRY_ERR_POLLING),
                 ("constants", 0, 0),
             ]
@@ -691,6 +731,182 @@ fn a_log_opened_where_no_entry_begins_fails_there_and_says_so() {
         let mut withdrawn = -7;
         assert!(!cavalry_committed_log_withdrawn_at(log, &mut withdrawn));
         assert_eq!(withdrawn, -7, "nothing played went unread");
+        assert_eq!(cavalry_committed_log_close(log, client), 0, "{}", errmsg());
+        assert_eq!(cavalry_close(client), 0);
+        assert_eq!(cavalry_context_close(context), 0);
+    }
+}
+
+/// The log buffers under a driver directory's `publications/`, by name.
+fn publication_logs(dir: &Path) -> Vec<PathBuf> {
+    let mut logs: Vec<PathBuf> = std::fs::read_dir(dir.join("publications"))
+        .expect("the driver's publications")
+        .map(|entry| entry.expect("an entry").path())
+        .collect();
+    logs.sort();
+    logs
+}
+
+/// A service whose read of the replay's image stops on a fault, through the ABI: the
+/// poll that meets it returns −1 with `CAVALRY_ERR_FAULT_IMAGE`, once;
+/// `cavalry_committed_log_fault` answers it until the next poll; and
+/// `cavalry_committed_log_faulted` answers it from that poll on, for as long as the
+/// handle is held, with the same code, session id and position, and sets no error
+/// (`spec/c-abi.md`, version 3; ADR 0080). Before the fault it is `false` and writes
+/// nothing.
+///
+/// The test makes the fault as `cavalry-raft`'s own test of the Rust handle does: the
+/// service reads five of eleven committed entries, and the test changes the version
+/// byte of the sixth in the replay's log buffer, the one file that appears under the
+/// member's `publications/` when the log is opened.
+#[test]
+fn a_service_whose_image_faulted_reads_the_fault_for_the_life_of_its_handle() {
+    use std::os::unix::fs::FileExt;
+
+    let mut cluster = Cluster::start("service-faulted");
+    const ENTRIES: u32 = 10;
+    const READ_FIRST: usize = 5;
+    cluster.offer(0, ENTRIES);
+    let end = 96 + i64::from(ENTRIES) * 96;
+    let stopped = 96 * i64::try_from(READ_FIRST).expect("a count");
+    cluster.commit(end);
+
+    let member_dir = cluster.members[1].2.clone();
+    let (context, client) = connect(&member_dir);
+    let before = publication_logs(&member_dir);
+    // SAFETY: the ABI's conventions, held by this test.
+    unsafe {
+        let mut log: *mut cavalry_committed_log_t = ptr::null_mut();
+        assert_eq!(
+            cavalry_committed_log(&mut log, client, 0),
+            0,
+            "{}",
+            errmsg()
+        );
+        assert!(!log.is_null(), "member 1 has a recording of the log");
+        let replayed: Vec<PathBuf> = publication_logs(&member_dir)
+            .into_iter()
+            .filter(|path| !before.contains(path))
+            .collect();
+        assert_eq!(replayed.len(), 1, "the replay's one log: {replayed:?}");
+        let replay_log = std::fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .open(&replayed[0])
+            .expect("the replay's log opens");
+
+        // Five entries, under a bound that is the end of the eleven.
+        let mut collected = Collected::default();
+        let clientd = ptr::addr_of_mut!(collected).cast::<c_void>();
+        let deadline = Instant::now() + Duration::from_secs(30);
+        while collected.entries.len() < READ_FIRST
+            || cavalry_committed_log_commit_position(log) < end
+        {
+            assert!(Instant::now() < deadline, "the service read five entries");
+            let limit = READ_FIRST - collected.entries.len();
+            let delivered = cavalry_committed_log_poll(log, Some(collect), clientd, limit);
+            assert!(delivered >= 0, "{}", errmsg());
+            cluster.work();
+        }
+        assert_eq!(cavalry_committed_log_position(log), stopped);
+
+        // No fault yet: `false`, nothing written, and no error set by the answer.
+        let untouched = cavalry_fault_t {
+            code: 7,
+            session_id: 7,
+            position: 7,
+        };
+        let mut kept = untouched;
+        assert_eq!(cavalry_committed_log_entry_position(ptr::null()), -1);
+        assert_eq!(cavalry_errcode(), CAVALRY_ERR_NULL);
+        assert!(!cavalry_committed_log_faulted(log, &mut kept));
+        assert_eq!((kept.code, kept.session_id, kept.position), (7, 7, 7));
+        assert_eq!(
+            cavalry_errcode(),
+            CAVALRY_ERR_NULL,
+            "an answer sets no error: the code is the one the call before left"
+        );
+        assert!(!cavalry_committed_log_faulted(log, ptr::null_mut()));
+        assert_eq!(cavalry_errcode(), CAVALRY_ERR_NULL);
+        assert!(
+            errmsg().contains("cavalry_committed_log_faulted"),
+            "{}",
+            errmsg()
+        );
+
+        // The sixth entry's frame, once the replay has written it, with a version no
+        // reader accepts.
+        let at = u64::try_from(stopped).expect("a position");
+        let deadline = Instant::now() + Duration::from_secs(30);
+        loop {
+            let mut length = [0u8; 4];
+            replay_log
+                .read_exact_at(&mut length, at)
+                .expect("the frame's length");
+            if i32::from_le_bytes(length) >= 32 {
+                break;
+            }
+            assert!(
+                Instant::now() < deadline,
+                "the replay wrote the sixth entry"
+            );
+            cluster.work();
+        }
+        replay_log
+            .write_all_at(&[9], at + 4)
+            .expect("the version byte");
+
+        // The poll that meets it: −1 with the fault as the error and in `_fault`.
+        assert_eq!(
+            cavalry_committed_log_poll(log, Some(collect), clientd, 16),
+            -1,
+            "the poll read a frame that fails its check"
+        );
+        assert_eq!(cavalry_errcode(), CAVALRY_ERR_FAULT_IMAGE, "{}", errmsg());
+        assert_eq!(
+            collected.entries.len(),
+            READ_FIRST,
+            "nothing more was delivered"
+        );
+        let mut met = std::mem::zeroed::<cavalry_fault_t>();
+        assert_eq!(cavalry_committed_log_fault(log, &mut met), 0);
+        assert_eq!((met.code, met.position), (CAVALRY_ERR_FAULT_IMAGE, stopped));
+        assert_ne!(met.session_id, 0, "the replay's session");
+
+        // The lasting read: the same fault, now and after any number of polls, each
+        // of which returns 0 and clears what `_fault` answers.
+        for polls in 0..50 {
+            let mut kept = untouched;
+            assert_eq!(cavalry_committed_log_entry_position(ptr::null()), -1);
+            assert!(
+                cavalry_committed_log_faulted(log, &mut kept),
+                "after {polls} polls"
+            );
+            assert_eq!(
+                (kept.code, kept.session_id, kept.position),
+                (CAVALRY_ERR_FAULT_IMAGE, met.session_id, stopped)
+            );
+            assert_eq!(
+                cavalry_errcode(),
+                CAVALRY_ERR_NULL,
+                "an answer sets no error: the code is the one the call before left"
+            );
+            assert_eq!(
+                cavalry_committed_log_poll(log, Some(collect), clientd, 16),
+                0
+            );
+            let mut last = std::mem::zeroed::<cavalry_fault_t>();
+            assert_eq!(cavalry_committed_log_fault(log, &mut last), 0);
+            assert_eq!(last.code, 0, "the next poll cleared the poll's own report");
+        }
+        assert!(cavalry_committed_log_is_ended(log));
+        let mut position = -7;
+        assert!(!cavalry_committed_log_failed_at(log, &mut position));
+        assert!(!cavalry_committed_log_withdrawn_at(log, &mut position));
+        assert_eq!(position, -7);
+        assert_eq!(cavalry_committed_log_position(log), stopped);
+        assert_eq!(cavalry_closed(client), 0, "the client is open");
+
         assert_eq!(cavalry_committed_log_close(log, client), 0, "{}", errmsg());
         assert_eq!(cavalry_close(client), 0);
         assert_eq!(cavalry_context_close(context), 0);

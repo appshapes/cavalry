@@ -38,7 +38,7 @@ public final class HandlerException extends RuntimeException {
         if (fragments < 0) {
             delivered = committedLog
                 ? "the entries this poll delivered before it stopped on a fault, which this CommittedLog's fault() reads"
-                    + " until its next poll and nothing reports after that, so read it and keep it before polling again"
+                    + " until its next poll, and its faulted() from then on when the fault is the log's own image's"
                 : "the fragments this poll delivered before it stopped on a fault, which Subscription.fault() reads";
         } else if (committedLog) {
             delivered = "the " + fragments + " " + (fragments == 1 ? one : many) + " this poll delivered";

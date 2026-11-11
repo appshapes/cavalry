@@ -59,18 +59,21 @@ An ended log delivered every committed entry it may read only when three things 
 - `log.WithdrawnAt()` is `null`. A position is where the entries begin that the log
   was not given, because the driver withdrew the replay, 5 s after it ended, before
   the service had read it.
-- No `log.Poll` returned −1 with the fault of the log's own image: a `log.GetFault()`
-  whose `Code` is `Abi.ERR_FAULT_IMAGE`, the replay's image failed a check, or
-  `Abi.ERR_FAULT_IMAGES_FULL`, the image could not join.
+- `log.Faulted()` is `null`. A `Subscription.Fault` is where this client's read of the
+  replay's image, the log's own, stopped: its `Code` is `Abi.ERR_FAULT_IMAGE` when a
+  frame of the image failed a check, or when the image was gone before this client
+  read it, and `Abi.ERR_FAULT_IMAGES_FULL` when the image could not join. No entry
+  from the fault on was delivered.
 
-Read the two reports once `log.IsEnded()` is true. The driver withdraws a replay that
-failed as it does any other, so both can be positions: `log.WithdrawnAt()` is then the
-lower, and the entries from it on, those below `log.FailedAt()` among them, were not
-delivered. The fault of the image is reported once. The poll that meets it returns −1,
-`log.GetFault()` answers it only until the next poll, the next poll returns 0 and
-clears it, and both reports are `null` for such a log. So a service keeps that −1 and
-its fault when it gets them: nothing reports them later, and without them this end
-reads as a whole one. In every case what the log delivered ends at `log.Position()`.
+Read the three reports once `log.IsEnded()` is true. The driver withdraws a replay
+that failed as it does any other, so the first two can both be positions:
+`log.WithdrawnAt()` is then the lower, and the entries from it on, those below
+`log.FailedAt()` among them, were not delivered. The poll that meets the image's fault
+returns −1 once, `log.GetFault()` answers it until the next poll, and the next poll
+returns 0 and clears it there. `log.Faulted()` answers it from that poll on, for as
+long as the log is held (ADR 0080). `log.WithdrawnAt()` is `null` for such a log, and
+`log.FailedAt()` is a position only when the driver's replay failed as well, which is
+then the cause to look at first. In every case what the log delivered ends at `log.Position()`.
 
 A committed log has an `UnmanagedCallersOnly` trampoline of its own, as a subscription
 has. A handler's exception goes where a subscription's goes ("The exception"): every
@@ -138,10 +141,11 @@ entry, and the service decides after each.
   subscription returns −1 with `Abi.ERR_POLLING`, and the poll in progress goes on. A
   committed log's handler is held to the same rule. From inside it, a `Poll` of the
   same log, `log.Position()` and `log.CommitPosition()` return −1, `log.IsEnded()` is
-  `false`, `log.FailedAt()` and `log.WithdrawnAt()` are `null`, and `log.GetFault()`
-  and `log.Close()` throw `CavalryException`, each with `Abi.ERR_POLLING`, and the log
-  stays open. The `false` and the two `null` are refusals there, not answers: read the
-  three after the poll has returned. The handler has each entry's own `position`.
+  `false`, `log.FailedAt()`, `log.WithdrawnAt()` and `log.Faulted()` are `null`, and
+  `log.GetFault()` and `log.Close()` throw `CavalryException`, each with
+  `Abi.ERR_POLLING`, and the log stays open. The `false` and the three `null` are
+  refusals there, not answers: read the four after the poll has returned. The handler
+  has each entry's own `position`.
 - Never edit a generated file by hand: `just lint` regenerates the library and fails
   when the committed files differ. `example/Program.cs` and `example/Example.csproj`
   are the files written by hand, and the program is this README's.

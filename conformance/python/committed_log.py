@@ -8,12 +8,14 @@
 A cluster started with `cavalry run` holds one entry, the first of its leader's term, 56
 bytes in a frame of 88 at position 0, so the log's next position is 96. The round reads
 that entry through the handler, with its position, its header and the handle's reads;
-makes each of the eight calls the ABI refuses from inside the log's own handler, each
+makes each of the nine calls the ABI refuses from inside the log's own handler, each
 after it has set the thread's error to another code, so that a refusal that answers what
 a live log answers is told from an answer; opens a log and closes it with no poll
-between, which leaves its client open (ADR 0078); checks where a handler's exception
-goes and that its entry is not delivered again; opens the log again at 96, where nothing
-is committed yet,
+between, which leaves its client open (ADR 0078); makes a log's own image fault, by one
+byte of the frame its replay wrote, and reads the fault from the poll that meets it and
+from `faulted()` for as long as the log is held (ADR 0080); checks where a handler's
+exception goes and that its entry is not delivered again; opens the log again at 96,
+where nothing is committed yet,
 beside a log at 0 that it reads the entry through meanwhile, so that the log at 96 has
 had the time a replay's image takes to join; closes twice; and closes a log after its
 client. Every wait is bounded at 30 s and sleeps a millisecond after a poll that
@@ -99,7 +101,8 @@ def main():
         inside.append(True)
         for name, call in (("poll", lambda: log.poll(on_entry, 1)), ("position", log.position),
                            ("commit_position", log.commit_position), ("is_ended", lambda: log.is_ended),
-                           ("failed_at", log.failed_at), ("withdrawn_at", log.withdrawn_at)):
+                           ("failed_at", log.failed_at), ("withdrawn_at", log.withdrawn_at),
+                           ("faulted", log.faulted)):
             set_another_error()
             refusals.append((name, call(), abi.cavalry_errcode()))
         for name, call in (("fault", log.fault), ("close", log.close)):
@@ -119,22 +122,22 @@ def main():
     polling = _abi.CAVALRY_ERR_POLLING
     expected = [("poll", -1, polling), ("position", -1, polling), ("commit_position", -1, polling),
                 ("is_ended", False, polling), ("failed_at", None, polling), ("withdrawn_at", None, polling),
-                ("fault", -1, polling), ("close", -1, polling)]
+                ("faulted", None, polling), ("fault", -1, polling), ("close", -1, polling)]
     if refusals != expected:
         fail(f"the calls from inside the log's own handler answered {refusals}, not {expected}")
     if (log.position(), log.commit_position()) != (NEXT, NEXT):
         fail(f"after the entry the log is at {log.position()} with bound {log.commit_position()}, not {NEXT} and {NEXT}")
-    if (log.is_ended or log.failed_at() is not None or log.withdrawn_at() is not None
+    if (log.is_ended or log.failed_at() is not None or log.withdrawn_at() is not None or log.faulted() is not None
             or log.fault() != (0, 0, cavalry.NULL_POSITION)):
         fail(f"a live log read ended {log.is_ended}, failed at {log.failed_at()}, withdrawn at "
-             f"{log.withdrawn_at()}, fault {log.fault()}")
+             f"{log.withdrawn_at()}, faulted {log.faulted()}, fault {log.fault()}")
     for _ in range(50):
         if log.poll(on_entry, 16) != 0:
             fail("an entry arrived with nothing more committed")
     if len(entries) != 1:
         fail(f"the refused poll, or a later one, delivered more: {entries}")
     print(f"conformance/python: committed log: member {log.member_id}'s entry at position 0 read once, next "
-          f"position {log.position()}, commit position {log.commit_position()}; eight calls from inside the handler "
+          f"position {log.position()}, commit position {log.commit_position()}; nine calls from inside the handler "
           f"refused with CAVALRY_ERR_POLLING, each made with the thread's error at CAVALRY_ERR_NULL")
     log.close()
     log.close()  # idempotent
@@ -147,6 +150,54 @@ def main():
         open_log(client, 0).close()
     if client.is_closed:
         fail(f"a log opened and closed with no poll between closed its client: {client.closed()}")
+
+    # A log whose own image faults (ADR 0080). The log's replay plays into a log buffer of
+    # its own, the one file that appears under the member's `publications/` when the log is
+    # opened. Before any poll of the log, the round changes one byte of the entry the
+    # replay wrote there, its frame's version, to one no reader accepts (spec/frame.md,
+    # "What a reader rejects"). The poll that reads the frame returns -1 with the fault,
+    # once; `fault()` answers it until the next poll; and `faulted()` answers it from that
+    # poll on, the same code, session and position, whatever is polled after.
+    publications = os.path.join(member_dir, "publications")
+    before = set(os.listdir(publications))
+    damaged = open_log(client, 0)
+    replayed = sorted(set(os.listdir(publications)) - before)
+    if len(replayed) != 1:
+        fail(f"opening a log made {replayed} under {publications}, not the replay's one log buffer")
+    if damaged.faulted() is not None:
+        fail(f"a log that has not polled reads a fault: {damaged.faulted()}")
+    with open(os.path.join(publications, replayed[0]), "r+b", buffering=0) as replay_log:
+        until = time.monotonic() + WAIT_SECONDS
+        while int.from_bytes(os.pread(replay_log.fileno(), 4, 0), "little", signed=True) < 32:
+            if time.monotonic() > until:
+                fail(f"the replay wrote no frame at position 0 of {replayed[0]} within {WAIT_SECONDS:.0f} s")
+            time.sleep(IDLE_SECONDS)
+        os.pwrite(replay_log.fileno(), bytes([9]), 4)   # the frame's version byte
+    delivered = []
+    until = time.monotonic() + WAIT_SECONDS
+    while True:
+        count = damaged.poll(lambda body, header, position: delivered.append(position), 16)
+        if count < 0:
+            break
+        if count > 0 or delivered:
+            fail(f"a frame that fails its check was delivered: {delivered}")
+        if time.monotonic() > until:
+            fail(f"no poll met the damaged frame within {WAIT_SECONDS:.0f} s")
+        time.sleep(IDLE_SECONDS)
+    met = damaged.fault()
+    if met[0] != _abi.CAVALRY_ERR_FAULT_IMAGE or met[2] != 0:
+        fail(f"the poll that met the damaged frame stopped on fault {met}, not CAVALRY_ERR_FAULT_IMAGE at position 0")
+    for polls in range(20):
+        if damaged.faulted() != met:
+            fail(f"after {polls} more polls faulted() is {damaged.faulted()}, not the fault the poll met, {met}")
+        if damaged.poll(lambda body, header, position: delivered.append(position), 16) != 0 or damaged.fault()[0] != 0:
+            fail(f"a poll after the fault did not return 0 and clear fault(): {damaged.fault()}")
+    if not damaged.is_ended or damaged.failed_at() is not None or damaged.withdrawn_at() is not None or delivered:
+        fail(f"the faulted log read ended {damaged.is_ended}, failed at {damaged.failed_at()}, withdrawn at "
+             f"{damaged.withdrawn_at()}, and delivered {delivered}")
+    damaged.close()
+    if client.is_closed:
+        fail(f"a log whose image faulted closed its client: {client.closed()}")
 
     # A handler that raises: the entry was delivered, the exception is raised after the
     # ABI has returned, and the log's position is past the entry, so it is not delivered
@@ -223,8 +274,9 @@ def main():
         fail(f"a poll after the client's close did not stop on the closed fault: {rest.fault()}")
     rest.close()
     print(f"conformance/python: committed log: twenty logs opened and closed with no poll between left the "
-          f"client open; a raising handler's entry is not delivered again; nothing at position {NEXT} while a "
-          f"log at 0 beside it read the entry at 0; a log closed after its client")
+          f"client open; a log whose image faulted at position 0 read fault {met} from the poll that met it and "
+          f"from faulted() after twenty more polls; a raising handler's entry is not delivered again; nothing at "
+          f"position {NEXT} while a log at 0 beside it read the entry at 0; a log closed after its client")
     return 0
 
 
