@@ -728,10 +728,10 @@ impl Cluster {
     }
 
     /// The member that leads: the running member whose role is leader, never one that
-    /// is halted or stalled. When two are,
-    /// a leader that was cut off or stood still and has not yet given up the lead
-    /// beside the one elected after it, it is the one of the higher term. `None`
-    /// while no running member leads, during an election.
+    /// is halted or stalled. When two are, a leader that was cut off or stood still
+    /// and has not yet given up the lead beside the one elected after it, it is the
+    /// one of the higher term. `None` while no running member leads, during an
+    /// election.
     pub fn leader(&self) -> Option<i32> {
         self.cores
             .iter()
@@ -934,6 +934,12 @@ impl Cluster {
     /// what is sent to it. The messages that wait are in flight: they count toward
     /// [`IN_FLIGHT_CAPACITY`], and one sent while that many are in flight is lost and
     /// counted, as any is.
+    ///
+    /// In a cluster made with [`Cluster::new`], [`Cluster::offer`] goes to the
+    /// appointed leader's core whether its module runs or not, as it does to a halted
+    /// one: a test that stalls or halts an appointed leader offers it nothing until
+    /// it runs again. In a cluster that elects, an offer goes to [`Cluster::leader`],
+    /// which is never a stalled or a halted member.
     pub fn stall(&mut self, member: i32) {
         if let Some(disk) = self.disk_mut(member) {
             disk.stalled = true;
