@@ -24,14 +24,19 @@ fn three_members_run_their_duty_cycles_without_an_allocation() {
         std::process::id()
     ));
     let _ = std::fs::remove_dir_all(&dir);
-    let sockets: Vec<UdpSocket> = (0..15)
-        .map(|_| UdpSocket::bind("127.0.0.1:0").expect("a loopback socket"))
+    // Fifteen ports from 20000 to 31999, each tried by binding it: below the ports an
+    // operating system gives a socket bound to port 0, as `tests/cluster.rs` takes
+    // its own and for its reason. A follower binds its `log` endpoint only when it
+    // joins the log, and every publication of the three drivers has a send socket
+    // bound to port 0 meanwhile, which could be given a port that was chosen by
+    // binding port 0 and releasing it. The process id picks where the choice starts.
+    let start = std::process::id() % 12_000;
+    let ports: Vec<u16> = (0..12_000_u32)
+        .filter_map(|offset| u16::try_from(20_000 + (start + offset) % 12_000).ok())
+        .filter(|port| UdpSocket::bind(("127.0.0.1", *port)).is_ok())
+        .take(15)
         .collect();
-    let ports: Vec<u16> = sockets
-        .iter()
-        .map(|socket| socket.local_addr().expect("bound").port())
-        .collect();
-    drop(sockets);
+    assert_eq!(ports.len(), 15, "free loopback ports from 20000 to 31999");
     let members = (0..3)
         .map(|member| {
             let endpoints: Vec<String> = ports[member * 5..member * 5 + 5]

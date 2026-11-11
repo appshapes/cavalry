@@ -167,8 +167,14 @@ jobs:
           # needs API billing for a headless run, so the loop stays on this action. Fable 5.1
           # ran this agent from 2026-10-16; the turn and time bounds were measured on Opus.
           claude_args: "--model claude-opus-5-5 --effort xhigh --max-turns 70 --add-dir pr-head"
-          # Public repository: run logs are world readable. Keep the agent's output out.
+          # Public repository: run logs are world readable. Keep the agent's output out,
+          # but for the bounded excerpts "Verify a review was submitted" prints below.
           show_full_output: false
+          # The submit form and the paragraph on CI are card 247's: the misses read in this
+          # workflow's own log were sessions that ended their turn to wait for CI, and a
+          # body given as `--body '...'` is denied when a line of it begins with `#`.
+          # `.claude/agents/reviewer.md` has both in full; scripts/claude-workflow-test.py
+          # reads the two texts and runs the form.
           prompt: |
             You are the reviewer agent. Read `.claude/agents/reviewer.md` for your
             operating instructions and review pull request
@@ -179,14 +185,35 @@ jobs:
             changed files and their surroundings there. `gh pr view`, `gh pr diff`
             and `gh pr checks` work from the working directory.
 
-            You MUST end your session by actually executing
-            `gh pr review ${{ inputs.pr_number }} --approve --body "<summary>"`
-            or
-            `gh pr review ${{ inputs.pr_number }} --request-changes --body "<findings>"`.
+            You MUST end your session by actually executing `gh pr review` with
+            the body on standard input, in a quoted heredoc. These three lines
+            start at the first column, the last one too:
+
+            ```
+            gh pr review ${{ inputs.pr_number }} --approve --body-file - <<'EOF'
+            <summary>
+            EOF
+            ```
+
+            For findings, the same command with `--request-changes` in place of
+            `--approve`. Use that form and no other: a body given as
+            `--body "..."` is refused by this session's permissions when a line
+            of it begins with `#`.
             Your final text response is discarded: a verdict not submitted via
             `gh pr review` does not exist, and this job fails if no review lands.
             If the submission command errors, retry it, and surface a persistent
             failure with `gh pr comment` before ending the session.
+
+            Do not wait for CI. It started when you did, so its checks may still
+            be queued or running when your verdict is ready: submit then, and say
+            in the body what the checks read. This session is one turn and
+            nothing resumes it: no watch, no monitor and no background command
+            brings it back, and a session that ends to wait for a check has
+            submitted nothing. Among the checks, a check that has failed is a
+            blocker, and so is a pull request that conflicts with `master`; a
+            check in any other state is not, and the operating instructions say
+            how to read each. GitHub merges an approved pull request only once
+            the required checks pass.
 
             When requesting changes, end the review body with the following
             line, written as plain text on its own line. Do NOT wrap it in
@@ -246,6 +273,11 @@ jobs:
       # denied, and on a miss the session's final text, which the action discards, so
       # the second attempt can be read against the first. Bounded excerpts, on a page as
       # public as the log; the full output stays out (`show_full_output` is off above).
+      # The same lines go to this step's log, because a session reads a run with `gh`,
+      # which prints a log and no job summary (card 247). The excerpts are the agent's
+      # words, formed while it read a pull request anyone can open, and the runner reads
+      # a log line that begins with `::` as a workflow command: the lines are printed
+      # with commands stopped around them, by a token made after the session ended.
       - name: Verify a review was submitted
         id: verify
         if: steps.pr.outputs.proceed == 'true'
@@ -276,7 +308,9 @@ jobs:
           has_trailer=${last##*$'\t'}
           # The summary. The execution file is the action's record of the session, a JSON
           # array of its messages ending in the SDK's result; it is absent when the action
-          # never ran the session.
+          # never ran the session. Built in a file, then written to the job summary and
+          # to this step's log.
+          summary=$(mktemp)
           {
             echo "## Reviewer session, attempt $ATTEMPT of 2, head $HEAD_SHA"
             echo
@@ -301,14 +335,26 @@ jobs:
             else
               echo "- No execution file; the Review step's outcome was '$REVIEW_OUTCOME'."
             fi
-          } >> "$GITHUB_STEP_SUMMARY" || echo "::warning::The job summary could not be written"
+          } > "$summary" || echo "::warning::The reviewer session's summary could not be built in full"
+          cat "$summary" >> "$GITHUB_STEP_SUMMARY" || echo "::warning::The job summary could not be written"
+          # To the log, with workflow commands stopped until the token is printed again.
+          # Without a token of 32 hex digits nothing of the session is printed.
+          token=$(od -An -N16 -tx1 /dev/urandom | tr -d ' \n' || true)
+          if [[ "$token" =~ ^[0-9a-f]{32}$ ]]; then
+            echo "::stop-commands::$token"
+            cat "$summary"
+            echo
+            echo "::$token::"
+          else
+            echo "::warning::No token could be made to stop workflow commands, so the reviewer session's summary is not printed to this log; the job summary has it"
+          fi
           if [ -z "$reviews" ]; then
             if [ "$ATTEMPT" = "1" ]; then
-              echo "::warning::Reviewer session ended without submitting a formal review at head $HEAD_SHA on attempt 1 of 2 (none newer than the ${REVIEWS_BEFORE:-0} at this head before the run; the Review step's outcome was '$REVIEW_OUTCOME'; the job summary says what the session did); the retry job dispatches attempt 2"
+              echo "::warning::Reviewer session ended without submitting a formal review at head $HEAD_SHA on attempt 1 of 2 (none newer than the ${REVIEWS_BEFORE:-0} at this head before the run; the Review step's outcome was '$REVIEW_OUTCOME'; the job summary and this step's log say what the session did); the retry job dispatches attempt 2"
               echo "reviewed=false" >> "$GITHUB_OUTPUT"
               exit 0
             fi
-            echo "::error::Reviewer session ended without submitting a formal review at head $HEAD_SHA on attempt $ATTEMPT of 2 (none newer than the ${REVIEWS_BEFORE:-0} at this head before the run; the Review step's outcome was '$REVIEW_OUTCOME'; the job summary says what the session did): add the review label to the pull request to run it again (docs/how-to/ask-the-agent.md, \"When it does not work\")"
+            echo "::error::Reviewer session ended without submitting a formal review at head $HEAD_SHA on attempt $ATTEMPT of 2 (none newer than the ${REVIEWS_BEFORE:-0} at this head before the run; the Review step's outcome was '$REVIEW_OUTCOME'; the job summary and this step's log say what the session did): add the review label to the pull request to run it again (docs/how-to/ask-the-agent.md, \"When it does not work\")"
             exit 1
           fi
           echo "reviewed=true" >> "$GITHUB_OUTPUT"
@@ -346,6 +392,7 @@ jobs:
           HEAD_SHA: ${{ inputs.head_sha }}
           REF: ${{ github.ref_name }}
           RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+          RUN_ID: ${{ github.run_id }}
         run: |
           set -euo pipefail
           head_now=$(gh api "repos/$GH_REPO/pulls/$PR_NUMBER" --jq '.head.sha')
@@ -353,7 +400,7 @@ jobs:
             echo "::notice::pull request $PR_NUMBER moved from $HEAD_SHA to $head_now; the run dispatched for the new head reviews it"
             exit 0
           fi
-          gh pr comment "$PR_NUMBER" --body "The reviewer session for $HEAD_SHA ended without submitting a review ($RUN_URL; its job summary says what the session did). Running it once more. If the second run ends the same way, its \`review pr\` run fails on the Actions tab: add the \`review\` label to this pull request to run it again (\`docs/how-to/ask-the-agent.md\`, \"When it does not work\")."
+          gh pr comment "$PR_NUMBER" --body "The reviewer session for $HEAD_SHA ended without submitting a review ($RUN_URL; its job summary says what the session did, and \`gh run view $RUN_ID --log\` prints the same lines after the line \"## Reviewer session, attempt 1 of 2\"). Running it once more. If the second run ends the same way, its \`review pr\` run fails on the Actions tab: add the \`review\` label to this pull request to run it again (\`docs/how-to/ask-the-agent.md\`, \"When it does not work\")."
           # Last on purpose: the new run joins this pull request's concurrency group and
           # cancels this one, so nothing may follow the dispatch.
           gh workflow run review-pull-request.yml --ref "$REF" \
