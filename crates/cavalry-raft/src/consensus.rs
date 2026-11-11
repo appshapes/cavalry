@@ -1684,7 +1684,8 @@ impl Consensus {
     /// position is a catch-up within its term (state 11): the replay follows the
     /// leader's live recording, with no end, until the leader stops it. One above
     /// the leader's append position asks for what the leader does not hold: nothing
-    /// is started, and the member's own timer counts it.
+    /// is started, the member's own timer counts it, and what the leader held for
+    /// the member is ended, since the member has left whatever it was in.
     ///
     /// With no replay running to the member the leader starts one at once. With one
     /// running, the member failed and asks again: the leader stops that one and keeps
@@ -1698,7 +1699,10 @@ impl Consensus {
         io: &mut I,
     ) -> Result<(), I::Fault> {
         if position < 0 || position > self.append_position {
-            return Ok(());
+            // Nothing this leader can replay. The member asked all the same, so what
+            // the leader held for it, of an older request, is ended as a canvass
+            // position ends it: the replay stopped, the one owed dropped.
+            return self.end_serving(index, io);
         }
         let end = if position < self.term_base {
             // This leader's own term is in its record at its base, above the position.
@@ -1773,8 +1777,9 @@ impl Consensus {
         Ok(Serving::Running { end })
     }
 
-    /// Ends what this leader serves the member at `index`, which canvasses again:
-    /// the replay it runs is stopped, and the next it owed is dropped.
+    /// Ends what this leader serves the member at `index`, which canvasses again or
+    /// asks for what the leader cannot replay: the replay it runs is stopped, and the
+    /// next it owed is dropped.
     fn end_serving<I: Io>(&mut self, index: usize, io: &mut I) -> Result<(), I::Fault> {
         let serving = match self.serving(index) {
             Serving::Idle | Serving::Next { .. } => Serving::Idle,
@@ -1799,44 +1804,59 @@ impl Consensus {
     /// is tried again on a later cycle, when the member has reported its position.
     fn serve_replays<I: Io>(&mut self, io: &mut I) -> Result<usize, I::Fault> {
         let mut work = 0;
+        // Every member is served in every cycle: one member's fault, which may last,
+        // is kept and returned after the others have had their turn.
+        let mut fault = None;
         for index in 0..self.count {
-            let peer = self.peer(index);
-            let serving = match self.serving(index) {
-                Serving::Idle => continue,
-                Serving::Running { end } => match io.replay_stopped(peer.id)? {
-                    None => continue,
-                    // A replication's replay that ended at its recording's end,
-                    // below the replication's: the next recording's is owed. A
-                    // catch-up's replay is followed by nothing, however it ended.
-                    Some(stopped)
-                        if stopped.ended && end.is_some_and(|end| stopped.position < end) =>
-                    {
-                        Serving::Next {
-                            position: stopped.position,
-                            end,
-                        }
+            match self.serve_member(index, io) {
+                Ok(served) => work = work.max(served),
+                Err(error) => {
+                    fault.get_or_insert(error);
+                }
+            }
+        }
+        match fault {
+            Some(error) => Err(error),
+            None => Ok(work),
+        }
+    }
+
+    /// One member's turn in [`Consensus::serve_replays`]: returns 1 when what the
+    /// leader holds for it changed.
+    fn serve_member<I: Io>(&mut self, index: usize, io: &mut I) -> Result<usize, I::Fault> {
+        let peer = self.peer(index);
+        let serving = match self.serving(index) {
+            Serving::Idle => return Ok(0),
+            Serving::Running { end } => match io.replay_stopped(peer.id)? {
+                None => return Ok(0),
+                // A replication's replay that ended at its recording's end, below
+                // the replication's: the next recording's is owed. A catch-up's
+                // replay is followed by nothing, however it ended.
+                Some(stopped) if stopped.ended && end.is_some_and(|end| stopped.position < end) => {
+                    Serving::Next {
+                        position: stopped.position,
+                        end,
                     }
-                    Some(_) => Serving::Idle,
-                },
-                Serving::Stopping { next } => match (io.replay_stopped(peer.id)?, next) {
-                    (None, _) => continue,
-                    (Some(_), None) => Serving::Idle,
-                    (Some(_), Some((position, end))) => {
-                        self.serve(index, Serving::Next { position, end });
-                        self.start_replay(peer.id, position, end, io)?
-                    }
-                },
-                Serving::Next { position, end } => {
-                    if !(peer.reported && peer.appended && peer.position >= position) {
-                        continue;
-                    }
+                }
+                Some(_) => Serving::Idle,
+            },
+            Serving::Stopping { next } => match (io.replay_stopped(peer.id)?, next) {
+                (None, _) => return Ok(0),
+                (Some(_), None) => Serving::Idle,
+                (Some(_), Some((position, end))) => {
+                    self.serve(index, Serving::Next { position, end });
                     self.start_replay(peer.id, position, end, io)?
                 }
-            };
-            self.serve(index, serving);
-            work = 1;
-        }
-        Ok(work)
+            },
+            Serving::Next { position, end } => {
+                if !(peer.reported && peer.appended && peer.position >= position) {
+                    return Ok(0);
+                }
+                self.start_replay(peer.id, position, end, io)?
+            }
+        };
+        self.serve(index, serving);
+        Ok(1)
     }
 
     fn due(last: Option<u64>, interval_ns: u64, clock: Clock) -> bool {

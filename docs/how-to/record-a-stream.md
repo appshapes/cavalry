@@ -129,8 +129,14 @@ or until `recording.stop_position()` is `Some`. Then it calls
 acknowledges its messages up to that position and no further, never up to the
 position `offer` returned. While the recording is live, `synced_position()` is then at
 or past the position `position()` had reached. The call returns when the recorder has
-synced what it had written; it syncs nothing the recorder had not written yet, which
-is why the program waits for `position()` first. Once `stop_position()` is `Some`, the
+synced what it had written. Before it syncs, the recorder writes what was committed
+when it took the request, up to 1 MiB of it, so a message offered before the call is
+covered as a rule. Waiting for `position()` first makes it certain: `position()` trails
+a publisher that does not pause by about 50 µs of its messages, more while the
+recorder's idle strategy has it parked, and a recorder behind a slow disk can be
+further back than the request reaches
+([ADR 0084](../decisions/0084-let-the-recorder-trail-a-publisher-it-is-keeping-up-with.md)).
+Once `stop_position()` is `Some`, the
 recording has stopped: `position()` and `synced_position()` return the stop position
 and never move again, so the program stops waiting for them, and `sync` is `Ok` with
 nothing done. After a sync that failed, or a stop whose own writes failed, on a
