@@ -61,7 +61,8 @@ pub enum Role {
 /// `spec/cluster.md` gives it, the value of the `cluster.election_state` gauge. Every
 /// move from one to another adds one to a count of [`Counts`], the counter
 /// `counters.toml` registers for it as the machine `cluster_election` (ADR 0067). A
-/// member whose leader is appointed never enters nominate or a ballot.
+/// member whose leader is appointed never enters nominate, a ballot or follower log
+/// replication.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 #[repr(u8)]
 pub enum ElectionState {
@@ -972,7 +973,9 @@ impl Consensus {
     /// appointed leader"). A leader that elects answers a catch-up position below its
     /// term base log position with a replay of its own recordings, and stops the
     /// replay it runs to a member that canvasses again ("Messages outside an
-    /// election"; ADR 0085). A member that elects notes the sender of whatever it reads
+    /// election"; ADR 0085). A member that elects and reads a new leadership term
+    /// which leaves it below its leader's term base goes to follower log replication
+    /// (ADR 0086). A member that elects notes the sender of whatever it reads
     /// as heard, for its ballot (ADR 0077). Once its election has closed it holds an
     /// election, beginning at init, on a request vote or a commit position of a term
     /// above its own from another member, and its leader on a canvass position with
