@@ -1058,6 +1058,12 @@ pub struct Block<'a> {
     pub padding: bool,
     /// How many frames the block holds: the data frames, or 1 for a padding frame.
     pub frames: usize,
+    /// Whether the scan ended at a frame that is not committed, so that the block
+    /// reaches as far as the stream is committed: the scan read the word a publisher
+    /// writes next. False for a block that ended for its limit, at its term's end or
+    /// before a padding frame, and for a padding frame's own block; more may be
+    /// committed after any of those.
+    pub uncommitted: bool,
 }
 
 impl Block<'_> {
@@ -1296,10 +1302,12 @@ impl TermReader {
             .min(term_length as usize) as u32;
         let mut offset = start;
         let mut frames = 0;
+        let mut uncommitted = false;
         while offset < term_length && (offset == start || offset < end) {
             let frame = self.mapped.frame(partition, offset);
             let word = frame.word();
             if layout::frame_word_length(word) <= 0 {
+                uncommitted = true;
                 break;
             }
             let bytes = frame.header(word);
@@ -1317,6 +1325,7 @@ impl TermReader {
                         length: aligned as usize,
                         padding: true,
                         frames: 1,
+                        uncommitted: false,
                     });
                 }
                 break;
@@ -1334,6 +1343,7 @@ impl TermReader {
             length: length as usize,
             padding: false,
             frames,
+            uncommitted,
         })
     }
 }

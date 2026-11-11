@@ -837,6 +837,7 @@ fn a_block_holds_whole_committed_frames_up_to_the_limit_and_stops_at_a_claim() {
     let empty = reader.block(usize::MAX).unwrap();
     assert!(empty.is_empty() && !empty.padding && empty.bytes.is_empty());
     assert_eq!((empty.position, empty.end()), (0, 0));
+    assert!(empty.uncommitted, "the scan ended at a frame not committed");
 
     for n in 0..3u8 {
         let mut claim = appender.try_claim(5, unlimited()).unwrap();
@@ -854,11 +855,16 @@ fn a_block_holds_whole_committed_frames_up_to_the_limit_and_stops_at_a_claim() {
     );
     assert_eq!(block.bytes, &file[..192], "three frames, headers included");
     assert_eq!(block.end(), 192);
+    assert!(block.uncommitted, "the scan ended at the claim");
     assert_eq!(reader.position(), 0, "the position moves only on seek");
     assert_eq!(
         reader.block(100).unwrap().length,
         64,
         "the second frame does not fit"
+    );
+    assert!(
+        !reader.block(100).unwrap().uncommitted && !reader.block(128).unwrap().uncommitted,
+        "a block that ended for its limit did not reach a frame not committed"
     );
     assert_eq!(reader.block(128).unwrap().length, 128);
     assert_eq!(
@@ -916,6 +922,10 @@ fn a_padding_frame_is_a_block_of_its_own_and_the_next_block_is_in_the_next_term(
         &file[..65472],
         "the block stops before the padding"
     );
+    assert!(
+        !data.uncommitted,
+        "it ended at a padding frame, which is committed"
+    );
     reader.seek(data.end()).unwrap();
 
     let padding = reader.block(usize::MAX).unwrap();
@@ -925,6 +935,7 @@ fn a_padding_frame_is_a_block_of_its_own_and_the_next_block_is_in_the_next_term(
     assert_eq!(padding.bytes, &file[65472..65472 + 32]);
     assert_eq!(padding.length, 64, "its aligned length in the stream");
     assert_eq!(padding.end(), i64::from(T));
+    assert!(!padding.uncommitted, "more is committed in the next term");
     assert_eq!(
         &padding.bytes[..4],
         &64i32.to_le_bytes(),
@@ -937,6 +948,7 @@ fn a_padding_frame_is_a_block_of_its_own_and_the_next_block_is_in_the_next_term(
         (next.position, next.length, next.padding),
         (i64::from(T), 1056, false)
     );
+    assert!(next.uncommitted, "this one reaches as far as is committed");
     assert_eq!(
         next.bytes,
         &file[T as usize..T as usize + 1056],

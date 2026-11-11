@@ -129,3 +129,4 @@ under `docs/` is listed here; `just lint-docs` fails on one that is not.
 - [0081. Build the election beside the appointed leader, and move the module to it once](decisions/0081-build-the-election-beside-the-appointed-leader-and-move-the-module-to-it-once.md)
 - [0080. Keep the fault that ended a committed log, and take the C ABI to version 3](decisions/0080-keep-the-fault-that-ended-a-committed-log-and-take-the-c-abi-to-version-3.md)
 - [0082. Give up the lead on a higher term or a lost quorum, and count a follower's election on a higher term](decisions/0082-give-up-the-lead-on-a-higher-term-or-a-lost-quorum.md)
+- [0084. Let the recorder trail a publisher it is keeping up with](decisions/0084-let-the-recorder-trail-a-publisher-it-is-keeping-up-with.md)
