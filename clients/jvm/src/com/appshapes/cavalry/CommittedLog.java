@@ -171,8 +171,11 @@ public final class CommittedLog implements AutoCloseable {
         }
     }
 
-    /** Whether the member closed or left its log: once a poll then returns 0, close this log
-     * and open another from {@link #position()}. */
+    /** Whether this log has come to its end: no poll will deliver another entry. Stop reading
+     * when it is true, not when a poll returns 0. Then read {@link #failedAt()} and
+     * {@link #withdrawnAt()}: the log delivered every entry it was owed only when both are
+     * empty. In every case what it delivered ends at {@link #position()}, where a service
+     * opens the log again. */
     public boolean isEnded() {
         try {
             return (boolean) Abi.cavalry_committed_log_is_ended.invokeExact(handle);
@@ -183,7 +186,8 @@ public final class CommittedLog implements AutoCloseable {
 
     /** The position after the last frame the driver's replay of the member's recording played
      * before it failed, or empty for a log that is live or that ended because its member
-     * closed or left the recording. */
+     * closed or left the recording. No entry from that position on is delivered. Read it once
+     * {@link #isEnded()} is true: the entries below it may still be on their way before. */
     public OptionalLong failedAt() {
         try (Arena scratch = Arena.ofConfined()) {
             MemorySegment position = scratch.allocate(JAVA_LONG);
@@ -191,6 +195,22 @@ public final class CommittedLog implements AutoCloseable {
             return failed ? OptionalLong.of(position.get(JAVA_LONG, 0)) : OptionalLong.empty();
         } catch (Throwable t) {
             throw Abi.failed("cavalry_committed_log_failed_at", t);
+        }
+    }
+
+    /** The position at which the entries this log was not given begin, when the driver
+     * withdrew the replay before the polls had read it to its end, or empty. The driver keeps
+     * a replay 5 s after it ends and then withdraws it, read or not: a service that did not
+     * poll for that long after its member closed or left the log, or whose handler took that
+     * long, ends so. The entries from that position on were played and not delivered. Read it
+     * once {@link #isEnded()} is true. */
+    public OptionalLong withdrawnAt() {
+        try (Arena scratch = Arena.ofConfined()) {
+            MemorySegment position = scratch.allocate(JAVA_LONG);
+            boolean withdrawn = (boolean) Abi.cavalry_committed_log_withdrawn_at.invokeExact(handle, position);
+            return withdrawn ? OptionalLong.of(position.get(JAVA_LONG, 0)) : OptionalLong.empty();
+        } catch (Throwable t) {
+            throw Abi.failed("cavalry_committed_log_withdrawn_at", t);
         }
     }
 

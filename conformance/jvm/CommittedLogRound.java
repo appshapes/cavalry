@@ -1,4 +1,4 @@
-// The JVM client's committed log round (spec/c-abi.md, version 2; ADR 0068):
+// The JVM client's committed log round (spec/c-abi.md, version 2; ADR 0070):
 // Client.committedLog and CommittedLog beside a cluster member that conformance/jvm/run.sh
 // started with `cavalry run`, one of three on the loopback, as
 // conformance/python/committed_log.py runs it through clients/python.
@@ -128,6 +128,7 @@ public final class CommittedLogRound {
             refusals.add("commitPosition " + log.commitPosition() + " " + Abi.errcode());
             refusals.add("isEnded " + log.isEnded() + " " + Abi.errcode());
             refusals.add("failedAt " + log.failedAt().isPresent() + " " + Abi.errcode());
+            refusals.add("withdrawnAt " + log.withdrawnAt().isPresent() + " " + Abi.errcode());
             try {
                 log.close();
                 refusals.add("close 0 0");
@@ -153,7 +154,8 @@ public final class CommittedLogRound {
         }
         int polling = Abi.ERR_POLLING;
         List<String> expected = List.of("poll -1 " + polling, "position -1 " + polling, "commitPosition -1 " + polling,
-            "isEnded false " + polling, "failedAt false " + polling, "close -1 " + polling);
+            "isEnded false " + polling, "failedAt false " + polling, "withdrawnAt false " + polling,
+            "close -1 " + polling);
         if (!refusals.equals(expected)) {
             fail("the calls from inside the log's own handler answered " + refusals + ", not " + expected);
         }
@@ -162,9 +164,10 @@ public final class CommittedLogRound {
                 + " and " + NEXT);
         }
         Subscription.Fault fault = log.fault();
-        if (log.isEnded() || log.failedAt().isPresent() || fault.code() != 0 || fault.sessionId() != 0
-            || fault.position() != Abi.NULL_POSITION) {
-            fail("a live log read ended " + log.isEnded() + ", failed at " + log.failedAt() + ", fault " + fault);
+        if (log.isEnded() || log.failedAt().isPresent() || log.withdrawnAt().isPresent() || fault.code() != 0
+            || fault.sessionId() != 0 || fault.position() != Abi.NULL_POSITION) {
+            fail("a live log read ended " + log.isEnded() + ", failed at " + log.failedAt() + ", withdrawn at "
+                + log.withdrawnAt() + ", fault " + fault);
         }
         for (int i = 0; i < 50; i++) {
             if (log.poll(onEntry, 16) != 0) {
@@ -175,7 +178,7 @@ public final class CommittedLogRound {
             fail("the refused poll, or a later one, delivered more: " + entries);
         }
         say("member " + log.memberId() + "'s entry at position 0 read once, next position " + log.position()
-            + ", commit position " + log.commitPosition() + "; six calls from inside the handler refused with ERR_POLLING");
+            + ", commit position " + log.commitPosition() + "; seven calls from inside the handler refused with ERR_POLLING");
         log.close();
         log.close(); // idempotent
 

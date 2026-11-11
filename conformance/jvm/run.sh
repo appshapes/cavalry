@@ -6,7 +6,7 @@
 # clients/jvm with the runner's java, then clients/jvm/README.md's example through Readme;
 # then starts three cluster members on the loopback, each a `cavalry run` in a member's
 # role, and runs CommittedLogRound beside member 1, the client's committed log against a
-# cluster (spec/c-abi.md, version 2; ADR 0068); and cleans up.
+# cluster (spec/c-abi.md, version 2; ADR 0070); and cleans up.
 # `just conformance` runs this after conformance/go (clients/README.md; ADR 0046, card
 # 208).
 set -euo pipefail
