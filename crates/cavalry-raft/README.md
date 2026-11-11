@@ -45,9 +45,13 @@ commit path runs per message.
   a term it holds none of at its base before it asks, checks that each replay's image
   joins where its log ends, fails its election when its append position does not move
   for the leader heartbeat timeout, and at its leader's base records the leader's term
-  and waits for the commit position (ADR 0086). The consensus module does not use this
-  path yet: a member over a driver is appointed until the election can do what the next
-  section lists, and then the module moves to it in one change (ADR 0081).
+  and waits for the commit position (ADR 0086). A leader answers a member that is behind
+  within the leader's own term too, with a catch-up position from its term base to its
+  append position: the replay follows its live recording, with no end, and the leader
+  stops it and sends stop catch-up when the member reports from it the leader's own
+  append position (ADR 0087). The consensus module does not use this path yet: a member
+  over a driver is appointed until the election can do what the next section lists, and
+  then the module moves to it in one change (ADR 0081).
 - Counts every move of the election. `ElectionState` is the state machine
   `cluster_election` of `counters.toml`, and each of its transitions adds one to a
   count of `Counts`, the counter registered for it; `Counts::by_counter` pairs each
@@ -66,16 +70,17 @@ commit path runs per message.
   `cluster.role`, `cluster.election_state`, `cluster.leadership_term_id`,
   `cluster.append_position`, `cluster.commit_position`, `cluster.messages_rejected`,
   `cluster.log_recording_id`, the recording that holds its log, which its service
-  replays, and the twenty-one counts of `Counts::by_counter`, of which the four of the
-  ballot, the two of an election held on a higher term, the two of a truncation and the
-  two of a replication stay 0 while the leader is appointed. The counters of sessions,
-  of the service's version and of the catch-up in `spec/cluster.md`, "Counters", come
-  with those features. One thread calls `do_work()`; the leader's process appends with
-  `offer(payload)`, up to 1,344 bytes an entry. A follower that leaves the log holds its
-  recording until the driver has said where it stopped, and that stop is where its log
-  ends. A stop that the driver refuses or does not answer is a `client` error, and a
-  stop position not read within 1 s is a `stop-timeout` error. Either way the member
-  stays in init with the recording held, and the next `do_work()` stops it again.
+  replays, and the twenty-two counts of `Counts::by_counter`, of which the four of the
+  ballot, the two of an election held on a higher term, the two of a truncation, the two
+  of a replication and the one of a catch-up stay 0 while the leader is appointed. The
+  counters of sessions, of the service's version and of the member's side of a
+  catch-up in `spec/cluster.md`, "Counters", come with those features. One thread calls `do_work()`;
+  the leader's process appends with `offer(payload)`, up to 1,344 bytes an entry. A
+  follower that leaves the log holds its recording until the driver has said where it
+  stopped, and that stop is where its log ends. A stop that the driver refuses or does
+  not answer is a `client` error, and a stop position not read within 1 s is a
+  `stop-timeout` error. Either way the member stays in init with the recording held, and
+  the next `do_work()` stops it again.
 - Asks for the sync a commit waits for: a member's append position is its
   recording's synced position, and the driver's recorder syncs a recording by itself
   once a second. So the module asks its driver to sync its recording of the log,
@@ -124,18 +129,18 @@ elections a leader holds, the truncation and the replication of a term a member 
 of `spec/cluster.md`. Where the page's election does more, it does this instead, until
 the step that builds it (ADR 0081):
 
-- A member catches up with nothing, and a leader serves no catch-up within its own
-  term, a catch-up position at or above its term base. Where a member's append
-  position is behind its leader's log position within the leader's term, it fails its
-  election, counted in `cluster.elections_failed`, and canvasses again, every election
-  status interval, 100 ms, until that step. So a leader that gave up the lead does not
-  join the leader elected after it: it truncates an entry no quorum recorded, is then
-  at the new term's base, and is behind the new leader's log by what was appended
-  since. So too a member that replicated to its leader's base while the leader waited
-  for it: the leader counts it, closes its election and appends the term's first
-  entry, and the member is behind by that entry. Where the leader needs that member
-  for its quorum, nothing above the term's base is committed until the member can
-  catch up.
+- A member catches up with nothing: a leader answers a catch-up within its own term that
+  no member asks for yet, and in the in-memory cluster starts no such replay until the
+  member's side is built. Where a member's append position is behind its leader's log
+  position within the leader's term, it fails its election, counted in
+  `cluster.elections_failed`, and canvasses again, every election status interval, 100
+  ms, until that step. So a leader that gave up the lead does not join the leader
+  elected after it: it truncates an entry no quorum recorded, is then at the new term's
+  base, and is behind the new leader's log by what was appended since. So too a member
+  that replicated to its leader's base while the leader waited for it: the leader counts
+  it, closes its election and appends the term's first entry, and the member is behind
+  by that entry. Where the leader needs that member for its quorum, nothing above the
+  term's base is committed until the member can catch up.
 - Over a driver a leader cannot give its log up, a member cannot truncate, a leader
   cannot replay and a member cannot replicate: the module's `Io` refuses `remove_log`,
   `truncate_log`, `start_replay`, `stop_replay`, `replay_stopped`, `add_catchup`,

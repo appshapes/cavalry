@@ -652,13 +652,17 @@ started is counted in `cluster.log_replications`, once per replay where a
 replication spans several recordings, and the `replay-end` vectors pin where a
 replay begins and ends; one at
 or above it is a catch-up within the leader's term (state 11), whose replay follows
-the live recording, counted in `cluster.catchups`; a position the leader's recordings
+the live recording, counted in `cluster.catchups`; a position above the leader's own
+append position asks for what the leader does not hold, and is answered by nothing
+(ADR 0087); a position the leader's recordings
 do not hold, purged by retention (`spec/client-protocol.md`, "Commands", purge
 segments), is answered by nothing, and the follower's timeout counts it. Each replay's
 publication has a session id of its own in this version, so the follower's image of
 it is on its `catchup` endpoint alone; and sends stop catch-up, stopping the replay with `stop replay`, when a
-follower whose position was appended from the replay reports an append position at or
-past the leader's log position. A leader, its election closed or in states 5 to 8, that
+follower whose position was appended from the replay reports, for the leader's term, an append position at or
+past the leader's log position, which is the leader's own append position: the replay is
+asked to stop once, and stop catch-up is sent for each such report, so that one that is
+lost is sent again on the follower's next (ADR 0087). A leader, its election closed or in states 5 to 8, that
 reads canvass position first stops any replay it has running to that follower with
 `stop replay` and drops any next replay it was waiting to start for it, as a new
 catch-up position from the follower does too, so that a follower that failed and
