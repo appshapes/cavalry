@@ -112,7 +112,16 @@ replay's session id, since a recording holds one session id (`spec/durable-log.m
 and each term's publication and each replay has its own. A member's append position
 is the end of the contiguous span its recordings hold from the log's start, position
 0: a position its recordings do not hold is a hole, and the append position stops at
-the first hole whatever lies beyond it. A replay of the log takes each position from
+the first hole whatever lies beyond it. A recording holds a position once a sync that
+returned success has covered it: what counts is the recording's synced position,
+`recording.synced_position` (`spec/client-protocol.md`, "Commands"), never what the
+recorder has written and not yet synced, so that a position a member reports is one a
+power loss leaves in its log (ADR 0060). The recorder syncs a recording by itself
+once a second, the recording sync interval. So a member asks its driver to sync its
+recording of the log, `sync recording`, whenever the recorder has written past what
+it has synced, once for each position written that it sees and without waiting for
+the answer: its append position then follows what it has recorded by one sync, and a
+commit waits for one sync on a quorum (ADR 0069). A replay of the log takes each position from
 one recording, the one that begins first among those that hold it, and moves to the
 next recording at the first position the current one lacks; where two recordings
 overlap, which state 13 makes, the positions they share are read from the earlier

@@ -42,6 +42,8 @@ ADD_DESTINATION, REMOVE_DESTINATION = 7, 8
 ADD_COUNTER, REMOVE_COUNTER = 9, 10
 ON_COUNTER_READY, ON_UNAVAILABLE_COUNTER = 0x0F08, 0x0F09
 MAX_COUNTER_KEY, MAX_COUNTER_LABEL = 112, 124
+# Version 8: a sync of a recording on command, the next of Cavalry's own ids (ADR 0069).
+SYNC_RECORDING = 0x0108
 # The replay's conventions, Aeron's: NULL_POSITION, NULL_LENGTH and Long.MAX_VALUE.
 NULL_POSITION, NULL_LENGTH, FOLLOW_LENGTH = -1, -1, 2**63 - 1
 
@@ -84,6 +86,8 @@ COMMANDS = {
                                   ("counter_type_id", "i"), ("key", "b"), ("label", "s"))),
     REMOVE_COUNTER: ("remove_counter", (("client_id", "q"), ("correlation_id", "q"),
                                         ("registration_id", "q"))),
+    SYNC_RECORDING: ("sync_recording", (("client_id", "q"), ("correlation_id", "q"),
+                                        ("recording_id", "q"))),
 }
 EVENTS = {
     ON_ERROR: ("error", (("offending_correlation_id", "q"), ("error_code", "i"),
@@ -267,6 +271,10 @@ VECTORS = [
     command(REMOVE_COUNTER, "remove-counter", client_id=3, correlation_id=21, registration_id=20),
     command(REMOVE_COUNTER, "remove-counter-extremes", client_id=2**63 - 1, correlation_id=2**63 - 1,
             registration_id=2**63 - 1),
+    # Version 8: a sync of a recording on command, stop recording's fields.
+    command(SYNC_RECORDING, "sync-recording", client_id=5, correlation_id=24, recording_id=0),
+    command(SYNC_RECORDING, "sync-recording-extremes", client_id=2**63 - 1,
+            correlation_id=2**63 - 1, recording_id=2**63 - 1),
     command(REMOVE_DESTINATION, "remove-destination-extremes", client_id=2**63 - 1,
             correlation_id=2**63 - 1, registration_id=2**63 - 1, channel="c" * MAX_STRING),
     # Events.
@@ -356,18 +364,23 @@ VECTORS = [
           error_message="registration 20 is not a counter of this client (client-protocol.md, Error codes)"),
     event(ON_ERROR, "error-counter-type-not-a-clients", offending_correlation_id=20, error_code=11,
           error_message="counter type 19 is not one a client adds; add a counter whose scope is client in counters.toml (docs/reference/counters.md)"),
+    # Version 8: sync recording's answers, an operation success or the sync's failure.
+    event(ON_OPERATION_SUCCESS, "operation-success-sync", correlation_id=24),
+    event(ON_ERROR, "error-sync-failed", offending_correlation_id=24, error_code=12,
+          error_message="a sync of recording 0 failed, so the recording is given up at the position last synced and recording stopped follows; check the disk the log directory is on (client-protocol.md, Error codes)"),
     # Invalid commands, by the reason a conforming implementation reports, in the order
     # the checks run.
     vector("command", ADD_PUBLICATION, "too-short-before-correlation-id", error="too-short",
            raw=struct.pack("<qi", 0, 1)),
     # The reserved ids, one per range the page names: Aeron's ids past this version's,
     # between the ranges, Cavalry's not yet taken, and above both. Version 7 took 9 and
-    # 10, the gap the earlier versions left in Aeron's.
+    # 10, the gap the earlier versions left in Aeron's, and version 8 took 0x0108, so
+    # the first of Cavalry's not yet taken is 0x0109.
     vector("command", 12, "unknown-type-aeron-reserved", error="type",
            raw=struct.pack("<qq", 0, 1)),
     vector("command", 0x0100, "unknown-type-between", error="type",
            raw=struct.pack("<qq", 0, 1)),
-    vector("command", 0x0108, "unknown-type-cavalry-reserved", error="type",
+    vector("command", 0x0109, "unknown-type-cavalry-reserved", error="type",
            raw=struct.pack("<qq", 0, 1)),
     vector("command", 0x0200, "unknown-type-above", error="type",
            raw=struct.pack("<qq", 0, 1)),
@@ -401,6 +414,8 @@ VECTORS = [
            raw=struct.pack("<qqi", 3, 20, 109) + encode_bytes(bytes.fromhex(MEMBER_KEY))),
     vector("command", REMOVE_COUNTER, "remove-counter-too-short-no-registration-id", error="too-short",
            raw=struct.pack("<qq", 3, 21)),
+    vector("command", SYNC_RECORDING, "sync-recording-too-short-no-recording-id",
+           error="too-short", raw=struct.pack("<qq", 5, 24)),
     vector("command", ADD_PUBLICATION, "string-negative-length", error="string",
            raw=struct.pack("<qqii", 0, 1, 1001, -1)),
     vector("command", ADD_PUBLICATION, "string-over-4096", error="string",
@@ -467,6 +482,8 @@ VECTORS = [
                            label=COUNTER_LABEL)) + b"\0\0\0\0"),
     vector("command", REMOVE_COUNTER, "remove-counter-length-trailing", error="length",
            raw=struct.pack("<qqqi", 3, 21, 20, 0)),
+    vector("command", SYNC_RECORDING, "sync-recording-length-trailing", error="length",
+           raw=struct.pack("<qqqi", 5, 24, 0, 0)),
     # Invalid events, the same checks on the client's side.
     vector("event", ON_OPERATION_SUCCESS, "event-too-short", error="too-short",
            raw=struct.pack("<i", 3)),
@@ -500,7 +517,7 @@ def main():
     out = Path(__file__).with_suffix(".json")
     names = [v["name"] for v in VECTORS]
     assert len(names) == len(set(names)), "vector names must be unique"
-    out.write_text(json.dumps({"spec": "spec/client-protocol.md", "version": 7,
+    out.write_text(json.dumps({"spec": "spec/client-protocol.md", "version": 8,
                                "generated_by": "spec/vectors/client-protocol.py",
                                "vectors": VECTORS}, indent=1) + "\n")
     print(f"wrote {out} ({len(VECTORS)} vectors)")
