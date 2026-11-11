@@ -8,7 +8,6 @@
 //! every error code (`spec/client-protocol.md`, "Commands"; ADR 0030). The full cases
 //! come first.
 
-use std::net::UdpSocket;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
@@ -18,6 +17,11 @@ use cavalry_client::{
 };
 use cavalry_driver::{Driver, spec};
 use cavalry_proto::client_protocol::ErrorCode;
+
+// This test's ports, from the one file that says how they are taken and why, which is
+// `cavalry-raft`'s: `crates/cavalry-raft/tests/ports/mod.rs`.
+#[path = "../../cavalry-raft/tests/ports/mod.rs"]
+mod ports;
 
 /// A directory of its own per test, removed when the guard drops.
 struct TestDir(PathBuf);
@@ -493,11 +497,7 @@ fn a_replay_stops_on_request_at_the_position_reached() {
 fn a_replay_plays_a_recording_to_a_udp_subscription_on_the_same_driver() {
     let dir = TestDir::new("udp");
     let (driver, mut client, end) = recorded(&dir, 100);
-    let port = UdpSocket::bind("127.0.0.1:0")
-        .expect("a loopback socket")
-        .local_addr()
-        .expect("bound")
-        .port();
+    let port = ports::free_port();
     let channel = format!("cavalry:udp?endpoint=127.0.0.1:{port}");
     let mut subscription = client
         .add_subscription(&channel, 72)

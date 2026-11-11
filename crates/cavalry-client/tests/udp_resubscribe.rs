@@ -2,13 +2,17 @@
 //! (card 194; ADR 0049): the second add waits in the driver for the receiver to close
 //! the first endpoint and then binds it again, so the client sees `subscription ready`
 //! and no refusal, and `channel.opened` counts 2.
-use std::net::UdpSocket;
 use std::path::{Path, PathBuf};
 
 use cavalry_client::Cavalry;
 use cavalry_driver::Driver;
 use cavalry_shm::counters::CountersReader;
 use cavalry_shm::counters::generated::{CHANNEL_CLOSED, CHANNEL_OPENED};
+
+// This test's ports, from the one file that says how they are taken and why, which is
+// `cavalry-raft`'s: `crates/cavalry-raft/tests/ports/mod.rs`.
+#[path = "../../cavalry-raft/tests/ports/mod.rs"]
+mod ports;
 
 /// A driver directory of its own, with its log directory beside it, removed when the
 /// guard drops.
@@ -45,10 +49,7 @@ impl Drop for TestDir {
 fn a_subscription_removed_and_added_on_one_udp_channel_needs_no_retry() {
     let dir = TestDir::new("once");
     let driver = Driver::start(dir.path(), dir.log_dir()).expect("the driver");
-    let port = UdpSocket::bind("127.0.0.1:0")
-        .and_then(|socket| socket.local_addr())
-        .map(|address| address.port())
-        .expect("a free loopback port");
+    let port = ports::free_port();
     let channel = format!("cavalry:udp?endpoint=127.0.0.1:{port}");
     let mut client = Cavalry::connect_to(dir.path()).expect("a client");
     let first = client
