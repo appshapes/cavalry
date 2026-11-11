@@ -41,7 +41,11 @@ class Repository(unittest.TestCase):
         (self.root / "docs" / "how-to" / "a-page.md").write_text("# A page\n\n## A heading\n", encoding="utf-8")
         self.commit("the changelog")
 
-    def git(self, *args, at=None):
+    def git(self, *args, at=None, check=True):
+        """Run git in the test's repository with its own identity, clock and no host
+        config, so it reads the same on a laptop and on a runner with no identity. Every
+        git call in this file goes through here. With `check`, a failure fails the test
+        and the output is returned; without it, the finished process is, to be asserted on."""
         self.clock += 60
         when = f"{at if at is not None else self.clock} +0000"
         env = {**os.environ, "GIT_AUTHOR_NAME": "A Test", "GIT_AUTHOR_EMAIL": "test@example.invalid",
@@ -49,6 +53,8 @@ class Repository(unittest.TestCase):
                "GIT_AUTHOR_DATE": when, "GIT_COMMITTER_DATE": when, "GIT_CONFIG_GLOBAL": os.devnull,
                "GIT_CONFIG_SYSTEM": os.devnull}
         done = subprocess.run(["git", *args], cwd=self.root, env=env, capture_output=True, text=True)
+        if not check:
+            return done
         self.assertEqual(done.returncode, 0, done.stderr)
         return done.stdout
 
@@ -259,8 +265,7 @@ class Fold(Repository):
         self.entry("1-one.md", ONE)
         self.entry("2-two.md", TWO)
         shallow = Path(self.tmp.name + "-shallow")
-        subprocess.run(["git", "clone", "--quiet", "--depth", "1", self.root.as_uri(), str(shallow)], check=True,
-                       capture_output=True)
+        self.git("clone", "--quiet", "--depth", "1", self.root.as_uri(), str(shallow))
         self.addCleanup(lambda: subprocess.run(["rm", "-rf", str(shallow)], check=False))
         printed = []
         self.assertEqual(changelog.main(["fold"], shallow, printed.append), 1)
@@ -469,9 +474,13 @@ class Grown(Repository):
         # With master merged in, the branch's line is still the one line it appended.
         # The merge conflicts where both sides added at the end of the file, which is
         # what ADR 0075 is about; it is resolved by keeping both, master's lines first.
-        merged = subprocess.run(["git", "merge", "--no-ff", "--no-commit", "master"], cwd=self.root,
-                                capture_output=True, text=True)
-        self.assertNotEqual(merged.returncode, 0, "the appended line conflicts with the fold")
+        # A merge that never started, for want of an identity, say, would leave no
+        # MERGE_HEAD, and the commit below would be an ordinary one that does not merge.
+        merged = self.git("merge", "--no-ff", "--no-commit", "master", check=False)
+        said = merged.stdout + merged.stderr
+        self.assertTrue((self.root / ".git" / "MERGE_HEAD").is_file(), f"the merge did not start:\n{said}")
+        self.assertEqual(self.git("diff", "--name-only", "--diff-filter=U"), "CHANGELOG.md\n",
+                         f"the appended line conflicts with the fold, and nothing else does:\n{said}")
         (self.root / "CHANGELOG.md").write_text(
             self.git("show", "master:CHANGELOG.md") + "- A third, on master alone.\n", encoding="utf-8")
         self.commit("Merge master")
