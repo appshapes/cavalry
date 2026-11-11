@@ -27,8 +27,9 @@ test *ARGS: test-scripts
 # for each other against a fake GitHub API and a fake clock (card 212), and the fixer
 # workflow's approval of the run GitHub held on its push, the step's own script against
 # a fake `gh` (card 215), and the list of what can move the bench, with the reading of a
-# change from its event against a fake GitHub API (ADR 0071). Standard library only, no
-# network.
+# change from its event against a fake GitHub API (ADR 0071), and `just tidy`'s
+# matching of a merged pull request's head to what is here, against a made-up origin
+# and a fake `gh` (card 262). Standard library only, no network.
 test-scripts:
     python3 scripts/release-notes-email-test.py
     python3 scripts/release-notes-test.py
@@ -37,6 +38,7 @@ test-scripts:
     python3 scripts/changelog-test.py
     python3 scripts/wait-for-partner-job-test.py
     python3 scripts/claude-workflow-test.py
+    python3 scripts/tidy-test.py
     python3 clients/generate-test.py
     python3 clients/lint-test.py
 
