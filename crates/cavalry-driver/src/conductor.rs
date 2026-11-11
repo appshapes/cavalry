@@ -224,6 +224,10 @@ struct Publication {
     stalled: Option<(i64, i64)>,
     /// The end of stream position and when it was stored.
     closing: Option<(i64, i64)>,
+    /// Whether `unavailable image` has gone to its images: once, when every subscriber
+    /// has reached the end of stream or the linger has passed, which may be before the
+    /// log is removed (ADR 0078).
+    withdrawn: bool,
     log_file_name: String,
     /// What a `cavalry:udp` publication carries beside: its endpoint and what the
     /// sender has told the conductor (ADR 0041); `None` for `cavalry:ipc`.
@@ -408,9 +412,11 @@ struct UdpImage {
     rebuild: Counter,
     log_file_name: String,
     source_identity: String,
-    /// The subscriptions reading it, each with the id of its `subscription.position`
-    /// record, freed when the receiver says the reader went.
-    subscriptions: Vec<(i64, u32)>,
+    /// The subscriptions reading it, each with its `subscription.position` record,
+    /// freed when the receiver says the reader went. On a retired image, the ones
+    /// whose record waits for a client that may not have read the announcement yet
+    /// (`waiting`).
+    subscriptions: Vec<UdpPair>,
     state: ImageState,
     /// Its last subscription was removed: the receiver has been asked to drop the
     /// image's last reader and retires the image when it does (`spec/udp.md`, "The
@@ -418,6 +424,31 @@ struct UdpImage {
     /// log that is unlinked when the reply comes, so it is given to no subscription
     /// and no recording that arrives meanwhile (ADR 0068).
     leaving: bool,
+    /// Retired, with its log and the records in `subscriptions` kept for clients that
+    /// may not have read their `available image` yet: `remove_retired_images` removes
+    /// it once none of them waits (ADR 0078).
+    waiting: bool,
+}
+
+/// One subscription's place on an image over UDP.
+#[derive(Clone, Copy)]
+struct UdpPair {
+    subscription_id: i64,
+    /// The id of its `subscription.position` record.
+    record: u32,
+    /// The position it joined at, stored in the record before the image was announced.
+    joined: i64,
+    /// When the driver sent its `available image`.
+    announced: i64,
+}
+
+/// Whether what an `available image` named must still be kept: the log and the
+/// position counter stay for the counter reuse timeout after the event, while the
+/// position stands where the image joined. A position that has moved is the
+/// subscriber's own store, made through the counter after reading the log, so its
+/// client has both (`spec/log-buffer.md`, "Closing"; ADR 0078).
+fn announcement_waits(announced: i64, joined: i64, position: i64, now: i64) -> bool {
+    now.saturating_sub(announced) < spec::nanos(spec::COUNTER_REUSE_TIMEOUT) && position == joined
 }
 
 /// One image: a subscription's view of one publication, with the position counter the
@@ -426,6 +457,13 @@ struct Image {
     publication_id: i64,
     subscription_id: i64,
     position: Counter,
+    /// The position the image joined at, which the driver stored in `position` before
+    /// it announced the image.
+    joined: i64,
+    /// When the driver sent its `available image`: the publication's log is not
+    /// removed, and this counter not freed, while [`announcement_waits`] says so,
+    /// unless the subscription is removed first (ADR 0078).
+    announced: i64,
 }
 
 /// The driver's one recorder, seen from the conductor: the request queue it offers
@@ -774,6 +812,9 @@ pub(crate) struct Conductor {
     /// How many subscription and image pairs the images over UDP hold: they count
     /// against the images registry with the IPC pairs in `images`.
     udp_pairs: usize,
+    /// How many retired images over UDP are `waiting`, so that a duty cycle with none
+    /// does not look for one.
+    udp_waiting: usize,
     /// The receiver's thread, once the driver has spawned it, unparked with every
     /// request offered as the sender's is. `None` in the tests that drive the duty
     /// cycles by hand.
@@ -861,6 +902,7 @@ impl Conductor {
             receive_endpoints: Vec::with_capacity(spec::MAX_RECEIVE_ENDPOINTS),
             udp_images: Vec::with_capacity(spec::MAX_IMAGES),
             udp_pairs: 0,
+            udp_waiting: 0,
             receiver_thread: None,
             correlation,
             registration_count: 0,
@@ -995,6 +1037,9 @@ impl Conductor {
         work += self.flush_receiver_deferred();
         if !self.udp_images.is_empty() {
             work += self.stop_recordings_of_retired_images();
+            if self.udp_waiting > 0 {
+                work += self.remove_retired_images(now);
+            }
         }
         work += self.flush_commands();
         work += self.keep_replays(now);
@@ -1120,7 +1165,7 @@ impl Conductor {
                 correlation_id,
                 stream_id,
                 channel,
-            } => self.add_subscription(client_id, correlation_id, stream_id, channel),
+            } => self.add_subscription(client_id, correlation_id, stream_id, channel, now),
             Command::RemoveSubscription {
                 client_id,
                 correlation_id,
@@ -1703,6 +1748,7 @@ impl Conductor {
             producer_loaded_at: now,
             stalled: None,
             closing: None,
+            withdrawn: false,
             log_file_name,
             udp: None,
         };
@@ -1735,7 +1781,7 @@ impl Conductor {
             .map(|subscription| subscription.registration_id)
             .collect();
         for subscription_id in matching {
-            self.add_image(publication_index, subscription_id);
+            self.add_image(publication_index, subscription_id, now);
         }
     }
 
@@ -2024,6 +2070,7 @@ impl Conductor {
             producer_loaded_at: now,
             stalled: None,
             closing: None,
+            withdrawn: false,
             log_file_name,
             udp: Some(UdpPublication {
                 endpoint_id,
@@ -2462,8 +2509,8 @@ impl Conductor {
 
     /// Creates the image of publication `publication_index` for subscription
     /// `subscription_id`: a position counter the client owns, at the producer's position,
-    /// and an `available image` event.
-    fn add_image(&mut self, publication_index: usize, subscription_id: i64) {
+    /// and an `available image` event, sent at `now`.
+    fn add_image(&mut self, publication_index: usize, subscription_id: i64, now: i64) {
         if !self
             .subscriptions
             .iter()
@@ -2519,6 +2566,8 @@ impl Conductor {
             publication_id,
             subscription_id,
             position,
+            joined: join_position,
+            announced: now,
         });
         self.send(&event);
     }
@@ -2590,6 +2639,7 @@ impl Conductor {
         correlation_id: i64,
         stream_id: i32,
         channel: &[u8],
+        now: i64,
     ) {
         let raw = channel;
         let Some(channel) = self.check_channel(correlation_id, channel, "the channel") else {
@@ -2625,7 +2675,7 @@ impl Conductor {
             .map(|(index, _)| index)
             .collect();
         for index in matching {
-            self.add_image(index, correlation_id);
+            self.add_image(index, correlation_id, now);
         }
     }
 
@@ -3097,11 +3147,13 @@ impl Conductor {
         };
         let counter_record = position.id();
         self.send(&event);
-        self.udp_images[index]
-            .subscriptions
-            .push((subscription_id, counter_record));
+        self.udp_images[index].subscriptions.push(UdpPair {
+            subscription_id,
+            record: counter_record,
+            joined: join,
+            announced: now,
+        });
         self.udp_pairs += 1;
-        let _ = now;
         self.receiver_request(receiver::Request::AddReader {
             registration_id: image_id,
             key: ReaderKey::Subscription(subscription_id),
@@ -3194,9 +3246,9 @@ impl Conductor {
                         && let Some(pair) = image
                             .subscriptions
                             .iter()
-                            .position(|(id, _)| *id == subscription_id)
+                            .position(|pair| pair.subscription_id == subscription_id)
                     {
-                        let (_, record) = image.subscriptions.swap_remove(pair);
+                        let record = image.subscriptions.swap_remove(pair).record;
                         let reuse = now.saturating_add(spec::nanos(spec::COUNTER_REUSE_TIMEOUT));
                         let _ = self.counters.free(record, reuse);
                         self.udp_pairs = self.udp_pairs.saturating_sub(1);
@@ -3258,6 +3310,7 @@ impl Conductor {
                                 pending.correlation_id,
                                 pending.stream_id,
                                 &pending.channel,
+                                now,
                             );
                         }
                     }
@@ -3388,7 +3441,7 @@ impl Conductor {
         let source_identity = source.to_string();
         let mut readers: Vec<(ReaderKey, Option<Counter>, i64)> =
             Vec::with_capacity(subscribers.len());
-        let mut pairs: Vec<(i64, u32)> = Vec::with_capacity(subscribers.len());
+        let mut pairs: Vec<UdpPair> = Vec::with_capacity(subscribers.len());
         let mut announced: Vec<(i64, i32)> = Vec::with_capacity(subscribers.len());
         for subscription_id in subscribers {
             let label = format!(
@@ -3403,7 +3456,12 @@ impl Conductor {
                 }
             };
             position.store_release(start.position);
-            pairs.push((subscription_id, position.id()));
+            pairs.push(UdpPair {
+                subscription_id,
+                record: position.id(),
+                joined: start.position,
+                announced: now,
+            });
             announced.push((subscription_id, counter_id(&position)));
             readers.push((
                 ReaderKey::Subscription(subscription_id),
@@ -3424,6 +3482,7 @@ impl Conductor {
             subscriptions: pairs,
             state: ImageState::Live,
             leaving: false,
+            waiting: false,
         });
         let entry = &mut self.receive_endpoints[endpoint_index];
         entry.image_count += 1;
@@ -3479,10 +3538,13 @@ impl Conductor {
 
     /// The receiver retired an image (`spec/udp.md`, "The receiver", step 5):
     /// `unavailable image` to the subscriptions that remain and their position records
-    /// freed at once; then, once a recording of the image has stopped, at the rebuild
+    /// freed; then, once a recording of the image has stopped, at the rebuild
     /// position the retire left (`stop_recordings_of_retired_images`), the image's two
     /// counters freed, its log unlinked, `image.removed`, and the endpoint closed when
-    /// nothing holds it (`remove_udp_image`).
+    /// nothing holds it (`remove_udp_image`). A subscription that remains and may not
+    /// have read its `available image` yet (`pair_waits`) keeps its record, and the
+    /// image its log, until that subscription waits no longer
+    /// (`remove_retired_images`; ADR 0078).
     fn on_image_retired(&mut self, registration_id: i64, state: ImageState, now: i64) {
         let Some(index) = self
             .udp_images
@@ -3503,16 +3565,29 @@ impl Conductor {
             .find(|endpoint| endpoint.registration_id == endpoint_id)
             .map(|endpoint| endpoint.channel.clone())
             .unwrap_or_default();
-        let pairs = std::mem::take(&mut self.udp_images[index].subscriptions);
-        for (subscription_id, record) in pairs {
+        let mut pairs = std::mem::take(&mut self.udp_images[index].subscriptions);
+        for pair in &pairs {
             self.send(&Event::UnavailableImage {
                 correlation_id: registration_id,
-                subscriber_registration_id: subscription_id,
+                subscriber_registration_id: pair.subscription_id,
                 stream_id,
                 channel: channel.as_bytes(),
             });
-            let _ = self.counters.free(record, reuse);
-            self.udp_pairs = self.udp_pairs.saturating_sub(1);
+        }
+        // A record whose subscription may not have read the announcement yet stays, and
+        // goes with the log; every other record is freed now, as before.
+        pairs.retain(|pair| {
+            let waits = self.pair_waits(pair, now);
+            if !waits {
+                let _ = self.counters.free(pair.record, reuse);
+                self.udp_pairs = self.udp_pairs.saturating_sub(1);
+            }
+            waits
+        });
+        if !pairs.is_empty() {
+            self.udp_images[index].subscriptions = pairs;
+            self.udp_images[index].waiting = true;
+            self.udp_waiting += 1;
         }
         // A recorded image's log waits for its recording to stop, as a recorded
         // publication's does (`spec/log-buffer.md`, "Closing"): the stop goes to the
@@ -3522,7 +3597,7 @@ impl Conductor {
             .recordings
             .iter()
             .any(|recording| recording.publication_id == registration_id);
-        if !recorded {
+        if !recorded && !self.udp_images[index].waiting {
             self.remove_udp_image(registration_id, now);
         }
     }
@@ -3584,7 +3659,8 @@ impl Conductor {
 
     /// Finishes a retired image: its two counters freed after the reuse timeout, its
     /// log unlinked, `image.removed`, the endpoint's image count down and the endpoint
-    /// closed when nothing holds it.
+    /// closed when nothing holds it. Records the image kept for subscriptions that
+    /// waited (`on_image_retired`) are freed here, with the log.
     fn remove_udp_image(&mut self, registration_id: i64, now: i64) {
         let Some(index) = self.udp_images.iter().position(|image| {
             image.registration_id == registration_id && image.state != ImageState::Live
@@ -3593,9 +3669,13 @@ impl Conductor {
         };
         let reuse = now.saturating_add(spec::nanos(spec::COUNTER_REUSE_TIMEOUT));
         let mut image = self.udp_images.swap_remove(index);
-        for (_, record) in image.subscriptions.drain(..) {
-            let _ = self.counters.free(record, reuse);
+        for pair in image.subscriptions.drain(..) {
+            let _ = self.counters.free(pair.record, reuse);
             self.udp_pairs = self.udp_pairs.saturating_sub(1);
+        }
+        if image.waiting {
+            image.waiting = false;
+            self.udp_waiting = self.udp_waiting.saturating_sub(1);
         }
         let _ = self.counters.free(image.hwm.id(), reuse);
         let _ = self.counters.free(image.rebuild.id(), reuse);
@@ -3613,6 +3693,49 @@ impl Conductor {
                 .set(i64::try_from(entry.image_count).unwrap_or(i64::MAX));
         }
         self.release_receive_endpoint(image.endpoint_id);
+    }
+
+    /// Whether `pair`'s subscription may still be to open what its `available image`
+    /// named: the subscription is registered, its announcement is less than the
+    /// counter reuse timeout old, and its position stands where it joined
+    /// ([`announcement_waits`]). A record that is not allocated waits for nothing.
+    fn pair_waits(&self, pair: &UdpPair, now: i64) -> bool {
+        self.subscriptions
+            .iter()
+            .any(|subscription| subscription.registration_id == pair.subscription_id)
+            && self.counters.counter(pair.record).is_ok_and(|position| {
+                announcement_waits(pair.announced, pair.joined, position.load_acquire(), now)
+            })
+    }
+
+    /// Removes the retired images that were `waiting` and wait no longer: none of
+    /// their kept subscriptions may still be to open the log, and no recording holds
+    /// it. Each duty cycle while an image waits, by the duty cycle's clock, since
+    /// nothing else comes back for one. Returns how many went.
+    fn remove_retired_images(&mut self, now: i64) -> usize {
+        let mut removed = 0;
+        let mut index = 0;
+        while index < self.udp_images.len() {
+            let image = &self.udp_images[index];
+            let registration_id = image.registration_id;
+            let due = image.waiting
+                && !image
+                    .subscriptions
+                    .iter()
+                    .any(|pair| self.pair_waits(pair, now))
+                && !self
+                    .recordings
+                    .iter()
+                    .any(|recording| recording.publication_id == registration_id);
+            if due {
+                // The last image takes this place: look at it next.
+                self.remove_udp_image(registration_id, now);
+                removed += 1;
+            } else {
+                index += 1;
+            }
+        }
+        removed
     }
 
     /// Closes a receive endpoint left with no subscription and no image: `channel.status`
@@ -3680,15 +3803,29 @@ impl Conductor {
                     && image
                         .subscriptions
                         .iter()
-                        .any(|(id, _)| *id == subscription.registration_id)
-                    && !image.subscriptions.iter().any(|(id, _)| {
+                        .any(|pair| pair.subscription_id == subscription.registration_id)
+                    && !image.subscriptions.iter().any(|pair| {
                         self.subscriptions
                             .iter()
-                            .any(|held| held.registration_id == *id)
+                            .any(|held| held.registration_id == pair.subscription_id)
                     })
                 {
                     image.leaving = true;
                 }
+            }
+            // Its record on an image already retired, kept in case its client had not
+            // read the announcement (ADR 0078), is freed now: the receiver holds no
+            // reader for it and sends no reply.
+            let reuse = now.saturating_add(spec::nanos(spec::COUNTER_REUSE_TIMEOUT));
+            for image in self.udp_images.iter_mut().filter(|image| image.waiting) {
+                image.subscriptions.retain(|pair| {
+                    let kept = pair.subscription_id != subscription.registration_id;
+                    if !kept {
+                        let _ = self.counters.free(pair.record, reuse);
+                        self.udp_pairs = self.udp_pairs.saturating_sub(1);
+                    }
+                    kept
+                });
             }
             self.receiver_request(receiver::Request::RemoveInterest {
                 endpoint_id,
@@ -4025,8 +4162,9 @@ impl Conductor {
     }
 
     /// Closes the publication at `index` once every subscriber has reached the end of
-    /// stream or the linger has passed: unavailable image events, counters freed, the
-    /// log removed. A `cavalry:udp` publication waits for the sender's closed reply
+    /// stream or the linger has passed: unavailable image events, then counters freed
+    /// and the log removed, which wait for an image that a client may not have opened
+    /// yet (ADR 0078). A `cavalry:udp` publication waits for the sender's closed reply
     /// first, and its `sender.position` and `sender.limit` are freed with its own two,
     /// since the sender dropped its handles before it replied. Returns whether it was
     /// removed.
@@ -4059,19 +4197,45 @@ impl Conductor {
         if !all_reached && !lingered {
             return false;
         }
+        // `unavailable image` goes now, when it always has, and once.
+        if !self.publications[index].withdrawn {
+            self.publications[index].withdrawn = true;
+            let stream_id = self.publications[index].stream_id;
+            for image in 0..self.images.len() {
+                if self.images[image].publication_id == publication_id {
+                    let event = Event::UnavailableImage {
+                        correlation_id: publication_id,
+                        subscriber_registration_id: self.images[image].subscription_id,
+                        stream_id,
+                        channel: IPC_CHANNEL,
+                    };
+                    self.send(&event);
+                }
+            }
+        }
+        // The log and the position counters stay while a client may still be to open
+        // what an `available image` named: the counter reuse timeout after the event,
+        // for an image whose position stands where it joined (`spec/log-buffer.md`,
+        // "Closing"; ADR 0078). An image whose subscription was removed is no longer
+        // listed, so a subscriber that has read, and one that leaves, make nothing
+        // wait.
+        if self.images.iter().any(|image| {
+            image.publication_id == publication_id
+                && announcement_waits(
+                    image.announced,
+                    image.joined,
+                    image.position.load_acquire(),
+                    now,
+                )
+        }) {
+            return false;
+        }
         let publication = self.publications.swap_remove(index);
         let reuse = now.saturating_add(spec::nanos(spec::COUNTER_REUSE_TIMEOUT));
         let images = std::mem::take(&mut self.images);
         let mut kept = Vec::with_capacity(spec::MAX_IMAGES);
         for image in images {
             if image.publication_id == publication_id {
-                let event = Event::UnavailableImage {
-                    correlation_id: publication_id,
-                    subscriber_registration_id: image.subscription_id,
-                    stream_id: publication.stream_id,
-                    channel: IPC_CHANNEL,
-                };
-                self.send(&event);
                 let _ = self.counters.free(image.position.id(), reuse);
             } else {
                 kept.push(image);
@@ -5094,9 +5258,11 @@ impl Conductor {
                 registration_id: publication_id,
                 key: ReaderKey::Recording(publication_id),
             });
-        } else {
+        } else if !image.waiting {
             self.remove_udp_image(publication_id, now_nanos());
         }
+        // A retired image that waits is `remove_retired_images`'s, on the duty cycle's
+        // clock, now that nothing records it (ADR 0078).
     }
 
     /// The recorder stopped a recording: its entry goes, its counters are freed after
@@ -5758,6 +5924,7 @@ impl Conductor {
             producer_loaded_at: now,
             stalled: None,
             closing: None,
+            withdrawn: false,
             log_file_name,
             udp,
         });
@@ -5795,7 +5962,7 @@ impl Conductor {
             .map(|subscription| subscription.registration_id)
             .collect();
         for subscription_id in matching {
-            self.add_image(publication_index, subscription_id);
+            self.add_image(publication_index, subscription_id, now);
         }
         if self
             .images
@@ -6785,7 +6952,7 @@ mod tests {
 
         // A subscriber, then a publication, loaded at t0; the first cycle raises the
         // limit, and after it nothing moves.
-        conductor.add_subscription(1, 1, 7, IPC_CHANNEL);
+        conductor.add_subscription(1, 1, 7, IPC_CHANNEL, t0);
         conductor.add_publication(1, 2, 7, IPC_CHANNEL, false, t0);
         assert_eq!(conductor.publications.len(), 1, "the publication is added");
         assert_eq!(conductor.images.len(), 1, "the subscriber has an image");
@@ -7529,8 +7696,13 @@ mod recording {
         assert_eq!(h.counter(CHANNEL_OPENED), 0);
         // A subscription resolves its host the same way (ADR 0042), and a recording
         // on a channel with no live publication or image on it is code 20.
-        h.conductor
-            .add_subscription(1, 4, 7, b"cavalry:udp?endpoint=no-such-host.invalid:40123");
+        h.conductor.add_subscription(
+            1,
+            4,
+            7,
+            b"cavalry:udp?endpoint=no-such-host.invalid:40123",
+            h.now,
+        );
         let (code, message) = h.last_error(4).expect("an error");
         assert_eq!(code, 9, "{message}");
         assert!(h.conductor.receive_endpoints.is_empty());
@@ -8094,12 +8266,18 @@ mod recording {
         assert_eq!(h.last_error(201), None, "a remove of one not held");
         assert_eq!(h.conductor.send_endpoints[1].destinations.get(), 64);
         // A subscription's channel that names a publication's keys.
-        h.conductor
-            .add_subscription(1, 11, 7, b"cavalry:udp?endpoint=127.0.0.1:40123|fc=max");
+        h.conductor.add_subscription(
+            1,
+            11,
+            7,
+            b"cavalry:udp?endpoint=127.0.0.1:40123|fc=max",
+            h.now,
+        );
         let (code, message) = h.last_error(11).expect("an error");
         assert_eq!(code, 1, "{message}");
         assert!(message.contains("(subscription)"), "{message}");
-        h.conductor.add_subscription(1, 12, 7, control.as_bytes());
+        h.conductor
+            .add_subscription(1, 12, 7, control.as_bytes(), h.now);
         assert_eq!(h.last_error(12).expect("an error").0, 1);
         assert!(h.conductor.receive_endpoints.is_empty());
         // Version 2's position keys: a publication's, refused on a subscription and on a
@@ -8109,6 +8287,7 @@ mod recording {
             15,
             7,
             b"cavalry:udp?endpoint=127.0.0.1:40123|init-term-id=7|term-id=9|term-offset=4096",
+            h.now,
         );
         let (code, message) = h.last_error(15).expect("an error");
         assert_eq!(code, 1, "{message}");
@@ -9247,7 +9426,7 @@ mod recording {
         let mut h = Harness::new("recorder-counters-full");
         let now = h.now;
         h.conductor.add_publication(1, 2, 7, IPC_CHANNEL, true, now);
-        h.conductor.add_subscription(1, 5, 7, IPC_CHANNEL);
+        h.conductor.add_subscription(1, 5, 7, IPC_CHANNEL, h.now);
         assert_eq!(h.conductor.images.len(), 1, "the subscriber has an image");
         h.conductor.start_recording(3, 7, IPC_CHANNEL, now);
         h.conductor.duty_cycle(now);
@@ -9691,7 +9870,8 @@ mod replay {
         let window = i64::from(publication.log.header().publication_window_length());
 
         // The commands pass: the image joins, and nothing the publisher reads moves.
-        h.conductor.add_subscription(CLIENT, 3, STREAM, IPC_CHANNEL);
+        h.conductor
+            .add_subscription(CLIENT, 3, STREAM, IPC_CHANNEL, h.now);
         assert_eq!(h.conductor.images.len(), 1);
         let publication = &h.conductor.publications[0];
         assert!(
@@ -9748,7 +9928,8 @@ mod replay {
         let now = h.now;
         h.conductor
             .add_publication(CLIENT, 2, STREAM, IPC_CHANNEL, true, now);
-        h.conductor.add_subscription(CLIENT, 3, STREAM, IPC_CHANNEL);
+        h.conductor
+            .add_subscription(CLIENT, 3, STREAM, IPC_CHANNEL, h.now);
         h.conductor.keep_publications(now);
         let window = i64::from(
             h.conductor.publications[0]
@@ -9827,7 +10008,8 @@ mod replay {
         let now = h.now;
         h.conductor
             .add_publication(CLIENT, 2, STREAM, IPC_CHANNEL, true, now);
-        h.conductor.add_subscription(CLIENT, 3, STREAM, IPC_CHANNEL);
+        h.conductor
+            .add_subscription(CLIENT, 3, STREAM, IPC_CHANNEL, h.now);
         h.conductor.keep_publications(now);
         let window = i64::from(
             h.conductor.publications[0]
@@ -10035,7 +10217,7 @@ mod replay {
     ) {
         if let Some(registration) = subscription {
             h.conductor
-                .add_subscription(CLIENT, registration, REPLAY_STREAM, IPC_CHANNEL);
+                .add_subscription(CLIENT, registration, REPLAY_STREAM, IPC_CHANNEL, h.now);
         }
         h.conductor.start_replay(
             correlation_id,
@@ -10129,8 +10311,47 @@ mod replay {
         assert_eq!(h.counter(REPLAY_STOPPED), 1);
         assert_eq!(h.counter(REPLAY_ENDED), 1);
         assert_eq!(h.counter(REPLAY_FAILED), 0);
-        // The subscriber stood at the end from the start, so the publication closed at
-        // once: the image went and the empty log was removed.
+        // The subscriber stood at the end from the start, so the publication is closed
+        // and drained at once, and the subscriber hears the image go, as before. The
+        // image was announced less than the counter reuse timeout ago and its position
+        // stands where it joined, so the log and the position counter stay: a client
+        // whose conductor has not read `available image` yet still finds both (ADR
+        // 0078).
+        let went = |got: &[(i32, Vec<u8>)]| {
+            got.iter().any(|(type_id, message)| {
+                matches!(
+                    Event::parse(*type_id, message),
+                    Ok(Event::UnavailableImage {
+                        correlation_id: 6,
+                        subscriber_registration_id: 5,
+                        ..
+                    })
+                )
+            })
+        };
+        let (position, announced) = h
+            .conductor
+            .images
+            .iter()
+            .find(|image| image.publication_id == 6)
+            .map(|image| (image.position.id(), image.announced))
+            .expect("the image is still listed");
+        assert!(
+            h.conductor.publications.iter().any(
+                |publication| publication.registration_id == 6 && publication.closing.is_some()
+            ),
+            "the publication is closing, and waits"
+        );
+        assert!(h.dir.path().join("publications/6.logbuffer").exists());
+        assert!(h.conductor.counters.counter(position).is_ok());
+        assert!(went(&got), "the subscriber heard the image go");
+        // One cycle short of the time, still there; once it has passed, the counter is
+        // freed and the empty log is removed. A cycle adds a millisecond.
+        h.now = announced + spec::nanos(spec::COUNTER_REUSE_TIMEOUT) - 2 * MS;
+        h.cycle();
+        assert!(h.dir.path().join("publications/6.logbuffer").exists());
+        assert!(h.conductor.counters.counter(position).is_ok());
+        h.cycle();
         assert!(
             h.conductor
                 .publications
@@ -10138,17 +10359,8 @@ mod replay {
                 .all(|publication| publication.registration_id != 6)
         );
         assert!(!h.dir.path().join("publications/6.logbuffer").exists());
-        let unavailable = got.iter().any(|(type_id, message)| {
-            matches!(
-                Event::parse(*type_id, message),
-                Ok(Event::UnavailableImage {
-                    correlation_id: 6,
-                    subscriber_registration_id: 5,
-                    ..
-                })
-            )
-        });
-        assert!(unavailable, "the subscriber heard the image go");
+        assert!(h.conductor.counters.counter(position).is_err());
+        assert!(!went(&events(&mut h)), "and heard it once");
         drop(appender);
     }
 
@@ -10488,7 +10700,7 @@ mod replay {
         h.conductor
             .add_publication(CLIENT, 2, STREAM, IPC_CHANNEL, true, now);
         h.conductor
-            .add_subscription(CLIENT, 20, STREAM, IPC_CHANNEL);
+            .add_subscription(CLIENT, 20, STREAM, IPC_CHANNEL, h.now);
         h.cycle();
         let mut appender = h.conductor.publications[0]
             .log
@@ -10635,7 +10847,7 @@ mod replay {
         let _ = events(&mut h);
         // One subscription that never polls: every replay's publication lingers.
         h.conductor
-            .add_subscription(CLIENT, 5, REPLAY_STREAM, IPC_CHANNEL);
+            .add_subscription(CLIENT, 5, REPLAY_STREAM, IPC_CHANNEL, h.now);
         let allocated = h.conductor.publications.capacity();
         let bound = spec::MAX_REPLAY_PUBLICATIONS as i64;
         for n in 0..bound {
@@ -11384,7 +11596,7 @@ mod replay {
         sync(&mut h);
         stop_recording(&mut h, 4);
         h.conductor
-            .add_subscription(CLIENT, 5, REPLAY_STREAM, IPC_CHANNEL);
+            .add_subscription(CLIENT, 5, REPLAY_STREAM, IPC_CHANNEL, h.now);
         let _ = events(&mut h);
         let term = cavalry_shm::log::layout::MIN_TERM_LENGTH;
         let mut receiver = TestReceiver::bind();
@@ -13405,7 +13617,7 @@ mod receiving {
         for (i, port) in ports.iter().enumerate() {
             let channel = format!("cavalry:udp?endpoint=127.0.0.1:{port}");
             h.conductor
-                .add_subscription(1, 2 + i as i64, STREAM, channel.as_bytes());
+                .add_subscription(1, 2 + i as i64, STREAM, channel.as_bytes(), h.now);
             assert_eq!(h.last_error(2 + i as i64), None);
         }
         let control = format!(
@@ -13546,7 +13758,7 @@ mod receiving {
         let port = free_port();
         let channel = format!("cavalry:udp?endpoint=127.0.0.1:{port}");
         h.conductor
-            .add_subscription(1, subscription_id, STREAM, channel.as_bytes());
+            .add_subscription(1, subscription_id, STREAM, channel.as_bytes(), h.now);
         assert_eq!(h.last_error(subscription_id), None);
         h.cycle();
         let mut sender = TestSender::bind(port);
@@ -13644,7 +13856,7 @@ mod receiving {
         let port = free_port();
         let channel = format!("cavalry:udp?endpoint=127.0.0.1:{port}");
         h.conductor
-            .add_subscription(1, 2, STREAM, channel.as_bytes());
+            .add_subscription(1, 2, STREAM, channel.as_bytes(), h.now);
         assert_eq!(h.last_error(2), None);
         h.cycle();
         let now = h.now;
@@ -13716,9 +13928,9 @@ mod receiving {
         let port = free_port();
         let channel = format!("cavalry:udp?endpoint=127.0.0.1:{port}");
         h.conductor
-            .add_subscription(1, 2, STREAM, channel.as_bytes());
+            .add_subscription(1, 2, STREAM, channel.as_bytes(), h.now);
         h.conductor
-            .add_subscription(1, 3, STREAM + 1, channel.as_bytes());
+            .add_subscription(1, 3, STREAM + 1, channel.as_bytes(), h.now);
         h.cycle();
         let now = h.now;
         h.conductor
@@ -13727,7 +13939,7 @@ mod receiving {
         assert_eq!(h.conductor.armed_recordings.len(), 1);
         // A second subscription on the stream keeps it armed; the last one drops it.
         h.conductor
-            .add_subscription(1, 5, STREAM, channel.as_bytes());
+            .add_subscription(1, 5, STREAM, channel.as_bytes(), h.now);
         h.conductor.remove_subscription(1, 6, 2, now);
         assert_eq!(h.conductor.armed_recordings.len(), 1);
         h.conductor.remove_subscription(1, 7, 5, now);
@@ -13783,8 +13995,13 @@ mod receiving {
         let n = spec::MAX_SUBSCRIPTIONS as i32;
         let allocated = h.conductor.armed_recordings.capacity();
         for i in 0..n {
-            h.conductor
-                .add_subscription(1, 10_000 + i64::from(i), STREAM + i, channel.as_bytes());
+            h.conductor.add_subscription(
+                1,
+                10_000 + i64::from(i),
+                STREAM + i,
+                channel.as_bytes(),
+                h.now,
+            );
             // The receiver takes the interest, so its queue has room for the next add.
             let now = h.now;
             h.udp_receiver.duty_cycle(now);
@@ -13818,7 +14035,7 @@ mod receiving {
 
         // The next add is refused, so its stream has nothing to arm on.
         h.conductor
-            .add_subscription(1, 30_000, STREAM + n, channel.as_bytes());
+            .add_subscription(1, 30_000, STREAM + n, channel.as_bytes(), h.now);
         let (code, message) = h.last_error(30_000).expect("one more is refused");
         assert_eq!(code, 10, "{message}");
         assert!(message.contains("subscriptions"), "{message}");
@@ -13862,7 +14079,7 @@ mod receiving {
         let port = free_port();
         let channel = format!("cavalry:udp?endpoint=127.0.0.1:{port}");
         h.conductor
-            .add_subscription(1, 2, STREAM, channel.as_bytes());
+            .add_subscription(1, 2, STREAM, channel.as_bytes(), h.now);
         assert_eq!(h.last_error(2), None);
         h.cycle();
         let now = h.now;
@@ -14254,6 +14471,199 @@ mod receiving {
         assert_eq!(h.counter(CHANNEL_CLOSED), 0);
     }
 
+    /// An image over UDP that is retired with a subscription remaining, less than the
+    /// counter reuse timeout after its `available image`, tells the subscription at
+    /// once and keeps its log and the subscription's position record until that time
+    /// has passed, so that a client whose conductor has not read the announcement yet
+    /// finds both (`spec/udp.md`, "The receiver", step 5; ADR 0078).
+    #[test]
+    fn an_image_retired_soon_after_its_announcement_keeps_its_log_and_records_for_the_reuse_timeout()
+     {
+        let mut h = Harness::new("udp-announced");
+        let allocated = h.counter(COUNTERS_ALLOCATED);
+        let (sender, image_id, position) = subscribe_and_connect(&mut h, 2);
+        let announced = h.conductor.udp_images[0].subscriptions[0].announced;
+        let record = position.id();
+        let log = h.dir.path().join(format!("images/{image_id}.logbuffer"));
+        // The stream ends where it began, and the subscriber stands there already.
+        sender.send_heartbeat(SESSION, 0, true);
+        assert!(
+            h.cycle_until(|h| h.counter(IMAGE_ENDED) == 1),
+            "the receiver retired the image"
+        );
+        let wait = spec::nanos(spec::COUNTER_REUSE_TIMEOUT);
+        assert!(
+            h.now < announced + wait,
+            "the test's clock is inside the wait"
+        );
+        assert_eq!(
+            unavailable_images(&mut h, 2),
+            vec![image_id],
+            "the subscription is told at once"
+        );
+        assert_eq!(h.counter(IMAGE_REMOVED), 0);
+        assert_eq!(h.conductor.udp_images.len(), 1);
+        assert_eq!(h.conductor.udp_waiting, 1);
+        assert_eq!(h.conductor.udp_pairs, 1, "the pair is held with its record");
+        assert!(h.conductor.counters.counter(record).is_ok());
+        assert!(log.exists(), "the log is still there to open");
+        // One cycle short of the time, nothing has gone; a cycle adds a millisecond.
+        h.now = announced + wait - 2 * MS;
+        h.cycle();
+        assert_eq!(h.counter(IMAGE_REMOVED), 0);
+        assert!(log.exists());
+        // The time has passed: the record is freed, the log unlinked, the image removed,
+        // and no second `unavailable image` goes.
+        h.cycle();
+        assert_eq!(h.counter(IMAGE_REMOVED), 1);
+        assert!(h.conductor.udp_images.is_empty());
+        assert_eq!((h.conductor.udp_pairs, h.conductor.udp_waiting), (0, 0));
+        assert!(h.conductor.counters.counter(record).is_err());
+        assert!(!log.exists());
+        assert!(unavailable_images(&mut h, 2).is_empty());
+        // The subscription and its endpoint stay; removing it frees every record.
+        let now = h.now;
+        h.conductor.remove_subscription(1, 3, 2, now);
+        assert!(h.cycle_until(|h| h.conductor.receive_endpoints.is_empty()));
+        assert_eq!(h.counter(COUNTERS_ALLOCATED), allocated);
+        drop(sender);
+    }
+
+    /// A subscription removed while its retired image waits for it: its record is freed
+    /// with the removal, as a removed subscription's always is, and the image, which
+    /// now waits for nobody, is removed on the next duty cycle, before the time has
+    /// passed. Its client knows it left (ADR 0078).
+    #[test]
+    fn a_subscription_removed_while_its_retired_image_waits_frees_its_record_and_the_image() {
+        let mut h = Harness::new("udp-announced-left");
+        let allocated = h.counter(COUNTERS_ALLOCATED);
+        let (sender, image_id, position) = subscribe_and_connect(&mut h, 2);
+        let announced = h.conductor.udp_images[0].subscriptions[0].announced;
+        let record = position.id();
+        sender.send_heartbeat(SESSION, 0, true);
+        assert!(h.cycle_until(|h| h.counter(IMAGE_ENDED) == 1));
+        assert_eq!(
+            h.conductor.udp_waiting, 1,
+            "the image waits for its subscriber"
+        );
+        let now = h.now;
+        assert!(now < announced + spec::nanos(spec::COUNTER_REUSE_TIMEOUT));
+        h.conductor.remove_subscription(1, 3, 2, now);
+        assert!(
+            h.conductor.counters.counter(record).is_err(),
+            "freed with the removal"
+        );
+        assert_eq!(h.conductor.udp_pairs, 0);
+        assert_eq!(
+            h.counter(IMAGE_REMOVED),
+            0,
+            "the image goes on the next cycle"
+        );
+        assert!(h.cycle_until(|h| h.conductor.receive_endpoints.is_empty()));
+        assert!(
+            h.now < announced + spec::nanos(spec::COUNTER_REUSE_TIMEOUT),
+            "before the time has passed"
+        );
+        assert_eq!(h.counter(IMAGE_REMOVED), 1);
+        assert_eq!(h.conductor.udp_waiting, 0);
+        assert!(
+            !h.dir
+                .path()
+                .join(format!("images/{image_id}.logbuffer"))
+                .exists()
+        );
+        assert_eq!(h.counter(COUNTERS_ALLOCATED), allocated);
+        drop(sender);
+    }
+
+    /// A publication added and removed with nothing published, beside a subscriber: the
+    /// subscriber's image stands at the end from the start, and before ADR 0078 the log
+    /// and the image's position counter went in the same duty cycle, ahead of the
+    /// client's conductor. `unavailable image` still goes in that cycle; the log and
+    /// the counter stay for the counter reuse timeout after the `available image`. A
+    /// subscriber that leaves makes nothing wait, since its client knows,
+    /// and neither does one that has read from the image, since its position shows
+    /// that its client has the log and the counter.
+    #[test]
+    fn a_publication_closed_soon_after_an_image_was_announced_keeps_its_log_for_the_reuse_timeout()
+    {
+        let mut h = Harness::new("ipc-announced");
+        let wait = spec::nanos(spec::COUNTER_REUSE_TIMEOUT);
+        let now = h.now;
+        h.conductor.add_subscription(1, 2, STREAM, IPC_CHANNEL, now);
+        h.conductor
+            .add_publication(1, 3, STREAM, IPC_CHANNEL, false, now);
+        assert_eq!(h.conductor.images.len(), 1, "the subscriber has its image");
+        let (record, announced) = (
+            h.conductor.images[0].position.id(),
+            h.conductor.images[0].announced,
+        );
+        assert_eq!(announced, now);
+        let log = h.dir.path().join("publications/3.logbuffer");
+        h.conductor.remove_publication(1, 4, 3, now);
+        h.cycle();
+        assert_eq!(
+            h.conductor.publications.len(),
+            1,
+            "closed, drained, and waiting"
+        );
+        assert!(h.conductor.publications[0].closing.is_some());
+        assert!(log.exists());
+        assert!(h.conductor.counters.counter(record).is_ok());
+        assert_eq!(
+            unavailable_images(&mut h, 2),
+            vec![3],
+            "the subscriber hears the image go at once"
+        );
+        h.now = announced + wait - 2 * MS;
+        h.cycle();
+        assert_eq!(h.conductor.publications.len(), 1, "one cycle short");
+        assert!(log.exists());
+        h.cycle();
+        assert!(h.conductor.publications.is_empty());
+        assert!(h.conductor.images.is_empty());
+        assert!(!log.exists());
+        assert!(h.conductor.counters.counter(record).is_err());
+        assert!(
+            unavailable_images(&mut h, 2).is_empty(),
+            "and hears it once"
+        );
+
+        // The same again, and the subscriber leaves first: the close waits for nothing.
+        let now = h.now;
+        h.conductor
+            .add_publication(1, 5, STREAM, IPC_CHANNEL, false, now);
+        assert_eq!(h.conductor.images.len(), 1);
+        h.conductor.remove_subscription(1, 6, 2, now);
+        h.conductor.remove_publication(1, 7, 5, now);
+        h.cycle();
+        assert!(h.conductor.publications.is_empty());
+        assert!(!h.dir.path().join("publications/5.logbuffer").exists());
+
+        // And a subscriber that has read a frame: its position moved from where it
+        // joined, so the close finds every subscriber at the end and waits for nothing.
+        let now = h.now;
+        h.conductor.add_subscription(1, 8, STREAM, IPC_CHANNEL, now);
+        h.conductor
+            .add_publication(1, 9, STREAM, IPC_CHANNEL, false, now);
+        h.cycle();
+        let limit = h.conductor.publications[0].limit.get();
+        let mut appender = h.conductor.publications[0]
+            .log
+            .appender()
+            .expect("an appender");
+        appender.offer(&[7u8; 32], limit, 0).expect("a frame");
+        let end = appender.position().expect("the position");
+        assert_eq!(end, 64, "one frame of 32 bytes and its header");
+        h.conductor.images[0].position.store_release(end);
+        let now = h.now;
+        h.conductor.remove_publication(1, 10, 9, now);
+        h.cycle();
+        assert!(h.conductor.publications.is_empty());
+        assert!(!h.dir.path().join("publications/9.logbuffer").exists());
+        assert_eq!(unavailable_images(&mut h, 8), vec![9]);
+    }
+
     /// A heartbeat's term offset is checked against its image's term, not the driver's:
     /// an image whose setup frame named a term longer than the driver's 16 MiB keeps
     /// the heartbeats past 16 MiB that a sender idle there sends, and one whose term
@@ -14359,7 +14769,7 @@ mod receiving {
         let port = h.conductor.receive_endpoints[0].endpoint.port();
         let channel = format!("cavalry:udp?endpoint=127.0.0.1:{port}");
         h.conductor
-            .add_subscription(2, 3, STREAM, channel.as_bytes());
+            .add_subscription(2, 3, STREAM, channel.as_bytes(), h.now);
         let (joined, position_id, _, _) = last_available_image(&mut h, 3).expect("joins the image");
         assert_eq!(joined, image_id);
         let second = h
@@ -14666,7 +15076,7 @@ mod receiving {
         let port = free_port();
         let channel = format!("cavalry:udp?endpoint=127.0.0.1:{port}");
         h.conductor
-            .add_subscription(1, 2, STREAM, channel.as_bytes());
+            .add_subscription(1, 2, STREAM, channel.as_bytes(), h.now);
         h.cycle();
         let sender = TestSender::bind(port);
         sender.send_setup(SESSION, 0);
@@ -14744,7 +15154,7 @@ mod receiving {
         let port = h.conductor.receive_endpoints[0].endpoint.port();
         let channel = format!("cavalry:udp?endpoint=127.0.0.1:{port}");
         h.conductor
-            .add_subscription(1, 3, STREAM, channel.as_bytes());
+            .add_subscription(1, 3, STREAM, channel.as_bytes(), h.now);
         let (joined, position_id, _, _) = last_available_image(&mut h, 3).expect("joins the image");
         assert_eq!(joined, image_id);
         let second = h
@@ -14931,7 +15341,7 @@ mod receiving {
         let port = free_port();
         let channel = format!("cavalry:udp?endpoint=127.0.0.1:{port}");
         h.conductor
-            .add_subscription(1, 2, STREAM, channel.as_bytes());
+            .add_subscription(1, 2, STREAM, channel.as_bytes(), h.now);
         assert_eq!(h.last_error(2), None);
         h.cycle();
         let now = h.now;
@@ -14943,9 +15353,9 @@ mod receiving {
         // Before the receiver's next cycle: the socket is still bound, and the adds
         // wait.
         h.conductor
-            .add_subscription(1, 4, STREAM, channel.as_bytes());
+            .add_subscription(1, 4, STREAM, channel.as_bytes(), h.now);
         h.conductor
-            .add_subscription(1, 5, STREAM, channel.as_bytes());
+            .add_subscription(1, 5, STREAM, channel.as_bytes(), h.now);
         assert_eq!(h.last_error(4), None);
         assert_eq!(h.last_error(5), None);
         assert!(h.conductor.subscriptions.is_empty(), "nothing registered");
@@ -15027,7 +15437,7 @@ mod receiving {
         assert!(h.conductor.udp_images[0].leaving);
         assert_eq!(h.conductor.receive_endpoints[0].state, ChannelState::Active);
         h.conductor
-            .add_subscription(1, 4, STREAM, channel.as_bytes());
+            .add_subscription(1, 4, STREAM, channel.as_bytes(), h.now);
         assert_eq!(
             events_about(&mut h, 4),
             (vec![], vec![], vec![]),
@@ -15074,7 +15484,7 @@ mod receiving {
         let port = h.conductor.receive_endpoints[0].endpoint.port();
         let channel = format!("cavalry:udp?endpoint=127.0.0.1:{port}");
         h.conductor
-            .add_subscription(1, 5, STREAM + 1, channel.as_bytes());
+            .add_subscription(1, 5, STREAM + 1, channel.as_bytes(), h.now);
         assert_eq!(h.last_error(5), None);
         h.cycle();
         let now = h.now;
@@ -15082,7 +15492,7 @@ mod receiving {
         assert_eq!(h.conductor.udp_images.len(), 1);
         assert!(h.conductor.udp_images[0].leaving);
         h.conductor
-            .add_subscription(1, 7, STREAM, channel.as_bytes());
+            .add_subscription(1, 7, STREAM, channel.as_bytes(), h.now);
         assert_eq!(
             events_about(&mut h, 7),
             (vec![], vec![], vec![]),
@@ -15118,7 +15528,7 @@ mod receiving {
         let port = free_port();
         let channel = format!("cavalry:udp?endpoint=127.0.0.1:{port}");
         h.conductor
-            .add_subscription(1, 2, STREAM, channel.as_bytes());
+            .add_subscription(1, 2, STREAM, channel.as_bytes(), h.now);
         assert_eq!(h.last_error(2), None);
         h.cycle();
         let now = h.now;
@@ -15129,7 +15539,7 @@ mod receiving {
         );
         for n in 0..spec::MAX_SUBSCRIPTIONS as i64 {
             h.conductor
-                .add_subscription(1, 10 + n, STREAM, channel.as_bytes());
+                .add_subscription(1, 10 + n, STREAM, channel.as_bytes(), h.now);
         }
         assert_eq!(
             h.conductor.pending_subscriptions.len(),
@@ -15137,7 +15547,7 @@ mod receiving {
         );
         assert_eq!(h.last_error(10), None);
         h.conductor
-            .add_subscription(1, 9_999, STREAM, channel.as_bytes());
+            .add_subscription(1, 9_999, STREAM, channel.as_bytes(), h.now);
         let (code, message) = h.last_error(9_999).expect("one more is refused");
         assert_eq!(code, 10, "{message}");
         assert_eq!(
@@ -15169,7 +15579,7 @@ mod receiving {
         let port = free_port();
         let channel = format!("cavalry:udp?endpoint=127.0.0.1:{port}");
         h.conductor
-            .add_subscription(1, 2, STREAM, channel.as_bytes());
+            .add_subscription(1, 2, STREAM, channel.as_bytes(), h.now);
         assert_eq!(h.last_error(2), None);
         h.cycle();
         let now = h.now;
@@ -15179,7 +15589,7 @@ mod receiving {
             ChannelState::Closing
         );
         h.conductor
-            .add_subscription(1, 4, STREAM, channel.as_bytes());
+            .add_subscription(1, 4, STREAM, channel.as_bytes(), h.now);
         assert_eq!(h.conductor.pending_subscriptions.len(), 1);
         assert_eq!(h.counter(SUBSCRIPTION_ADD_DEFERRED), 1);
         assert_eq!(h.counter(SUBSCRIPTION_ADD_DEFERRED_WAITING), 1);
@@ -15251,7 +15661,7 @@ mod receiving {
         let port = free_port();
         let channel = format!("cavalry:udp?endpoint=127.0.0.1:{port}");
         h.conductor
-            .add_subscription(1, 2, STREAM, channel.as_bytes());
+            .add_subscription(1, 2, STREAM, channel.as_bytes(), h.now);
         assert_eq!(h.last_error(2), None);
         h.cycle();
         let now = h.now;
@@ -15262,16 +15672,18 @@ mod receiving {
         );
         let registered = spec::MAX_SUBSCRIPTIONS as i64 - 1;
         for n in 0..registered {
-            h.conductor.add_subscription(1, 10 + n, STREAM, IPC_CHANNEL);
+            h.conductor
+                .add_subscription(1, 10 + n, STREAM, IPC_CHANNEL, h.now);
         }
         assert_eq!(h.last_error(10), None);
         assert_eq!(h.conductor.subscriptions.len(), spec::MAX_SUBSCRIPTIONS - 1);
         h.conductor
-            .add_subscription(1, 5_000, STREAM, channel.as_bytes());
+            .add_subscription(1, 5_000, STREAM, channel.as_bytes(), h.now);
         assert_eq!(h.conductor.pending_subscriptions.len(), 1);
         // The registry is full, 1023 registered and one waiting: the IPC add is
         // refused, with nothing registered.
-        h.conductor.add_subscription(1, 6_000, STREAM, IPC_CHANNEL);
+        h.conductor
+            .add_subscription(1, 6_000, STREAM, IPC_CHANNEL, h.now);
         let (code, message) = h.last_error(6_000).expect("the IPC add is refused");
         assert_eq!(code, 10, "{message}");
         assert!(message.contains("subscriptions"), "{message}");
@@ -15307,7 +15719,7 @@ mod receiving {
             taken.local_addr().expect("bound").port()
         );
         h.conductor
-            .add_subscription(1, 998, STREAM, channel.as_bytes());
+            .add_subscription(1, 998, STREAM, channel.as_bytes(), h.now);
         let (code, message) = h.last_error(998).expect("refused");
         assert_eq!(code, 4, "{message}");
         assert!(h.conductor.subscriptions.is_empty());
@@ -15316,7 +15728,7 @@ mod receiving {
             let port = free_port();
             let channel = format!("cavalry:udp?endpoint=127.0.0.1:{port}");
             h.conductor
-                .add_subscription(1, 100 + n, STREAM, channel.as_bytes());
+                .add_subscription(1, 100 + n, STREAM, channel.as_bytes(), h.now);
             assert_eq!(h.last_error(100 + n), None, "endpoint {n}");
         }
         assert_eq!(
@@ -15326,7 +15738,7 @@ mod receiving {
         let port = free_port();
         let channel = format!("cavalry:udp?endpoint=127.0.0.1:{port}");
         h.conductor
-            .add_subscription(1, 999, STREAM, channel.as_bytes());
+            .add_subscription(1, 999, STREAM, channel.as_bytes(), h.now);
         let (code, message) = h.last_error(999).expect("refused");
         assert_eq!(code, 10, "{message}");
         assert!(message.contains("receive endpoints"), "{message}");
@@ -15371,11 +15783,11 @@ mod receiving {
             .expect("a receiver");
         let port = free_port();
         let channel = format!("cavalry:udp?endpoint=127.0.0.1:{port}");
-        conductor.add_subscription(1, 2, STREAM, channel.as_bytes());
+        conductor.add_subscription(1, 2, STREAM, channel.as_bytes(), now_nanos());
         assert_eq!(conductor.subscriptions.len(), 1);
         let port = free_port();
         let channel = format!("cavalry:udp?endpoint=127.0.0.1:{port}");
-        conductor.add_subscription(1, 3, STREAM, channel.as_bytes());
+        conductor.add_subscription(1, 3, STREAM, channel.as_bytes(), now_nanos());
         let mut refused = None;
         while events
             .receive(|type_id, message| {

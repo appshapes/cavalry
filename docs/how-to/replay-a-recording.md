@@ -175,6 +175,14 @@ its send endpoint stays open for the publication linger after it
   `--to` is counted from the start position, which only the driver knows, so the
   command refuses the pair before anything is sent; pass the start position error 23's
   message names to `--from` instead.
+- `cavalry replay: the replay failed at position N`, with exit status 1 and no message
+  printed, where N is the `--from` you passed: N is a multiple of 32 inside the
+  recording at which no frame begins, so the bytes there are no frame header. Error 23
+  cannot refuse it, since the driver does not know where frames begin until it reads
+  them. Pass a position a subscriber took from a frame, `image.position_of(&header)`,
+  or resolve an instant with `--at`, or pass `--from start`. The same message at a
+  position you did not pass is a recording whose file is damaged there: `cavalry
+  doctor` warns of `replay.failed` and names the recording.
 - `error 7 (malformed command)`: a length below −1; `--to` before `--from` is refused
   before the command is sent.
 - `error 12 (storage space)`: a segment file of the recording is missing from the log

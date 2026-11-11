@@ -489,7 +489,10 @@ receiver id is a random i64 chosen when it starts. On a datagram from a source a
    that remain, the stop of its recording when it has one (below), its counters
    freed after the counter reuse timeout, its log removed once every subscription has
    released it and its recording has stopped, as a recorded publication's log waits
-   (`spec/log-buffer.md`, "Closing"), and its session record put **on cool-down** for the image cool-down, a
+   (`spec/log-buffer.md`, "Closing"), and no sooner than the counter reuse timeout
+   after the `available image` of a subscription that remains and whose position
+   stands where it joined, that subscription's `subscription.position` kept until
+   then or until the subscription is removed (ADR 0078), and its session record put **on cool-down** for the image cool-down, a
    bound of this page's own on every retire, during which a setup, data datagram or heartbeat for the
    session is dropped and counted in `receiver.dropped_cool_down` with no status message
    sent, so that a late retransmit or heartbeat for a retired session creates no second

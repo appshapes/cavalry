@@ -461,7 +461,8 @@ typedef struct {
   int32_t session_id;
   /*
    The reader's position when the check failed, for 120, else
-   `CAVALRY_NULL_POSITION`.
+   `CAVALRY_NULL_POSITION`. A 120 with `CAVALRY_NULL_POSITION` is an image that
+   was gone before the client read its announcement: it had no reader (ADR 0078).
    */
   int64_t position;
 } cavalry_fault_t;

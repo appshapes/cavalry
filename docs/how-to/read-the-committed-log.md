@@ -137,12 +137,12 @@ its services read what it appends in the same way.
   this version a service cannot read the entries before that from this member. Read
   them on a member that has not left the log, one whose `cluster.elections` counter
   is 1: its recording begins at 0.
-- `poll refused (closed)` with `the client closed: corrupt`, right after the `reading
-  member` line: `--from` is a multiple of 32 at which no entry begins. The driver's
-  replay finds no frame there and ends at once, and in this version the client that
-  asked for it is closed with it and is not told why (card 241). `cavalry doctor` on
-  the member shows `replay.failed` grown by one. Use a `next position` that a run on
-  this member printed, or 0.
+- `cluster-service: the replay of member 1's recording 0 failed at position ...`,
+  right after the `reading member` line, with the position you passed and no entry
+  read: `--from` is a multiple of 32 at which no entry begins. The driver's replay
+  finds no frame there and ends at once. `cavalry doctor` on the member shows
+  `replay.failed` grown by one. Use a `next position` that a run on this member
+  printed, or 0. The next entry has the same message for a recording that is damaged.
 - `cluster-service: the replay of member 1's recording 0 failed at position ...`, and
   the program exits 1: the driver could not play the member's recording past that
   position, because a segment file of the recording could not be read or a frame in
@@ -161,9 +161,7 @@ its services read what it appends in the same way.
   the recording is damaged there: read the entries from it on on another member, one
   that has not left the log, whose recording begins at 0. When the message says the
   program read no entry, `--from` was not the position of an entry, or the recording
-  is damaged at that position: use a `next position` an earlier run printed, or 0. A
-  `--from` at which no entry begins fails the replay so, but in this version the
-  client is closed before it can say so: that is the entry above this one.
+  is damaged at that position: use a `next position` an earlier run printed, or 0.
 - `--from needs a position, a multiple of 32 from 0`: the program refused the value
   before it asked the driver.
 - `error 10 (resource temporarily unavailable)`: the driver already plays 64 replays.
