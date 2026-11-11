@@ -713,6 +713,24 @@ class Clients(unittest.TestCase):
         self.assertIn("Subscription.onFragment", finding)
         self.assertIn("throws", finding)
 
+    def test_a_throw_in_the_committed_logs_catch_in_jvm_fails(self):
+        """The committed log's upcall is held as the subscription's is: the entry's position
+        is read in a helper with a try of its own, so the catch around the handler's call
+        holds no invokeExact, and a throw there is a raise."""
+        self.assertEqual(lint.findings(self.tmp), [])
+        self.edit_jvm("        } catch (Throwable t) {\n            raised++;\n",
+                      "        } catch (Throwable t) {\n            raised++;\n            throw t;\n", file="CommittedLog.java")
+        [finding] = lint.findings(self.tmp)
+        self.assertIn("CommittedLog.onEntry", finding)
+        self.assertIn("throws", finding)
+
+    def test_building_handler_exception_before_the_committed_logs_call_in_jvm_fails(self):
+        self.edit_jvm("        int count;\n        try {\n            count = (int) Abi.cavalry_committed_log_poll.invokeExact(",
+                      "        int count;\n        RuntimeException early = new HandlerException(0, 0, first);\n        try {\n"
+                      "            count = (int) Abi.cavalry_committed_log_poll.invokeExact(", file="CommittedLog.java")
+        found = lint.findings(self.tmp)
+        self.assertTrue(any("CommittedLog.poll" in f and "HandlerException" in f for f in found), found)
+
     def test_an_allocation_in_jvm_fails(self):
         self.edit_jvm("    public long commit() {\n        claim = null;\n",
                       "    public long commit() {\n        byte[] copy = new byte[8];\n        claim = null;\n")
@@ -756,7 +774,7 @@ class Clients(unittest.TestCase):
         self.assertIn("builds CavalryException", finding)
 
     def test_a_jvm_package_without_the_per_message_methods_fails(self):
-        for name in ("Publication", "Subscription", "Header"):
+        for name in ("Publication", "Subscription", "CommittedLog", "Header"):
             with open(os.path.join(self.jvm, name + ".java"), "w", encoding="utf-8") as f:
                 f.write(f"package com.appshapes.cavalry;\n\npublic final class {name} {{\n    int here() {{\n"
                         f"        return 1;\n    }}\n}}\n")

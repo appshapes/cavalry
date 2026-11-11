@@ -212,4 +212,31 @@ public final class Client implements AutoCloseable {
             throw Abi.failed("cavalry_stop_replay", t);
         }
     }
+
+    /** Opens the committed log of the cluster member on this client's driver at
+     * {@code position}, 0 or the {@link CommittedLog#position()} an earlier log reached. Null
+     * while the driver hosts no member that has a recording of its log, so a service started
+     * before its member asks again (spec/cluster.md, "The service"; spec/c-abi.md,
+     * "Functions", committed log). */
+    public synchronized CommittedLog committedLog(long position) {
+        try (Arena arena = Arena.ofConfined()) {
+            MemorySegment out = arena.allocate(ADDRESS);
+            Abi.check("cavalry_committed_log", (int) Abi.cavalry_committed_log.invokeExact(out, handle, position));
+            MemorySegment log = out.get(ADDRESS, 0);
+            return log.address() == 0 ? null : new CommittedLog(log, this);
+        } catch (Throwable t) {
+            throw Abi.failed("cavalry_committed_log", t);
+        }
+    }
+
+    /** A committed log's close, under the client's lock: the ABI's result, with the thread's
+     * error for the caller to read. After this client's own close the handle is null, and
+     * the ABI frees the log and leaves the replay to the driver. */
+    synchronized int closeCommittedLog(MemorySegment log) {
+        try {
+            return (int) Abi.cavalry_committed_log_close.invokeExact(log, handle);
+        } catch (Throwable t) {
+            throw Abi.failed("cavalry_committed_log_close", t);
+        }
+    }
 }

@@ -14,7 +14,8 @@ client's own code. A `Client` closes with `close()` or `try`-with-resources; a
 `Publication` claims a slice of the log as a `MemorySegment` over it or offers a
 `MemorySegment`; a `Subscription` polls with a `FragmentHandler` that receives the
 body as a `MemorySegment` into the log and the frame's `Header`; a `Recording` and a
-`Replay` wrap the driver's archive. Every message the client sends or receives goes
+`Replay` wrap the driver's archive; a `CommittedLog` is a service's read of a cluster's
+committed log beside a member (below). Every message the client sends or receives goes
 through one `extern "C"` call on the caller's thread, as the ABI's page promises
 (ADR 0046's boundary; ADR 0051). In Aeron, this is the Java client's `Publication`,
 `Subscription` and `FragmentHandler`, which this one copies in shape: the handler
@@ -28,14 +29,78 @@ from Java alone, at run time, so the library is `javac` and `java` and nothing e
 cost is the Java release: 22 brought the API, and this library takes 25, the
 long-term release that holds it.
 
+### The committed log
+
+A service is a program beside a cluster member that applies the entries the cluster
+has committed (`docs/how-to/read-the-committed-log.md`). `client.committedLog(position)`
+opens the log of the member on the client's driver at a position, 0 or the
+`position()` an earlier run reached, and returns `null` while the driver hosts no
+member with a log, so a service started before its member asks again. `log.poll(handler,
+fragmentLimit)` calls the `EntryHandler`, `handler.onEntry(body, header, position)`,
+for each committed entry, in order, none at or past the member's commit position;
+`position` is the entry's position in the log. It returns the entry count, or −1 when
+the ABI's poll stopped on a fault, which `log.fault()` gives, its `code()`,
+`sessionId()` and `position()`, until the next poll. `log.position()` is the position
+after the last entry delivered, the one a service keeps for its next start, and
+`log.commitPosition()` the bound of the last poll. `log.isEnded()` says that no poll
+will deliver another entry: stop reading when it is true, not when a poll returns 0,
+then close the log and open another from `log.position()`. `log.close()`, or
+`try`-with-resources, stops the driver's replay and is idempotent; a log closed after
+its client is freed, and the driver ends the replay by itself. When the ABI could not
+stop the replay, `log.close()` throws `CavalryException` after it has freed the log,
+and a second close does nothing. `log.memberId()` and `log.recordingId()` say whose
+log it is (`spec/c-abi.md`, "Functions", committed log; ADR 0070).
+
+An ended log delivered every committed entry it may read only when three things hold:
+
+- `log.failedAt()` is empty. A position is where the driver's replay of the member's
+  recording failed, and no entry from it on was delivered.
+- `log.withdrawnAt()` is empty. A position is where the entries begin that the log was
+  not given, because the driver withdrew the replay, 5 s after it ended, before the
+  service had read it.
+- No `log.poll` returned −1 with the fault of the log's own image: a `log.fault()`
+  whose `code()` is `Abi.ERR_FAULT_IMAGE`, the replay's image failed a check, or
+  `Abi.ERR_FAULT_IMAGES_FULL`, the image could not join.
+
+Read the two reports, each an `OptionalLong`, once `log.isEnded()` is true. The driver
+withdraws a replay that failed as it does any other, so both can be positions:
+`log.withdrawnAt()` is then the lower, and the entries from it on, those below
+`log.failedAt()` among them, were not delivered. The fault of the image is reported
+once. The poll that meets it returns −1, `log.fault()` answers it only until the next
+poll, the next poll returns 0 and clears it, and both reports are empty for such a
+log. So a service keeps that −1 and its fault when it gets them: nothing reports them
+later, and without them this end reads as a whole one. In every case what the log
+delivered ends at `log.position()`.
+
+A committed log has an upcall stub of its own, as a subscription has. A handler's
+exception goes where a subscription's goes ("The exception"): every entry the ABI
+delivers reaches the handler, and `poll` throws `HandlerException` once the ABI has
+returned, with the poll's result as its `fragments()`, the −1 of a fault included. An
+entry whose handler call threw was delivered and is not delivered again:
+`log.position()` is past it, and past every entry the same poll delivered after it. A
+handler cannot stop a poll: the ABI goes on handing it entries up to the fragment
+limit. So a service that must apply every entry, in order, does this:
+
+1. The handler catches its own exceptions. When it cannot apply an entry, it keeps
+   that entry's `position` and sets a flag.
+2. While the flag is set the handler applies nothing and returns at once, for the rest
+   of that poll: the poll still hands it the entries after the one that failed.
+3. After the poll, the service closes the log and opens a new one at the position it
+   kept.
+
+With entries at 0, 96 and 192 and a failure at 96, opening again at `log.position()`
+would lose the entry at 96, and applying 192 before opening again at 96 would apply
+192 twice. A `fragmentLimit` of 1 is the simple form: a poll then delivers at most one
+entry, and the service decides after each.
+
 ## What it must never do
 
 - Never run a message through anything but one ABI call: no lock, no `synchronized`
   block, no wait, no future, no thread, no copy of a fragment into a new array for the
   handler. `clients/lint.py` reads the per-message methods of `Publication`,
-  `Subscription` and `Header`, the claim, the reserved value, the commit, the abort,
-  the offer, the poll, the header's nine getters and the upcall that calls the
-  handler, for Java's forms of each: `synchronized`, as a modifier or a block, the lock
+  `Subscription`, `CommittedLog` and `Header`, the claim, the reserved value, the
+  commit, the abort, the offer, each poll, the header's nine getters and each upcall
+  that calls a handler, for Java's forms of each: `synchronized`, as a modifier or a block, the lock
   classes of `java.util.concurrent` and a lock taken on any receiver (`.lock(`,
   `.tryLock(`, `.acquire(`), a blocking wait (`wait`, `join`, `await`, `park`, `sleep`,
   `take`), a future or an executor, a thread started, `throw` and `new`. The one
@@ -60,13 +125,22 @@ long-term release that holds it.
   raises there, an `OutOfMemoryError` as the body's segment is made, ends the process.
 - Never lose a handle the ABI keeps open. Every close frees its handle, whatever it
   returns, so `close()` forgets the handle once the ABI's close has returned. The one
-  exception is a subscription's close from inside a handler of its own poll, which the
-  ABI refuses with `Abi.ERR_POLLING`, leaving the subscription open (`spec/c-abi.md`,
-  "Calls during a claim or a poll"). `close()` then throws `CavalryException` and keeps
-  the handle, so the subscription can be polled and closed after the poll. A call
-  after a close hands the ABI a null handle, as the Python and Go clients do, and the
-  ABI refuses it with `Abi.ERR_NULL`: a poll answers -1, a claim
+  exception is a subscription's or a committed log's close from inside a handler of its
+  own poll, which the ABI refuses with `Abi.ERR_POLLING`, leaving it open
+  (`spec/c-abi.md`, "Calls during a claim or a poll"). `close()` then throws
+  `CavalryException` and keeps the handle, so it can be polled and closed after the
+  poll. A call after a close hands the ABI a null handle, as the Python and Go clients
+  do, and the ABI refuses it with `Abi.ERR_NULL`: a poll answers -1, a claim
   `PUBLICATION_ERROR`, never a delivery and never a frame.
+- Never read a refusal as an answer. A `poll` from inside a handler of the same
+  subscription returns −1 with `Abi.ERR_POLLING`, and the poll in progress goes on. A
+  committed log's handler is held to the same rule. From inside it, a `poll` of the
+  same log, `log.position()` and `log.commitPosition()` return −1, `log.isEnded()` is
+  `false`, `log.failedAt()` and `log.withdrawnAt()` are empty, and `log.fault()` and
+  `log.close()` throw `CavalryException`, each with `Abi.ERR_POLLING`, and the log
+  stays open. The `false` and the two empty answers are refusals there, not answers:
+  read the three after the poll has returned. The handler has each entry's own
+  `position`.
 - Never hand the ABI a claim struct that names a freed publication. The one
   `cavalry_buffer_claim_t` a publication keeps names its handle in its `publication`
   field, and the ABI reads that field on a commit, an abort and a reserved value. So
@@ -178,7 +252,7 @@ the thread blocks in the call.
 A `Client`'s methods are `synchronized`, so threads may share one: an add, a command
 or a close holds the client's lock for its one ABI call, which the ABI serialises
 anyway, and the lock is never on a message's path. A `Publication`, a `Subscription`
-and its `Header` are used from one thread at a time, the ABI's rule for every handle;
+or a `CommittedLog` and its `Header` are used from one thread at a time, the ABI's rule for every handle;
 a program with several threads gives each its own, as the Rust API's are used.
 `Client.addDestination` and `removeDestination` are calls on the client, not on the
 `Publication` they name: they may run beside that publication's `offer` or `tryClaim`
@@ -207,7 +281,10 @@ reinterprets the body's segment to its length, one more object, points the
 subscription's one `Header` at the frame and calls the handler inside a
 `try`/`catch (Throwable)` ("The exception"). So four objects per received message,
 each a few dozen bytes, each dead when the handler returns, counted by the allocation
-round below. The body is never copied.
+round below. The body is never copied. A committed log's upcall, `CommittedLog.onEntry`,
+makes the same four and one downcall more per entry before the handler:
+`cavalry_committed_log_entry_position` on the header, for the position it hands the
+handler, a `long`, no object.
 
 There is no one view per subscription reused across messages, as the card asked and
 as the Rust API's slice is, because a `MemorySegment` cannot be pointed somewhere else
@@ -298,8 +375,12 @@ inside a `try`/`catch (Throwable)`, keeps the first throwable, counts every one,
 goes on calling the handler for every later fragment of the poll, so that no fragment
 is consumed unseen; `poll` throws `HandlerException` once the ABI has returned, with
 `fragments()`, `raised()`, the first throwable as its cause, and a message that says
-what to do. The throwable is kept as thrown, an `Error` included, and stays the first
-when another follows it in the same poll.
+what to do. `fragments()` is the poll's result: the count, or −1 when the poll also
+stopped on a fault, which `fault()` reads. A committed log's `HandlerException` has
+`committedLog()` true and speaks of entries, and when `fragments()` is −1 it names
+`log.fault()`, to read before the next poll ("The committed log"). The throwable is
+kept as thrown, an `Error` included, and stays the first when another follows it in
+the same poll.
 
 ## What to read next
 

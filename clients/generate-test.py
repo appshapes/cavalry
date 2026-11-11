@@ -1217,8 +1217,9 @@ class JvmPackage(unittest.TestCase):
 
     BASE = JVM_BASE
     FILES = sorted(JVM_BASE + name for name in (
-        "Abi.java", "CavalryException.java", "Client.java", "FragmentHandler.java", "HandlerException.java",
-        "Header.java", "Image.java", "Publication.java", "Recording.java", "Replay.java", "Subscription.java"))
+        "Abi.java", "CavalryException.java", "Client.java", "CommittedLog.java", "EntryHandler.java",
+        "FragmentHandler.java", "HandlerException.java", "Header.java", "Image.java", "Publication.java",
+        "Recording.java", "Replay.java", "Subscription.java"))
 
     @classmethod
     def setUpClass(cls):
@@ -1323,12 +1324,24 @@ class JvmPackage(unittest.TestCase):
                          r"static final long cavalry_buffer_claim_t_length = 8;")  # the 8-byte pointer before it
 
     def test_handler_exceptions_message_says_what_to_do_and_names_a_heading_of_the_readme(self):
-        code = gen_jvm.write_jvm(self.header)[self.BASE + "HandlerException.java"]
-        body = code.split("public HandlerException(int fragments, int raised, Throwable cause) {", 1)[1].split("\n    }\n", 1)[0]
+        files = gen_jvm.write_jvm(self.header)
+        code = files[self.BASE + "HandlerException.java"]
+        self.assertIn("    public HandlerException(int fragments, int raised, Throwable cause, boolean committedLog) {\n"
+                      "        super(describe(fragments, raised, cause, committedLog), cause);\n", code)
+        body = code.split("private static String describe(int fragments, int raised, Throwable cause, boolean committedLog) {",
+                          1)[1].split("\n    }\n", 1)[0]
         self.assertIn("fragment(s) this poll delivered", body)
         self.assertIn("before it stopped on a fault, which Subscription.fault() reads", body)
         self.assertIn("Fix the handler: its first throwable, ", body)
         self.assertIn("See clients/jvm/README.md#the-exception", body)
+        # A committed log's poll names its own fault() and its entries: the fault of the
+        # log's image is reported once, so the message must not send the reader to a
+        # subscription's (clients/jvm/README.md, "The committed log").
+        self.assertIn('String one = committedLog ? "entry" : "fragment";', body)
+        self.assertIn("which this CommittedLog's fault() reads\"\n                    + \" until its next poll and nothing "
+                      "reports after that, so read it and keep it before polling again\"", body)
+        self.assertIn("throw new HandlerException(count, raised, cause, true);", files[self.BASE + "CommittedLog.java"])
+        self.assertIn("throw new HandlerException(count, raised, cause);", files[self.BASE + "Subscription.java"])
         with open(os.path.join(gen.ROOT, "clients", "jvm", "README.md"), encoding="utf-8") as f:
             slugs = {re.sub(r"[^a-z0-9 -]", "", line.lstrip("#").strip().lower()).replace(" ", "-")
                      for line in f if line.startswith("#")}

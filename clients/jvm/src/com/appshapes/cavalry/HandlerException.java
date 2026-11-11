@@ -3,24 +3,52 @@
 package com.appshapes.cavalry;
 
 /**
- * The fragment handler threw during a poll: {@link #fragments()} is the count the poll
- * returned once the ABI was done, {@link #raised()} how many handler calls threw, and
+ * The handler threw during a poll, a subscription's fragment handler or, when
+ * {@link #committedLog()} is true, a committed log's entry handler: {@link #fragments()} is
+ * the count the poll returned once the ABI was done, of fragments or of entries, or -1 when
+ * the poll also stopped on a fault, which the {@code fault()} of the object that was polled
+ * reads until its next poll; {@link #raised()} how many handler calls threw, and
  * {@link #getCause()} the first throwable, kept as thrown.
  */
 public final class HandlerException extends RuntimeException {
     private static final long serialVersionUID = 1L;
     private final int fragments;
     private final int raised;
+    private final boolean committedLog;
 
     public HandlerException(int fragments, int raised, Throwable cause) {
-        super("the fragment handler threw on " + raised + " of " + (fragments >= 0
-            ? "the " + fragments + " fragment(s) this poll delivered"
-            : "the fragments this poll delivered before it stopped on a fault, which Subscription.fault() reads")
-            + "; every fragment reached the handler once, in order. Fix the handler: its first throwable, " + cause
-            + ", is this exception's cause; polling again does not deliver these fragments again."
-            + " See clients/jvm/README.md#the-exception", cause);
+        this(fragments, raised, cause, false);
+    }
+
+    public HandlerException(int fragments, int raised, Throwable cause, boolean committedLog) {
+        super(describe(fragments, raised, cause, committedLog), cause);
         this.fragments = fragments;
         this.raised = raised;
+        this.committedLog = committedLog;
+    }
+
+    /** The message: what the handler threw on, the fragments of a subscription's poll or the
+     * entries of a committed log's, and what to do. The fault of a committed log's own image
+     * is reported by one poll (clients/jvm/README.md, "The committed log"), so its message
+     * names the log's own {@code fault()}. */
+    private static String describe(int fragments, int raised, Throwable cause, boolean committedLog) {
+        String one = committedLog ? "entry" : "fragment";
+        String many = committedLog ? "entries" : "fragments";
+        String delivered;
+        if (fragments < 0) {
+            delivered = committedLog
+                ? "the entries this poll delivered before it stopped on a fault, which this CommittedLog's fault() reads"
+                    + " until its next poll and nothing reports after that, so read it and keep it before polling again"
+                : "the fragments this poll delivered before it stopped on a fault, which Subscription.fault() reads";
+        } else if (committedLog) {
+            delivered = "the " + fragments + " " + (fragments == 1 ? one : many) + " this poll delivered";
+        } else {
+            delivered = "the " + fragments + " fragment(s) this poll delivered";
+        }
+        return "the " + one + " handler threw on " + raised + " of " + delivered
+            + "; every " + one + " reached the handler once, in order. Fix the handler: its first throwable, " + cause
+            + ", is this exception's cause; polling again does not deliver these " + many + " again."
+            + " See clients/jvm/README.md#the-exception";
     }
 
     public int fragments() {
@@ -29,5 +57,10 @@ public final class HandlerException extends RuntimeException {
 
     public int raised() {
         return raised;
+    }
+
+    /** Whether the poll was a committed log's, whose {@code fault()} then reads its fault. */
+    public boolean committedLog() {
+        return committedLog;
     }
 }

@@ -1,12 +1,11 @@
 #!/usr/bin/env python3
 """The check `just lint` runs over the generated clients (clients/README.md; ADR 0046, the
 boundary's second part): the per-message functions a generator writes, the wrapper of each
-of the ABI's seven per-message functions of a publication and a subscription
-(`crates/cavalry-ffi/README.md`: the claim, the reserved value, the commit and abort, the
-offer, the poll and the header's values), the wrapper of the committed log's two, its poll
-and an entry's position, where a package has a committed log object, Python's, Node's,
-Go's and .NET's so far (ADR 0070), and the trampoline that calls the user's handler, hold no lock, no `await` and no
-raise, in the language's forms, and so does every function of the package they call. For Python those
+of the ABI's nine per-message functions (`crates/cavalry-ffi/README.md`: the claim, the
+reserved value, the commit and abort, the offer, the poll and the header's values, and
+the committed log's poll and an entry's position; ADR 0070) and each trampoline that
+calls the user's handler, hold no lock, no `await` and no raise, in the language's
+forms, and so does every function of the package they call. For Python those
 forms are `threading`'s locks and anything else of `threading`, `async def`, `await`,
 `raise`, and building one of the package's own exceptions. For JavaScript, read from
 `clients/node/index.js` without a parser, by a tokenizer that drops comments and strings
@@ -40,7 +39,7 @@ run a goroutine's next cgo call on another OS thread and the ABI's error is the 
 thread's, so for Go it also fails any function of the package that reads that error,
 through `check` or `lastError`, without `runtime.LockOSThread()` and then
 `defer runtime.UnlockOSThread()` before its first ABI call (clients/go/README.md, "The
-thread's error"). For Java, read from the eleven files of `clients/jvm/src/com/appshapes/cavalry` by
+thread's error"). For Java, read from the thirteen files of `clients/jvm/src/com/appshapes/cavalry` by
 the same tokenizer, the forms are `synchronized`, as a modifier or a block, the locks of
 `java.util.concurrent` and a lock taken on any receiver, `.lock(`, `.tryLock(` or
 `.acquire(`, a blocking wait, `wait`, `join`, `await`, `park`, `sleep` or `take`, a future
@@ -205,8 +204,9 @@ RULES = {
     "jvm": {
         "file": os.path.join("src", "com", "appshapes", "cavalry", "Publication.java"),
         "files": [os.path.join("src", "com", "appshapes", "cavalry", name) for name in (
-            "Abi.java", "CavalryException.java", "Client.java", "FragmentHandler.java", "HandlerException.java",
-            "Header.java", "Image.java", "Publication.java", "Recording.java", "Replay.java", "Subscription.java")],
+            "Abi.java", "CavalryException.java", "Client.java", "CommittedLog.java", "EntryHandler.java",
+            "FragmentHandler.java", "HandlerException.java", "Header.java", "Image.java", "Publication.java",
+            "Recording.java", "Replay.java", "Subscription.java")],
         "functions": [
             "Publication.tryClaim",
             "Publication.setReservedValue",
@@ -215,6 +215,8 @@ RULES = {
             "Publication.offer",
             "Subscription.poll",
             "Subscription.onFragment",
+            "CommittedLog.poll",
+            "CommittedLog.onEntry",
             "Header.frameLength",
             "Header.version",
             "Header.flags",
@@ -225,7 +227,8 @@ RULES = {
             "Header.termId",
             "Header.reservedValue",
         ],
-        "raise_after": ("Subscription.poll", "cavalry_subscription_poll.invokeExact"),
+        "raise_after": [("Subscription.poll", "cavalry_subscription_poll.invokeExact"),
+                        ("CommittedLog.poll", "cavalry_committed_log_poll.invokeExact")],
         "guards": ["Header.ensure"],
     },
     # The .NET client calls the ABI through LibraryImport stubs (clients/dotnet/README.md):

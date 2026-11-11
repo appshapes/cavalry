@@ -40,7 +40,8 @@ C_LIMITS = {"INT64_MAX": ("long", "Long.MAX_VALUE"), "INT64_MIN": ("long", "Long
 CRITICAL = ("cavalry_publication_offer",)
 # The per-message methods of the generated Java, which clients/lint.py reads.
 PER_MESSAGE_JVM = ("Publication.tryClaim", "Publication.setReservedValue", "Publication.commit", "Publication.abort",
-                   "Publication.offer", "Subscription.poll", "Subscription.onFragment", "Header.frameLength",
+                   "Publication.offer", "Subscription.poll", "Subscription.onFragment", "CommittedLog.poll",
+                   "CommittedLog.onEntry", "Header.frameLength",
                    "Header.version", "Header.flags", "Header.type", "Header.termOffset", "Header.sessionId",
                    "Header.streamId", "Header.termId", "Header.reservedValue")
 
@@ -158,9 +159,11 @@ def write_jvm(header) -> dict[str, str]:
         base + "CavalryException.java": CAVALRY_EXCEPTION,
         base + "HandlerException.java": HANDLER_EXCEPTION,
         base + "FragmentHandler.java": FRAGMENT_HANDLER,
+        base + "EntryHandler.java": ENTRY_HANDLER,
         base + "Client.java": CLIENT,
         base + "Publication.java": PUBLICATION,
         base + "Subscription.java": SUBSCRIPTION,
+        base + "CommittedLog.java": COMMITTED_LOG,
         base + "Header.java": HEADER,
         base + "Image.java": IMAGE,
         base + "Recording.java": RECORDING,
@@ -390,24 +393,52 @@ public final class CavalryException extends RuntimeException {
 
 HANDLER_EXCEPTION = HEADING + r'''
 /**
- * The fragment handler threw during a poll: {@link #fragments()} is the count the poll
- * returned once the ABI was done, {@link #raised()} how many handler calls threw, and
+ * The handler threw during a poll, a subscription's fragment handler or, when
+ * {@link #committedLog()} is true, a committed log's entry handler: {@link #fragments()} is
+ * the count the poll returned once the ABI was done, of fragments or of entries, or -1 when
+ * the poll also stopped on a fault, which the {@code fault()} of the object that was polled
+ * reads until its next poll; {@link #raised()} how many handler calls threw, and
  * {@link #getCause()} the first throwable, kept as thrown.
  */
 public final class HandlerException extends RuntimeException {
     private static final long serialVersionUID = 1L;
     private final int fragments;
     private final int raised;
+    private final boolean committedLog;
 
     public HandlerException(int fragments, int raised, Throwable cause) {
-        super("the fragment handler threw on " + raised + " of " + (fragments >= 0
-            ? "the " + fragments + " fragment(s) this poll delivered"
-            : "the fragments this poll delivered before it stopped on a fault, which Subscription.fault() reads")
-            + "; every fragment reached the handler once, in order. Fix the handler: its first throwable, " + cause
-            + ", is this exception's cause; polling again does not deliver these fragments again."
-            + " See clients/jvm/README.md#the-exception", cause);
+        this(fragments, raised, cause, false);
+    }
+
+    public HandlerException(int fragments, int raised, Throwable cause, boolean committedLog) {
+        super(describe(fragments, raised, cause, committedLog), cause);
         this.fragments = fragments;
         this.raised = raised;
+        this.committedLog = committedLog;
+    }
+
+    /** The message: what the handler threw on, the fragments of a subscription's poll or the
+     * entries of a committed log's, and what to do. The fault of a committed log's own image
+     * is reported by one poll (clients/jvm/README.md, "The committed log"), so its message
+     * names the log's own {@code fault()}. */
+    private static String describe(int fragments, int raised, Throwable cause, boolean committedLog) {
+        String one = committedLog ? "entry" : "fragment";
+        String many = committedLog ? "entries" : "fragments";
+        String delivered;
+        if (fragments < 0) {
+            delivered = committedLog
+                ? "the entries this poll delivered before it stopped on a fault, which this CommittedLog's fault() reads"
+                    + " until its next poll and nothing reports after that, so read it and keep it before polling again"
+                : "the fragments this poll delivered before it stopped on a fault, which Subscription.fault() reads";
+        } else if (committedLog) {
+            delivered = "the " + fragments + " " + (fragments == 1 ? one : many) + " this poll delivered";
+        } else {
+            delivered = "the " + fragments + " fragment(s) this poll delivered";
+        }
+        return "the " + one + " handler threw on " + raised + " of " + delivered
+            + "; every " + one + " reached the handler once, in order. Fix the handler: its first throwable, " + cause
+            + ", is this exception's cause; polling again does not deliver these " + many + " again."
+            + " See clients/jvm/README.md#the-exception";
     }
 
     public int fragments() {
@@ -416,6 +447,11 @@ public final class HandlerException extends RuntimeException {
 
     public int raised() {
         return raised;
+    }
+
+    /** Whether the poll was a committed log's, whose {@code fault()} then reads its fault. */
+    public boolean committedLog() {
+        return committedLog;
     }
 }
 '''
@@ -430,6 +466,19 @@ import java.lang.foreign.MemorySegment;
 @FunctionalInterface
 public interface FragmentHandler {
     void onFragment(MemorySegment body, Header header);
+}
+'''
+
+ENTRY_HANDLER = HEADING + r'''
+import java.lang.foreign.MemorySegment;
+
+/**
+ * Receives each entry a committed log's poll delivers: {@code body} and {@code header} as a
+ * fragment's, and {@code position} the entry's position in the log.
+ */
+@FunctionalInterface
+public interface EntryHandler {
+    void onEntry(MemorySegment body, Header header, long position);
 }
 '''
 
@@ -642,6 +691,33 @@ public final class Client implements AutoCloseable {
             Abi.check("cavalry_stop_replay", (int) Abi.cavalry_stop_replay.invokeExact(handle, replaySessionId));
         } catch (Throwable t) {
             throw Abi.failed("cavalry_stop_replay", t);
+        }
+    }
+
+    /** Opens the committed log of the cluster member on this client's driver at
+     * {@code position}, 0 or the {@link CommittedLog#position()} an earlier log reached. Null
+     * while the driver hosts no member that has a recording of its log, so a service started
+     * before its member asks again (spec/cluster.md, "The service"; spec/c-abi.md,
+     * "Functions", committed log). */
+    public synchronized CommittedLog committedLog(long position) {
+        try (Arena arena = Arena.ofConfined()) {
+            MemorySegment out = arena.allocate(ADDRESS);
+            Abi.check("cavalry_committed_log", (int) Abi.cavalry_committed_log.invokeExact(out, handle, position));
+            MemorySegment log = out.get(ADDRESS, 0);
+            return log.address() == 0 ? null : new CommittedLog(log, this);
+        } catch (Throwable t) {
+            throw Abi.failed("cavalry_committed_log", t);
+        }
+    }
+
+    /** A committed log's close, under the client's lock: the ABI's result, with the thread's
+     * error for the caller to read. After this client's own close the handle is null, and
+     * the ABI frees the log and leaves the replay to the driver. */
+    synchronized int closeCommittedLog(MemorySegment log) {
+        try {
+            return (int) Abi.cavalry_committed_log_close.invokeExact(log, handle);
+        } catch (Throwable t) {
+            throw Abi.failed("cavalry_committed_log_close", t);
         }
     }
 }
@@ -1075,6 +1151,274 @@ public final class Subscription implements AutoCloseable {
         }
         if (result != 0) {
             CavalryException error = Abi.lastError("cavalry_subscription_close");
+            if (error.code() == Abi.ERR_POLLING) {
+                throw error;
+            }
+            handle = MemorySegment.NULL;
+            stub = MemorySegment.NULL;
+            arena.close();
+            throw error;
+        }
+        handle = MemorySegment.NULL;
+        stub = MemorySegment.NULL;
+        arena.close();
+    }
+}
+'''
+
+COMMITTED_LOG = HEADING + r'''
+import java.lang.foreign.Arena;
+import java.lang.foreign.FunctionDescriptor;
+import java.lang.foreign.MemorySegment;
+import java.lang.invoke.MethodHandle;
+import java.lang.invoke.MethodHandles;
+import java.lang.invoke.MethodType;
+import java.util.OptionalLong;
+
+import static java.lang.foreign.ValueLayout.ADDRESS;
+import static java.lang.foreign.ValueLayout.JAVA_INT;
+import static java.lang.foreign.ValueLayout.JAVA_LONG;
+
+/**
+ * A service's read of a cluster's committed log, beside the member on the client's driver
+ * (spec/cluster.md, "The service"): {@link #poll} calls the handler for each entry a quorum
+ * has committed, in order and none at or past the member's commit position, with the entry's
+ * position in the log, and returns the count, or the ABI's -1 when the poll stopped on a
+ * fault, which {@link #fault()} reads until the next poll, throwing a
+ * {@link HandlerException} once the ABI has returned when a handler call threw; the entry
+ * was delivered and is not delivered again. {@link #position()} is the position after the
+ * last entry delivered: where a service opens the log again. {@link #isEnded()} says when
+ * to stop reading and what tells a whole end from a short one. The handler is reached
+ * through an upcall stub this log makes once from a method handle bound to itself.
+ */
+@SuppressWarnings("restricted")
+public final class CommittedLog implements AutoCloseable {
+    private MemorySegment handle;
+    private final Client client;
+    private final Arena arena = Arena.ofShared();
+    private MemorySegment stub;
+    private final Header header;
+    private EntryHandler handler;
+    private boolean polling;
+    private int raised;
+    private Throwable first;
+    private final int memberId;
+    private final long recordingId;
+
+    CommittedLog(MemorySegment handle, Client client) {
+        this.handle = handle;
+        this.client = client;
+        this.header = new Header(arena);
+        try {
+            MethodHandle target = MethodHandles.lookup().findVirtual(CommittedLog.class, "onEntry",
+                MethodType.methodType(void.class, MemorySegment.class, MemorySegment.class, long.class,
+                    MemorySegment.class)).bindTo(this);
+            stub = Abi.LINKER.upcallStub(target, FunctionDescriptor.ofVoid(ADDRESS, ADDRESS, JAVA_LONG, ADDRESS), arena);
+        } catch (ReflectiveOperationException e) {
+            arena.close();
+            throw new CavalryException("cavalry_committed_log", 0, "the upcall stub could not be made: " + e);
+        }
+        try (Arena scratch = Arena.ofConfined()) {
+            MemorySegment k = scratch.allocate(Abi.cavalry_committed_log_constants_t);
+            Abi.check("cavalry_committed_log_constants", (int) Abi.cavalry_committed_log_constants.invokeExact(handle, k));
+            memberId = k.get(JAVA_INT, Abi.cavalry_committed_log_constants_t_member_id);
+            recordingId = k.get(JAVA_LONG, Abi.cavalry_committed_log_constants_t_recording_id);
+        } catch (Throwable t) {
+            arena.close();
+            throw Abi.failed("cavalry_committed_log_constants", t);
+        }
+    }
+
+    /** The id of the member whose log this is. */
+    public int memberId() {
+        return memberId;
+    }
+
+    /** The id of the member's recording of the log that this handle replays. */
+    public long recordingId() {
+        return recordingId;
+    }
+
+    /** Delivers up to {@code fragmentLimit} entries to the handler: one ABI call, the count it
+     * returned (or -1, with {@link Abi#errcode()} saying why: a fault, which {@link #fault()}
+     * reads until the next poll, or {@link Abi#ERR_POLLING} for a poll from inside a handler
+     * of this log, which the ABI refuses and which touches nothing here), and a
+     * {@link HandlerException} when a handler call threw, whose {@code fragments()} is that
+     * count, -1 included. A fault code of {@link Abi#ERR_FAULT_IMAGE} or
+     * {@link Abi#ERR_FAULT_IMAGES_FULL} is the one report that the replay's image failed a
+     * check or could not join: the log is ended short of its entries, and the next poll
+     * returns 0 and clears the fault, so keep this answer ({@link #isEnded()}). An entry
+     * whose handler call threw was delivered and is not delivered again:
+     * {@link #position()} is past it, and past every entry this poll delivered after it. */
+    public int poll(EntryHandler handler, int fragmentLimit) {
+        if (polling) {
+            try {
+                return (int) Abi.cavalry_committed_log_poll.invokeExact(handle, stub, MemorySegment.NULL, (long) fragmentLimit);
+            } catch (Throwable t) {
+                throw Abi.failed("cavalry_committed_log_poll", t);
+            }
+        }
+        this.handler = handler;
+        polling = true;
+        raised = 0;
+        first = null;
+        int count;
+        try {
+            count = (int) Abi.cavalry_committed_log_poll.invokeExact(handle, stub, MemorySegment.NULL, (long) fragmentLimit);
+        } catch (Throwable t) {
+            polling = false;
+            this.handler = null;
+            throw Abi.failed("cavalry_committed_log_poll", t);
+        }
+        polling = false;
+        this.handler = null;
+        if (raised == 0) {
+            return count;
+        }
+        Throwable cause = first;
+        first = null;
+        throw new HandlerException(count, raised, cause, true);
+    }
+
+    /** The upcall the ABI reaches through the stub, once per entry: the body as a segment over
+     * the log's bytes, no copy, the log's one {@link Header} pointed at the frame, the entry's
+     * position, which the ABI gives for the header its own poll handed over, and the handler
+     * called inside a catch that keeps its first throwable and counts every one, so that no
+     * throwable unwinds through the ABI's frames and every entry of the poll reaches the
+     * handler (clients/jvm/README.md, "The exception"). */
+    void onEntry(MemorySegment clientd, MemorySegment buffer, long length, MemorySegment frame) {
+        MemorySegment body = buffer.reinterpret(length);
+        header.set(frame);
+        try {
+            handler.onEntry(body, header, entryPosition(frame));
+        } catch (Throwable t) {
+            raised++;
+            if (first == null) {
+                first = t;
+            }
+        } finally {
+            header.clear();
+        }
+    }
+
+    /** The entry's position in the log, from the header the poll handed over. The downcall
+     * has a try of its own, so that the catch around the handler's call in
+     * {@link #onEntry} holds no {@code invokeExact} and stays the one that counts what the
+     * handler threw. */
+    private static long entryPosition(MemorySegment frame) {
+        try {
+            return (long) Abi.cavalry_committed_log_entry_position.invokeExact(frame);
+        } catch (Throwable t) {
+            throw Abi.failed("cavalry_committed_log_entry_position", t);
+        }
+    }
+
+    /** What the last poll stopped on; its code is 0 when the last poll returned a count. A
+     * poll that returns a count clears it, so read it after a poll that returned -1 and
+     * before the next. */
+    public Subscription.Fault fault() {
+        try (Arena scratch = Arena.ofConfined()) {
+            MemorySegment f = scratch.allocate(Abi.cavalry_fault_t);
+            Abi.check("cavalry_committed_log_fault", (int) Abi.cavalry_committed_log_fault.invokeExact(handle, f));
+            return new Subscription.Fault(f.get(JAVA_INT, Abi.cavalry_fault_t_code),
+                f.get(JAVA_INT, Abi.cavalry_fault_t_session_id), f.get(JAVA_LONG, Abi.cavalry_fault_t_position));
+        } catch (Throwable t) {
+            throw Abi.failed("cavalry_committed_log_fault", t);
+        }
+    }
+
+    /** The position after the last entry delivered, or the position the log was opened at
+     * before the first; -1 from inside a handler of this log's own poll. */
+    public long position() {
+        try {
+            return (long) Abi.cavalry_committed_log_position.invokeExact(handle);
+        } catch (Throwable t) {
+            throw Abi.failed("cavalry_committed_log_position", t);
+        }
+    }
+
+    /** The bound of the last poll: the highest commit position taken from the member's
+     * counter, 0 before the first poll. */
+    public long commitPosition() {
+        try {
+            return (long) Abi.cavalry_committed_log_commit_position.invokeExact(handle);
+        } catch (Throwable t) {
+            throw Abi.failed("cavalry_committed_log_commit_position", t);
+        }
+    }
+
+    /** Whether this log has come to its end: no poll will deliver another entry. Stop reading
+     * when it is true, not when a poll returns 0. The log delivered every entry it was owed
+     * only when three things hold: {@link #failedAt()} is empty, {@link #withdrawnAt()} is
+     * empty, and no {@link #poll} of this log returned -1 with the fault of the log's own
+     * image, {@link Abi#ERR_FAULT_IMAGE} when the image failed a check or
+     * {@link Abi#ERR_FAULT_IMAGES_FULL} when it could not join. That fault is reported once,
+     * by the poll that meets it: {@link #fault()} answers it only until the next poll, which
+     * returns 0 and clears it, and both reports are empty for such a log. So a service keeps
+     * that poll's answer, since nothing reports it later. In every case what the log
+     * delivered ends at {@link #position()}, where a service opens the log again. */
+    public boolean isEnded() {
+        try {
+            return (boolean) Abi.cavalry_committed_log_is_ended.invokeExact(handle);
+        } catch (Throwable t) {
+            throw Abi.failed("cavalry_committed_log_is_ended", t);
+        }
+    }
+
+    /** The position after the last frame the driver's replay of the member's recording played
+     * before it failed, or empty for a log that is live or that ended because its member
+     * closed or left the recording. No entry from that position on is delivered. The entries
+     * below it may still be on their way when this first is a position, so read it once
+     * {@link #isEnded()} is true. They have all been delivered by then unless the driver
+     * withdrew the replay first, which it does 5 s after a replay ends, one that failed
+     * included: {@link #withdrawnAt()} is then a position below this one, and the entries
+     * from there on, those below this position among them, were not delivered either. What
+     * the log delivered ends at {@link #position()}. */
+    public OptionalLong failedAt() {
+        try (Arena scratch = Arena.ofConfined()) {
+            MemorySegment position = scratch.allocate(JAVA_LONG);
+            boolean failed = (boolean) Abi.cavalry_committed_log_failed_at.invokeExact(handle, position);
+            return failed ? OptionalLong.of(position.get(JAVA_LONG, 0)) : OptionalLong.empty();
+        } catch (Throwable t) {
+            throw Abi.failed("cavalry_committed_log_failed_at", t);
+        }
+    }
+
+    /** The position at which the entries this log was not given begin, when the driver
+     * withdrew the replay before the polls had read it to its end, or empty. The driver keeps
+     * a replay 5 s after it ends and then withdraws it, read or not: a service that did not
+     * poll for that long after its member closed or left the log, or whose handler took that
+     * long, ends so. The entries from that position on were played and not delivered. A
+     * replay that failed is withdrawn in the same way: {@link #failedAt()} is then a position
+     * too, and this one is the lower. Read it once {@link #isEnded()} is true. */
+    public OptionalLong withdrawnAt() {
+        try (Arena scratch = Arena.ofConfined()) {
+            MemorySegment position = scratch.allocate(JAVA_LONG);
+            boolean withdrawn = (boolean) Abi.cavalry_committed_log_withdrawn_at.invokeExact(handle, position);
+            return withdrawn ? OptionalLong.of(position.get(JAVA_LONG, 0)) : OptionalLong.empty();
+        } catch (Throwable t) {
+            throw Abi.failed("cavalry_committed_log_withdrawn_at", t);
+        }
+    }
+
+    /** Stops the replay through the client and frees the handle and its upcall stub.
+     * Idempotent. After the client's own close it frees the handle alone, and the driver ends
+     * the replay by itself. The handle is freed whatever the ABI answers. When the ABI could
+     * not stop the replay, through a client that the driver or a timeout closed or within the
+     * response timeout, this throws the {@link CavalryException} after the handle and the
+     * stub are freed: the log is closed, a second close does nothing, and the driver ends the
+     * replay by itself. The one exception is a close from inside a handler of this log's own
+     * poll, which the ABI refuses with {@link Abi#ERR_POLLING} and which leaves the log open
+     * (spec/c-abi.md, "Calls during a claim or a poll"): it then throws the
+     * {@link CavalryException} and keeps the handle and the stub. */
+    @Override
+    public void close() {
+        if (handle.address() == 0) {
+            return;
+        }
+        int result = client.closeCommittedLog(handle);
+        if (result != 0) {
+            CavalryException error = Abi.lastError("cavalry_committed_log_close");
             if (error.code() == Abi.ERR_POLLING) {
                 throw error;
             }

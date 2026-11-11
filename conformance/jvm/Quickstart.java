@@ -780,6 +780,14 @@ public final class Quickstart {
             replay.close();
             replaySub.close();
             ipcSub.close();
+
+            // This driver hosts no cluster member, so it has no committed log to open: null,
+            // and no error (spec/c-abi.md, version 2). The log beside a member is
+            // conformance/jvm/CommittedLogRound's round.
+            if (client.committedLog(0) != null) {
+                fail("a driver that hosts no cluster member gave a committed log");
+            }
+            say("no committed log on a driver that hosts no cluster member");
         }
 
         // The report, never gated: the laptop's or the runner's cost of this side of the
