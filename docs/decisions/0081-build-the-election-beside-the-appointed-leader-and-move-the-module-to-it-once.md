@@ -77,13 +77,17 @@ and went to candidate ballot. `cluster.ballots_lost` counts a ballot that ended 
 no leader for the member, which canvasses again: its own at the election timeout, the
 one of the candidate it voted for when no new leadership term came within the
 election timeout, or either on a new leadership term for a log term the member did
-not report. `cluster.votes_for` and `cluster.votes_against` are registered as the
+not report. A candidate that reads another member's new leadership term for its own
+candidate term and follows it has a leader, so it counts no ballot lost: its move to
+follower is the step to follower replay, counted in `cluster.election_steps`.
+`cluster.votes_for` and `cluster.votes_against` are registered as the
 page has them. The machine `cluster_election` gains nominate, candidate ballot and
 follower ballot with fourteen rows, and `cluster_role` gains follower to candidate,
 candidate to leader and candidate to follower, the last with the counter of each of
-its three causes: a ballot lost, a vote for another candidate, and an election that
-fails on a leader's term the candidate cannot join, after which it is a follower in
-init, never a candidate. Two members that each count a
+its four causes: a ballot lost, a vote for another candidate, a step to follower
+replay on the term of the member that won, and an election that fails on that term
+when the candidate cannot join it, after which it is a follower in init, never a
+candidate. Two members that each count a
 candidacy and a ballot lost in one election are a split vote.
 
 **Nominate reads what canvass reads.** A member in nominate is a canvassing member
@@ -125,6 +129,10 @@ cannot join without it. A leader reads no new leadership term and holds no elect
   at init and leaves the log; a lost ballot goes back to canvass with the reports it
   has. An operator who sees elections take two seconds needs to tell a split vote
   from a member that cannot join, and one counter for both cannot.
+- **Count a ballot lost when a candidate follows another member that won its term.**
+  Lost. That ballot ended with a leader, and the candidate's election takes no
+  longer. Counted as lost, it would make a contested ballot that one candidate won
+  read in the counters like a split vote, which costs an election timeout.
 - **Leave a new leadership term unread in nominate.** Lost. The member would open a
   ballot for a higher term against a leader it had just heard of, and a leader with
   no step-down yet would never take it back.

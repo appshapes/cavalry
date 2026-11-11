@@ -433,12 +433,16 @@ fn every_transition_of_the_election_and_the_role_adds_one_to_a_counter_registere
     assert_eq!(outbid.election_state(), ElectionState::FollowerReplay);
 
     // A candidate that reads the new leadership term of its own candidate term from
-    // another member follows it.
+    // another member follows it, a follower by the step to follower replay. Its ballot
+    // ended with a leader, so it counts no ballot lost.
     let mut io = Stub::new();
     let mut beaten = elector(4);
     let ms = to_candidate_ballot(&mut watch, &mut beaten, &mut io, 1);
     watch.read(&mut beaten, &mut io, ms + 1, &new_leadership_term(1, 0));
     assert_eq!(beaten.election_state(), ElectionState::FollowerReplay);
+    assert_eq!(beaten.role(), Role::Follower);
+    assert_eq!(beaten.leader_member_id(), 1);
+    assert_eq!(beaten.counts().ballots_lost, 0);
 
     // A candidate ahead of that leader's term base needs a truncation: it fails, a
     // follower from the same call, and is one still when init begins its next

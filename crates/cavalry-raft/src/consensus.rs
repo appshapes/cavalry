@@ -341,9 +341,13 @@ pub struct Counts {
     pub log_images_lost: u64,
     /// `cluster.candidacies`: a ballot the member began as a candidate (ADR 0081).
     pub candidacies: u64,
-    /// `cluster.ballots_lost`: a ballot that ended with no leader, the member's own or
-    /// the one of the candidate it voted for, after which it canvassed again (ADR
-    /// 0081).
+    /// `cluster.ballots_lost`: a ballot that ended with no leader for the member, which
+    /// canvasses again: a candidate at the election timeout short of a quorum or with
+    /// a vote against, a member in follower ballot whose candidate's new leadership
+    /// term did not come within the election timeout, or either that reads a new
+    /// leadership term for a log term it did not report. A candidate that follows
+    /// another member's new leadership term for its own candidate term has a leader
+    /// and counts none (ADR 0081).
     pub ballots_lost: u64,
     /// `cluster.votes_for`: a vote the member sent for a candidate.
     pub votes_for: u64,
@@ -869,12 +873,13 @@ impl Consensus {
                         self.term = leadership_term_id;
                         self.term_base = term_base_log_position;
                         // The sender is this member's leader from here. A candidate
-                        // that reads it has lost its ballot to it.
+                        // that reads it follows the member that won its candidate
+                        // term: its ballot did not end with no leader, so no ballot
+                        // is lost (`cluster.ballots_lost`), and its move to follower
+                        // is the step to follower replay that `cluster.election_steps`
+                        // counts (ADR 0081).
                         self.leader_id = leader_member_id;
-                        if self.role == Role::Candidate {
-                            count(&mut self.counts.ballots_lost);
-                            self.role = Role::Follower;
-                        }
+                        self.role = Role::Follower;
                         self.log_session_id = log_session_id;
                         self.leader_log_position = log_position;
                         self.leader_word(clock, log_position, commit_position);
@@ -1028,7 +1033,8 @@ impl Consensus {
         self.enter(ElectionState::Init, clock);
     }
 
-    /// A ballot that ended with no leader, this member's own or its candidate's:
+    /// A ballot that ended with no leader, this member's own or its candidate's, at the
+    /// election timeout or on a new leadership term for a log term it did not report:
     /// counted, and the member canvasses again as a follower, with the reports and the
     /// members heard that it has.
     fn lose_ballot(&mut self, clock: Clock) -> usize {

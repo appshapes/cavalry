@@ -1325,8 +1325,8 @@ id = 128
 name = "cluster.ballots_lost"
 kind = "counter"
 scope = "client"
-doc = "Ballots that ended with no leader for one cluster member, which went back to canvass: its own, at the election timeout short of a quorum or with a vote against, or the ballot of the candidate it voted for, whose new leadership term did not come within the election timeout (spec/cluster.md, Roles and the election, states 3 and 4; ADR 0081); key: member id (i32), little-endian; label text: the member id in decimal."
-doctor = "A count that rises with cluster.candidacies on two members at once is a split vote: two candidates whose nomination delays ended within a round trip of each other each voted for themselves. The next canvass draws new delays, and the election takes one election timeout, 1 s, longer. A count that keeps rising with no cluster.terms_led on any member is a cluster with no member whose log a quorum will vote for: run cavalry doctor on each member's host and compare cluster.append_position."
+doc = "Ballots that ended with no leader for one cluster member, which went back to canvass: a candidate at the election timeout short of a quorum or with a vote against, a member in follower ballot whose candidate's new leadership term did not come within the election timeout, or either that read a new leadership term for a log term it did not report. A candidate that follows another member's new leadership term for its own candidate term has a leader and counts none (spec/cluster.md, Roles and the election, states 3 and 4, and Counters; ADR 0081); key: member id (i32), little-endian; label text: the member id in decimal."
+doctor = "A count that rises with cluster.candidacies on two members at once is a split vote: two candidates whose nomination delays ended within a round trip of each other each voted for itself. The next canvass draws new delays, and the election takes one election timeout, 1 s, longer. A cluster.candidacies that rises on a member with neither this count nor cluster.terms_led is a candidate that followed another member that won the same term, and its election took no longer. A count that keeps rising with no cluster.terms_led on any member is a cluster with no member whose log a quorum will vote for: run cavalry doctor on each member's host and compare cluster.append_position."
 
 [[counter]]
 id = 129
@@ -1347,10 +1347,11 @@ doctor = ""
 # A cluster member's role (spec/cluster.md, "Roles and the election"; ADR 0052, feature
 # 3). A member whose leader is appointed becomes the leader from follower, and no
 # member is a candidate (ADR 0063). A member that elects (ADR 0077, ADR 0081) is a
-# candidate from its nomination until it leads, loses its ballot, votes for another
-# or fails its election on a leader's term it cannot join. Candidate to follower is
-# listed with the counter of each of those three causes. No leader stops leading yet:
-# the step-down comes with card 228's next change.
+# candidate from its nomination until it leads, loses its ballot, votes for another,
+# follows another member that won its candidate term, or fails its election on such a
+# member's term when it cannot join it. Candidate to follower is listed with the
+# counter of each of those four causes. No leader stops leading yet: the step-down
+# comes with card 228's next change.
 
 [[state_machine]]
 name = "cluster_role"
@@ -1385,6 +1386,12 @@ machine = "cluster_role"
 from = "candidate"
 to = "follower"
 counter = "cluster.votes_for"
+
+[[transition]]
+machine = "cluster_role"
+from = "candidate"
+to = "follower"
+counter = "cluster.election_steps"
 
 [[transition]]
 machine = "cluster_role"
