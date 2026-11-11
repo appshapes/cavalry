@@ -719,6 +719,14 @@ fn a_service_reads_the_committed_log_on_every_member_and_nothing_past_the_commit
         assert_eq!((log.position(), log.commit_position()), (0, 0));
         assert!(!log.is_ended());
     }
+    // A member names its recording before the leader's election closes, state 5 on
+    // the leader and 15 on a follower, and the leader refuses an offer until it has
+    // closed: the offers below wait for every election to close.
+    run_until(&mut members, "every election closed", |members| {
+        members
+            .iter()
+            .all(|m| m.module.election_state() == ElectionState::Closed)
+    });
     let mut reads: Vec<Read> = vec![Vec::new(); 3];
 
     // Five hundred entries while every member runs: each service reads the term's
