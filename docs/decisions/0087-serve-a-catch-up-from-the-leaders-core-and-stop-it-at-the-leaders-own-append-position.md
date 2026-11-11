@@ -7,8 +7,11 @@
   election": a catch-up position above the leader's own append position is answered
   by nothing; the leader's log position that ends a catch-up is its own append
   position, and the follower's report must be for the leader's term; and stop
-  catch-up is sent for each such report. The page's version stays 0: no message
-  changes, and no member over a driver takes a vote yet (ADR 0081).
+  catch-up is sent for each such report. Adds one clause to row 9 of "Roles and the
+  election", a failure of follower log replication that ADR 0086 decided and the
+  row did not list: the second review of pull request 227 noted it after that
+  change's last run. The page's version stays 0: no message changes, and no member
+  over a driver takes a vote yet (ADR 0081).
 
 ## Context
 
