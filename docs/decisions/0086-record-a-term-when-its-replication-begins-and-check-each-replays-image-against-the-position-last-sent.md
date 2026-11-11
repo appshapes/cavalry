@@ -5,10 +5,12 @@
 - **Invariants affected:** 1, 3, 4, 6
 - **Supersedes:** none. Changes row 9 of `spec/cluster.md`, "Roles and the election",
   in four places: a member at the next term base log position records that term
-  before it asks, where the row had it recorded at the stop; what an image's join
-  position is checked against; what a term with nothing in it asks for; and what a
-  member carried past its stop does. Adds the steps into and out of follower log
-  replication to the row of `cluster.election_steps` in "Counters". The page's
+  before it asks, and only while its append position is still that base, where the
+  row had it recorded at the stop; what an image's join position is checked
+  against; what a term with nothing in it asks for; and what a member carried past
+  its stop does. Adds the steps into and out of follower log replication to the row
+  of `cluster.election_steps` in "Counters", and what state 9 checks a join position
+  against to the row of `cluster.join_position_mismatches` there. The page's
   version stays 0: no message changes, and no member over a driver takes a vote yet
   (ADR 0081).
 
