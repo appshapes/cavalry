@@ -1397,7 +1397,7 @@ id = 137
 name = "cluster.catchups"
 kind = "counter"
 scope = "client"
-doc = "Times one cluster member began, or served, a catch-up within the leader's term: on a follower, a catch-up position it sent from follower catch-up init; on the leader, a replay of its live recording that it started for such a member, which follows the recording until the leader stops it (spec/cluster.md, follower catch-up init, Messages outside an election, and Counters; ADR 0087). A member of this version counts the leader's replays alone; key: member id (i32), little-endian; label text: the member id in decimal."
+doc = "Times one cluster member began, or served, a catch-up within the leader's term: on a follower, a catch-up position it sent from follower catch-up init; on the leader, a replay of its live recording that it started for such a member, which follows the recording until the leader stops it (spec/cluster.md, follower catch-up init, Messages outside an election, and Counters; ADR 0087, ADR 0088); key: member id (i32), little-endian; label text: the member id in decimal."
 doctor = "A member that joined its leader's term behind the leader's log catches up from the leader's live recording, and this rises on both by one. It is how such a member returns, and nothing to act on. If it rises on a leader again and again for one member while that member's cluster.append_position does not reach the leader's, the member cannot keep up with the replay or cannot receive it: check that its catchup endpoint in the members string is the one its host listens on, and compare its cluster.append_position with the leader's over a few seconds."
 
 # A cluster member's role (spec/cluster.md, "Roles and the election"; ADR 0052, feature
@@ -1482,14 +1482,17 @@ counter = "cluster.elections_failed"
 # appointed leader"; ADR 0063, ADR 0067) and, for a member that elects, nominate and
 # the two ballots (ADR 0077, ADR 0081), the elections a leader holds (ADR 0082), and
 # follower log replication, which a member enters from the four states that read a
-# new leadership term and leaves for canvass at its stop (ADR 0086).
+# new leadership term and leaves for canvass at its stop (ADR 0086), and the three
+# states of the catch-up within a leader's term, which a member behind its leader's
+# log enters from follower replay and leaves for follower log init, already
+# subscribed, so that follower log init then steps to follower ready (ADR 0088).
 # Each transition the core makes is listed with every counter it adds one to; a
 # transition with more than one cause, closed to init with five, is listed with the
 # counter of each cause. A leader that elects and loses its quorum in leader log
 # replication or leader ready adds one to both counters of its row.
 [[state_machine]]
 name = "cluster_election"
-states = ["init", "canvass", "nominate", "candidate_ballot", "follower_ballot", "leader_log_replication", "leader_replay", "leader_init", "leader_ready", "follower_log_replication", "follower_replay", "follower_log_init", "follower_log_await", "follower_ready", "closed"]
+states = ["init", "canvass", "nominate", "candidate_ballot", "follower_ballot", "leader_log_replication", "leader_replay", "leader_init", "leader_ready", "follower_log_replication", "follower_replay", "follower_catchup_init", "follower_catchup_await", "follower_catchup", "follower_log_init", "follower_log_await", "follower_ready", "closed"]
 
 [[transition]]
 machine = "cluster_election"
@@ -1786,3 +1789,57 @@ machine = "cluster_election"
 from = "follower_log_replication"
 to = "init"
 counter = "cluster.log_replications_unavailable"
+
+[[transition]]
+machine = "cluster_election"
+from = "follower_replay"
+to = "follower_catchup_init"
+counter = "cluster.election_steps"
+
+[[transition]]
+machine = "cluster_election"
+from = "follower_catchup_init"
+to = "follower_catchup_await"
+counter = "cluster.election_steps"
+
+[[transition]]
+machine = "cluster_election"
+from = "follower_catchup_init"
+to = "init"
+counter = "cluster.elections_failed"
+
+[[transition]]
+machine = "cluster_election"
+from = "follower_catchup_await"
+to = "follower_catchup"
+counter = "cluster.election_steps"
+
+[[transition]]
+machine = "cluster_election"
+from = "follower_catchup_await"
+to = "init"
+counter = "cluster.elections_failed"
+
+[[transition]]
+machine = "cluster_election"
+from = "follower_catchup_await"
+to = "init"
+counter = "cluster.join_position_mismatches"
+
+[[transition]]
+machine = "cluster_election"
+from = "follower_catchup"
+to = "follower_log_init"
+counter = "cluster.election_steps"
+
+[[transition]]
+machine = "cluster_election"
+from = "follower_catchup"
+to = "init"
+counter = "cluster.elections_failed"
+
+[[transition]]
+machine = "cluster_election"
+from = "follower_log_init"
+to = "follower_ready"
+counter = "cluster.election_steps"

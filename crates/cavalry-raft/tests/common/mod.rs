@@ -74,6 +74,8 @@ pub struct Stub {
     /// The last append position sent: who it was for, the term it carried and the
     /// position.
     pub last_append: Option<(i32, i64, i64)>,
+    /// The flags of that append position.
+    pub last_append_flags: u8,
 }
 
 impl Stub {
@@ -100,6 +102,7 @@ impl Stub {
             stopped: [None; Stub::MEMBERS],
             catchup_image: None,
             last_append: None,
+            last_append_flags: 0,
         }
     }
 
@@ -161,11 +164,13 @@ impl Io for Stub {
         if let Message::AppendPosition {
             leadership_term_id,
             log_position,
+            flags,
             ..
         } = *message
             && !self.refuse_send
         {
             self.last_append = Some((member, leadership_term_id, log_position));
+            self.last_append_flags = flags;
         }
         !self.refuse_send
     }

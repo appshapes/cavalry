@@ -20,11 +20,11 @@
 use cavalry_proto::cluster::{
     APPEND_POSITION_FLAG_CATCHUP, CanvassAction, CanvassTerms, ELECTION_STATUS_INTERVAL_NS,
     ELECTION_TIMEOUT_NS, LEADER_HEARTBEAT_INTERVAL_NS, LEADER_HEARTBEAT_TIMEOUT_NS,
-    LIVE_ADD_MAX_WINDOW, LogReport,
-    MAX_MEMBERS, MemberPosition, Message, PROTOCOL_VERSION, STARTUP_CANVASS_TIMEOUT_NS, TermAction,
-    TermFields, TermSpan, TimeUnit, Vote, VoteRequest, appointed_canvass, appointed_leader, ballot,
-    candidate, canvass_position_action, commit_position, leader_ready, log_at_least,
-    new_leadership_term_action, next_fields, quorum, request_vote,
+    LIVE_ADD_MAX_WINDOW, LogReport, MAX_MEMBERS, MemberPosition, Message, PROTOCOL_VERSION,
+    STARTUP_CANVASS_TIMEOUT_NS, TermAction, TermFields, TermSpan, TimeUnit, Vote, VoteRequest,
+    appointed_canvass, appointed_leader, ballot, candidate, canvass_position_action,
+    commit_position, leader_ready, log_at_least, new_leadership_term_action, next_fields, quorum,
+    request_vote,
 };
 use cavalry_shm::counters::CounterId;
 use cavalry_shm::counters::generated::{
@@ -2695,12 +2695,7 @@ impl Consensus {
 
     /// The member's append position to its leader, with `flags`: the catch-up flag
     /// for a position appended from the leader's catch-up replay.
-    fn send_append_position_flagged<I: Io>(
-        &mut self,
-        clock: Clock,
-        flags: u8,
-        io: &mut I,
-    ) -> bool {
+    fn send_append_position_flagged<I: Io>(&mut self, clock: Clock, flags: u8, io: &mut I) -> bool {
         let sent = io.send(
             self.leader_id,
             &Message::AppendPosition {
