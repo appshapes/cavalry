@@ -27,8 +27,11 @@ Checks:
           a README; a change to spec/ needs an ADR in the same change whose Status is
           Accepted; an ADR that was already Accepted may change only its Status line;
           and CHANGELOG.md gains no entry line, one that begins `- ` or two spaces,
-          unless the same change removes an entry file under changelog.d/, which is a
-          release's fold: a change's entry is a file of its own there (ADR 0075)
+          but a fold's, which moves it out of the entry files under changelog.d/ in
+          the same change, and a correction's, which replaces a line where it
+          stands: a change's entry is a file of its own (ADR 0075, ADR 0076; `grown`
+          in scripts/changelog.py, which reads the change's two ends, from the
+          commit where its head left the base's history)
 
 The range: $LINT_DOCS_RANGE if set; in CI, origin/<base>...HEAD for a pull request and
 <before>..<after> for a push (HEAD~1..HEAD when <before> is the null commit); on a
@@ -40,6 +43,8 @@ Standard library only, like scripts/lint-workspace.py (ADR 0003).
 
 from __future__ import annotations
 
+import functools
+import importlib.util
 import json
 import os
 import re
@@ -311,6 +316,16 @@ def content_at(rev: str | None, path: str) -> str | None:
     return p.stdout if p.returncode == 0 else None
 
 
+@functools.lru_cache(maxsize=None)
+def changelog():
+    """scripts/changelog.py, which holds the rule on what CHANGELOG.md may gain, loaded
+    once."""
+    spec = importlib.util.spec_from_file_location("changelog", Path(__file__).resolve().parent / "changelog.py")
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
 def check_change() -> tuple[str, int]:
     base, head = pick_range()
     label = f"{base}..{head or 'working tree'}"
@@ -335,17 +350,21 @@ def check_change() -> tuple[str, int]:
         if not accepted:
             find("change: spec/ changed with no ADR in the same change whose Status is Accepted "
                  "(CLAUDE.md, Protocol: spec first, with an accepted ADR)")
-    # ADR 0075: a change's changelog entry is a file under changelog.d/. An entry line
-    # added to CHANGELOG.md is the line two pull requests conflict in; only a fold,
-    # which removes entry files in the same change, adds such lines.
+    # ADR 0075, ADR 0076: a change's changelog entry is a file under changelog.d/, and
+    # CHANGELOG.md grows by entry lines only as a fold moves them out of entry files.
+    # scripts/changelog.py has the rule and scripts/changelog-test.py its tests.
     if "CHANGELOG.md" in files:
-        appended = [line for line in file_diff(base, head, "CHANGELOG.md").splitlines()
-                    if line.startswith(("+- ", "+  "))]
-        folded = any(f.startswith("changelog.d/") and content_at(head, f) is None for f in files)
-        if appended and not folded:
-            find(f"change: CHANGELOG.md gained {len(appended)} entry line(s); a change's entry is a file of "
-                 "its own, changelog.d/<card>-<a few words>.md, and CHANGELOG.md is edited by a release's "
-                 "fold alone (changelog.d/README.md; ADR 0075)")
+        try:
+            appended = changelog().grown(ROOT, base, head)
+        except changelog().Unreadable as e:
+            appended = 0
+            find(f"change: what CHANGELOG.md gained from {label} could not be read, so its gate has no "
+                 f"answer: {e}; set LINT_DOCS_RANGE to a range this checkout holds, as in "
+                 "LINT_DOCS_RANGE=origin/master...HEAD (changelog.d/README.md, \"When it does not work\")")
+        if appended:
+            find(f"change: CHANGELOG.md gained {appended} entry line(s) that are neither a fold's nor a "
+                 "correction's; a change's entry is a file of its own, changelog.d/<card>-<a few words>.md "
+                 "(changelog.d/README.md, \"When it does not work\"; ADR 0075, ADR 0076)")
     for f in files:
         if not (f.startswith("docs/decisions/") and ADR_NAME.match(Path(f).name)):
             continue
