@@ -13,6 +13,9 @@
 #                                    swap is off, none of the timers setup-ubuntu.sh
 #                                    masks is active and no driver-bound interrupt names
 #                                    one of those CPUs
+#
+# It also prints how full /dev/shm is; that line never fails, since what killed bench
+# processes left there is removed by the next bench at its start (card 251).
 set -euo pipefail
 
 cpu=/sys/devices/system/cpu
@@ -94,6 +97,11 @@ echo "  swap devices:   $swap"
 echo "  timers:         $timers_total active${active_timers:+, of the masked set: $active_timers}"
 bound_list=$(bound_irqs | sed -E 's/^([0-9]+)\|([^|]*)\|(.*)$/\1 \2 on CPUs \3/' | paste -sd ';' - | sed 's/;/; /g')
 echo "  bound irqs:     ${bound_list:-none}"
+# How full /dev/shm is. What killed bench processes left there is memory until a bench of
+# the same user removes it at its start (card 251), so a host that is filling shows here.
+# Printed and never a finding: the bench this script runs before is what cleans up.
+shm_use=$(df --output=pcent /dev/shm 2>/dev/null | tail -1 | tr -d ' ' || true)
+echo "  /dev/shm:       ${shm_use:-unknown} used"
 echo "  cmdline:        $(cat /proc/cmdline)"
 
 [ $# -ge 1 ] || exit 0

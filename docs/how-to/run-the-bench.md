@@ -27,7 +27,8 @@ shared runner is
    just bench
    ```
 
-   It builds `cavalry-bench` in release, creates a log buffer and a counters file under
+   It builds `cavalry-bench` in release, removes what bench processes that were killed
+   left behind, creates a log buffer and a counters file under
    `/dev/shm` on Linux and the system's temporary directory elsewhere, and runs the
    benchmarks for one million messages each after a warm-up; CI runs five million. The
    warm-up is one rotation through all three terms, 196,608 messages for the default
@@ -897,6 +898,36 @@ shared runner is
 - The harness refuses to start: it needs to create files under `/dev/shm` or the
   system's temporary directory and at least two cores; the error names what it could
   not do.
+- `cavalry-bench: removed N entries under /dev/shm that bench processes no longer
+  running left`, before the table: not a failure. Each row keeps its files in
+  `/dev/shm/cavalry-bench-<pid>-<benchmark>`, with a `.log` and a `.probe` directory
+  beside it for some rows, and removes them when it ends, passed or failed. A process
+  that is killed first, a CI job cancelled by a newer push or stopped at its timeout,
+  or a run stopped with Ctrl-C, leaves them, and on `/dev/shm` they are memory. So
+  every run begins by removing its own user's entries whose process no longer runs.
+  An entry of a running process is never removed, so two runs on one host do not
+  disturb each other. A process counts as running when this run can see it: a bench
+  in a container with its own process ids that shares this `/dev/shm` is not seen,
+  so give such a container a `/dev/shm` of its own.
+- The same line with `N entries under /dev/shm that such processes left belong to
+  another user and were not touched`: the entries belong to a process that has ended
+  and to a user this run is not, the CI runner's when the run is by hand. The next run
+  as that user removes them. To remove them now, as that user, for a process id that
+  `ps -p <pid>` no longer finds: `rm -r /dev/shm/cavalry-bench-<pid>-*`.
+  `bench/host/check.sh` prints how full `/dev/shm` is.
+- The same line with `N entries that such processes left could not be removed, the
+  first: <path>: <error>`: an entry of this user's would not go, and the error says
+  why. An entry is renamed `cavalry-bench-<pid>-swept-<n>`, under this run's process
+  id, before it is removed, so that is the name it has now when the removal failed.
+  The next run tries it again; remove it by hand once the error's cause is gone.
+- The same line with `N entries under /dev/shm are named for other bench processes
+  and none was removed`, and then the reason. `which of them have ended cannot be
+  told here`: the run found neither a `/proc` with its own process in it nor a
+  `ps -p` that finds its own process, so it could not tell a killed bench from a
+  running one. `this process's user could not be read`: `/proc/self/status` had no
+  `Uid:` line, or `ps -o uid=` printed none, so the run could not tell its own
+  entries from another user's. Either way it removed nothing: remove what a killed
+  bench left by hand, as above.
 - `the recorded_purging benchmark failed: the purge removed no file of the pile in 60 s`:
   the replayer admitted the purge but removed nothing in a minute. Listing the largest
   pile takes the replayer a few seconds and no more; a replayer that removes nothing in
@@ -913,3 +944,12 @@ shared runner is
   purge's reply is handled inside the counting window, so such a run can also fail
   with `allocations per message` above 0, the conductor's answer to the command and
   not the path's.
+- `the recorded_purging benchmark failed: purging the pile: command lost
+  (response-timeout): no answer to purge segments within 10 s`: the replayer needed
+  longer than the client's response timeout to remove the pile. The pile is what a
+  probe removed in about 2.5 s just before the run, so the replayer removed files more
+  than four times slower than the probe did: something else was writing to the bench
+  directory's file system, or the replayer's CPU was busy. The message's advice is the
+  client's for any command and does not fit here: the driver is not stalled. Run the
+  row again with nothing else on that file system. If it repeats on an idle host, keep
+  the run's first line and report it.

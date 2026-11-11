@@ -411,12 +411,23 @@ impl Conductor {
         while received < 16 {
             let shared = &self.shared;
             let recordings = &self.recordings;
+            let registrations = &mut self.registrations;
+            let registry = &mut self.registry;
             let mut outcome = Ok(Outcome::Nothing);
             let got = self.receiver.receive(|type_id, message| {
                 outcome = event(
                     client_id,
                     shared.pending(),
                     &|correlation_id| recordings.awaits(correlation_id),
+                    // A subscription is registered before its command goes, so the
+                    // registrations queued now are admitted before the registry is
+                    // asked, and an image of this client's finds its subscription.
+                    &mut |registration_id| {
+                        while let Some(registration) = registrations.poll() {
+                            registry.admit(registration);
+                        }
+                        registry.holds(registration_id)
+                    },
                     type_id,
                     message,
                 );
@@ -607,6 +618,14 @@ impl Registry {
             }
         }
         work
+    }
+
+    /// Whether the subscription with `registration_id` is registered here, which is
+    /// what makes an `available image` this client's.
+    pub(crate) fn holds(&self, registration_id: i64) -> bool {
+        self.subscriptions
+            .iter()
+            .any(|registration| registration.registration_id == registration_id)
     }
 
     /// The registration of the subscription with `registration_id`.
@@ -890,7 +909,12 @@ fn log_name(log_file_name: &[u8]) -> Option<(LogDirectory, i64)> {
 /// `too-short`, `type`, `string` or `length`, closes it with [`Closed::Corrupt`], since
 /// an event it cannot decode may be the one it needed (`spec/client-protocol.md`, "What
 /// the driver rejects"); `available image` and `unavailable image` are for the
-/// subscription they name, whatever is pending, `replay stopped` is for the replay
+/// subscription they name, whatever is pending, and an `available image` is this
+/// client's only when `subscribes` accepts the subscriber registration id it names
+/// ([`Registry::holds`], asked once the queued registrations are admitted): the driver
+/// announces every image to every client, and one that is another client's is nothing
+/// to this one, with nothing copied from it, so that a conductor allocates nothing for
+/// its neighbours' images (card 253); `replay stopped` is for the replay
 /// handle it names, and `recording stopped` is for the recording handle it names; a
 /// `recording ready` or an `error` that names a correlation id `awaits` accepts is the
 /// second answer to an armed `start recording`, for that recording's handle, and is
@@ -904,6 +928,7 @@ fn event(
     client_id: i64,
     pending: i64,
     awaits: &dyn Fn(i64) -> bool,
+    subscribes: &mut dyn FnMut(i64) -> bool,
     type_id: i32,
     message: &[u8],
 ) -> Result<Outcome, Closed> {
@@ -923,12 +948,20 @@ fn event(
             source_identity,
             ..
         } => {
+            let log_name = log_name(log_file_name).ok_or(Closed::Corrupt)?;
+            // The driver announces an image to every client. Nothing is copied from
+            // one that is another client's: its source identity, `cavalry:ipc` or the
+            // sender's address, is made a `String` for this client's subscription
+            // alone, so a client's conductor allocates nothing for its neighbours.
+            if !subscribes(subscriber_registration_id) {
+                return Ok(Outcome::Nothing);
+            }
             return Ok(Outcome::ImageAvailable {
                 correlation_id,
                 session_id,
                 subscriber_registration_id,
                 position_counter_id: subscriber_position_counter_id,
-                log_name: log_name(log_file_name).ok_or(Closed::Corrupt)?,
+                log_name,
                 source_identity: String::from_utf8_lossy(source_identity).into_owned(),
             });
         }
@@ -1212,14 +1245,28 @@ mod tests {
         let (type_id, message) = ready(40);
         assert!(!registry.awaits(40));
         assert!(matches!(
-            event(5, 40, &|id| registry.awaits(id), type_id, &message),
+            event(
+                5,
+                40,
+                &|id| registry.awaits(id),
+                &mut |_| true,
+                type_id,
+                &message
+            ),
             Ok(Outcome::Answer(Response::RecordingReady { .. }))
         ));
         // `operation success` arms it. The image arrives before the user's thread has
         // cleared its pending id: the answer is the handle's all the same.
         registry.armed(40);
         assert!(registry.awaits(40));
-        let outcome = event(5, 40, &|id| registry.awaits(id), type_id, &message);
+        let outcome = event(
+            5,
+            40,
+            &|id| registry.awaits(id),
+            &mut |_| true,
+            type_id,
+            &message,
+        );
         let Ok(Outcome::ArmedAnswer(response)) = outcome else {
             panic!("the second answer was read as {outcome:?}");
         };
@@ -1249,7 +1296,14 @@ mod tests {
             error_code: 20,
             error_message: b"the stream's last subscription is gone",
         });
-        let outcome = event(5, NO_PENDING, &|id| registry.awaits(id), type_id, &message);
+        let outcome = event(
+            5,
+            NO_PENDING,
+            &|id| registry.awaits(id),
+            &mut |_| true,
+            type_id,
+            &message,
+        );
         let Ok(Outcome::ArmedAnswer(response)) = outcome else {
             panic!("the second answer was read as {outcome:?}");
         };
@@ -1273,7 +1327,14 @@ mod tests {
         assert!(!registry.awaits(42));
         let (type_id, message) = ready(42);
         assert_eq!(
-            event(5, NO_PENDING, &|id| registry.awaits(id), type_id, &message),
+            event(
+                5,
+                NO_PENDING,
+                &|id| registry.awaits(id),
+                &mut |_| true,
+                type_id,
+                &message
+            ),
             Ok(Outcome::Nothing)
         );
     }
@@ -1427,11 +1488,11 @@ mod tests {
     fn client_timeout_for_this_client_closes_it() {
         let (type_id, message) = CLIENT_TIMEOUT;
         assert_eq!(
-            event(5, NO_PENDING, &|_| false, type_id, message),
+            event(5, NO_PENDING, &|_| false, &mut |_| true, type_id, message),
             Err(Closed::ClientTimeout)
         );
         assert_eq!(
-            event(5, 3, &|_| false, type_id, message),
+            event(5, 3, &|_| false, &mut |_| true, type_id, message),
             Err(Closed::ClientTimeout)
         );
     }
@@ -1440,7 +1501,7 @@ mod tests {
     fn client_timeout_for_another_client_leaves_it_open() {
         let (type_id, message) = CLIENT_TIMEOUT;
         assert_eq!(
-            event(6, NO_PENDING, &|_| false, type_id, message),
+            event(6, NO_PENDING, &|_| false, &mut |_| true, type_id, message),
             Ok(Outcome::Nothing)
         );
     }
@@ -1449,11 +1510,11 @@ mod tests {
     fn a_decoded_event_nobody_waits_for_leaves_it_open() {
         let (type_id, message) = OPERATION_SUCCESS;
         assert_eq!(
-            event(5, NO_PENDING, &|_| false, type_id, message),
+            event(5, NO_PENDING, &|_| false, &mut |_| true, type_id, message),
             Ok(Outcome::Nothing)
         );
         assert_eq!(
-            event(5, 4, &|_| false, type_id, message),
+            event(5, 4, &|_| false, &mut |_| true, type_id, message),
             Ok(Outcome::Nothing),
             "another command's"
         );
@@ -1463,7 +1524,7 @@ mod tests {
     fn the_pending_commands_event_is_its_answer() {
         let (type_id, message) = OPERATION_SUCCESS;
         assert_eq!(
-            event(5, 3, &|_| false, type_id, message),
+            event(5, 3, &|_| false, &mut |_| true, type_id, message),
             Ok(Outcome::Answer(Response::Success { correlation_id: 3 }))
         );
         // `error`: type 3841, offending correlation id 4, code 1, message "abc".
@@ -1471,7 +1532,7 @@ mod tests {
             4, 0, 0, 0, 0, 0, 0, 0, 1, 0, 0, 0, 3, 0, 0, 0, 0x61, 0x62, 0x63, 0,
         ];
         assert_eq!(
-            event(5, 4, &|_| false, 3841, error),
+            event(5, 4, &|_| false, &mut |_| true, 3841, error),
             Ok(Outcome::Answer(Response::Error {
                 correlation_id: 4,
                 code: 1,
@@ -1499,7 +1560,14 @@ mod tests {
         message.extend_from_slice(source);
         message.push(0);
         assert_eq!(
-            event(5, NO_PENDING, &|_| false, 0x0F02, &message),
+            event(
+                5,
+                NO_PENDING,
+                &|_| false,
+                &mut |id| id == 6,
+                0x0F02,
+                &message
+            ),
             Ok(Outcome::ImageAvailable {
                 correlation_id: 7,
                 session_id: -2,
@@ -1508,6 +1576,41 @@ mod tests {
                 log_name: (LogDirectory::Publications, 7),
                 source_identity: "cavalry:ipc".to_string(),
             })
+        );
+        // The same image, announced to a client that does not hold subscription 6: it
+        // is nothing to that client, whatever it waits on, and the check is asked of
+        // the registration id the event names.
+        let mut asked = Vec::new();
+        assert_eq!(
+            event(
+                5,
+                NO_PENDING,
+                &|_| false,
+                &mut |id| {
+                    asked.push(id);
+                    false
+                },
+                0x0F02,
+                &message
+            ),
+            Ok(Outcome::Nothing)
+        );
+        assert_eq!(asked, [6]);
+        assert_eq!(
+            event(5, 7, &|_| false, &mut |_| false, 0x0F02, &message),
+            Ok(Outcome::Nothing)
+        );
+        // An image whose log file name is not the page's shape is corrupt before the
+        // subscription is asked for: an event this client cannot decode closes it,
+        // whoever the event was for.
+        let mut misnamed = message.clone();
+        // The log file name starts after 28 bytes of fields and its length: the slash
+        // of `publications/7.logbuffer` is its thirteenth byte.
+        assert_eq!(misnamed[32 + 12], b'/');
+        misnamed[32 + 12] = b'-';
+        assert_eq!(
+            event(5, NO_PENDING, &|_| false, &mut |_| false, 0x0F02, &misnamed),
+            Err(Closed::Corrupt)
         );
         assert_eq!(
             log_name(b"publications/42.logbuffer"),
@@ -1532,7 +1635,7 @@ mod tests {
                 "the `{error}` vector"
             );
             assert_eq!(
-                event(5, NO_PENDING, &|_| false, type_id, message),
+                event(5, NO_PENDING, &|_| false, &mut |_| true, type_id, message),
                 Err(Closed::Corrupt),
                 "the `{error}` vector"
             );
