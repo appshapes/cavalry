@@ -143,8 +143,11 @@ election does more, it does this instead, until the step that builds it (ADR 008
   When that member leads, it can ask another for a truncation below a commit position
   that member knows, which is refused at every election: the member does not join
   (card 267, with a test that makes the history).
-- Leader ready waits for every member the leader has heard, as the appointed leader's
-  does, since a follower that misses a term's first entry cannot catch up with it.
+- Leader ready waits for every member the leader has heard to count, as the appointed
+  leader's does, and for a quorum alone only once the leader heartbeat timeout has
+  passed in that state, where the page closes it on a quorum at once. The wait was for
+  a follower that missed a term's first entry and could not catch up with it; it can
+  now, and the wait goes in the next change (ADR 0088).
 - A member starts with no term: its record of terms and its candidate term are not
   read back.
 

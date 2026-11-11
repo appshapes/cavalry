@@ -147,9 +147,11 @@ the replay has brought the log to where it joined.
 - A member that comes back behind its leader, by any of the ways the electing path
   has, ends on the leader's log: it truncates what no quorum recorded, replicates
   the terms it missed, and catches up within the leader's term.
-- A leader whose election closed on a quorum, once the leader heartbeat timeout had
-  passed in leader ready, leaves no member behind for good: one that missed the
-  term's first entry catches up with it.
+- Leader ready still waits for every member the leader has heard to count, and for
+  a quorum alone only once the leader heartbeat timeout has passed in that state.
+  The page's row 8 closes it on a quorum at once. The wait was there because a
+  member that missed the term's first entry could not come back; it can now, so the
+  wait can go, in the next change to the core.
 - No operation is added to `Io`. Over a driver the catch-up's recording and the
   live one overlap from where the live image joined, and `Io::append_position` is
   the end of what the two hold together, which is the module's to keep when its I/O
