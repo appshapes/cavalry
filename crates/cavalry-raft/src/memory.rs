@@ -34,7 +34,7 @@ use std::collections::VecDeque;
 use cavalry_proto::cluster::{LEADER_HEARTBEAT_TIMEOUT_NS, Message, Stream, entry_position};
 
 use crate::consensus::{
-    Clock, Consensus, Counts, ElectionState, Io, Log, MembersRefused, Refused, Role,
+    Clock, Consensus, Counts, ElectionState, Io, Log, MembersRefused, Refused, Role, terms_above,
 };
 
 /// The MTU length the cluster's log positions are computed with: the UDP transport's
@@ -371,6 +371,11 @@ impl Io for MemberIo<'_> {
 
     fn append_position(&mut self) -> i64 {
         self.world.disks.get(self.own).map_or(0, |disk| disk.synced)
+    }
+
+    fn terms_after(&mut self, term: i64) -> [Option<(i64, i64)>; 2] {
+        let record = self.world.disks.get(self.own).map(|disk| &disk.terms);
+        terms_above(record.into_iter().flatten().copied(), term)
     }
 
     fn append(&mut self, entry: &Message<'_>) -> Result<bool, Self::Fault> {
