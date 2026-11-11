@@ -451,8 +451,11 @@ pub struct Counts {
     pub leader_heartbeat_timeouts: u64,
     /// `cluster.leadership_terms_ignored`: a new leadership term ignored for its term.
     pub leadership_terms_ignored: u64,
-    /// `cluster.join_position_mismatches`: an image of the log that joined at a
-    /// position other than the member's append position.
+    /// `cluster.join_position_mismatches`: an image of the live log that joined at a
+    /// position other than the member's append position, in follower log await; or,
+    /// in follower log replication, a replay's image that joined at a position other
+    /// than the one the member asked from, for the first image, or last sent its
+    /// leader, for each image after (ADR 0086).
     pub join_position_mismatches: u64,
     /// `cluster.log_images_lost`: a follower whose image of the leader's log was no
     /// longer available, so that it began again at init.

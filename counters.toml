@@ -1216,7 +1216,7 @@ name = "cluster.elections_failed"
 kind = "counter"
 scope = "client"
 doc = "Elections one cluster member failed in a state and began again at init: a log it cannot join without a truncation, a replication or a catch-up, an image of the log that joined at another position, or a step that made no progress for the leader heartbeat timeout, 10 s; and, for a leader that elects, in leader log replication or leader ready, a canvass position with a term above its own or active members that fell below a quorum (spec/cluster.md, Roles and the election; ADR 0082); key and label as cluster.elections."
-doctor = "A member whose elections keep failing cannot join its leader's log as it stands: read cluster.join_position_mismatches on it; a member that started after the leader's first entry, or on a log of its own, needs the catch-up, which this version does not have, so start it on an empty log directory before the leader's first entry."
+doctor = "A member whose elections keep failing cannot join its leader's log as it stands: read cluster.join_position_mismatches on it; a member that started after the leader's first entry, or on a log of its own, needs the catch-up, which this version does not have, so start it on an empty log directory before the leader's first entry. A member that elects and asked its leader for a term it missed, whose cluster.log_replications rose, fails in follower log replication: read cluster.log_replications_unavailable on it, which rises when the replay it asked for stopped arriving, and see that counter's text."
 
 [[counter]]
 id = 116
@@ -1239,8 +1239,8 @@ id = 118
 name = "cluster.join_position_mismatches"
 kind = "counter"
 scope = "client"
-doc = "Images of the log that joined one cluster follower at a position other than its append position, so that it failed its election and left the image (spec/cluster.md, Roles and the election, state 15); key and label as cluster.elections."
-doctor = "The member subscribed to the log after the leader had appended past its append position, and joining there would leave a hole in its log: start it on an empty log directory before the leader's first entry; this version has no catch-up."
+doc = "Images of the log that joined one cluster member somewhere other than where its log ends, so that it failed its election and left the image: in follower log await, state 15, an image of the live log that joined at a position other than its append position; in follower log replication, state 9, an image of a replay that joined at a position other than the one the member asked from, for the first image, or the append position it last sent its leader, for each image after (spec/cluster.md, Roles and the election, states 9 and 15; ADR 0086); key and label as cluster.elections."
+doctor = "In follower log await, state 15: the member subscribed to the log after the leader had appended past its append position, and joining there would leave a hole in its log: start it on an empty log directory before the leader's first entry; this version has no catch-up. In follower log replication, state 9, on a member whose cluster.log_replications rose because it asked its leader for a term it missed: a replay reached this member's catchup endpoint at a position other than the one it asked from or last sent its leader, so it was a replay this member did not ask for. Do not empty this member's log directory for it. Check, on every host, that no two members share a catchup endpoint in the members string: a leader replays to the endpoint its own members string names, so a replay that another member asked for can arrive here. Then read cluster.log_replications on the leader and on the other members to find which member asked. This member asks again at its next election."
 
 [[counter]]
 id = 119
