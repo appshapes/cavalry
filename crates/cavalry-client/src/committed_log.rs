@@ -161,9 +161,9 @@ impl Bound {
 /// [is ended](Self::is_ended), and the service opens the log again from
 /// [`position`](Self::position).
 ///
-/// Two ends are short of that, and each has its own report, read once the handle is
-/// ended. An ended handle has delivered every entry it was owed only when both are
-/// `None`.
+/// Three ends are short of that, and each has its own report, read once the handle is
+/// ended. An ended handle has delivered every entry it was owed only when all three
+/// are `None`.
 ///
 /// The driver's replay of the recording can fail: a segment file it cannot read, or a
 /// frame that fails a check. The replay ends there, with the member still running and
@@ -199,8 +199,10 @@ pub struct CommittedLog {
     /// The image is gone: the driver withdrew it, or it failed a check, or the replay
     /// ended before it joined this subscription. Nothing more arrives through it.
     gone: bool,
-    /// The replay's image failed a check and was removed: nothing more is delivered.
-    faulted: bool,
+    /// The fault of the replay's image, this log's own, from the poll that returned it
+    /// on: the image failed a check, was gone, or could not join, and nothing more is
+    /// delivered. Kept for the life of the handle ([`CommittedLog::faulted`]; ADR 0080).
+    faulted: Option<Fault>,
 }
 
 impl CommittedLog {
@@ -228,7 +230,7 @@ impl CommittedLog {
             position,
             read: position,
             gone: false,
-            faulted: false,
+            faulted: None,
         }))
     }
 
@@ -277,7 +279,7 @@ impl CommittedLog {
             Ok(_) => true,
             Err(Fault::Closed) => return Err(Fault::Closed),
             Err(fault) if self.is_own(&fault) => {
-                self.faulted = true;
+                self.faulted.get_or_insert(fault);
                 self.gone = true;
                 return Err(fault);
             }
@@ -333,7 +335,7 @@ impl CommittedLog {
         }
         match polled {
             Err(fault) if self.is_own(&fault) => {
-                self.faulted = true;
+                self.faulted.get_or_insert(fault);
                 Err(fault)
             }
             // Another session's image, announced since `discard_others` and refused as
@@ -365,10 +367,10 @@ impl CommittedLog {
     /// recording on, and the image has been read to where the replay ended; once the
     /// replay's image failed a check; or once the driver has withdrawn the image.
     ///
-    /// What an ended handle has delivered is said by two reports, read after this
-    /// returns true. With [`failed_at`](Self::failed_at) and
-    /// [`withdrawn_at`](Self::withdrawn_at) both `None`, and an image that passed
-    /// every check, it has delivered every entry below the bound it took, or below the
+    /// What an ended handle has delivered is said by three reports, read after this
+    /// returns true. With [`failed_at`](Self::failed_at),
+    /// [`withdrawn_at`](Self::withdrawn_at) and [`faulted`](Self::faulted) all `None`,
+    /// it has delivered every entry below the bound it took, or below the
     /// recording's stop when that is lower: open the log again from
     /// [`position`](Self::position) when the member names a recording again. With
     /// `failed_at` a position, the driver's replay failed there, and the entries from
@@ -376,7 +378,10 @@ impl CommittedLog {
     /// committed them. With `withdrawn_at` a position, the entries from it on were
     /// played and not delivered. Both can be positions: the driver withdraws a replay
     /// that failed as it does any other, and `withdrawn_at` is then the lower, so the
-    /// entries from it on, those below `failed_at` among them, were not delivered. In
+    /// entries from it on, those below `failed_at` among them, were not delivered.
+    /// With `faulted` a fault, this client's read of the replay's image stopped there;
+    /// `withdrawn_at` is then `None`, and `failed_at` is a position only when the
+    /// driver's replay failed as well, which is then the cause to look at first. In
     /// every case what the handle delivered ends at [`position`](Self::position).
     ///
     /// Until then a poll that returns 0 says only that nothing below the bound has
@@ -391,7 +396,7 @@ impl CommittedLog {
     /// position is the one the last poll left, so a call reads no shared memory but
     /// the replay's end, one acquire load.
     pub fn is_ended(&self) -> bool {
-        self.faulted
+        self.faulted.is_some()
             || self.gone
             || (self.bound.lost && self.read >= self.bound.commit_position)
             || self.replay.ended().is_some_and(|(end, _)| self.read >= end)
@@ -416,7 +421,7 @@ impl CommittedLog {
     /// recording this handle replayed, [`recording_id`](Self::recording_id), and on
     /// every member that has not left the log.
     pub fn withdrawn_at(&self) -> Option<i64> {
-        if !self.gone || self.faulted {
+        if !self.gone || self.faulted.is_some() {
             return None;
         }
         // The replay's end is known by the time its image goes: the driver sends
@@ -449,6 +454,29 @@ impl CommittedLog {
             Some((position, Some(ReplayStopReason::Failed))) => Some(position),
             _ => None,
         }
+    }
+
+    /// The fault of this log's own image, when it faulted: [`Fault::Image`] when a frame
+    /// of the replay's image failed a check, with the reader's position, or when the
+    /// image was [`Fault::GONE`] before this client's conductor read its announcement,
+    /// with no position; [`Fault::ImagesFull`] when the image could not join. `None`
+    /// for a log whose image has not faulted.
+    ///
+    /// It is the fault one [`poll`](Self::poll) returned, the first of this log's own
+    /// if there were ever a second, kept from that poll on for the life of the handle:
+    /// later polls return 0, and nothing else reports it. So
+    /// a service that did not keep that poll's answer reads it here, once
+    /// [`is_ended`](Self::is_ended) is true, and tells this end from a whole one
+    /// (ADR 0080). No entry from the fault on was delivered through this handle,
+    /// though the member may have committed more: what the handle delivered ends at
+    /// [`position`](Self::position), and the service opens the log again there.
+    ///
+    /// A fault of another session's image on the stream, another service's replay, is
+    /// not this log's: no poll of this handle returns it, and it is never kept. Nor
+    /// is [`Fault::Closed`], which is the client's state and which
+    /// [`Cavalry::closed`] reads.
+    pub fn faulted(&self) -> Option<Fault> {
+        self.faulted
     }
 
     /// The id of the member whose log this is.

@@ -11,12 +11,14 @@
  * A cluster started with `cavalry run` holds one entry, the first of its leader's term, 56
  * bytes in a frame of 88 at position 0, so the log's next position is 96. The round reads
  * that entry through the handler, with its position, its header and the handle's reads;
- * makes each of the eight calls the ABI refuses from inside the log's own handler, each
+ * makes each of the nine calls the ABI refuses from inside the log's own handler, each
  * after it has set the thread's error to another code, so that a refusal that answers what
  * a live log answers is told from an answer; opens a log and closes it with no poll
- * between, which leaves its client open (ADR 0078); checks where a handler's exception
- * goes and that its entry is not delivered again; opens the log again at 96, where nothing
- * is committed yet,
+ * between, which leaves its client open (ADR 0078); makes a log's own image fault, by one
+ * byte of the frame its replay wrote, and reads the fault from the poll that meets it and
+ * from `faulted()` for as long as the log is held (ADR 0080); checks where a handler's
+ * exception goes and that its entry is not delivered again; opens the log again at 96,
+ * where nothing is committed yet,
  * beside a log at 0 that it reads the entry through meanwhile, so that the log at 96 has had
  * the time a replay's image takes to join; closes twice; and closes a log after its client.
  * Every wait is bounded at 30 s and sleeps a millisecond after a poll that delivered
@@ -24,6 +26,7 @@
  * (ADR 0003).
  */
 
+const fs = require("fs");
 const path = require("path");
 
 const cavalry = require(path.join(__dirname, "..", "..", "clients", "node"));
@@ -110,7 +113,8 @@ function main() {
     inside = true;
     const calls = [["poll", () => log.poll(onEntry, 1)], ["position", () => log.position()],
       ["commitPosition", () => log.commitPosition()], ["isEnded", () => log.isEnded],
-      ["failedAt", () => log.failedAt()], ["withdrawnAt", () => log.withdrawnAt()]];
+      ["failedAt", () => log.failedAt()], ["withdrawnAt", () => log.withdrawnAt()],
+      ["faulted", () => log.faulted()]];
     for (const [name, call] of calls) {
       setAnotherError();
       refusals.push([name, call(), addon.cavalry_errcode()]);
@@ -137,7 +141,7 @@ function main() {
   const polling = constants.CAVALRY_ERR_POLLING;
   const expected = [["poll", -1, polling], ["position", -1, polling], ["commitPosition", -1, polling],
     ["isEnded", false, polling], ["failedAt", null, polling], ["withdrawnAt", null, polling],
-    ["fault", -1, polling], ["close", -1, polling]];
+    ["faulted", null, polling], ["fault", -1, polling], ["close", -1, polling]];
   if (!same(refusals, expected)) {
     fail(`the calls from inside the log's own handler answered ${JSON.stringify(refusals)}, not ` +
       `${JSON.stringify(expected)}`);
@@ -146,17 +150,17 @@ function main() {
     fail(`after the entry the log is at ${log.position()} with bound ${log.commitPosition()}, not ${NEXT} and ${NEXT}`);
   }
   const fault = log.fault();
-  if (log.isEnded || log.failedAt() !== null || log.withdrawnAt() !== null || fault.code !== 0 ||
-      fault.sessionId !== 0 || fault.position !== cavalry.NULL_POSITION) {
+  if (log.isEnded || log.failedAt() !== null || log.withdrawnAt() !== null || log.faulted() !== null ||
+      fault.code !== 0 || fault.sessionId !== 0 || fault.position !== cavalry.NULL_POSITION) {
     fail(`a live log read ended ${log.isEnded}, failed at ${log.failedAt()}, withdrawn at ` +
-      `${log.withdrawnAt()}, fault ${JSON.stringify(fault)}`);
+      `${log.withdrawnAt()}, faulted ${JSON.stringify(log.faulted())}, fault ${JSON.stringify(fault)}`);
   }
   for (let i = 0; i < 50; i++) {
     if (log.poll(onEntry, 16) !== 0) fail("an entry arrived with nothing more committed");
   }
   if (entries.length !== 1) fail(`the refused poll, or a later one, delivered more: ${JSON.stringify(entries)}`);
   say(`member ${log.memberId}'s entry at position 0 read once, next position ${log.position()}, commit position ` +
-    `${log.commitPosition()}; eight calls from inside the handler refused with CAVALRY_ERR_POLLING, each ` +
+    `${log.commitPosition()}; nine calls from inside the handler refused with CAVALRY_ERR_POLLING, each ` +
     `made with the thread's error at CAVALRY_ERR_NULL`);
   log.close();
   log.close(); // a second close does nothing
@@ -167,6 +171,63 @@ function main() {
   // tries), which twenty in a row and a log opened after them show.
   for (let i = 0; i < 20; i++) openLog(client, 0).close();
   if (client.isClosed) fail(`a log opened and closed with no poll between closed its client: ${client.closed()}`);
+
+  // A log whose own image faults (ADR 0080). The log's replay plays into a log buffer of its
+  // own, the one file that appears under the member's `publications/` when the log is opened.
+  // Before any poll of the log, the round changes one byte of the entry the replay wrote
+  // there, its frame's version, to one no reader accepts (spec/frame.md, "What a reader
+  // rejects"). The poll that reads the frame returns -1 with the fault, once; `fault()`
+  // answers it until the next poll; and `faulted()` answers it from that poll on, the same
+  // code, session and position, whatever is polled after.
+  const publications = path.join(memberDir, "publications");
+  const before = new Set(fs.readdirSync(publications));
+  const damaged = openLog(client, 0);
+  const replayed = fs.readdirSync(publications).filter((name) => !before.has(name)).sort();
+  if (replayed.length !== 1) {
+    fail(`opening a log made ${JSON.stringify(replayed)} under ${publications}, not the replay's one log buffer`);
+  }
+  if (damaged.faulted() !== null) fail(`a log that has not polled reads a fault: ${JSON.stringify(damaged.faulted())}`);
+  const replayLog = fs.openSync(path.join(publications, replayed[0]), "r+");
+  const frameLength = Buffer.alloc(4);
+  let wrote = Date.now() + WAIT_MS;
+  for (;;) {
+    fs.readSync(replayLog, frameLength, 0, 4, 0);
+    if (frameLength.readInt32LE(0) >= 32) break;
+    if (Date.now() > wrote) fail(`the replay wrote no frame at position 0 of ${replayed[0]} within ${WAIT_MS / 1000} s`);
+    sleep(IDLE_MS);
+  }
+  fs.writeSync(replayLog, Buffer.from([9]), 0, 1, 4); // the frame's version byte
+  fs.closeSync(replayLog);
+  const delivered = [];
+  const count = (body, header, position) => { delivered.push(position); };
+  wrote = Date.now() + WAIT_MS;
+  for (;;) {
+    const polled = damaged.poll(count, 16);
+    if (polled < 0) break;
+    if (polled > 0 || delivered.length > 0) fail(`a frame that fails its check was delivered: ${JSON.stringify(delivered)}`);
+    if (Date.now() > wrote) fail(`no poll met the damaged frame within ${WAIT_MS / 1000} s`);
+    sleep(IDLE_MS);
+  }
+  const met = damaged.fault();
+  if (met.code !== constants.CAVALRY_ERR_FAULT_IMAGE || met.position !== 0) {
+    fail(`the poll that met the damaged frame stopped on fault ${JSON.stringify(met)}, not ` +
+      `CAVALRY_ERR_FAULT_IMAGE at position 0`);
+  }
+  for (let polls = 0; polls < 20; polls++) {
+    if (!same(damaged.faulted(), met)) {
+      fail(`after ${polls} more polls faulted() is ${JSON.stringify(damaged.faulted())}, not the fault the poll ` +
+        `met, ${JSON.stringify(met)}`);
+    }
+    if (damaged.poll(count, 16) !== 0 || damaged.fault().code !== 0) {
+      fail(`a poll after the fault did not return 0 and clear fault(): ${JSON.stringify(damaged.fault())}`);
+    }
+  }
+  if (!damaged.isEnded || damaged.failedAt() !== null || damaged.withdrawnAt() !== null || delivered.length > 0) {
+    fail(`the faulted log read ended ${damaged.isEnded}, failed at ${damaged.failedAt()}, withdrawn at ` +
+      `${damaged.withdrawnAt()}, and delivered ${JSON.stringify(delivered)}`);
+  }
+  damaged.close();
+  if (client.isClosed) fail(`a log whose image faulted closed its client: ${client.closed()}`);
 
   // A handler that throws: the entry was delivered, the exception is thrown after the ABI
   // has returned, and the log's position is past the entry, so it is not delivered again.
@@ -250,9 +311,10 @@ function main() {
     fail(`a poll after the client's close did not stop on the closed fault: ${JSON.stringify(rest.fault())}`);
   }
   rest.close();
-  say(`twenty logs opened and closed with no poll between left the client open; a throwing handler's entry is ` +
-    `not delivered again; nothing at position ${NEXT} while a log at 0 beside it read the entry at 0; a log ` +
-    `closed after its client`);
+  say(`twenty logs opened and closed with no poll between left the client open; a log whose image faulted at ` +
+    `position 0 read fault ${JSON.stringify(met)} from the poll that met it and from faulted() after twenty more ` +
+    `polls; a throwing handler's entry is not delivered again; nothing at position ${NEXT} while a log at 0 ` +
+    `beside it read the entry at 0; a log closed after its client`);
 }
 
 try {

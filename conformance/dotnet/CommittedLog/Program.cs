@@ -9,11 +9,13 @@
 // bytes in a frame of 88 at position 0, so the log's next position is 96. The round opens
 // twenty logs and closes each with no poll between, which leaves its client open (ADR
 // 0078); reads that entry through the handler, with its position, its header and the
-// handle's reads; makes each of the eight calls the ABI refuses from inside the log's own
+// handle's reads; makes each of the nine calls the ABI refuses from inside the log's own
 // handler, each after it has set the thread's error to another code, so that a refusal
-// that answers what a live log answers is told from an answer; checks where a handler's
-// exception goes and that its entry is not delivered again; opens the log again at 96,
-// where nothing is committed yet,
+// that answers what a live log answers is told from an answer; makes a log's own image
+// fault, by one byte of the frame its replay wrote, and reads the fault from the poll that
+// meets it and from Faulted() for as long as the log is held (ADR 0080); checks where a
+// handler's exception goes and that its entry is not delivered again; opens the log again
+// at 96, where nothing is committed yet,
 // beside a log at 0 that it reads the entry through meanwhile, so that the log at 96 has
 // had the time a replay's image takes to join; closes twice; and closes a log after its
 // client. Every wait is bounded at 30 s and sleeps a millisecond after a poll that
@@ -23,6 +25,8 @@
 using System;
 using System.Collections.Generic;
 using System.Diagnostics;
+using System.IO;
+using System.Linq;
 using System.Threading;
 using Cavalry;
 
@@ -160,6 +164,8 @@ public static class CommittedLogRound
             setAnotherError();
             refusals.Add($"WithdrawnAt {log.WithdrawnAt()?.ToString() ?? "null"} {Abi.Errcode()}");
             setAnotherError();
+            refusals.Add($"Faulted {log.Faulted()?.ToString() ?? "null"} {Abi.Errcode()}");
+            setAnotherError();
             try
             {
                 log.GetFault();
@@ -210,7 +216,8 @@ public static class CommittedLogRound
         string[] expected =
         {
             $"Poll -1 {polling}", $"Position -1 {polling}", $"CommitPosition -1 {polling}", $"IsEnded False {polling}",
-            $"FailedAt null {polling}", $"WithdrawnAt null {polling}", $"GetFault -1 {polling}",
+            $"FailedAt null {polling}", $"WithdrawnAt null {polling}", $"Faulted null {polling}",
+            $"GetFault -1 {polling}",
             $"Close -1 {polling}",
         };
         if (string.Join("; ", refusals) != string.Join("; ", expected))
@@ -223,11 +230,11 @@ public static class CommittedLogRound
             Fail($"after the entry the log is at {log.Position()} with bound {log.CommitPosition()}, not {NEXT} and {NEXT}");
         }
         Subscription.Fault fault = log.GetFault();
-        if (log.IsEnded() || log.FailedAt() != null || log.WithdrawnAt() != null || fault.Code != 0 ||
-            fault.SessionId != 0 || fault.Position != Abi.NULL_POSITION)
+        if (log.IsEnded() || log.FailedAt() != null || log.WithdrawnAt() != null || log.Faulted() != null ||
+            fault.Code != 0 || fault.SessionId != 0 || fault.Position != Abi.NULL_POSITION)
         {
             Fail($"a live log read ended {log.IsEnded()}, failed at {log.FailedAt()}, withdrawn at " +
-                 $"{log.WithdrawnAt()}, fault {fault}");
+                 $"{log.WithdrawnAt()}, faulted {log.Faulted()}, fault {fault}");
         }
         for (int i = 0; i < 50; i++)
         {
@@ -241,10 +248,100 @@ public static class CommittedLogRound
             Fail("the refused poll, or a later one, delivered more: " + string.Join("; ", entries));
         }
         Say($"member {log.MemberId}'s entry at position 0 read once, next position {log.Position()}, commit position " +
-            $"{log.CommitPosition()}; eight calls from inside the handler refused with ERR_POLLING, each made " +
+            $"{log.CommitPosition()}; nine calls from inside the handler refused with ERR_POLLING, each made " +
             "with the thread's error at ERR_NULL");
         log.Close();
         log.Close(); // idempotent
+
+        // A log whose own image faults (ADR 0080). The log's replay plays into a log buffer of
+        // its own, the one file that appears under the member's `publications/` when the log is
+        // opened. Before any poll of the log, the round changes one byte of the entry the
+        // replay wrote there, its frame's version, to one no reader accepts (spec/frame.md,
+        // "What a reader rejects"). The poll that reads the frame returns -1 with the fault,
+        // once; GetFault() answers it until the next poll; and Faulted() answers it from that
+        // poll on, the same code, session and position, whatever is polled after.
+        string publications = Path.Combine(memberDir, "publications");
+        var before = new HashSet<string>(Directory.GetFiles(publications));
+        CommittedLog damaged = OpenLog(client, 0);
+        string[] replayed = Directory.GetFiles(publications).Where(file => !before.Contains(file)).ToArray();
+        if (replayed.Length != 1)
+        {
+            Fail($"opening a log made {string.Join(", ", replayed)} under {publications}, not the replay's one log buffer");
+        }
+        if (damaged.Faulted() != null)
+        {
+            Fail($"a log that has not polled reads a fault: {damaged.Faulted()}");
+        }
+        using (var replayLog = new FileStream(replayed[0], FileMode.Open, FileAccess.ReadWrite, FileShare.ReadWrite))
+        {
+            var frameLength = new byte[4];
+            until = Deadline();
+            while (true)
+            {
+                replayLog.Seek(0, SeekOrigin.Begin);
+                replayLog.ReadExactly(frameLength);
+                if (BitConverter.ToInt32(frameLength, 0) >= 32)
+                {
+                    break;
+                }
+                if (Stopwatch.GetTimestamp() > until)
+                {
+                    Fail($"the replay wrote no frame at position 0 of {replayed[0]} within {WAIT_SECONDS} s");
+                }
+                Thread.Sleep(IDLE_MILLISECONDS);
+            }
+            replayLog.Seek(4, SeekOrigin.Begin);
+            replayLog.WriteByte(9); // the frame's version byte
+            replayLog.Flush();
+        }
+        var delivered = new List<long>();
+        until = Deadline();
+        while (true)
+        {
+            int polled = damaged.Poll((body, header, position) => delivered.Add(position), 16);
+            if (polled < 0)
+            {
+                break;
+            }
+            if (polled > 0 || delivered.Count > 0)
+            {
+                Fail($"a frame that fails its check was delivered: {string.Join(", ", delivered)}");
+            }
+            if (Stopwatch.GetTimestamp() > until)
+            {
+                Fail($"no poll met the damaged frame within {WAIT_SECONDS} s");
+            }
+            Thread.Sleep(IDLE_MILLISECONDS);
+        }
+        Subscription.Fault met = damaged.GetFault();
+        if (met.Code != Abi.ERR_FAULT_IMAGE || met.Position != 0)
+        {
+            Fail($"the poll that met the damaged frame stopped on fault {met}, not ERR_FAULT_IMAGE at position 0");
+        }
+        for (int polls = 0; polls < 20; polls++)
+        {
+            Subscription.Fault? kept = damaged.Faulted();
+            if (kept != met)
+            {
+                Fail($"after {polls} more polls Faulted() is {kept?.ToString() ?? "null"}, not the fault the poll met, {met}");
+            }
+            if (damaged.Poll((body, header, position) => delivered.Add(position), 16) != 0 || damaged.GetFault().Code != 0)
+            {
+                Fail($"a poll after the fault did not return 0 and clear GetFault(): {damaged.GetFault()}");
+            }
+        }
+        if (!damaged.IsEnded() || damaged.FailedAt() != null || damaged.WithdrawnAt() != null || delivered.Count > 0)
+        {
+            Fail($"the faulted log read ended {damaged.IsEnded()}, failed at {damaged.FailedAt()}, withdrawn at " +
+                 $"{damaged.WithdrawnAt()}, and delivered {string.Join(", ", delivered)}");
+        }
+        damaged.Close();
+        if (client.IsClosed())
+        {
+            Fail($"a log whose image faulted closed its client: {client.Closed()}");
+        }
+        Say($"a log whose image faulted at position 0 read fault {met} from the poll that met it and from " +
+            "Faulted() after twenty more polls");
 
         // A handler that throws: the entry was delivered, the exception is thrown after the
         // ABI has returned, and the log's position is past the entry, so it is not delivered

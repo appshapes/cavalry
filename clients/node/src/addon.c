@@ -932,6 +932,17 @@ static napi_value fn_cavalry_committed_log_withdrawn_at(napi_env env, napi_callb
   return tuple;
 }
 
+static napi_value fn_cavalry_committed_log_faulted(napi_env env, napi_callback_info info) {
+  size_t argc = 2; napi_value argv[2];
+  if (!read_args(env, info, 2, &argc, argv, "cavalry_committed_log_faulted")) return NULL;
+  cavalry_committed_log_t *log = (cavalry_committed_log_t *) external_arg(env, argv[0], "log");
+  if (arg_failed) return NULL;
+  cavalry_fault_t *fault = (cavalry_fault_t *) struct_arg(env, argv[1], sizeof(cavalry_fault_t), _Alignof(cavalry_fault_t), "fault");
+  if (arg_failed) return NULL;
+  bool result = cavalry_committed_log_faulted(log, fault);
+  return make_bool(env, result);
+}
+
 static napi_value fn_cavalry_committed_log_constants(napi_env env, napi_callback_info info) {
   size_t argc = 2; napi_value argv[2];
   if (!read_args(env, info, 2, &argc, argv, "cavalry_committed_log_constants")) return NULL;
@@ -1373,6 +1384,7 @@ static napi_value init(napi_env env, napi_value exports) {
     { "cavalry_committed_log_is_ended", NULL, fn_cavalry_committed_log_is_ended, NULL, NULL, NULL, napi_default, NULL },
     { "cavalry_committed_log_failed_at", NULL, fn_cavalry_committed_log_failed_at, NULL, NULL, NULL, napi_default, NULL },
     { "cavalry_committed_log_withdrawn_at", NULL, fn_cavalry_committed_log_withdrawn_at, NULL, NULL, NULL, napi_default, NULL },
+    { "cavalry_committed_log_faulted", NULL, fn_cavalry_committed_log_faulted, NULL, NULL, NULL, napi_default, NULL },
     { "cavalry_committed_log_constants", NULL, fn_cavalry_committed_log_constants, NULL, NULL, NULL, napi_default, NULL },
     { "cavalry_committed_log_close", NULL, fn_cavalry_committed_log_close, NULL, NULL, NULL, napi_default, NULL },
     { "cavalry_context_init_v", NULL, fn_cavalry_context_init_v, NULL, NULL, NULL, napi_default, NULL },

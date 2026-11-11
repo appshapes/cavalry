@@ -58,19 +58,22 @@ An ended log delivered every committed entry it may read only when three things 
 - `log.withdrawnAt()` is empty. A position is where the entries begin that the log was
   not given, because the driver withdrew the replay, 5 s after it ended, before the
   service had read it.
-- No `log.poll` returned −1 with the fault of the log's own image: a `log.fault()`
-  whose `code()` is `Abi.ERR_FAULT_IMAGE`, the replay's image failed a check, or
-  `Abi.ERR_FAULT_IMAGES_FULL`, the image could not join.
+- `log.faulted()` is empty. A `Subscription.Fault` is where this client's read of the
+  replay's image, the log's own, stopped: its `code()` is `Abi.ERR_FAULT_IMAGE` when a
+  frame of the image failed a check, or when the image was gone before this client
+  read it, and `Abi.ERR_FAULT_IMAGES_FULL` when the image could not join. No entry
+  from the fault on was delivered.
 
-Read the two reports, each an `OptionalLong`, once `log.isEnded()` is true. The driver
-withdraws a replay that failed as it does any other, so both can be positions:
-`log.withdrawnAt()` is then the lower, and the entries from it on, those below
-`log.failedAt()` among them, were not delivered. The fault of the image is reported
-once. The poll that meets it returns −1, `log.fault()` answers it only until the next
-poll, the next poll returns 0 and clears it, and both reports are empty for such a
-log. So a service keeps that −1 and its fault when it gets them: nothing reports them
-later, and without them this end reads as a whole one. In every case what the log
-delivered ends at `log.position()`.
+Read the three reports, two `OptionalLong` and an `Optional<Subscription.Fault>`, once
+`log.isEnded()` is true. The driver withdraws a replay that failed as it does any
+other, so the first two can both be positions: `log.withdrawnAt()` is then the lower,
+and the entries from it on, those below `log.failedAt()` among them, were not
+delivered. The poll that meets the image's fault returns −1 once, `log.fault()`
+answers it until the next poll, and the next poll returns 0 and clears it there.
+`log.faulted()` answers it from that poll on, for as long as the log is held
+(ADR 0080). `log.withdrawnAt()` is empty for such a log, and `log.failedAt()` is a
+position only when the driver's replay failed as well, which is then the cause to
+look at first. In every case what the log delivered ends at `log.position()`.
 
 A committed log has an upcall stub of its own, as a subscription has. A handler's
 exception goes where a subscription's goes ("The exception"): every entry the ABI
@@ -136,11 +139,11 @@ entry, and the service decides after each.
   subscription returns −1 with `Abi.ERR_POLLING`, and the poll in progress goes on. A
   committed log's handler is held to the same rule. From inside it, a `poll` of the
   same log, `log.position()` and `log.commitPosition()` return −1, `log.isEnded()` is
-  `false`, `log.failedAt()` and `log.withdrawnAt()` are empty, and `log.fault()` and
-  `log.close()` throw `CavalryException`, each with `Abi.ERR_POLLING`, and the log
-  stays open. The `false` and the two empty answers are refusals there, not answers:
-  read the three after the poll has returned. The handler has each entry's own
-  `position`.
+  `false`, `log.failedAt()`, `log.withdrawnAt()` and `log.faulted()` are empty, and
+  `log.fault()` and `log.close()` throw `CavalryException`, each with
+  `Abi.ERR_POLLING`, and the log stays open. The `false` and the three empty answers
+  are refusals there, not answers: read the four after the poll has returned. The
+  handler has each entry's own `position`.
 - Never hand the ABI a claim struct that names a freed publication. The one
   `cavalry_buffer_claim_t` a publication keeps names its handle in its `publication`
   field, and the ABI reads that field on a commit, an abort and a reserved value. So
@@ -378,7 +381,8 @@ is consumed unseen; `poll` throws `HandlerException` once the ABI has returned, 
 what to do. `fragments()` is the poll's result: the count, or −1 when the poll also
 stopped on a fault, which `fault()` reads. A committed log's `HandlerException` has
 `committedLog()` true and speaks of entries, and when `fragments()` is −1 it names
-`log.fault()`, to read before the next poll ("The committed log"). The throwable is
+`log.fault()`, to read before the next poll, and `log.faulted()`, which keeps the
+fault of the log's own image ("The committed log"). The throwable is
 kept as thrown, an `Error` included, and stays the first when another follows it in
 the same poll.
 

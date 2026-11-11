@@ -8,7 +8,7 @@ use std::ffi::c_int;
 /// This page's version: the header's `CAVALRY_ABI_VERSION`, which
 /// `cavalry_context_init` passes to `cavalry_context_init_v` and the library compares
 /// with its own.
-pub const CAVALRY_ABI_VERSION: c_int = 2;
+pub const CAVALRY_ABI_VERSION: c_int = 3;
 /// The environment variable a context's default directory reads.
 pub const CAVALRY_DIR_ENV: &str = "CAVALRY_DIR";
 /// The images a subscription holds at most.

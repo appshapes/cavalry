@@ -9,11 +9,13 @@
 // bytes in a frame of 88 at position 0, so the log's next position is 96. The round opens
 // twenty logs and closes each with no poll between, which leaves its client open (ADR
 // 0078); reads that entry through the handler, with its position, its header and the
-// handle's reads; makes each of the eight calls the ABI refuses from inside the log's own
+// handle's reads; makes each of the nine calls the ABI refuses from inside the log's own
 // handler, each after it has set the thread's error to another code, so that a refusal
-// that answers what a live log answers is told from an answer; checks where a handler's
-// panic goes and that its entry is not delivered again; opens the log again at 96, where
-// nothing is committed yet,
+// that answers what a live log answers is told from an answer; makes a log's own image
+// fault, by one byte of the frame its replay wrote, and reads the fault from the poll that
+// meets it and from Faulted for as long as the log is held (ADR 0080); checks where a
+// handler's panic goes and that its entry is not delivered again; opens the log again at
+// 96, where nothing is committed yet,
 // beside a log at 0 that it reads the entry through meanwhile, so that the log at 96 has
 // had the time a replay's image takes to join; closes twice, with the log's slot in the
 // table freed; and closes a log after its client. Every wait is bounded at 30 s and sleeps
@@ -22,9 +24,11 @@
 package main
 
 import (
+	"encoding/binary"
 	"errors"
 	"fmt"
 	"os"
+	"path/filepath"
 	"reflect"
 	"strconv"
 	"strings"
@@ -185,6 +189,12 @@ func main() {
 		}
 		refusals = append(refusals, refusal{"WithdrawnAt", at, cavalry.Errcode()})
 		setAnotherError()
+		kept := int64(0)
+		if _, _, _, ok := log.Faulted(); ok {
+			kept = 1
+		}
+		refusals = append(refusals, refusal{"Faulted", kept, cavalry.Errcode()})
+		setAnotherError()
 		faulted := int64(0)
 		_, _, _, faultErr := log.Fault()
 		if faultErr != nil {
@@ -226,8 +236,8 @@ func main() {
 		fail("the poll refused from inside the log's own handler left Err %v, not ErrPolling", nested)
 	}
 	expected := []refusal{{"Poll", -1, polling}, {"Position", -1, polling}, {"CommitPosition", -1, polling},
-		{"IsEnded", 0, polling}, {"FailedAt", 0, polling}, {"WithdrawnAt", 0, polling}, {"Fault", -1, polling},
-		{"Close", -1, polling}}
+		{"IsEnded", 0, polling}, {"FailedAt", 0, polling}, {"WithdrawnAt", 0, polling}, {"Faulted", 0, polling},
+		{"Fault", -1, polling}, {"Close", -1, polling}}
 	if !reflect.DeepEqual(refusals, expected) {
 		fail("the calls from inside the log's own handler answered %v, not %v", refusals, expected)
 	}
@@ -238,9 +248,10 @@ func main() {
 	mustOK(err)
 	_, failed := log.FailedAt()
 	_, withdrawn := log.WithdrawnAt()
-	if log.IsEnded() || failed || withdrawn || code != 0 || sessionID != 0 || position != cavalry.NullPosition {
-		fail("a live log read ended %v, failed %v, withdrawn %v, fault %d %d %d", log.IsEnded(), failed, withdrawn, code,
-			sessionID, position)
+	_, _, _, kept := log.Faulted()
+	if log.IsEnded() || failed || withdrawn || kept || code != 0 || sessionID != 0 || position != cavalry.NullPosition {
+		fail("a live log read ended %v, failed %v, withdrawn %v, faulted %v, fault %d %d %d", log.IsEnded(), failed,
+			withdrawn, kept, code, sessionID, position)
 	}
 	for i := 0; i < 50; i++ {
 		count, err := log.Poll(onEntry, 16)
@@ -252,7 +263,7 @@ func main() {
 	if len(entries) != 1 {
 		fail("the refused poll, or a later one, delivered more: %v", entries)
 	}
-	say("member %d's entry at position 0 read once, next position %d, commit position %d; eight calls from inside the "+
+	say("member %d's entry at position 0 read once, next position %d, commit position %d; nine calls from inside the "+
 		"handler refused with ErrPolling, each made with the thread's error at ErrNull", log.MemberID, log.Position(),
 		log.CommitPosition())
 	mustOK(log.Close())
@@ -260,6 +271,103 @@ func main() {
 	if cavalry.Registered() != held {
 		fail("the table holds %d slots after the log's close, %d before its open", cavalry.Registered(), held)
 	}
+
+	// A log whose own image faults (ADR 0080). The log's replay plays into a log buffer of
+	// its own, the one file that appears under the member's `publications/` when the log is
+	// opened. Before any poll of the log, the round changes one byte of the entry the replay
+	// wrote there, its frame's version, to one no reader accepts (spec/frame.md, "What a
+	// reader rejects"). The poll that reads the frame returns -1 with the fault, once; Fault
+	// answers it until the next poll; and Faulted answers it from that poll on, the same
+	// code, session and position, whatever is polled after.
+	publications := filepath.Join(memberDir, "publications")
+	before := map[string]bool{}
+	listed, err := os.ReadDir(publications)
+	mustOK(err)
+	for _, file := range listed {
+		before[file.Name()] = true
+	}
+	damaged := openLog(client, 0)
+	var replayed []string
+	listed, err = os.ReadDir(publications)
+	mustOK(err)
+	for _, file := range listed {
+		if !before[file.Name()] {
+			replayed = append(replayed, file.Name())
+		}
+	}
+	if len(replayed) != 1 {
+		fail("opening a log made %v under %s, not the replay's one log buffer", replayed, publications)
+	}
+	if _, _, _, kept := damaged.Faulted(); kept {
+		fail("a log that has not polled reads a fault")
+	}
+	replayLog, err := os.OpenFile(filepath.Join(publications, replayed[0]), os.O_RDWR, 0)
+	mustOK(err)
+	frameLength := make([]byte, 4)
+	until = time.Now().Add(wait)
+	for {
+		_, err := replayLog.ReadAt(frameLength, 0)
+		mustOK(err)
+		if int32(binary.LittleEndian.Uint32(frameLength)) >= 32 {
+			break
+		}
+		if time.Now().After(until) {
+			fail("the replay wrote no frame at position 0 of %s within %v", replayed[0], wait)
+		}
+		time.Sleep(idle)
+	}
+	_, err = replayLog.WriteAt([]byte{9}, 4) // the frame's version byte
+	mustOK(err)
+	mustOK(replayLog.Close())
+	var delivered []int64
+	counted := func(body []byte, header *cavalry.Header, position int64) { delivered = append(delivered, position) }
+	until = time.Now().Add(wait)
+	for {
+		polled, err := damaged.Poll(counted, 16)
+		mustOK(err)
+		if polled < 0 {
+			break
+		}
+		if polled > 0 || len(delivered) > 0 {
+			fail("a frame that fails its check was delivered: %v", delivered)
+		}
+		if time.Now().After(until) {
+			fail("no poll met the damaged frame within %v", wait)
+		}
+		time.Sleep(idle)
+	}
+	metCode, metSession, metPosition, err := damaged.Fault()
+	mustOK(err)
+	if metCode != cavalry.ErrFaultImage || metPosition != 0 {
+		fail("the poll that met the damaged frame stopped on fault %d %d %d, not ErrFaultImage at position 0", metCode,
+			metSession, metPosition)
+	}
+	for polls := 0; polls < 20; polls++ {
+		keptCode, keptSession, keptPosition, kept := damaged.Faulted()
+		if !kept || keptCode != metCode || keptSession != metSession || keptPosition != metPosition {
+			fail("after %d more polls Faulted is %d %d %d %v, not the fault the poll met, %d %d %d", polls, keptCode,
+				keptSession, keptPosition, kept, metCode, metSession, metPosition)
+		}
+		polled, err := damaged.Poll(counted, 16)
+		mustOK(err)
+		cleared, _, _, err := damaged.Fault()
+		mustOK(err)
+		if polled != 0 || cleared != 0 {
+			fail("a poll after the fault returned %d and left Fault at %d, not 0 and 0", polled, cleared)
+		}
+	}
+	_, damagedFailed := damaged.FailedAt()
+	_, damagedWithdrawn := damaged.WithdrawnAt()
+	if !damaged.IsEnded() || damagedFailed || damagedWithdrawn || len(delivered) > 0 {
+		fail("the faulted log read ended %v, failed %v, withdrawn %v, and delivered %v", damaged.IsEnded(), damagedFailed,
+			damagedWithdrawn, delivered)
+	}
+	mustOK(damaged.Close())
+	if client.IsClosed() {
+		fail("a log whose image faulted closed its client: %d", client.Closed())
+	}
+	say("a log whose image faulted at position 0 read fault %d %d %d from the poll that met it and from Faulted after "+
+		"twenty more polls", metCode, metSession, metPosition)
 
 	// A handler that panics: the entry was delivered, the panic is returned as a
 	// *HandlerError once the ABI has returned, and the log's position is past the entry,
