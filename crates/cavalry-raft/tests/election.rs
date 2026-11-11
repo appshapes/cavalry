@@ -421,6 +421,146 @@ fn a_follower_that_is_behind_is_no_candidate_and_joins_once_it_is_level() {
     assert_eq!(cluster.log(behind), cluster.log(ahead));
 }
 
+/// A payload whose session message takes a frame of `frame` bytes in the log.
+fn payload_of_frame(frame: i64) -> Vec<u8> {
+    use cavalry_proto::cluster::{Message, entry_position};
+    (0..1_024usize)
+        .map(|length| vec![7u8; length])
+        .find(|payload| {
+            let entry = Message::SessionMessage {
+                leadership_term_id: 0,
+                cluster_session_id: -1,
+                timestamp: 0,
+                payload,
+            };
+            entry_position(0, entry.encoded_length(), 1_408)
+                .is_some_and(|after| after.position_after == frame)
+        })
+        .expect("a session message as long as a new leadership term event")
+}
+
+/// A member that missed a whole term and holds, in its place, an entry no quorum
+/// recorded that is exactly as long as that term. In a cluster of five, the first
+/// leader's last entry reaches one follower alone, and the leader stops. That follower
+/// is cut off while the other three elect the second leader, whose term holds its
+/// first entry and nothing more, as long as the entry the follower holds; then the
+/// second leader stops and the cut ends. The follower votes for the third leader,
+/// whose log is of a later term than its own, and the third leads at a base that is
+/// the follower's append position, byte for byte.
+///
+/// The follower's log differs from the third leader's between the second term's base
+/// and the third's, so it must not join there. The new leadership term it reads names
+/// the second term, the next its leader's record holds after the follower's own, at
+/// that term's base. A member whose append position is above that base truncates to
+/// it, which this path does not do yet: its election fails, and it records no term at
+/// a base its log does not reach by the leader's bytes. With two members stopped and
+/// this one not joined, the third leader has no quorum that recorded its term, and
+/// commits nothing: the cluster waits, where a leader that named its own term as the
+/// next would have counted the follower and committed over its bytes.
+#[test]
+fn a_member_whose_tail_is_as_long_as_a_term_it_missed_does_not_join_on_it() {
+    let ids = [0, 1, 2, 3, 4];
+    let mut safety = Safety::new(&ids);
+    let mut cluster = Cluster::with_election(&ids, 1).expect("five members");
+    safety.run_until(&mut cluster, 6_000, "the first election", |cluster| {
+        settled(cluster, &ids)
+    });
+    let first = cluster.leader().expect("a leader");
+    let first_term = cluster
+        .member(first)
+        .expect("a member")
+        .leadership_term_id();
+    // The term's first entry is synced a step after the election closes: its frame is
+    // what the log holds then.
+    safety.run(&mut cluster, 10);
+    let frame = cluster.append_position(first).expect("the leader");
+    cluster
+        .offer(b"committed by all")
+        .expect("the leader appends");
+    safety.run(&mut cluster, 1_000);
+    let second_base = cluster.commit_position(first).expect("the leader");
+    let others: Vec<i32> = ids.iter().copied().filter(|&id| id != first).collect();
+    let (tailed, rest) = (others[0], &others[1..]);
+
+    // One entry more, as long as a term's first entry, to one follower alone.
+    for &id in rest {
+        cluster.cut_between(first, id);
+    }
+    let tail_end = cluster
+        .offer(&payload_of_frame(frame))
+        .expect("the leader appends");
+    assert_eq!(tail_end, second_base + frame);
+    safety.run(&mut cluster, 100);
+    assert_eq!(cluster.append_position(tailed), Some(tail_end));
+    assert_eq!(cluster.commit_position(first), Some(second_base));
+
+    // The leader stops, and the follower that holds the entry is cut off: the other
+    // three elect the second leader without its vote, at the second term's base.
+    cluster.halt(first);
+    cluster.cut(tailed);
+    safety.run_until(&mut cluster, 14_000, "the second leader", |cluster| {
+        cluster
+            .leader()
+            .is_some_and(|leader| rest.contains(&leader))
+    });
+    safety.run_until(&mut cluster, 3_000, "the second election", |cluster| {
+        settled(cluster, rest)
+    });
+    let second = cluster.leader().expect("a leader");
+    safety.run(&mut cluster, 1_000);
+    let third_base = cluster.append_position(second).expect("the leader");
+    assert_eq!(
+        third_base, tail_end,
+        "the second term is as long as the entry"
+    );
+    let remaining: Vec<i32> = rest.iter().copied().filter(|&id| id != second).collect();
+    for &id in &remaining {
+        assert_eq!(cluster.append_position(id), Some(third_base));
+    }
+    assert_ne!(
+        cluster.log_to(tailed, third_base),
+        cluster.log_to(second, third_base),
+        "the two hold different bytes below one position"
+    );
+
+    // The second leader stops and the cut ends: the two that remain need the
+    // follower's vote, and it gives it, to a log of a later term than its own.
+    cluster.halt(second);
+    cluster.heal(tailed);
+    safety.run_until(&mut cluster, 14_000, "the third leader", |cluster| {
+        cluster
+            .leader()
+            .is_some_and(|leader| remaining.contains(&leader))
+    });
+    let third = cluster.leader().expect("a leader");
+    assert_eq!(
+        cluster
+            .member(third)
+            .expect("a member")
+            .leadership_term_id(),
+        first_term + 2
+    );
+    // The safety check runs after every step. A follower that joined at the third
+    // term's base would be told a commit position above bytes that were never
+    // committed, and the check would fail on it.
+    safety.run(&mut cluster, 12_000);
+    let member = cluster.member(tailed).expect("a member");
+    assert_ne!(member.election_state(), ElectionState::Closed);
+    assert!(member.counts().elections_failed > 0);
+    let (terms, _) = cluster.record_of_terms(tailed).expect("a member");
+    assert_eq!(
+        terms,
+        vec![(first_term, 0)],
+        "it records no term at a base it does not reach by the leader's bytes"
+    );
+    // No quorum has recorded the third term, so nothing of it is committed.
+    assert_eq!(
+        cluster.election_state(third),
+        Some(ElectionState::LeaderLogReplication)
+    );
+    assert_eq!(cluster.commit_position(third), Some(third_base));
+}
+
 /// The leader is cut off from both followers, its duty cycle still running. It leads
 /// for the leader heartbeat timeout more, appends what its process offers and commits
 /// none of it, with no quorum that records it. Then its active members fall below a

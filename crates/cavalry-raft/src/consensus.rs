@@ -19,7 +19,7 @@ use cavalry_proto::cluster::{
     CanvassAction, CanvassTerms, ELECTION_STATUS_INTERVAL_NS, ELECTION_TIMEOUT_NS,
     LEADER_HEARTBEAT_INTERVAL_NS, LEADER_HEARTBEAT_TIMEOUT_NS, LogReport, MAX_MEMBERS,
     MemberPosition, Message, PROTOCOL_VERSION, STARTUP_CANVASS_TIMEOUT_NS, TermAction, TermFields,
-    TimeUnit, Vote, VoteRequest, appointed_canvass, appointed_leader, ballot, candidate,
+    TermSpan, TimeUnit, Vote, VoteRequest, appointed_canvass, appointed_leader, ballot, candidate,
     canvass_position_action, commit_position, leader_ready, log_at_least,
     new_leadership_term_action, next_fields, quorum, request_vote,
 };
@@ -194,6 +194,15 @@ pub trait Io {
     /// Appends `entry` to the leader's log. `Ok(false)` when the publication is
     /// back-pressured and nothing was written.
     fn append(&mut self, entry: &Message<'_>) -> Result<bool, Self::Fault>;
+
+    /// The two lowest terms in the member's record of terms above `term`, each with its
+    /// term base log position, the lower first; `None` where the record holds no such
+    /// term. A leader reads them to tell a member whose log is of `term` which term
+    /// its record holds next, where that term begins and where it ends, the base of
+    /// the term after it (`spec/cluster.md`, "New leadership term, template 53"). The
+    /// record is the one [`Io::record_term`] wrote, read from memory: it returns at
+    /// once and cannot fail.
+    fn terms_after(&mut self, term: i64) -> [Option<(i64, i64)>; 2];
 }
 
 /// Why [`Consensus::new`] refused its members. The members are checked in the order of
@@ -460,6 +469,44 @@ fn sender(message: &Message<'_>) -> Option<i32> {
         } => Some(leader_member_id),
         _ => None,
     }
+}
+
+/// The two lowest terms of `record` above `term`, each with its term base log
+/// position, the lower first, and `None` where the record holds no such term: what
+/// [`Io::terms_after`] returns, from a record of terms read in any order.
+///
+/// ```
+/// use cavalry_raft::consensus::terms_above;
+///
+/// let record = [(0, 0), (1, 96), (3, 160)];
+/// assert_eq!(terms_above(record, 0), [Some((1, 96)), Some((3, 160))]);
+/// assert_eq!(terms_above(record, 1), [Some((3, 160)), None]);
+/// assert_eq!(terms_above(record, 3), [None, None]);
+/// ```
+pub fn terms_above(
+    record: impl IntoIterator<Item = (i64, i64)>,
+    term: i64,
+) -> [Option<(i64, i64)>; 2] {
+    let mut lowest: Option<(i64, i64)> = None;
+    let mut next: Option<(i64, i64)> = None;
+    for recorded in record {
+        if recorded.0 <= term {
+            continue;
+        }
+        match lowest {
+            Some(held) if recorded.0 == held.0 => {}
+            Some(held) if recorded.0 > held.0 => {
+                if next.is_none_or(|after| recorded.0 < after.0) {
+                    next = Some(recorded);
+                }
+            }
+            _ => {
+                next = lowest;
+                lowest = Some(recorded);
+            }
+        }
+    }
+    [lowest, next]
 }
 
 /// One more in a count, which stays at its highest value sooner than it wraps.
@@ -1562,9 +1609,20 @@ impl Consensus {
             return;
         };
         let peer = self.peer(index);
-        // This leader's record holds its own term alone, so the lowest term above any
-        // other the member reports is that term, at its base, with no end.
-        let next = next_fields(&[], peer.term, self.term, self.term_base);
+        // The lowest term this leader's record holds above the one the member
+        // reports, with its base and its end, the base of the term after it. The
+        // member truncates what it holds above that base, so the term named must be
+        // the next one the record holds and never a later one: a member told a later
+        // term keeps a tail of its own between the two bases and joins on it. An
+        // appointed leader's record holds its own term alone, which is then the next
+        // of any other, with no end.
+        let [next, after] = io.terms_after(peer.term);
+        let span = next.map(|(term, base)| TermSpan {
+            term,
+            base,
+            end: after.map_or(-1, |(_, base)| base),
+        });
+        let next = next_fields(span.as_slice(), peer.term, self.term, self.term_base);
         io.send(
             peer.id,
             &Message::NewLeadershipTerm {
