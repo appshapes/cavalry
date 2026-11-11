@@ -1,5 +1,5 @@
 //! Every move of the election and of the role, checked against `counters.toml`
-//! (CLAUDE.md, invariant 4; ADR 0067, ADR 0081). One call into a core, a duty cycle or
+//! (CLAUDE.md, invariant 4; ADR 0067, ADR 0081, ADR 0082). One call into a core, a duty cycle or
 //! a message read, moves its election at most once and its role at most once. After
 //! every call the test checks that each move it made is a `[[transition]]` of its
 //! machine, `cluster_election` or `cluster_role`, and that a counter registered for it
@@ -253,6 +253,60 @@ fn to_candidate_ballot(watch: &mut Watch, member: &mut Consensus, io: &mut Stub,
     ms
 }
 
+/// The same member taken on to leader log replication as the leader of term 0, on both
+/// votes, with its log added. Returns the next millisecond; the other members
+/// reported last in canvass, 505 ms before it.
+fn to_leader_log_replication(
+    watch: &mut Watch,
+    member: &mut Consensus,
+    io: &mut Stub,
+    ms: u64,
+) -> u64 {
+    let ms = to_candidate_ballot(watch, member, io, ms);
+    for voter in [1, 2] {
+        let vote = Message::Vote {
+            candidate_term_id: 0,
+            log_leadership_term_id: -1,
+            log_position: 0,
+            candidate_member_id: 0,
+            follower_member_id: voter,
+            vote: true,
+        };
+        watch.read(member, io, ms + 1, &vote);
+    }
+    watch.work(member, io, ms + 2);
+    assert_eq!(member.election_state(), ElectionState::LeaderLogReplication);
+    watch.work(member, io, ms + 3);
+    ms + 4
+}
+
+/// The leader taken on to leader ready, where it waits: member 1 has joined its log,
+/// and member 2, heard in canvass, has not. Returns the next millisecond.
+fn to_leader_ready(watch: &mut Watch, member: &mut Consensus, io: &mut Stub, ms: u64) -> u64 {
+    let ms = to_leader_log_replication(watch, member, io, ms);
+    watch.read(member, io, ms, &append_position(1, 0));
+    for step in 0..4 {
+        watch.work(member, io, ms + step);
+    }
+    assert_eq!(member.election_state(), ElectionState::LeaderReady);
+    ms + 4
+}
+
+/// The leader taken on to closed: both members have joined its log. Returns the next
+/// millisecond.
+fn to_closed_leader(watch: &mut Watch, member: &mut Consensus, io: &mut Stub, ms: u64) -> u64 {
+    let ms = to_leader_log_replication(watch, member, io, ms);
+    for step in 0..6 {
+        for other in [1, 2] {
+            watch.read(member, io, ms + step, &append_position(other, 0));
+        }
+        watch.work(member, io, ms + step);
+    }
+    assert_eq!(member.election_state(), ElectionState::Closed);
+    assert_eq!(member.role(), Role::Leader);
+    ms + 6
+}
+
 /// Member 1's request vote for `term`, with a log that holds no term.
 fn request_vote(term: i64) -> Message<'static> {
     Message::RequestVote {
@@ -502,6 +556,95 @@ fn every_transition_of_the_election_and_the_role_adds_one_to_a_counter_registere
     assert_eq!(voter.election_state(), ElectionState::FollowerBallot);
     watch.read(&mut voter, &mut io, 3, &new_leadership_term(1, 0));
     assert_eq!(voter.election_state(), ElectionState::Init);
+
+    // A leader that elects, its election closed, holds an election on a term above its
+    // own, a follower from the same call: on a canvass position, a request vote and a
+    // commit position.
+    let higher_canvass = Message::CanvassPosition {
+        log_leadership_term_id: 0,
+        log_position: 0,
+        leadership_term_id: 1,
+        follower_member_id: 2,
+        protocol_version: 0,
+    };
+    let higher_commit = Message::CommitPosition {
+        leadership_term_id: 1,
+        log_position: 0,
+        leader_member_id: 2,
+    };
+    for message in [higher_canvass.clone(), request_vote(1), higher_commit] {
+        let mut io = Stub::new();
+        let mut leader = elector(11);
+        let ms = to_closed_leader(&mut watch, &mut leader, &mut io, 1);
+        watch.read(&mut leader, &mut io, ms, &message);
+        assert_eq!(leader.election_state(), ElectionState::Init);
+        assert_eq!(leader.role(), Role::Follower);
+        watch.work(&mut leader, &mut io, ms + 1);
+        assert_eq!(leader.election_state(), ElectionState::Canvass);
+    }
+
+    // Its active members fall below a quorum: closed, it holds an election; in leader
+    // log replication and in leader ready, its election fails.
+    let mut io = Stub::new();
+    let mut leader = elector(12);
+    let ms = to_closed_leader(&mut watch, &mut leader, &mut io, 1);
+    watch.work(&mut leader, &mut io, ms + 10_000);
+    assert_eq!(leader.election_state(), ElectionState::Init);
+    assert_eq!(leader.role(), Role::Follower);
+    let mut io = Stub::new();
+    let mut leader = elector(13);
+    let ms = to_leader_log_replication(&mut watch, &mut leader, &mut io, 1);
+    watch.work(&mut leader, &mut io, ms + 10_000);
+    assert_eq!(leader.election_state(), ElectionState::Init);
+    assert_eq!(leader.role(), Role::Follower);
+    let mut io = Stub::new();
+    let mut leader = elector(14);
+    let ms = to_leader_ready(&mut watch, &mut leader, &mut io, 1);
+    watch.work(&mut leader, &mut io, ms + 10_000);
+    assert_eq!(leader.election_state(), ElectionState::Init);
+    assert_eq!(leader.role(), Role::Follower);
+
+    // A leader whose election has not closed fails it on a canvass position with a
+    // term above its own, in leader log replication and in leader ready.
+    let mut io = Stub::new();
+    let mut leader = elector(15);
+    let ms = to_leader_log_replication(&mut watch, &mut leader, &mut io, 1);
+    watch.read(&mut leader, &mut io, ms, &higher_canvass);
+    assert_eq!(leader.election_state(), ElectionState::Init);
+    assert_eq!(leader.counts().leader_quorum_losses, 0);
+    let mut io = Stub::new();
+    let mut leader = elector(16);
+    let ms = to_leader_ready(&mut watch, &mut leader, &mut io, 1);
+    watch.read(&mut leader, &mut io, ms, &higher_canvass);
+    assert_eq!(leader.election_state(), ElectionState::Init);
+    assert_eq!(leader.counts().leader_quorum_losses, 0);
+
+    // A follower that elects, member 2, its election closed behind member 0, holds an
+    // election on member 1's request vote and on member 1's commit position, each of a
+    // term above its own.
+    let commit_of_another = Message::CommitPosition {
+        leadership_term_id: 1,
+        log_position: 0,
+        leader_member_id: 1,
+    };
+    for message in [request_vote(1), commit_of_another] {
+        let mut io = Stub::new();
+        let mut follower = Consensus::with_election(&[0, 1, 2], 2, 17).expect("a member");
+        let ms = to_follower_log_await(
+            &mut watch,
+            &mut follower,
+            &mut io,
+            1,
+            &new_leadership_term(0, 0),
+        );
+        io.image = Some(0);
+        watch.work(&mut follower, &mut io, ms);
+        watch.work(&mut follower, &mut io, ms + 1);
+        assert_eq!(follower.election_state(), ElectionState::Closed);
+        watch.read(&mut follower, &mut io, ms + 2, &message);
+        assert_eq!(follower.election_state(), ElectionState::Init);
+        assert_eq!(follower.counts().higher_terms_seen, 1);
+    }
 
     for machine in [&watch.election, &watch.role] {
         let unmade = machine.unmade();

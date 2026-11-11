@@ -127,3 +127,4 @@ under `docs/` is listed here; `just lint-docs` fails on one that is not.
 - [0079. Hold the driver directory by a lock for the driver's life](decisions/0079-hold-the-driver-directory-by-a-lock-for-the-drivers-life.md)
 - [0077. Elect the leader by vote, close a ballot on the members heard, and build in the election's card what a lost leader needs](decisions/0077-elect-the-leader-by-vote-and-close-a-ballot-on-the-members-heard.md)
 - [0081. Build the election beside the appointed leader, and move the module to it once](decisions/0081-build-the-election-beside-the-appointed-leader-and-move-the-module-to-it-once.md)
+- [0082. Give up the lead on a higher term or a lost quorum, and count a follower's election on a higher term](decisions/0082-give-up-the-lead-on-a-higher-term-or-a-lost-quorum.md)

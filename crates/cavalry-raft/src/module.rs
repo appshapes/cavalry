@@ -403,8 +403,8 @@ impl Io for ClientIo {
         // term's base: a call for the same term is a step tried again, and one for
         // another term would append that term's entries where the earlier term's
         // publication stands. A member that led an earlier term in this process gives
-        // its publication and its recording up before it leads again, which is the
-        // step-down's to do (ADR 0077).
+        // its publication and its recording up before it leads again, in init, by
+        // `remove_log` (ADR 0082), which this module does not have yet.
         if self.log_term.is_some_and(|held| held != term) {
             return Err(RaftError::Unsupported {
                 what: "a term led by a member that still holds the log publication of an \
@@ -513,6 +513,16 @@ impl Io for ClientIo {
         self.log_subscription = None;
         self.image = LogImage::Awaited;
         Ok(())
+    }
+
+    /// Refused: the module's member is appointed (ADR 0081), and an appointed leader
+    /// holds no election, so its core never asks this. Closing the publication,
+    /// stopping the leader's recording and taking its stop as the log's end come when
+    /// the module's I/O is built for the election, before the module moves to it.
+    fn remove_log(&mut self) -> Result<(), Self::Fault> {
+        Err(RaftError::Unsupported {
+            what: "a leader that gives up its log publication to hold an election",
+        })
     }
 
     fn append_position(&mut self) -> i64 {

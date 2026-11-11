@@ -341,7 +341,7 @@ pub const CLUSTER_ELECTIONS: CounterId = CounterId(110);
 /// `cluster.terms_led`, a client counter: Terms one cluster member began to lead, on entering leader log replication: cluster.role going to leader (spec/cluster.md, The appointed leader); key and label as cluster.elections.
 pub const CLUSTER_TERMS_LED: CounterId = CounterId(111);
 
-/// `cluster.leader_quorum_losses`, a client counter: Times the active members of one cluster leader fell below a quorum, a member being active while its last report is younger than the leader heartbeat timeout, 10 s; the appointed leader stays the leader and its commit position stops until a quorum reports again (spec/cluster.md, The appointed leader); key and label as cluster.elections.
+/// `cluster.leader_quorum_losses`, a client counter: Times the active members of one cluster leader fell below a quorum, a member being active while its last report is younger than the leader heartbeat timeout, 10 s; a leader that elects holds an election, beginning at init, a failed election when it was in leader log replication or leader ready, and the appointed leader stays the leader and its commit position stops until a quorum reports again (spec/cluster.md, The commit position and The appointed leader; ADR 0082); key and label as cluster.elections.
 pub const CLUSTER_LEADER_QUORUM_LOSSES: CounterId = CounterId(112);
 
 /// `cluster.appointed_leader_behind`, a client counter: Members the appointed leader found holding a log ahead of its own, in canvass or in leader ready, once for each such member in an election; the leader does not lead, or does not close its election, while one reports so (spec/cluster.md, The appointed leader); key and label as cluster.elections.
@@ -350,7 +350,7 @@ pub const CLUSTER_APPOINTED_LEADER_BEHIND: CounterId = CounterId(113);
 /// `cluster.log_images_lost`, a client counter: Times one cluster follower's image of its leader's log was no longer available, so that it began its election again at init (spec/cluster.md, Roles and the election); key and label as cluster.elections.
 pub const CLUSTER_LOG_IMAGES_LOST: CounterId = CounterId(114);
 
-/// `cluster.elections_failed`, a client counter: Elections one cluster member failed in a state and began again at init: a log it cannot join without a truncation, a replication or a catch-up, an image of the log that joined at another position, or a step that made no progress for the leader heartbeat timeout, 10 s (spec/cluster.md, Roles and the election); key and label as cluster.elections.
+/// `cluster.elections_failed`, a client counter: Elections one cluster member failed in a state and began again at init: a log it cannot join without a truncation, a replication or a catch-up, an image of the log that joined at another position, or a step that made no progress for the leader heartbeat timeout, 10 s; and, for a leader that elects, in leader log replication or leader ready, a canvass position with a term above its own or active members that fell below a quorum (spec/cluster.md, Roles and the election; ADR 0082); key and label as cluster.elections.
 pub const CLUSTER_ELECTIONS_FAILED: CounterId = CounterId(115);
 
 /// `cluster.leader_heartbeat_timeouts`, a client counter: Times one cluster follower heard nothing from its leader for the leader heartbeat timeout, 10 s, and began its election again at init (spec/cluster.md, Roles and the election); key and label as cluster.elections.
@@ -397,6 +397,12 @@ pub const CLUSTER_VOTES_FOR: CounterId = CounterId(129);
 
 /// `cluster.votes_against`, a client counter: Votes one cluster member sent against a candidate: a request vote for a term at or below its candidate term, in which it has voted, or for a higher term from a candidate whose log is behind its own (spec/cluster.md, Messages during an election); key: member id (i32), little-endian; label text: the member id in decimal.
 pub const CLUSTER_VOTES_AGAINST: CounterId = CounterId(130);
+
+/// `cluster.leader_step_downs`, a client counter: Times one cluster leader whose election had closed held an election, beginning at init, on a term above its own: a canvass position with either term, a request vote whose candidate term id or a commit position whose leadership term id above its leadership term id, from another member. It is a follower from then on and gives up its log publication, Raft's step-down (spec/cluster.md, Messages outside an election, and Counters; ADR 0082); key: member id (i32), little-endian; label text: the member id in decimal.
+pub const CLUSTER_LEADER_STEP_DOWNS: CounterId = CounterId(131);
+
+/// `cluster.higher_terms_seen`, a client counter: Times one cluster follower whose election had closed held an election, beginning at init, on a term above its own: a request vote whose candidate term id or a commit position whose leadership term id above its leadership term id, from another member. The cluster began that term without it, and it joins it through the election it holds (spec/cluster.md, Messages outside an election, and Counters; ADR 0082); key: member id (i32), little-endian; label text: the member id in decimal.
+pub const CLUSTER_HIGHER_TERMS_SEEN: CounterId = CounterId(132);
 
 /// Every entry of `counters.toml`, in the file's order.
 pub const COUNTERS: &[CounterDef] = &[
@@ -1286,7 +1292,7 @@ pub const COUNTERS: &[CounterDef] = &[
         kind: Kind::Counter,
         scope: Scope::Client,
         doc: "Elections one cluster member began, from init: on starting, and each time it begins again after a failed or lost election (spec/cluster.md, Roles and the election). At most one more than cluster.elections_closed and cluster.elections_failed together, the one more being the election under way; key: member id (i32), little-endian; label text: the member id in decimal.",
-        doctor: "A cluster.elections that keeps rising is a member that keeps beginning again: read cluster.elections_failed, cluster.leader_heartbeat_timeouts and cluster.log_images_lost on the same member to see why each election ended.",
+        doctor: "A cluster.elections that keeps rising is a member that keeps beginning again: read cluster.elections_failed, cluster.leader_heartbeat_timeouts and cluster.log_images_lost on the same member to see why each election ended, and on a member that elects cluster.leader_quorum_losses, cluster.leader_step_downs and cluster.higher_terms_seen too.",
     },
     CounterDef {
         id: CLUSTER_TERMS_LED,
@@ -1301,7 +1307,7 @@ pub const COUNTERS: &[CounterDef] = &[
         name: "cluster.leader_quorum_losses",
         kind: Kind::Counter,
         scope: Scope::Client,
-        doc: "Times the active members of one cluster leader fell below a quorum, a member being active while its last report is younger than the leader heartbeat timeout, 10 s; the appointed leader stays the leader and its commit position stops until a quorum reports again (spec/cluster.md, The appointed leader); key and label as cluster.elections.",
+        doc: "Times the active members of one cluster leader fell below a quorum, a member being active while its last report is younger than the leader heartbeat timeout, 10 s; a leader that elects holds an election, beginning at init, a failed election when it was in leader log replication or leader ready, and the appointed leader stays the leader and its commit position stops until a quorum reports again (spec/cluster.md, The commit position and The appointed leader; ADR 0082); key and label as cluster.elections.",
         doctor: "The leader cannot commit while fewer than a quorum of members report to it: check that a majority of the members in the members string are running and that each reaches the leader's consensus endpoint.",
     },
     CounterDef {
@@ -1325,7 +1331,7 @@ pub const COUNTERS: &[CounterDef] = &[
         name: "cluster.elections_failed",
         kind: Kind::Counter,
         scope: Scope::Client,
-        doc: "Elections one cluster member failed in a state and began again at init: a log it cannot join without a truncation, a replication or a catch-up, an image of the log that joined at another position, or a step that made no progress for the leader heartbeat timeout, 10 s (spec/cluster.md, Roles and the election); key and label as cluster.elections.",
+        doc: "Elections one cluster member failed in a state and began again at init: a log it cannot join without a truncation, a replication or a catch-up, an image of the log that joined at another position, or a step that made no progress for the leader heartbeat timeout, 10 s; and, for a leader that elects, in leader log replication or leader ready, a canvass position with a term above its own or active members that fell below a quorum (spec/cluster.md, Roles and the election; ADR 0082); key and label as cluster.elections.",
         doctor: "A member whose elections keep failing cannot join its leader's log as it stands: read cluster.join_position_mismatches on it; a member that started after the leader's first entry, or on a log of its own, needs the catch-up, which this version does not have, so start it on an empty log directory before the leader's first entry.",
     },
     CounterDef {
@@ -1447,5 +1453,21 @@ pub const COUNTERS: &[CounterDef] = &[
         scope: Scope::Client,
         doc: "Votes one cluster member sent against a candidate: a request vote for a term at or below its candidate term, in which it has voted, or for a higher term from a candidate whose log is behind its own (spec/cluster.md, Messages during an election); key: member id (i32), little-endian; label text: the member id in decimal.",
         doctor: "",
+    },
+    CounterDef {
+        id: CLUSTER_LEADER_STEP_DOWNS,
+        name: "cluster.leader_step_downs",
+        kind: Kind::Counter,
+        scope: Scope::Client,
+        doc: "Times one cluster leader whose election had closed held an election, beginning at init, on a term above its own: a canvass position with either term, a request vote whose candidate term id or a commit position whose leadership term id above its leadership term id, from another member. It is a follower from then on and gives up its log publication, Raft's step-down (spec/cluster.md, Messages outside an election, and Counters; ADR 0082); key: member id (i32), little-endian; label text: the member id in decimal.",
+        doctor: "The leader stood still, or was parted from the other members, for longer than the leader heartbeat timeout, 10 s, while they elected another, and gave up the lead when it read the later term. A count that keeps rising on one member is a process that stops again and again: check the host's CPU throttling, and the path between this member's consensus endpoint and each other member's.",
+    },
+    CounterDef {
+        id: CLUSTER_HIGHER_TERMS_SEEN,
+        name: "cluster.higher_terms_seen",
+        kind: Kind::Counter,
+        scope: Scope::Client,
+        doc: "Times one cluster follower whose election had closed held an election, beginning at init, on a term above its own: a request vote whose candidate term id or a commit position whose leadership term id above its leadership term id, from another member. The cluster began that term without it, and it joins it through the election it holds (spec/cluster.md, Messages outside an election, and Counters; ADR 0082); key: member id (i32), little-endian; label text: the member id in decimal.",
+        doctor: "The follower followed a leader the other members had replaced, or another member asked for votes in a later term: this member or its leader was parted from the members that held the ballot. Read cluster.leader_step_downs and cluster.leader_quorum_losses on the member it followed, and check the path between this member's consensus endpoint and each other member's.",
     },
 ];
