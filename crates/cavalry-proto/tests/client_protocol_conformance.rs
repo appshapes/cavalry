@@ -134,6 +134,13 @@ fn command_fields(command: &Command<'_>) -> Value {
         } => {
             json!({"name": "purge_recording", "client_id": client_id, "correlation_id": correlation_id, "recording_id": recording_id})
         }
+        Command::SyncRecording {
+            client_id,
+            correlation_id,
+            recording_id,
+        } => {
+            json!({"name": "sync_recording", "client_id": client_id, "correlation_id": correlation_id, "recording_id": recording_id})
+        }
         Command::AddDestination {
             client_id,
             correlation_id,
