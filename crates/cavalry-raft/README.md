@@ -83,9 +83,10 @@ commit path runs per message.
   0066).
 - Runs the same core in memory: `memory::Cluster` is one to eight members in one process
   on a clock the caller steps, with loss, delay, a member cut from every other, two
-  members parted from each other (`cut_between`), paused syncs and a member started
-  again on an empty log directory to set: what the example below and most of the crate's
-  tests run. Every member holds a log of its own, the entries that reached it, so
+  members parted from each other (`cut_between`) or one that the other stops hearing
+  (`cut_one_way`), a member that stops (`halt`) or whose module stands still while
+  its driver receives (`stall`), paused syncs and a member started again on an empty
+  log directory to set: what the example below and most of the crate's tests run. Every member holds a log of its own, the entries that reached it, so
   `log(member)` is that member's bytes and a test can find two members that hold
   different bytes at one position. `memory::Cluster::with_election(member_ids, seed)` is
   the same cluster with members that elect: which member leads depends on the seed,

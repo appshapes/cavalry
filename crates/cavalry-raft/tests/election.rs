@@ -1,10 +1,12 @@
 //! The election, three cores at a time in memory (`spec/cluster.md`, "Roles and the
 //! election"; ADR 0077, ADR 0081, ADR 0082): members that start together elect one
 //! leader, a leader that stops is replaced by a member whose log a quorum votes for, a
-//! member votes once in a term, and a leader that is cut off or stood still gives up
-//! the lead. Every test checks, at every step, that no committed entry is lost, what
-//! one leader committed is in the log of every leader after it, and that no two
-//! members lead one term.
+//! member votes once in a term, a leader that is cut off or stood still gives up the
+//! lead, and a leader that a quorum cannot hear, or whose module stood still while
+//! its driver received, steps down on the request vote of the term after its own.
+//! Every test checks, at every step, that no committed entry is lost, what one
+//! leader committed is in the log of every leader after it, and that no two members
+//! lead one term.
 //!
 //! A member on this path has no truncation and no catch-up yet (the crate's README,
 //! "What the election does not do yet"), so the tests stop a leader when its
@@ -781,6 +783,235 @@ fn a_leader_that_stood_still_gives_up_the_lead_when_it_runs_again() {
         for &id in &others {
             assert_eq!(cluster.commit_position(id), Some(last), "seed {seed}");
             assert_eq!(cluster.log(id), cluster.log(second), "seed {seed}");
+        }
+    }
+}
+
+/// A partition that cuts one way, in a cluster of five. What the leader sends stops
+/// reaching three of its followers, and they still reach it; the fourth follower hears
+/// everyone and is heard by everyone. The three hear nothing from the leader for the
+/// leader heartbeat timeout, canvass, and are a quorum by themselves, so one of them
+/// asks for votes in the next term. Until then the leader leads: every member still
+/// reports to it, so it loses no quorum.
+///
+/// The candidate's request vote reaches the old leader and the fourth follower, each
+/// with its election closed. Each holds an election on the higher term: the leader
+/// steps down, counted in `cluster.leader_step_downs`, and the follower, whose leader
+/// it heard to the last, counts `cluster.higher_terms_seen`. The follower then
+/// canvasses to the new leader and joins it, level with the new term's base. The old
+/// leader stays in canvass while it is not heard, and when the partition ends it is
+/// told the new term and is behind the new leader's log, which it joins only by
+/// catching up.
+///
+/// The UDP transport holds a partition that cuts one way for the connection timeout,
+/// 5 s, at most ([`Cluster::cut_one_way`]). The in-memory cluster holds it for the ten
+/// seconds this takes: the test is of what the two members do with the request vote,
+/// whatever brings it.
+#[test]
+fn a_leader_that_three_of_five_cannot_hear_steps_down_on_their_request_vote() {
+    let ids = [0, 1, 2, 3, 4];
+    for seed in [1, 2, 3] {
+        let mut safety = Safety::new(&ids);
+        let mut cluster = Cluster::with_election(&ids, seed).expect("five members");
+        safety.run_until(&mut cluster, 6_000, "the first election", |cluster| {
+            settled(cluster, &ids)
+        });
+        let first = cluster.leader().expect("a leader");
+        let first_term = cluster
+            .member(first)
+            .expect("a member")
+            .leadership_term_id();
+        cluster
+            .offer(b"committed by all")
+            .expect("the leader appends");
+        safety.run(&mut cluster, 1_000);
+        let committed = cluster.commit_position(first).expect("the leader");
+        let others: Vec<i32> = ids.iter().copied().filter(|&id| id != first).collect();
+        let (unhearing, hearing) = (&others[..3], others[3]);
+        for &id in &others {
+            assert_eq!(cluster.append_position(id), Some(committed), "seed {seed}");
+        }
+
+        for &id in unhearing {
+            cluster.cut_one_way(first, id);
+        }
+        // For nine seconds nothing moves: the leader leads, and all four follow it.
+        safety.run(&mut cluster, 9_000);
+        assert_eq!(cluster.leader(), Some(first), "seed {seed}");
+        for &id in &others {
+            assert_eq!(
+                cluster.election_state(id),
+                Some(ElectionState::Closed),
+                "seed {seed}, member {id}"
+            );
+        }
+
+        let took = safety.run_until(&mut cluster, 3_000, "the leader's step-down", |cluster| {
+            cluster.role(first) == Some(Role::Follower)
+        });
+        assert!(took < 2_000, "seed {seed}: {took} ms");
+        let counts = cluster.counts(first).expect("a member");
+        assert_eq!(counts.leader_step_downs, 1, "seed {seed}: {counts:?}");
+        assert_eq!(counts.leader_quorum_losses, 0, "seed {seed}: {counts:?}");
+        // The follower that heard the leader throughout held its election on the same
+        // request vote, in the same step: no timeout ran, and it had not lost its image.
+        let counts = cluster.counts(hearing).expect("a member");
+        assert_eq!(counts.higher_terms_seen, 1, "seed {seed}: {counts:?}");
+        assert_eq!(
+            counts.leader_heartbeat_timeouts, 0,
+            "seed {seed}: {counts:?}"
+        );
+        assert_eq!(counts.log_images_lost, 0, "seed {seed}: {counts:?}");
+        for &id in unhearing {
+            let counts = cluster.counts(id).expect("a member");
+            assert_eq!(
+                counts.leader_heartbeat_timeouts, 1,
+                "seed {seed}: {counts:?}"
+            );
+            assert_eq!(counts.higher_terms_seen, 0, "seed {seed}: {counts:?}");
+        }
+
+        // One of the three leads the next term, and the four close behind it.
+        safety.run_until(&mut cluster, 13_000, "the second election", |cluster| {
+            settled(cluster, &others)
+        });
+        let second = cluster.leader().expect("a leader");
+        assert!(
+            unhearing.contains(&second),
+            "seed {seed}: member {second} leads"
+        );
+        assert!(
+            cluster
+                .member(second)
+                .expect("a member")
+                .leadership_term_id()
+                > first_term,
+            "seed {seed}"
+        );
+        let entry = cluster
+            .offer(b"committed by four")
+            .expect("the new leader appends");
+        safety.run(&mut cluster, 1_000);
+        for &id in &others {
+            assert_eq!(cluster.commit_position(id), Some(entry), "seed {seed}");
+            assert_eq!(cluster.log(id), cluster.log(second), "seed {seed}");
+        }
+        // The old leader hears the new one and is not heard: it canvasses, a follower
+        // with no leader.
+        let member = cluster.member(first).expect("a member");
+        assert_eq!(member.role(), Role::Follower, "seed {seed}");
+        assert_eq!(
+            member.election_state(),
+            ElectionState::Canvass,
+            "seed {seed}"
+        );
+        assert_eq!(member.leader_member_id(), -1, "seed {seed}");
+        assert_eq!(member.counts().terms_led, 1, "seed {seed}");
+
+        // The partition ends: it is told the term, and is behind the new leader's log.
+        for &id in unhearing {
+            cluster.heal_between(first, id);
+        }
+        safety.run(&mut cluster, 2_000);
+        let member = cluster.member(first).expect("a member");
+        assert_eq!(member.role(), Role::Follower, "seed {seed}");
+        assert!(member.counts().elections_failed > 0, "seed {seed}");
+        assert_eq!(cluster.leader(), Some(second), "seed {seed}");
+        assert_eq!(
+            cluster.append_position(first),
+            Some(committed),
+            "seed {seed}"
+        );
+    }
+}
+
+/// The leader's consensus module stands still while its driver runs, for longer than
+/// the leader heartbeat timeout. Its followers elect one of themselves and commit.
+/// What they sent to the old leader in that time waited for it: their last append
+/// positions, their canvass positions, the request vote of the candidate that now
+/// leads. When its module runs again it reads them in order, before its duty cycle.
+/// The append positions are read at the time it runs, so by them its followers
+/// report, and it would lose no quorum; the request vote, of a term above its own,
+/// is what makes it give up the lead, counted in `cluster.leader_step_downs`. It
+/// reads nothing after that in init, and canvasses.
+#[test]
+fn a_leader_whose_module_stood_still_steps_down_on_the_request_vote_that_waited() {
+    let ids = [0, 1, 2];
+    for seed in [1, 2, 3, 12] {
+        let mut safety = Safety::new(&ids);
+        let (mut cluster, first) = elected(seed, &mut safety);
+        let first_term = cluster
+            .member(first)
+            .expect("a member")
+            .leadership_term_id();
+        let others: Vec<i32> = ids.iter().copied().filter(|&id| id != first).collect();
+        cluster
+            .offer(b"committed by all")
+            .expect("the leader appends");
+        safety.run(&mut cluster, 1_000);
+        let committed = cluster.commit_position(first).expect("the leader");
+
+        cluster.stall(first);
+        assert_eq!(cluster.leader(), None, "seed {seed}");
+        assert_eq!(
+            cluster.offer(b"to a module that stands still"),
+            Err(Refused::NotLeader),
+            "seed {seed}"
+        );
+        safety.run_until(
+            &mut cluster,
+            14_000,
+            "a leader of the next term",
+            |cluster| cluster.leader().is_some(),
+        );
+        safety.run_until(&mut cluster, 3_000, "the second election", |cluster| {
+            settled(cluster, &others)
+        });
+        let second = cluster.leader().expect("a leader");
+        let entry = cluster
+            .offer(b"committed by two")
+            .expect("the new leader appends");
+        safety.run(&mut cluster, 1_000);
+        assert_eq!(cluster.commit_position(second), Some(entry), "seed {seed}");
+        // It still reads leader of its term, and what was sent to it waits.
+        assert_eq!(cluster.role(first), Some(Role::Leader), "seed {seed}");
+        assert!(
+            cluster.in_flight() > 100,
+            "seed {seed}: {}",
+            cluster.in_flight()
+        );
+        assert_eq!(cluster.full_queue_losses(), 0, "seed {seed}");
+
+        cluster.unstall(first);
+        safety.run(&mut cluster, 1);
+        assert_eq!(cluster.role(first), Some(Role::Follower), "seed {seed}");
+        let counts = cluster.counts(first).expect("a member");
+        assert_eq!(counts.leader_step_downs, 1, "seed {seed}: {counts:?}");
+        assert_eq!(counts.leader_quorum_losses, 0, "seed {seed}: {counts:?}");
+        // Everything that waited was taken out, read or, after the step-down, not.
+        assert!(
+            cluster.in_flight() < 20,
+            "seed {seed}: {}",
+            cluster.in_flight()
+        );
+        assert_eq!(cluster.leader(), Some(second), "seed {seed}");
+
+        // It is told the new term at the position it holds to, records it, and is
+        // behind the new leader's log until it can catch up.
+        safety.run(&mut cluster, 2_000);
+        let member = cluster.member(first).expect("a member");
+        assert_eq!(member.role(), Role::Follower, "seed {seed}");
+        assert!(member.counts().elections_failed > 0, "seed {seed}");
+        let (terms, _) = cluster.record_of_terms(first).expect("a member");
+        assert_eq!(
+            terms,
+            vec![(first_term, 0), (first_term + 1, committed)],
+            "seed {seed}"
+        );
+        let last = cluster.offer(b"and again").expect("the new leader appends");
+        safety.run(&mut cluster, 1_000);
+        for &id in &others {
+            assert_eq!(cluster.commit_position(id), Some(last), "seed {seed}");
         }
     }
 }
