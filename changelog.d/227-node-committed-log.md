@@ -9,7 +9,10 @@
   with the fault of the log's own image, `CAVALRY_ERR_FAULT_IMAGE` or
   `CAVALRY_ERR_FAULT_IMAGES_FULL`: that fault is reported once, so a service keeps
   it. A handler's exception is thrown after the poll as `HandlerError`, as a
-  subscription's is, and its entry is not delivered again. The Node runner starts a
+  subscription's is, and its entry is not delivered again. When the runtime keeps an
+  entry from the handler, the handler is handed no later entry of that poll, and
+  `HandlerError.undeliveredAt` is the first one's position, where the service opens
+  the log again. The Node runner starts a
   cluster of three members and reads its log
   ([ADR 0070](docs/decisions/0070-take-the-c-abi-to-version-2-with-the-committed-log.md);
   card 227).

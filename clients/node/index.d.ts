@@ -101,12 +101,16 @@ export class CavalryError extends Error {
  * reach the handler cleanly: the handler threw on `raised` of them, `undelivered` never reached
  * it, and `cause` is the first of these. `fragments` is the poll's result, -1 when the poll
  * also stopped on a fault, which the `fault()` of the object that was polled reads until its
- * next poll. */
+ * next poll. `undeliveredAt` is a committed log's position of the poll's first entry that
+ * never reached the handler, after which the handler was handed no entry of the poll, and
+ * where the service opens the log again; null when every entry reached it, and for a
+ * subscription. */
 export class HandlerError extends Error {
   fragments: number;
   raised: number;
   undelivered: number;
   committedLog: boolean;
+  undeliveredAt: number | null;
 }
 
 /** The body as a Buffer into the log, valid for the call, and the frame's header. */
