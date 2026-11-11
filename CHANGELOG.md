@@ -2082,77 +2082,13 @@ user-visible change, added in the same commit as the change. The format follows
   228 ms now, over twenty runs
   ([ADR 0069](docs/decisions/0069-sync-a-recording-on-command-as-client-protocol-version-8.md);
   card 227).
-- The C ABI is at version 2 and feeds a cluster's committed log to a service in C.
-  `cavalry_committed_log(&log, client, position)` opens the log of the cluster member
-  on the client's driver, with a null handle and no error while the driver hosts no
-  member; `cavalry_committed_log_poll` hands the fragment handler each entry a quorum
-  has committed, none past the commit position, and
-  `cavalry_committed_log_entry_position(header)` gives the handler the entry's position
-  in the log; `cavalry_committed_log_position` is where a service that has applied
-  every entry opens the log again; and once `cavalry_committed_log_is_ended` is true,
-  `cavalry_committed_log_failed_at` and `cavalry_committed_log_withdrawn_at` say
-  whether the handle ended short of the entries it was owed, and where. The Python,
-  Node, Go, JVM and .NET packages are regenerated from the version 2 header and
-  refuse a version 1 library; each gets its own committed log object in a later
-  change
-  ([ADR 0070](docs/decisions/0070-take-the-c-abi-to-version-2-with-the-committed-log.md);
-  card 227).
-- The Python client reads a cluster's committed log. `client.committed_log(position)`
-  returns a `CommittedLog`, or `None` while the driver hosts no cluster member with a
-  log; `log.poll(handler, fragment_limit)` calls `handler(body, header, position)` for
-  each entry a quorum has committed, none past the commit position; `log.position()`
-  is where a service opens the log again; and once `log.is_ended` is true,
-  `log.failed_at()` and `log.withdrawn_at()` say whether the log ended short of the
-  entries it was owed, and where. A handler's exception is raised after the poll, as
-  a subscription's is, and its entry is not delivered again. The Python runner starts
-  a cluster of three members and reads its log
-  ([ADR 0070](docs/decisions/0070-take-the-c-abi-to-version-2-with-the-committed-log.md);
-  card 227).
-- The Node client reads a cluster's committed log. `client.committedLog(position)`
-  returns a `CommittedLog`, or `null` while the driver hosts no cluster member with a
-  log; `log.poll(handler, fragmentLimit)` calls `handler(body, header, position)` for
-  each entry a quorum has committed, none past the commit position; `log.position()`
-  is where a service opens the log again; and once `log.isEnded` is true,
-  `log.failedAt()` and `log.withdrawnAt()` say whether the log ended short of the
-  entries it was owed, and where. A handler's exception is thrown after the poll as
-  `HandlerError`, as a subscription's is, and its entry is not delivered again. The
-  Node runner starts a cluster of three members and reads its log
-  ([ADR 0070](docs/decisions/0070-take-the-c-abi-to-version-2-with-the-committed-log.md);
-  card 227).
-- The Go client reads a cluster's committed log. `client.CommittedLog(position)`
-  returns a `*CommittedLog`, or `nil` and no error while the driver hosts no cluster
-  member with a log; `log.Poll(handler, fragmentLimit)` calls `handler(body, header,
-  position)` for each entry a quorum has committed, none past the commit position;
-  `log.Position()` is where a service opens the log again; and once `log.IsEnded()`
-  is true, `log.FailedAt()` and `log.WithdrawnAt()` say whether the log ended short of
-  the entries it was owed, and where. A handler's panic is returned as a
-  `*HandlerError` after the poll, as a subscription's is, and its entry is not
-  delivered again. An open log holds one slot of the table of 4,096. The Go runner
-  starts a cluster of three members and reads its log
-  ([ADR 0070](docs/decisions/0070-take-the-c-abi-to-version-2-with-the-committed-log.md);
-  card 227).
-- The .NET client reads a cluster's committed log. `client.CommittedLog(position)`
-  returns a `CommittedLog`, or `null` while the driver hosts no cluster member with a
-  log; `log.Poll(handler, fragmentLimit)` calls the `EntryHandler`, `handler(body,
-  header, position)`, for each entry a quorum has committed, none past the commit
-  position; `log.Position()` is where a service opens the log again; and once
-  `log.IsEnded()` is true, `log.FailedAt()` and `log.WithdrawnAt()` say whether the
-  log ended short of the entries it was owed, and where. A handler's exception is
-  thrown after the poll as `HandlerException`, as a subscription's is, and its entry
-  is not delivered again. The .NET runner starts a cluster of three members and reads
-  its log
-  ([ADR 0070](docs/decisions/0070-take-the-c-abi-to-version-2-with-the-committed-log.md);
-  card 227).
-- The JVM client reads a cluster's committed log. `client.committedLog(position)`
-  returns a `CommittedLog`, or `null` while the driver hosts no cluster member with a
-  log; `log.poll(handler, fragmentLimit)` calls the `EntryHandler`,
-  `handler.onEntry(body, header, position)`, for each entry a quorum has committed,
-  none past the commit position; `log.position()` is where a service opens the log
-  again; and once `log.isEnded()` is true, `log.failedAt()` and `log.withdrawnAt()`
-  say whether the log ended short of the entries it was owed, and where. A handler's
-  exception is thrown after the poll as `HandlerException`, as a subscription's is,
-  and its entry is not delivered again. The JVM runner starts a cluster of three
-  members and reads its log. With this, a service can be written in each of the five
-  clients' languages
-  ([ADR 0070](docs/decisions/0070-take-the-c-abi-to-version-2-with-the-committed-log.md);
-  card 227).
+- A landing takes the bench hosts once, and a pull request no longer waits for macOS.
+  `master`'s run at a merge reports its bench jobs without the hosts when the pull
+  request's own run measured the same tree on them, and its `changes` job names that
+  run, whose figures are `master`'s
+  ([ADR 0074](docs/decisions/0074-do-not-run-the-bench-on-master-for-a-tree-its-pull-request-measured.md)).
+  `gates (macos)` runs for every commit on `master` and for runs by hand, not for pull
+  requests, and is no longer a required check: in 92 runs it failed alone twice, on an
+  intermittent failure no change caused
+  ([ADR 0073](docs/decisions/0073-run-the-macos-gates-for-master-and-not-for-pull-requests.md);
+  [Run the bench](docs/how-to/run-the-bench.md), "When the bench jobs run"; card 254).

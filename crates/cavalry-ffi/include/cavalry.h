@@ -447,7 +447,8 @@ typedef void (*cavalry_fragment_handler_t)(void *clientd,
                                            const cavalry_header_t *header);
 
 /*
- What the subscription's last poll stopped on; 0 when it returned a count.
+ What the subscription's last poll stopped on, or the committed log's; 0 when it
+ returned a count.
  */
 typedef struct {
   /*
@@ -980,8 +981,11 @@ int64_t cavalry_committed_log_commit_position(const cavalry_committed_log_t *log
  Whether the handle has come to its end: no poll will deliver another entry. What
  an ended handle has delivered is said by `cavalry_committed_log_failed_at` and
  `cavalry_committed_log_withdrawn_at`, read after this returns `true`: it has
- delivered every entry it was owed only when both return `false`. In every case
- what it delivered ends at `cavalry_committed_log_position`.
+ delivered every entry it was owed only when both return `false` and no poll of
+ the handle returned −1 with `CAVALRY_ERR_FAULT_IMAGE` or
+ `CAVALRY_ERR_FAULT_IMAGES_FULL`, the one report that the replay's image failed a
+ check or could not join. In every case what it delivered ends at
+ `cavalry_committed_log_position`.
 
  # Safety
 

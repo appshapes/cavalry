@@ -213,7 +213,10 @@ gh pr checks <number>
 - **Merged.** `git fetch --quiet origin` and `git log --oneline -1 origin/master` show
   the squash commit with the pull request's title; `gh run list --branch master
   --workflow ci --limit 1` is its CI run, and the pull request is not done until that
-  run is green. Then comment the commit hash on the card and archive it, and run
+  run is green. It is the first run of `gates (macos)` for the change, which a pull
+  request does not have (ADR 0073): a red one there is yours to fix forward, before
+  the card and before any other work. Its bench jobs report in seconds when the pull
+  request's own run measured the same tree (ADR 0074). Then comment the commit hash on the card and archive it, and run
   `just tidy`: it retires the branch locally, with its worktree, and GitHub has already
   deleted it on origin.
 

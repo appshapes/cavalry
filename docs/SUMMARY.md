@@ -119,3 +119,5 @@ under `docs/` is listed here; `just lint-docs` fails on one that is not.
 - [0070. Take the C ABI to version 2 with the committed log](decisions/0070-take-the-c-abi-to-version-2-with-the-committed-log.md)
 - [0071. Run the bench jobs only for a change that can move the bench](decisions/0071-run-the-bench-jobs-only-for-a-change-that-can-move-the-bench.md)
 - [0072. Wait in a client's connect for a driver that is creating its files](decisions/0072-wait-in-a-clients-connect-for-a-driver-that-is-creating-its-files.md)
+- [0073. Run the macOS gates for master and not for pull requests](decisions/0073-run-the-macos-gates-for-master-and-not-for-pull-requests.md)
+- [0074. Do not run the bench on master for a tree its pull request measured](decisions/0074-do-not-run-the-bench-on-master-for-a-tree-its-pull-request-measured.md)
