@@ -93,6 +93,31 @@ committed once a quorum, two of three, has it on disk.
 - A member that started before another may show `WARN receiver.receive_failed`: the
   datagrams it sent before the other member listened were refused by this host's
   kernel. The count stops rising once every member runs.
+- Every member's recording holds the same entries at the same positions. To see it,
+  stop the three members. Start a driver on one member's directories, in a terminal
+  where neither variable is set:
+
+  ```sh
+  target/release/cavalry run --dir /tmp/cavalry-member-1 --log-dir /tmp/cavalry-member-1-log
+  ```
+
+  In a second terminal, replay that member's recording, as
+  [Replay a recording](replay-a-recording.md) says:
+
+  ```sh
+  target/release/cavalry replay --dir /tmp/cavalry-member-1 --log-dir /tmp/cavalry-member-1-log --recording 0 --from 0
+  ```
+
+  You will see one line, position `0` and a body in hex, and then `replay 3 of
+  recording 0 ended at position 96: 1 messages from position 0`. The line is the
+  term's first entry, which the leader appended when its election closed. Every
+  member's recording gives the same line. `just replay-check` is that check as a gate:
+  three members replicate and commit 100,000 entries whose payloads carry a hash
+  chain, each member's recording is replayed through a driver of its own, and the gate
+  fails unless the three members' lines hash the same and their payloads are the ones
+  the leader was offered, in order (`scripts/replay-check.sh`).
+- A program beside a member reads the entries as the cluster commits them:
+  [Read a cluster's committed log from a service](read-the-committed-log.md).
 
 ## When it does not work
 

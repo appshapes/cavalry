@@ -1,6 +1,7 @@
 //! [`Cavalry`], a process's attachment to the driver (`spec/client-protocol.md`, "The
 //! driver directory"; ADR 0021).
 
+use std::io::ErrorKind;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::thread::JoinHandle;
@@ -8,14 +9,15 @@ use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
 
 use cavalry_proto::client_protocol::{Command, ErrorCode};
-use cavalry_shm::broadcast::BroadcastBuffer;
+use cavalry_shm::broadcast::{BroadcastBuffer, BroadcastError};
 use cavalry_shm::command_ring::layout::DRIVER_CLOSED;
-use cavalry_shm::command_ring::{CommandRing, Producer};
+use cavalry_shm::command_ring::{CommandRing, CommandRingError, Producer};
 use cavalry_shm::counters::generated::REPLAY_POSITION;
-use cavalry_shm::counters::{CounterValue, CountersReader, CountersWriter};
+use cavalry_shm::counters::{CounterValue, CountersError, CountersReader, CountersWriter};
 use cavalry_shm::log::LogBuffers;
 use cavalry_shm::spsc;
 
+use crate::committed_log::CommittedLog;
 use crate::conductor::{
     COMMAND_SCRATCH, Conductor, DRIVER_TIMEOUT, MAX_REPLAYS, MAX_SUBSCRIPTIONS, NO_PENDING,
     RECORDING_QUEUE, RECORDING_REGISTRY, REGISTRATION_QUEUE, REPLAY_QUEUE, RESPONSE_QUEUE,
@@ -34,6 +36,132 @@ use crate::subscription::{
 /// The environment variable that names the driver directory (`config.toml`, `dir`;
 /// ADR 0020). Clients read the same key the driver does.
 pub const DIR_ENV: &str = "CAVALRY_DIR";
+
+/// How long a connecting client sleeps between two reads of a directory whose driver is
+/// still creating its files: the interval at which a starting driver reads a
+/// `not-ready` command ring again (`spec/client-protocol.md`, "The driver directory";
+/// ADR 0072). Every read maps the files it finds whole anew, so the interval also
+/// bounds the work of a client that waits the whole driver timeout: a thousand reads.
+const ATTACH_POLL: Duration = Duration::from_millis(10);
+
+/// The driver directory's three files, each open and past its page's checks, beside a
+/// driver whose heartbeat is fresh: what one read of the directory gives a connecting
+/// client.
+struct Attached {
+    ring: CommandRing,
+    broadcast: BroadcastBuffer,
+    counters: CountersReader,
+}
+
+/// Why one read of the driver directory attached nothing.
+enum Unattached {
+    /// A file is as its creator leaves it on the way: the driver is creating its files
+    /// now, or stopped while it was. Read again, up to the driver timeout.
+    Creating(Unfinished),
+    /// Anything else, which no wait changes: no driver, a driver that is gone, a file
+    /// that fails a check of its page.
+    Refused(ClientError),
+}
+
+/// Which file a read found unfinished.
+enum Unfinished {
+    /// The command ring: at the bound a dead driver's, as it is to a starting driver.
+    CommandRing,
+    /// The broadcast buffer or the counters file, beside a finished command ring.
+    Other {
+        /// The file's own refusal: what the client answers with at the bound when the
+        /// driver has stored its heartbeat meanwhile.
+        error: ClientError,
+        /// The ring's heartbeat on this read. A driver that runs stores it again every
+        /// heartbeat interval; a creator that stopped after its ring never does.
+        heartbeat: i64,
+    },
+}
+
+/// Whether a refusal of the broadcast buffer is of a file its creator has not
+/// finished: `not-ready`, empty, or not there yet beside the command ring.
+fn broadcast_unfinished(error: &BroadcastError) -> bool {
+    match error {
+        BroadcastError::NotReady | BroadcastError::TooShort { given: 0 } => true,
+        BroadcastError::Io(source) => source.kind() == ErrorKind::NotFound,
+        _ => false,
+    }
+}
+
+/// As [`broadcast_unfinished`], of the counters file.
+fn counters_unfinished(error: &CountersError) -> bool {
+    match error {
+        CountersError::NotReady | CountersError::TooShort { given: 0 } => true,
+        CountersError::Io(source) => source.kind() == ErrorKind::NotFound,
+        _ => false,
+    }
+}
+
+impl Attached {
+    /// One read of the directory, in the order of `spec/client-protocol.md`, "The
+    /// driver directory": the command ring writable and its heartbeat, the broadcast
+    /// buffer read-only, the counters file read-only. A file that is missing, empty
+    /// or `not-ready` once the command ring is there is [`Unattached::Creating`]; a
+    /// directory with no command ring is no driver.
+    fn open(dir: &Path) -> Result<Self, Unattached> {
+        if !dir.join("command-ring").is_file() {
+            return Err(Unattached::Refused(ClientError::NotFound {
+                dir: dir.to_path_buf(),
+            }));
+        }
+        let ring = match CommandRing::open(dir, true) {
+            Ok(ring) => ring,
+            Err(CommandRingError::NotReady | CommandRingError::TooShort { given: 0 }) => {
+                return Err(Unattached::Creating(Unfinished::CommandRing));
+            }
+            // Gone between the look above and the open: a starting driver removes the
+            // directory a dead one left. No command ring is no driver.
+            Err(CommandRingError::Io(source)) if source.kind() == ErrorKind::NotFound => {
+                return Err(Unattached::Refused(ClientError::NotFound {
+                    dir: dir.to_path_buf(),
+                }));
+            }
+            Err(error) => return Err(Unattached::Refused(error.into())),
+        };
+        let heartbeat = ring.consumer_heartbeat();
+        if heartbeat == DRIVER_CLOSED {
+            return Err(Unattached::Refused(ClientError::DriverGone {
+                dir: dir.to_path_buf(),
+                reason: Closed::DriverClosed,
+            }));
+        }
+        if now_nanos().saturating_sub(heartbeat) > nanos(DRIVER_TIMEOUT) {
+            return Err(Unattached::Refused(ClientError::DriverGone {
+                dir: dir.to_path_buf(),
+                reason: Closed::DriverTimeout,
+            }));
+        }
+        let broadcast = BroadcastBuffer::open(dir, false).map_err(|error| {
+            Unattached::other(broadcast_unfinished(&error), error.into(), heartbeat)
+        })?;
+        let counters = CountersReader::open(dir).map_err(|error| {
+            Unattached::other(counters_unfinished(&error), error.into(), heartbeat)
+        })?;
+        Ok(Self {
+            ring,
+            broadcast,
+            counters,
+        })
+    }
+}
+
+impl Unattached {
+    /// A refusal of the broadcast buffer or the counters file, beside a command ring
+    /// that held `heartbeat`: to be read again when the file is `unfinished`, refused
+    /// for good otherwise.
+    fn other(unfinished: bool, error: ClientError, heartbeat: i64) -> Self {
+        if unfinished {
+            Unattached::Creating(Unfinished::Other { error, heartbeat })
+        } else {
+            Unattached::Refused(error)
+        }
+    }
+}
 
 /// A client: one process's attachment to one driver. [`Cavalry::connect`] opens the
 /// driver directory's files, takes a client id and starts the client conductor thread,
@@ -92,32 +220,62 @@ impl Cavalry {
     /// the first keepalive, so the driver knows the client; and starts the conductor.
     /// A directory with no command ring is [`ClientError::NotFound`]; a driver that
     /// closed or whose heartbeat is stale is [`ClientError::DriverGone`].
+    ///
+    /// A driver that is still creating its files is waited for: while the command ring
+    /// is there and one of the three files is missing, empty or `not-ready`, the call
+    /// reads the directory again every 10 ms, for up to the driver timeout, 10 s. A
+    /// driver takes a few milliseconds to create its files, so a client started right
+    /// after its driver connects and needs no retry of its own. At the bound the
+    /// driver is a dead one, [`ClientError::DriverGone`] with `driver-timeout`, when
+    /// its command ring is still unfinished, or is finished and its heartbeat was
+    /// never stored again while the client waited; another file still unfinished
+    /// beside a heartbeat the driver has stored meanwhile is refused with its own
+    /// check (`spec/client-protocol.md`, "The driver directory"; ADR 0072). The bound
+    /// is measured on a clock that never goes back, so a wall clock that is set
+    /// during the wait neither lengthens it nor changes its answer.
     pub fn connect_to(dir: impl AsRef<Path>) -> Result<Self, ClientError> {
         let dir = dir.as_ref().to_path_buf();
-        if !dir.join("command-ring").is_file() {
-            return Err(ClientError::NotFound { dir });
-        }
-        let ring = CommandRing::open(&dir, true)?;
-        let now = now_nanos();
-        let heartbeat = ring.consumer_heartbeat();
-        if heartbeat == DRIVER_CLOSED {
-            return Err(ClientError::DriverGone {
-                dir,
-                reason: Closed::DriverClosed,
+        let deadline = Instant::now() + DRIVER_TIMEOUT;
+        // The heartbeat on the first read that found the command ring finished and
+        // another file not.
+        let mut first_heartbeat = None;
+        let Attached {
+            ring,
+            broadcast,
+            counters,
+        } = loop {
+            let unfinished = match Attached::open(&dir) {
+                Ok(attached) => break attached,
+                Err(Unattached::Refused(error)) => return Err(error),
+                Err(Unattached::Creating(unfinished)) => unfinished,
+            };
+            if let Unfinished::Other { heartbeat, .. } = &unfinished {
+                first_heartbeat.get_or_insert(*heartbeat);
+            }
+            if Instant::now() < deadline {
+                std::thread::sleep(ATTACH_POLL);
+                continue;
+            }
+            return Err(match unfinished {
+                // The driver stored its heartbeat while the client waited: it runs, and
+                // a running driver finished its files before it ran. The directory is
+                // damaged, and the file's own check says how.
+                Unfinished::Other { error, heartbeat } if first_heartbeat != Some(heartbeat) => {
+                    error
+                }
+                // A ring never finished, or a heartbeat never stored again: the creator
+                // stopped on the way.
+                Unfinished::CommandRing | Unfinished::Other { .. } => ClientError::DriverGone {
+                    dir,
+                    reason: Closed::DriverTimeout,
+                },
             });
-        }
-        if now.saturating_sub(heartbeat) > nanos(DRIVER_TIMEOUT) {
-            return Err(ClientError::DriverGone {
-                dir,
-                reason: Closed::DriverTimeout,
-            });
-        }
+        };
         let mut producer = ring.producer(DRIVER_TIMEOUT)?;
         let conductor_producer = ring.producer(DRIVER_TIMEOUT)?;
         let client_id = producer.next_correlation_id();
-        let broadcast = BroadcastBuffer::open(&dir, false)?;
         let receiver = broadcast.receiver()?;
-        let counters = Arc::new(CountersReader::open(&dir)?);
+        let counters = Arc::new(counters);
 
         let mut scratch = vec![0u8; COMMAND_SCRATCH];
         let keepalive = Command::ClientKeepalive {
@@ -1059,6 +1217,135 @@ impl Cavalry {
     /// The driver's counters file, read-only: what `doctor` reads, from the client.
     pub fn counters(&self) -> &CountersReader {
         &self.counters
+    }
+
+    /// The counters file as the handles that check a record before they trust its
+    /// value hold it ([`Recording`], [`CommittedLog`]).
+    pub(crate) fn shared_counters(&self) -> Arc<CountersReader> {
+        Arc::clone(&self.counters)
+    }
+
+    /// Opens the committed log of the cluster member on this client's driver at
+    /// `position`, for a service to read (`spec/cluster.md`, "The service"; ADR 0066):
+    /// it adds a subscription on `cavalry:ipc` and stream [`SERVICE_LOG_STREAM_ID`] and
+    /// starts a replay that follows the member's recording of the log from `position`.
+    /// `position` is where an entry begins: 0, or [`CommittedLog::position`] of an
+    /// earlier handle.
+    ///
+    /// Returns `None` while the driver hosts no member that has a recording of its
+    /// log: the member has not started, its election has not given it a log yet, or
+    /// it has closed. A service that starts before its member calls again, with a
+    /// pause between two calls: each reads the counters file's records to find the
+    /// member, which is not a call for a loop that spins. Nothing is sent to the
+    /// driver until a member is found.
+    ///
+    /// The refusals are those of [`Cavalry::add_subscription`] and
+    /// [`Cavalry::start_replay`]: a position that is not a multiple of 32, is past
+    /// what the member has recorded, or is below where the recording the member names
+    /// begins is [`ClientError::Refused`] with code 23, and a driver whose replays
+    /// registry is full, 64 replays, is code 10.
+    ///
+    /// The recording the member names begins at 0 on a member that has not left the
+    /// log. A member that left the log and joined it again records into a new
+    /// recording, which begins where it joined, and the entries below that are in the
+    /// recording it left, which this version names to no service. A service whose
+    /// position is below the new recording's start is refused here, with code 23, and
+    /// reads no more of that member's log (`spec/cluster.md`, "The service" and "Out
+    /// of this version").
+    ///
+    /// A service reads a handle until [`CommittedLog::is_ended`] says that no poll will
+    /// deliver another entry, and not until a poll returns 0: when its member closes or
+    /// leaves the log, entries below the bound the handle took may still be on their
+    /// way from the replay, and a service that stopped short of them would start again
+    /// at a position the member's next recording does not hold. It keeps polling until
+    /// then: the driver withdraws the replay's image 5 s after the replay ends, read or
+    /// not, and a handle whose image went before it was read is ended short, which
+    /// [`CommittedLog::withdrawn_at`] says. A handle is ended short too when the
+    /// driver's replay of the recording failed, which [`CommittedLog::failed_at`]
+    /// says. A service reads both once the handle is ended, and has been given every
+    /// entry it was owed only when both are `None`.
+    ///
+    /// ```
+    /// use cavalry_client::{Cavalry, CommittedLog};
+    ///
+    /// /// A service's loop: every committed entry from `position` on, in order, each
+    /// /// once, until the member's log ends. Returns where to open the log again, or
+    /// /// an error that says which entries it was not given.
+    /// fn apply(client: &mut Cavalry, position: i64) -> Result<i64, Box<dyn std::error::Error>> {
+    ///     // Ask until the member on this driver has its log.
+    ///     let mut log: CommittedLog = loop {
+    ///         if let Some(log) = client.committed_log(position)? {
+    ///             break log;
+    ///         }
+    ///         std::thread::sleep(std::time::Duration::from_millis(100));
+    ///     };
+    ///     loop {
+    ///         let entries = log.poll(
+    ///             |entry, _header, entry_position| {
+    ///                 // Apply `entry`, in `spec/cluster.md`'s encoding, at its position.
+    ///                 let _ = (entry, entry_position);
+    ///             },
+    ///             64,
+    ///         )?;
+    ///         if log.is_ended() {
+    ///             let next = log.position();
+    ///             let failed = log.failed_at();
+    ///             let withdrawn = log.withdrawn_at();
+    ///             log.close(client)?;
+    ///             if let Some(failed) = failed {
+    ///                 // The driver could not play the member's recording on from
+    ///                 // `failed`: the entries from there on were not delivered,
+    ///                 // though the member may have committed them.
+    ///                 return Err(format!(
+    ///                     "the replay of the member's recording failed at position \
+    ///                      {failed}: the log was not opened at the position of an entry, \
+    ///                      or the recording's files are damaged; run `cavalry doctor`, \
+    ///                      which names a damaged recording, and open the log again from \
+    ///                      position {next} if this handle read entries, or from 0; see \
+    ///                      docs/how-to/read-the-committed-log.md#when-it-does-not-work"
+    ///                 )
+    ///                 .into());
+    ///             }
+    ///             if let Some(unread) = withdrawn {
+    ///                 // The driver withdrew the replay's image before it was read: the
+    ///                 // entries from `unread` on were not delivered.
+    ///                 return Err(format!(
+    ///                     "entries from position {unread} were withdrawn unread, 5 s after \
+    ///                      the replay ended; open the log again from position {next}; see \
+    ///                      docs/how-to/read-the-committed-log.md#when-it-does-not-work"
+    ///                 )
+    ///                 .into());
+    ///             }
+    ///             // Neither: the member closed or left its log, and every entry below
+    ///             // the last commit position the handle took has been delivered.
+    ///             return Ok(next);
+    ///         }
+    ///         if entries == 0 {
+    ///             // Nothing below the bound has arrived yet.
+    ///             std::thread::yield_now();
+    ///         }
+    ///     }
+    /// }
+    ///
+    /// # fn main() -> Result<(), Box<dyn std::error::Error>> {
+    /// # let dir = std::env::temp_dir().join(format!("cavalry-doc-committed-{}", std::process::id()));
+    /// # let _ = std::fs::remove_dir_all(&dir);
+    /// # let driver = cavalry_driver::Driver::start(&dir, dir.join("log"))?;
+    /// let mut client = Cavalry::connect_to(&dir)?;
+    /// // A driver that hosts no cluster member has no committed log to open, and a
+    /// // service beside it asks again later, as `apply` does.
+    /// assert!(client.committed_log(0)?.is_none());
+    /// # let _ = apply;
+    /// # client.close()?;
+    /// # driver.close()?;
+    /// # let _ = std::fs::remove_dir_all(&dir);
+    /// # Ok(())
+    /// # }
+    /// ```
+    ///
+    /// [`SERVICE_LOG_STREAM_ID`]: crate::SERVICE_LOG_STREAM_ID
+    pub fn committed_log(&mut self, position: i64) -> Result<Option<CommittedLog>, ClientError> {
+        CommittedLog::open(self, position)
     }
 
     /// Sends `client close`, so the driver removes this client's publications and

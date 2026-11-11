@@ -1,6 +1,17 @@
 //! The core allocates nothing: not in a duty cycle, not for a message it reads, not for
-//! an entry it appends (`CLAUDE.md`, invariant 2). A test of its own, since the counting
-//! allocator is the whole process's.
+//! an entry it appends (`CLAUDE.md`, invariant 2). A program of its own, since the
+//! counting allocator is the whole process's.
+//!
+//! A program with no test harness (`harness = false` in the crate's `Cargo.toml`), so
+//! that the process has one thread: a region counts every thread of the process. Under
+//! the harness, the harness's own thread starts the test's thread and then allocates
+//! on its way to waiting for the result, last of all the result channel's list of
+//! waiting receivers, 96 bytes. The window below opens a few microseconds after its
+//! thread would start, sooner than any other allocation test's, so that allocation
+//! could fall inside it, and once did: `gates (linux)` of master's CI at 80bc9d0
+//! counted one allocation of 96 bytes here, on a tree where the test had passed twice.
+//! `cargo test` runs the program and fails on a panic; it prints one line when the
+//! check has passed, and it takes no filter.
 
 mod common;
 
@@ -14,7 +25,8 @@ use stats_alloc::{INSTRUMENTED_SYSTEM, Region, StatsAlloc};
 #[global_allocator]
 static GLOBAL: &StatsAlloc<System> = &INSTRUMENTED_SYSTEM;
 
-#[test]
+/// A leader and a follower, their elections closed, run ten thousand duty cycles, an
+/// entry appended and committed in each, and the window over them counts nothing.
 fn a_leader_and_a_follower_run_ten_thousand_cycles_without_an_allocation() {
     // A leader with its election closed.
     let mut leader_io = Stub::new();
@@ -91,5 +103,13 @@ fn a_leader_and_a_follower_run_ten_thousand_cycles_without_an_allocation() {
         (change.allocations, change.reallocations),
         (0, 0),
         "the core allocated in its duty cycle: {change:?}"
+    );
+}
+
+fn main() {
+    a_leader_and_a_follower_run_ten_thousand_cycles_without_an_allocation();
+    println!(
+        "allocations: a leader and a follower ran ten thousand duty cycles, an entry \
+         appended and committed in each, without an allocation or a reallocation"
     );
 }
