@@ -16,6 +16,16 @@ commit path runs per message.
   reports a log ahead of its own, so a leader that lost its log directory never leads
   a second time. A member that could join only with a catch-up or a truncation, one
   that starts late, is left out and counted, never joined wrong.
+- Elects, on a path of its own that is being built:
+  `Consensus::with_election(member_ids, member_id, seed)` is a member that canvasses,
+  nominates itself after a delay drawn from its seed, asks for the other members' votes
+  and leads the term a quorum votes for, at once when every member it has heard has
+  voted for it (ADR 0077). It stores a term before the vote or the request vote that
+  raises it, and votes once in a term. A candidate asks for votes in the term it
+  nominated itself for and no other: one whose term another candidate's request raised
+  asks for none in the raised term and does not lead it. The consensus module does not
+  use this path yet: a member over a driver is appointed until the election can do what
+  the next section lists, and then the module moves to it in one change (ADR 0081).
 - Counts every move of the election. `ElectionState` is the state machine
   `cluster_election` of `counters.toml`, and each of its transitions adds one to a
   count of `Counts`, the counter registered for it; `Counts::by_counter` pairs each
@@ -35,7 +45,8 @@ commit path runs per message.
   `cluster.role`, `cluster.election_state`, `cluster.leadership_term_id`,
   `cluster.append_position`, `cluster.commit_position`, `cluster.messages_rejected`,
   `cluster.log_recording_id`, the recording that holds its log, which its service
-  replays, and the eleven counts of `Counts::by_counter`. The counters of sessions, of
+  replays, and the fifteen counts of `Counts::by_counter`, of which the four of the
+  ballot stay 0 while the leader is appointed. The counters of sessions, of
   the service's version and of the catch-up in `spec/cluster.md`, "Counters", come
   with those features. One thread calls `do_work()`; the leader's process appends
   with `offer(payload)`, up to 1,344 bytes an entry. A follower that leaves the log
@@ -78,6 +89,29 @@ commit path runs per message.
 
 In Aeron, this is Cluster, with Cluster Standby as a paid component
 ([glossary](../../docs/glossary.md)).
+
+### What the election does not do yet
+
+A member made with `Consensus::with_election` has nominate and the two ballots of
+`spec/cluster.md`. Where the page's election does more, it does this instead, until
+the step that builds it (ADR 0081):
+
+- A leader holds no election. One whose active members fall below a quorum stays the
+  leader of its term and commits nothing, and one that reads a higher term in a
+  message ignores it, with one exception. A leader whose election has not closed, in
+  leader log replication to leader ready, may read a request vote for a higher term
+  from a log behind its own. It takes that term as its candidate term, stores it,
+  votes against, and still leads its own term. So a leader that was cut off and
+  returns is a second leader of an older term, which no member follows.
+- A member truncates nothing, replicates nothing and catches up with nothing. Where a
+  new leadership term asks it to, or its append position is behind the leader's log
+  position, it fails its election, counted in `cluster.elections_failed`, and
+  canvasses again. A leader whose followers are not level with its term's base waits
+  in leader log replication, with no quorum that has recorded its term.
+- Leader ready waits for every member the leader has heard, as the appointed leader's
+  does, since a follower that misses a term's first entry cannot catch up with it.
+- A member starts with no term: its record of terms and its candidate term are not
+  read back.
 
 ## What it must never do
 
