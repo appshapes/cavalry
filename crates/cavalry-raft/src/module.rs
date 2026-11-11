@@ -49,6 +49,8 @@ const LOG_POLL_LIMIT: usize = 64;
 
 /// How long a member leaving the log waits for its recording's stop position.
 const STOP_TIMEOUT: Duration = Duration::from_secs(1);
+/// No sync asked for yet: no position a recording has written.
+const NO_SYNC_ASKED: i64 = -1;
 
 const DOC: &str = "docs/reference/cluster.md#roles-and-the-election";
 const DOC_MEMBERS: &str = "docs/reference/cluster.md#members-and-streams";
@@ -272,6 +274,30 @@ struct ClientIo {
     held: Option<Held>,
     /// The end of the contiguous span the recordings this member has stopped hold.
     stopped_at: i64,
+    /// The position its recording of the log had written when this member last asked
+    /// the recorder to sync it ([`ask_sync`]).
+    sync_asked_at: i64,
+}
+
+/// Asks the driver to sync `recording`, this member's recording of the log, when the
+/// recorder has written past what it has synced, without waiting for the answer
+/// (`spec/client-protocol.md`, "Commands", sync recording; ADR 0060, ADR 0069). The
+/// member's append position is the recording's synced position, so without the
+/// request an entry counts toward a commit at the recorder's next sync of its own,
+/// up to a second later. It asks once for each position written that it sees, never
+/// once per duty cycle: while the sync runs the recorder writes nothing, the next
+/// block it takes holds everything that arrived meanwhile, and one request then
+/// covers that block, so the syncs group the entries by themselves. A request the
+/// driver refuses, its recorder's queue full, is not asked again until the position
+/// written moves; the recorder's own sync covers what it left within a second.
+fn ask_sync(client: &mut Cavalry, recording: &Recording, asked_at: &mut i64) {
+    let written = recording.position();
+    if written > recording.synced_position()
+        && written != *asked_at
+        && recording.request_sync(client).is_ok()
+    {
+        *asked_at = written;
+    }
 }
 
 impl ClientIo {
@@ -473,10 +499,14 @@ impl Io for ClientIo {
 
     fn append_position(&mut self) -> i64 {
         if let Some(recording) = &self.log_recording {
+            ask_sync(&mut self.client, recording, &mut self.sync_asked_at);
             return recording.synced_position();
         }
         match &self.held {
-            Some(held) if held.start == self.stopped_at => held.recording.synced_position(),
+            Some(held) if held.start == self.stopped_at => {
+                ask_sync(&mut self.client, &held.recording, &mut self.sync_asked_at);
+                held.recording.synced_position()
+            }
             _ => self.stopped_at,
         }
     }
@@ -736,6 +766,7 @@ impl ConsensusModule {
                 image: LogImage::Awaited,
                 held: None,
                 stopped_at: 0,
+                sync_asked_at: NO_SYNC_ASKED,
             },
             counters,
             messages_rejected: 0,
