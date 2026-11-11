@@ -364,7 +364,7 @@ class Package:
 def raise_after_of(rules: dict) -> dict[str, str]:
     """{poll: the ABI call after whose last line it may raise}, from a rule's
     `raise_after`: one pair, or a list of pairs where a package has a committed log's poll
-    beside its subscription's (ADR 0068)."""
+    beside its subscription's (ADR 0070)."""
     pairs = rules["raise_after"]
     return dict(pairs if isinstance(pairs, list) else [pairs])
 

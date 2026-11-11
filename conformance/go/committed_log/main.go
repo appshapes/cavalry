@@ -1,4 +1,4 @@
-// The Go client's committed log round (spec/c-abi.md, version 2; ADR 0068):
+// The Go client's committed log round (spec/c-abi.md, version 2; ADR 0070):
 // Client.CommittedLog and CommittedLog beside a cluster member that conformance/go/run.sh
 // started with `cavalry run`, one of three on the loopback, as
 // conformance/python/committed_log.py runs it through clients/python.
@@ -134,6 +134,11 @@ func main() {
 			at = 1
 		}
 		refusals = append(refusals, refusal{"FailedAt", at, cavalry.Errcode()})
+		at, withdrawn := log.WithdrawnAt()
+		if withdrawn {
+			at = 1
+		}
+		refusals = append(refusals, refusal{"WithdrawnAt", at, cavalry.Errcode()})
 		closed := int64(0)
 		closeErr := log.Close()
 		if closeErr != nil {
@@ -160,7 +165,7 @@ func main() {
 	}
 	polling := int32(cavalry.ErrPolling)
 	expected := []refusal{{"Poll", -1, polling}, {"Position", -1, polling}, {"CommitPosition", -1, polling},
-		{"IsEnded", 0, polling}, {"FailedAt", 0, polling}, {"Close", -1, polling}}
+		{"IsEnded", 0, polling}, {"FailedAt", 0, polling}, {"WithdrawnAt", 0, polling}, {"Close", -1, polling}}
 	if !reflect.DeepEqual(refusals, expected) {
 		fail("the calls from inside the log's own handler answered %v, not %v", refusals, expected)
 	}
@@ -169,8 +174,11 @@ func main() {
 	}
 	code, sessionID, position, err := log.Fault()
 	mustOK(err)
-	if _, failed := log.FailedAt(); log.IsEnded() || failed || code != 0 || sessionID != 0 || position != cavalry.NullPosition {
-		fail("a live log read ended %v, failed %v, fault %d %d %d", log.IsEnded(), failed, code, sessionID, position)
+	_, failed := log.FailedAt()
+	_, withdrawn := log.WithdrawnAt()
+	if log.IsEnded() || failed || withdrawn || code != 0 || sessionID != 0 || position != cavalry.NullPosition {
+		fail("a live log read ended %v, failed %v, withdrawn %v, fault %d %d %d", log.IsEnded(), failed, withdrawn, code,
+			sessionID, position)
 	}
 	for i := 0; i < 50; i++ {
 		count, err := log.Poll(onEntry, 16)
@@ -182,7 +190,7 @@ func main() {
 	if len(entries) != 1 {
 		fail("the refused poll, or a later one, delivered more: %v", entries)
 	}
-	say("member %d's entry at position 0 read once, next position %d, commit position %d; six calls from inside the "+
+	say("member %d's entry at position 0 read once, next position %d, commit position %d; seven calls from inside the "+
 		"handler refused with ErrPolling", log.MemberID, log.Position(), log.CommitPosition())
 	mustOK(log.Close())
 	mustOK(log.Close()) // idempotent
