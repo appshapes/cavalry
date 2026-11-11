@@ -211,6 +211,30 @@ fn a_member_at_the_next_base_records_that_term_before_it_asks() {
     assert_eq!(member.counts().log_replications, 2);
 }
 
+/// The term is begun at its base and nowhere else. The message was read with the
+/// append position of the cycle before. A member whose append position has risen
+/// past the base by the cycle that would record the term holds bytes above the base
+/// that are not of that term: it records nothing, asks for nothing, and its election
+/// fails.
+#[test]
+fn a_member_that_moved_past_the_base_before_it_recorded_the_term_records_nothing() {
+    let mut io = Stub::new();
+    let (mut member, ms) = after_term_zero(&mut io, 64);
+    read(&mut member, &mut io, ms, &told(3, 200, 0, [1, 64, 160], 0));
+    assert_eq!(
+        member.election_state(),
+        ElectionState::FollowerLogReplication
+    );
+    // What it had received and not synced when the message came is synced now.
+    io.append_position = 96;
+    work(&mut member, &mut io, ms + 1);
+    assert_eq!(member.election_state(), ElectionState::Init);
+    assert_eq!(member.counts().elections_failed, 1);
+    assert_eq!(io.count(|call| matches!(call, Call::RecordTerm(..))), 0);
+    assert_eq!(io.count(|call| *call == Call::AddCatchup), 0);
+    assert_eq!(recorded(&io), vec![(0, 0)]);
+}
+
 /// The reason a term is recorded when its replication begins (ADR 0086). A member
 /// begins term 1 at 64, is told a commit position of 200 by its leader, and holds 32
 /// bytes of the term when the replay stops coming: its election fails. It canvasses

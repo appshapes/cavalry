@@ -78,6 +78,12 @@ record names, and one that fails midway reports that term. The leader then names
 the term after it, whose base is above the member's append position, and the member
 carries on from where it stopped: nothing is truncated and nothing refused.
 
+The member records the term only while its append position is still that base. The
+new leadership term is read with the append position of the duty cycle before, and
+the record is made in the next one. A member whose append position has risen in
+between holds bytes above the base that are not of the term: it records nothing and
+fails its election. The review of this change found the gap.
+
 The record is safe on the ground a join at a leader's base rests on. A member that
 joins a leader at the leader's term base records the leader's term there before it
 holds a byte of it ("Messages during an election"), because it holds the leader's
@@ -159,7 +165,7 @@ speaks of bytes a member has not reported.
 
 ## Evidence
 
-- `crates/cavalry-raft/tests/follower_log_replication.rs`, twelve tests on one core
+- `crates/cavalry-raft/tests/follower_log_replication.rs`, thirteen tests on one core
   through an `Io` that remembers what it was asked.
   - A member 32 bytes short of the next base subscribes, then asks from 32 once,
     reports with its own term as it goes, and at the stop records the leader's term
@@ -169,6 +175,9 @@ speaks of bytes a member has not reported.
     `add_catchup` and before the catch-up position. A record that fails is
     returned, nothing is asked, and the next cycle records again. At a stop below
     the leader's base it records nothing more and waits for nothing.
+  - A member whose append position rose past that base between the message and
+    the cycle that would record the term records nothing, asks for nothing, and
+    fails its election.
   - A member that began term 1 at 64, was told a commit position of 200, and
     stopped at 96 for the leader heartbeat timeout fails its election. Told the term
     after, it asks from 96: `truncate_log` is never called and
@@ -234,6 +243,11 @@ speaks of bytes a member has not reported.
 - `cavalry-proto`'s `replication_record` is unchanged, and its vectors with it: its
   `replicated` field is what the record holds by the stop, and only its `leader`
   field is written there.
+- The step to follower replay records the leader's term at its base on the same
+  kind of read, one cycle old, and has done since before this change. A member over
+  a driver is out of the log there, so its append position does not rise until an
+  image brings it bytes; the module's I/O for the election must keep that, or the
+  same check belongs in that step.
 - Revisit: when the module's I/O for the election is built, at which the four
   operations stop refusing and `catchup_image`'s order against `append_position` is
   the module's to keep; and with card 267.

@@ -2354,7 +2354,8 @@ impl Consensus {
     /// append position to the stop position its new leadership term gave, the end of
     /// that term (`spec/cluster.md`, follower log replication; ADR 0086).
     ///
-    /// A term it holds none of is recorded at its base first. Then it subscribes on
+    /// A term it holds none of is recorded at its base first, and only while its
+    /// append position is still that base. Then it subscribes on
     /// its `catchup` endpoint and sends catch-up position once. Each replay's image
     /// must join where the member's log ends: the position it asked from, then the
     /// append position it last sent, on which the leader starts the next recording's
@@ -2379,6 +2380,14 @@ impl Consensus {
             return Ok(1);
         };
         if let Some((term, base)) = replication.begins {
+            // The term is begun at its base and nowhere else. The message that began
+            // this was read with the append position of the cycle before; one that
+            // has risen since is of bytes above the base that are of no term this
+            // member may record there, so it records nothing and begins again.
+            if self.append_position != base {
+                self.fail(clock);
+                return Ok(1);
+            }
             io.record_term(term, base)?;
             self.log_term = term;
             replication.begins = None;
