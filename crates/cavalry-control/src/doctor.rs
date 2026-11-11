@@ -1389,8 +1389,13 @@ impl LogPath {
 
 /// The election states, by their codes in `spec/cluster.md`, in which this version's
 /// member has taken a leader and joins its log before it closes: follower replay,
-/// follower log init, follower log await and follower ready. Each lasts at most the
-/// leader heartbeat timeout before the election fails.
+/// follower log init, follower log await and follower ready. The leader heartbeat
+/// timeout bounds follower log await and follower ready: each fails the election when
+/// it has not moved on within it. Follower log init lasts one step. Follower replay has
+/// no timeout of its own in the spec, where the replay lasts as long as the member's
+/// log takes; in this version it is one step too, which fails the election where the
+/// member's log is behind the leader's and goes on to follower log init where it is
+/// not, so that `doctor` sees a member there about as rarely as in follower log init.
 const JOINING_STATES: [i64; 4] = [10, 14, 15, 16];
 
 /// What `cluster-joining` says of member `id`, its election in `state`: the leader it
@@ -1494,8 +1499,9 @@ fn member_findings(
             doc: DOC_CLUSTER,
         });
     } else if !leads && JOINING_STATES.contains(&state) {
-        // A leader taken, and a step of at most 10 s left before the election closes or
-        // fails: not a member with no leader.
+        // A leader taken, and only the steps of joining its log left before the election
+        // closes or fails, `JOINING_STATES` saying what bounds each: not a member with no
+        // leader.
         findings.push(Finding {
             check: "cluster-joining",
             level: Level::Note,
