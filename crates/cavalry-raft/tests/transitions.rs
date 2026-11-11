@@ -307,6 +307,24 @@ fn to_closed_leader(watch: &mut Watch, member: &mut Consensus, io: &mut Stub, ms
     ms + 6
 }
 
+/// Member 1's new leadership term for term 0 with its base at 64, to a member whose
+/// log holds no term and ends at 0. The member is below the term's base and would
+/// replicate what it lacks (state 9), which this path does not have, so its election
+/// fails.
+fn term_past_the_log() -> Message<'static> {
+    let mut term = new_leadership_term(1, 64);
+    if let Message::NewLeadershipTerm {
+        next_term_base_log_position,
+        term_base_log_position,
+        ..
+    } = &mut term
+    {
+        *next_term_base_log_position = 64;
+        *term_base_log_position = 64;
+    }
+    term
+}
+
 /// Member 1's request vote for `term`, with a log that holds no term.
 fn request_vote(term: i64) -> Message<'static> {
     Message::RequestVote {
@@ -498,19 +516,28 @@ fn every_transition_of_the_election_and_the_role_adds_one_to_a_counter_registere
     assert_eq!(beaten.leader_member_id(), 1);
     assert_eq!(beaten.counts().ballots_lost, 0);
 
-    // A candidate ahead of that leader's term base needs a truncation: it fails, a
-    // follower from the same call, and is one still when init begins its next
-    // election.
+    // A candidate below that leader's term base would replicate what it lacks, which
+    // this path does not have: it fails, a follower from the same call, and is one
+    // still when init begins its next election.
+    let mut io = Stub::new();
+    let mut below = elector(5);
+    let ms = to_candidate_ballot(&mut watch, &mut below, &mut io, 1);
+    watch.read(&mut below, &mut io, ms + 1, &term_past_the_log());
+    assert_eq!(below.election_state(), ElectionState::Init);
+    assert_eq!(below.role(), Role::Follower);
+    watch.work(&mut below, &mut io, ms + 2);
+    assert_eq!(below.election_state(), ElectionState::Canvass);
+    assert_eq!(below.role(), Role::Follower);
+
+    // A candidate ahead of that leader's term base truncates to it, which moves
+    // neither its election nor its role, and follows from there.
     let mut io = Stub::new();
     io.append_position = 64;
     let mut ahead = elector(5);
     let ms = to_candidate_ballot(&mut watch, &mut ahead, &mut io, 1);
     watch.read(&mut ahead, &mut io, ms + 1, &new_leadership_term(1, 0));
-    assert_eq!(ahead.election_state(), ElectionState::Init);
-    assert_eq!(ahead.role(), Role::Follower);
-    watch.work(&mut ahead, &mut io, ms + 2);
-    assert_eq!(ahead.election_state(), ElectionState::Canvass);
-    assert_eq!(ahead.role(), Role::Follower);
+    assert_eq!(ahead.election_state(), ElectionState::FollowerReplay);
+    assert_eq!(ahead.counts().log_truncations, 1);
 
     // A member in canvass votes for a candidate and waits for it; with no new
     // leadership term for the election timeout it canvasses again.
@@ -530,31 +557,25 @@ fn every_transition_of_the_election_and_the_role_adds_one_to_a_counter_registere
     assert_eq!(nominee.election_state(), ElectionState::FollowerBallot);
 
     // A member in nominate reads a leader's term as canvass does: it follows, or
-    // fails where it would need a truncation.
+    // fails where it would need a replication.
     let mut io = Stub::new();
     let mut nominee = elector(8);
     let ms = to_nominate(&mut watch, &mut nominee, &mut io, 1);
     watch.read(&mut nominee, &mut io, ms, &new_leadership_term(1, 0));
     assert_eq!(nominee.election_state(), ElectionState::FollowerReplay);
     let mut io = Stub::new();
-    io.append_position = 64;
     let mut nominee = elector(9);
     let ms = to_nominate(&mut watch, &mut nominee, &mut io, 1);
-    watch.read(&mut nominee, &mut io, ms, &new_leadership_term(1, 0));
+    watch.read(&mut nominee, &mut io, ms, &term_past_the_log());
     assert_eq!(nominee.election_state(), ElectionState::Init);
 
-    // A member in follower ballot ahead of its candidate's term base fails.
+    // A member in follower ballot below its candidate's term base fails.
     let mut io = Stub::new();
-    io.append_position = 64;
     let mut voter = elector(10);
     watch.work(&mut voter, &mut io, 1);
-    let mut longer = request_vote(0);
-    if let Message::RequestVote { log_position, .. } = &mut longer {
-        *log_position = 64;
-    }
-    watch.read(&mut voter, &mut io, 2, &longer);
+    watch.read(&mut voter, &mut io, 2, &request_vote(0));
     assert_eq!(voter.election_state(), ElectionState::FollowerBallot);
-    watch.read(&mut voter, &mut io, 3, &new_leadership_term(1, 0));
+    watch.read(&mut voter, &mut io, 3, &term_past_the_log());
     assert_eq!(voter.election_state(), ElectionState::Init);
 
     // A leader that elects, its election closed, holds an election on a term above its

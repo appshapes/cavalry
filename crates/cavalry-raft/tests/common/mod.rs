@@ -6,7 +6,7 @@
 
 use cavalry_proto::cluster::{Message, Template};
 use cavalry_raft::consensus::terms_above;
-use cavalry_raft::{Clock, Io, Log};
+use cavalry_raft::{Clock, Consensus, ElectionState, Io, Log};
 
 /// One call the core made, in the order it made it.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -18,6 +18,7 @@ pub enum Call {
     JoinLog,
     LeaveLog,
     RemoveLog,
+    TruncateLog(i64),
     Append(Template),
 }
 
@@ -34,6 +35,8 @@ pub struct Stub {
     pub fail_record: bool,
     /// Whether `remove_log` fails.
     pub fail_remove: bool,
+    /// Whether `truncate_log` is still under way: it cuts nothing and returns `None`.
+    pub truncating: bool,
     /// Whether `append` is back-pressured.
     pub back_pressured: bool,
     /// Whether `send` reports a message not sent, as a publication that is
@@ -58,6 +61,7 @@ impl Stub {
             image: None,
             fail_record: false,
             fail_remove: false,
+            truncating: false,
             back_pressured: false,
             refuse_send: false,
             terms: [None; Stub::TERMS],
@@ -169,6 +173,27 @@ impl Io for Stub {
         Ok(())
     }
 
+    fn truncate_log(&mut self, position: i64) -> Result<Option<i64>, Self::Fault> {
+        self.call(Call::TruncateLog(position));
+        if self.truncating {
+            return Ok(None);
+        }
+        self.append_position = self.append_position.min(position);
+        for slot in &mut self.terms {
+            if slot.is_some_and(|(_, base)| base > position) {
+                *slot = None;
+            }
+        }
+        Ok(Some(
+            self.terms
+                .iter()
+                .flatten()
+                .map(|&(term, _)| term)
+                .max()
+                .unwrap_or(-1),
+        ))
+    }
+
     fn append_position(&mut self) -> i64 {
         self.append_position
     }
@@ -234,4 +259,79 @@ pub fn canvass_position(member: i32, term: i64, position: i64) -> Message<'stati
         follower_member_id: member,
         protocol_version: 0,
     }
+}
+
+/// `leader`'s new leadership term for `term`, which begins at `base` with the leader's
+/// log at `log_position`, to a member whose log is of `log_term`, with `next` as its
+/// three next fields: the next leadership term id, that term's base and its end.
+pub fn leadership_term(
+    leader: i32,
+    term: i64,
+    base: i64,
+    log_position: i64,
+    log_term: i64,
+    next: [i64; 3],
+) -> Message<'static> {
+    let [
+        next_leadership_term_id,
+        next_term_base_log_position,
+        next_log_position,
+    ] = next;
+    Message::NewLeadershipTerm {
+        log_leadership_term_id: log_term,
+        next_leadership_term_id,
+        next_term_base_log_position,
+        next_log_position,
+        leadership_term_id: term,
+        term_base_log_position: base,
+        log_position,
+        leader_recording_id: 5,
+        timestamp: 1_700_000_000_000,
+        leader_member_id: leader,
+        log_session_id: 77,
+        app_version: 0,
+        is_startup: true,
+        commit_position: base,
+    }
+}
+
+/// Takes `member` from canvass to closed as a follower of the leader whose new
+/// leadership term is `term`, with the image of the leader's log joining at `join`,
+/// from `ms` on; returns the millisecond its election closed at.
+pub fn follow_term(
+    member: &mut Consensus,
+    io: &mut Stub,
+    ms: u64,
+    term: &Message<'_>,
+    join: i64,
+) -> u64 {
+    assert_eq!(member.election_state(), ElectionState::Canvass);
+    member.on_message(at(ms), term, io).expect("no fault");
+    assert_eq!(member.election_state(), ElectionState::FollowerReplay);
+    member.do_work(at(ms + 1), io).expect("no fault");
+    member.do_work(at(ms + 2), io).expect("no fault");
+    io.image = Some(join);
+    member.do_work(at(ms + 3), io).expect("no fault");
+    member.do_work(at(ms + 4), io).expect("no fault");
+    assert_eq!(member.election_state(), ElectionState::Closed);
+    ms + 4
+}
+
+/// The follower hears nothing for the leader heartbeat timeout after `closed_at` and
+/// canvasses again, with `appended` bytes in its recordings; returns the next
+/// millisecond.
+pub fn lose_the_leader(
+    member: &mut Consensus,
+    io: &mut Stub,
+    closed_at: u64,
+    appended: i64,
+) -> u64 {
+    let ms = closed_at + 10_000;
+    member.do_work(at(ms), io).expect("no fault");
+    assert_eq!(member.election_state(), ElectionState::Init);
+    io.image = None;
+    io.append_position = appended;
+    member.do_work(at(ms + 1), io).expect("no fault");
+    assert_eq!(member.election_state(), ElectionState::Canvass);
+    ms + 2
 }
