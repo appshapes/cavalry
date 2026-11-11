@@ -180,7 +180,7 @@ class Package(unittest.TestCase):
         self.assertLess(close.index("self._release()"), zeroed)
 
     def test_the_committed_log_reads_the_position_in_its_trampoline_and_keeps_a_refused_close_open(self):
-        """The Python committed log (ADR 0068): the trampoline asks the header for the
+        """The Python committed log (ADR 0070): the trampoline asks the header for the
         entry's position while the pointer is the ABI's, before the handler runs; the open
         returns None for the null handle of a driver with no member; and `close` drops its
         handle only when the ABI freed it, which a call refused from inside the log's own
@@ -194,6 +194,11 @@ class Package(unittest.TestCase):
         self.assertEqual(log.count("self._abi.cavalry_committed_log_poll("), 2)  # the nested refusal and the poll itself
         close = log.split("    def close(self):\n", 1)[1]
         self.assertIn("if error is None or error.code != _abi.CAVALRY_ERR_POLLING:\n            self._handle = None", close)
+        # Both reports of a short end, each None unless the ABI answered true.
+        for report in ("failed_at", "withdrawn_at"):
+            body = log.split(f"    def {report}(self):\n", 1)[1].split("\n    def ", 1)[0]
+            self.assertIn(f"self._abi.cavalry_committed_log_{report}(self._handle, ctypes.byref(position))", body)
+            self.assertIn("return position.value if ", body)
         client = code.split("class Client:", 1)[1].split("\nclass ", 1)[0]
         self.assertIn("return CommittedLog(self._abi, handle.value, self) if handle.value else None", client)
         for name in ("cavalry_committed_log_poll", "cavalry_committed_log_entry_position"):

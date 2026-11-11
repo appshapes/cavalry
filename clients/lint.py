@@ -5,7 +5,7 @@ of the ABI's seven per-message functions of a publication and a subscription
 (`crates/cavalry-ffi/README.md`: the claim, the reserved value, the commit and abort, the
 offer, the poll and the header's values), the wrapper of the committed log's two, its poll
 and an entry's position, where a package has a committed log object, Python's so far (ADR
-0068), and the trampoline that calls the user's handler, hold no lock, no `await` and no
+0070), and the trampoline that calls the user's handler, hold no lock, no `await` and no
 raise, in the language's forms, and so does every function of the package they call. For Python those
 forms are `threading`'s locks and anything else of `threading`, `async def`, `await`,
 `raise`, and building one of the package's own exceptions. For JavaScript, read from

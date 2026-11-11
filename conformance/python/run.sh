@@ -5,7 +5,7 @@
 # conformance/python/readme.py; then starts three cluster members on the loopback, each a
 # `cavalry run` in a member's role, and runs conformance/python/committed_log.py beside
 # member 1, the client's committed log against a cluster (spec/c-abi.md, version 2; ADR
-# 0068); and cleans up. `just conformance` runs this after conformance/c
+# 0070); and cleans up. `just conformance` runs this after conformance/c
 # (clients/README.md; ADR 0046, card 205). Nothing is installed: ctypes is in the standard
 # library.
 set -euo pipefail
