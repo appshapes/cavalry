@@ -96,6 +96,18 @@ takes a new leadership term for a term at least its candidate term as canvass do
 A member that learns of a leader during its delay follows it, and opens no ballot
 against it half a second later.
 
+**A new leadership term from another member alone.** The appointed path reads the
+appointed leader's new leadership term and no other, so its leader was always a
+member. A member that elects takes the sender as its leader, so it reads a new
+leadership term only when the leader member id is another member's, as the core
+reads no consensus message of any template from an id that is no other member's. A
+host started with another members string, or a message in the member's own name,
+gets no term recorded and no leader taken. Like those other messages, it is not
+counted. The page's "Counters" names no counter for a sender that is not a member,
+and `cluster.leadership_terms_ignored` is defined as a term ignored for its term.
+Counting every such message, of every template, is a reason for "What a reader
+rejects", and that change is the page's.
+
 **The canvass deadline.** A member that elects takes the startup canvass timeout
 after the state began as its deadline until its first election since it started has
 closed, and the leader heartbeat timeout after the last word of a leader from then
@@ -144,11 +156,13 @@ cannot join without it. A leader reads no new leadership term and holds no elect
   `cluster_role`, and checks after every call into a core that each move it made, of
   the election and of the role, is a registered row and that a counter registered
   for it rose.
-- `crates/cavalry-raft/tests/ballot.rs`, eight tests on one core: a term is stored
+- `crates/cavalry-raft/tests/ballot.rs`, nine tests on one core: a term is stored
   before the request vote or the vote it allows; a member votes once in a term; a
   ballot closes at once when every member heard has voted for the candidate, waits
   the election timeout for a member heard that has not, and is lost on a vote
-  against; a candidate whose term rose during its ballot leads no term.
+  against; a candidate whose term rose during its ballot leads no term; a member
+  records no term and takes no leader from an id that is no other member's, in
+  canvass or as a candidate.
 - Every test that was on `master` passes unchanged: `replication` 18, `core` 5,
   `cluster` 10 over drivers, the two allocation tests.
 - On the branch this was written on, the in-memory cluster elects with this core,

@@ -342,6 +342,46 @@ fn a_candidate_whose_term_rose_during_its_ballot_leads_no_term() {
     );
 }
 
+/// A member that elects takes no term from an id that is no other member's: id 7, a
+/// host started with another members string, or its own id. In canvass it records no
+/// term, takes no leader and canvasses on; a candidate stays in its ballot. A new
+/// leadership term is read as no consensus message from such an id is read.
+#[test]
+fn a_member_that_elects_takes_no_term_from_an_id_that_is_no_other_members() {
+    for stranger in [7, 0] {
+        let mut io = Stub::new();
+        let mut member = elector(9);
+        member.do_work(at(1), &mut io).expect("no fault");
+        member
+            .on_message(at(2), &new_leadership_term(stranger, 0), &mut io)
+            .expect("no fault");
+        assert_eq!(
+            io.first(|call| matches!(call, Call::RecordTerm(..))),
+            None,
+            "leader {stranger}"
+        );
+        assert_eq!(member.election_state(), ElectionState::Canvass);
+        assert_eq!(member.leader_member_id(), -1);
+        assert_eq!(member.leadership_term_id(), -1);
+
+        // A candidate for term 0 reads it for term 0, its own candidate term.
+        let mut io = Stub::new();
+        let mut member = elector(10);
+        let ms = to_candidate_ballot(&mut member, &mut io, &[1, 2]);
+        member
+            .on_message(at(ms + 1), &new_leadership_term(stranger, 0), &mut io)
+            .expect("no fault");
+        assert_eq!(
+            io.first(|call| matches!(call, Call::RecordTerm(..))),
+            None,
+            "leader {stranger}"
+        );
+        assert_eq!(member.election_state(), ElectionState::CandidateBallot);
+        assert_eq!(member.role(), Role::Candidate);
+        assert_eq!(member.leader_member_id(), -1);
+    }
+}
+
 /// A member that elects takes the new leadership term of whichever member sends it,
 /// where a member whose leader is appointed reads the appointed leader's alone.
 #[test]

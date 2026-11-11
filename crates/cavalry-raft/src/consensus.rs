@@ -805,10 +805,16 @@ impl Consensus {
             } => {
                 // A leader reads none: the election it would hold on a higher term is
                 // the step-down, which this version does not have. Where the leader is
-                // appointed, no other member's is read.
-                if self.role == Role::Leader
-                    || (self.election.is_none() && leader_member_id != self.leader_id)
-                {
+                // appointed, no other member's is read. A member that elects reads one
+                // from another member alone, as it reads no consensus message from an
+                // id that is no other member's: it records no term that a host started
+                // with another members string announces, nor one in its own name.
+                let sender_read = if self.election.is_some() {
+                    self.other(leader_member_id).is_some()
+                } else {
+                    leader_member_id == self.leader_id
+                };
+                if self.role == Role::Leader || !sender_read {
                     return Ok(());
                 }
                 let voting = matches!(
