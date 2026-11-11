@@ -111,7 +111,9 @@ feature that followed this page, commit by commit.
 - `git log --oneline --grep '^<card>:' origin/master` lists the feature's commits,
   each with the prefix.
 - `gh run list --commit <full sha>` shows the `ci` run green, with `gates (linux)` and
-  `gates (macos)` both passed.
+  `gates (macos)` both passed. `gates (macos)` runs for `master`'s commit and not for
+  the pull request, so this is where a change that breaks macOS alone shows: fix it
+  forward in the same session.
 - `just docs`, then open `target/book/index.html`: the new ADR and pages are in the
   book.
 - The card is archived with the commit hashes in its last comment.
