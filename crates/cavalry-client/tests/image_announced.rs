@@ -6,7 +6,7 @@
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
-use cavalry_client::{Cavalry, Fault, NULL_POSITION};
+use cavalry_client::{Cavalry, Fault, NULL_POSITION, Subscription};
 use cavalry_driver::{Driver, spec};
 use cavalry_proto::client_protocol::Command;
 use cavalry_shm::command_ring::CommandRing;
@@ -39,6 +39,60 @@ impl Drop for TestDir {
 /// its client within the first few dozen rounds on a laptop.
 const ROUNDS: usize = 300;
 
+/// Polls a subscription whose images come and go with nothing published until a poll
+/// returns with nothing wrong. On the way it takes the fault `image` with the reason
+/// `gone` for an image the test asked for long enough ago, and nothing else.
+///
+/// The driver keeps what an `available image` names for
+/// [`spec::COUNTER_REUSE_TIMEOUT`] after it sends the event. A conductor that reads
+/// the event later than that finds no log, its subscription's next poll says so, once
+/// for each such image, and the client reads on (`spec/log-buffer.md`, "Closing"; ADR
+/// 0078): a host that holds the conductor's thread that long does it to a test. So an
+/// image may be gone, but not soon: `asked` holds each publication's session id and
+/// when the test asked the driver for it, the image leaves `asked` when it is gone,
+/// and one that is gone in under half the timeout fails the test, as does one the
+/// test never made or one reported twice. Half, because the driver counts from its
+/// duty cycle's clock, read a moment before the command.
+///
+/// A poll that reports an image gone returns there and leaves the events behind it in
+/// the subscription's queue, so this polls again, as a subscriber does. Any other
+/// fault fails the test, a closed client first of all, which is what the bug was.
+fn poll_through_gone(
+    subscription: &mut Subscription,
+    asked: &mut Vec<(i32, Instant)>,
+    when: std::fmt::Arguments<'_>,
+) {
+    loop {
+        match subscription.poll(|_, _| {}, 1) {
+            Ok(_) => return,
+            Err(Fault::Image {
+                session_id,
+                position,
+                reason,
+            }) => {
+                assert_eq!(
+                    (position, reason),
+                    (NULL_POSITION, Fault::GONE),
+                    "{when}: session {session_id}'s fault is not `gone`"
+                );
+                let Some(index) = asked.iter().position(|(asked, _)| *asked == session_id) else {
+                    panic!("{when}: session {session_id} is gone twice, or was never asked for");
+                };
+                let (_, at) = asked.swap_remove(index);
+                assert!(
+                    at.elapsed() >= spec::COUNTER_REUSE_TIMEOUT / 2,
+                    "{when}: session {session_id} was gone {:?} after the test asked for it; \
+                     the driver keeps an image's log and position counter for {:?} after it \
+                     announces them",
+                    at.elapsed(),
+                    spec::COUNTER_REUSE_TIMEOUT
+                );
+            }
+            Err(other) => panic!("{when}: {other}"),
+        }
+    }
+}
+
 #[test]
 fn a_publication_added_and_removed_with_nothing_published_leaves_a_subscribers_client_open() {
     let dir = TestDir::new("came-and-went");
@@ -48,10 +102,13 @@ fn a_publication_added_and_removed_with_nothing_published_leaves_a_subscribers_c
         .add_subscription("cavalry:ipc", 2410)
         .expect("a subscription");
     let mut publisher = Cavalry::connect_to(dir.path()).expect("the publisher connects");
+    let mut asked = Vec::with_capacity(ROUNDS);
     for round in 0..ROUNDS {
+        let at = Instant::now();
         let publication = publisher
             .add_publication("cavalry:ipc", 2410)
             .expect("a publication");
+        asked.push((publication.session_id(), at));
         // Removed at once, with nothing published: its one subscriber is at its end.
         publication.close().expect("the publication closes");
         assert_eq!(
@@ -59,15 +116,18 @@ fn a_publication_added_and_removed_with_nothing_published_leaves_a_subscribers_c
             None,
             "round {round}: a peer's add and remove closed the subscriber's client"
         );
-        // A poll now and then, as a subscriber polls; none is needed to stay open.
-        if round % 7 == 0 {
-            subscription.poll(|_, _| {}, 1).expect("polls");
-        }
+        // A poll each round, as a subscriber polls; none is needed to stay open, which
+        // the next test holds.
+        poll_through_gone(&mut subscription, &mut asked, format_args!("round {round}"));
     }
     // The conductor reads what is left of the events, and the client is still open.
     let deadline = Instant::now() + Duration::from_secs(3);
     while Instant::now() < deadline {
-        subscription.poll(|_, _| {}, 1).expect("polls");
+        poll_through_gone(
+            &mut subscription,
+            &mut asked,
+            format_args!("after the last round"),
+        );
         assert_eq!(subscriber.closed(), None, "after the last round");
         std::thread::sleep(Duration::from_millis(20));
     }
