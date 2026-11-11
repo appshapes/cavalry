@@ -46,7 +46,11 @@ The daemon: conductor, sender, receiver and idle strategies. Data plane.
   "Commands") name a stream, the conductor hands the recorder each start and stop
   through a bounded queue and never touches the disk, the recorder takes blocks of
   committed frames from the publication's log buffer and writes them into the log
-  directory's segment files with one positional write each, syncing once per second,
+  directory's segment files with one positional write each, reading at the position
+  of a publisher that does not pause once in 50 µs and not every duty cycle, since
+  each read there takes the cache line the publisher writes next, and writing what is
+  committed before a stop or a sync it is asked for (ADR 0084), syncing once per
+  second,
   or at once when a client's `sync recording` asks through the same queue (ADR 0069),
   and its position, `recording.position`, bounds the publisher's limit, so that a slow
   disk back-pressures the publisher and never loses a byte (ADR 0025). The log

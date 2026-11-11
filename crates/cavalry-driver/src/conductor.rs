@@ -9209,7 +9209,7 @@ mod recording {
 
     /// Every frame of the recording in order, from its segment files, folded into one
     /// number the same way the publisher folded what it offered.
-    fn fold_recording(log_dir: &Path, recording_id: i64) -> (i64, u64) {
+    pub(super) fn fold_recording(log_dir: &Path, recording_id: i64) -> (i64, u64) {
         let reader = cavalry_log::catalog::CatalogReader::open(log_dir).expect("the catalog opens");
         let descriptor = reader
             .get(recording_id)
@@ -9524,7 +9524,7 @@ mod recording {
     }
 
     /// The fold of the first `count` messages `offer_to` numbers.
-    fn fold_offered(count: i64) -> u64 {
+    pub(super) fn fold_offered(count: i64) -> u64 {
         let mut message = [0u8; 32];
         let mut fold = 0u64;
         for n in 0..count {
@@ -9859,7 +9859,7 @@ mod replay {
     };
     use cavalry_shm::log::ClaimError;
 
-    use super::recording::{Harness, TestReceiver, offer_to};
+    use super::recording::{Harness, TestReceiver, fold_offered, fold_recording, offer_to};
     use super::*;
 
     const MS: i64 = 1_000_000;
@@ -13250,6 +13250,289 @@ mod replay {
         h.conductor.sync_recording(46, 0);
         assert_eq!(successes(&events(&mut h)), vec![46]);
         assert_eq!(h.conductor.recorder.requests.len(), 0);
+        drop(appender);
+    }
+
+    /// After a block that ended at its publisher's tail the recorder leaves the
+    /// recording alone for `RECORDER_TAIL_INTERVAL` (ADR 0084). A frame published to a
+    /// recorder that had written nothing is written on its next duty cycle, as ever.
+    /// A second frame, published just after, is not: one nanosecond short of the
+    /// interval the recorder has written nothing of it, and at the interval it has.
+    #[test]
+    fn a_recorder_that_read_to_the_tail_reads_there_again_after_its_interval() {
+        let (mut h, mut appender) = recorded("recorder-tail-interval");
+        let position = h.conductor.recordings[0]
+            .position
+            .clone()
+            .expect("attached");
+        offer(&mut h, &mut appender, 0, 1);
+        h.cycle();
+        assert_eq!(
+            position.load_acquire(),
+            64,
+            "an idle recorder writes at once"
+        );
+        let read = h.now;
+
+        offer(&mut h, &mut appender, 1, 1);
+        h.recorder
+            .duty_cycle(read + spec::RECORDER_TAIL_INTERVAL - 1);
+        assert_eq!(
+            position.load_acquire(),
+            64,
+            "inside the interval the tail is not read"
+        );
+        h.recorder.duty_cycle(read + spec::RECORDER_TAIL_INTERVAL);
+        assert_eq!(position.load_acquire(), 128, "at the interval it is");
+        drop(appender);
+    }
+
+    /// The interval holds a recorder that has reached its publisher, and not one that
+    /// is behind it (ADR 0084). With a term of 4 MiB and 1.5 MiB committed, the first
+    /// duty cycle takes a block of the recorder's limit, 1 MiB, which did not reach
+    /// the tail, so the next duty cycle, a nanosecond later, takes the rest. That
+    /// block did reach it: a frame published then waits for the interval.
+    #[test]
+    fn a_recorder_that_is_behind_its_publisher_is_not_held_by_the_interval() {
+        let mut h = Harness::new("recorder-behind");
+        h.conductor.term_length = 4 * 1024 * 1024;
+        let now = h.now;
+        h.conductor
+            .add_publication(CLIENT, 2, STREAM, IPC_CHANNEL, true, now);
+        h.conductor.start_recording(3, STREAM, IPC_CHANNEL, now);
+        h.cycle();
+        h.cycle();
+        assert_eq!(h.conductor.recordings[0].state, RecordingState::Live);
+        let mut appender = h.conductor.publications[0]
+            .log
+            .appender()
+            .expect("an appender");
+        let position = h.conductor.recordings[0]
+            .position
+            .clone()
+            .expect("attached");
+        let read = h.now;
+        let mebibyte = 1024 * 1024;
+        assert_eq!(
+            offer(&mut h, &mut appender, 0, 24_576),
+            mebibyte + mebibyte / 2
+        );
+        assert_eq!(h.now, read, "published with no duty cycle between");
+
+        h.recorder.duty_cycle(read + 1);
+        assert_eq!(position.load_acquire(), mebibyte, "a block of the limit");
+        h.recorder.duty_cycle(read + 2);
+        assert_eq!(
+            position.load_acquire(),
+            mebibyte + mebibyte / 2,
+            "and the rest on the next duty cycle"
+        );
+        offer(&mut h, &mut appender, 24_576, 1);
+        h.recorder.duty_cycle(read + 3);
+        assert_eq!(
+            position.load_acquire(),
+            mebibyte + mebibyte / 2,
+            "the recorder has reached its publisher: the interval holds"
+        );
+        h.recorder
+            .duty_cycle(read + 2 + spec::RECORDER_TAIL_INTERVAL);
+        assert_eq!(position.load_acquire(), mebibyte + mebibyte / 2 + 64);
+        drop(appender);
+    }
+
+    /// The recorder's clock is the wall's, and a clock that is set back must not hold
+    /// a recording for the size of the step (ADR 0084): a duty cycle a second before
+    /// the last block counts as the interval passed, and writes.
+    #[test]
+    fn a_clock_set_back_does_not_hold_the_recorder() {
+        let (mut h, mut appender) = recorded("recorder-clock-back");
+        let position = h.conductor.recordings[0]
+            .position
+            .clone()
+            .expect("attached");
+        offer(&mut h, &mut appender, 0, 1);
+        h.cycle();
+        assert_eq!(position.load_acquire(), 64);
+        let read = h.now;
+
+        offer(&mut h, &mut appender, 1, 1);
+        h.recorder.duty_cycle(read - SECOND);
+        assert_eq!(position.load_acquire(), 128);
+        drop(appender);
+    }
+
+    /// A `sync recording` and a `stop recording` are served to the tail (ADR 0084):
+    /// taken inside the interval, with frames committed that the interval is holding
+    /// back, each writes those frames first. The sync's position is the publisher's,
+    /// and so is the stop's, with every message in the recording.
+    #[test]
+    fn a_sync_and_a_stop_inside_the_interval_write_what_is_committed_first() {
+        let (mut h, mut appender) = recorded("recorder-request-tail");
+        let position = h.conductor.recordings[0]
+            .position
+            .clone()
+            .expect("attached");
+        let synced = h.conductor.recordings[0].synced.clone().expect("attached");
+        offer(&mut h, &mut appender, 0, 1);
+        h.cycle();
+        assert_eq!(position.load_acquire(), 64);
+        let read = h.now;
+
+        assert_eq!(offer(&mut h, &mut appender, 1, 10), 704);
+        h.recorder.duty_cycle(read + 1);
+        assert_eq!(
+            position.load_acquire(),
+            64,
+            "the interval holds ten frames back"
+        );
+        h.conductor.sync_recording(40, 0);
+        h.recorder.duty_cycle(read + 2);
+        assert_eq!(position.load_acquire(), 704, "written before the sync");
+        assert_eq!(synced.load_acquire(), 704, "and synced");
+
+        assert_eq!(offer(&mut h, &mut appender, 11, 5), 1024);
+        h.recorder.duty_cycle(read + 3);
+        assert_eq!(
+            position.load_acquire(),
+            704,
+            "the interval holds five more back"
+        );
+        h.conductor.stop_recording(41, 0);
+        h.recorder.duty_cycle(read + 4);
+        for _ in 0..10 {
+            h.cycle();
+        }
+        assert!(h.conductor.recordings.is_empty(), "stopped");
+        let answered = events(&mut h);
+        assert_eq!(successes(&answered), vec![40, 41]);
+        assert_eq!(errors(&answered), Vec::new());
+        let (stop, fold) = fold_recording(&h.log_dir, 0);
+        assert_eq!(stop, 1024, "the stop is where the publisher was");
+        assert_eq!(fold, fold_offered(16), "with every message");
+        assert_eq!(
+            h.counter(cavalry_shm::counters::generated::RECORDING_WRITE_FAILED),
+            0
+        );
+        drop(appender);
+    }
+
+    /// What a request writes first is bounded in blocks, four of them
+    /// (`RECORDER_REQUEST_BLOCKS`; ADR 0084), and a recorder further behind than its
+    /// bound is served where the bound leaves it. Tried here with a bound of one: the
+    /// recorder is 48 KiB into the first term and the publisher 16 KiB into the
+    /// second, which is two blocks, since a block ends with its term. One block takes
+    /// the recorder to the term's end and no further; the bound the recorder uses
+    /// takes it to the publisher.
+    #[test]
+    fn what_a_request_writes_first_is_bounded_in_blocks() {
+        let (mut h, mut appender) = recorded("recorder-request-bound");
+        let position = h.conductor.recordings[0]
+            .position
+            .clone()
+            .expect("attached");
+        let term = i64::from(cavalry_shm::log::layout::MIN_TERM_LENGTH);
+        assert_eq!(offer(&mut h, &mut appender, 0, 768), term * 3 / 4);
+        h.cycle();
+        h.cycle();
+        assert_eq!(position.load_acquire(), term * 3 / 4);
+        let read = h.now;
+        let published = offer(&mut h, &mut appender, 768, 512);
+        assert_eq!(published, term + term / 4, "a quarter into the second term");
+        assert_eq!(h.now, read, "published with no duty cycle between");
+
+        use crate::recorder::Taken;
+        assert_eq!(
+            h.recorder.write_blocks(0, read + 1, 1),
+            Taken::Filled,
+            "a block that ended with its term, and more is committed"
+        );
+        assert_eq!(
+            position.load_acquire(),
+            term,
+            "one block ends with its term"
+        );
+        assert_eq!(
+            h.recorder
+                .write_blocks(0, read + 2, spec::RECORDER_REQUEST_BLOCKS),
+            Taken::Nothing,
+            "the last attempt found nothing left"
+        );
+        assert_eq!(position.load_acquire(), published);
+        drop(appender);
+    }
+
+    /// A block that ends with its term has not reached the publisher, and starts no
+    /// interval (ADR 0084): with the recorder 48 KiB into the first term and the
+    /// publisher 16 KiB into the second, two duty cycles a nanosecond apart take the
+    /// recorder to the term's end and then to the publisher.
+    #[test]
+    fn a_block_that_ends_with_its_term_starts_no_interval() {
+        let (mut h, mut appender) = recorded("recorder-term-end");
+        let position = h.conductor.recordings[0]
+            .position
+            .clone()
+            .expect("attached");
+        let term = i64::from(cavalry_shm::log::layout::MIN_TERM_LENGTH);
+        assert_eq!(offer(&mut h, &mut appender, 0, 768), term * 3 / 4);
+        h.cycle();
+        h.cycle();
+        assert_eq!(position.load_acquire(), term * 3 / 4);
+        let read = h.now;
+        let published = offer(&mut h, &mut appender, 768, 512);
+        assert_eq!(h.now, read, "published with no duty cycle between");
+
+        h.recorder.duty_cycle(read + spec::RECORDER_TAIL_INTERVAL);
+        assert_eq!(position.load_acquire(), term, "to the term's end");
+        h.recorder
+            .duty_cycle(read + spec::RECORDER_TAIL_INTERVAL + 1);
+        assert_eq!(
+            position.load_acquire(),
+            published,
+            "and on, a nanosecond later"
+        );
+        drop(appender);
+    }
+
+    /// What a request writes first is also bounded in bytes, one block's limit, 1 MiB
+    /// (ADR 0084): with a term of 4 MiB and 1.5 MiB committed, a request writes 1 MiB
+    /// and leaves the rest to the duty cycle.
+    #[test]
+    fn what_a_request_writes_first_is_bounded_in_bytes() {
+        let mut h = Harness::new("recorder-request-bytes");
+        h.conductor.term_length = 4 * 1024 * 1024;
+        let now = h.now;
+        h.conductor
+            .add_publication(CLIENT, 2, STREAM, IPC_CHANNEL, true, now);
+        h.conductor.start_recording(3, STREAM, IPC_CHANNEL, now);
+        h.cycle();
+        h.cycle();
+        assert_eq!(h.conductor.recordings[0].state, RecordingState::Live);
+        let mut appender = h.conductor.publications[0]
+            .log
+            .appender()
+            .expect("an appender");
+        let position = h.conductor.recordings[0]
+            .position
+            .clone()
+            .expect("attached");
+        let read = h.now;
+        let mebibyte = 1024 * 1024;
+        let published = offer(&mut h, &mut appender, 0, 24_576);
+        assert_eq!(published, mebibyte + mebibyte / 2);
+
+        use crate::recorder::Taken;
+        assert_eq!(
+            h.recorder
+                .write_blocks(0, read + 1, spec::RECORDER_REQUEST_BLOCKS),
+            Taken::Filled
+        );
+        assert_eq!(position.load_acquire(), mebibyte, "one block's limit");
+        h.recorder.duty_cycle(read + 2);
+        assert_eq!(
+            position.load_acquire(),
+            published,
+            "the rest on the next duty cycle"
+        );
         drop(appender);
     }
 
