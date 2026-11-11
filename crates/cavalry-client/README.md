@@ -46,9 +46,11 @@ The client API implementation, re-exported by the `cavalry` crate. Data plane.
   client. `Cavalry::sync_recording(id)`, or `Recording::sync(&mut client)`, has the
   recorder sync what it has written of the recording at once, where its own sync runs
   once a second, and returns when the sync has: a program that acknowledges what it
-  recorded waits for one sync, not for the next second. `Recording::request_sync(&mut
-  client)` asks for the same sync and does not wait for the answer, for a caller that
-  must not block; it allocates nothing (ADR 0069). The recording is the driver's:
+  recorded waits for one sync, not for the next second, and acknowledges up to
+  `synced_position()`, which a failed sync leaves below what was written.
+  `Recording::request_sync(&mut client)` asks for the same sync and does not wait for
+  the answer, for a caller that must not block; it allocates nothing (ADR 0069). The
+  recording is the driver's:
   it outlives the client, and dropping the handle stops nothing (ADR 0025).
   The client follows the stop of each recording it started, whoever stopped it:
   `Recording::stop_position()` is `None` while the recording is live and its stop

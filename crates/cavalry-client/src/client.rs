@@ -884,14 +884,22 @@ impl Cavalry {
 
     /// Has the driver's recorder sync what it has written of recording `recording_id`
     /// now, without waiting for its sync once a second, and waits for the answer
-    /// (`spec/client-protocol.md`, "Commands"; ADR 0069). `Ok` means that everything
-    /// the recorder had written when it took the request is covered by a sync that
-    /// returned success, and `recording.synced_position` says how far that is. It does
-    /// not mean that everything this client published before the call is covered: the
-    /// recorder may not have written it yet. A caller that needs a position compares
-    /// [`Recording::synced_position`] with it and calls again while that is behind;
-    /// one sync covers everything written since the last. A recording that has stopped
-    /// is `Ok` with nothing done, since nothing is left to sync.
+    /// (`spec/client-protocol.md`, "Commands"; ADR 0069). For a live recording, `Ok`
+    /// means that everything the recorder had written when it took the request is
+    /// covered by a sync that returned success, and `recording.synced_position` says
+    /// how far that is. It does not mean that everything this client published before
+    /// the call is covered: the recorder may not have written it yet. A caller that
+    /// needs a position compares [`Recording::synced_position`] with it, and calls
+    /// again while that is behind and [`Recording::stop_position`] is `None`; one sync
+    /// covers everything written since the last.
+    ///
+    /// A recording that has stopped is `Ok` with nothing done, since nothing is left to
+    /// sync. What is durable of it is its stop position, which `recording stopped`
+    /// carried and [`Recording::stop_position`] returns. That is below what the
+    /// recorder wrote when a sync of the recording, or the stop's own writes or syncs,
+    /// failed (ADR 0064, ADR 0065). So `Ok` alone never says that a position is on the
+    /// disk: [`Recording::synced_position`] says it, live or stopped, and a caller
+    /// acknowledges up to that position and no further.
     ///
     /// An id the catalog does not hold is [`ClientError::Refused`] with error code 21.
     /// The recorder's request queue full is code 10: call again. A sync that failed is
