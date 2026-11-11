@@ -12,7 +12,9 @@ branch that never became a pull request. For each branch to retire, in this orde
 worktree that has it checked out is removed when it is clean and left, and named, when it
 is not; the local branch is deleted; the branch is deleted on origin when it is still
 there. The current branch and `master` are never touched. A named branch with an open
-pull request is refused. Nothing here rebases, force-pushes or aborts a merge.
+pull request is refused, and so is one that `gh` cannot be asked about, not installed
+or signed out: nothing is retired on a guess. Nothing here rebases, force-pushes or
+aborts a merge.
 
 A merged pull request's head is matched to what is here in two ways. By name: a local
 branch, a worktree's branch or a branch on origin that is called what the head was
@@ -35,7 +37,9 @@ merged at: one that was pushed to again since is somebody's and is left. A local
 branch whose upstream is gone from origin and that no merged pull request accounts
 for is left too, and named, with what retires it.
 
-Needs `git` and, for the no-argument form, `gh` (the merged pull requests come from it).
+Needs `git` and `gh`: the merged pull requests come from `gh`, and so does the answer
+to whether a named branch has an open one. With no `gh`, the no-argument form retires
+nothing and the named form refuses.
 Python 3.9 standard library only (ADR 0003).
 """
 
@@ -165,9 +169,23 @@ def holds_no_more(branch: str, pull_request: dict) -> bool:
     return ok("git", "merge-base", "--is-ancestor", f"refs/heads/{branch}", head)
 
 
-def open_pull_request(branch: str) -> bool:
-    out = run("gh", "pr", "list", "--state", "open", "--head", branch, "--json", "number", check=False)
-    return bool(out.strip()) and out.strip() != "[]"
+def open_pull_request(branch: str) -> bool | None:
+    """Whether `branch` is the head of an open pull request. None when `gh` cannot say:
+    it is not installed, it failed, as it does signed out or with no network, or what
+    it printed is not a list. The caller must not take None for "no": a branch whose
+    open pull request went unseen would be deleted on origin, which closes it."""
+    try:
+        result = subprocess.run(["gh", "pr", "list", "--state", "open", "--head", branch, "--json", "number"],
+                                capture_output=True, text=True)
+    except FileNotFoundError:
+        return None
+    if result.returncode != 0:
+        return None
+    try:
+        found = json.loads(result.stdout)
+    except ValueError:
+        return None
+    return bool(found) if isinstance(found, list) else None
 
 
 def retire(branch: str, main_worktree: Path, current: str, origin: str | None = None,
@@ -232,10 +250,15 @@ def main(argv: list[str]) -> int:
         branch = argv[1]
         if branch in PROTECTED:
             sys.exit(f"tidy: {branch} is never retired")
-        # The branch's pull request is under the name it was pushed to.
+        # The branch's pull request is under the name it was pushed to. `master` is
+        # nobody's head to ask about: a branch that tracks it was started from it.
         upstream = upstreams().get(branch, (branch, False))[0]
-        for name in sorted({branch, upstream}):
-            if open_pull_request(name):
+        for name in sorted({branch, upstream} - PROTECTED):
+            has_open = open_pull_request(name)
+            if has_open is None:
+                sys.exit(f"tidy: gh could not say whether {name} has an open pull request, so {branch} is left "
+                         f"as it is: install gh, or sign in with `gh auth login`, then run `just tidy {branch}` again")
+            if has_open:
                 sys.exit(f"tidy: {name} has an open pull request; merge or close it first")
         if branch not in local_branches() and branch not in origin_branches():
             sys.exit(f"tidy: no branch {branch} here or on origin")

@@ -11,14 +11,17 @@ retired only when it was made before its pull request was opened and holds no mo
 than the pull request did, the head's commit fetched from the pull request's ref when
 a fixer put it past this checkout; a branch on origin goes only while it stands where
 its pull request merged; what is left is named with the reason and with what retires
-it; `master` and a branch that tracks it are never touched; and with no `gh` nothing
-is retired and nothing is said of pull requests that were not read.
+it; `master` and a branch that tracks it are never touched; with no `gh` nothing
+is retired and nothing is said of pull requests that were not read; and a named branch
+is refused, and left on origin, when `gh` cannot say whether it has an open pull
+request: signed out, not installed, or printing what is no list.
 
 Standard library only; `just test-scripts` runs it.
 """
 import datetime
 import json
 import os
+import shutil
 import stat
 import subprocess
 import sys
@@ -29,22 +32,25 @@ from pathlib import Path
 TIDY = Path(__file__).resolve().parent / "tidy.py"
 
 # The fake `gh`: `gh pr list --state merged ... --json ...` prints the file FAKE_GH_MERGED
-# names, or fails as a `gh` that is signed out does when FAKE_GH_SIGNED_OUT is set; and
-# `gh pr list --state open --head <branch> ...` prints a pull request for the head
-# FAKE_GH_OPEN names and none for any other.
+# names; `gh pr list --state open --head <branch> ...` prints a pull request for the head
+# FAKE_GH_OPEN names and none for any other, or what FAKE_GH_OPEN_PRINTS holds; and
+# either fails as a `gh` that is signed out does when FAKE_GH_SIGNED_OUT is set.
 FAKE_GH = r'''#!/usr/bin/env python3
 import os, sys
 argv = sys.argv[1:]
 if argv[:2] != ["pr", "list"] or "--state" not in argv:
     sys.exit("fake gh: only `gh pr list --state ...` is served, got " + " ".join(argv))
 state = argv[argv.index("--state") + 1]
+if os.environ.get("FAKE_GH_SIGNED_OUT"):
+    sys.exit("gh: To get started with GitHub CLI, please run: gh auth login")
 if state == "merged":
-    if os.environ.get("FAKE_GH_SIGNED_OUT"):
-        sys.exit("gh: To get started with GitHub CLI, please run: gh auth login")
     sys.stdout.write(open(os.environ["FAKE_GH_MERGED"], encoding="utf-8").read())
 elif state == "open":
     head = argv[argv.index("--head") + 1]
-    sys.stdout.write('[{"number": 77}]' if head == os.environ.get("FAKE_GH_OPEN") else "[]")
+    if "FAKE_GH_OPEN_PRINTS" in os.environ:
+        sys.stdout.write(os.environ["FAKE_GH_OPEN_PRINTS"])
+    else:
+        sys.stdout.write('[{"number": 77}]' if head == os.environ.get("FAKE_GH_OPEN") else "[]")
 else:
     sys.exit("fake gh: an unexpected state " + state)
 '''
@@ -277,6 +283,52 @@ class Tidy(Checkout):
         self.assertIn("tidy: 15-head has an open pull request; merge or close it first", out)
         self.assertTrue(path.exists())
         self.assertIn("15-local", self.branches())
+
+    def left_as_it_was(self, branch, path, out):
+        """A named branch that tidy refused: here, on origin and in its worktree."""
+        self.assertTrue(path.exists(), out)
+        self.assertIn(branch, self.branches(), out)
+        self.assertIn(branch, self.on_origin(), out)
+
+    def test_a_named_branch_is_refused_when_gh_is_signed_out_and_stays_on_origin(self):
+        path, _ = self.worktree("17-own-name", "17-own-name")
+        status, out = self.tidy("17-own-name", FAKE_GH_SIGNED_OUT="1")
+        self.assertNotEqual(status, 0, out)
+        self.assertIn("tidy: gh could not say whether 17-own-name has an open pull request, so 17-own-name is "
+                      "left as it is: install gh, or sign in with `gh auth login`, then run "
+                      "`just tidy 17-own-name` again", out)
+        self.left_as_it_was("17-own-name", path, out)
+
+    def test_a_named_branch_is_refused_when_gh_is_not_installed(self):
+        path, _ = self.worktree("18-own-name", "18-own-name")
+        # A PATH with git and nothing else: no `gh` of the test's, none of the host's.
+        only_git = Path(self.tmp.name).resolve() / "only-git"
+        only_git.mkdir()
+        (only_git / "git").symlink_to(shutil.which("git", path=self.env["PATH"]))
+        status, out = self.tidy("18-own-name", PATH=str(only_git))
+        self.assertNotEqual(status, 0, out)
+        self.assertIn("tidy: gh could not say whether 18-own-name has an open pull request", out)
+        self.assertNotIn("Traceback", out)
+        self.left_as_it_was("18-own-name", path, out)
+
+    def test_a_named_branch_is_refused_when_gh_prints_what_is_no_list(self):
+        path, _ = self.worktree("19-own-name", "19-own-name")
+        for printed in ("", "not json", '{"message": "rate limited"}'):
+            status, out = self.tidy("19-own-name", FAKE_GH_OPEN_PRINTS=printed)
+            self.assertNotEqual(status, 0, (printed, out))
+            self.assertIn("tidy: gh could not say whether 19-own-name has an open pull request", out)
+            self.left_as_it_was("19-own-name", path, out)
+
+    def test_a_named_branch_that_tracks_master_is_not_asked_about_master(self):
+        path = self.trees / "20-from-master"
+        self.git("worktree", "add", "--quiet", "--track", "-b", "20-from-master", str(path), "origin/master")
+        # Some other pull request's head is called master: not this branch's to wait for.
+        status, out = self.tidy("20-from-master", FAKE_GH_OPEN="master")
+        self.assertEqual(status, 0, out)
+        self.assertFalse(path.exists())
+        self.assertNotIn("20-from-master", self.branches())
+        self.assertIn("master", self.on_origin())
+        self.assertNotIn("open pull request", out)
 
     def test_a_named_branch_leaves_a_head_of_another_name_on_origin_and_says_so(self):
         path, _ = self.worktree("16-local", "16-head")

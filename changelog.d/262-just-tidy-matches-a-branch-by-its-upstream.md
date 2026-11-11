@@ -4,5 +4,7 @@
   retired only when it was made before its pull request was opened and holds no
   commit the pull request did not; a branch on origin is deleted only while it stands
   where its pull request merged; and `just tidy` names each branch it leaves, with
-  the reason and with what retires it
+  the reason and with what retires it. `just tidy <branch>` now refuses, and says
+  what to do, when `gh` is not installed or signed out, where it went on and could
+  delete the head of an open pull request it had not seen
   ([how](docs/how-to/implement-a-feature.md); card 262).

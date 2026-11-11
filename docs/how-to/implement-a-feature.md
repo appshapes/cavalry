@@ -113,7 +113,10 @@ feature that followed this page, commit by commit.
      was made after its pull request was opened, which is a branch started from that
      head, or that holds a commit its pull request did not; a branch on origin that
      was pushed to again after its pull request merged; and a branch whose upstream
-     is gone and that no merged pull request accounts for.
+     is gone and that no merged pull request accounts for. `just tidy <branch>`
+     refuses a branch that has an open pull request, under its own name or the name
+     it was pushed to, and refuses when `gh` cannot say whether it has one, not
+     installed or signed out: install it or run `gh auth login`, then run it again.
 
 ## How to verify it worked
 
