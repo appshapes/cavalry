@@ -120,3 +120,4 @@ under `docs/` is listed here; `just lint-docs` fails on one that is not.
 - [0072. Wait in a client's connect for a driver that is creating its files](decisions/0072-wait-in-a-clients-connect-for-a-driver-that-is-creating-its-files.md)
 - [0073. Run the macOS gates for master and not for pull requests](decisions/0073-run-the-macos-gates-for-master-and-not-for-pull-requests.md)
 - [0074. Do not run the bench on master for a tree its pull request measured](decisions/0074-do-not-run-the-bench-on-master-for-a-tree-its-pull-request-measured.md)
+- [0075. Keep each change's changelog entry in a file of its own](decisions/0075-keep-each-changes-changelog-entry-in-a-file-of-its-own.md)
