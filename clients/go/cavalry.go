@@ -233,10 +233,11 @@ func CheckABIVersion(expected int32) error {
 			"docs/reference/c-abi.md#versions-and-what-a-reader-rejects", found, expected)}
 }
 
-// The table the trampoline reads subscriptions from: C must not hold a Go pointer, so
-// the ABI is given a subscription's 1-based index as the poll's clientd. The table is
-// bounded (CLAUDE.md, invariant 3): a process holds at most maxSubscriptions open
-// subscriptions through this package, and AddSubscription returns an *Error with
+// The table the trampoline reads subscriptions and committed logs from: C must not hold a
+// Go pointer, so the ABI is given a 1-based index into it as the poll's clientd. An open
+// subscription holds one slot and an open committed log holds one. The table is bounded
+// (CLAUDE.md, invariant 3): a process holds at most maxSubscriptions of the two together
+// through this package, and AddSubscription and CommittedLog return an *Error with
 // ErrSubscriptionsFull above that. Slots are taken and freed under registryMu, on the
 // control plane; the trampoline reads a slot with one atomic load.
 const maxSubscriptions = 4096
@@ -268,8 +269,9 @@ func unregister(s *Subscription) {
 	}
 }
 
-// Registered is how many subscriptions the table holds: every open one, and none once
-// each is closed. The runner reads it to check that a close frees the slot.
+// Registered is how many slots of the table are held: one for every open subscription
+// and one for every open committed log, and none once each is closed. The runner reads
+// it to check that a close frees the slot.
 func Registered() int {
 	count := 0
 	for i := range subscriptions {
@@ -349,12 +351,12 @@ func (c *Client) Closed() int32 {
 }
 
 // Close closes the client, cavalry_close, and none of the handles it made: each
-// Publication, Subscription, Recording and Replay is freed by its own Close and by
-// nothing else, and a publication or a subscription answers as closed until then
-// (spec/c-abi.md, "Lifetimes"). An unclosed Subscription keeps its slot in the table of
-// 4096, so a program that closes only its clients fills the table and
-// AddSubscription returns ErrSubscriptionsFull. Idempotent; the handle is forgotten
-// whatever the ABI returns.
+// Publication, Subscription, Recording, Replay and CommittedLog is freed by its own Close
+// and by nothing else, and a publication or a subscription answers as closed until then
+// (spec/c-abi.md, "Lifetimes"). An unclosed Subscription or CommittedLog keeps its slot in
+// the table of 4096, so a program that closes only its clients fills the
+// table, and AddSubscription and CommittedLog return ErrSubscriptionsFull. Idempotent;
+// the handle is forgotten whatever the ABI returns.
 func (c *Client) Close() error {
 	c.mu.Lock()
 	defer c.mu.Unlock()
@@ -799,23 +801,33 @@ func (s *Subscription) Poll(handler FragmentHandler, fragmentLimit int) (int, er
 }
 
 // deliver calls the handler for one fragment and recovers its panic: the first value is
-// kept and every one counted, so the poll goes on to its next fragment. A committed log's
-// entry goes to its entry handler with its position, which the ABI gives for the header
-// its own poll handed over.
+// kept and every one counted, so the poll goes on to its next fragment. A poll with no
+// fragment handler, a nil one or a committed log's slot, panics on the call and is
+// counted as any panic is: the poll returns a *HandlerError, and nothing is dropped in
+// silence.
 func (s *Subscription) deliver(body []byte) {
-	defer func() {
-		if r := recover(); r != nil {
-			s.raised++
-			if s.raised == 1 {
-				s.first = r
-			}
-		}
-	}()
-	if s.entry != nil {
-		s.entry(body, &s.header, int64(C.cavalry_committed_log_entry_position(s.header.ptr)))
-		return
-	}
+	defer s.recovered()
 	s.handler(body, &s.header)
+}
+
+// deliverEntry calls a committed log's entry handler for one entry, with its position,
+// and recovers its panic as deliver does. The position is the one the C trampoline read
+// from the header (shim.c), so no call crosses to C here. A poll with no entry handler,
+// a nil one or a subscription's slot, is a counted panic, as in deliver.
+func (s *Subscription) deliverEntry(body []byte, position int64) {
+	defer s.recovered()
+	s.entry(body, &s.header, position)
+}
+
+// recovered is deliver's and deliverEntry's deferred call: it recovers a handler's
+// panic, keeps the first value and counts every one.
+func (s *Subscription) recovered() {
+	if r := recover(); r != nil {
+		s.raised++
+		if s.raised == 1 {
+			s.first = r
+		}
+	}
 }
 
 // Err is the failure of this subscription's last poll that returned -1: an *Error with

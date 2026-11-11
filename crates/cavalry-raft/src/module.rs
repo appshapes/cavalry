@@ -2,10 +2,11 @@
 //! it (ADR 0063). It gives the core its [`Io`] through the commands every program
 //! uses: the consensus messages on a publication to each peer and a subscription of
 //! its own, the leader's log as a publication with every other member as a
-//! destination and a recording of it, a follower's log as a subscription with a
-//! recording armed on it, and the record of terms in the `terms` file of the member's
-//! log directory. What the core counts it stores in counters it adds to the driver's
-//! counters file, where `cavalry doctor` reads them.
+//! destination, created at the term's base log position, and a recording of it that
+//! begins there, a follower's log as a subscription with a recording armed on it, and
+//! the record of terms in the `terms` file of the member's log directory. What the
+//! core counts it stores in counters it adds to the driver's counters file, where
+//! `cavalry doctor` reads them.
 //!
 //! One thread drives a module: [`ConsensusModule::do_work`] once per duty cycle. A
 //! cycle reads the clock once, allocates nothing and sends no command; the commands, a
@@ -24,6 +25,7 @@ use cavalry_proto::cluster::{
     CONSENSUS_STREAM_ID, EMPTY_MEMBER, Endpoint, LOG_STREAM_ID, MAX_MEMBERS, MembersError, Message,
     Stream, parse_members,
 };
+use cavalry_proto::udp::UDP_TERM_LENGTH;
 use cavalry_shm::counters::CounterId;
 use cavalry_shm::counters::generated::{
     CLUSTER_APPEND_POSITION, CLUSTER_COMMIT_POSITION, CLUSTER_ELECTION_STATE,
@@ -264,6 +266,8 @@ struct ClientIo {
     scratch: Box<[u8; 1408]>,
     // The leader's log.
     log_publication: Option<Publication>,
+    /// The term `log_publication` was created for.
+    log_term: Option<i64>,
     destinations_added: usize,
     log_recording: Option<Recording>,
     // A follower's log.
@@ -394,19 +398,33 @@ impl Io for ClientIo {
         Ok(self.terms.append(term, base, NO_RECORDING)?)
     }
 
-    fn add_log(&mut self, _term: i64, base: i64) -> Result<Option<Log>, Self::Fault> {
-        if base != 0 {
-            // A term after the first begins where the last ended, which needs the
-            // position keys on the publication and a member that starts on its log.
+    fn add_log(&mut self, term: i64, base: i64) -> Result<Option<Log>, Self::Fault> {
+        // The publication held is the one of the term it was created for, at that
+        // term's base: a call for the same term is a step tried again, and one for
+        // another term would append that term's entries where the earlier term's
+        // publication stands. A member that led an earlier term in this process gives
+        // its publication and its recording up before it leads again, which is the
+        // step-down's to do (ADR 0077).
+        if self.log_term.is_some_and(|held| held != term) {
             return Err(RaftError::Unsupported {
-                what: "a term whose base is not position 0",
+                what: "a term led by a member that still holds the log publication of an \
+                       earlier term",
             });
         }
         if self.log_publication.is_none() {
+            // A term's publication is created at the term's base, so that every frame
+            // of the term lies at its position in the cluster's log, and the recording
+            // started below begins there (`spec/cluster.md`, state 5; ADR 0059).
+            let Some(channel) = log_channel_at(&self.log_control_channel, base) else {
+                return Err(RaftError::Unsupported {
+                    what: "a term whose base no publication's position keys can name",
+                });
+            };
             self.log_publication = Some(
                 self.client
-                    .add_exclusive_publication(&self.log_control_channel, LOG_STREAM_ID)?,
+                    .add_exclusive_publication(&channel, LOG_STREAM_ID)?,
             );
+            self.log_term = Some(term);
         }
         let Some(publication) = self.log_publication.as_ref() else {
             return Ok(None);
@@ -529,6 +547,28 @@ impl Io for ClientIo {
             })),
         }
     }
+}
+
+/// The channel of a log publication whose first frame lies at `base`: `control`, the
+/// member's log control channel, as it is for a base of 0, where a publication's log
+/// begins unless its channel says otherwise, and for any other base `control` with
+/// the three position keys, an `init-term-id` of 0, the whole terms below `base` as
+/// `term-id` and the rest of `base` as `term-offset` (`spec/udp.md`, "The sender";
+/// ADR 0059). `None` for a base below 0 and for one whose terms are more than a
+/// `term-id` holds, 2,147,483,647 terms of 16 MiB.
+fn log_channel_at(control: &str, base: i64) -> Option<String> {
+    if base == 0 {
+        return Some(control.to_owned());
+    }
+    if base < 0 {
+        return None;
+    }
+    let term_length = i64::from(UDP_TERM_LENGTH);
+    let term_id = i32::try_from(base.checked_div(term_length)?).ok()?;
+    let term_offset = base.checked_rem(term_length)?;
+    Some(format!(
+        "{control}|init-term-id=0|term-id={term_id}|term-offset={term_offset}"
+    ))
 }
 
 /// One of the module's counters with the value it last stored.
@@ -759,6 +799,7 @@ impl ConsensusModule {
                 log_endpoint_channel: endpoint_channel(&own.log),
                 scratch: Box::new([0u8; 1408]),
                 log_publication: None,
+                log_term: None,
                 destinations_added: 0,
                 log_recording: None,
                 log_subscription: None,
@@ -929,3 +970,6 @@ impl core::fmt::Debug for ConsensusModule {
             .finish()
     }
 }
+
+#[cfg(test)]
+mod tests;
