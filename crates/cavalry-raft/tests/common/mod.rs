@@ -17,6 +17,7 @@ pub enum Call {
     AddLog(i64, i64),
     JoinLog,
     LeaveLog,
+    RemoveLog,
     Append(Template),
 }
 
@@ -31,6 +32,8 @@ pub struct Stub {
     pub image: Option<i64>,
     /// Whether `record_term` fails.
     pub fail_record: bool,
+    /// Whether `remove_log` fails.
+    pub fail_remove: bool,
     /// Whether `append` is back-pressured.
     pub back_pressured: bool,
     /// Whether `send` reports a message not sent, as a publication that is
@@ -54,6 +57,7 @@ impl Stub {
             append_position: 0,
             image: None,
             fail_record: false,
+            fail_remove: false,
             back_pressured: false,
             refuse_send: false,
             terms: [None; Stub::TERMS],
@@ -154,6 +158,14 @@ impl Io for Stub {
 
     fn leave_log(&mut self) -> Result<(), Self::Fault> {
         self.call(Call::LeaveLog);
+        Ok(())
+    }
+
+    fn remove_log(&mut self) -> Result<(), Self::Fault> {
+        self.call(Call::RemoveLog);
+        if self.fail_remove {
+            return Err("the recording cannot be stopped");
+        }
         Ok(())
     }
 

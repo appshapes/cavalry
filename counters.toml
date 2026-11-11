@@ -1176,7 +1176,7 @@ name = "cluster.elections"
 kind = "counter"
 scope = "client"
 doc = "Elections one cluster member began, from init: on starting, and each time it begins again after a failed or lost election (spec/cluster.md, Roles and the election). At most one more than cluster.elections_closed and cluster.elections_failed together, the one more being the election under way; key: member id (i32), little-endian; label text: the member id in decimal."
-doctor = "A cluster.elections that keeps rising is a member that keeps beginning again: read cluster.elections_failed, cluster.leader_heartbeat_timeouts and cluster.log_images_lost on the same member to see why each election ended."
+doctor = "A cluster.elections that keeps rising is a member that keeps beginning again: read cluster.elections_failed, cluster.leader_heartbeat_timeouts and cluster.log_images_lost on the same member to see why each election ended, and on a member that elects cluster.leader_quorum_losses, cluster.leader_step_downs and cluster.higher_terms_seen too."
 
 [[counter]]
 id = 111
@@ -1191,7 +1191,7 @@ id = 112
 name = "cluster.leader_quorum_losses"
 kind = "counter"
 scope = "client"
-doc = "Times the active members of one cluster leader fell below a quorum, a member being active while its last report is younger than the leader heartbeat timeout, 10 s; the appointed leader stays the leader and its commit position stops until a quorum reports again (spec/cluster.md, The appointed leader); key and label as cluster.elections."
+doc = "Times the active members of one cluster leader fell below a quorum, a member being active while its last report is younger than the leader heartbeat timeout, 10 s; a leader that elects holds an election, beginning at init, a failed election when it was in leader log replication or leader ready, and the appointed leader stays the leader and its commit position stops until a quorum reports again (spec/cluster.md, The commit position and The appointed leader; ADR 0082); key and label as cluster.elections."
 doctor = "The leader cannot commit while fewer than a quorum of members report to it: check that a majority of the members in the members string are running and that each reaches the leader's consensus endpoint."
 
 [[counter]]
@@ -1215,7 +1215,7 @@ id = 115
 name = "cluster.elections_failed"
 kind = "counter"
 scope = "client"
-doc = "Elections one cluster member failed in a state and began again at init: a log it cannot join without a truncation, a replication or a catch-up, an image of the log that joined at another position, or a step that made no progress for the leader heartbeat timeout, 10 s (spec/cluster.md, Roles and the election); key and label as cluster.elections."
+doc = "Elections one cluster member failed in a state and began again at init: a log it cannot join without a truncation, a replication or a catch-up, an image of the log that joined at another position, or a step that made no progress for the leader heartbeat timeout, 10 s; and, for a leader that elects, in leader log replication or leader ready, a canvass position with a term above its own or active members that fell below a quorum (spec/cluster.md, Roles and the election; ADR 0082); key and label as cluster.elections."
 doctor = "A member whose elections keep failing cannot join its leader's log as it stands: read cluster.join_position_mismatches on it; a member that started after the leader's first entry, or on a log of its own, needs the catch-up, which this version does not have, so start it on an empty log directory before the leader's first entry."
 
 [[counter]]
@@ -1344,14 +1344,34 @@ scope = "client"
 doc = "Votes one cluster member sent against a candidate: a request vote for a term at or below its candidate term, in which it has voted, or for a higher term from a candidate whose log is behind its own (spec/cluster.md, Messages during an election); key: member id (i32), little-endian; label text: the member id in decimal."
 doctor = ""
 
+[[counter]]
+id = 131
+name = "cluster.leader_step_downs"
+kind = "counter"
+scope = "client"
+doc = "Times one cluster leader whose election had closed held an election, beginning at init, on a term above its own: a canvass position with either term, a request vote whose candidate term id or a commit position whose leadership term id above its leadership term id, from another member. It is a follower from then on and gives up its log publication, Raft's step-down (spec/cluster.md, Messages outside an election, and Counters; ADR 0082); key: member id (i32), little-endian; label text: the member id in decimal."
+doctor = "The leader stood still, or was parted from the other members, for longer than the leader heartbeat timeout, 10 s, while they elected another, and gave up the lead when it read the later term. A count that keeps rising on one member is a process that stops again and again: check the host's CPU throttling, and the path between this member's consensus endpoint and each other member's."
+
+[[counter]]
+id = 132
+name = "cluster.higher_terms_seen"
+kind = "counter"
+scope = "client"
+doc = "Times one cluster follower whose election had closed held an election, beginning at init, on a term above its own: a request vote whose candidate term id or a commit position whose leadership term id above its leadership term id, from another member. The cluster began that term without it, and it joins it through the election it holds (spec/cluster.md, Messages outside an election, and Counters; ADR 0082); key: member id (i32), little-endian; label text: the member id in decimal."
+doctor = "The follower followed a leader the other members had replaced, or another member asked for votes in a later term: this member or its leader was parted from the members that held the ballot. Read cluster.leader_step_downs and cluster.leader_quorum_losses on the member it followed, and check the path between this member's consensus endpoint and each other member's."
+
 # A cluster member's role (spec/cluster.md, "Roles and the election"; ADR 0052, feature
 # 3). A member whose leader is appointed becomes the leader from follower, and no
 # member is a candidate (ADR 0063). A member that elects (ADR 0077, ADR 0081) is a
 # candidate from its nomination until it leads, loses its ballot, votes for another,
 # follows another member that won its candidate term, or fails its election on such a
 # member's term when it cannot join it. Candidate to follower is listed with the
-# counter of each of those four causes. No leader stops leading yet: the step-down
-# comes with card 228's next change.
+# counter of each of those four causes. A leader that elects stops leading when it
+# holds an election, a follower from the same call (ADR 0082): on a term above its own
+# once its election has closed, when its active members fall below a quorum, and when
+# its election fails in leader log replication or leader ready. Leader to follower is
+# listed with the counter of each of those three causes; the appointed leader never
+# stops leading.
 
 [[state_machine]]
 name = "cluster_role"
@@ -1399,12 +1419,32 @@ from = "candidate"
 to = "follower"
 counter = "cluster.elections_failed"
 
+[[transition]]
+machine = "cluster_role"
+from = "leader"
+to = "follower"
+counter = "cluster.leader_step_downs"
+
+[[transition]]
+machine = "cluster_role"
+from = "leader"
+to = "follower"
+counter = "cluster.leader_quorum_losses"
+
+[[transition]]
+machine = "cluster_role"
+from = "leader"
+to = "follower"
+counter = "cluster.elections_failed"
+
 # The election as one member's core holds it, `cavalry_raft::ElectionState`: the states
 # of the appointed leader's path (spec/cluster.md, "Roles and the election" and "The
 # appointed leader"; ADR 0063, ADR 0067) and, for a member that elects, nominate and
-# the two ballots (ADR 0077, ADR 0081). Each transition the core makes is listed with
-# every counter it adds one to; a transition with two causes, closed to init, is listed
-# with the counter of each cause.
+# the two ballots (ADR 0077, ADR 0081), and the elections a leader holds (ADR 0082).
+# Each transition the core makes is listed with every counter it adds one to; a
+# transition with more than one cause, closed to init with five, is listed with the
+# counter of each cause. A leader that elects and loses its quorum in leader log
+# replication or leader ready adds one to both counters of its row.
 [[state_machine]]
 name = "cluster_election"
 states = ["init", "canvass", "nominate", "candidate_ballot", "follower_ballot", "leader_log_replication", "leader_replay", "leader_init", "leader_ready", "follower_replay", "follower_log_init", "follower_log_await", "follower_ready", "closed"]
@@ -1614,3 +1654,45 @@ machine = "cluster_election"
 from = "follower_ballot"
 to = "init"
 counter = "cluster.elections_failed"
+
+[[transition]]
+machine = "cluster_election"
+from = "closed"
+to = "init"
+counter = "cluster.leader_step_downs"
+
+[[transition]]
+machine = "cluster_election"
+from = "closed"
+to = "init"
+counter = "cluster.higher_terms_seen"
+
+[[transition]]
+machine = "cluster_election"
+from = "closed"
+to = "init"
+counter = "cluster.leader_quorum_losses"
+
+[[transition]]
+machine = "cluster_election"
+from = "leader_log_replication"
+to = "init"
+counter = "cluster.elections_failed"
+
+[[transition]]
+machine = "cluster_election"
+from = "leader_log_replication"
+to = "init"
+counter = "cluster.leader_quorum_losses"
+
+[[transition]]
+machine = "cluster_election"
+from = "leader_ready"
+to = "init"
+counter = "cluster.elections_failed"
+
+[[transition]]
+machine = "cluster_election"
+from = "leader_ready"
+to = "init"
+counter = "cluster.leader_quorum_losses"

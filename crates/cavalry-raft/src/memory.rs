@@ -86,7 +86,8 @@ struct Publication {
     position: i64,
     /// Every entry appended to it, for the cluster's life.
     entries: Vec<Entry>,
-    /// Gone with the member that added it.
+    /// Gone: the member that added it was started again on an empty log directory, or
+    /// gave its log up to hold an election ([`Io::remove_log`]).
     closed: bool,
 }
 
@@ -350,6 +351,20 @@ impl Io for MemberIo<'_> {
             disk.joined = false;
             disk.image = None;
             disk.image_lost = false;
+        }
+        Ok(())
+    }
+
+    fn remove_log(&mut self) -> Result<(), Self::Fault> {
+        // The member's log publication is gone, and with it every follower's image of
+        // it: nothing more of it reaches a member, and `log_image` finds no
+        // publication with its session id from this step on, where a transport takes
+        // the image liveness timeout at most. What the member appended stays in its
+        // own log.
+        for publication in &mut self.world.publications {
+            if publication.leader == self.own {
+                publication.closed = true;
+            }
         }
         Ok(())
     }
@@ -673,9 +688,10 @@ impl Cluster {
         bytes
     }
 
-    /// The member that leads: the one whose role is leader, the one of the highest
-    /// term when a member that stopped still holds an older one, and never a halted
-    /// member. `None` while no running member leads, during an election.
+    /// The member that leads: the running member whose role is leader. When two are,
+    /// a leader that was cut off or stood still and has not yet given up the lead
+    /// beside the one elected after it, it is the one of the higher term. `None`
+    /// while no running member leads, during an election.
     pub fn leader(&self) -> Option<i32> {
         self.cores
             .iter()
