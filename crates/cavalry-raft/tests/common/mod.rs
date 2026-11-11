@@ -5,6 +5,7 @@
 #![allow(dead_code)]
 
 use cavalry_proto::cluster::{Message, Template};
+use cavalry_raft::consensus::terms_above;
 use cavalry_raft::{Clock, Io, Log};
 
 /// One call the core made, in the order it made it.
@@ -35,10 +36,16 @@ pub struct Stub {
     /// Whether `send` reports a message not sent, as a publication that is
     /// back-pressured or not connected does.
     pub refuse_send: bool,
+    /// The terms recorded, each with its base: the first [`Stub::TERMS`] of them.
+    pub terms: [Option<(i64, i64)>; Stub::TERMS],
+    /// The last new leadership term sent: who it was for, the log leadership term id
+    /// it answers, and its three next fields.
+    pub last_term: Option<(i32, i64, [i64; 3])>,
 }
 
 impl Stub {
     pub const CALLS: usize = 64;
+    pub const TERMS: usize = 8;
 
     pub fn new() -> Self {
         Self {
@@ -49,6 +56,8 @@ impl Stub {
             fail_record: false,
             back_pressured: false,
             refuse_send: false,
+            terms: [None; Stub::TERMS],
+            last_term: None,
         }
     }
 
@@ -89,6 +98,24 @@ impl Io for Stub {
             to: member,
             template: message.template(),
         });
+        if let Message::NewLeadershipTerm {
+            log_leadership_term_id,
+            next_leadership_term_id,
+            next_term_base_log_position,
+            next_log_position,
+            ..
+        } = *message
+        {
+            self.last_term = Some((
+                member,
+                log_leadership_term_id,
+                [
+                    next_leadership_term_id,
+                    next_term_base_log_position,
+                    next_log_position,
+                ],
+            ));
+        }
         !self.refuse_send
     }
 
@@ -101,6 +128,9 @@ impl Io for Stub {
         self.call(Call::RecordTerm(term, base));
         if self.fail_record {
             return Err("the terms file cannot be written");
+        }
+        if let Some(slot) = self.terms.iter_mut().find(|slot| slot.is_none()) {
+            *slot = Some((term, base));
         }
         Ok(())
     }
@@ -137,6 +167,10 @@ impl Io for Stub {
         }
         self.call(Call::Append(entry.template()));
         Ok(true)
+    }
+
+    fn terms_after(&mut self, term: i64) -> [Option<(i64, i64)>; 2] {
+        terms_above(self.terms.iter().flatten().copied(), term)
     }
 }
 

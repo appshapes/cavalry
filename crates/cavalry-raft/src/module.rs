@@ -34,7 +34,7 @@ use cavalry_shm::counters::generated::{
 };
 
 use crate::consensus::{
-    Clock, Consensus, Counts, ElectionState, Io, Log, MembersRefused, Refused, Role,
+    Clock, Consensus, Counts, ElectionState, Io, Log, MembersRefused, Refused, Role, terms_above,
 };
 
 /// The longest payload [`ConsensusModule::offer`] takes: what one frame of the log
@@ -527,6 +527,17 @@ impl Io for ClientIo {
             }
             _ => self.stopped_at,
         }
+    }
+
+    fn terms_after(&mut self, term: i64) -> [Option<(i64, i64)>; 2] {
+        // The `terms` file's entries as it holds them in memory: nothing is read from
+        // the disk here.
+        terms_above(
+            self.terms
+                .terms()
+                .map(|entry| (entry.leadership_term_id, entry.term_base_log_position)),
+            term,
+        )
     }
 
     fn append(&mut self, entry: &Message<'_>) -> Result<bool, Self::Fault> {

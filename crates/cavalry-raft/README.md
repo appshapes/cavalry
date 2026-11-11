@@ -23,7 +23,11 @@ commit path runs per message.
   voted for it (ADR 0077). It stores a term before the vote or the request vote that
   raises it, and votes once in a term. A candidate asks for votes in the term it
   nominated itself for and no other: one whose term another candidate's request raised
-  asks for none in the raised term and does not lead it. The consensus module does not
+  asks for none in the raised term and does not lead it. A leader tells a member whose
+  log is of an older term which term its own record of terms holds next, with that
+  term's base and its end, read through `Io::terms_after`: the member truncates what
+  it holds above that base, so the leader names the next term and never a later one,
+  over which the member would keep bytes of its own. The consensus module does not
   use this path yet: a member over a driver is appointed until the election can do what
   the next section lists, and then the module moves to it in one change (ADR 0081).
 - Counts every move of the election. `ElectionState` is the state machine
