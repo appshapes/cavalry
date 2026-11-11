@@ -42,12 +42,17 @@ committed entry, in order, none at or past the member's commit position, and ret
 the entry count; `position` is the entry's position in the log. `log.Position()` is
 the position after the last entry delivered, the one a service keeps for its next
 start, and `log.CommitPosition()` the bound of the last poll. `log.IsEnded()` says that
-the member closed or left its log: once a poll then returns 0, close the log and open
-another from `log.Position()`. `log.FailedAt()` is `null` unless the driver's replay of
-the member's recording failed. `log.Close()`, or `using`, stops the driver's replay
+no poll will deliver another entry: stop reading when it is true, not when a poll
+returns 0, then close the log and open another from `log.Position()`. Two reports say
+whether the log ended short of the entries it was owed, each `null` or a position,
+read once `log.IsEnded()` is true: `log.FailedAt()`, where the driver's replay of the
+member's recording failed, and `log.WithdrawnAt()`, where the entries begin that the
+log was not given because the driver withdrew the replay, 5 s after it ended, before
+the service had read it. The log delivered every committed entry it may read only
+when both are `null`. `log.Close()`, or `using`, stops the driver's replay
 and is idempotent; a log closed after its client is freed, and the driver ends the
 replay by itself. `log.MemberId` and `log.RecordingId` say whose log it is
-(`spec/c-abi.md`, "Functions", committed log; ADR 0068).
+(`spec/c-abi.md`, "Functions", committed log; ADR 0070).
 
 A committed log has an `UnmanagedCallersOnly` trampoline of its own, as a subscription
 has. A handler's exception goes where a subscription's goes ("The exception"): every
