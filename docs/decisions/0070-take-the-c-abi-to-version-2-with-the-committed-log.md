@@ -1,4 +1,4 @@
-# 0068. Take the C ABI to version 2 with the committed log
+# 0070. Take the C ABI to version 2 with the committed log
 
 - **Status:** Accepted
 - **Date:** 2026-11-10
@@ -25,7 +25,7 @@ number is free to move.
 
 Card 227 also gave the Rust client an armed recording, a recording's stop position, a
 client's counter, the bounded poll and the sync of a recording on command (ADR 0059,
-ADR 0062, ADR 0066, ADR 0067). Each is used by a consensus module, which is Rust and
+ADR 0062, ADR 0066, ADR 0069). Each is used by a consensus module, which is Rust and
 runs beside the driver. None is something a service needs.
 
 The Rust `CommittedLog::poll` hands its handler three things: the entry's bytes, its

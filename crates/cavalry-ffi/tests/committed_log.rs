@@ -1,5 +1,5 @@
 //! The committed log through the ABI (`spec/c-abi.md`, "Functions", committed log;
-//! ADR 0068): a driver that hosts no member answers the open with a null handle and
+//! ADR 0070): a driver that hosts no member answers the open with a null handle and
 //! no error; beside a cluster member in the test's process, the C handler is handed
 //! the entries a quorum committed and none past the commit position, each with its
 //! position; the calls from inside the handler answer as the page's table says; a

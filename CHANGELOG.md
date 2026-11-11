@@ -1943,5 +1943,5 @@ user-visible change, added in the same commit as the change. The format follows
   every entry opens the log again. The Python, Node, Go, JVM and .NET packages are
   regenerated from the version 2 header and refuse a version 1 library; each gets its
   own committed log object in a later change
-  ([ADR 0068](docs/decisions/0068-take-the-c-abi-to-version-2-with-the-committed-log.md);
+  ([ADR 0070](docs/decisions/0070-take-the-c-abi-to-version-2-with-the-committed-log.md);
   card 227).

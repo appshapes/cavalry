@@ -550,7 +550,7 @@ class NodePackage(unittest.TestCase):
         two that take the C fragment handler: the addon's `poll` makes the one
         `cavalry_subscription_poll` call with its trampoline, and the header's fields are
         read through `headerField`; `cavalry_committed_log_poll` is not bound in this
-        package yet (ADR 0068)."""
+        package yet (ADR 0070)."""
         addon = gen_node.write_node(self.header)["src/addon.c"]
         self.assertEqual(gen_node.HANDLER_FUNCTIONS, ("cavalry_subscription_poll", "cavalry_committed_log_poll"))
         for fn in self.header.functions:

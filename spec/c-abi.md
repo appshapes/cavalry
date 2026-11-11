@@ -415,7 +415,7 @@ when it loads, as its message says, until it is regenerated.
 Version 2 adds the committed log: the opaque type `cavalry_committed_log_t`, the
 struct `cavalry_committed_log_constants_t`, the ten functions of the "committed log"
 group, `CAVALRY_SERVICE_LOG_STREAM_ID`, error code 138, `CAVALRY_ERR_NO_POSITION`, and
-`CAVALRY_ABI_VERSION` 2 (ADR 0068); every declaration of version 1 is unchanged.
+`CAVALRY_ABI_VERSION` 2 (ADR 0070); every declaration of version 1 is unchanged.
 Nothing is released, so again no built program meets the refusal, and a generated
 client's package of version 1 refuses a version 2 library when it loads until it is
 regenerated.

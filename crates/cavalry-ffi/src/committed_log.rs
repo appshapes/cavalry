@@ -1,6 +1,6 @@
 //! A committed log's handle: its open, its poll with the C fragment handler, an
 //! entry's position, its reads and its close (`spec/c-abi.md`, "Functions", committed
-//! log, "Calls during a claim or a poll", "A frame's position"; ADR 0068). The Rust
+//! log, "Calls during a claim or a poll", "A frame's position"; ADR 0070). The Rust
 //! core is `cavalry_client::CommittedLog` (`spec/cluster.md`, "The service"; ADR 0066).
 
 use std::ffi::{c_int, c_void};
