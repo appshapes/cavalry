@@ -14,7 +14,8 @@ In Aeron, this is the media driver ([glossary](../glossary.md)).
   write-back can stall a publisher, and `doctor` says so.
 - No other driver on this host for the same user, or a directory of your own for this
   one: `--dir <path>`. A second driver on the same directory is refused with
-  `driver-active`, which names the directory and the pid.
+  `driver-active`, which names the directory and the pid, however close together the
+  two were started: the first holds a lock on the directory until it stops.
 
 ## Steps
 
@@ -75,12 +76,17 @@ reports it running with a new pid.
 
 ## When it does not work
 
-- **`driver refused (driver-active)`.** Another driver is alive on the directory, and
-  the message names its pid. Stop that one, or leave it: one driver per host is the
-  shape.
-- **`FAIL driver-heartbeat ... stopped without closing`.** A driver died without
-  storing −1: its process was killed with SIGKILL or crashed. Its counters are still
-  readable; the next `cavalry run` remakes the directory.
+- **`driver refused (driver-active)`.** Another driver holds the directory, running or
+  starting there, and the message names its pid. Stop that one, or leave it: one
+  driver per host is the shape. A driver whose process is stopped, by a debugger or
+  `SIGSTOP`, still holds the directory, and the refusal still names it; a driver that
+  was killed holds nothing, and the next `cavalry run` takes the directory over.
+- **`FAIL driver-heartbeat ... stopped without closing`.** A driver's heartbeat is
+  older than ten seconds and is not −1. Either its process was killed with SIGKILL or
+  crashed: its counters are still readable, and the next `cavalry run` takes the
+  directory over at once and makes its files anew. Or its process is alive and
+  stopped or stalled: `cavalry run` then answers `driver-active` with its pid, as the
+  first entry says.
 - **A warning per counter.** Every static counter with a non-empty `doctor` text in
   `counters.toml` is reported when it is above 0, with that text, which says what the
   operator does next; [the counters reference](../reference/counters.md) lists them.

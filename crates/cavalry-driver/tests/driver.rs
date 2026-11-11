@@ -214,17 +214,22 @@ fn counter(dir: &Path, id: cavalry_shm::counters::CounterId) -> i64 {
 fn a_live_directory_is_refused_and_a_dead_one_is_remade() {
     let dir = TestDir::new("directory");
     let driver = Driver::start(dir.path(), dir.path().join("log")).expect("the driver starts");
-    for file in ["counters", "command-ring", "broadcast-buffer"] {
+    for file in ["pid", "counters", "command-ring", "broadcast-buffer"] {
         assert!(dir.path().join(file).is_file(), "{file} exists");
     }
+    // The driver holds the lock on the directory and wrote its pid there; a second
+    // driver is refused the lock, names that pid and changes nothing (ADR 0079).
+    let pid = std::process::id();
+    assert_eq!(
+        std::fs::read_to_string(dir.path().join("pid")).expect("the pid file"),
+        format!("{pid}\n")
+    );
     let refused =
         Driver::start(dir.path(), dir.path().join("log")).expect_err("a second driver is refused");
     assert_eq!(refused.reason(), "driver-active");
-    assert!(
-        refused
-            .to_string()
-            .contains("docs/reference/client-protocol.md#the-driver-directory")
-    );
+    let said = refused.to_string();
+    assert!(said.contains(&format!("pid {pid};")), "{said}");
+    assert!(said.contains("docs/reference/client-protocol.md#the-driver-directory"));
     let first_start = CommandRing::open(dir.path(), false)
         .expect("opens")
         .header()
@@ -247,12 +252,100 @@ fn a_live_directory_is_refused_and_a_dead_one_is_remade() {
     assert!(second_start > first_start, "the files were made anew");
     again.close().expect("closes");
 
-    // A half-created directory, the ring missing, is a dead driver's too.
+    // A half-created directory, the ring missing, is a dead driver's too, and what a
+    // driver that has gone left beside its files goes with them.
     std::fs::remove_file(dir.path().join("command-ring")).expect("remove the ring");
+    std::fs::write(dir.path().join("left-behind"), b"a file").expect("a stray file");
+    std::fs::create_dir_all(dir.path().join("publications/left")).expect("a stray directory");
     let third = Driver::start_with(dir.path(), dir.path().join("log"), IdleStrategy::Yield)
         .expect("starts on a half directory");
     assert!(dir.path().join("command-ring").is_file());
+    assert!(dir.path().join("pid").is_file());
+    assert!(!dir.path().join("left-behind").exists());
+    assert!(!dir.path().join("publications/left").exists());
     third.close().expect("closes");
+}
+
+/// The three files of a driver directory, made as a driver makes them, with a heartbeat
+/// stored now and no thread behind them: a driver that runs, to whoever reads the ring.
+fn a_directory_with_a_fresh_heartbeat(
+    dir: &Path,
+) -> (cavalry_shm::command_ring::Consumer, impl Sized + use<>) {
+    std::fs::create_dir_all(dir).expect("the directory");
+    let counters = cavalry_shm::counters::CountersFile::create(dir, spec::COUNTERS_CAPACITY)
+        .expect("the counters file");
+    let ring = CommandRing::create(dir, spec::COMMAND_RING_CAPACITY).expect("the ring");
+    let consumer = ring
+        .consumer(spec::COMMAND_RING_UNBLOCK_TIMEOUT)
+        .expect("the ring's consumer");
+    consumer.store_heartbeat(now_nanos());
+    let broadcast =
+        BroadcastBuffer::create(dir, spec::BROADCAST_CAPACITY).expect("the broadcast buffer");
+    (consumer, (counters, ring, broadcast))
+}
+
+/// A driver of an earlier version holds no lock and leaves no pid file. Its directory
+/// is told by its heartbeat, as before: fresh, and the starter refuses with the ring's
+/// creator pid, removes nothing and leaves no pid of its own behind; older than the
+/// driver timeout or −1, and the starter takes the directory over
+/// (`spec/client-protocol.md`, "The driver directory"; ADR 0079).
+#[test]
+fn a_driver_of_an_earlier_version_is_still_told_by_its_heartbeat() {
+    let dir = TestDir::new("earlier-version");
+    let (consumer, files) = a_directory_with_a_fresh_heartbeat(dir.path());
+    assert!(!dir.path().join("pid").exists());
+
+    let refused = Driver::start(dir.path(), dir.path().join("log"))
+        .expect_err("a driver with a fresh heartbeat is there");
+    assert_eq!(refused.reason(), "driver-active");
+    let said = refused.to_string();
+    assert!(
+        said.contains(&format!("pid {};", std::process::id())),
+        "the ring's creator: {said}"
+    );
+    assert!(dir.path().join("counters").is_file(), "nothing was removed");
+    assert!(
+        !dir.path().join("pid").exists(),
+        "the refused starter left no pid: the next starter must not take the \
+         directory for one of this version's"
+    );
+    // Refused again: the first refusal let go of the lock and changed nothing.
+    let again = Driver::start(dir.path(), dir.path().join("log")).expect_err("still there");
+    assert_eq!(again.reason(), "driver-active");
+
+    // That driver stops: -1 in the heartbeat. The next starter takes the directory.
+    consumer.store_heartbeat(-1);
+    drop((consumer, files));
+    let driver = Driver::start(dir.path(), dir.path().join("log"))
+        .expect("the directory of a driver that stopped is taken over");
+    assert!(dir.path().join("pid").is_file());
+    driver.close().expect("closes");
+}
+
+/// A driver of this version that was killed leaves a heartbeat that is fresh for the
+/// driver timeout, and its pid in the directory. The next starter takes the lock the
+/// operating system dropped, reads the pid, and knows that the driver that wrote it
+/// held this lock and has gone: it takes the directory at once, where a starter that
+/// went by the heartbeat was refused for up to ten seconds (ADR 0079).
+#[test]
+fn a_killed_driver_of_this_version_is_taken_over_at_once_whatever_its_heartbeat() {
+    let dir = TestDir::new("killed");
+    let files = a_directory_with_a_fresh_heartbeat(dir.path());
+    std::fs::write(dir.path().join("pid"), b"4242\n").expect("the pid a killed driver left");
+    let began = Instant::now();
+    let driver = Driver::start(dir.path(), dir.path().join("log"))
+        .expect("the directory of a driver that was killed is taken over");
+    assert!(
+        began.elapsed() < Duration::from_secs(5),
+        "at once, not after the driver timeout: {:?}",
+        began.elapsed()
+    );
+    assert_eq!(
+        std::fs::read_to_string(dir.path().join("pid")).expect("the pid file"),
+        format!("{}\n", std::process::id())
+    );
+    drop(files);
+    driver.close().expect("closes");
 }
 
 #[test]

@@ -69,6 +69,10 @@ pub struct Driver {
     replayer: Option<JoinHandle<()>>,
     sender: Option<JoinHandle<()>>,
     receiver: Option<JoinHandle<()>>,
+    /// The lock on the directory, held from before the directory was read until the
+    /// threads have stopped (`spec/client-protocol.md`, "The driver directory"; ADR
+    /// 0079).
+    dir_lock: Option<conductor::DirLock>,
 }
 
 impl Driver {
@@ -150,7 +154,7 @@ impl Driver {
     ) -> Result<Self, DriverError> {
         let dir = dir.as_ref().to_path_buf();
         let log_dir = log_dir.as_ref().to_path_buf();
-        conductor::prepare_dir(&dir)?;
+        let dir_lock = conductor::prepare_dir(&dir)?;
         let (log, recovery) = LogDir::open(&log_dir, conductor::now_nanos())?;
         let (requests, request_consumer) =
             spsc::queue::<recorder::Request>(spec::RECORDER_QUEUE_CAPACITY);
@@ -336,6 +340,7 @@ impl Driver {
             replayer: Some(replayer_handle),
             sender: Some(sender_handle),
             receiver: Some(receiver_handle),
+            dir_lock: Some(dir_lock),
         })
     }
 
@@ -403,6 +408,9 @@ impl Driver {
             }),
             None => Ok(()),
         };
+        // The threads have stopped and the heartbeat holds −1: the directory is the
+        // next driver's to take.
+        self.dir_lock = None;
         conductor
             .and(recorder)
             .and(replayer)

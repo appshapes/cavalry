@@ -206,8 +206,13 @@ In Aeron, this is the media driver ([glossary](../../docs/glossary.md)).
   and `doctor` explains the counter (invariant 4).
 - Deliver a message twice or out of order, or lose one without reporting the gap to the
   subscriber (invariant 1).
-- Remove a file whose creator is alive. A directory with a fresh heartbeat is
-  `driver-active`, and the driver refuses to start.
+- Remove a file whose creator is alive. A driver holds its directory by a lock of the
+  operating system on the directory itself, from before it reads the directory until
+  it stops, and the system drops the lock with the process, however it ends. A
+  starter that is refused the lock answers `driver-active`, with the pid the holder
+  wrote in the file `pid`, and changes nothing, so of two drivers started at one
+  moment one runs and the other is refused. A starter that takes the lock and finds a
+  pid there knows that driver has gone, and takes the directory at once (ADR 0079).
 - Report a recording's position before the operating system holds the bytes, or a
   synced position before a sync made them durable; clean a recorded byte before the
   recorder has written it; or share a log directory with another driver (invariant 1).
@@ -230,22 +235,24 @@ fn main() -> Result<(), DriverError> {
     // is memory; `Driver::default_log_dir()` is the rule a running driver uses.
     let log_dir = std::env::temp_dir().join(format!("cavalry-driver-readme-{pid}-log"));
 
-    // Start: the directory and its three files exist, the log directory holds its
-    // catalog under this driver's lock, and the conductor and recorder are running.
+    // Start: the directory is locked and holds this driver's pid and its three files,
+    // the log directory holds its catalog under this driver's lock, and the conductor
+    // and recorder are running.
     let driver = Driver::start(&dir, &log_dir)?;
-    for file in ["counters", "command-ring", "broadcast-buffer"] {
+    for file in ["pid", "counters", "command-ring", "broadcast-buffer"] {
         assert!(dir.join(file).is_file(), "{file}");
     }
     assert!(log_dir.join("catalog").is_file());
 
-    // A second driver on the same directory finds this one's heartbeat and refuses.
+    // A second driver on the same directory is refused the lock this one holds.
     let refused = Driver::start(&dir, &log_dir).unwrap_err();
     assert_eq!(refused.reason(), "driver-active");
     println!("{refused}");
 
-    // Close: the heartbeat becomes -1 and the directory stays for `doctor`. The next
-    // driver to start finds a dead driver there and makes the directory anew; the log
-    // directory it finds whole, with nothing to repair.
+    // Close: the heartbeat becomes -1, the lock is released and the directory stays
+    // for `doctor`. The next driver to start takes the lock, removes what this one
+    // left and makes its files anew; the log directory it finds whole, with nothing
+    // to repair.
     driver.close()?;
     let again = Driver::start(&dir, &log_dir)?;
     again.close()?;
@@ -258,7 +265,7 @@ fn main() -> Result<(), DriverError> {
 Running it prints one line, the refusal with its reason, what to do and the docs anchor:
 
 ```text
-driver refused (driver-active): /tmp/cavalry-driver-readme-4242 holds a driver whose heartbeat is fresh, created by pid 4242; stop that driver, or start this one on another directory; see docs/reference/client-protocol.md#the-driver-directory
+driver refused (driver-active): another driver holds /tmp/cavalry-driver-readme-4242, running or starting there, pid 4242; stop that driver, or start this one on another directory; see docs/reference/client-protocol.md#the-driver-directory
 ```
 
 ## What to read next
