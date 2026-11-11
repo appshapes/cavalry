@@ -11,10 +11,23 @@
 //! the log joins at the position the leader's publication is at when the follower
 //! subscribes; a member's append position is what its recording has synced; and the
 //! leader's own append position rises by its own sync, like any member's.
+//!
+//! Its bounds, and what it does at each:
+//!
+//! - The consensus stream holds at most [`IN_FLIGHT_CAPACITY`] messages in flight,
+//!   allocated when the cluster is made. A message sent while that many are in flight
+//!   is lost, as a datagram is when the socket buffer has no room for it, and counted
+//!   in [`Cluster::full_queue_losses`]. Every consensus message is sent again at its
+//!   interval, so a loss delays the cluster and never stops it.
+//! - A message is late by at most [`MAX_DELAY_MS`], the leader heartbeat timeout;
+//!   [`Cluster::set_delivery`] holds a longer delay to it.
+//! - The log and the records of terms have no bound: the log holds every entry offered
+//!   for the cluster's life, and a member's record of terms holds every term it
+//!   records. A test that offers a million entries holds a million entries in memory.
 
 use std::collections::VecDeque;
 
-use cavalry_proto::cluster::{Message, Stream, entry_position};
+use cavalry_proto::cluster::{LEADER_HEARTBEAT_TIMEOUT_NS, Message, Stream, entry_position};
 
 use crate::consensus::{
     Clock, Consensus, Counts, ElectionState, Io, Log, MembersRefused, Refused, Role,
@@ -26,6 +39,19 @@ const MTU: usize = 1408;
 
 /// How long a consensus message takes with no delay asked: one step.
 const STEP_NS: u64 = 1_000_000;
+
+/// The most consensus messages in flight at once, between every pair of members. Eight
+/// members send at most 112 messages in a step, one append position or canvass
+/// position and one commit position or new leadership term each way between each of
+/// the 28 pairs, so the queue holds more than 36 steps of the most they send, and every
+/// message of the crate's tests with the delays they set. A message sent while it is
+/// full is lost and counted ([`Cluster::full_queue_losses`]).
+pub const IN_FLIGHT_CAPACITY: usize = 4_096;
+
+/// The most a consensus message is late, in milliseconds: the leader heartbeat timeout
+/// (`spec/cluster.md`, "Values"). A message later than that is one the member that
+/// waits for it has already given up on, which loss plays as well.
+pub const MAX_DELAY_MS: u64 = LEADER_HEARTBEAT_TIMEOUT_NS / STEP_NS;
 
 /// How long an image outlives the last datagram of its stream: the transport's image
 /// liveness timeout (`spec/udp.md`).
@@ -93,7 +119,12 @@ impl Disk {
 struct World {
     clock: Clock,
     disks: Vec<Disk>,
+    /// Every consensus message in flight, at most [`IN_FLIGHT_CAPACITY`], in the order
+    /// sent.
     net: VecDeque<Flight>,
+    /// The messages lost because `net` was full.
+    full_queue_losses: u64,
+    /// Every entry offered, for the cluster's life.
     log: Vec<Entry>,
     log_session_id: Option<i32>,
     log_position: i64,
@@ -144,13 +175,25 @@ impl Io for MemberIo<'_> {
         if cut || lost {
             return true;
         }
+        if self.world.net.len() >= IN_FLIGHT_CAPACITY {
+            // Full: lost, as a datagram the socket buffer has no room for is, and
+            // counted. The core sends it again at its interval.
+            self.world.full_queue_losses = self.world.full_queue_losses.saturating_add(1);
+            return true;
+        }
+        // `set_delivery` holds the delay to MAX_DELAY_MS, so the sum below cannot
+        // wrap; it saturates all the same.
         let delay_ms = if self.world.max_delay_ms == 0 {
             0
         } else {
-            self.world.next_random() % (self.world.max_delay_ms + 1)
+            self.world.next_random() % self.world.max_delay_ms.saturating_add(1)
         };
         self.world.net.push_back(Flight {
-            deliver_at_ns: self.world.clock.now_ns + STEP_NS + delay_ms * STEP_NS,
+            deliver_at_ns: self
+                .world
+                .clock
+                .now_ns
+                .saturating_add(STEP_NS.saturating_mul(delay_ms.saturating_add(1))),
             to,
             bytes: buffer.get(..length).unwrap_or(&[]).to_vec(),
         });
@@ -271,7 +314,8 @@ impl Cluster {
                     time_ms: 1_700_000_000_000,
                 },
                 disks,
-                net: VecDeque::new(),
+                net: VecDeque::with_capacity(IN_FLIGHT_CAPACITY),
+                full_queue_losses: 0,
                 log: Vec::new(),
                 log_session_id: None,
                 log_position: 0,
@@ -295,8 +339,8 @@ impl Cluster {
     /// recording syncs, the consensus messages due arrive, and every member runs one
     /// duty cycle.
     pub fn step(&mut self) {
-        self.world.clock.now_ns += STEP_NS;
-        self.world.clock.time_ms += 1;
+        self.world.clock.now_ns = self.world.clock.now_ns.saturating_add(STEP_NS);
+        self.world.clock.time_ms = self.world.clock.time_ms.saturating_add(1);
         let log_position = self.world.log_position;
         for disk in &mut self.world.disks {
             // A recording holds the image from its join position: only one that joined
@@ -314,12 +358,24 @@ impl Cluster {
             }
         }
         let now_ns = self.world.clock.now_ns;
-        let mut waiting = VecDeque::with_capacity(self.world.net.len());
-        while let Some(flight) = self.world.net.pop_front() {
-            if flight.deliver_at_ns > now_ns {
-                waiting.push_back(flight);
+        // The messages due are taken out where they stand, so that the queue's length
+        // is every message in flight, the bound `send` holds, and the ones still
+        // waiting stay ahead of any sent while these arrive. A message sent now is due
+        // at the next step at the soonest, so the walk ends.
+        let mut index = 0;
+        while index < self.world.net.len() {
+            let due = self
+                .world
+                .net
+                .get(index)
+                .is_some_and(|flight| flight.deliver_at_ns <= now_ns);
+            if !due {
+                index += 1;
                 continue;
             }
+            let Some(flight) = self.world.net.remove(index) else {
+                break;
+            };
             let halted = self
                 .world
                 .disks
@@ -340,9 +396,6 @@ impl Cluster {
                 let Ok(()) = core.on_message(clock, &message, &mut io);
             }
         }
-        // Messages sent while these arrived are behind the ones still waiting.
-        waiting.append(&mut self.world.net);
-        self.world.net = waiting;
         for (own, core) in self.cores.iter_mut().enumerate() {
             if self.world.disks.get(own).is_none_or(|disk| disk.halted) {
                 continue;
@@ -411,12 +464,16 @@ impl Cluster {
             .index(member)
             .and_then(|index| self.world.disks.get(index))
             .map_or(0, |disk| disk.received);
-        self.world
+        let mut bytes = Vec::new();
+        for entry in self
+            .world
             .log
             .iter()
             .take_while(|entry| entry.position_after <= received)
-            .flat_map(|entry| entry.bytes.iter().copied())
-            .collect()
+        {
+            bytes.extend_from_slice(&entry.bytes);
+        }
+        bytes
     }
 
     /// Offers `payload` to the leader, the member with the lowest id, as its own
@@ -534,11 +591,24 @@ impl Cluster {
 
     /// How the consensus stream delivers from here on: one message in `loss_one_in` is
     /// lost, 0 for none, and each of the rest arrives up to `max_delay_ms` late, so
-    /// that two may arrive out of the order they were sent in. The faults are the same
-    /// at every run.
-    pub fn set_delivery(&mut self, loss_one_in: u64, max_delay_ms: u64) {
+    /// that two may arrive out of the order they were sent in. A `max_delay_ms` above
+    /// [`MAX_DELAY_MS`] is held to it, which this returns, the delay set. The faults
+    /// are the same at every run.
+    pub fn set_delivery(&mut self, loss_one_in: u64, max_delay_ms: u64) -> u64 {
         self.world.loss_one_in = loss_one_in;
-        self.world.max_delay_ms = max_delay_ms;
+        self.world.max_delay_ms = max_delay_ms.min(MAX_DELAY_MS);
+        self.world.max_delay_ms
+    }
+
+    /// How many consensus messages are in flight now, at most [`IN_FLIGHT_CAPACITY`].
+    pub fn in_flight(&self) -> usize {
+        self.world.net.len()
+    }
+
+    /// How many consensus messages were lost because [`IN_FLIGHT_CAPACITY`] were in
+    /// flight when they were sent. It only rises.
+    pub fn full_queue_losses(&self) -> u64 {
+        self.world.full_queue_losses
     }
 }
 
@@ -548,6 +618,7 @@ impl core::fmt::Debug for Cluster {
             .field("now_ns", &self.world.clock.now_ns)
             .field("members", &self.cores.len())
             .field("log_position", &self.world.log_position)
+            .field("in_flight", &self.world.net.len())
             .finish()
     }
 }

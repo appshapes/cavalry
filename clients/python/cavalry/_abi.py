@@ -244,6 +244,7 @@ FUNCTIONS = {
     "cavalry_committed_log_commit_position": (c_int64, [c_void_p]),
     "cavalry_committed_log_is_ended": (c_bool, [c_void_p]),
     "cavalry_committed_log_failed_at": (c_bool, [c_void_p, POINTER(c_int64)]),
+    "cavalry_committed_log_withdrawn_at": (c_bool, [c_void_p, POINTER(c_int64)]),
     "cavalry_committed_log_constants": (c_int, [c_void_p, POINTER(cavalry_committed_log_constants_t)]),
     "cavalry_committed_log_close": (c_int, [c_void_p, c_void_p]),
     "cavalry_context_init_v": (c_int, [POINTER(c_void_p), c_int]),

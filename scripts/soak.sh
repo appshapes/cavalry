@@ -7,7 +7,11 @@
 # recording of the stream; then, until it is told to stop:
 #
 #   - every SAMPLE_SECONDS it writes `cavalry doctor`'s report and a copy of the
-#     counters file under $SOAK_DIR/samples, named by the time; nothing prunes them;
+#     counters file under $SOAK_DIR/samples, named by the time, and appends one line
+#     for the driver and one for the program to the run's own file there,
+#     processes-<the run's start>.txt, with the same time: the process's resident
+#     memory, its parts, its virtual size, its threads and its open descriptors (card
+#     240); nothing prunes them;
 #   - every ROTATE_SECONDS it stops the recording and starts a new one, purges the
 #     segments of the one it stopped before the middle of its hour, and deletes every
 #     recording older than KEEP_RECORDINGS rotations, so retention runs on a host whose
@@ -49,6 +53,9 @@ soak="$SOAK_BIN/examples/soak"
 log_dir="$SOAK_DIR/log"
 samples="$SOAK_DIR/samples"
 state="$SOAK_DIR/recordings.txt"   # one line per recording started: <id> <start epoch> <state>
+# One file of process samples for each run, named by the run's start, so that a run's
+# first line and its last are of the same two processes.
+processes="$samples/processes-$(date -u +%Y%m%dT%H%M%SZ).txt"
 stop_file="$SOAK_DIR/stop"
 
 say() { printf 'soak.sh: %s %s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$*"; }
@@ -133,12 +140,69 @@ rotate() {
         fi
     done < "$state"
 }
+# One line for one process, to standard output: what the kernel says of it at this
+# sample, so that a week shows a course and not one reading (card 240):
+#
+#   <time> <name> pid=<pid> rss_kib=<n> anon_kib=<n> file_kib=<n> shmem_kib=<n> vsz_kib=<n> threads=<n> fds=<n>
+#
+# `rss_kib` is the resident memory and `vsz_kib` the virtual size, in KiB. On Linux,
+# from /proc/<pid>/status, `anon_kib`, `file_kib` and `shmem_kib` are the resident
+# memory's three parts: the heap and stacks, the files mapped from a disk, and the
+# files mapped from a tmpfs, which is where the driver's directory is. A driver maps
+# its rings, its counters file and every log buffer from that directory and touches
+# each page once, so `shmem_kib` is the mappings and `anon_kib` is what could leak.
+# `fds` counts /proc/<pid>/fd. Where there is no /proc, as on macOS, `ps` gives the
+# resident memory, the virtual size and the threads, `lsof` the descriptors, and the
+# three parts read `-`; whether there is one is decided once, when the script starts.
+# A value that could not be read is `-`, never 0, and a process whose resident memory
+# could not be read, because it ended before or while the script looked, has
+# `<time> <name> pid=<pid> gone` for its line. On Linux the function starts no
+# process of its own, so that a sample costs the host next to nothing.
+#
+# A soak of a cluster (ADR 0061, condition 5) samples each member with one more call.
+if [ -r /proc/self/status ]; then have_proc=1; else have_proc=0; fi
+sample_process() {
+    local at=$1 name=$2 pid=$3
+    local rss="" anon=- file=- shmem=- vsz=- threads=- fds=- key value _
+    if [ -n "$pid" ] && [ "$have_proc" = 1 ]; then
+        while read -r key value _; do
+            case "$key" in
+                VmRSS:) rss=$value ;;
+                RssAnon:) anon=$value ;;
+                RssFile:) file=$value ;;
+                RssShmem:) shmem=$value ;;
+                VmSize:) vsz=$value ;;
+                Threads:) threads=$value ;;
+            esac
+        done 2>/dev/null < "/proc/$pid/status"
+        set -- "/proc/$pid/fd"/*
+        if [ -e "$1" ]; then fds=$#; fi
+    elif [ -n "$pid" ]; then
+        read -r rss vsz < <(ps -o rss= -o vsz= -p "$pid" 2>/dev/null)
+        if [ -n "$rss" ]; then
+            threads=$(ps -M -p "$pid" 2>/dev/null | tail -n +2 | wc -l | tr -d ' ')
+            fds=$(lsof -n -P -a -p "$pid" -d 0-1048575 2>/dev/null | tail -n +2 | wc -l | tr -d ' ')
+            if [ "$threads" = 0 ]; then threads=-; fi
+            if [ "$fds" = 0 ]; then fds=-; fi
+        fi
+    fi
+    if [ -z "$rss" ]; then
+        printf '%s %s pid=%s gone\n' "$at" "$name" "${pid:--}"
+        return
+    fi
+    printf '%s %s pid=%s rss_kib=%s anon_kib=%s file_kib=%s shmem_kib=%s vsz_kib=%s threads=%s fds=%s\n' \
+        "$at" "$name" "$pid" "$rss" "$anon" "$file" "$shmem" "${vsz:--}" "$threads" "$fds"
+}
 sample() {
     local at
     at=$(date -u +%Y%m%dT%H%M%SZ)
     "$cavalry" doctor --dir "$CAVALRY_DIR" --log-dir "$log_dir" > "$samples/doctor-$at.txt" 2>&1
     printf 'exit %s\n' "$?" >> "$samples/doctor-$at.txt"
     cp "$CAVALRY_DIR/counters" "$samples/counters-$at" 2>/dev/null || say "no counters file to copy"
+    {
+        sample_process "$at" driver "$driver_pid"
+        sample_process "$at" soak "$soak_pid"
+    } >> "$processes"
 }
 
 say "starting: driver on $CAVALRY_DIR, log directory $log_dir, stream $STREAM_ID at $RATE messages/s"

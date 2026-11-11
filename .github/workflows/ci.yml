@@ -18,6 +18,9 @@
 # ADR 0034); kip ran it beside them from 2026-10-29 to 2026-10-31 and is the soak host.
 # The link rows run across the direct cable between the two hosts as a pair of jobs that
 # meet over it once both single-host bench jobs are done (ADR 0039, ADR 0044).
+# The four bench jobs take their hosts only for a change that can move the bench: the
+# `changes` job reads the change's files, and when none of them can, the jobs keep
+# their names, run on a hosted runner and pass in seconds (ADR 0071).
 #
 # The job names are stable on purpose: "gates (linux)", "gates (macos)", "bench (linux)"
 # and "bench (grip)" are the checks branch protection on master requires, and
@@ -43,6 +46,38 @@ concurrency:
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 jobs:
+  # Whether the change can move the bench (ADR 0071). The two bench hosts take one job
+  # at a time and a run holds them for about 21 minutes, so a change to a page, an ADR,
+  # a workflow other than this one, a test or a client's generated code, which changes
+  # no instruction the harness runs, is not sent to them: scripts/bench-needed.py reads
+  # the change's files, a pull request's against its base and a push's between the
+  # event's before and after, and answers `bench=false` only when every file is on its
+  # list of paths known not to matter and, for a push, the commit before it has a
+  # completed, successful run of this workflow on its branch, so that a page pushed
+  # onto a commit whose run was replaced while it waited, or whose bench failed, runs
+  # the bench over both. Anything else is `bench=true`: a file nobody listed, a
+  # change it could not list, `workflow_dispatch`. The bench jobs below read
+  # the answer as "run on the host" unless it is exactly `false`, and run when this job
+  # failed too, so that no failure here can pass a change unmeasured.
+  changes:
+    name: changes
+    runs-on: blacksmith-4vcpu-ubuntu-2404
+    timeout-minutes: 5          # a sparse checkout and a few API reads; not a p90, a floor
+    permissions:
+      contents: read
+      pull-requests: read       # the pull request's files
+      actions: read             # the run of the commit before a push
+    outputs:
+      bench: ${{ steps.decide.outputs.bench }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          sparse-checkout: scripts
+      - id: decide
+        run: python3 -I scripts/bench-needed.py
+        env:
+          GH_TOKEN: ${{ github.token }}
+
   gates:
     name: gates (${{ matrix.name }})
     runs-on: ${{ matrix.runner }}
@@ -153,30 +188,47 @@ jobs:
   # fork's change meets the gate when a maintainer pushes it.
   bench:
     name: bench (linux)
-    if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository
-    runs-on: [self-hosted, bench-linux]
+    needs: changes
+    # `!cancelled()` so that the job runs when `changes` failed too: its answer is then
+    # empty, which is not `false`, and the bench runs on its host (ADR 0071).
+    if: ${{ !cancelled() && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository) }}
+    runs-on: ${{ needs.changes.outputs.bench == 'false' && 'blacksmith-4vcpu-ubuntu-2404' || fromJSON('["self-hosted", "bench-linux"]') }}
+    env:
+      SKIP: ${{ needs.changes.outputs.bench == 'false' }}
     # The build is incremental on the persistent runner, so this bounds a hung host, not
     # a build: the first run compiled the workspace in release in under three minutes.
     timeout-minutes: 30
     steps:
+      # A change no file of which can move the bench is not sent to the host: the job
+      # says so here, on a hosted runner, and every step below is skipped (ADR 0071).
+      - name: Nothing in this change can move the bench
+        if: env.SKIP == 'true'
+        run: echo "bench-needed answered bench=false for this change, so this job reports without its host; the changes job's log lists the files and why (ADR 0071; docs/how-to/run-the-bench.md, 'When the bench jobs run')"
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        if: env.SKIP != 'true'
       - uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8 # v1
+        if: env.SKIP != 'true'
         with:
           toolchain: stable
       - uses: extractions/setup-just@53165ef7e734c5c07cb06b3c8e7b647c5aa16db3 # v4.0.0
+        if: env.SKIP != 'true'
       # No cache action: the runner keeps its target directory between runs, and the
       # bench host is not to spend its run uploading it.
       # The host's state opens every log, and a host that lost its tuning fails here.
       - run: bench/host/check.sh 8,10,12,14
+        if: env.SKIP != 'true'
       # Twenty-one runs per benchmark: the gate reads each one's median p99.99, and the
       # result keeps all twenty-one (ADR 0016).
       - run: just bench --messages 5000000 --repeat 21 --pin 8,10,12,14
+        if: env.SKIP != 'true'
         id: bench
         env:
           CAVALRY_BENCH_PROFILE: bench-linux
       - run: just bench-compare
+        if: env.SKIP != 'true'
       # The same run with the checks built out, so that ADR 0010's cost is measured on
-      # every commit; its profile is bench-linux-unchecked, with a baseline of its own.
+      # every commit the bench runs for; its profile is bench-linux-unchecked, with a
+      # baseline of its own.
       # It runs when the checked comparison failed too, so that every run yields both
       # profiles' results, since a baseline is every process of the job at one tree
       # (ADR 0033); it does not run after a failed check.sh or a failed checked bench,
@@ -184,13 +236,13 @@ jobs:
       # it wrote a result, or `bench-compare` would judge the checked result twice.
       - run: just bench-unchecked --messages 5000000 --repeat 21 --pin 8,10,12,14
         id: unchecked
-        if: ${{ !cancelled() && steps.bench.outcome == 'success' }}
+        if: ${{ !cancelled() && env.SKIP != 'true' && steps.bench.outcome == 'success' }}
         env:
           CAVALRY_BENCH_PROFILE: bench-linux
       - run: just bench-compare
-        if: ${{ !cancelled() && steps.unchecked.outcome == 'success' }}
+        if: ${{ !cancelled() && env.SKIP != 'true' && steps.unchecked.outcome == 'success' }}
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
-        if: always()
+        if: ${{ always() && env.SKIP != 'true' }}
         with:
           name: bench-results-bench-linux
           path: bench/results/
@@ -204,31 +256,45 @@ jobs:
   # the host.
   bench-grip:
     name: bench (grip)
-    if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository
-    runs-on: [self-hosted, grip-linux]
+    needs: changes
+    if: ${{ !cancelled() && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository) }}
+    runs-on: ${{ needs.changes.outputs.bench == 'false' && 'blacksmith-4vcpu-ubuntu-2404' || fromJSON('["self-hosted", "grip-linux"]') }}
+    env:
+      SKIP: ${{ needs.changes.outputs.bench == 'false' }}
     timeout-minutes: 30
     steps:
+      # A change no file of which can move the bench is not sent to the host: the job
+      # says so here, on a hosted runner, and every step below is skipped (ADR 0071).
+      - name: Nothing in this change can move the bench
+        if: env.SKIP == 'true'
+        run: echo "bench-needed answered bench=false for this change, so this job reports without its host; the changes job's log lists the files and why (ADR 0071; docs/how-to/run-the-bench.md, 'When the bench jobs run')"
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        if: env.SKIP != 'true'
       - uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8 # v1
+        if: env.SKIP != 'true'
         with:
           toolchain: stable
       - uses: extractions/setup-just@53165ef7e734c5c07cb06b3c8e7b647c5aa16db3 # v4.0.0
+        if: env.SKIP != 'true'
       - run: bench/host/check.sh 4,5,6,7
+        if: env.SKIP != 'true'
       - run: just bench --messages 5000000 --repeat 21 --pin 4,5,6,7
+        if: env.SKIP != 'true'
         id: bench
         env:
           CAVALRY_BENCH_PROFILE: grip-linux
       - run: just bench-compare
+        if: env.SKIP != 'true'
       # Both profiles on every run whose checked bench ran, as above (ADR 0033).
       - run: just bench-unchecked --messages 5000000 --repeat 21 --pin 4,5,6,7
         id: unchecked
-        if: ${{ !cancelled() && steps.bench.outcome == 'success' }}
+        if: ${{ !cancelled() && env.SKIP != 'true' && steps.bench.outcome == 'success' }}
         env:
           CAVALRY_BENCH_PROFILE: grip-linux
       - run: just bench-compare
-        if: ${{ !cancelled() && steps.unchecked.outcome == 'success' }}
+        if: ${{ !cancelled() && env.SKIP != 'true' && steps.unchecked.outcome == 'success' }}
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
-        if: always()
+        if: ${{ always() && env.SKIP != 'true' }}
         with:
           name: bench-results-grip-linux
           path: bench/results/
@@ -249,26 +315,40 @@ jobs:
   # joins master's required checks by hand once it has run green there.
   bench-udp:
     name: bench (udp)
-    needs: [bench, bench-grip]
-    if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository
-    runs-on: [self-hosted, bench-linux]
+    needs: [changes, bench, bench-grip]
+    # Both single-host jobs must have passed, as `needs` alone asked before
+    # `!cancelled()` was here for `changes`' sake (ADR 0071).
+    if: ${{ !cancelled() && needs.bench.result == 'success' && needs.bench-grip.result == 'success' && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository) }}
+    runs-on: ${{ needs.changes.outputs.bench == 'false' && 'blacksmith-4vcpu-ubuntu-2404' || fromJSON('["self-hosted", "bench-linux"]') }}
+    env:
+      SKIP: ${{ needs.changes.outputs.bench == 'false' }}
     # The pair's wait for each other, up to 45 minutes, plus the run (card 212).
     timeout-minutes: 60
     permissions:
       contents: read
       actions: read             # the run's jobs, for the wait below
     steps:
+      # A change no file of which can move the bench is not sent to the host: the job
+      # says so here, on a hosted runner, and every step below is skipped (ADR 0071).
+      - name: Nothing in this change can move the bench
+        if: env.SKIP == 'true'
+        run: echo "bench-needed answered bench=false for this change, so this job reports without its host; the changes job's log lists the files and why (ADR 0071; docs/how-to/run-the-bench.md, 'When the bench jobs run')"
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        if: env.SKIP != 'true'
       - uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8 # v1
+        if: env.SKIP != 'true'
         with:
           toolchain: stable
       - uses: extractions/setup-just@53165ef7e734c5c07cb06b3c8e7b647c5aa16db3 # v4.0.0
+        if: env.SKIP != 'true'
       - run: bench/host/check.sh 8,10,12,14
+        if: env.SKIP != 'true'
       # Each end of the pair queues on its own host once `bench` and `bench-grip` end,
       # and the harness waits ten minutes for the other end; a partner queued behind
       # another run's job for longer than that left the first end dead (card 212). So
       # each job waits here, doing nothing, until the run's other job is in progress.
       - run: scripts/wait-for-partner-job.sh "bench (udp peer)"
+        if: env.SKIP != 'true'
         env:
           GH_TOKEN: ${{ github.token }}
       # One message in flight at a time, so a run is its messages times the round trip:
@@ -276,9 +356,11 @@ jobs:
       # rows' warm-up of 10,000 each. bench-link and grip-link are the cable's ends in
       # both hosts' /etc/hosts (docs/how-to/set-up-a-bench-host.md, "Further hosts").
       - run: just bench --link-here bench-link:40182 --link-peer grip-link:40183 --messages 100000 --repeat 21 --pin 8,10,12,14
+        if: env.SKIP != 'true'
         env:
           CAVALRY_BENCH_PROFILE: bench-linux
       - run: just bench-compare
+        if: env.SKIP != 'true'
       # The offset the one-way row carries is this host's: chronyd serves its cooked
       # time, the system clock plus the residual it has still to apply against its
       # internet sources, and grip follows that, so grip's clock stands at bench's raw
@@ -286,9 +368,9 @@ jobs:
       # the pools, while grip's own error against bench-link is nanoseconds
       # (docs/how-to/set-up-a-bench-host.md, "Further hosts", the clock).
       - run: chronyc tracking
-        if: always()
+        if: ${{ always() && env.SKIP != 'true' }}
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
-        if: always()
+        if: ${{ always() && env.SKIP != 'true' }}
         with:
           name: bench-results-bench-linux-link
           path: bench/results/
@@ -305,25 +387,38 @@ jobs:
   # residual (card 182).
   bench-udp-peer:
     name: bench (udp peer)
-    needs: [bench, bench-grip]
-    if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository
-    runs-on: [self-hosted, grip-linux]
+    needs: [changes, bench, bench-grip]
+    if: ${{ !cancelled() && needs.bench.result == 'success' && needs.bench-grip.result == 'success' && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository) }}
+    runs-on: ${{ needs.changes.outputs.bench == 'false' && 'blacksmith-4vcpu-ubuntu-2404' || fromJSON('["self-hosted", "grip-linux"]') }}
+    env:
+      SKIP: ${{ needs.changes.outputs.bench == 'false' }}
     # The pair's wait for each other, up to 45 minutes, plus the run (card 212).
     timeout-minutes: 60
     permissions:
       contents: read
       actions: read             # the run's jobs, for the wait below
     steps:
+      # A change no file of which can move the bench is not sent to the host: the job
+      # says so here, on a hosted runner, and every step below is skipped (ADR 0071).
+      - name: Nothing in this change can move the bench
+        if: env.SKIP == 'true'
+        run: echo "bench-needed answered bench=false for this change, so this job reports without its host; the changes job's log lists the files and why (ADR 0071; docs/how-to/run-the-bench.md, 'When the bench jobs run')"
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        if: env.SKIP != 'true'
       - uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8 # v1
+        if: env.SKIP != 'true'
         with:
           toolchain: stable
       - uses: extractions/setup-just@53165ef7e734c5c07cb06b3c8e7b647c5aa16db3 # v4.0.0
+        if: env.SKIP != 'true'
       - run: bench/host/check.sh 4,5,6,7
+        if: env.SKIP != 'true'
       # The same wait as bench (udp)'s, for it (card 212).
       - run: scripts/wait-for-partner-job.sh "bench (udp)"
+        if: env.SKIP != 'true'
         env:
           GH_TOKEN: ${{ github.token }}
       - run: just bench --echo --link-here grip-link:40183 --link-peer bench-link:40182 --pin 4,5,6,7
+        if: env.SKIP != 'true'
       - run: chronyc sourcestats -v && chronyc sources -v && chronyc tracking
-        if: always()
+        if: ${{ always() && env.SKIP != 'true' }}

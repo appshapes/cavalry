@@ -444,7 +444,7 @@ impl RecordingWriter {
     /// Syncs the segment and the index now, whatever time has passed since the last
     /// sync, when there are unsynced bytes, and moves the synced position up to the
     /// position: the sync a `sync recording` command asks for
-    /// (`spec/client-protocol.md`, "Commands"; ADR 0067). Returns whether it synced;
+    /// (`spec/client-protocol.md`, "Commands"; ADR 0069). Returns whether it synced;
     /// with nothing unsynced it makes no sync. The periodic [`sync`](Self::sync) is
     /// next due a second after this one. Not to be called once
     /// [`sync_failed`](Self::sync_failed) is true, as that says.

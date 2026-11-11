@@ -112,7 +112,7 @@ class Parse(unittest.TestCase):
         expected = {fn["name"]: (flat(fn["returns"]), [(flat(t), n) for t, n in fn["params"]])
                     for fn in self.vectors["functions"]}
         self.assertEqual(parsed, expected)
-        self.assertEqual(len(self.header.functions), 70)
+        self.assertEqual(len(self.header.functions), 71)
 
     def test_the_defines_are_the_vectors(self):
         parsed = {name: gen.python_value(value) for name, value in self.header.defines if name != "CAVALRY_H"}
@@ -570,7 +570,7 @@ class NodePackage(unittest.TestCase):
         two that take the C fragment handler: the addon's `poll` makes the one
         `cavalry_subscription_poll` call with its trampoline, and the header's fields are
         read through `headerField`; `cavalry_committed_log_poll` is not bound in this
-        package yet (ADR 0068)."""
+        package yet (ADR 0070)."""
         addon = gen_node.write_node(self.header)["src/addon.c"]
         self.assertEqual(gen_node.HANDLER_FUNCTIONS, ("cavalry_subscription_poll", "cavalry_committed_log_poll"))
         for fn in self.header.functions:

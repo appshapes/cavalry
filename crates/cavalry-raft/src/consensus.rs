@@ -16,6 +16,13 @@ use cavalry_proto::cluster::{
     appointed_leader, canvass_position_action, commit_position, leader_ready, log_at_least,
     new_leadership_term_action, next_fields, quorum,
 };
+use cavalry_shm::counters::CounterId;
+use cavalry_shm::counters::generated::{
+    CLUSTER_APPOINTED_LEADER_BEHIND, CLUSTER_ELECTION_STEPS, CLUSTER_ELECTIONS,
+    CLUSTER_ELECTIONS_CLOSED, CLUSTER_ELECTIONS_FAILED, CLUSTER_JOIN_POSITION_MISMATCHES,
+    CLUSTER_LEADER_HEARTBEAT_TIMEOUTS, CLUSTER_LEADER_QUORUM_LOSSES,
+    CLUSTER_LEADERSHIP_TERMS_IGNORED, CLUSTER_LOG_IMAGES_LOST, CLUSTER_TERMS_LED,
+};
 
 /// The cluster session id of a session message of no session: one the leader's own
 /// process appended (`spec/cluster.md`, "The appointed leader").
@@ -38,7 +45,9 @@ pub enum Role {
 
 // state machine: cluster_election
 /// The states of the election a member of this version enters, each with the code
-/// `spec/cluster.md` gives it, the value of the `cluster.election_state` gauge.
+/// `spec/cluster.md` gives it, the value of the `cluster.election_state` gauge. Every
+/// move from one to another adds one to a count of [`Counts`], the counter
+/// `counters.toml` registers for it as the machine `cluster_election` (ADR 0067).
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 #[repr(u8)]
 pub enum ElectionState {
@@ -157,48 +166,79 @@ pub trait Io {
     fn append(&mut self, entry: &Message<'_>) -> Result<bool, Self::Fault>;
 }
 
-/// Why [`Consensus::new`] refused its members.
+/// Why [`Consensus::new`] refused its members. The members are checked in the order of
+/// `spec/cluster.md`, "What a reader rejects", each check over every member, and each
+/// variant is one check, named by [`MembersRefused::reason`].
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum MembersRefused {
-    /// No member, or more than [`MAX_MEMBERS`].
+    /// `members-grammar`: no member was given, as an empty members string is.
+    Empty,
+    /// `members-grammar`: a member id below 0, which no members string can hold.
+    Negative {
+        /// The id.
+        id: i32,
+    },
+    /// `members-duplicate`: two members with one id.
+    Duplicate {
+        /// The id.
+        id: i32,
+    },
+    /// `members-count`: more than [`MAX_MEMBERS`] members.
     Count {
         /// How many were given.
         found: usize,
     },
-    /// Two members with one id, or an id below 0.
-    Id {
-        /// The id.
-        id: i32,
-    },
-    /// The member's own id is not among the members.
+    /// `members-self`: the member's own id is not among the members.
     NotAMember {
         /// The id.
         id: i32,
     },
 }
 
+impl MembersRefused {
+    /// The name in `spec/cluster.md`, "What a reader rejects", of the check that
+    /// refused the members.
+    pub const fn reason(self) -> &'static str {
+        match self {
+            MembersRefused::Empty | MembersRefused::Negative { .. } => "members-grammar",
+            MembersRefused::Duplicate { .. } => "members-duplicate",
+            MembersRefused::Count { .. } => "members-count",
+            MembersRefused::NotAMember { .. } => "members-self",
+        }
+    }
+}
+
 impl core::fmt::Display for MembersRefused {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
-        match self {
+        let reason = self.reason();
+        match *self {
+            MembersRefused::Empty => write!(
+                f,
+                "members refused ({reason}): no member was given; give the members string \
+                 of the cluster, 1 to {MAX_MEMBERS} members"
+            ),
+            MembersRefused::Negative { id } => write!(
+                f,
+                "members refused ({reason}): member id {id} is below 0; give each member an \
+                 id from 0 to 2147483647"
+            ),
+            MembersRefused::Duplicate { id } => write!(
+                f,
+                "members refused ({reason}): two members have the id {id}; give each member \
+                 its own id"
+            ),
             MembersRefused::Count { found } => write!(
                 f,
-                "members refused (members-count): {found} members, and a cluster has 1 to \
-                 {MAX_MEMBERS}; give the members string of the cluster; see \
-                 docs/reference/cluster.md#members-and-streams"
-            ),
-            MembersRefused::Id { id } => write!(
-                f,
-                "members refused (members-duplicate): member id {id} is below 0 or given \
-                 twice; give each member one id from 0 upward; see \
-                 docs/reference/cluster.md#members-and-streams"
+                "members refused ({reason}): {found} members, and a cluster has at most \
+                 {MAX_MEMBERS}; give the members string of the cluster"
             ),
             MembersRefused::NotAMember { id } => write!(
                 f,
-                "members refused (members-self): member id {id} is not in the members \
-                 string; set the member id to one the string holds; see \
-                 docs/reference/cluster.md#members-and-streams"
+                "members refused ({reason}): member id {id} is not in the members string; \
+                 set the member id to one the string holds"
             ),
-        }
+        }?;
+        f.write_str("; see docs/reference/cluster.md#what-a-reader-rejects")
     }
 }
 
@@ -244,7 +284,8 @@ impl core::fmt::Display for Refused {
 impl core::error::Error for Refused {}
 
 /// What a member has counted, each field the counter of `spec/cluster.md`, "Counters",
-/// with its name. The module stores them in the counters file; they only rise.
+/// with its name, registered in `counters.toml`. The module stores them in the
+/// counters file, by [`Counts::by_counter`]; they only rise.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
 pub struct Counts {
     /// `cluster.elections`: an election begun, from init.
@@ -252,6 +293,12 @@ pub struct Counts {
     /// `cluster.elections_failed`: an election that failed in a state and began again
     /// at init.
     pub elections_failed: u64,
+    /// `cluster.elections_closed`: an election that closed, from leader ready or
+    /// follower ready (ADR 0067).
+    pub elections_closed: u64,
+    /// `cluster.election_steps`: a step of an election from one state to the next that
+    /// neither begins it, fails it, closes it nor makes the member a leader (ADR 0067).
+    pub election_steps: u64,
     /// `cluster.terms_led`: a term the member began to lead.
     pub terms_led: u64,
     /// `cluster.leader_quorum_losses`: a leader whose active members fell below a
@@ -272,6 +319,55 @@ pub struct Counts {
     /// `cluster.log_images_lost`: a follower whose image of the leader's log was no
     /// longer available, so that it began again at init.
     pub log_images_lost: u64,
+}
+
+impl Counts {
+    /// How many counts a member keeps: one counter of `counters.toml` each.
+    pub const LEN: usize = 11;
+
+    /// Each count with the id of its counter in `counters.toml`, the constant
+    /// `cavalry-shm` generates from it: what the consensus module stores, each as a
+    /// client counter keyed by the member's id (ADR 0062; ADR 0067).
+    ///
+    /// ```
+    /// use cavalry_raft::Counts;
+    /// use cavalry_shm::counters::generated::{CLUSTER_ELECTIONS, COUNTERS};
+    ///
+    /// let counts = Counts { elections: 3, ..Counts::default() };
+    /// let pairs = counts.by_counter();
+    /// assert!(pairs.contains(&(CLUSTER_ELECTIONS, 3)));
+    /// // Every one is a counter `counters.toml` registers.
+    /// for (id, _) in pairs {
+    ///     assert!(COUNTERS.iter().any(|def| def.id == id));
+    /// }
+    /// ```
+    pub const fn by_counter(&self) -> [(CounterId, u64); Counts::LEN] {
+        [
+            (CLUSTER_ELECTIONS, self.elections),
+            (CLUSTER_ELECTIONS_FAILED, self.elections_failed),
+            (CLUSTER_ELECTIONS_CLOSED, self.elections_closed),
+            (CLUSTER_ELECTION_STEPS, self.election_steps),
+            (CLUSTER_TERMS_LED, self.terms_led),
+            (CLUSTER_LEADER_QUORUM_LOSSES, self.leader_quorum_losses),
+            (
+                CLUSTER_APPOINTED_LEADER_BEHIND,
+                self.appointed_leader_behind,
+            ),
+            (
+                CLUSTER_LEADER_HEARTBEAT_TIMEOUTS,
+                self.leader_heartbeat_timeouts,
+            ),
+            (
+                CLUSTER_LEADERSHIP_TERMS_IGNORED,
+                self.leadership_terms_ignored,
+            ),
+            (
+                CLUSTER_JOIN_POSITION_MISMATCHES,
+                self.join_position_mismatches,
+            ),
+            (CLUSTER_LOG_IMAGES_LOST, self.log_images_lost),
+        ]
+    }
 }
 
 /// One more in a count, which stays at its highest value sooner than it wraps.
@@ -341,8 +437,21 @@ impl Consensus {
     /// no term and no vote: a member of this version starts on a log that holds
     /// neither (`spec/cluster.md`, "The appointed leader"), which its caller checks.
     pub fn new(member_ids: &[i32], member_id: i32) -> Result<Self, MembersRefused> {
+        // `spec/cluster.md`, "What a reader rejects": grammar, duplicate, count and self,
+        // in that order, each over every member.
+        if member_ids.is_empty() {
+            return Err(MembersRefused::Empty);
+        }
+        if let Some(&id) = member_ids.iter().find(|&&id| id < 0) {
+            return Err(MembersRefused::Negative { id });
+        }
+        for (index, &id) in member_ids.iter().enumerate() {
+            if member_ids.iter().take(index).any(|&other| other == id) {
+                return Err(MembersRefused::Duplicate { id });
+            }
+        }
         let count = member_ids.len();
-        if count == 0 || count > MAX_MEMBERS {
+        if count > MAX_MEMBERS {
             return Err(MembersRefused::Count { found: count });
         }
         let mut peers = [Peer {
@@ -356,9 +465,6 @@ impl Consensus {
         }; MAX_MEMBERS];
         let mut own = None;
         for (index, (&id, peer)) in member_ids.iter().zip(peers.iter_mut()).enumerate() {
-            if id < 0 || member_ids.iter().take(index).any(|&other| other == id) {
-                return Err(MembersRefused::Id { id });
-            }
             peer.id = id;
             if id == member_id {
                 own = Some(index);
@@ -445,8 +551,8 @@ impl Consensus {
             ElectionState::Init => self.init(clock, io),
             ElectionState::Canvass => self.canvass(clock, io),
             ElectionState::LeaderLogReplication => self.leader_log_replication(clock, io),
-            ElectionState::LeaderReplay => Ok(self.enter(ElectionState::LeaderInit, clock)),
-            ElectionState::LeaderInit => Ok(self.enter(ElectionState::LeaderReady, clock)),
+            ElectionState::LeaderReplay => Ok(self.step(ElectionState::LeaderInit, clock)),
+            ElectionState::LeaderInit => Ok(self.step(ElectionState::LeaderReady, clock)),
             ElectionState::LeaderReady => self.leader_ready(clock, io),
             ElectionState::FollowerReplay => self.follower_replay(clock),
             ElectionState::FollowerLogInit => self.follower_log_init(clock, io),
@@ -577,7 +683,7 @@ impl Consensus {
                         self.log_session_id = log_session_id;
                         self.leader_log_position = log_position;
                         self.leader_word(clock, log_position, commit_position);
-                        self.enter(ElectionState::FollowerReplay, clock);
+                        self.step(ElectionState::FollowerReplay, clock);
                         Ok(())
                     }
                     // A truncation, a replication, a wait or a log the leader's does
@@ -672,10 +778,26 @@ impl Consensus {
         }
     }
 
+    /// Moves the election to `state`. Every caller counts the move, in the count
+    /// `counters.toml` registers for it (`cluster_election`).
     fn enter(&mut self, state: ElectionState, clock: Clock) -> usize {
         self.state = state;
         self.state_since_ns = clock.now_ns;
         1
+    }
+
+    /// A step of the election to `state`, the next on its way to closed, counted in
+    /// `cluster.election_steps`.
+    fn step(&mut self, state: ElectionState, clock: Clock) -> usize {
+        count(&mut self.counts.election_steps);
+        self.enter(state, clock)
+    }
+
+    /// The election closed, from leader ready or follower ready, counted in
+    /// `cluster.elections_closed`.
+    fn close(&mut self, clock: Clock) -> usize {
+        count(&mut self.counts.elections_closed);
+        self.enter(ElectionState::Closed, clock)
     }
 
     /// Whether this member has taken a leader: in a follower's states after canvass.
@@ -962,7 +1084,7 @@ impl Consensus {
         )
         .quorum_position;
         if quorum_position >= self.append_position {
-            return Ok(self.enter(ElectionState::LeaderReplay, clock));
+            return Ok(self.step(ElectionState::LeaderReplay, clock));
         }
         Ok(work)
     }
@@ -1015,7 +1137,7 @@ impl Consensus {
         if !appended {
             return Ok(work);
         }
-        Ok(self.enter(ElectionState::Closed, clock))
+        Ok(self.close(clock))
     }
 
     /// The leader, its election closed: the commit position from the members' append
@@ -1050,7 +1172,7 @@ impl Consensus {
             self.fail(clock);
             return Ok(1);
         }
-        Ok(self.enter(ElectionState::FollowerLogInit, clock))
+        Ok(self.step(ElectionState::FollowerLogInit, clock))
     }
 
     /// State 14. The log subscription and its armed recording. No member of this
@@ -1058,14 +1180,14 @@ impl Consensus {
     fn follower_log_init<I: Io>(&mut self, clock: Clock, io: &mut I) -> Result<usize, I::Fault> {
         io.join_log()?;
         self.joined = true;
-        Ok(self.enter(ElectionState::FollowerLogAwait, clock))
+        Ok(self.step(ElectionState::FollowerLogAwait, clock))
     }
 
     /// State 15. The leader's image, which must join at this member's append position.
     fn follower_log_await<I: Io>(&mut self, clock: Clock, io: &mut I) -> Result<usize, I::Fault> {
         match io.log_image(self.log_session_id)? {
             Some(join_position) if join_position == self.append_position => {
-                Ok(self.enter(ElectionState::FollowerReady, clock))
+                Ok(self.step(ElectionState::FollowerReady, clock))
             }
             Some(_) => {
                 // Init leaves the log this image is on.
@@ -1104,7 +1226,7 @@ impl Consensus {
     fn follower_ready<I: Io>(&mut self, clock: Clock, io: &mut I) -> usize {
         if self.send_append_position(clock, io) {
             self.last_leader_word_ns = clock.now_ns;
-            return self.enter(ElectionState::Closed, clock);
+            return self.close(clock);
         }
         if clock.now_ns.saturating_sub(self.state_since_ns) >= LEADER_HEARTBEAT_TIMEOUT_NS {
             self.fail(clock);

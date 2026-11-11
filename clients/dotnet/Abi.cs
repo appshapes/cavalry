@@ -282,6 +282,10 @@ public static unsafe partial class Abi
     internal static partial bool cavalry_committed_log_failed_at(nint log, out long position);
 
     [LibraryImport(Library)]
+    [return: MarshalAs(UnmanagedType.U1)]
+    internal static partial bool cavalry_committed_log_withdrawn_at(nint log, out long position);
+
+    [LibraryImport(Library)]
     internal static partial int cavalry_committed_log_constants(nint log, ref cavalry_committed_log_constants_t constants);
 
     [LibraryImport(Library)]

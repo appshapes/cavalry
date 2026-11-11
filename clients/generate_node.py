@@ -183,7 +183,7 @@ def write_addon(header) -> str:
     # The two polls take the C fragment handler, which no generic marshalling makes: the
     # subscription's is `poll` below, written by hand, and the committed log's has none
     # in this package yet, so the addon does not bind it (spec/c-abi.md, version 2; ADR
-    # 0068).
+    # 0070).
     functions = [fn for fn in header.functions if fn.name not in HANDLER_FUNCTIONS]
     wrappers = []
     for fn in functions:

@@ -245,6 +245,7 @@ public final class Abi {
     static final MethodHandle cavalry_committed_log_commit_position;
     static final MethodHandle cavalry_committed_log_is_ended;
     static final MethodHandle cavalry_committed_log_failed_at;
+    static final MethodHandle cavalry_committed_log_withdrawn_at;
     static final MethodHandle cavalry_committed_log_constants;
     static final MethodHandle cavalry_committed_log_close;
     static final MethodHandle cavalry_context_init_v;
@@ -331,6 +332,7 @@ public final class Abi {
         cavalry_committed_log_commit_position = LINKER.downcallHandle(LOOKUP.findOrThrow("cavalry_committed_log_commit_position"), FunctionDescriptor.of(JAVA_LONG, ADDRESS));
         cavalry_committed_log_is_ended = LINKER.downcallHandle(LOOKUP.findOrThrow("cavalry_committed_log_is_ended"), FunctionDescriptor.of(JAVA_BOOLEAN, ADDRESS));
         cavalry_committed_log_failed_at = LINKER.downcallHandle(LOOKUP.findOrThrow("cavalry_committed_log_failed_at"), FunctionDescriptor.of(JAVA_BOOLEAN, ADDRESS, ADDRESS));
+        cavalry_committed_log_withdrawn_at = LINKER.downcallHandle(LOOKUP.findOrThrow("cavalry_committed_log_withdrawn_at"), FunctionDescriptor.of(JAVA_BOOLEAN, ADDRESS, ADDRESS));
         cavalry_committed_log_constants = LINKER.downcallHandle(LOOKUP.findOrThrow("cavalry_committed_log_constants"), FunctionDescriptor.of(JAVA_INT, ADDRESS, ADDRESS));
         cavalry_committed_log_close = LINKER.downcallHandle(LOOKUP.findOrThrow("cavalry_committed_log_close"), FunctionDescriptor.of(JAVA_INT, ADDRESS, ADDRESS));
         cavalry_context_init_v = LINKER.downcallHandle(LOOKUP.findOrThrow("cavalry_context_init_v"), FunctionDescriptor.of(JAVA_INT, ADDRESS, JAVA_INT));
