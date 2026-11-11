@@ -6,8 +6,9 @@
 # its generated files are gofmt's, starts a driver on a directory of its own, runs
 # conformance/go/quickstart through clients/go with the runner's Go, then
 # clients/go/README.md's example through conformance/go/readme; then starts three cluster
-# members on the loopback, each a `cavalry run` in a member's role, and runs
-# conformance/go/committed_log beside member 1, the client's committed log against a
+# members on the loopback, each a `cavalry run` in a member's role, and runs beside member
+# 1 the package's one test that needs a member, a committed log's open with the table
+# full, and then conformance/go/committed_log, the client's committed log against a
 # cluster (spec/c-abi.md, version 2; ADR 0070); and cleans up.
 # `just conformance` runs this after conformance/node (clients/README.md; ADR 0046, card
 # 207).
@@ -104,6 +105,21 @@ done
 [ -n "$formed" ] || {
     echo "conformance/go: member 1 did not close its election in 60 s; the members said:" >&2
     cat "$cluster"/member-*.out >&2 || true
+    exit 1
+}
+
+echo "conformance/go: the package's test of a committed log's open with the table full, beside member 1"
+# The test must have run and passed: `go test` exits 0 for a name that matches nothing and
+# for a test that skipped itself, so its own line is asked for.
+bound=$(cd clients/go && CAVALRY_GO_MEMBER_DIR="$cluster/member-1" go test -count=1 -run '^TestACommittedLogAtTheTablesBound$' -v ./... 2>&1) || {
+    echo "$bound"
+    echo "conformance/go: the package's test failed beside member 1; the members said:" >&2
+    cat "$cluster"/member-*.out >&2 || true
+    exit 1
+}
+echo "$bound"
+grep -q '^--- PASS: TestACommittedLogAtTheTablesBound ' <<<"$bound" || {
+    echo "conformance/go: TestACommittedLogAtTheTablesBound did not run and pass beside member 1: it was renamed in clients/generate_go.py, or it skipped itself; fix the name here or CAVALRY_GO_MEMBER_DIR above" >&2
     exit 1
 }
 

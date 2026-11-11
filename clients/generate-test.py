@@ -199,6 +199,14 @@ class Package(unittest.TestCase):
             body = log.split(f"    def {report}(self):\n", 1)[1].split("\n    def ", 1)[0]
             self.assertIn(f"self._abi.cavalry_committed_log_{report}(self._handle, ctypes.byref(position))", body)
             self.assertIn("return position.value if ", body)
+        # A log whose constants cannot be read is closed, as the Go client closes one it
+        # cannot return, after its error is read and before the error is raised.
+        opened = log.split("    def __init__(self, abi, handle, client):\n", 1)[1].split("\n    def ", 1)[0]
+        read = opened.index('error = _error(abi, "cavalry_committed_log_constants")')
+        closed = opened.index("abi.cavalry_committed_log_close(handle, client._handle)")
+        self.assertLess(opened.index("abi.cavalry_committed_log_constants(handle, ctypes.byref(constants)) != 0"), read)
+        self.assertLess(read, closed)
+        self.assertLess(closed, opened.index("raise error"))
         client = code.split("class Client:", 1)[1].split("\nclass ", 1)[0]
         self.assertIn("return CommittedLog(self._abi, handle.value, self) if handle.value else None", client)
         for name in ("cavalry_committed_log_poll", "cavalry_committed_log_entry_position"):
@@ -758,6 +766,32 @@ class NodePackage(unittest.TestCase):
         self.assertIs(gen.WRITERS["node"], gen_node.write_node)
         self.assertEqual(gen.LANGUAGES["node"], "node")
 
+    def test_the_committed_log_reads_both_reports_and_closes_a_log_it_cannot_return(self):
+        """The Node committed log (ADR 0070): `failedAt` and `withdrawnAt` each answer the
+        position the ABI wrote when it answered true and null when it answered false, the
+        addon handing both back from one call; and a log whose constants cannot be read is
+        closed, as the Go client closes one it cannot return, after its error is read and
+        before the error is thrown."""
+        files = gen_node.write_node(self.header)
+        log = files["index.js"].split("class CommittedLog {", 1)[1].split("\nclass ", 1)[0]
+        for report, answered in (("failedAt", "failed"), ("withdrawnAt", "withdrawn")):
+            abi = "cavalry_committed_log_" + ("failed_at" if report == "failedAt" else "withdrawn_at")
+            body = log.split(f"  {report}() {{\n", 1)[1].split("\n  }", 1)[0]
+            self.assertIn(f"const [{answered}, position] = addon.{abi}(this.handle);", body)
+            self.assertIn(f"return {answered} ? position : null;", body)
+            native = files["src/addon.c"].split(f"static napi_value fn_{abi}(", 1)[1].split("\n}\n", 1)[0]
+            self.assertIn("int64_t position = 0;", native)
+            self.assertIn(f"bool result = {abi}(log, &position);", native)
+            self.assertLess(native.index("napi_set_element(env, tuple, 0, make_bool(env, result));"),
+                            native.index("napi_set_element(env, tuple, 1, make_int64(env, position));"))
+            self.assertIn(f"  {report}(): number | null;", files["index.d.ts"])
+        opened = log.split("  constructor(handle, client) {\n", 1)[1].split("\n  }\n", 1)[0]
+        read = opened.index('const failed = error("cavalry_committed_log_constants");')
+        closed = opened.index("addon.cavalry_committed_log_close(handle, client.handle);")
+        self.assertLess(opened.index("if (addon.cavalry_committed_log_constants(handle, c.buffer) !== 0) {"), read)
+        self.assertLess(read, closed)
+        self.assertLess(closed, opened.index("throw failed;"))
+
     def test_a_header_change_changes_the_addon_and_the_client(self):
         changed = gen.parse(self.text.replace("#define CAVALRY_MAX_IMAGES 256", "#define CAVALRY_MAX_IMAGES 512"))
         files = gen_node.write_node(changed)
@@ -1038,6 +1072,30 @@ class GoPackage(unittest.TestCase):
         self.assertLess(close.index("p.Claim = nil"), zeroed)
         self.assertLess(zeroed, close.index("C.cavalry_publication_close(p.handle)"))
 
+    def test_the_committed_log_reads_both_reports_and_closes_a_log_it_cannot_return(self):
+        """The Go committed log (ADR 0070): `FailedAt` and `WithdrawnAt` each answer the
+        position the ABI wrote and true when it answered true, and 0 and false when it
+        answered false; and the open closes a log whose constants cannot be read, or that
+        the table has no slot for, before it returns the error."""
+        code = gen_go.write_go(self.header)["cavalry.go"]
+        for report, abi in (("FailedAt", "cavalry_committed_log_failed_at"),
+                            ("WithdrawnAt", "cavalry_committed_log_withdrawn_at")):
+            body = code.split(f"func (l *CommittedLog) {report}() (int64, bool) {{\n", 1)[1].split("\n}\n", 1)[0]
+            self.assertEqual(body, "\tvar position C.int64_t\n"
+                                   f"\tif !bool(C.{abi}(l.handle, &position)) {{\n"
+                                   "\t\treturn 0, false\n"
+                                   "\t}\n"
+                                   "\treturn int64(position), true")
+        opened = code.split("func (c *Client) CommittedLog(position int64) (*CommittedLog, error) {\n", 1)[1]
+        opened = opened.split("\n}\n", 1)[0]
+        constants = opened.index('check("cavalry_committed_log_constants", C.cavalry_committed_log_constants(handle, &k))')
+        table = opened.index("if err := register(state); err != nil {")
+        closes = [at for at in range(len(opened)) if opened.startswith("C.cavalry_committed_log_close(handle, c.handle)", at)]
+        self.assertEqual(len(closes), 2)
+        self.assertLess(constants, closes[0])
+        self.assertLess(closes[0], table)
+        self.assertLess(table, closes[1])
+
     def test_every_define_is_a_constant_under_its_go_name(self):
         code = gen_go.write_go(self.header)["cavalry.go"]
         for name, _ in self.header.defines:
@@ -1058,6 +1116,43 @@ class GoPackage(unittest.TestCase):
         self.assertIn("//export cavalryGoFragment\n", files["trampoline.go"])
         self.assertIn("C.cavalry_go_poll(s.handle, C.uintptr_t(s.slot), C.size_t(fragmentLimit), &s.err)", files["cavalry.go"])
         self.assertNotIn("C.cavalry_subscription_poll(", files["cavalry.go"])
+
+    def test_a_committed_logs_trampoline_reads_the_position_in_c(self):
+        """A committed log's poll installs a trampoline of its own, which reads the entry's
+        position from the header and hands it to `cavalryGoEntry` in the one call back, as
+        the Node addon's does: the Go side makes no cgo call for it, which it made once
+        for each entry before (clients/go/README.md, "The call-back, by construction")."""
+        files = gen_go.write_go(self.header)
+        shim = files["shim.c"]
+        entry = shim.split("static void cavalry_go_entry_trampoline(", 1)[1].split("\n}\n", 1)[0]
+        self.assertIn("cavalryGoEntry((uintptr_t) clientd, (uint8_t *) buffer, length, (cavalry_header_t *) header,\n"
+                      "                 cavalry_committed_log_entry_position(header));", entry)
+        self.assertIn("cavalry_committed_log_poll(log, cavalry_go_entry_trampoline, (void *) index, fragment_limit)", shim)
+        self.assertEqual(shim.count("cavalry_committed_log_poll("), 1)
+        self.assertEqual(shim.count("cavalry_committed_log_entry_position("), 1)
+        trampoline = files["trampoline.go"]
+        self.assertIn("//export cavalryGoEntry\n", trampoline)
+        entered = trampoline.split("func cavalryGoEntry(", 1)[1].split("\n}\n", 1)[0]
+        self.assertIn("position C.int64_t) {", entered)
+        self.assertIn("s.deliverEntry(body, int64(position))", entered)
+        self.assertNotRegex(entered, r"C\.cavalry_\w+\(")   # no call back into C: types alone
+        code = files["cavalry.go"]
+        self.assertNotIn("C.cavalry_committed_log_entry_position(", code)
+        delivered = code.split("func (s *Subscription) deliverEntry(body []byte, position int64) {\n", 1)[1].split("\n}\n", 1)[0]
+        # No guard for a nil handler or a slot of the other kind: that call panics, the
+        # one deferred call recovers and counts it, and the poll reports it.
+        self.assertEqual(delivered, "\tdefer s.recovered()\n\ts.entry(body, &s.header, position)")
+        fragment = code.split("func (s *Subscription) deliver(body []byte) {\n", 1)[1].split("\n}\n", 1)[0]
+        self.assertEqual(fragment, "\tdefer s.recovered()\n\ts.handler(body, &s.header)")
+        recovered = code.split("func (s *Subscription) recovered() {\n", 1)[1].split("\n}\n", 1)[0]
+        self.assertIn("if r := recover(); r != nil {", recovered)
+        self.assertIn("s.raised++", recovered)
+        self.assertIn("log.raised != 1 || log.first == nil || subscription.raised != 1", files["cavalry_test.go"])
+        for call in ("cavalryGoEntry(0, nil, 0, nil, 96)", "cavalryGoEntry(maxSubscriptions+1, nil, 0, nil, 96)",
+                     "cavalryGoFragment(1, nil, 0, nil)"):
+            self.assertIn(call, files["cavalry_test.go"])
+        for name in ("Subscription.deliverEntry", "cavalryGoEntry"):
+            self.assertIn(name, gen_go.PER_MESSAGE_GO)
 
     def test_each_per_message_call_keeps_its_error_in_the_c_call_that_failed(self):
         """The ABI's error is the calling thread's and Go may run a goroutine's next cgo
@@ -1239,6 +1334,36 @@ class JvmPackage(unittest.TestCase):
         self.assertIs(gen.WRITERS["jvm"], gen_jvm.write_jvm)
         self.assertEqual(gen.LANGUAGES["jvm"], "jvm")
 
+    def test_the_committed_log_reads_both_reports_and_closes_a_log_it_cannot_return(self):
+        """The JVM committed log (ADR 0070): `failedAt` and `withdrawnAt` each answer the
+        position the ABI wrote when it answered true and an empty `OptionalLong` when it
+        answered false; and a log whose upcall stub cannot be made or whose constants
+        cannot be read is closed, as the Go client closes one it cannot return, with its
+        arena, the constants' error read before the close."""
+        log = gen_jvm.write_jvm(self.header)[self.BASE + "CommittedLog.java"]
+        for report, answered in (("failedAt", "failed"), ("withdrawnAt", "withdrawn")):
+            abi = "cavalry_committed_log_" + ("failed_at" if report == "failedAt" else "withdrawn_at")
+            body = log.split(f"    public OptionalLong {report}() {{\n", 1)[1].split("\n    }\n", 1)[0]
+            self.assertIn("MemorySegment position = scratch.allocate(JAVA_LONG);", body)
+            self.assertIn(f"boolean {answered} = (boolean) Abi.{abi}.invokeExact(handle, position);", body)
+            self.assertIn(f"return {answered} ? OptionalLong.of(position.get(JAVA_LONG, 0)) : OptionalLong.empty();", body)
+            self.assertIn(f'throw Abi.failed("{abi}", t);', body)
+        opened = log.split("    CommittedLog(MemorySegment handle, Client client) {\n", 1)[1].split("\n    }\n", 1)[0]
+        # Three ways out, each closing the log before anything is thrown: the stub's two
+        # and the constants', where `Abi.failed` throws an Error on and so comes after.
+        self.assertEqual(opened.count("abandon();"), 3)
+        self.assertNotIn("arena.close();", opened)
+        for thrown in ('throw new CavalryException("cavalry_committed_log", 0, "the upcall stub could not be made: " + e);',
+                       "throw e;", 'throw Abi.failed("cavalry_committed_log_constants", t);'):
+            at = opened.index(thrown)
+            self.assertEqual(opened[:at].rstrip().rsplit("\n", 1)[-1].strip(), "abandon();", thrown)
+        self.assertIn("} catch (RuntimeException e) {", opened)
+        abandon = log.split("    private void abandon() {\n", 1)[1].split("\n    }\n", 1)[0]
+        closed = abandon.index("client.closeCommittedLog(handle);")
+        self.assertLess(closed, abandon.index("} finally {"))
+        self.assertLess(abandon.index("} finally {"), abandon.index("handle = MemorySegment.NULL;"))
+        self.assertLess(abandon.index("handle = MemorySegment.NULL;"), abandon.index("arena.close();"))
+
     def test_a_header_change_changes_the_constants(self):
         changed = gen.parse(self.text.replace("#define CAVALRY_MAX_IMAGES 256", "#define CAVALRY_MAX_IMAGES 512"))
         code = gen_jvm.write_jvm(changed)[self.BASE + "Abi.java"]
@@ -1419,6 +1544,27 @@ class DotnetPackage(unittest.TestCase):
             self.assertEqual(self.committed(name), content, name)
         self.assertIs(gen.WRITERS["dotnet"], gen_dotnet.write_dotnet)
         self.assertEqual(gen.LANGUAGES["dotnet"], "dotnet")
+
+    def test_the_committed_log_reads_both_reports_and_closes_a_log_it_cannot_return(self):
+        """The .NET committed log (ADR 0070): `FailedAt` and `WithdrawnAt` each answer the
+        position the ABI wrote when it answered true and null when it answered false; and
+        a log whose constants cannot be read is closed, as the Go client closes one it
+        cannot return, before its `GCHandle` is freed and the exception goes on."""
+        log = gen_dotnet.write_dotnet(self.header)["CommittedLog.cs"]
+        for report, abi in (("FailedAt", "cavalry_committed_log_failed_at"),
+                            ("WithdrawnAt", "cavalry_committed_log_withdrawn_at")):
+            body = log.split(f"    public long? {report}()\n    {{\n", 1)[1].split("\n    }\n", 1)[0]
+            self.assertEqual(body.strip(), f"return Abi.{abi}(handle, out long position) ? position : null;")
+        opened = log.split("    internal CommittedLog(nint handle, Client client)\n    {\n", 1)[1].split("\n    }\n", 1)[0]
+        caught = opened.split("        catch\n        {\n", 1)[1].split("\n        }\n", 1)[0]
+        closed = caught.index("client.CloseCommittedLog(handle);")
+        self.assertLess(opened.index('Abi.Check("cavalry_committed_log_constants"'), opened.index("        catch\n"))
+        # The close is in a try of its own, so the GCHandle is freed and the constructor's
+        # exception goes on whatever the close does.
+        self.assertLess(caught.index("            try\n"), closed)
+        self.assertLess(closed, caught.index("            catch\n"))
+        self.assertLess(caught.index("            catch\n"), caught.index("self.Free();"))
+        self.assertLess(caught.index("self.Free();"), caught.index("throw;"))
 
     def test_a_header_change_changes_the_constants(self):
         changed = gen.parse(self.text.replace("#define CAVALRY_MAX_IMAGES 256", "#define CAVALRY_MAX_IMAGES 512"))
