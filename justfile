@@ -34,6 +34,7 @@ test-scripts:
     python3 scripts/release-notes-test.py
     python3 scripts/bench-compare-test.py
     python3 scripts/bench-needed-test.py
+    python3 scripts/changelog-test.py
     python3 scripts/wait-for-partner-job-test.py
     python3 scripts/claude-workflow-test.py
     python3 clients/generate-test.py
@@ -212,9 +213,12 @@ docs:
 
 # Fail if a public item, counter, config key or spec/ changed without docs, a page is
 # missing from docs/SUMMARY.md, an ADR is malformed, or an accepted ADR was edited. The
-# range it checks is described in the script's header. What CI runs.
+# range it checks is described in the script's header. And fail if a changelog entry
+# under changelog.d/ has a name or a shape the release's fold could not place (ADR
+# 0075). What CI runs.
 lint-docs:
     python3 scripts/lint-docs.py
+    python3 scripts/changelog.py check
 
 # External links in docs/ and the READMEs, checked online. Not a gate: run it before a
 # release, and when a source in docs/explanation/why-cavalry.md looks stale.

@@ -96,8 +96,10 @@ and `--request-changes` in place of `--approve` for findings.
    would check, building the gate is part of the change (CLAUDE.md, "Gates"). The recipe
    in `pr-head/justfile` shows whether a gate prints it, so this needs no finished run.
 4. **Documentation.** Docs ship in the same commit: a changed public item, counter, config key
-   or `spec/` file needs its README or `docs/` change; a user-visible change needs a line
-   under `Unreleased` in `CHANGELOG.md`; "docs to follow" is a blocker.
+   or `spec/` file needs its README or `docs/` change; a user-visible change needs its
+   changelog entry, a file of its own under `changelog.d/` (`changelog.d/README.md`;
+   ADR 0075), and a line appended to `CHANGELOG.md` in its place is a blocker, since it
+   is what makes two pull requests conflict; "docs to follow" is a blocker.
 5. **Tests.** A behaviour change with no test that could fail is not done. A bounded
    collection has a test at capacity before a test on the happy path.
 6. **Simplicity.** The simplest thing a stranger can support; nothing beyond what the issue

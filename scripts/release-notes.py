@@ -21,8 +21,9 @@ says about why they received it are decided here, by code that release-notes-tes
               starts with that day's first commit. It writes window.txt (one commit a line,
               oldest first), title.txt (the email's first line, which the writer copies) and,
               under sources/, commits.md (every commit's message, the review record),
-              changelog.md (the lines the window added to CHANGELOG.md, the authority on what
-              changed for a user), decisions.md (the ADRs the window added or changed, with their
+              changelog.md (the changelog lines the window added, in the entry files of
+              changelog.d/ and in CHANGELOG.md, the authority on what changed for a user;
+              ADR 0075), decisions.md (the ADRs the window added or changed, with their
               status) and docs.md (the documentation pages the window touched). The subject is
               `Cavalry <version>`, the highest product version (ADR 0002) among the commits the
               email covers, the shape Brigade's email uses too.
@@ -85,6 +86,7 @@ that GitHub renders them on the run page. No address is ever printed except on i
 """
 from __future__ import annotations
 
+import collections
 import datetime
 import json
 import os
@@ -197,6 +199,40 @@ class Context:
                     continue
                 die(f"GET {path.split('?')[0]} failed: {getattr(e, 'reason', e)}")
         return None    # unreachable: every path above returns or dies
+
+
+ENTRIES = "changelog.d/"
+ENTRIES_README = ":(exclude)changelog.d/README.md"
+
+
+def diff_lines(ctx, lower, upper, *paths):
+    """(added, removed): the lines a window added to and removed from some paths, a
+    renamed file read as the one file it is."""
+    added, removed = [], []
+    for line in git(ctx, "diff", "-M", lower, upper, "--", *paths).split("\n"):
+        if line.startswith("+") and not line.startswith("+++"):
+            added.append(line[1:])
+        elif line.startswith("-") and not line.startswith("---"):
+            removed.append(line[1:])
+    return added, removed
+
+
+def changelog_added(ctx, lower, upper):
+    """The changelog lines a window added, from both places an entry can be (ADR 0075):
+    the lines added to CHANGELOG.md and the lines added under changelog.d/, its README
+    left out, whether in a new entry file or at the end of one that was there. A fold
+    moves lines from the files into CHANGELOG.md, and those were an earlier window's
+    or are counted where they were added: for every line the window removed from an
+    entry file, one equal line added to CHANGELOG.md is left out."""
+    entries, moved = diff_lines(ctx, lower, upper, ENTRIES, ENTRIES_README)
+    moved = collections.Counter(moved)
+    added = []
+    for line in diff_lines(ctx, lower, upper, "CHANGELOG.md")[0]:
+        if moved[line] > 0:
+            moved[line] -= 1
+        else:
+            added.append(line)
+    return added + entries
 
 
 def git(ctx, *args, check=True):
@@ -361,12 +397,13 @@ def window(ctx):
         f"# The {len(shas)} commits this email covers, oldest first\n\nEach commit's message is the review record: "
         "what changed, which invariant, and the evidence.\n\n" + log, encoding="utf-8")
 
-    added = [line[1:] for line in git(ctx, "diff", lower, upper, "--", "CHANGELOG.md").split("\n")
-             if line.startswith("+") and not line.startswith("+++")]
+    added = changelog_added(ctx, lower, upper)
     (sources / "changelog.md").write_text(
-        "# The lines this window added to CHANGELOG.md\n\nThe changelog is written in the reader's words, one line per "
-        "user-visible change, in the commit that made the change. It is the authority on what changed and why.\n\n"
-        + ("\n".join(added) + "\n" if added else "No line was added to CHANGELOG.md in this window.\n"), encoding="utf-8")
+        "# The changelog lines this window added\n\nThe changelog is written in the reader's words, one entry per "
+        "user-visible change, in the commit that made the change: a file under changelog.d/ since ADR 0075, a line "
+        "of CHANGELOG.md before it and after a release has folded the files in. It is the authority on what "
+        "changed and why.\n\n"
+        + ("\n".join(added) + "\n" if added else "No changelog line was added in this window.\n"), encoding="utf-8")
 
     decisions = ["# The ADRs this window added or changed\n"]
     for entry in git(ctx, "diff", "--name-status", lower, upper, "--", "docs/decisions/").splitlines():
