@@ -23,6 +23,12 @@ use cavalry_shm::counters::generated::{
     RECEIVER_NAKS_SENT, RECEIVER_SETUPS_ELICITED, SENDER_RETRANSMITS_SENT,
 };
 
+// This test's ports, from the one file that says how they are taken and why, which is
+// `cavalry-raft`'s: `crates/cavalry-raft/tests/ports/mod.rs`.
+#[path = "../../cavalry-raft/tests/ports/mod.rs"]
+mod ports;
+use ports::free_port;
+
 /// A directory of its own per test, removed when the guard drops.
 struct TestDir(PathBuf);
 
@@ -56,15 +62,6 @@ fn wait_until(timeout: Duration, mut condition: impl FnMut() -> bool) -> bool {
         std::thread::sleep(Duration::from_millis(1));
     }
     true
-}
-
-/// A port no socket holds at the moment it is read: bound and released.
-fn free_port() -> u16 {
-    UdpSocket::bind("127.0.0.1:0")
-        .expect("a loopback socket")
-        .local_addr()
-        .expect("bound")
-        .port()
 }
 
 fn read_counter(dir: &Path, id: cavalry_shm::counters::CounterId) -> i64 {
