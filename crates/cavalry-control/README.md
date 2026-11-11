@@ -17,10 +17,34 @@ is allowed here.
   it (ADR 0020).
 - Explains a driver from its directory: `doctor` opens the counters file and the command
   ring read-only, as their pages say a reader does, and every finding names the docs
-  anchor that explains it (`CLAUDE.md`, invariant 4). The checks of the two
-  configuration keys are here: the filesystem under the driver directory, and the idle
-  strategy the running conductor recorded in its counter against the host's isolated
-  CPUs. The `cavalry doctor` command is this module behind a `main`.
+  anchor that explains it (`CLAUDE.md`, invariant 4). The checks of the configuration
+  keys are here: the filesystem under the driver directory (`driver-directory-backing`)
+  and under the log directory (`log-directory-backing`), the idle strategy the running
+  conductor recorded in its counter against the host's isolated CPUs
+  (`conductor-idle-strategy`), and the two cluster keys, checked together and against
+  the members string (`cluster-members`, `cluster-member-id`). `doctor::examine_config`
+  runs every check with the configuration the keys give, and the `cavalry doctor`
+  command is that call behind a `main`.
+- Explains a cluster member from the counters its consensus module stores, while its
+  driver runs: who the member is and what it knows, its role, term, election state,
+  append position and commit position (`cluster-member`, a note); a member that
+  follows no leader, told by the members string `examine_config` has whether it is
+  the appointed leader the others wait for (`cluster-no-leader`); a member that has
+  taken its leader and joins its log, with the path that needs (`cluster-joining`, a
+  note); a member whose
+  elections fail, because its leader's log never reached it, a network path the
+  message names first with its two endpoints, or because the log left it behind,
+  which this version cannot bring back (`cluster-joined-late`); an appointed leader that does not lead, or leads and does
+  not close its election, because its log is behind a member's
+  (`cluster-leader-behind`); a leader that lost its quorum (`cluster-quorum-lost`); a
+  commit position behind the leader's own append position (`cluster-commit-waits`);
+  and, with each counter's own doctor sentence from `counters.toml`, consensus
+  messages the member rejected, as from a member of another version
+  (`cluster.messages_rejected`), a leader it stopped hearing
+  (`cluster.leader_heartbeat_timeouts`) and a leader's log stream it lost
+  (`cluster.log_images_lost`).
+  [Run a cluster of three members](../../docs/how-to/run-a-cluster.md#when-it-does-not-work)
+  says what an operator does about each.
 - May use `async` and an executor: nothing a message passes through lives here.
 
 In Aeron, this is AeronStat and hand-written tooling: the open project has no admin API

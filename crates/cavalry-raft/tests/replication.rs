@@ -5,7 +5,7 @@
 //! checks, at every step, that nothing uncommitted is called committed.
 
 use cavalry_proto::cluster::{MAX_MEMBERS, Message, Stream, TimeUnit, quorum};
-use cavalry_raft::memory::Cluster;
+use cavalry_raft::memory::{Cluster, IN_FLIGHT_CAPACITY, MAX_DELAY_MS};
 use cavalry_raft::{Consensus, ElectionState, MembersRefused, NO_SESSION, Refused, Role};
 
 /// What must hold after every step (invariant 1): the leader's commit position is at
@@ -103,7 +103,11 @@ fn a_cluster_started_together_appoints_its_leader_replicates_and_commits() {
         let counts = member.counts();
         assert_eq!(counts.elections, 1);
         assert_eq!(counts.elections_failed, 0);
+        assert_eq!(counts.elections_closed, 1);
         assert_eq!(counts.terms_led, u64::from(id == 0));
+        // Leader log replication, replay and init on the leader; follower replay, log
+        // init, log await and ready on a follower (ADR 0067).
+        assert_eq!(counts.election_steps, if id == 0 { 3 } else { 4 });
     }
     // The leader stored the term it proposed before it led; a follower's raise on
     // following is in memory alone. Every member recorded term 0 at position 0 before
@@ -178,30 +182,76 @@ fn eight_members_replicate_and_a_ninth_is_refused() {
         assert_eq!(cluster.commit_position(id), Some(position));
     }
 
+    // Each refusal names the check of `spec/cluster.md`, "What a reader rejects", that
+    // failed, in the spec's order: grammar, duplicate, count, self, each over every
+    // member, so that an operator who searches for the name finds the rule.
     let nine: Vec<i32> = (0..9).collect();
-    assert_eq!(
-        Consensus::new(&nine, 0).err(),
-        Some(MembersRefused::Count { found: 9 })
-    );
-    assert_eq!(
-        Consensus::new(&[], 0).err(),
-        Some(MembersRefused::Count { found: 0 })
-    );
-    assert_eq!(
-        Consensus::new(&[0, 1, 1], 0).err(),
-        Some(MembersRefused::Id { id: 1 })
-    );
-    assert_eq!(
-        Consensus::new(&[0, -4, 1], 0).err(),
-        Some(MembersRefused::Id { id: -4 })
-    );
-    let not_a_member = Consensus::new(&[0, 1, 2], 3).expect_err("3 is not a member");
-    assert_eq!(not_a_member, MembersRefused::NotAMember { id: 3 });
-    assert!(
-        not_a_member
-            .to_string()
-            .contains("docs/reference/cluster.md#members-and-streams")
-    );
+    let mut nine_with_a_duplicate = nine.clone();
+    nine_with_a_duplicate.push(3);
+    for (members, own, refused, reason, says) in [
+        (
+            &[][..],
+            0,
+            MembersRefused::Empty,
+            "members-grammar",
+            "no member was given",
+        ),
+        (
+            &[0, -4, 1][..],
+            0,
+            MembersRefused::Negative { id: -4 },
+            "members-grammar",
+            "member id -4 is below 0",
+        ),
+        (
+            &[0, 1, 1, -4][..],
+            0,
+            MembersRefused::Negative { id: -4 },
+            "members-grammar",
+            "member id -4 is below 0",
+        ),
+        (
+            &[0, 1, 1][..],
+            0,
+            MembersRefused::Duplicate { id: 1 },
+            "members-duplicate",
+            "two members have the id 1",
+        ),
+        (
+            &nine_with_a_duplicate[..],
+            0,
+            MembersRefused::Duplicate { id: 3 },
+            "members-duplicate",
+            "two members have the id 3",
+        ),
+        (
+            &nine[..],
+            0,
+            MembersRefused::Count { found: 9 },
+            "members-count",
+            "9 members",
+        ),
+        (
+            &[0, 1, 2][..],
+            3,
+            MembersRefused::NotAMember { id: 3 },
+            "members-self",
+            "member id 3 is not in the members string",
+        ),
+    ] {
+        let found = Consensus::new(members, own).expect_err("refused");
+        assert_eq!(found, refused, "{members:?}");
+        assert_eq!(found.reason(), reason, "{members:?}");
+        let message = found.to_string();
+        assert!(
+            message.starts_with(&format!("members refused ({reason}): {says}")),
+            "{message}"
+        );
+        assert!(
+            message.ends_with("; see docs/reference/cluster.md#what-a-reader-rejects"),
+            "{message}"
+        );
+    }
 }
 
 /// A cold start with a member missing. The appointed leader canvasses for the startup
@@ -571,6 +621,57 @@ fn lost_and_late_consensus_messages_change_no_outcome() {
         assert_eq!(counts.elections_failed, 0, "member {id}");
         assert_eq!(counts.leader_heartbeat_timeouts, 0, "member {id}");
     }
+}
+
+/// The consensus stream in memory is bounded (invariant 3). Eight members whose messages
+/// are up to two seconds late, with an entry offered every millisecond, send more than
+/// the queue holds, about seven messages a millisecond for a second on average: it holds `IN_FLIGHT_CAPACITY` and never more, what is sent while it is
+/// full is lost and counted, and since every consensus message is sent again at its
+/// interval, every member learns the last commit position once delivery is prompt
+/// again, with no election failed. A delay past `MAX_DELAY_MS` is held to it.
+#[test]
+fn the_consensus_stream_in_memory_holds_its_bound_and_loses_what_it_cannot_hold() {
+    let ids: Vec<i32> = (0..8).collect();
+    let mut cluster = Cluster::new(&ids).expect("eight members");
+    let mut safety = Safety::new(&ids);
+    safety.run(&mut cluster, 1_000);
+    assert_eq!(cluster.full_queue_losses(), 0);
+    assert_eq!(cluster.set_delivery(0, 2_000), 2_000);
+    let mut last = 0;
+    let mut fullest = 0;
+    for i in 0..3_000u32 {
+        last = cluster.offer(&i.to_le_bytes()).expect("the leader appends");
+        safety.run(&mut cluster, 1);
+        assert!(cluster.in_flight() <= IN_FLIGHT_CAPACITY, "{cluster:?}");
+        fullest = fullest.max(cluster.in_flight());
+    }
+    assert_eq!(fullest, IN_FLIGHT_CAPACITY);
+    let lost = cluster.full_queue_losses();
+    assert!(lost > 0);
+
+    assert_eq!(cluster.set_delivery(0, 0), 0);
+    safety.run(&mut cluster, 3_000);
+    assert!(cluster.in_flight() < IN_FLIGHT_CAPACITY);
+    assert_eq!(
+        cluster.full_queue_losses(),
+        lost,
+        "prompt delivery loses nothing"
+    );
+    for &id in &ids {
+        assert_eq!(cluster.commit_position(id), Some(last), "member {id}");
+        assert_eq!(
+            cluster.election_state(id),
+            Some(ElectionState::Closed),
+            "member {id}"
+        );
+        assert_eq!(cluster.counts(id).expect("a member").elections_failed, 0);
+    }
+
+    // A delay that would overflow the clock's sum is held to the leader heartbeat
+    // timeout, and the cluster runs on.
+    assert_eq!(cluster.set_delivery(0, u64::MAX), MAX_DELAY_MS);
+    safety.run(&mut cluster, 100);
+    assert!(cluster.in_flight() <= IN_FLIGHT_CAPACITY);
 }
 
 /// What an offer is refused for, each with what to do next.

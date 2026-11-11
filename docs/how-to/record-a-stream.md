@@ -124,13 +124,22 @@ when the stop's own writes failed, the last sync before the stop covered it (see
 A program that must know its messages are on the disk before it goes on, to
 acknowledge them for one, does not wait for the recorder's sync once a second. It
 waits until `recording.position()` has reached the position its last `offer` returned,
-calls `recording.sync(&mut client)?`, and then reads `recording.synced_position()`,
-which is at or past that position. The call returns when the recorder has synced what
-it had written; it syncs nothing the recorder had not written yet, which is why the
-program waits for `position()` first. `recording.request_sync(&mut client)?` asks for
-the same sync and returns at once, for a program that polls `synced_position()` in a
-loop of its own
-([ADR 0067](../decisions/0067-sync-a-recording-on-command-as-client-protocol-version-8.md)).
+or until `recording.stop_position()` is `Some`. Then it calls
+`recording.sync(&mut client)?` and reads `recording.synced_position()`. It
+acknowledges its messages up to that position and no further, never up to the
+position `offer` returned. While the recording is live, `synced_position()` is then at
+or past the position `position()` had reached. The call returns when the recorder has
+synced what it had written; it syncs nothing the recorder had not written yet, which
+is why the program waits for `position()` first. Once `stop_position()` is `Some`, the
+recording has stopped: `position()` and `synced_position()` return the stop position
+and never move again, so the program stops waiting for them, and `sync` is `Ok` with
+nothing done. After a sync that failed, or a stop whose own writes failed, on a
+failing or full disk, the stop position is the position last synced, below what was
+written, and the messages past it may not be on the disk; `recording-write-failed`
+below says why and what to do.
+`recording.request_sync(&mut client)?` asks for the same sync and returns at once, for
+a program that polls `synced_position()` in a loop of its own
+([ADR 0069](../decisions/0069-sync-a-recording-on-command-as-client-protocol-version-8.md)).
 
 ## How to verify it worked
 
