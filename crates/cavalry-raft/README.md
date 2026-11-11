@@ -16,16 +16,16 @@ commit path runs per message.
   reports a log ahead of its own, so a leader that lost its log directory never leads
   a second time. A member that could join only with a catch-up or a truncation, one
   that starts late, is left out and counted, never joined wrong.
-- Elects, on a path of its own that is being built: `Consensus::with_election(member_ids,
-  member_id, seed)` is a member that canvasses, nominates itself after a delay drawn
-  from its seed, asks for the other members' votes and leads the term a quorum votes
-  for, at once when every member it has heard has voted for it (ADR 0077). It stores
-  a term before the vote or the request vote that raises it, and votes once in a
-  term. A candidate asks for votes in the term it nominated itself for and no other:
-  one whose term another candidate's request raised asks for none in the raised term
-  and does not lead it. The consensus module does not use this path yet: a member over a driver is
-  appointed until the election can do what the next section lists, and then the
-  module moves to it in one change (ADR 0081).
+- Elects, on a path of its own that is being built:
+  `Consensus::with_election(member_ids, member_id, seed)` is a member that canvasses,
+  nominates itself after a delay drawn from its seed, asks for the other members' votes
+  and leads the term a quorum votes for, at once when every member it has heard has
+  voted for it (ADR 0077). It stores a term before the vote or the request vote that
+  raises it, and votes once in a term. A candidate asks for votes in the term it
+  nominated itself for and no other: one whose term another candidate's request raised
+  asks for none in the raised term and does not lead it. The consensus module does not
+  use this path yet: a member over a driver is appointed until the election can do what
+  the next section lists, and then the module moves to it in one change (ADR 0081).
 - Counts every move of the election. `ElectionState` is the state machine
   `cluster_election` of `counters.toml`, and each of its transitions adds one to a
   count of `Counts`, the counter registered for it; `Counts::by_counter` pairs each
