@@ -398,18 +398,57 @@ impl Io for MemberIo<'_> {
 pub struct Cluster {
     cores: Vec<Consensus>,
     world: World,
+    /// `Some` for a cluster whose members elect their leader: the seed each member's
+    /// own is made from.
+    election: Option<u64>,
 }
 
 impl Cluster {
     /// A cluster of the members with `member_ids`, every member started, at time 0.
+    /// Its leader is appointed: the member with the lowest id (`spec/cluster.md`, "The
+    /// appointed leader"), as in a cluster over drivers.
     pub fn new(member_ids: &[i32]) -> Result<Self, MembersRefused> {
-        let cores = member_ids
-            .iter()
-            .map(|&id| Consensus::new(member_ids, id))
+        Self::start(member_ids, None)
+    }
+
+    /// A cluster of the members with `member_ids` that elect their leader
+    /// ([`Consensus::with_election`]; ADR 0077), every member started, at time 0.
+    /// Each member's nomination delays come from `seed` and its place among the
+    /// members, so that no two members draw the same delays and a seed gives the same
+    /// elections at every run. Which member leads depends on the seed:
+    /// [`Cluster::leader`] says.
+    pub fn with_election(member_ids: &[i32], seed: u64) -> Result<Self, MembersRefused> {
+        Self::start(member_ids, Some(seed))
+    }
+
+    /// The core of the member at `index` among `member_ids`, appointed or electing.
+    fn core(
+        member_ids: &[i32],
+        index: usize,
+        election: Option<u64>,
+    ) -> Result<Consensus, MembersRefused> {
+        let id = member_ids.get(index).copied().unwrap_or(-1);
+        match election {
+            None => Consensus::new(member_ids, id),
+            // One seed for each member: the cluster's, moved on by the member's place.
+            Some(seed) => Consensus::with_election(
+                member_ids,
+                id,
+                seed.wrapping_add(1)
+                    .wrapping_mul(0x9E37_79B9_7F4A_7C15)
+                    .wrapping_add((index as u64).wrapping_mul(0xD1B5_4A32_D192_ED03)),
+            ),
+        }
+    }
+
+    fn start(member_ids: &[i32], election: Option<u64>) -> Result<Self, MembersRefused> {
+        let cores = (0..member_ids.len())
+            .map(|index| Self::core(member_ids, index, election))
             .collect::<Result<Vec<_>, _>>()?;
         let disks = member_ids.iter().map(|&id| Disk::empty(id)).collect();
         Ok(Self {
             cores,
+            election,
             world: World {
                 clock: Clock {
                     now_ns: 0,
@@ -470,7 +509,13 @@ impl Cluster {
             {
                 // Every entry appended since the last step, each one at the end of what
                 // the member holds; an entry that begins below it is one the member
-                // holds already, in whatever bytes it has there.
+                // holds already, in whatever bytes it has there. An entry that begins
+                // below what the member holds and ends above it, which needs a member
+                // that received past what it synced and then joined a publication whose
+                // entries end elsewhere, is skipped too, and the next is taken after a
+                // gap: the member's log is then not the publication's, which is what
+                // the safety check of a test finds. The election's truncation, when a
+                // member has it, cuts the member's log to where it joins.
                 for entry in publication.entries.iter().skip(image.next) {
                     if entry.position >= disk.received {
                         disk.received = entry.position_after;
@@ -603,11 +648,48 @@ impl Cluster {
         bytes
     }
 
-    /// Offers `payload` to the leader, the member with the lowest id, as its own
-    /// process does, and returns the position after the entry
-    /// ([`Consensus::offer`]).
+    /// The bytes of the member's log up to `position`: every entry it holds that ends
+    /// at or below that position, as [`Cluster::log`] gives them. With a commit
+    /// position, the entries the member holds that are committed.
+    pub fn log_to(&self, member: i32, position: i64) -> Vec<u8> {
+        let mut bytes = Vec::new();
+        if let Some(disk) = self
+            .index(member)
+            .and_then(|index| self.world.disks.get(index))
+        {
+            for entry in disk
+                .log
+                .iter()
+                .take_while(|entry| entry.position_after <= position)
+            {
+                bytes.extend_from_slice(&entry.bytes);
+            }
+        }
+        bytes
+    }
+
+    /// The member that leads: the one whose role is leader, the one of the highest
+    /// term when a member that stopped still holds an older one, and never a halted
+    /// member. `None` while no running member leads, during an election.
+    pub fn leader(&self) -> Option<i32> {
+        self.cores
+            .iter()
+            .zip(&self.world.disks)
+            .filter(|(core, disk)| core.role() == Role::Leader && !disk.halted)
+            .max_by_key(|(core, _)| core.leadership_term_id())
+            .map(|(core, _)| core.member_id())
+    }
+
+    /// Offers `payload` to the leader as its own process does, and returns the
+    /// position after the entry ([`Consensus::offer`]). The leader is the appointed
+    /// one, the member with the lowest id, in a cluster made with [`Cluster::new`],
+    /// and [`Cluster::leader`] in one that elects, where an offer made while no member
+    /// leads is refused as not the leader's.
     pub fn offer(&mut self, payload: &[u8]) -> Result<i64, Refused> {
-        let leader = self.cores.first().map_or(-1, Consensus::leader_member_id);
+        let leader = match self.election {
+            None => self.cores.first().map_or(-1, Consensus::leader_member_id),
+            Some(_) => self.leader().unwrap_or(-1),
+        };
         let Some(own) = self.index(leader) else {
             return Err(Refused::NotLeader);
         };
@@ -698,7 +780,10 @@ impl Cluster {
             .cores
             .get(index)
             .is_some_and(|core| core.role() == Role::Leader);
-        if let (Some(core), Ok(new)) = (self.cores.get_mut(index), Consensus::new(&ids, member)) {
+        if let (Some(core), Ok(new)) = (
+            self.cores.get_mut(index),
+            Self::core(&ids, index, self.election),
+        ) {
             *core = new;
         }
         if let Some(disk) = self.world.disks.get_mut(index) {
