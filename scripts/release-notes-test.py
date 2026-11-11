@@ -331,6 +331,64 @@ class Window(Base):
         self.assertEqual(run.outputs["count"], "2")
         self.assertIn("- Ten days ago.", run.read("sources/changelog.md"))
 
+    def test_an_entry_added_as_a_file_in_the_window_is_a_changelog_line_of_it(self):
+        # ADR 0075: an entry is a file under changelog.d/, and CHANGELOG.md is not touched.
+        self.repo.write("changelog.d/README.md", "# Changelog entries\n\n- Not an entry, a page.\n")
+        self.repo.write("changelog.d/7-before.md", "- An entry before the window.\n")
+        self.repo.commit("Before the window", "2026-01-05T10:00:00Z")
+        self.repo.write("changelog.d/9-in-the-window.md", "- An entry in the window,\n  on two lines.\n- And a second.\n")
+        start = self.repo.commit("In the window", "2026-01-06T10:00:00Z")
+        self.repo.git("mv", "changelog.d/7-before.md", "changelog.d/7-renamed.md")
+        last = self.repo.commit("A rename", "2026-01-06T11:00:00Z")
+        run = self.run_script("window", env={"RELEASE_NOTES_FROM": start, "GITHUB_SHA": last})
+        self.passes(run)
+        changelog = run.read("sources/changelog.md")
+        self.assertIn("- An entry in the window,\n  on two lines.\n- And a second.\n", changelog)
+        for absent in ("before the window", "Not an entry", "The third thing"):
+            self.assertNotIn(absent, changelog)
+        self.assertIn("# The changelog lines this window added", changelog)
+
+    def test_a_line_added_in_the_window_to_an_entry_file_that_was_there_is_a_line_of_it(self):
+        # A change's second entry goes into its file, and a new entry may end with the
+        # same line as an old one: neither is lost.
+        self.repo.write("changelog.d/7-before.md", "- An entry before the window\n  (card 7).\n")
+        self.repo.commit("Before the window", "2026-01-05T10:00:00Z")
+        self.repo.append("changelog.d/7-before.md", "- A second entry of the same change\n  (card 7).\n")
+        start = self.repo.commit("In the window", "2026-01-06T10:00:00Z")
+        run = self.run_script("window", env={"RELEASE_NOTES_FROM": start, "GITHUB_SHA": start})
+        self.passes(run)
+        changelog = run.read("sources/changelog.md")
+        self.assertIn("- A second entry of the same change\n  (card 7).\n", changelog)
+        self.assertNotIn("An entry before the window", changelog)
+
+    def test_a_fold_in_the_window_reports_no_entry_a_second_time(self):
+        # A release folds the files into CHANGELOG.md: the lines of a file that was there
+        # when the window began were an earlier email's, and those of one added and
+        # folded inside the window are this one's, once.
+        self.repo.write("changelog.d/7-before.md", "- An entry before the window\n  (card 7).\n")
+        self.repo.commit("Before the window", "2026-01-05T10:00:00Z")
+        self.repo.write("changelog.d/9-in-the-window.md", "- An entry in the window\n  (card 7).\n")
+        start = self.repo.commit("In the window", "2026-01-06T10:00:00Z")
+        self.repo.append("CHANGELOG.md", "- An entry before the window\n  (card 7).\n- An entry in the window\n  (card 7).\n")
+        self.repo.git("rm", "-q", "changelog.d/7-before.md", "changelog.d/9-in-the-window.md")
+        self.repo.append("CHANGELOG.md", "- A line appended by hand, as before ADR 0075\n  (card 7).\n")
+        last = self.repo.commit("The fold", "2026-01-07T10:00:00Z")
+        run = self.run_script("window", env={"RELEASE_NOTES_FROM": start, "GITHUB_SHA": last})
+        self.passes(run)
+        changelog = run.read("sources/changelog.md")
+        self.assertEqual(changelog.count("- An entry in the window"), 1)
+        self.assertIn("- A line appended by hand, as before ADR 0075\n  (card 7).\n", changelog)
+        self.assertNotIn("before the window", changelog)
+        # Two entries are the window's, each with its last line, which the old one shares.
+        self.assertEqual(changelog.count("  (card 7)."), 2)
+
+    def test_a_window_with_no_changelog_line_says_so(self):
+        self.repo.write("docs/how-to/third.md", "# Third\n")
+        last = self.repo.commit("A page", "2026-01-05T10:00:00Z")
+        run = self.run_script("window", env={"RELEASE_NOTES_FROM": last, "GITHUB_SHA": last})
+        self.passes(run)
+        self.assertIn("No changelog line was added in this window.", run.read("sources/changelog.md"))
+
     def test_nothing_to_send(self):
         self.gh.routes[f"/repos/{REPO}/actions/workflows/{rn.WORKFLOW_FILE}/runs"] = {"workflow_runs": []}
         run = self.run_script("window")

@@ -3,6 +3,7 @@ paths:
   - "docs/**"
   - "**/README.md"
   - "CHANGELOG.md"
+  - "changelog.d/**"
   - "spec/**"
 ---
 
@@ -75,9 +76,13 @@ that.
 
 ## Changelog
 
-`CHANGELOG.md` follows Keep a Changelog. Every user-visible change adds a line under
-`Unreleased` in the same commit, in the reader's words ("`cavalry doctor` now reports
-cgroup CPU throttling"), linking the ADR or docs page where one exists.
+`CHANGELOG.md` follows Keep a Changelog. Every user-visible change adds its entry in
+the same commit, in the reader's words ("`cavalry doctor` now reports cgroup CPU
+throttling"), linking the ADR or docs page where one exists. The entry is a file of
+its own, `changelog.d/<card>-<a few words>.md`, and not a line of `CHANGELOG.md`: two
+pull requests that both appended there always conflicted (ADR 0075).
+`changelog.d/README.md` has the shape, `just lint-docs` checks it, and
+`python3 scripts/changelog.py fold` moves the entries under Unreleased at a release.
 
 ## Before committing
 

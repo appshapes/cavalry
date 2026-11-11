@@ -29,8 +29,9 @@ changelog, the commits, the cards or the plans, and they will give this email on
 
 - `/tmp/cavalry-email/window.txt`: the commits this email covers, one a line, oldest first.
 - `/tmp/cavalry-email/title.txt`: the email's first line, without the `# `. Copy it exactly.
-- `/tmp/cavalry-email/sources/changelog.md`: the lines the window added to `CHANGELOG.md`,
-  which is written in the reader's words, one line per user-visible change. It is the
+- `/tmp/cavalry-email/sources/changelog.md`: the changelog lines the window added, from
+  the entry files under `changelog.d/` and from `CHANGELOG.md` (ADR 0075). The changelog
+  is written in the reader's words, one entry per user-visible change. It is the
   authority on what changed and why.
 - `/tmp/cavalry-email/sources/commits.md`: every commit's message. Each is the review record:
   what changed, which invariant it serves, and the evidence. Read it for what a change means

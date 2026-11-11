@@ -25,7 +25,10 @@ Checks:
   change  over the range: a change to a public item (a line with `pub ` in a crate's
           src/), to spec/, counters.toml or config.toml needs a change under docs/ or to
           a README; a change to spec/ needs an ADR in the same change whose Status is
-          Accepted; an ADR that was already Accepted may change only its Status line
+          Accepted; an ADR that was already Accepted may change only its Status line;
+          and CHANGELOG.md gains no entry line, one that begins `- ` or two spaces,
+          unless the same change removes an entry file under changelog.d/, which is a
+          release's fold: a change's entry is a file of its own there (ADR 0075)
 
 The range: $LINT_DOCS_RANGE if set; in CI, origin/<base>...HEAD for a pull request and
 <before>..<after> for a push (HEAD~1..HEAD when <before> is the null commit); on a
@@ -332,6 +335,17 @@ def check_change() -> tuple[str, int]:
         if not accepted:
             find("change: spec/ changed with no ADR in the same change whose Status is Accepted "
                  "(CLAUDE.md, Protocol: spec first, with an accepted ADR)")
+    # ADR 0075: a change's changelog entry is a file under changelog.d/. An entry line
+    # added to CHANGELOG.md is the line two pull requests conflict in; only a fold,
+    # which removes entry files in the same change, adds such lines.
+    if "CHANGELOG.md" in files:
+        appended = [line for line in file_diff(base, head, "CHANGELOG.md").splitlines()
+                    if line.startswith(("+- ", "+  "))]
+        folded = any(f.startswith("changelog.d/") and content_at(head, f) is None for f in files)
+        if appended and not folded:
+            find(f"change: CHANGELOG.md gained {len(appended)} entry line(s); a change's entry is a file of "
+                 "its own, changelog.d/<card>-<a few words>.md, and CHANGELOG.md is edited by a release's "
+                 "fold alone (changelog.d/README.md; ADR 0075)")
     for f in files:
         if not (f.startswith("docs/decisions/") and ADR_NAME.match(Path(f).name)):
             continue
