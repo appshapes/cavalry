@@ -238,6 +238,7 @@ States: `follower`, `candidate`, `leader`.
 | `candidate` | `leader` | `cluster.terms_led` |
 | `candidate` | `follower` | `cluster.ballots_lost` |
 | `candidate` | `follower` | `cluster.votes_for` |
+| `candidate` | `follower` | `cluster.elections_failed` |
 
 ### `cluster_election`
 

@@ -80,7 +80,10 @@ election timeout, or either on a new leadership term for a log term the member d
 not report. `cluster.votes_for` and `cluster.votes_against` are registered as the
 page has them. The machine `cluster_election` gains nominate, candidate ballot and
 follower ballot with fourteen rows, and `cluster_role` gains follower to candidate,
-candidate to leader and candidate to follower. Two members that each count a
+candidate to leader and candidate to follower, the last with the counter of each of
+its three causes: a ballot lost, a vote for another candidate, and an election that
+fails on a leader's term the candidate cannot join, after which it is a follower in
+init, never a candidate. Two members that each count a
 candidacy and a ballot lost in one election are a split vote.
 
 **Nominate reads what canvass reads.** A member in nominate is a canvassing member
@@ -129,9 +132,10 @@ cannot join without it. A leader reads no new leadership term and holds no elect
 ## Evidence
 
 - `crates/cavalry-raft/tests/transitions.rs` makes every row of `cluster_election`,
-  the twenty of the appointed path and the fourteen new ones, and checks after every
-  call into a core that a move it made is a registered row and that a counter
-  registered for it rose.
+  the twenty of the appointed path and the fourteen new ones, and every row of
+  `cluster_role`, and checks after every call into a core that each move it made, of
+  the election and of the role, is a registered row and that a counter registered
+  for it rose.
 - `crates/cavalry-raft/tests/ballot.rs`, eight tests on one core: a term is stored
   before the request vote or the vote it allows; a member votes once in a term; a
   ballot closes at once when every member heard has voted for the candidate, waits

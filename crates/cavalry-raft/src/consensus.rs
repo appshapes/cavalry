@@ -1014,9 +1014,17 @@ impl Consensus {
         self.commit_position = self.commit_position.max(commit_position);
     }
 
-    /// An election that failed in its state: counted, and begun again at init.
+    /// An election that failed in its state: counted, and begun again at init. A
+    /// candidate's fails when it reads the new leadership term of its candidate term
+    /// and could join it only with a truncation, a replication or a wait: it is a
+    /// follower from here, the move `candidate -> follower` that `cluster.elections_failed`
+    /// counts, so that the role never reads candidate while the election reads init. No
+    /// leader fails an election in this version.
     fn fail(&mut self, clock: Clock) {
         count(&mut self.counts.elections_failed);
+        if self.role == Role::Candidate {
+            self.role = Role::Follower;
+        }
         self.enter(ElectionState::Init, clock);
     }
 

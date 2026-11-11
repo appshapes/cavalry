@@ -1347,9 +1347,10 @@ doctor = ""
 # A cluster member's role (spec/cluster.md, "Roles and the election"; ADR 0052, feature
 # 3). A member whose leader is appointed becomes the leader from follower, and no
 # member is a candidate (ADR 0063). A member that elects (ADR 0077, ADR 0081) is a
-# candidate from its nomination until it leads, loses its ballot or votes for
-# another. No leader stops leading yet: the step-down comes with card 228's next
-# change.
+# candidate from its nomination until it leads, loses its ballot, votes for another
+# or fails its election on a leader's term it cannot join. Candidate to follower is
+# listed with the counter of each of those three causes. No leader stops leading yet:
+# the step-down comes with card 228's next change.
 
 [[state_machine]]
 name = "cluster_role"
@@ -1384,6 +1385,12 @@ machine = "cluster_role"
 from = "candidate"
 to = "follower"
 counter = "cluster.votes_for"
+
+[[transition]]
+machine = "cluster_role"
+from = "candidate"
+to = "follower"
+counter = "cluster.elections_failed"
 
 # The election as one member's core holds it, `cavalry_raft::ElectionState`: the states
 # of the appointed leader's path (spec/cluster.md, "Roles and the election" and "The
