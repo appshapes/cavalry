@@ -75,8 +75,9 @@ conflict: a conflict is resolved in place, as step 4 says.
    commit on `master` (`auto-merge.yml`), so the branch's messages are drafts of that.
 
 4. **Merge `master` in.** `git merge --no-edit origin/master`. A conflict in a file
-   everyone appends to (`CHANGELOG.md`, `docs/SUMMARY.md`, `docs/glossary.md`,
-   `spec/README.md`, `counters.toml`, a crate's `lib.rs`) is resolved by keeping both
+   everyone appends to (`docs/SUMMARY.md`, `docs/glossary.md`, `spec/README.md`,
+   `counters.toml`, a crate's `lib.rs`; no longer `CHANGELOG.md`, since an entry is a
+   file of its own under `changelog.d/`, ADR 0075) is resolved by keeping both
    sides with `master`'s lines first (CLAUDE.md, Working rules for agents); any other
    conflict by keeping what both changes meant, with the files and the resolution named
    in the pull request body (card 218). After a merge commit, run step 2 again.
