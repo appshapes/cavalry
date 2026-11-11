@@ -41,6 +41,15 @@ commit path runs per message.
   error, and a stop position not read within 1 s is a `stop-timeout` error. Either
   way the member stays in init with the recording held, and the next `do_work()`
   stops it again.
+- Asks for the sync a commit waits for: a member's append position is its
+  recording's synced position, and the driver's recorder syncs a recording by itself
+  once a second. So the module asks its driver to sync its recording of the log,
+  `Recording::request_sync`, whenever the recorder has written past what it has
+  synced, once for each position written and without waiting for the answer. A
+  commit then waits for one sync on a quorum: ten entries, each appended once the
+  last was committed, took from 186 ms to 228 ms in twenty runs on three members on
+  a macOS laptop, and 10.0 s without the requests (`spec/cluster.md`, "The log"; ADR
+  0060, ADR 0069).
 - Tells a service where the log is: `cluster.log_recording_id` holds the id of the
   recording the member records the live log into, −1 while it records none, stored
   before the member's commit position exists and changed before a commit position
