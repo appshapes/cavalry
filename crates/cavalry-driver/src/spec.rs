@@ -150,6 +150,23 @@ pub(crate) const RECORDER_QUEUE_CAPACITY: usize = 2 * MAX_RECORDINGS;
 /// first committed frame is always taken, so a block makes progress under any limit.
 pub(crate) const RECORDER_BLOCK_LIMIT: usize = 1024 * 1024;
 
+/// How long after a block that ended at a publisher's tail the recorder scans that
+/// recording again, 50 µs in nanoseconds (ADR 0084). A scan reads the word at the
+/// tail, the cache line the publisher writes next; one read in 50 µs costs a
+/// publisher that never pauses one message in some hundreds, where one a duty cycle
+/// costs it every message. A recorder that wrote nothing, or whose block ended for
+/// its limit, its term or a padding frame, is not held by it.
+pub(crate) const RECORDER_TAIL_INTERVAL: i64 = 50_000;
+
+/// The most blocks the recorder writes of one recording before a stop or a sync it
+/// was asked for, and before its stop when the driver closes, 4 (ADR 0084), within
+/// [`RECORDER_BLOCK_LIMIT`] bytes in all: what is committed is written first. Four,
+/// since a block ends with its term and a padding frame is a block of its own, so
+/// what the interval held back can lie across a term's end in three. A recorder
+/// further behind than this, which is a disk slower than its publisher, stops or
+/// syncs where it is.
+pub(crate) const RECORDER_REQUEST_BLOCKS: usize = 4;
+
 /// How many requests the recorder handles per duty cycle before it turns to the
 /// recordings.
 pub(crate) const RECORDER_REQUESTS_PER_CYCLE: usize = 16;

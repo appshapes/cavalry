@@ -429,8 +429,16 @@ What the driver does with each, after the checks of "What the driver rejects":
   every outcome, and `recording.armed` is `recording.armed_started`,
   `recording.armed_dropped` and `recording.armed_failed` together with the recordings
   still armed or starting (ADR 0059).
-- **stop recording.** The driver stops the recording at the position the recorder has
-  written and answers `operation success` once the catalog's stop fields are written and
+- **stop recording.** The driver hands the command to its recorder. The recorder first
+  writes what is committed of the stream at the recording's position, block after
+  block, until it finds no committed frame there, has written four blocks or 1 MiB,
+  meets a frame that fails its check, or a write fails; a block ends at its term's end,
+  and a padding frame is a block of its own (ADR 0084). A recorder reads at the
+  position of a publisher that does not pause once in 50 µs, and a stop does not leave
+  unwritten what was committed since. The driver
+  stops the recording at the position
+  the recorder has then written and answers `operation success` once the catalog's stop
+  fields are written and
   synced (`spec/durable-log.md`, "The driver"); then every client gets `recording
   stopped`. A stop whose own writes or syncs fail is answered with `operation success`
   all the same, once the failure is counted: the recording is stopped, and the
@@ -442,14 +450,19 @@ What the driver does with each, after the checks of "What the driver rejects":
   since a recording id is never reused.
 - **sync recording.** The driver hands the command to its recorder through the request
   queue that carries a recording's start and stop. When the recorder takes the request,
+  it first writes what is committed of the stream at the recording's position, as for a
+  `stop recording` and with the same bound (ADR 0084); then
   it syncs what it has written of the recording, the segment file and the time index,
   stores the position in `recording.synced_position`, and the driver answers
   `operation success`; when nothing written is unsynced it makes no sync and the
   answer is the same. The recorder's own sync is next due a second after this one. For
   a live recording the answer means that everything the recorder had written when it
-  took the request is covered by a sync that returned success. It does not mean that
-  everything the client published before the command is covered, since the recorder
-  may not have written it yet: a client that needs a position reads
+  synced is covered by a sync that returned success, and that includes every frame
+  that was committed when it took the request and that it reached within its four
+  blocks and 1 MiB. It does not mean that
+  everything the client published before the command is covered: a frame claimed and
+  not yet committed ends the recorder's scan, and so does the bound for a recorder
+  that was further behind. A client that needs a position reads
   `recording.synced_position`, and sends the command again while that is behind; one
   sync covers everything written since the last. A recording id below 0, or at or past
   the next recording id, is error code 21. One below the next id that no live recording
