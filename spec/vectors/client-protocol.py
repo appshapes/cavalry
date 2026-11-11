@@ -42,7 +42,7 @@ ADD_DESTINATION, REMOVE_DESTINATION = 7, 8
 ADD_COUNTER, REMOVE_COUNTER = 9, 10
 ON_COUNTER_READY, ON_UNAVAILABLE_COUNTER = 0x0F08, 0x0F09
 MAX_COUNTER_KEY, MAX_COUNTER_LABEL = 112, 124
-# Version 8: a sync of a recording on command, the next of Cavalry's own ids (ADR 0067).
+# Version 8: a sync of a recording on command, the next of Cavalry's own ids (ADR 0069).
 SYNC_RECORDING = 0x0108
 # The replay's conventions, Aeron's: NULL_POSITION, NULL_LENGTH and Long.MAX_VALUE.
 NULL_POSITION, NULL_LENGTH, FOLLOW_LENGTH = -1, -1, 2**63 - 1

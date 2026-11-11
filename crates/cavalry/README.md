@@ -29,7 +29,8 @@ binary's `main`.
   cluster: `run` starts the member's consensus module on a thread of its own, stops it
   before the driver, and refuses one key without the other; `doctor` explains the
   driver from its counters and exits 0 when no check failed, listing every recording's
-  two positions; `record <stream id>` records a stream's live publication to the durable
+  two positions and, on a driver that is a cluster member, what the member is and
+  what it waits for; `record <stream id>` records a stream's live publication to the durable
   log, `record --stop <id>` stops it (ADR 0025), and `record --truncate <id> --to <point>`,
   `--purge <id> --before <point>` and `--delete <id>` cut, purge and delete a stopped
   one (ADR 0031); `replay --recording <id> --from
@@ -48,12 +49,17 @@ binary's `main`.
 - Needs no arguments and no configuration: the directory is
   `spec/client-protocol.md`'s default, `/dev/shm/cavalry-<user>` on Linux and
   `<tmp>/cavalry-<user>` elsewhere, the log directory is `~/.local/share/cavalry/log`,
-  and the conductor backs off when idle. The three keys of `config.toml` change that:
+  and the conductor backs off when idle. Three keys of `config.toml` change that:
   `--dir <path>` on every command, or `CAVALRY_DIR`; `--log-dir <path>` on `run` and
   `doctor`, or `CAVALRY_LOG_DIR`; and `CAVALRY_CONDUCTOR_IDLE_STRATEGY`, `backoff`,
-  `yield` or `busy-spin`; the flag wins over the variable, and a value a key does not
-  take exits 2 before anything starts, saying what to do. Each key carries its `why_not_default` and its `doctor`
-  check (invariant 5; ADR 0020), and `cavalry::config` is the reader behind both.
+  `yield` or `busy-spin`. Two more make the driver a cluster member, as the bullet on
+  `run` says: `CAVALRY_CLUSTER_MEMBERS` and `CAVALRY_CLUSTER_MEMBER_ID`, which have no
+  flag and are set together; a member id of −1 is the key unset. Where a key has a
+  flag, the flag wins over the variable, and a value a key does not take exits 2
+  before anything starts, saying what to do. Every key is in
+  `docs/reference/config.md` with its
+  `why_not_default` and its `doctor` check (invariant 5; ADR 0020), and
+  `cavalry::config` is the reader behind them.
 
 In Aeron, this is the client library and the media driver, which are separate artifacts
 there ([glossary](../../docs/glossary.md)).
@@ -119,7 +125,8 @@ cavalry doctor: /tmp/cavalry-readme-4242, checks run: 14
   [Replay a recording](../../docs/how-to/replay-a-recording.md), the how-tos for
   `record` and `replay`, and [`spec/client-protocol.md`](../../spec/client-protocol.md),
   the directory, the commands and the events it keeps.
-- [Configuration](../../docs/reference/config.md), the two keys and how one is set, and
+- [Configuration](../../docs/reference/config.md), every key with its environment
+  variable and its doctor check, and how one is set, and
   [ADR 0020](../../docs/decisions/0020-configure-by-environment-variable.md), why by
   environment variable.
 - [`cavalry-driver`](../cavalry-driver/README.md), the driver behind `run`, and

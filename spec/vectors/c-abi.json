@@ -1062,6 +1062,20 @@
       ]
     },
     {
+      "name": "cavalry_committed_log_withdrawn_at",
+      "returns": "bool",
+      "params": [
+        [
+          "const cavalry_committed_log_t *",
+          "log"
+        ],
+        [
+          "int64_t *",
+          "position"
+        ]
+      ]
+    },
+    {
       "name": "cavalry_committed_log_constants",
       "returns": "int",
       "params": [

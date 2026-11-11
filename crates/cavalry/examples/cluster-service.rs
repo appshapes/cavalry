@@ -144,29 +144,65 @@ fn run(args: &Args) -> Result<(), Box<dyn std::error::Error>> {
         if args.entries.is_some_and(|wanted| read >= wanted) {
             break;
         }
-        if entries == 0 {
+        // Ended, and not merely a poll of 0: a poll returns 0 while entries below the
+        // bound are still on their way from the replay, and the handle is ended only
+        // once every one of them has been delivered.
+        if log.is_ended() {
             if let Some(position) = log.failed_at() {
-                // The driver could not play the member's recording on from here.
+                // The driver could not play the member's recording on from there. What
+                // this program read ends at the handle's position, which is below the
+                // failure when the driver withdrew the failed replay before this
+                // program had read it, and is where the next run starts.
+                let next = log.position();
+                let again = if read > 0 {
+                    format!(
+                        "this program read every entry below position {next} and none \
+                         from it on; start it again with --from {next}"
+                    )
+                } else {
+                    format!(
+                        "this program read no entry: --from {} was not the position of an \
+                         entry, or the recording is damaged there; give --from a next \
+                         position an earlier run printed, or 0",
+                        args.from
+                    )
+                };
                 return Err(format!(
                     "the replay of member {}'s recording {} failed at position {position}: \
-                     --from was not the position of an entry, or the recording's files \
-                     are damaged; give --from a next position this program printed, or 0, \
-                     and run `cavalry doctor`, which names a damaged recording; see \
+                     a segment file of the recording could not be read or a frame in it \
+                     failed a check; {again}; run `cavalry doctor`, which names a damaged \
+                     recording; see \
                      docs/how-to/read-the-committed-log.md#when-it-does-not-work",
                     log.member_id(),
                     log.recording_id()
                 )
                 .into());
             }
-            if log.is_ended() {
-                // The member left its log or closed: nothing more comes from this
-                // handle. What was read stays read; the next run starts here.
-                eprintln!(
-                    "cluster-service: the member's log ended; read to position {}",
+            if let Some(position) = log.withdrawn_at() {
+                // The driver withdrew the replay's image 5 s after the replay ended,
+                // before this program had read it: the entries from there on were not
+                // read, and the next run starts where this one stopped.
+                return Err(format!(
+                    "the driver withdrew the replay of member {}'s recording {} before \
+                     this program read the entries from position {position}: it did not \
+                     read them within 5 s of its member closing or leaving its log; start \
+                     it again with --from {} once the member runs; see \
+                     docs/how-to/read-the-committed-log.md#when-it-does-not-work",
+                    log.member_id(),
+                    log.recording_id(),
                     log.position()
-                );
-                break;
+                )
+                .into());
             }
+            // The member left its log or closed, and every entry below the last commit
+            // position the handle took has been read: the next run starts here.
+            eprintln!(
+                "cluster-service: the member's log ended; read to position {}",
+                log.position()
+            );
+            break;
+        }
+        if entries == 0 {
             std::thread::sleep(Duration::from_millis(1));
         }
     }

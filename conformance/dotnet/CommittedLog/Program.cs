@@ -1,4 +1,4 @@
-// The .NET client's committed log round (spec/c-abi.md, version 2; ADR 0068):
+// The .NET client's committed log round (spec/c-abi.md, version 2; ADR 0070):
 // Client.CommittedLog and CommittedLog beside a cluster member that
 // conformance/dotnet/run.sh started with `cavalry run`, one of three on the loopback, as
 // conformance/python/committed_log.py runs it through clients/python.
@@ -151,6 +151,7 @@ public static class CommittedLogRound
             refusals.Add($"CommitPosition {log.CommitPosition()} {Abi.Errcode()}");
             refusals.Add($"IsEnded {log.IsEnded()} {Abi.Errcode()}");
             refusals.Add($"FailedAt {log.FailedAt()?.ToString() ?? "null"} {Abi.Errcode()}");
+            refusals.Add($"WithdrawnAt {log.WithdrawnAt()?.ToString() ?? "null"} {Abi.Errcode()}");
             try
             {
                 log.Close();
@@ -184,7 +185,7 @@ public static class CommittedLogRound
         string[] expected =
         {
             $"Poll -1 {polling}", $"Position -1 {polling}", $"CommitPosition -1 {polling}", $"IsEnded False {polling}",
-            $"FailedAt null {polling}", $"Close -1 {polling}",
+            $"FailedAt null {polling}", $"WithdrawnAt null {polling}", $"Close -1 {polling}",
         };
         if (string.Join("; ", refusals) != string.Join("; ", expected))
         {
@@ -196,10 +197,11 @@ public static class CommittedLogRound
             Fail($"after the entry the log is at {log.Position()} with bound {log.CommitPosition()}, not {NEXT} and {NEXT}");
         }
         Subscription.Fault fault = log.GetFault();
-        if (log.IsEnded() || log.FailedAt() != null || fault.Code != 0 || fault.SessionId != 0 ||
-            fault.Position != Abi.NULL_POSITION)
+        if (log.IsEnded() || log.FailedAt() != null || log.WithdrawnAt() != null || fault.Code != 0 ||
+            fault.SessionId != 0 || fault.Position != Abi.NULL_POSITION)
         {
-            Fail($"a live log read ended {log.IsEnded()}, failed at {log.FailedAt()}, fault {fault}");
+            Fail($"a live log read ended {log.IsEnded()}, failed at {log.FailedAt()}, withdrawn at " +
+                 $"{log.WithdrawnAt()}, fault {fault}");
         }
         for (int i = 0; i < 50; i++)
         {
@@ -213,7 +215,7 @@ public static class CommittedLogRound
             Fail("the refused poll, or a later one, delivered more: " + string.Join("; ", entries));
         }
         Say($"member {log.MemberId}'s entry at position 0 read once, next position {log.Position()}, commit position " +
-            $"{log.CommitPosition()}; six calls from inside the handler refused with ERR_POLLING");
+            $"{log.CommitPosition()}; seven calls from inside the handler refused with ERR_POLLING");
         log.Close();
         log.Close(); // idempotent
 

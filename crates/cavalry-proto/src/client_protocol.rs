@@ -3,7 +3,7 @@
 //! events ADR 0030, the retention commands ADR 0031, the `cavalry:udp` channel, the
 //! channel status indicator id and error codes 4 and 9 ADR 0040, the destination
 //! commands ADR 0053, the armed recording and the position keys ADR 0059, a client's
-//! counter ADR 0062, the sync of a recording on command ADR 0067).
+//! counter ADR 0062, the sync of a recording on command ADR 0069).
 //!
 //! A [`Command`] is the message of a command ring record whose type is a
 //! [`CommandType`]; an [`Event`] is the message of a broadcast buffer record whose type
@@ -148,7 +148,7 @@ pub enum CommandType {
     /// Delete a stopped recording's files; its slot stays as state 3.
     PurgeRecording = 0x0107,
     /// Sync what the recorder has written of a live recording now, without waiting
-    /// for its sync once a second (ADR 0067).
+    /// for its sync once a second (ADR 0069).
     SyncRecording = 0x0108,
 }
 
@@ -671,7 +671,7 @@ pub enum Command<'a> {
     },
     /// Type 264 (`0x0108`): the recorder syncs what it has written of the recording
     /// when it takes the request, and the driver answers `operation success` once the
-    /// sync has returned, or `error` with code 12 when it failed (ADR 0067).
+    /// sync has returned, or `error` with code 12 when it failed (ADR 0069).
     SyncRecording {
         /// The client's id.
         client_id: i64,

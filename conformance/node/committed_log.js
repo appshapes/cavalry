@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 "use strict";
 /**
- * The Node client's committed log round (spec/c-abi.md, version 2; ADR 0068):
+ * The Node client's committed log round (spec/c-abi.md, version 2; ADR 0070):
  * `Client.committedLog` and `CommittedLog` beside a cluster member that
  * `conformance/node/run.sh` started with `cavalry run`, one of three on the loopback, as
  * `conformance/python/committed_log.py` runs it through `clients/python`.
@@ -90,6 +90,7 @@ function main() {
     refusals.push(["commitPosition", log.commitPosition(), addon.cavalry_errcode()]);
     refusals.push(["isEnded", log.isEnded, addon.cavalry_errcode()]);
     refusals.push(["failedAt", log.failedAt(), addon.cavalry_errcode()]);
+    refusals.push(["withdrawnAt", log.withdrawnAt(), addon.cavalry_errcode()]);
     try {
       log.close();
       refusals.push(["close", 0, 0]);
@@ -106,7 +107,8 @@ function main() {
   }
   const polling = constants.CAVALRY_ERR_POLLING;
   const expected = [["poll", -1, polling], ["position", -1, polling], ["commitPosition", -1, polling],
-    ["isEnded", false, polling], ["failedAt", null, polling], ["close", -1, polling]];
+    ["isEnded", false, polling], ["failedAt", null, polling], ["withdrawnAt", null, polling],
+    ["close", -1, polling]];
   if (!same(refusals, expected)) {
     fail(`the calls from inside the log's own handler answered ${JSON.stringify(refusals)}, not ` +
       `${JSON.stringify(expected)}`);
@@ -115,16 +117,17 @@ function main() {
     fail(`after the entry the log is at ${log.position()} with bound ${log.commitPosition()}, not ${NEXT} and ${NEXT}`);
   }
   const fault = log.fault();
-  if (log.isEnded || log.failedAt() !== null || fault.code !== 0 || fault.sessionId !== 0 ||
-      fault.position !== cavalry.NULL_POSITION) {
-    fail(`a live log read ended ${log.isEnded}, failed at ${log.failedAt()}, fault ${JSON.stringify(fault)}`);
+  if (log.isEnded || log.failedAt() !== null || log.withdrawnAt() !== null || fault.code !== 0 ||
+      fault.sessionId !== 0 || fault.position !== cavalry.NULL_POSITION) {
+    fail(`a live log read ended ${log.isEnded}, failed at ${log.failedAt()}, withdrawn at ` +
+      `${log.withdrawnAt()}, fault ${JSON.stringify(fault)}`);
   }
   for (let i = 0; i < 50; i++) {
     if (log.poll(onEntry, 16) !== 0) fail("an entry arrived with nothing more committed");
   }
   if (entries.length !== 1) fail(`the refused poll, or a later one, delivered more: ${JSON.stringify(entries)}`);
   say(`member ${log.memberId}'s entry at position 0 read once, next position ${log.position()}, commit position ` +
-    `${log.commitPosition()}; six calls from inside the handler refused with CAVALRY_ERR_POLLING`);
+    `${log.commitPosition()}; seven calls from inside the handler refused with CAVALRY_ERR_POLLING`);
   log.close();
   log.close(); // a second close does nothing
 

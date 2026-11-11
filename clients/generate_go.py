@@ -22,7 +22,7 @@ its bound and the trampoline's refusal of a slot the table does not hold;
 `trampoline.go`, the exported Go function the C trampoline calls per fragment (a file
 with an `//export` may hold no C definition in its preamble, so it is a file of its own);
 `shim.h` and `shim.c`, the C trampoline, the one `cavalry_subscription_poll` call, the one
-`cavalry_committed_log_poll` call (ADR 0068) and the per-message calls that keep their error. Python 3.9 standard library only.
+`cavalry_committed_log_poll` call (ADR 0070) and the per-message calls that keep their error. Python 3.9 standard library only.
 """
 
 from __future__ import annotations
@@ -1267,16 +1267,34 @@ func (l *CommittedLog) CommitPosition() int64 {
 	return int64(C.cavalry_committed_log_commit_position(l.handle))
 }
 
-// IsEnded is whether the member closed or left its log: once a poll then returns 0,
-// close this log and open another from Position.
+// IsEnded is whether this log has come to its end: no poll will deliver another entry.
+// Stop reading when it is true, not when a poll returns 0. Then read FailedAt and
+// WithdrawnAt: the log delivered every entry it was owed only when both are false. In
+// every case what it delivered ends at Position, where a service opens the log again.
 func (l *CommittedLog) IsEnded() bool { return bool(C.cavalry_committed_log_is_ended(l.handle)) }
 
 // FailedAt is the position after the last frame the driver's replay of the member's
 // recording played before it failed, and true; or 0 and false for a log that is live or
-// that ended because its member closed or left the recording.
+// that ended because its member closed or left the recording. No entry from that
+// position on is delivered. Read it once IsEnded is true: the entries below it may still
+// be on their way before.
 func (l *CommittedLog) FailedAt() (int64, bool) {
 	var position C.int64_t
 	if !bool(C.cavalry_committed_log_failed_at(l.handle, &position)) {
+		return 0, false
+	}
+	return int64(position), true
+}
+
+// WithdrawnAt is the position at which the entries this log was not given begin, and
+// true, when the driver withdrew the replay before the polls had read it to its end; or
+// 0 and false. The driver keeps a replay 5 s after it ends and then withdraws it, read
+// or not: a service that did not poll for that long after its member closed or left the
+// log, or whose handler took that long, ends so. The entries from that position on were
+// played and not delivered. Read it once IsEnded is true.
+func (l *CommittedLog) WithdrawnAt() (int64, bool) {
+	var position C.int64_t
+	if !bool(C.cavalry_committed_log_withdrawn_at(l.handle, &position)) {
 		return 0, false
 	}
 	return int64(position), true

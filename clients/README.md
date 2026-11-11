@@ -48,7 +48,7 @@ imports), Go (`go/`, by `generate_go.py`), the JVM (`jvm/`, by `generate_jvm.py`
 - `just lint` runs `clients/lint.py` over the generated per-message functions, the
   wrapper of each of the ABI's nine (`crates/cavalry-ffi/README.md`: the claim, the
   reserved value, the commit and abort, the offer, the poll and the header's values,
-  and the committed log's poll and an entry's position; ADR 0068), and each
+  and the committed log's poll and an entry's position; ADR 0070), and each
   trampoline that calls the user's handler: no lock, no `await`, no raise, in
   the language's forms, in the function's own body or in any function of the package
   it calls. Generated code of the client in another language on the same path is read

@@ -1147,8 +1147,11 @@ public sealed unsafe class CommittedLog : IDisposable
         return Abi.cavalry_committed_log_commit_position(handle);
     }
 
-    /// <summary>Whether the member closed or left its log: once a poll then returns 0, close
-    /// this log and open another from <see cref="Position"/>.</summary>
+    /// <summary>Whether this log has come to its end: no poll will deliver another entry.
+    /// Stop reading when it is true, not when a poll returns 0. Then read
+    /// <see cref="FailedAt"/> and <see cref="WithdrawnAt"/>: the log delivered every entry it
+    /// was owed only when both are null. In every case what it delivered ends at
+    /// <see cref="Position"/>, where a service opens the log again.</summary>
     public bool IsEnded()
     {
         return Abi.cavalry_committed_log_is_ended(handle);
@@ -1156,10 +1159,23 @@ public sealed unsafe class CommittedLog : IDisposable
 
     /// <summary>The position after the last frame the driver's replay of the member's
     /// recording played before it failed, or null for a log that is live or that ended
-    /// because its member closed or left the recording.</summary>
+    /// because its member closed or left the recording. No entry from that position on is
+    /// delivered. Read it once <see cref="IsEnded"/> is true: the entries below it may still
+    /// be on their way before.</summary>
     public long? FailedAt()
     {
         return Abi.cavalry_committed_log_failed_at(handle, out long position) ? position : null;
+    }
+
+    /// <summary>The position at which the entries this log was not given begin, when the
+    /// driver withdrew the replay before the polls had read it to its end, or null. The
+    /// driver keeps a replay 5 s after it ends and then withdraws it, read or not: a service
+    /// that did not poll for that long after its member closed or left the log, or whose
+    /// handler took that long, ends so. The entries from that position on were played and
+    /// not delivered. Read it once <see cref="IsEnded"/> is true.</summary>
+    public long? WithdrawnAt()
+    {
+        return Abi.cavalry_committed_log_withdrawn_at(handle, out long position) ? position : null;
     }
 
     /// <summary>Stops the replay through the client and frees the handle and its

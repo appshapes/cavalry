@@ -3,7 +3,7 @@
 boundary's second part): the per-message functions a generator writes, the wrapper of each
 of the ABI's nine per-message functions (`crates/cavalry-ffi/README.md`: the claim, the
 reserved value, the commit and abort, the offer, the poll and the header's values, and
-the committed log's poll and an entry's position; ADR 0068) and each trampoline that
+the committed log's poll and an entry's position; ADR 0070) and each trampoline that
 calls the user's handler, hold no lock, no `await` and no raise, in the language's
 forms, and so does every function of the package they call. For Python those
 forms are `threading`'s locks and anything else of `threading`, `async def`, `await`,
@@ -372,7 +372,7 @@ class Package:
 def raise_after_of(rules: dict) -> dict[str, str]:
     """{poll: the ABI call after whose last line it may raise}, from a rule's
     `raise_after`: one pair, or a list of pairs where a package has a committed log's poll
-    beside its subscription's (ADR 0068)."""
+    beside its subscription's (ADR 0070)."""
     pairs = rules["raise_after"]
     return dict(pairs if isinstance(pairs, list) else [pairs])
 

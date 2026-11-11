@@ -204,6 +204,7 @@ export class CommittedLog {
   commitPosition(): number;
   readonly isEnded: boolean;
   failedAt(): number | null;
+  withdrawnAt(): number | null;
   close(): void;
 }
 

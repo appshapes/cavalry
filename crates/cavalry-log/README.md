@@ -26,7 +26,7 @@ The durable log: recording and replay. Data plane.
   each block of committed frames with one positional write, appends an index entry at
   most once per millisecond, rolls segments at their length, and syncs once per second
   behind two positions, what is written and what is synced, or at once when its caller
-  was asked to (`RecordingWriter::sync_now`; ADR 0067); `LogDir::stop` writes the
+  was asked to (`RecordingWriter::sync_now`; ADR 0069); `LogDir::stop` writes the
   stop (ADR 0025). A roll allocates nothing while the log directory's path is at most
   337 bytes (`recorder::LOG_DIR_PATH_LIMIT`): the standard library opens a path on its
   stack only under 384 bytes, the longest segment name is 45, and the next segment's

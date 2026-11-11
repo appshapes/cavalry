@@ -1,5 +1,5 @@
 //! The allocation gate over a sync asked for without a wait (CLAUDE.md, invariant 2 and
-//! gate 2; ADR 0067): a driver, a client with a publication and its recording, and
+//! gate 2; ADR 0069): a driver, a client with a publication and its recording, and
 //! `stats_alloc` over two hundred rounds of one message offered, the recorder writing
 //! it, `Recording::request_sync`, and the synced position reaching it, with no
 //! allocation and no reallocation at all, in any thread of the process: the client's
