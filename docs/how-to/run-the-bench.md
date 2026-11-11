@@ -886,16 +886,22 @@ shared runner is
   disturb each other. A process counts as running when this run can see it: a bench
   in a container with its own process ids that shares this `/dev/shm` is not seen,
   so give such a container a `/dev/shm` of its own.
-- The same line with `N more are another user's and were not touched`: the entries
-  belong to a process that has ended and to a user this run is not, the CI runner's
-  when the run is by hand. The next run as that user removes them. To remove them now,
-  as that user, for a process id that `ps -p <pid>` no longer finds:
-  `rm -r /dev/shm/cavalry-bench-<pid>-*`. `bench/host/check.sh` prints how full
-  `/dev/shm` is.
-- The same line with `N could not be removed, the first: <path>: <error>`: an entry
-  of this user's would not go, and the error says why. It was renamed
-  `cavalry-bench-<pid>-swept-<n>` under this run's process id before the attempt, and
-  the next run tries it again; remove it by hand once the error's cause is gone.
+- The same line with `N entries under /dev/shm that such processes left belong to
+  another user and were not touched`: the entries belong to a process that has ended
+  and to a user this run is not, the CI runner's when the run is by hand. The next run
+  as that user removes them. To remove them now, as that user, for a process id that
+  `ps -p <pid>` no longer finds: `rm -r /dev/shm/cavalry-bench-<pid>-*`.
+  `bench/host/check.sh` prints how full `/dev/shm` is.
+- The same line with `N entries that such processes left could not be removed, the
+  first: <path>: <error>`: an entry of this user's would not go, and the error says
+  why. An entry is renamed `cavalry-bench-<pid>-swept-<n>`, under this run's process
+  id, before it is removed, so that is the name it has now when the removal failed.
+  The next run tries it again; remove it by hand once the error's cause is gone.
+- The same line with `N entries under /dev/shm are named for other bench processes,
+  and whether those have ended cannot be told here`: the run found neither a `/proc`
+  with its own process in it nor a `ps -p` that finds its own process, so it could
+  not tell a killed bench from a running one and removed nothing. Remove what a
+  killed one left by hand, as above.
 - `the recorded_purging benchmark failed: the purge removed no file of the pile in 60 s`:
   the replayer admitted the purge but removed nothing in a minute. Listing the largest
   pile takes the replayer a few seconds and no more; a replayer that removes nothing in
