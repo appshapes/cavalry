@@ -64,11 +64,16 @@ and the Collaborating section below does not apply:
 4. **Land it** with the `pr` skill and the card's number (`/pr <number>`) and follow it to the squash
    merge exactly as that skill says: every wait there is the loop's own work in progress, and the one
    manual step each stall needs is written there. **Deployed to development** means this: the squash
-   merge is on origin's `master` and the `ci` run on it is green (`gh run list --commit <full sha>`).
+   merge is on origin's `master` and a `ci` run on `master` whose commit holds the squash is green.
+   That is the squash's own run, `gh run list --branch master --workflow ci --commit <full sha>`,
+   unless it reads `cancelled` with no job run: a later landing took its place while it waited, and
+   the run to read is the next one on `master` that started (the `pr` skill, step "Merged").
    Cavalry has no development environment, and a release is not part of this skill. A red job is part
    of the card until it is fixed.
 5. **Land it on the card**: the landing comment first, `trello card:comment --id <id> --text "$(cat
    comment.md)"`, saying where the work landed (the commit on `master` and the pull request number),
+   the run on `master` that was green with it, and when that is not the squash's own run, that it
+   is the next one that started and which landings it covers,
    what changed, every existing file touched and why, how each "Done when" item was checked, and what
    is still open and who owns it, with the session stamp as its last line (`Session stamp:
    <team>/<session name>, <YYYY-MM-DD>`: the team is `team_name` and the session name the

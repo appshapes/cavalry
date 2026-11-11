@@ -111,13 +111,24 @@ feature that followed this page, commit by commit.
 
 - `git log --oneline --grep '^<card>:' origin/master` lists the feature's commits,
   each with the prefix.
-- `gh run list --commit <full sha>` shows the `ci` run green, with `gates (linux)` and
-  `gates (macos)` both passed. `gates (macos)` runs for `master`'s commit and not for
-  the pull request, so this is where a change that breaks macOS alone shows: fix it
-  forward in the same session.
+- `gh run list --branch master --workflow ci --commit <full sha>` shows the `ci` run
+  green, with `gates (linux)` and `gates (macos)` both passed. `gates (macos)` runs for
+  `master`'s commit and not for the pull request, so this is where a change that
+  breaks macOS alone shows: fix it forward in the same session.
+- If that run reads `cancelled` and `gh run view <run id>` lists no jobs, nothing
+  failed: another commit landed on `master` while your run waited. Runs on `master`
+  go one at a time with one waiting, and a newer push takes the waiting run's place
+  ([Run the bench](run-the-bench.md), step 3, "When the bench jobs run"). Read the
+  next run on `master` that started instead. In `gh run list --branch master
+  --workflow ci --limit 5` it is the oldest run newer than yours that does not read
+  `cancelled`. Its commit is later on `master`, so its tree holds yours. When it is
+  green with both gates passed, `master` is green with your change in it, and that is
+  the proof for this step. Name that run on the card with the commits it covers,
+  because a run that did not happen has no link.
 - `just docs`, then open `target/book/index.html`: the new ADR and pages are in the
   book.
-- The card is archived with the commit hashes in its last comment.
+- The card is archived with the commit hashes in its last comment, and, for a commit
+  whose own run was replaced, the run that covered it.
 
 ## When it does not work
 
