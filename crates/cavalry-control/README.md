@@ -46,7 +46,8 @@ is allowed here.
   hold `cluster.leader_member_id` and no `cluster.appointed_leader_behind`, is told
   what such a member does instead: why its election began and that a quorum elects a
   leader (`cluster-no-leader`), and what a replication or a catch-up waits for
-  (`cluster-joining`), with the elections it has failed and the counter of each rule;
+  (`cluster-joining`), with the elections it has failed, the counters of three rules
+  that fail one, and how many failed on none of the three;
   it is never told to start the cluster again (ADR 0100). [Run a cluster of three
   members](../../docs/how-to/run-a-cluster.md#when-it-does-not-work) says what an
   operator does about each.

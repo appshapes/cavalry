@@ -785,7 +785,7 @@ impl TermsFile {
                 continue;
             }
             let at = (HEADER_LENGTH + index * ENTRY_LENGTH) as u64;
-            self.write_at(at, &DELETED.to_le_bytes(), "truncate")?;
+            self.write_at(at, &DELETED.to_le_bytes(), "drop a term from")?;
             self.entries[index].state = DELETED;
         }
         Ok(self.log_leadership_term_id())

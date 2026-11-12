@@ -63,9 +63,6 @@ struct Client {
     producer: Producer,
     receiver: Receiver,
     buffer: Vec<u8>,
-    /// How long the client waits for the answer to an add, for an image and for an
-    /// error: 5 s, which a test that asks a driver for thousands of them raises.
-    patience: Duration,
 }
 
 impl Client {
@@ -80,7 +77,6 @@ impl Client {
             producer,
             receiver,
             buffer: vec![0u8; 8192],
-            patience: Duration::from_secs(5),
         }
     }
 
@@ -149,7 +145,7 @@ impl Client {
             }
         };
         self.send(&command);
-        self.wait(self.patience, |event| match *event {
+        self.wait(Duration::from_secs(5), |event| match *event {
             Event::PublicationReady {
                 correlation_id: id,
                 registration_id,
@@ -184,7 +180,7 @@ impl Client {
             stream_id,
             channel: IPC_CHANNEL,
         });
-        self.wait(self.patience, |event| match *event {
+        self.wait(Duration::from_secs(5), |event| match *event {
             Event::SubscriptionReady {
                 correlation_id: id, ..
             } if id == correlation_id => Some(id),
@@ -193,7 +189,7 @@ impl Client {
     }
 
     fn wait_error(&mut self, correlation_id: i64) -> (i32, String) {
-        self.wait(self.patience, |event| match *event {
+        self.wait(Duration::from_secs(5), |event| match *event {
             Event::Error {
                 offending_correlation_id,
                 error_code,
@@ -1141,7 +1137,7 @@ fn poison_counter(dir: &Path, counter_id: i32, value: i64) {
 }
 
 fn wait_image(client: &mut Client, subscription_id: i64) -> (i64, i32) {
-    client.wait(client.patience, |event| match *event {
+    client.wait(Duration::from_secs(5), |event| match *event {
         Event::AvailableImage {
             correlation_id,
             subscriber_registration_id,
@@ -1407,22 +1403,32 @@ fn the_image_registry_is_bounded_and_says_so() {
     let dir = TestDir::new("images");
     let driver = Driver::start(dir.path(), dir.path().join("log")).expect("starts");
     let mut client = Client::attach(dir.path());
-    // This test waits for 2,146 answers and events, one after another, beside the 26
-    // other tests of this file and their drivers. On the CI's Linux runner it has
-    // finished 12 s, 36 s and 52 s after the file's tests began, in three runs of one
-    // day that passed, and in two runs one of its waits passed 5 s and failed it with
-    // "no event within 5s". What it tests is the registry's bound and its error, not
-    // how soon a driver answers on a loaded runner, so each of its waits has 30 s.
-    client.patience = Duration::from_secs(30);
-    // 64 exclusive publications times 32 subscriptions: 2048 images, the capacity.
-    let publications = 64;
-    let subscriptions = spec::MAX_IMAGES / publications;
-    for _ in 0..publications {
+    // The fewest publications that fill the registry: 4 exclusive publications times
+    // 512 subscriptions, half the subscriptions registry, are 2048 images, the capacity,
+    // and one subscription more is still registered before its first image is refused.
+    // A publication is what costs this test its time: each exclusive one has a log of
+    // its own, 192 MiB, and the driver makes every page of it resident when it makes it
+    // (ADR 0027). With 64 publications and 32 subscriptions, as this test was, the logs
+    // were 12.0 GiB: 5.3 s of the test's 6.8 s on a Linux host whose temporary directory
+    // is a tmpfs. On the CI's Linux runner the test ended 12 s, 36 s and 52 s after the
+    // file's tests began, in three runs of one day, alone for the last 25 s and 41 s of
+    // the slower two, every other test of the file having ended; and in two runs one
+    // answer took more than 5 s and failed it (card 265).
+    const SUBSCRIPTIONS: usize = spec::MAX_SUBSCRIPTIONS / 2;
+    const PUBLICATIONS: usize = spec::MAX_IMAGES / SUBSCRIPTIONS;
+    const {
+        assert!(
+            PUBLICATIONS * SUBSCRIPTIONS == spec::MAX_IMAGES,
+            "the image registry is not a whole number of publications times half the \
+             subscriptions registry; choose this test's publications and subscriptions again"
+        );
+    }
+    for _ in 0..PUBLICATIONS {
         client.add_publication(77, true);
     }
-    for _ in 0..subscriptions {
+    for _ in 0..SUBSCRIPTIONS {
         let subscription_id = client.add_subscription(77);
-        for _ in 0..publications {
+        for _ in 0..PUBLICATIONS {
             wait_image(&mut client, subscription_id);
         }
     }

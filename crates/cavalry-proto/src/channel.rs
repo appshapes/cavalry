@@ -3,11 +3,13 @@
 //! `cavalry:udp?control=<host>:<port>|control-mode=manual` of multi-destination cast,
 //! and `fc=max|min`, the flow control strategy, on a publication's channel, and, from
 //! version 2, the position keys `init-term-id`, `term-id` and `term-offset`, which
-//! create a publication at a position (`spec/udp.md`, "The channel URI";
-//! `spec/client-protocol.md`, version 6; ADR 0040, ADR 0053, ADR 0059).
+//! create a publication at a position, and, from version 3, `ssc=true|false`, by which
+//! a live recording connects a publication that no receiver answers (`spec/udp.md`,
+//! "The channel URI"; `spec/client-protocol.md`, version 9; ADR 0040, ADR 0053, ADR
+//! 0059, ADR 0098).
 //!
 //! [`Channel::parse`] reads a channel string, borrowing from it, and runs the spec's
-//! checks in the spec's order: `grammar`, `key`, `control`, `endpoint`, `fc`,
+//! checks in the spec's order: `grammar`, `key`, `control`, `endpoint`, `fc`, `ssc`,
 //! `position`, `multicast`. Resolving a host name is the driver's, on its control
 //! plane, and its failure is error code 9; every refusal here is error code 1.
 
@@ -35,7 +37,7 @@ pub enum ChannelError {
         what: &'static str,
     },
     /// A key this version does not name: not `endpoint`, `interface`, `control`,
-    /// `control-mode`, `fc`, `init-term-id`, `term-id` or `term-offset`.
+    /// `control-mode`, `fc`, `ssc`, `init-term-id`, `term-id` or `term-offset`.
     Key {
         /// The byte offset of the key within the channel string.
         at: usize,
@@ -63,6 +65,11 @@ pub enum ChannelError {
         /// What was wrong, in words.
         what: &'static str,
     },
+    /// An `ssc` value other than `true` or `false` (version 3, ADR 0098).
+    SimulatedConnection {
+        /// What was wrong, in words.
+        what: &'static str,
+    },
     /// One or two of the position keys `init-term-id`, `term-id` and `term-offset`
     /// without the rest; a value that is not a 32-bit integer in decimal; a `term-id`
     /// below `init-term-id` by the 32-bit two's complement count; or a `term-offset`
@@ -79,7 +86,7 @@ pub enum ChannelError {
 
 impl ChannelError {
     /// The reason's name in `spec/udp.md`, "What a reader rejects": `grammar`, `key`,
-    /// `control`, `endpoint`, `fc` or `multicast`.
+    /// `control`, `endpoint`, `fc`, `ssc`, `position` or `multicast`.
     pub const fn reason(self) -> &'static str {
         match self {
             ChannelError::Grammar { .. } => "grammar",
@@ -87,6 +94,7 @@ impl ChannelError {
             ChannelError::Control { .. } => "control",
             ChannelError::Endpoint { .. } => "endpoint",
             ChannelError::FlowControl { .. } => "fc",
+            ChannelError::SimulatedConnection { .. } => "ssc",
             ChannelError::Position { .. } => "position",
             ChannelError::Multicast => "multicast",
         }
@@ -120,9 +128,9 @@ impl fmt::Display for ChannelError {
             ChannelError::Key { at, len } => write!(
                 f,
                 "channel refused (key): the {len}-byte parameter at byte {at} is not one this \
-                 version names, endpoint, interface, control, control-mode, fc, init-term-id, \
-                 term-id or term-offset; remove it, or upgrade the driver to a version that \
-                 names it; see {DOC}"
+                 version names, endpoint, interface, control, control-mode, fc, ssc, \
+                 init-term-id, term-id or term-offset; remove it, or upgrade the driver to a \
+                 version that names it; see {DOC}"
             ),
             ChannelError::Control { what } => write!(
                 f,
@@ -140,6 +148,12 @@ impl fmt::Display for ChannelError {
                 f,
                 "channel refused (fc): {what}; the flow control strategy is fc=max or fc=min, \
                  max when the channel names none; see {DOC}"
+            ),
+            ChannelError::SimulatedConnection { what } => write!(
+                f,
+                "channel refused (ssc): {what}; ssc=true lets a live recording connect the \
+                 publication while no receiver answers, and ssc=false, or no ssc, leaves that \
+                 to a receiver; see {DOC}"
             ),
             ChannelError::Position { what } => write!(
                 f,
@@ -234,7 +248,8 @@ impl FlowControl {
 }
 
 /// A `cavalry:udp` channel, parsed: its endpoint and interface, or its control address
-/// and mode, and its flow control strategy, borrowed from the string.
+/// and mode, its flow control strategy, whether spies simulate connection, and its
+/// position keys, borrowed from the string.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub struct UdpChannel<'a> {
     endpoint: Option<Address<'a>>,
@@ -242,6 +257,7 @@ pub struct UdpChannel<'a> {
     control: Option<Address<'a>>,
     control_mode: Option<ControlMode>,
     flow_control: Option<FlowControl>,
+    spies_simulate_connection: Option<bool>,
     position: Option<PublicationPosition>,
 }
 
@@ -316,6 +332,19 @@ impl<'a> UdpChannel<'a> {
         self.flow_control.is_some()
     }
 
+    /// Whether spies simulate connection: what `ssc` names, `false` when the channel
+    /// names none. Under `true` a live recording of the publication connects it while
+    /// no receiver answers (`spec/udp.md`, version 3, "The sender"; ADR 0098).
+    pub const fn spies_simulate_connection(&self) -> bool {
+        matches!(self.spies_simulate_connection, Some(true))
+    }
+
+    /// Whether the channel names `ssc` at all, which an `add subscription`, a
+    /// destination channel and a `start replay` channel refuse.
+    pub const fn names_ssc(&self) -> bool {
+        self.spies_simulate_connection.is_some()
+    }
+
     /// The position keys, when the channel names them: a publication's log is created
     /// at [`PublicationPosition::position`] with their initial term id (version 2).
     pub const fn position_keys(&self) -> Option<PublicationPosition> {
@@ -360,8 +389,8 @@ impl<'a> Channel<'a> {
                 },
             });
         };
-        // `grammar` over every parameter first, then `key`, `control`, `endpoint`, `fc`
-        // and `multicast`: the page's order, so that a string wrong in two ways reports
+        // `grammar` over every parameter first, then `key`, `control`, `endpoint`, `fc`,
+        // `ssc`, `position` and `multicast`: the page's order, so that a string wrong in two ways reports
         // the earlier check whatever the order of its parameters.
         //
         // `grammar`: the key=value form, the key's characters, a non-empty value, and no
@@ -410,6 +439,7 @@ impl<'a> Channel<'a> {
                     | "control"
                     | "control-mode"
                     | "fc"
+                    | "ssc"
                     | "init-term-id"
                     | "term-id"
                     | "term-offset"
@@ -426,6 +456,7 @@ impl<'a> Channel<'a> {
         let mut endpoint_value = None;
         let mut interface_value = None;
         let mut fc_value = None;
+        let mut ssc_value = None;
         let mut initial_term_id_value = None;
         let mut term_id_value = None;
         let mut term_offset_value = None;
@@ -437,6 +468,7 @@ impl<'a> Channel<'a> {
                 "endpoint" => endpoint_value = Some(value),
                 "interface" => interface_value = Some(value),
                 "fc" => fc_value = Some(value),
+                "ssc" => ssc_value = Some(value),
                 "init-term-id" => initial_term_id_value = Some(value),
                 "term-id" => term_id_value = Some(value),
                 "term-offset" => term_offset_value = Some(value),
@@ -507,6 +539,17 @@ impl<'a> Channel<'a> {
                 });
             }
         };
+        // `ssc` (version 3): true or false, bare.
+        let spies_simulate_connection = match ssc_value {
+            None => None,
+            Some("true") => Some(true),
+            Some("false") => Some(false),
+            Some(_) => {
+                return Err(ChannelError::SimulatedConnection {
+                    what: "the ssc value is not true or false",
+                });
+            }
+        };
         // `position` (version 2): the three keys together, each a 32-bit integer, the
         // term id at or past the initial one and the offset within the UDP term.
         let position = match (initial_term_id_value, term_id_value, term_offset_value) {
@@ -560,6 +603,7 @@ impl<'a> Channel<'a> {
             control,
             control_mode,
             flow_control,
+            spies_simulate_connection,
             position,
         }))
     }
