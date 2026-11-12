@@ -1334,6 +1334,72 @@ fn a_member_that_catches_up_adds_the_live_log_and_goes_on_by_it() {
     );
 }
 
+/// The live recording begins where the member's log ended when it subscribed, or
+/// past it, and the replay goes on meanwhile. By the duty cycle in which the driver
+/// hands the live recording over, the replay's recording may have carried the log
+/// past the live recording's start: the live recording counts all the same, since
+/// what it must not begin below is where the log ended when the member subscribed,
+/// not where it ends when the recording is handed over. Here the member subscribes
+/// on its `log` endpoint, the leader appends a second entry, which the replay
+/// brings, and only then does the member look at its log subscription. The replay
+/// is stopped, and a third entry reaches the member by the live recording alone.
+#[test]
+fn a_live_recording_counts_though_the_replay_passed_its_start_before_it_was_handed_over() {
+    let mut pair = pair("handed-over-late");
+    let _receiver = pair.receive_log();
+    let log = pair
+        .leader
+        .io
+        .add_log(0, 0)
+        .expect("the driver takes the commands")
+        .expect("the log has its recording");
+    let one = pair.append(b"one", 0);
+    pair.member.io.add_catchup().expect("subscribed and armed");
+    assert!(
+        pair.leader
+            .io
+            .start_replay(1, 0, None)
+            .expect("the replay starts")
+    );
+    pair.observe_both("the replay's image is told", |io| {
+        io.catchup_image().expect("the image is read")
+    });
+    pair.observe_both("the append position reaches the leader's", |io| {
+        (io.append_position() == one).then_some(())
+    });
+
+    pair.member.io.join_log().expect("subscribed and armed");
+    let two = pair.append(b"two", one);
+    wait_for("the replay brings the second entry", || {
+        pair.member
+            .io
+            .observe_catchup()
+            .expect("the catch-up is observed");
+        (pair.member.io.append_position() == two).then_some(())
+    });
+    let live_start = pair.observe_both("the live recording's start is told", |io| {
+        io.log_image(log.session_id).expect("the image is read")
+    });
+    assert!(
+        (one..two).contains(&live_start),
+        "it began before the replay passed it: {live_start}"
+    );
+
+    pair.leader
+        .io
+        .stop_replay(1)
+        .expect("the replay is stopped");
+    pair.observe_both("the replay's recording has stopped", |io| {
+        io.catchup_held
+            .as_ref()
+            .and_then(|held| held.recording.stop_position())
+    });
+    let three = pair.append(b"three", two);
+    pair.observe_both("the append position follows the live recording", |io| {
+        (io.append_position() == three).then_some(())
+    });
+}
+
 /// A replay short enough to come and go between two of the member's duty cycles is
 /// still told to the election: its recording has stopped before the election first
 /// asks, and the first answer is where it begins all the same, so that its image is

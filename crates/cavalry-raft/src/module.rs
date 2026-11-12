@@ -276,9 +276,12 @@ struct Held {
     /// is. It is the image's join position when the recording was armed before the
     /// image arrived, and past it when the image came first (ADR 0093).
     start: i64,
-    /// Where the member's log ended when the driver handed this recording over. A
-    /// recording of the live log that began below it is no part of the log: its image
-    /// joined below the member's append position (ADR 0094).
+    /// Where the member's log ended when the member subscribed for this recording.
+    /// A recording of the live log that began below it is no part of the log: its
+    /// image joined below the member's append position (ADR 0094). It is taken at
+    /// the subscription and not when the driver hands the recording over: in a
+    /// catch-up the replay goes on meanwhile and may carry the log past where the
+    /// live recording begins before the module has the recording in hand.
     floor: i64,
     /// Whether the election has been told this recording's image: [`Io::log_image`]
     /// has returned its start for the image's session, or [`Io::catchup_image`] has
@@ -351,6 +354,9 @@ struct ClientIo {
     /// The image on the log subscription and where it joined.
     image: LogImage,
     held: Option<Held>,
+    /// Where the member's log ended when it subscribed on its `log` endpoint: the
+    /// floor of the recording armed there ([`Held::floor`]).
+    log_floor: i64,
     /// The driver's catalog, in the member's log directory: where a recording of the
     /// log begins is read from it, once for each recording handed over (ADR 0093).
     catalog: CatalogReader,
@@ -425,7 +431,7 @@ fn stop_recording(client: &mut Cavalry, recording: &Recording) -> Result<i64, Ra
 /// is recorded from what it had received by then, past its join position (ADR 0093).
 /// The driver writes the descriptor before it says the recording started; a read
 /// that fails leaves the recording waiting in `starting`, and the next cycle reads
-/// again. `floor` is where the member's log ends now.
+/// again. `floor` is where the member's log ended when it subscribed.
 fn take_started(
     armed: &mut Option<ArmedRecording>,
     starting: &mut Option<Recording>,
@@ -617,9 +623,12 @@ impl ClientIo {
         subscription
             .bounded_poll(session_id, |_, _| {}, i64::MAX, LOG_POLL_LIMIT)
             .map_err(RaftError::Poll)?;
-        let floor = self.end_below_live();
-        if let Some(held) = take_started(&mut self.armed, &mut self.starting, &self.catalog, floor)?
-        {
+        if let Some(held) = take_started(
+            &mut self.armed,
+            &mut self.starting,
+            &self.catalog,
+            self.log_floor,
+        )? {
             self.held = Some(held);
         }
         Ok(())
@@ -712,6 +721,9 @@ impl Io for ClientIo {
 
     fn join_log(&mut self) -> Result<(), Self::Fault> {
         if self.log_subscription.is_none() {
+            // Where the log ends now: the image that joins this subscription joins
+            // at or past it, and its recording must not begin below it.
+            self.log_floor = self.end_below_live();
             self.log_subscription = Some(
                 self.client
                     .add_subscription(&self.log_endpoint_channel, LOG_STREAM_ID)?,
@@ -1377,6 +1389,7 @@ impl ConsensusModule {
                 starting: None,
                 image: LogImage::Awaited,
                 held: None,
+                log_floor: 0,
                 catalog,
                 stopped_at: 0,
                 sync_asked_at: NO_SYNC_ASKED,

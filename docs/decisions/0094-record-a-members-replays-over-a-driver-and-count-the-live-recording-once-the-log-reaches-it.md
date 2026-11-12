@@ -71,12 +71,16 @@ recording has reached its start. Each recording that counts is asked to sync as
 its position moves.
 
 **A live recording that began below the log's end never counts.** The module notes
-where the member's log ended when a recording of the live log was handed over. One
-that began below that is of an image that joined below the member's append
-position: follower log await fails on it, and its bytes are of another log. With a
-catch-up the live recording must be allowed to begin before the end of the stopped
-recordings moves past it; this floor is what keeps the rule of ADR 0093 for the
-other case.
+where the member's log ended when the member subscribed on its `log` endpoint. A
+recording of the live log that began below that is of an image that joined below
+the member's append position: follower log await fails on it, and its bytes are of
+another log. With a catch-up the live recording must be allowed to begin before the
+end of the stopped recordings moves past it; this floor is what keeps the rule of
+ADR 0093 for the other case. The floor is taken at the subscription and not when
+the driver hands the recording over. In a catch-up the replay goes on between the
+two, and may carry the member's log past where the live recording begins: a floor
+taken at the hand-over would then shut out the very recording the member needs,
+and its append position would stop when the leader stops the replay.
 
 **A member that leaves the log in a catch-up stops the replay's recording first.**
 Init leaves the log and then removes the catch-up subscription. The live recording
@@ -115,7 +119,7 @@ member's recordings is not in this version (`spec/cluster.md`, "The service").
 
 ## Evidence
 
-- `crates/cavalry-raft/src/module/tests.rs`, seven tests. In six, the leader and
+- `crates/cavalry-raft/src/module/tests.rs`, eight tests. In seven, the leader and
   the member are each a module on a driver of its own, and the test drives the `Io`
   of both.
   - A term in two of the leader's recordings, 0 to 192 and 192 to 288. For each,
@@ -149,16 +153,22 @@ member's recordings is not in this version (`spec/cluster.md`, "The service").
     stopped while a replay runs. The image is said to have gone 9.996 s later in
     one run, the image liveness timeout; the test holds it to 9 s at least. What
     the replay had brought is the member's log, and the recording is kept.
+  - A live recording handed over late. The member subscribes on its `log`
+    endpoint, the leader appends a second entry, the replay brings it, and only
+    then does the member look at its log subscription: the live recording begins
+    at or past 96 and below 192, where the member's log ends by then. The replay
+    is stopped, and a third entry moves the append position by the live recording
+    alone. With the floor taken at the hand-over, as this change first had it,
+    this test fails: the append position stays at 192.
   - A catch-up position with a host name of 240 characters does not fit 128 bytes
     and fits 1,408.
 - Each rule taken out fails the test written for it: the floor; a live recording
   held to begin exactly where the stopped ones end; an image said to be gone as
   soon as its recording stopped, told or not; `leave_log` without stopping the
   replay's recording first.
-- The eighteen in-crate tests before the last was added ran fifteen times in a row
-  on a macOS laptop with no failure, 5.5 s a run; with it a run takes about 11 s,
-  the image liveness timeout. `cargo test -p cavalry-raft`: 156 passed. The tests over
-  three drivers, `cluster`, pass unchanged.
+- The twenty in-crate tests ran ten times in a row with no failure on a macOS
+  laptop, about 11 s a run, which is the image liveness timeout of one test. `cargo test -p cavalry-raft`: 157
+  passed. The tests over three drivers, `cluster`, pass unchanged.
 - Not shown: a member's whole election over drivers, which comes when the module
   moves (ADR 0081); and a stale sender on either endpoint, which Consequences
   leaves to the fault-injection tests.
