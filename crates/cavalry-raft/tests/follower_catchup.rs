@@ -380,30 +380,3 @@ fn a_catch_up_has_its_whole_timeout_from_when_the_image_joins() {
     assert_eq!(member.election_state(), ElectionState::Init);
     assert_eq!(member.counts().elections_failed, 1);
 }
-
-/// A member whose leader is appointed has no catch-up: behind its leader's log, it
-/// fails in follower replay, as before.
-#[test]
-fn an_appointed_member_behind_its_leaders_log_fails() {
-    let mut io = Stub::new();
-    let mut member = Consensus::new(&[0, 1, 2], 1).expect("a member");
-    work(&mut member, &mut io, 1);
-    read(&mut member, &mut io, 2, &new_leadership_term(0, 96));
-    assert_eq!(member.election_state(), ElectionState::FollowerReplay);
-    io.clear();
-    work(&mut member, &mut io, 3);
-    assert_eq!(member.election_state(), ElectionState::Init);
-    assert_eq!(member.counts().elections_failed, 1);
-    assert_eq!(
-        io.count(|call| matches!(
-            call,
-            Call::AddCatchup
-                | Call::CatchupPosition(..)
-                | Call::Send {
-                    template: Template::AppendPosition,
-                    ..
-                }
-        )),
-        0
-    );
-}

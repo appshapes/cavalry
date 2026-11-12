@@ -1,4 +1,4 @@
-//! The elections a member that elects holds once it leads or follows, one core at a
+//! The elections a member holds once it leads or follows, one core at a
 //! time, driven by hand through an [`Io`] that remembers what it was asked
 //! (`spec/cluster.md`, "The commit position", states 5 and 8, "Messages during an
 //! election" and "Messages outside an election"; ADR 0082): a leader closes its
@@ -12,7 +12,7 @@
 mod common;
 
 use cavalry_proto::cluster::{Message, Template};
-use cavalry_raft::{Consensus, ElectionCause, ElectionState, Role};
+use cavalry_raft::{Consensus, ElectionCause, ElectionState, Refused, Role};
 use common::{Call, Stub, append_position, at, canvass_position, new_leadership_term};
 
 /// Member 0 of `[0, 1, 2]`, electing.
@@ -274,41 +274,19 @@ fn a_follower_holds_an_election_on_a_higher_term_and_counts_it() {
     }
 }
 
-/// A member whose leader is appointed holds no election on a higher term: it reads no
-/// request vote, and a commit position of another term is not its leader's.
-#[test]
-fn a_member_whose_leader_is_appointed_holds_no_election_on_a_higher_term() {
-    let mut io = Stub::new();
-    let mut follower = Consensus::new(&[0, 1, 2], 2).expect("a member");
-    work(&mut follower, &mut io, 1);
-    read(&mut follower, &mut io, 2, &new_leadership_term(0, 0));
-    work(&mut follower, &mut io, 3);
-    work(&mut follower, &mut io, 4);
-    io.image = Some(0);
-    work(&mut follower, &mut io, 5);
-    work(&mut follower, &mut io, 6);
-    assert_eq!(follower.election_state(), ElectionState::Closed);
-    for message in [request_vote(1, 1), commit_position(1, 1)] {
-        read(&mut follower, &mut io, 7, &message);
-        assert_eq!(follower.election_state(), ElectionState::Closed);
-    }
-    let counts = follower.counts();
-    assert_eq!(counts.higher_terms_seen, 0);
-    assert_eq!(counts.leader_step_downs, 0);
-    // So cause 4 is never this path's: the cause is still the member's start, and
-    // the member still names its appointed leader (ADR 0102).
-    assert_eq!(follower.election_cause(), ElectionCause::Started);
-    assert_eq!(follower.leader_gauge(), 0);
-}
-
-/// A leader that elects closes its election in leader ready when a quorum counts for
-/// its term at its log position, itself among them, and waits for no other member:
-/// member 2, heard in canvass, has not joined its log. The term's first entry is
-/// appended once, in the cycle that closes. The appointed leader waits for the member
-/// it heard (`core.rs`, `leader_ready_waits_for_a_member_it_heard_whoever_else_has_joined`).
-/// A leader held in leader ready with no member counted stays there, an append
-/// position at another position than its own counts for nothing, and it closes in the
-/// cycle after a member reports its own.
+/// A leader closes its election in leader ready when a quorum counts for its term at
+/// its log position, itself among them, and waits for no other member: member 2,
+/// heard in canvass, has not joined its log. The term's first entry is appended once,
+/// in the cycle that closes.
+///
+/// A leader held in leader ready with no member counted stays there, and its process
+/// is refused an offer. A member counts by an append position at the leader's log
+/// position alone. One at another position counts for nothing. One under an id no
+/// member has, or under the leader's own id, counts for nothing. A canvass position
+/// that names the leader's term at its position counts for nothing: its sender
+/// recorded the term and went back to canvass, and has not joined the log. Back
+/// pressure on the term's first entry keeps the election open, and the entry is
+/// appended once. Then the leader's process appends.
 #[test]
 fn a_leader_closes_its_election_on_a_quorum_and_waits_for_no_other_member() {
     let first_entries =
@@ -329,7 +307,6 @@ fn a_leader_closes_its_election_on_a_quorum_and_waits_for_no_other_member() {
     let counts = leader.counts();
     assert_eq!(counts.elections_closed, 1);
     assert_eq!(counts.elections_failed, 0);
-    assert_eq!(counts.appointed_leader_behind, 0);
 
     // Held in leader ready: the leader alone counts, one of three.
     let mut io = Stub::new();
@@ -342,11 +319,39 @@ fn a_leader_closes_its_election_on_a_quorum_and_waits_for_no_other_member() {
     work(&mut leader, &mut io, ms + 1);
     assert_eq!(leader.election_state(), ElectionState::LeaderReady);
     assert_eq!(first_entries(&io), 0);
-    assert_eq!(leader.counts().appointed_leader_behind, 0);
-    read(&mut leader, &mut io, ms + 2, &append_position(2, 0));
+    // A report under an id no member has, and one under the leader's own id.
+    read(&mut leader, &mut io, ms + 2, &append_position(7, 0));
+    read(&mut leader, &mut io, ms + 2, &append_position(0, 0));
     work(&mut leader, &mut io, ms + 2);
+    assert_eq!(leader.election_state(), ElectionState::LeaderReady);
+    // Member 1 names the leader's term at the leader's position in a canvass
+    // position: it has not joined the log.
+    read(&mut leader, &mut io, ms + 3, &canvass_position(1, 0, 0));
+    work(&mut leader, &mut io, ms + 3);
+    assert_eq!(leader.election_state(), ElectionState::LeaderReady);
+    assert_eq!(first_entries(&io), 0);
+    assert_eq!(
+        leader.offer(at(ms + 3), b"early", &mut io),
+        Ok(Err(Refused::Election))
+    );
+
+    // Member 2 joins at the leader's position: a quorum. The first entry is
+    // back-pressured, and the election stays open until it is appended.
+    read(&mut leader, &mut io, ms + 4, &append_position(2, 0));
+    io.back_pressured = true;
+    work(&mut leader, &mut io, ms + 4);
+    assert_eq!(leader.election_state(), ElectionState::LeaderReady);
+    assert_eq!(first_entries(&io), 0);
+    io.back_pressured = false;
+    work(&mut leader, &mut io, ms + 5);
+    work(&mut leader, &mut io, ms + 6);
     assert_eq!(leader.election_state(), ElectionState::Closed);
     assert_eq!(first_entries(&io), 1);
+    assert_eq!(leader.offer(at(ms + 7), b"now", &mut io), Ok(Ok(())));
+    assert_eq!(
+        io.count(|call| *call == Call::Append(Template::SessionMessage)),
+        1
+    );
 }
 
 /// A leader whose election has not closed fails it on a canvass position with a term
@@ -399,11 +404,10 @@ fn a_leader_fails_its_election_on_a_canvass_position_with_a_higher_term() {
     assert_eq!(leader.counts().elections_failed, 0);
 }
 
-/// A leader that elects holds an election when its active members fall below a quorum:
-/// no other member has reported for the leader heartbeat timeout, 10 s. Its election
-/// closed, that is counted in `cluster.leader_quorum_losses` alone; in leader log
-/// replication and in leader ready its election fails, counted in both. The appointed
-/// leader counts the loss and stays the leader.
+/// A leader holds an election when its active members fall below a quorum: no other
+/// member has reported for the leader heartbeat timeout, 10 s. Its election closed,
+/// that is counted in `cluster.leader_quorum_losses` alone; in leader log replication
+/// and in leader ready its election fails, counted in both.
 #[test]
 fn a_leader_that_loses_its_quorum_holds_an_election() {
     // Closed.
@@ -451,30 +455,6 @@ fn a_leader_that_loses_its_quorum_holds_an_election() {
     let counts = leader.counts();
     assert_eq!(counts.leader_quorum_losses, 1);
     assert_eq!(counts.elections_failed, 1);
-
-    // The appointed leader, closed, with the same silence.
-    let mut io = Stub::new();
-    let mut appointed = Consensus::new(&[0, 1, 2], 0).expect("a member");
-    work(&mut appointed, &mut io, 1);
-    for other in [1, 2] {
-        read(&mut appointed, &mut io, 2, &canvass_position(other, -1, 0));
-    }
-    for ms in 3..=20 {
-        for other in [1, 2] {
-            read(&mut appointed, &mut io, ms, &append_position(other, 0));
-        }
-        work(&mut appointed, &mut io, ms);
-    }
-    assert_eq!(appointed.election_state(), ElectionState::Closed);
-    work(&mut appointed, &mut io, 20 + 10_000);
-    assert_eq!(appointed.election_state(), ElectionState::Closed);
-    assert_eq!(appointed.role(), Role::Leader);
-    assert_eq!(appointed.counts().leader_quorum_losses, 1);
-    assert_eq!(io.count(|call| *call == Call::RemoveLog), 0);
-    // So cause 3 is never this path's: the cause is still its start, and it names
-    // itself (ADR 0102).
-    assert_eq!(appointed.election_cause(), ElectionCause::Started);
-    assert_eq!(appointed.leader_gauge(), 0);
 }
 
 /// A leader that begins again gives its log up in init before anything else, once. A

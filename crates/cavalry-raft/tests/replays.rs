@@ -145,26 +145,6 @@ fn a_catch_up_position_that_is_no_request_of_this_leaders_starts_nothing() {
     assert_eq!(leader.counts().catchups, 0);
 }
 
-/// The appointed leader serves no replay: no member beside it replicates.
-#[test]
-fn an_appointed_leader_starts_no_replay() {
-    let mut io = Stub::new();
-    let mut leader = Consensus::new(&[0, 1, 2], 0).expect("a member");
-    work(&mut leader, &mut io, 1);
-    for other in [1, 2] {
-        read(&mut leader, &mut io, 2, &canvass_position(other, -1, 0));
-    }
-    work(&mut leader, &mut io, 3);
-    work(&mut leader, &mut io, 4);
-    assert_eq!(leader.election_state(), ElectionState::LeaderLogReplication);
-    io.append_position = 64;
-    work(&mut leader, &mut io, 5);
-    read(&mut leader, &mut io, 6, &catchup_position(2, 0, -1));
-    read(&mut leader, &mut io, 6, &catchup_position(2, 0, 0));
-    assert_eq!(started(&io), vec![]);
-    assert_eq!(leader.counts().log_replications, 0);
-}
-
 /// A position the leader's recordings do not hold, purged by retention, is answered
 /// by nothing and counted nowhere: the member's own timer counts it. The leader holds
 /// nothing for the member afterwards, so a later request is served.

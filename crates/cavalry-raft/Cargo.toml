@@ -23,8 +23,8 @@ allowed-dependencies = []
 [dependencies]
 # The cluster protocol: the consensus messages and the log's entries the core reads and
 # writes, and the rules of `spec/cluster.md` it decides by, the commit position, what a
-# reader does with new leadership term, the appointed leader (ADR 0058; ADR 0063). A
-# workspace member.
+# reader does with new leadership term, the candidate and the ballot (ADR 0058; ADR
+# 0077). A workspace member.
 cavalry-proto = { path = "../cavalry-proto" }
 # The consensus module is a client of its driver (ADR 0063): its consensus messages,
 # its log and its counters go through the commands every program uses. A workspace

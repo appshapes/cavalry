@@ -389,23 +389,3 @@ fn a_start_that_faults_for_one_member_does_not_starve_the_next() {
     assert_eq!(leader.counts().log_replications, 2);
     assert_eq!(leader.counts().catchups, 0);
 }
-
-/// The appointed leader serves no catch-up and sends no stop catch-up.
-#[test]
-fn an_appointed_leader_serves_no_catch_up() {
-    let mut io = Stub::new();
-    let mut leader = Consensus::new(&[0, 1, 2], 0).expect("a member");
-    work(&mut leader, &mut io, 1);
-    for other in [1, 2] {
-        read(&mut leader, &mut io, 2, &canvass_position(other, -1, 0));
-    }
-    work(&mut leader, &mut io, 3);
-    work(&mut leader, &mut io, 4);
-    assert_eq!(leader.election_state(), ElectionState::LeaderLogReplication);
-    io.clear();
-    read(&mut leader, &mut io, 5, &catchup_position(2, 0, 0));
-    read(&mut leader, &mut io, 6, &appended(2, 0, 0, true));
-    assert_eq!(started(&io), vec![]);
-    assert_eq!(stop_catchups(&io, 2), 0);
-    assert_eq!(leader.counts().catchups, 0);
-}

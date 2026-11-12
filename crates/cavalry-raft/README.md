@@ -247,23 +247,24 @@ its log, and an entry is committed once a quorum has recorded it.
 use cavalry_raft::memory::Cluster;
 use cavalry_raft::{ElectionState, Role};
 
-let mut cluster = Cluster::new(&[0, 1, 2])?;
-// One second of the cluster's clock: every member canvasses, the member with the
-// lowest id leads, the others join its log and report, and every election closes.
+let mut cluster = Cluster::with_election(&[0, 1, 2], 1)?;
+// One second of the cluster's clock: every member canvasses, one nominates itself
+// and wins the others' votes, they join its log and report, and every election closes.
 cluster.run_ms(1_000);
-assert_eq!(cluster.role(0), Some(Role::Leader));
-assert_eq!(cluster.role(1), Some(Role::Follower));
-assert_eq!(cluster.election_state(2), Some(ElectionState::Closed));
+let leader = cluster.leader().ok_or("no member leads")?;
+assert_eq!(cluster.role(leader), Some(Role::Leader));
+let closed = Some(ElectionState::Closed);
+assert!([0, 1, 2].iter().all(|&member| cluster.election_state(member) == closed));
 
 // The leader's own process appends an entry. It is committed when a quorum has
 // recorded it, and every member learns the commit position from the leader.
 let position = cluster.offer(b"hello")?;
 cluster.run_ms(1_000);
-assert_eq!(cluster.commit_position(0), Some(position));
-assert_eq!(cluster.commit_position(2), Some(position));
-// Every member's recording holds the same bytes.
-assert_eq!(cluster.log(1), cluster.log(0));
-assert_eq!(cluster.log(2), cluster.log(0));
+for member in [0, 1, 2] {
+    assert_eq!(cluster.commit_position(member), Some(position));
+    // Every member's recording holds the same bytes.
+    assert_eq!(cluster.log(member), cluster.log(leader));
+}
 # Ok::<(), Box<dyn std::error::Error>>(())
 ```
 

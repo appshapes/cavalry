@@ -11,10 +11,7 @@ mod common;
 
 use cavalry_proto::cluster::{Message, Template};
 use cavalry_raft::{Consensus, ElectionState, Role};
-use common::{
-    Call, Stub, append_position, at, canvass_position, follow_term, leadership_term,
-    lose_the_leader,
-};
+use common::{Call, Stub, at, canvass_position, follow_term, leadership_term, lose_the_leader};
 
 /// Member 0 of `[0, 1, 2]`, electing.
 fn elector(seed: u64) -> Consensus {
@@ -222,28 +219,4 @@ fn a_leader_says_whether_its_term_is_of_its_first_election_since_it_started() {
     io.last_startup = None;
     read(&mut member, &mut io, ms, &canvass_position(2, 0, 0));
     assert_eq!(io.last_startup, Some(false));
-}
-
-/// A member whose leader is appointed reads nothing of its directory: it starts with
-/// no term, as before, and its new leadership term says `is startup` 1.
-#[test]
-fn an_appointed_member_reads_nothing_of_its_directory() {
-    let mut io = Stub::new();
-    io.candidate_term = 7;
-    io.log_term = 5;
-    let mut leader = Consensus::new(&[0, 1, 2], 0).expect("a member");
-    work(&mut leader, &mut io, 1);
-    for other in [1, 2] {
-        read(&mut leader, &mut io, 2, &canvass_position(other, -1, 0));
-    }
-    for ms in 3..=20 {
-        for other in [1, 2] {
-            read(&mut leader, &mut io, ms, &append_position(other, 0));
-        }
-        work(&mut leader, &mut io, ms);
-    }
-    assert_eq!(leader.election_state(), ElectionState::Closed);
-    assert_eq!(leader.leadership_term_id(), 0);
-    assert_eq!(io.reads, [0, 0]);
-    assert_eq!(io.last_startup, Some(true));
 }

@@ -793,7 +793,8 @@ impl Io for ClientIo {
     }
 
     /// The `terms` file's stored candidate term as the module holds it in memory. The
-    /// module's member is appointed and its core never asks (ADR 0081, ADR 0089).
+    /// core reads it once, in its first init (ADR 0089), and reads −1: the module
+    /// refuses a log directory that holds one ([`RaftError::Restart`]).
     fn candidate_term(&mut self) -> i64 {
         self.terms.candidate_term()
     }
@@ -955,8 +956,9 @@ impl Io for ClientIo {
     /// base. What the leader appended and its recorder had not written is not in its
     /// log: it never reported it. The recording stays held until its stop has been
     /// read, so a stop the driver refused or did not answer in time returns with
-    /// nothing else changed, and init calls again on the next cycle. The module's own
-    /// core is appointed and never asks (ADR 0081).
+    /// nothing else changed, and init calls again on the next cycle. The core asks
+    /// it of a member that led and holds an election, in init, and not again once it
+    /// returned `Ok`.
     fn remove_log(&mut self) -> Result<(), Self::Fault> {
         if let Some(recording) = self.log_recording.as_ref() {
             let stop = stop_recording(&mut self.client, recording)?;
@@ -1001,7 +1003,8 @@ impl Io for ClientIo {
     /// that faults returns with what was cut so far cut in the table too, and the
     /// leader's next new leadership term asks again: a purge of a recording already
     /// purged, or a truncation to where a recording already stops, changes nothing.
-    /// The module's own core is appointed and never asks (ADR 0081).
+    /// The core asks it of a member that is out of the log, with a position below its
+    /// append position and at or above the commit position it knows (ADR 0083).
     fn truncate_log(&mut self, position: i64) -> Result<Option<i64>, Self::Fault> {
         if self.log_recording.is_some()
             || self.held.is_some()
@@ -1097,8 +1100,9 @@ impl Io for ClientIo {
     }
 
     /// Deletes every term above `term` from the `terms` file, each write synced
-    /// (`spec/durable-log.md`; ADR 0096). The module's own core is appointed and never
-    /// asks (ADR 0081).
+    /// (`spec/durable-log.md`; ADR 0096). The core asks it of a member that is out of
+    /// the log, after it has truncated what it held above the base of the lowest of
+    /// those terms.
     fn drop_terms_above(&mut self, term: i64) -> Result<i64, Self::Fault> {
         Ok(self.terms.drop_above_term(term)?)
     }
@@ -1128,8 +1132,8 @@ impl Io for ClientIo {
     /// driver answers `stop replay` once its replayer has written the replay's last
     /// frame (`spec/client-protocol.md`, "Commands"), and this waits for that answer,
     /// as the commands of [`Io::add_log`] wait for theirs. How the earlier replay
-    /// ended is forgotten. The module's own core is appointed and never asks
-    /// (ADR 0081).
+    /// ended is forgotten. The core asks it of a leader that has read a member's
+    /// catch-up position, and holds at most one replay a member (ADR 0085).
     fn start_replay(
         &mut self,
         member: i32,
@@ -1224,8 +1228,8 @@ impl Io for ClientIo {
     /// subscription held and before it asks its leader for a replay (ADR 0092), so
     /// the stream has no image when the recording is armed, and the replay's image
     /// is recorded from its join position. A call that failed at its second command
-    /// is tried again and sends that one alone. The module's own core is appointed
-    /// and never asks (ADR 0081).
+    /// is tried again and sends that one alone. The core asks it of a member behind
+    /// its leader: once for each replay of a replication, and once for a catch-up.
     fn add_catchup(&mut self) -> Result<(), Self::Fault> {
         if self.catchup_subscription.is_none() {
             self.catchup_subscription = Some(
@@ -1724,8 +1728,8 @@ impl ConsensusModule {
     }
 
     /// Appends `payload` to the cluster's log as a session message of no session, for
-    /// the leader's own process (`spec/cluster.md`, "The appointed leader"). It is
-    /// committed once a quorum has recorded it, which
+    /// the leader's own process (`spec/cluster.md`, "Session message header, template
+    /// 1"). It is committed once a quorum has recorded it, which
     /// [`ConsensusModule::commit_position`] says. The entry carries the cluster's time
     /// of the last duty cycle. A follower, a leader whose election
     /// has not closed and a back-pressured log are [`RaftError::Offer`], each with what

@@ -1,8 +1,6 @@
-//! One core that elects, driven by hand through an [`Io`] that remembers what it was
-//! asked: the order of a member's durable writes and its reports, and what it does
-//! when a write fails (`spec/cluster.md`, "The log"; ADR 0060, ADR 0100). These are
-//! rules a member has whoever leads it; `core.rs` has them for a member whose leader
-//! is appointed, until that path leaves.
+//! One core, driven by hand through an [`Io`] that remembers what it was asked: the
+//! order of a member's durable writes and its reports, and what it does when a write
+//! fails (`spec/cluster.md`, "The log"; ADR 0060, ADR 0100).
 //!
 //! [`Io`]: cavalry_raft::Io
 
@@ -15,7 +13,8 @@ use common::{Call, Stub, at, canvass_position, new_leadership_term};
 /// A fault at the record of terms leaves a member that has won its ballot leading
 /// nothing: no term led, no log added, nothing announced. The next cycle records the
 /// same term, not the one after it, and the member leads it. Its candidate term was
-/// stored once, before it asked for a vote.
+/// stored once, before it asked for a vote. It canvasses, stores its term, records it,
+/// adds its log and announces the term, in that order.
 #[test]
 fn a_record_that_fails_leaves_the_winner_leading_nothing_and_the_same_term_to_record() {
     let mut io = Stub::new();
@@ -79,7 +78,36 @@ fn a_record_that_fails_leaves_the_winner_leading_nothing_and_the_same_term_to_re
     let added = io
         .first(|call| *call == Call::AddLog(0, 0))
         .expect("the log is added");
-    assert!(recorded < added, "{:?}", io.calls);
+    let canvassed = io
+        .first(|call| {
+            matches!(
+                call,
+                Call::Send {
+                    template: Template::CanvassPosition,
+                    ..
+                }
+            )
+        })
+        .expect("it canvassed");
+    let stored = io
+        .first(|call| *call == Call::StoreCandidateTerm(0))
+        .expect("the term is stored");
+    let announced = io
+        .first(|call| {
+            matches!(
+                call,
+                Call::Send {
+                    template: Template::NewLeadershipTerm,
+                    ..
+                }
+            )
+        })
+        .expect("the term is announced");
+    assert!(
+        canvassed < stored && stored < recorded && recorded < added && added < announced,
+        "{:?}",
+        io.calls
+    );
     assert_eq!(
         io.count(|call| matches!(call, Call::RecordTerm(term, _) if *term != 0)),
         0,

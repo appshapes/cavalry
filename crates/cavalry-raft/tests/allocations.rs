@@ -26,41 +26,33 @@ use stats_alloc::{INSTRUMENTED_SYSTEM, Region, StatsAlloc};
 static GLOBAL: &StatsAlloc<System> = &INSTRUMENTED_SYSTEM;
 
 /// Member 0 of three as the leader of term 0, its election closed, with the next
-/// millisecond. Where the leader is appointed it leads from canvass; where it is
-/// elected it nominates itself, both others vote for it, and it closes with a quorum.
-fn closed_leader(electing: bool, io: &mut Stub) -> (Consensus, u64) {
-    let mut leader = if electing {
-        Consensus::with_election(&[0, 1, 2], 0, 1)
-    } else {
-        Consensus::new(&[0, 1, 2], 0)
-    }
-    .expect("a member");
+/// millisecond: it nominates itself, both others vote for it, and it closes with a
+/// quorum.
+fn closed_leader(io: &mut Stub) -> (Consensus, u64) {
+    let mut leader = Consensus::with_election(&[0, 1, 2], 0, 1).expect("a member");
     leader.do_work(at(1), io).expect("no fault");
     for follower in [1, 2] {
         leader
             .on_message(at(2), &canvass_position(follower, -1, 0), io)
             .expect("no fault");
     }
-    let mut ms = 3;
-    if electing {
-        leader.do_work(at(3), io).expect("no fault");
-        assert_eq!(leader.election_state(), ElectionState::Nominate);
-        // The nomination delay is below half the election timeout.
-        leader.do_work(at(503), io).expect("no fault");
-        assert_eq!(leader.election_state(), ElectionState::CandidateBallot);
-        for voter in [1, 2] {
-            let vote = Message::Vote {
-                candidate_term_id: 0,
-                log_leadership_term_id: -1,
-                log_position: 0,
-                candidate_member_id: 0,
-                follower_member_id: voter,
-                vote: true,
-            };
-            leader.on_message(at(504), &vote, io).expect("no fault");
-        }
-        ms = 505;
+    leader.do_work(at(3), io).expect("no fault");
+    assert_eq!(leader.election_state(), ElectionState::Nominate);
+    // The nomination delay is below half the election timeout.
+    leader.do_work(at(503), io).expect("no fault");
+    assert_eq!(leader.election_state(), ElectionState::CandidateBallot);
+    for voter in [1, 2] {
+        let vote = Message::Vote {
+            candidate_term_id: 0,
+            log_leadership_term_id: -1,
+            log_position: 0,
+            candidate_member_id: 0,
+            follower_member_id: voter,
+            vote: true,
+        };
+        leader.on_message(at(504), &vote, io).expect("no fault");
     }
+    let ms = 505;
     for step in 0..8 {
         for follower in [1, 2] {
             leader
@@ -74,21 +66,15 @@ fn closed_leader(electing: bool, io: &mut Stub) -> (Consensus, u64) {
 }
 
 /// A leader and a follower, their elections closed, run ten thousand duty cycles, an
-/// entry appended and committed in each, and the window over them counts nothing:
-/// where the leader is appointed and, `electing`, where it is elected (ADR 0100).
-fn a_leader_and_a_follower_run_ten_thousand_cycles_without_an_allocation(electing: bool) {
+/// entry appended and committed in each, and the window over them counts nothing.
+fn a_leader_and_a_follower_run_ten_thousand_cycles_without_an_allocation() {
     // A leader with its election closed.
     let mut leader_io = Stub::new();
-    let (mut leader, from) = closed_leader(electing, &mut leader_io);
+    let (mut leader, from) = closed_leader(&mut leader_io);
 
     // A follower with its election closed.
     let mut follower_io = Stub::new();
-    let mut follower = if electing {
-        Consensus::with_election(&[0, 1, 2], 1, 7)
-    } else {
-        Consensus::new(&[0, 1, 2], 1)
-    }
-    .expect("a member");
+    let mut follower = Consensus::with_election(&[0, 1, 2], 1, 7).expect("a member");
     follower.do_work(at(1), &mut follower_io).expect("no fault");
     follower
         .on_message(at(2), &new_leadership_term(0, 0), &mut follower_io)
@@ -145,11 +131,9 @@ fn a_leader_and_a_follower_run_ten_thousand_cycles_without_an_allocation(electin
 }
 
 fn main() {
-    a_leader_and_a_follower_run_ten_thousand_cycles_without_an_allocation(false);
-    a_leader_and_a_follower_run_ten_thousand_cycles_without_an_allocation(true);
+    a_leader_and_a_follower_run_ten_thousand_cycles_without_an_allocation();
     println!(
         "allocations: a leader and a follower ran ten thousand duty cycles, an entry \
-         appended and committed in each, without an allocation or a reallocation, with \
-         the leader appointed and with it elected"
+         appended and committed in each, without an allocation or a reallocation"
     );
 }
