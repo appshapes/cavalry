@@ -1723,9 +1723,14 @@ fn a_replay_whose_sender_vanished_is_said_gone_at_the_image_liveness_timeout() {
         _dir,
         ..
     } = pair;
+    // The driver goes first, and the leader's client after it. A client that closes
+    // while its driver runs has its replay ended by that driver, which sends an end
+    // of stream: the member's image would then go within a heartbeat or two, and not
+    // at the liveness timeout, whenever the driver ran a duty cycle between the two
+    // drops, as it did once in three runs on a loaded runner.
+    drop(_drivers.remove(0));
     let vanished = Instant::now();
     drop(leader);
-    drop(_drivers.remove(0));
     let deadline = vanished + cavalry_proto::udp::IMAGE_LIVENESS_TIMEOUT + Duration::from_secs(5);
     let gone = loop {
         member
