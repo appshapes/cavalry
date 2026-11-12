@@ -229,6 +229,48 @@ fn a_catch_up_is_stopped_by_a_canvass_position_and_replaced_by_a_new_request() {
     assert_eq!(leader.counts().log_replications, 0);
 }
 
+/// A member told to stop is owed no replay. A report with the catch-up flag says the
+/// member is on the live log, so a request of its that the leader still owed it is
+/// dropped, as a canvass position drops it: one whose start faulted, and one that
+/// waited for the replay before it to stop. Started, such a replay would find no
+/// subscriber, end at the replay connect timeout and count a catch-up nobody asked
+/// for, which the third review of pull request 229 noted.
+#[test]
+fn a_report_with_the_flag_drops_the_replay_the_leader_still_owed() {
+    // A request whose start faulted is owed.
+    let (mut leader, mut io, ms) = leading();
+    io.fail_start_to = Some(1);
+    assert_eq!(
+        leader.on_message(at(ms), &catchup_position(1, 2, 96), &mut io),
+        Err("the replay cannot be started")
+    );
+    io.fail_start_to = None;
+    read(&mut leader, &mut io, ms + 1, &appended(1, 2, 160, true));
+    assert_eq!(stop_catchups(&io, 1), 1);
+    assert_eq!(stops(&io, 1), 0, "no replay ran to it");
+    work(&mut leader, &mut io, ms + 2);
+    work(&mut leader, &mut io, ms + 3);
+    assert_eq!(started(&io), vec![(1, 96, None)], "the start that faulted");
+    assert_eq!(leader.counts().catchups, 0);
+
+    // A request made while a replay ran waits for that replay to stop.
+    let (mut leader, mut io, ms) = leading();
+    read(&mut leader, &mut io, ms, &catchup_position(2, 2, 96));
+    read(&mut leader, &mut io, ms + 1, &catchup_position(2, 2, 128));
+    assert_eq!(stops(&io, 2), 1);
+    read(&mut leader, &mut io, ms + 2, &appended(2, 2, 160, true));
+    assert_eq!(stops(&io, 2), 1, "the replay was asked to stop already");
+    assert_eq!(stop_catchups(&io, 2), 1);
+    io.stopped[2] = Some(ReplayStopped {
+        position: 112,
+        ended: false,
+    });
+    work(&mut leader, &mut io, ms + 3);
+    work(&mut leader, &mut io, ms + 4);
+    assert_eq!(started(&io), vec![(2, 96, None)]);
+    assert_eq!(leader.counts().catchups, 1);
+}
+
 /// A leader that holds an election stops a catch-up's replay in init, as it stops a
 /// replication's, and sends no stop catch-up as a follower.
 #[test]
