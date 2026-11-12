@@ -22,10 +22,11 @@ Wire types, zero-copy frames and version negotiation. Data plane.
 - Parses a channel, `cavalry:ipc`, `cavalry:udp?endpoint=<host>:<port>` with its
   `interface` option, or the control channel
   `cavalry:udp?control=<host>:<port>|control-mode=manual` of multi-destination cast,
-  each with `fc=max|min` on a publication's channel (ADR 0053) and the position keys
+  each with `fc=max|min` on a publication's channel (ADR 0053), the position keys
   `init-term-id`, `term-id` and `term-offset` that create one at a position (ADR
-  0059), in `channel`, borrowing from the string, with each refusal named and every
-  refusal error code 1;
+  0059), and `ssc=true|false`, by which a live recording connects one that no receiver
+  answers (ADR 0098), in `channel`, borrowing from the string, with each refusal named
+  and every refusal error code 1;
   resolving the host is the driver's.
 - Is the one place bytes are shuffled by hand. Every other crate uses its types. A
   reader that holds only a frame's header, as the log buffer's does, passes the bytes
