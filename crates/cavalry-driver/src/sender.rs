@@ -32,13 +32,13 @@ use cavalry_proto::udp::{
     StatusMessage, parse, retransmit_window, sender_limit,
 };
 use cavalry_shm::counters::generated::{
-    LOG_BUFFER_REJECTED_FRAME, PUBLICATION_CONNECTED, PUBLICATION_DISCONNECTED,
-    RECEIVER_RECEIVE_FAILED, SENDER_BYTES_SENT, SENDER_FLOW_CONTROL_LIMITED,
-    SENDER_FLOW_CONTROL_RECEIVERS_FULL, SENDER_FLOW_CONTROL_RECEIVERS_TIMED_OUT,
-    SENDER_FRAMES_SENT, SENDER_HEARTBEATS_SENT, SENDER_NAKS_IGNORED, SENDER_NAKS_RECEIVED,
-    SENDER_RETRANSMIT_OVERFLOW, SENDER_RETRANSMITS_SENT, SENDER_RETRANSMITTED_BYTES,
-    SENDER_RTT_REPLIES_SENT, SENDER_SEND_FAILED, SENDER_SETUPS_SENT, SENDER_SHORT_SENDS,
-    SENDER_STATUS_MESSAGES_RECEIVED, SENDER_STATUS_MESSAGES_REJECTED,
+    LOG_BUFFER_REJECTED_FRAME, LOG_BUFFER_REJECTED_POSITION, PUBLICATION_CONNECTED,
+    PUBLICATION_DISCONNECTED, RECEIVER_RECEIVE_FAILED, SENDER_BYTES_SENT, SENDER_BYTES_UNSENT,
+    SENDER_FLOW_CONTROL_LIMITED, SENDER_FLOW_CONTROL_RECEIVERS_FULL,
+    SENDER_FLOW_CONTROL_RECEIVERS_TIMED_OUT, SENDER_FRAMES_SENT, SENDER_HEARTBEATS_SENT,
+    SENDER_NAKS_IGNORED, SENDER_NAKS_RECEIVED, SENDER_RETRANSMIT_OVERFLOW, SENDER_RETRANSMITS_SENT,
+    SENDER_RETRANSMITTED_BYTES, SENDER_RTT_REPLIES_SENT, SENDER_SEND_FAILED, SENDER_SETUPS_SENT,
+    SENDER_SHORT_SENDS, SENDER_STATUS_MESSAGES_RECEIVED, SENDER_STATUS_MESSAGES_REJECTED,
 };
 use cavalry_shm::counters::{Counter, CounterId, CountersError};
 use cavalry_shm::log::{Positions, TermReader};
@@ -174,6 +174,17 @@ pub(crate) enum Request {
         /// The end of stream position the conductor stored.
         end_of_stream_position: i64,
     },
+    /// The recording a publication on a channel that names `ssc=true` follows while no
+    /// receiver answers, or none once that recording has stopped (`spec/udp.md`, "The
+    /// sender"; ADR 0098). A `None` is answered with [`Reply::Unfollowed`], whether or
+    /// not the sender still holds the publication, so that the conductor frees the
+    /// counter only after the sender has let it go.
+    Follow {
+        /// The publication.
+        registration_id: i64,
+        /// The recording's `recording.position` counter.
+        recording: Option<Counter>,
+    },
 }
 
 /// What the sender answers: the states only it can see.
@@ -197,6 +208,12 @@ pub(crate) enum Reply {
     /// The endpoint's socket is closed.
     EndpointClosed {
         /// The endpoint.
+        registration_id: i64,
+    },
+    /// The sender holds no recording's counter for the publication any more: the answer
+    /// to a [`Request::Follow`] with no recording.
+    Unfollowed {
+        /// The publication.
         registration_id: i64,
     },
 }
@@ -224,6 +241,8 @@ pub(crate) struct Statics {
     publication_disconnected: Counter,
     receive_failed: Counter,
     rejected_frame: Counter,
+    bytes_unsent: Counter,
+    rejected_position: Counter,
 }
 
 impl Statics {
@@ -253,6 +272,8 @@ impl Statics {
             publication_disconnected: counter(PUBLICATION_DISCONNECTED)?,
             receive_failed: counter(RECEIVER_RECEIVE_FAILED)?,
             rejected_frame: counter(LOG_BUFFER_REJECTED_FRAME)?,
+            bytes_unsent: counter(SENDER_BYTES_UNSENT)?,
+            rejected_position: counter(LOG_BUFFER_REJECTED_POSITION)?,
         })
     }
 
@@ -333,6 +354,58 @@ struct Live {
     receivers: Vec<Receiver>,
     /// Its `sender.flow_control_receivers` gauge.
     receivers_gauge: Counter,
+    /// The `recording.position` of the live recording of a publication whose channel
+    /// names `ssc=true`: while no receiver answers, the sender position follows it and
+    /// no data goes (`spec/udp.md`, "The sender"; ADR 0098). `None` for every other
+    /// publication, and once the recording has stopped.
+    recording: Option<Counter>,
+}
+
+impl Live {
+    /// Moves the sender position up to the recording's position when the publication is
+    /// alone with its recording, a recording followed and no receiver answering, and
+    /// returns whether it moved. The recording's position is a frame boundary at most
+    /// the producer position, and the publisher's limit holds it within a window of
+    /// the sender position, so the reader crosses at most one term's end on the way; a
+    /// position the reader refuses is counted and the sender position stays.
+    fn follow_recording(&mut self, statics: &Statics) -> bool {
+        if self.connection != ConnectionState::Disconnected {
+            return false;
+        }
+        let Some(recording) = &self.recording else {
+            return false;
+        };
+        let target = recording.load_acquire();
+        if target <= self.sender_position {
+            return false;
+        }
+        let term_length = i64::from(self.positions.term_length());
+        // Three seeks cross two term ends: more than a recorder a window ahead needs.
+        for _ in 0..3 {
+            let position = self.reader.position();
+            if position >= target {
+                break;
+            }
+            let term_end =
+                position - i64::from(self.positions.term_offset_of(position)) + term_length;
+            if self.reader.seek(target.min(term_end)).is_err() {
+                break;
+            }
+        }
+        let reached = self.reader.position();
+        if reached != target {
+            // Not a frame boundary the reader can stand on, or further than a publisher
+            // can be: the value is not this publication's recording's.
+            statics.rejected_position.increment();
+        }
+        if reached <= self.sender_position {
+            return false;
+        }
+        statics.bytes_unsent.add(reached - self.sender_position);
+        self.sender_position = reached;
+        self.position.store_release(reached);
+        true
+    }
 }
 
 /// One send endpoint: its socket, on this thread from the conductor's add until its
@@ -835,6 +908,7 @@ impl Sender {
                     flow_control: add.flow_control,
                     receivers: add.receiver_table,
                     receivers_gauge: add.receivers,
+                    recording: None,
                 });
             }
             Request::Close {
@@ -855,6 +929,33 @@ impl Sender {
                     // ended: closed at once, so the conductor's close completes, as a
                     // remove of an endpoint it does not hold is answered.
                     None => self.reply(Reply::Closed { registration_id }),
+                }
+            }
+            Request::Follow {
+                registration_id,
+                recording,
+            } => {
+                let live = self
+                    .live
+                    .iter_mut()
+                    .find(|live| live.registration_id == registration_id);
+                match recording {
+                    // A publication the sender no longer holds follows nothing: the
+                    // handle is dropped here.
+                    Some(recording) => {
+                        if let Some(live) = live {
+                            live.recording = Some(recording);
+                        }
+                    }
+                    // The recording stopped: one last look, so that a publication alone
+                    // with it ends where the recording ended, then the counter goes.
+                    None => {
+                        if let Some(live) = live {
+                            live.follow_recording(&self.statics);
+                            live.recording = None;
+                        }
+                        self.reply(Reply::Unfollowed { registration_id });
+                    }
                 }
             }
         }
@@ -1238,8 +1339,22 @@ impl Sender {
             work += 1;
         }
 
-        // 3. Data: one burst of whole committed frames up to the sender limit.
-        let room = live.sender_limit.saturating_sub(live.sender_position);
+        // Alone with its recording (`spec/udp.md`, "The sender"; ADR 0098): a recording
+        // followed and no receiver answering. The sender position moves with the
+        // recorder's and no data goes; a setup frame above or a heartbeat below names
+        // the position a receiver joins at.
+        let alone = live.connection == ConnectionState::Disconnected && live.recording.is_some();
+        if alone && live.follow_recording(statics) {
+            work += 1;
+        }
+
+        // 3. Data: one burst of whole committed frames up to the sender limit; none
+        //    while the publication is alone with its recording.
+        let room = if alone {
+            0
+        } else {
+            live.sender_limit.saturating_sub(live.sender_position)
+        };
         let burst = Burst::gather(
             &live.reader,
             live.positions,
@@ -1269,7 +1384,7 @@ impl Sender {
                 live.limited = false;
             }
             work += 1;
-        } else if room <= 0 && !live.limited {
+        } else if room <= 0 && !live.limited && !alone {
             // No window at all: a committed frame waiting is the limited state.
             limited = live
                 .reader
