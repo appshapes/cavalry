@@ -422,12 +422,7 @@ pub fn parse_slot(
     if bytes.len() < SLOT_HEADER_LENGTH + count * ENTRY_LENGTH {
         return Err(RecordingsError::Checksum);
     }
-    let stored = u32::from_le_bytes(
-        bytes
-            .first_chunk::<4>()
-            .copied()
-            .unwrap_or_default(),
-    );
+    let stored = u32::from_le_bytes(bytes.first_chunk::<4>().copied().unwrap_or_default());
     if stored != slot_checksum(bytes, count) {
         return Err(RecordingsError::Checksum);
     }
@@ -540,9 +535,7 @@ impl RecordingsFile {
         ];
         // A creation a crash tore: creation writes one list, the empty one of
         // sequence 0, so a zero magic over any other list is not one.
-        let written = |slot: &Result<i64, RecordingsError>, list: &Vec<ListedRecording>| {
-            matches!(slot, Ok(sequence) if *sequence > 0 || !list.is_empty())
-        };
+        let written = |slot: &Result<i64, RecordingsError>, list: &Vec<ListedRecording>| matches!(slot, Ok(sequence) if *sequence > 0 || !list.is_empty());
         let zero_magic = bytes.get(..8).is_some_and(|magic| magic == [0u8; 8]);
         let torn_creation = file_length < HEADER_LENGTH as u64
             || (zero_magic && !written(&slots[0], &lists[0]) && !written(&slots[1], &lists[1]));
@@ -686,7 +679,9 @@ mod tests {
         let second = [listed(0, 0), listed(3, 192), listed(4, 160)];
         // An entry that begins below the one before it is refused, and nothing changes.
         assert_eq!(
-            file.write(second).expect_err("an entry out of order").reason(),
+            file.write(second)
+                .expect_err("an entry out of order")
+                .reason(),
             "position"
         );
         assert_eq!(file.entries(), &first);
@@ -716,11 +711,15 @@ mod tests {
         // sequence 3 into slot 1: its sequence and count are there, its entries not.
         drop(file);
         let path = RecordingsFile::path_in(&dir);
-        let raw = OpenOptions::new().write(true).open(&path).expect("the file");
+        let raw = OpenOptions::new()
+            .write(true)
+            .open(&path)
+            .expect("the file");
         let mut torn = [0u8; 12];
         torn[..4].copy_from_slice(&3i32.to_le_bytes());
         torn[4..].copy_from_slice(&3i64.to_le_bytes());
-        raw.write_all_at(&torn, slot_offset(1) + 4).expect("a write");
+        raw.write_all_at(&torn, slot_offset(1) + 4)
+            .expect("a write");
         drop(raw);
         let mut file = RecordingsFile::open(&dir, 0).expect("the file opens");
         assert_eq!(file.entries(), &[listed(0, 0), listed(1, 96)]);
@@ -746,7 +745,10 @@ mod tests {
         file.write([listed(5, 0)]).expect("the list is written");
         drop(file);
         // A zero magic over a list is damage: creation never writes one.
-        let raw = OpenOptions::new().write(true).open(&path).expect("the file");
+        let raw = OpenOptions::new()
+            .write(true)
+            .open(&path)
+            .expect("the file");
         raw.write_all_at(&[0u8; 8], 0).expect("a write");
         assert_eq!(
             RecordingsFile::open(&dir, 1)
@@ -755,10 +757,18 @@ mod tests {
             "not-ready"
         );
         raw.write_all_at(&MAGIC, 0).expect("a write");
-        assert_eq!(RecordingsFile::open(&dir, 1).expect("whole").entries().len(), 1);
+        assert_eq!(
+            RecordingsFile::open(&dir, 1)
+                .expect("whole")
+                .entries()
+                .len(),
+            1
+        );
         // Both slots torn: damage.
-        raw.write_all_at(&[0xFF; 4], slot_offset(0)).expect("a write");
-        raw.write_all_at(&[0xFF; 4], slot_offset(1)).expect("a write");
+        raw.write_all_at(&[0xFF; 4], slot_offset(0))
+            .expect("a write");
+        raw.write_all_at(&[0xFF; 4], slot_offset(1))
+            .expect("a write");
         assert_eq!(
             RecordingsFile::open(&dir, 1)
                 .expect_err("neither slot whole")
@@ -768,12 +778,16 @@ mod tests {
         // A file cut short, and one with bytes after its end.
         raw.set_len(FILE_LENGTH as u64 - 1).expect("a length");
         assert_eq!(
-            RecordingsFile::open(&dir, 1).expect_err("cut short").reason(),
+            RecordingsFile::open(&dir, 1)
+                .expect_err("cut short")
+                .reason(),
             "too-short"
         );
         raw.set_len(FILE_LENGTH as u64 + 1).expect("a length");
         assert_eq!(
-            RecordingsFile::open(&dir, 1).expect_err("too long").reason(),
+            RecordingsFile::open(&dir, 1)
+                .expect_err("too long")
+                .reason(),
             "length"
         );
         std::fs::remove_dir_all(&dir).expect("the directory is removed");

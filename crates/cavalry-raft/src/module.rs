@@ -28,6 +28,8 @@ use cavalry_client::{
     Replay, Subscription,
 };
 use cavalry_log::catalog::{CatalogError, CatalogReader};
+use cavalry_log::layout::State;
+use cavalry_log::recordings::{ListedRecording, RecordingsError, RecordingsFile};
 use cavalry_log::terms::{NO_RECORDING, TermsError, TermsFile};
 use cavalry_proto::client_protocol::{ErrorCode, FOLLOW_LENGTH, ReplayStopReason};
 use cavalry_proto::cluster::{
@@ -71,6 +73,7 @@ const NO_SYNC_ASKED: i64 = -1;
 const DOC: &str = "docs/reference/cluster.md#roles-and-the-election";
 const DOC_MEMBERS: &str = "docs/reference/cluster.md#members-and-streams";
 const DOC_LOG_RECORDINGS: &str = "docs/reference/cluster.md#the-logs-recordings";
+const DOC_KEPT_LOG: &str = "docs/reference/durable-log.md#log-recordings";
 
 /// Why a consensus module did not start, or stopped.
 #[derive(Debug)]
@@ -79,13 +82,25 @@ pub enum RaftError {
     Members(MembersError),
     /// The member id is not one of the string's.
     Member(MembersRefused),
-    /// The member's log directory holds a term or a vote: a member of this version
-    /// does not start again on its log (`spec/cluster.md`, "A member's start").
-    Restart {
-        /// The highest term in the record, −1 for none.
-        log_leadership_term_id: i64,
-        /// The candidate term stored, −1 for none.
-        candidate_term: i64,
+    /// The member's record of its log's recordings, the `log-recordings` file in its
+    /// log directory, could not be read or written (`spec/durable-log.md`, "Log
+    /// recordings"; ADR 0108). At a start the member does not start. In a duty cycle
+    /// the recording that was to join the member's log is no part of it yet, and the
+    /// next cycle writes the record again.
+    Recordings(RecordingsError),
+    /// The catalog in the member's log directory holds, under an id the member's
+    /// record of its log's recordings names, a recording that begins elsewhere or is
+    /// of another stream: the catalog is not the one the record was written beside
+    /// (ADR 0108).
+    ListedRecording {
+        /// The recording the record names.
+        recording_id: i64,
+        /// Where the record says it begins.
+        listed_start: i64,
+        /// Where the catalog says it begins.
+        catalog_start: i64,
+        /// The stream the catalog says it is of.
+        catalog_stream_id: i32,
     },
     /// The `terms` file could not be read or written.
     Terms(TermsError),
@@ -131,14 +146,15 @@ pub enum RaftError {
 }
 
 impl RaftError {
-    /// The reason's name: `members`, `member`, `restart`, `terms`, `catalog`, `client`,
-    /// `poll`, `unsupported`, `payload-too-long`, `offer`, `stop-timeout` or
-    /// `log-recordings`.
+    /// The reason's name: `members`, `member`, `recordings`, `listed-recording`,
+    /// `terms`, `catalog`, `client`, `poll`, `unsupported`, `payload-too-long`, `offer`,
+    /// `stop-timeout` or `log-recordings`.
     pub const fn reason(&self) -> &'static str {
         match self {
             RaftError::Members(_) => "members",
             RaftError::Member(_) => "member",
-            RaftError::Restart { .. } => "restart",
+            RaftError::Recordings(_) => "recordings",
+            RaftError::ListedRecording { .. } => "listed-recording",
             RaftError::Terms(_) => "terms",
             RaftError::Catalog(_) => "catalog",
             RaftError::Client(_) => "client",
@@ -160,20 +176,22 @@ impl core::fmt::Display for RaftError {
                 write!(f, "member refused ({reason}): {error}; see {DOC_MEMBERS}")
             }
             RaftError::Member(error) => write!(f, "member refused ({reason}): {error}"),
-            RaftError::Restart {
-                log_leadership_term_id,
-                candidate_term,
+            RaftError::Recordings(error) => write!(f, "member stopped ({reason}): {error}"),
+            RaftError::ListedRecording {
+                recording_id,
+                listed_start,
+                catalog_start,
+                catalog_stream_id,
             } => write!(
                 f,
-                "member refused ({reason}): the log directory holds term \
-                 {log_leadership_term_id} and candidate term {candidate_term}, and a member \
-                 of this version does not start again on its log: the consensus module does \
-                 not yet read back which recordings hold it. The cluster goes on without \
-                 this member while a quorum of the others runs. To have every member again, \
-                 start the cluster again as a new cluster, every member on a new log \
-                 directory. Do not start this member alone on a new log directory: it would \
-                 join with no record of its votes or its log, and can then help elect a \
-                 leader that lacks a committed entry; see {DOC}"
+                "member refused ({reason}): the member's record of its log's recordings \
+                 names recording {recording_id} as part of its log from position \
+                 {listed_start}, and the catalog in its log directory holds under that id a \
+                 recording of stream {catalog_stream_id} that begins at {catalog_start}: \
+                 the `log-recordings` file and the `catalog` are not of one directory. \
+                 Start the member with the log directory it had, whole, as its driver \
+                 left it. If that directory is lost, the cluster goes on without this \
+                 member while a quorum of the others runs; see {DOC_KEPT_LOG}"
             ),
             RaftError::Terms(error) => write!(f, "member stopped ({reason}): {error}"),
             RaftError::Catalog(error) => write!(
@@ -227,6 +245,7 @@ impl std::error::Error for RaftError {
             RaftError::Members(error) => Some(error),
             RaftError::Member(error) => Some(error),
             RaftError::Terms(error) => Some(error),
+            RaftError::Recordings(error) => Some(error),
             RaftError::Catalog(error) => Some(error),
             RaftError::Client(error) => Some(error),
             RaftError::Poll(fault) => Some(fault),
@@ -246,6 +265,12 @@ impl From<ClientError> for RaftError {
 impl From<TermsError> for RaftError {
     fn from(error: TermsError) -> Self {
         RaftError::Terms(error)
+    }
+}
+
+impl From<RecordingsError> for RaftError {
+    fn from(error: RecordingsError) -> Self {
+        RaftError::Recordings(error)
     }
 }
 
@@ -323,8 +348,13 @@ struct Held {
     floor: i64,
     /// Whether the election has been told this recording's image: [`Io::log_image`]
     /// has returned its start for the image's session, or [`Io::catchup_image`] has
-    /// returned it. Only then is the recording part of the member's log.
+    /// returned it. Only then can the recording become part of the member's log.
     checked: bool,
+    /// Whether the member's record of its log's recordings names this recording (ADR
+    /// 0108). Only then is it part of the member's log: the member reports no
+    /// position this recording holds before the record that names it is synced, so
+    /// that a member that starts again finds every recording it reported from.
+    listed: bool,
 }
 
 impl Held {
@@ -337,7 +367,21 @@ impl Held {
     /// the log and counts once the replay's recording has reached its start (ADR
     /// 0094).
     fn carries_on_from(&self, end: i64) -> bool {
+        self.listed && self.would_carry_on_from(end)
+    }
+
+    /// [`Self::carries_on_from`] but for the record of the log's recordings: what
+    /// makes this recording one to list.
+    fn would_carry_on_from(&self, end: i64) -> bool {
         self.checked && self.start >= self.floor && self.start <= end
+    }
+
+    /// This recording as the record of the log's recordings names it.
+    fn as_listed(&self) -> ListedRecording {
+        ListedRecording {
+            recording_id: self.recording.recording_id(),
+            start_position: self.start,
+        }
     }
 }
 
@@ -381,6 +425,11 @@ struct ClientIo {
     /// The recordings of the log this member stopped, in position order: the last
     /// [`KEPT_RECORDINGS`], allocated at the member's start.
     kept: VecDeque<Kept>,
+    /// The member's record of its log's recordings, in its log directory: the ones
+    /// kept and the ones being made that are part of the log (ADR 0108).
+    recordings: RecordingsFile,
+    /// Whether that record names `log_recording`, as [`Held::listed`].
+    log_listed: bool,
     /// The replay this member started for each peer and has not yet said the end of,
     /// by the peer's place in `peers`.
     replays: Vec<Option<Replay>>,
@@ -517,6 +566,7 @@ fn take_started(
             start: descriptor.start_position(),
             floor,
             checked: false,
+            listed: false,
         })),
         Err(error) => {
             *starting = Some(recording);
@@ -525,7 +575,143 @@ fn take_started(
     }
 }
 
+/// Writes the member's record of its log's recordings (`spec/durable-log.md`, "Log
+/// recordings"; ADR 0108): the recordings it keeps, in the order they begin, and after
+/// them the ones it is making that are part of its log or are to be, `open`, its
+/// recording of a replay and then its recording of the live log or of the log it
+/// leads. One write and one sync, when a recording joins the log or a truncation has
+/// cut it, and no allocation.
+fn write_list(
+    recordings: &mut RecordingsFile,
+    kept: &VecDeque<Kept>,
+    open: [Option<ListedRecording>; 2],
+) -> Result<(), RaftError> {
+    let entries = kept
+        .iter()
+        .map(|kept| ListedRecording {
+            recording_id: kept.recording_id,
+            start_position: kept.start,
+        })
+        .chain(open.into_iter().flatten());
+    Ok(recordings.write(entries)?)
+}
+
+/// The log a member kept, read back at its start (`spec/cluster.md`, "A member's
+/// start"; ADR 0108): the recordings its record names that the catalog still holds,
+/// from the first of them, each carrying the log on from where the ones before it
+/// end. Returns the table of them and where the log ends.
+///
+/// A recording the record names and the catalog no longer holds was purged, by a
+/// truncation the member's stop cut short or by retention: before the first one held
+/// it is skipped, and after it the log ends there, as it does at a recording that
+/// begins past where the ones before it end. A recording still being made, the
+/// driver having run on while the member was away, is stopped first, so that its
+/// stop is read once and is final. Under an id the record names, a recording that
+/// begins elsewhere or is of another stream is [`RaftError::ListedRecording`].
+fn kept_log(
+    client: &mut Cavalry,
+    catalog: &CatalogReader,
+    listed: &[ListedRecording],
+) -> Result<(VecDeque<Kept>, i64), RaftError> {
+    let mut kept = VecDeque::with_capacity(KEPT_RECORDINGS);
+    let mut end: Option<i64> = None;
+    for entry in listed {
+        let recording_id = entry.recording_id;
+        let descriptor = match catalog.get(recording_id) {
+            Ok(Some(descriptor)) if descriptor.state() == State::Valid => descriptor,
+            Ok(_) | Err(CatalogError::Unknown { .. }) => {
+                if end.is_none() {
+                    continue;
+                }
+                break;
+            }
+            Err(error) => return Err(error.into()),
+        };
+        if descriptor.start_position() != entry.start_position
+            || descriptor.stream_id() != LOG_STREAM_ID
+        {
+            return Err(RaftError::ListedRecording {
+                recording_id,
+                listed_start: entry.start_position,
+                catalog_start: descriptor.start_position(),
+                catalog_stream_id: descriptor.stream_id(),
+            });
+        }
+        if end.is_some_and(|end| entry.start_position > end) {
+            break;
+        }
+        let stop = if descriptor.is_live() {
+            match client.stop_recording(recording_id) {
+                Ok(()) => {}
+                // Stopped between the catalog's read and the command.
+                Err(ClientError::Refused {
+                    code: Some(ErrorCode::UnknownRecording),
+                    ..
+                }) => {}
+                Err(error) => return Err(error.into()),
+            }
+            let deadline = Instant::now() + STOP_TIMEOUT;
+            loop {
+                if let Some(stop) = catalog.stop_position(recording_id)? {
+                    break stop;
+                }
+                if Instant::now() >= deadline {
+                    return Err(RaftError::StopTimeout { recording_id });
+                }
+                std::thread::sleep(Duration::from_micros(50));
+            }
+        } else {
+            descriptor.stop_position()
+        };
+        end = Some(end.map_or(stop, |end| end.max(stop)));
+        if stop > entry.start_position {
+            if kept.len() >= KEPT_RECORDINGS {
+                kept.pop_front();
+            }
+            kept.push_back(Kept {
+                recording_id,
+                start: entry.start_position,
+                stop,
+            });
+        }
+    }
+    Ok((kept, end.unwrap_or(0)))
+}
+
 impl ClientIo {
+    /// Makes the recordings that have come to carry the member's log on part of it
+    /// (ADR 0108): its recording of a replay, once the election was told its image
+    /// and it begins where the log ends, and its recording of the live log, once the
+    /// election was told its image and the log has reached where it begins. The
+    /// member's record of its log's recordings is written with them, synced, and only
+    /// then do they count: [`Io::append_position`] reports nothing either holds
+    /// before. A record that cannot be written leaves them out of the log, and the
+    /// next duty cycle writes it again. Nothing is written in a cycle in which no
+    /// recording joins.
+    fn list_counted(&mut self) -> Result<(), RaftError> {
+        let end = self.stopped_at;
+        let joins = |held: &&Held| held.checked && held.start == end;
+        let replay = self.catchup_held.as_ref().filter(joins);
+        let reached = replay.map_or(end, |held| end.max(held.recording.synced_position()));
+        let live = self
+            .held
+            .as_ref()
+            .filter(|held| held.would_carry_on_from(reached));
+        if !replay.is_some_and(|held| !held.listed) && !live.is_some_and(|held| !held.listed) {
+            return Ok(());
+        }
+        let open = [replay.map(Held::as_listed), live.map(Held::as_listed)];
+        let (replay, live) = (replay.is_some(), live.is_some());
+        write_list(&mut self.recordings, &self.kept, open)?;
+        if let Some(held) = self.catchup_held.as_mut().filter(|_| replay) {
+            held.listed = true;
+        }
+        if let Some(held) = self.held.as_mut().filter(|_| live) {
+            held.listed = true;
+        }
+        Ok(())
+    }
+
     /// Where this member's log ends below its recording of the live log: the end of
     /// the recordings it has stopped, and past it what its recording of a replay has
     /// synced, once the election was told the replay's image and when that recording
@@ -534,7 +720,7 @@ impl ClientIo {
         let end = self.stopped_at;
         self.catchup_held
             .as_ref()
-            .filter(|held| held.checked && held.start == end)
+            .filter(|held| held.checked && held.listed && held.start == end)
             .map_or(end, |held| end.max(held.recording.synced_position()))
     }
 
@@ -559,7 +745,7 @@ impl ClientIo {
                 start: held.start,
                 stop,
             };
-            if held.checked && kept.start == self.stopped_at {
+            if held.checked && held.listed && kept.start == self.stopped_at {
                 self.stopped_at = stop;
                 self.keep(kept);
             }
@@ -611,7 +797,10 @@ impl ClientIo {
 
     /// Keeps a recording this member stopped, for the replays a leader serves. A full
     /// table forgets its oldest: that recording stays in the driver's catalog, and
-    /// this member no longer replays it (ADR 0091).
+    /// this member no longer replays it (ADR 0091). The record of the log's
+    /// recordings names it until its next write, which is of the table as it then
+    /// is; a member that starts meanwhile keeps the last [`KEPT_RECORDINGS`] the
+    /// record names, as here (ADR 0108).
     fn keep(&mut self, kept: Kept) {
         if self.kept.len() >= KEPT_RECORDINGS {
             self.kept.pop_front();
@@ -654,7 +843,7 @@ impl ClientIo {
         let replayed = self
             .catchup_held
             .as_ref()
-            .filter(|held| held.checked && held.start == end)
+            .filter(|held| held.checked && held.listed && held.start == end)
             .map(|held| LogRecording {
                 recording_id: held.recording.recording_id(),
                 start_position: held.start,
@@ -796,8 +985,8 @@ impl Io for ClientIo {
     }
 
     /// The `terms` file's stored candidate term as the module holds it in memory. The
-    /// core reads it once, in its first init (ADR 0089), and reads −1: the module
-    /// refuses a log directory that holds one ([`RaftError::Restart`]).
+    /// core reads it once, in its first init (ADR 0089): −1 on a new log directory,
+    /// and what the member stored on one it kept (ADR 0108).
     fn candidate_term(&mut self) -> i64 {
         self.terms.candidate_term()
     }
@@ -850,6 +1039,20 @@ impl Io for ClientIo {
                     .start_recording(&self.log_control_channel, LOG_STREAM_ID)?,
             );
             self.sync_asked_at = NO_SYNC_ASKED;
+            self.log_listed = false;
+        }
+        // The recording is part of the member's log once the record of the log's
+        // recordings names it, and the leader appends nothing before (ADR 0108). A
+        // record that could not be written returns here, and the step is tried again.
+        if !self.log_listed
+            && let Some(recording) = self.log_recording.as_ref()
+        {
+            let own = ListedRecording {
+                recording_id: recording.recording_id(),
+                start_position: self.log_base,
+            };
+            write_list(&mut self.recordings, &self.kept, [None, Some(own)])?;
+            self.log_listed = true;
         }
         Ok(self.log_recording.as_ref().map(|recording| Log {
             session_id: publication.session_id(),
@@ -972,11 +1175,14 @@ impl Io for ClientIo {
             };
             self.log_recording = None;
             // A leader's recording begins at its term's base, which was its append
-            // position, the end of its log, when it began to lead.
-            if kept.start == self.stopped_at {
+            // position, the end of its log, when it began to lead. One the record of
+            // the log's recordings never named is no part of the log: nothing was
+            // appended to it.
+            if kept.start == self.stopped_at && self.log_listed {
                 self.stopped_at = stop;
                 self.keep(kept);
             }
+            self.log_listed = false;
         }
         if let Some(publication) = self.log_publication.take() {
             publication.close()?;
@@ -1048,13 +1254,17 @@ impl Io for ClientIo {
         }
         // A recording cut to where it begins holds nothing to replay.
         self.kept.retain(|kept| kept.stop > kept.start);
+        // The record of the log's recordings, without what was purged, before the
+        // record of terms: a member that stops between the two starts again with a
+        // term based above the end of its log, which it then deletes (ADR 0108).
+        write_list(&mut self.recordings, &self.kept, [None, None])?;
         self.terms.truncate_above(position)?;
         self.stopped_at = self.stopped_at.min(position);
         Ok(Some(self.terms.log_leadership_term_id()))
     }
 
     fn append_position(&mut self) -> i64 {
-        if let Some(recording) = &self.log_recording {
+        if let Some(recording) = self.log_recording.as_ref().filter(|_| self.log_listed) {
             ask_sync(&mut self.client, recording, &mut self.sync_asked_at);
             return recording.synced_position();
         }
@@ -1065,7 +1275,7 @@ impl Io for ClientIo {
         if let Some(held) = self
             .catchup_held
             .as_ref()
-            .filter(|held| held.checked && held.start == end)
+            .filter(|held| held.checked && held.listed && held.start == end)
         {
             ask_sync(
                 &mut self.client,
@@ -1535,9 +1745,15 @@ impl ConsensusModule {
     /// A log directory with no catalog is [`RaftError::Catalog`], and nothing is
     /// written into it: `log_dir` must be the directory the driver in `dir` was started
     /// with, whose catalog says where each of the member's recordings of the log
-    /// begins (ADR 0093). A log directory that holds a term or a vote is
-    /// [`RaftError::Restart`]: a member of this version starts on a new log directory,
-    /// with every other member of its cluster.
+    /// begins (ADR 0093).
+    ///
+    /// On the log directory it kept the member takes up its log (`spec/cluster.md`, "A
+    /// member's start"; ADR 0089, ADR 0108): the candidate term it stored, its record
+    /// of terms, and the recordings its record of the log's recordings names, each
+    /// with the stop the catalog holds for it, which is where its log ends. A term
+    /// the record of terms holds above that end is deleted: a truncation the member's
+    /// stop cut short. A directory of another member's, or a record the catalog does
+    /// not match, is refused with what to do.
     pub fn start(
         dir: impl AsRef<Path>,
         log_dir: impl AsRef<Path>,
@@ -1574,13 +1790,8 @@ impl ConsensusModule {
         // the `terms` file, which is created when it is not there, so that a
         // directory the module refuses is left as it was.
         let catalog = CatalogReader::open(log_dir.as_ref())?;
-        let terms = TermsFile::open(log_dir.as_ref())?;
-        if terms.log_leadership_term_id() != -1 || terms.candidate_term() != -1 {
-            return Err(RaftError::Restart {
-                log_leadership_term_id: terms.log_leadership_term_id(),
-                candidate_term: terms.candidate_term(),
-            });
-        }
+        let mut terms = TermsFile::open(log_dir.as_ref())?;
+        let mut recordings = RecordingsFile::open(log_dir.as_ref(), member_id)?;
 
         let recordings_path = dir
             .as_ref()
@@ -1589,6 +1800,19 @@ impl ConsensusModule {
             "{LOG_RECORDINGS_FILE_PREFIX}{member_id}{LOG_RECORDINGS_TMP_SUFFIX}"
         ));
         let mut client = Cavalry::connect_to(dir)?;
+        // The log the member kept, before it reads a message: its recordings, where
+        // they end, and a record of terms that holds no term above that end.
+        let (kept, stopped_at) = kept_log(&mut client, &catalog, recordings.entries())?;
+        terms.truncate_above(stopped_at)?;
+        let unchanged = recordings.entries().len() == kept.len()
+            && recordings
+                .entries()
+                .iter()
+                .zip(&kept)
+                .all(|(listed, kept)| listed.recording_id == kept.recording_id);
+        if !unchanged {
+            write_list(&mut recordings, &kept, [None, None])?;
+        }
         let consensus =
             client.add_subscription(&endpoint_channel(&own.consensus), CONSENSUS_STREAM_ID)?;
         let mut peers = Vec::with_capacity(MAX_MEMBERS);
@@ -1634,7 +1858,9 @@ impl ConsensusModule {
                 destinations_added: 0,
                 log_recording: None,
                 log_base: 0,
-                kept: VecDeque::with_capacity(KEPT_RECORDINGS),
+                kept,
+                recordings,
+                log_listed: false,
                 replays,
                 log_subscription: None,
                 armed: None,
@@ -1643,7 +1869,7 @@ impl ConsensusModule {
                 held: None,
                 log_floor: 0,
                 catalog,
-                stopped_at: 0,
+                stopped_at,
                 sync_asked_at: NO_SYNC_ASKED,
                 recordings_path,
                 recordings_tmp_path,
@@ -1704,6 +1930,10 @@ impl ConsensusModule {
         // faults at a step it tries again each cycle, a replay it cannot start, still
         // shows its role, its state and its counts (ADR 0091).
         let stepped = core.do_work(clock, io);
+        // A recording the election was just told of joins the member's log here, with
+        // the record that names it synced; the next cycle reports what it holds (ADR
+        // 0108). Its error is returned after the core's own.
+        let listed = io.list_counted();
         // The file of the log's recordings is written before the counter names a
         // recording it did not name (`spec/cluster.md`, "The service"; ADR 0103). A
         // file that could not be written leaves the counter at −1, and the next
@@ -1726,6 +1956,7 @@ impl ConsensusModule {
             .counters
             .store(&self.core, self.messages_rejected, log_recording_id);
         let work = read + stepped?;
+        listed?;
         written?;
         Ok(work)
     }
