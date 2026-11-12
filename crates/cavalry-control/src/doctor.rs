@@ -1066,14 +1066,18 @@ fn election_cause_text(code: i64) -> String {
         3 => "it led and its active members fell below a quorum".to_string(),
         4 => "a message carried a term above its own".to_string(),
         5 => "its election before failed".to_string(),
-        _ => format!("of cause {code}, one this doctor does not know"),
+        _ => format!(
+            "of cause {code}, one this doctor does not know: run the doctor of the \
+             driver's own version"
+        ),
     }
 }
 
 /// What the members string doctor was given says of the cluster: its members' ids, so
 /// that doctor knows whether the driver's member is in it, and the appointed leader
-/// among them (`spec/cluster.md`, "The appointed leader"); and each member's consensus
-/// and log endpoints, so that a check of a path between two members names their ports.
+/// among them (`spec/cluster.md`, "The appointed leader"); and each member's consensus,
+/// log and catchup endpoints, so that a check of a path between two members names
+/// their ports.
 #[derive(Clone, Debug, PartialEq, Eq)]
 struct Cluster {
     ids: [i32; MAX_MEMBERS],
@@ -1082,6 +1086,9 @@ struct Cluster {
     consensus: [String; MAX_MEMBERS],
     /// Each member's log endpoint, `host:port`, in the order of `ids`.
     log: [String; MAX_MEMBERS],
+    /// Each member's catchup endpoint, `host:port`, in the order of `ids`: where a
+    /// leader's replay reaches a member that replicates or catches up.
+    catchup: [String; MAX_MEMBERS],
 }
 
 /// An endpoint of the members string as the string writes it, `host:port`, an IPv6
@@ -1106,16 +1113,19 @@ impl Cluster {
             count,
             consensus: Default::default(),
             log: Default::default(),
+            catchup: Default::default(),
         };
         for (index, member) in parsed.iter().take(count).enumerate() {
-            if let (Some(id), Some(consensus), Some(log)) = (
+            if let (Some(id), Some(consensus), Some(log), Some(catchup)) = (
                 cluster.ids.get_mut(index),
                 cluster.consensus.get_mut(index),
                 cluster.log.get_mut(index),
+                cluster.catchup.get_mut(index),
             ) {
                 *id = member.id;
                 *consensus = endpoint_text(&member.consensus);
                 *log = endpoint_text(&member.log);
+                *catchup = endpoint_text(&member.catchup);
             }
         }
         Some(cluster)
@@ -1137,6 +1147,12 @@ impl Cluster {
     fn endpoints(&self, id: i32) -> Option<(&str, &str)> {
         let index = self.ids().iter().position(|&member| member == id)?;
         Some((self.consensus.get(index)?, self.log.get(index)?))
+    }
+
+    /// Member `id`'s catchup endpoint, none for an id the string does not hold.
+    fn catchup(&self, id: i32) -> Option<&str> {
+        let index = self.ids().iter().position(|&member| member == id)?;
+        self.catchup.get(index).map(String::as_str)
     }
 }
 
@@ -1387,13 +1403,19 @@ fn joined_late_message(member: &MemberCounters, cluster: Option<&Cluster>) -> St
     )
 }
 
-/// The path between member `id` and its leader that the member's election needs, as
-/// the members string names it: the leader's log to this member's log endpoint, and
-/// this member's consensus messages to the leader's consensus endpoint. In this version
-/// the leader is the appointed leader, the member with the lowest id.
+/// The path between a member and its leader that the member's election needs, as the
+/// members string names it: the leader's log to this member's log endpoint, the
+/// leader's replay to this member's catchup endpoint, and this member's consensus
+/// messages to the leader's consensus endpoint. The leader is the member that
+/// `cluster.leader_member_id` names (ADR 0102). A member whose gauge names none, or a
+/// member of a version before the gauge, has no leader to name: where its leader is
+/// appointed that is the member with the lowest id, and where it elects doctor says
+/// "its leader".
 struct LogPath {
     /// This member's log endpoint, followed by a comma.
     own_log: String,
+    /// This member's catchup endpoint, with no comma after it.
+    own_catchup: String,
     /// The leader, as a phrase: by its id with the members string, or by its place.
     leader: String,
     /// The leader's host, as a phrase.
@@ -1403,7 +1425,7 @@ struct LogPath {
 }
 
 impl LogPath {
-    /// The path of member `id`, its endpoints named from `cluster` when it holds the
+    /// The path of `member`, its endpoints named from `cluster` when it holds the
     /// member, and by their field in the member's entry when it does not.
     fn of(member: &MemberCounters, cluster: Option<&Cluster>) -> LogPath {
         let id = member.id;
@@ -1415,14 +1437,34 @@ impl LogPath {
                 format!("this member's log endpoint, the fourth field of its entry in {members},")
             }
         };
+        let own_catchup = match known.and_then(|cluster| cluster.catchup(id)) {
+            Some(catchup) => format!("this member's catchup endpoint in {members}, {catchup}"),
+            None => {
+                format!("this member's catchup endpoint, the fifth field of its entry in {members}")
+            }
+        };
         // The leader this member has taken, by its own gauge (ADR 0102): the member
-        // that leads, whichever path it leads by.
+        // that leads, whichever path it leads by. A member whose leader is appointed
+        // says so of the member it names, as it did before the gauge: the words are
+        // how `docs/how-to/run-a-cluster.md` tells the two paths' findings apart.
         if let Some(leader) = member.followed() {
             let consensus = known.and_then(|cluster| cluster.endpoints(leader));
+            let (name, host) = if member.elects() {
+                (
+                    format!("member {leader}"),
+                    format!("member {leader}'s host"),
+                )
+            } else {
+                (
+                    format!("member {leader}, the appointed leader"),
+                    format!("member {leader}'s host, the appointed leader's,"),
+                )
+            };
             return LogPath {
                 own_log,
-                leader: format!("member {leader}"),
-                leader_host: format!("member {leader}'s host"),
+                own_catchup,
+                leader: name,
+                leader_host: host,
                 leader_consensus: match consensus {
                     Some((consensus, _)) => {
                         format!("member {leader}'s consensus endpoint, {consensus}")
@@ -1437,6 +1479,7 @@ impl LogPath {
         if member.elects() {
             return LogPath {
                 own_log,
+                own_catchup,
                 leader: "its leader".to_string(),
                 leader_host: "its leader's host".to_string(),
                 leader_consensus: format!(
@@ -1453,6 +1496,7 @@ impl LogPath {
                     .map_or("", |(consensus, _)| consensus);
                 LogPath {
                     own_log,
+                    own_catchup,
                     leader: format!("member {leader}, the appointed leader"),
                     leader_host: format!("member {leader}'s host, the appointed leader's,"),
                     leader_consensus: format!("member {leader}'s consensus endpoint, {consensus}"),
@@ -1460,6 +1504,7 @@ impl LogPath {
             }
             _ => LogPath {
                 own_log,
+                own_catchup,
                 leader: "the appointed leader".to_string(),
                 leader_host: "the appointed leader's host".to_string(),
                 leader_consensus: format!(
@@ -1472,9 +1517,15 @@ impl LogPath {
 
     /// What to check of the path: both of its directions.
     fn check(&self) -> String {
+        self.check_toward("this member's log endpoint")
+    }
+
+    /// What to check of the path, the leader's direction toward `endpoints`, a phrase
+    /// for the endpoints of this member that its state receives on: the log endpoint
+    /// for the live log's image, the catchup endpoint for a replay.
+    fn check_toward(&self, endpoints: &str) -> String {
         format!(
-            "that {} reaches this member's log endpoint over UDP, and that this host reaches \
-             {}",
+            "that {} reaches {endpoints} over UDP, and that this host reaches {}",
             self.leader_host, self.leader_consensus
         )
     }
@@ -1543,19 +1594,44 @@ const ELECTING_JOINING_STATES: [i64; 8] = [9, 10, 11, 12, 13, 14, 15, 16];
 /// What a member that elects is told of the elections it has failed, as a sentence to
 /// end a finding with, empty when it has failed none. A member that elects begins
 /// again after each (`spec/cluster.md`, "Roles and the election"), so the count is
-/// history unless it keeps rising; the three counters beside it say which rule
-/// failed an election (`spec/cluster.md`, "Counters").
+/// history unless it keeps rising. Three counters beside it each count one rule that
+/// fails an election, and they do not hold every failure: an election also fails on a
+/// step that made no progress for the leader heartbeat timeout, on a log the member
+/// cannot join its leader with, and, for a member that leads before its election has
+/// closed, on a term above its own or on the loss of its quorum, the last counted in
+/// `cluster.leader_quorum_losses` (`counters.toml`, `cluster.elections_failed`). So
+/// the failures the three do not hold are counted out and said too.
 fn failed_elections_text(member: &MemberCounters) -> String {
     if member.elections_failed == 0 {
         return String::new();
     }
+    let timeout = LEADER_HEARTBEAT_TIMEOUT_NS / 1_000_000_000;
+    let named = member
+        .join_position_mismatches
+        .saturating_add(member.truncations_refused)
+        .saturating_add(member.replications_unavailable);
+    let others = member.elections_failed.saturating_sub(named);
+    let rest = if others > 0 {
+        format!(
+            " The other {others} failed on none of these three: a step that made no \
+             progress for the leader heartbeat timeout, {timeout} s, a log this member \
+             cannot join its leader with, or, while this member led and before its \
+             election closed, a term above its own or active members that fell below a \
+             quorum. cluster.leader_quorum_losses counts each time this member lost its \
+             quorum as a leader, before its election closed or after: {} on this member.",
+            member.leader_quorum_losses
+        )
+    } else {
+        String::new()
+    };
     format!(
         " {} of its elections have failed, and it began again after each: {} on an image \
          that joined somewhere other than where its log ends \
          (cluster.join_position_mismatches), {} on a truncation below a commit position it \
          knows (cluster.truncations_refused), and {} on a replication that did not move for \
-         the leader heartbeat timeout (cluster.log_replications_unavailable). If the count \
-         keeps rising, run doctor again and read which of the three rises with it.",
+         the leader heartbeat timeout (cluster.log_replications_unavailable).{rest} If the \
+         count keeps rising, run doctor again and read which of these counters rises with \
+         it.",
         member.elections_failed,
         member.join_position_mismatches,
         member.truncations_refused,
@@ -1566,6 +1642,10 @@ fn failed_elections_text(member: &MemberCounters) -> String {
 /// What `cluster-no-leader` says of a member that elects and has no leader: where its
 /// election stands, why it began, what elects a leader, and where to look when it
 /// stays so (`spec/cluster.md`, "Roles and the election", states 1 to 4; ADR 0077).
+/// In canvass it also says what a canvass after a replication is: a member that has
+/// replicated a term it missed goes back to canvass with no leader, in the election
+/// it was in, its cause as it was (follower log replication; ADR 0086), and what it
+/// waits for there is one member's answer and not a quorum's votes.
 fn electing_no_leader_message(
     member: &MemberCounters,
     state: i64,
@@ -1585,6 +1665,15 @@ fn electing_no_leader_message(
         ),
         None => format!("a quorum of the members in {members}"),
     };
+    let replicated = if state == 1 {
+        " A member that has replicated a term it missed from a leader's recordings also \
+         canvasses again, with no leader, in the same election: it waits there for that \
+         leader to answer its canvass position with the next new leadership term, and if \
+         it stays, this host and that leader's host do not reach each other's consensus \
+         endpoints."
+    } else {
+        ""
+    };
     format!(
         "member {id} follows no leader: its election is in {}{began}. The members elect \
          their leader: each canvasses, one that no member which reported is ahead of \
@@ -1593,7 +1682,7 @@ fn electing_no_leader_message(
          member to report, and nominates at once when all have. If this member stays \
          without a leader, fewer than a quorum of the members run or reach each other: run \
          doctor on each member's host, and check that each reaches the consensus endpoint \
-         of every other, the third field of its entry in {members}.{}",
+         of every other, the third field of its entry in {members}.{replicated}{}",
         election_state_name(state),
         failed_elections_text(member)
     )
@@ -1609,39 +1698,61 @@ fn electing_joining_message(
 ) -> String {
     let id = member.id;
     let timeout = LEADER_HEARTBEAT_TIMEOUT_NS / 1_000_000_000;
-    let members = MEMBERS_KEY.env;
     let path = LogPath::of(member, cluster);
     let replays = format!(
-        "The leader's replay must arrive, over UDP, on this member's catchup endpoint, \
-         the fifth field of its entry in {members}"
+        "The leader's replay must arrive, over UDP, on {}",
+        path.own_catchup
     );
-    let step = match state {
-        9 => format!(
-            "It replicates a term it missed from its leader's recordings, one replay for \
-             each request. {replays}"
+    // What the state does; which waits the leader heartbeat timeout bounds; and the
+    // endpoints of this member that the leader's host must reach for it.
+    let (step, waits, check) = match state {
+        9 => (
+            format!(
+                "It replicates a term it missed from its leader's recordings, one replay \
+                 for each request. {replays}"
+            ),
+            "Each wait",
+            path.check_toward("this member's catchup endpoint"),
         ),
-        10 => "It replays its own log, for as long as that takes".to_string(),
-        11..=13 => format!(
-            "It catches up within its leader's term: the leader replays what this member \
-             lacks while this member also records the live log, and the catch-up ends \
-             when its log reaches where that recording begins. {replays}, and an image of \
-             the leader's log on {}",
-            path.own_log.trim_end_matches(',')
+        // Its own replay needs no other member and has no timeout (`spec/cluster.md`,
+        // follower replay); what follows it is a catch-up or the live log's image.
+        10 => (
+            "It replays its own log first, for as long as that takes: no timeout bounds \
+             the replay, and it needs no other member. Then it joins its leader's log, \
+             through a catch-up when its append position is behind the leader's log \
+             position"
+                .to_string(),
+            "Each wait after the replay",
+            path.check_toward("this member's log endpoint and its catchup endpoint"),
         ),
-        _ => format!(
-            "An image of the leader's log must arrive, over UDP, on {} and this member's \
-             append position must reach the leader",
-            path.own_log
+        11..=13 => (
+            format!(
+                "It catches up within its leader's term: the leader replays what this \
+                 member lacks while this member also records the live log, and the \
+                 catch-up ends when its log reaches where that recording begins. \
+                 {replays}, and an image of the leader's log on {}",
+                path.own_log.trim_end_matches(',')
+            ),
+            "Each wait",
+            path.check_toward("this member's catchup endpoint and its log endpoint"),
+        ),
+        _ => (
+            format!(
+                "An image of the leader's log must arrive, over UDP, on {} and this \
+                 member's append position must reach the leader",
+                path.own_log
+            ),
+            "Each wait",
+            path.check(),
         ),
     };
     format!(
         "member {id} has taken its leader, {}, and joins its log: its election is in {}. \
-         {step}. Each wait is bounded by the leader heartbeat timeout, {timeout} s; when \
+         {step}. {waits} is bounded by the leader heartbeat timeout, {timeout} s; when \
          one is not met the election fails, counted in cluster.elections_failed, and the \
-         member begins again. If it does not close, check {}.{}",
+         member begins again. If it does not close, check {check}.{}",
         path.leader,
         election_state_name(state),
-        path.check(),
         failed_elections_text(member)
     )
 }
@@ -1756,14 +1867,22 @@ fn member_findings(
         });
     }
     if leads && member.leader_quorum_losses > 0 {
+        // The appointed leader stays the leader through a loss, its commit position
+        // where it was; a leader that elects stops leading and holds an election
+        // (`spec/cluster.md`, "The commit position"), so this one leads again.
+        let then = if member.elects() {
+            "each time it stopped leading and held an election, and it leads again now"
+        } else {
+            "nothing is committed while that lasts"
+        };
         findings.push(Finding {
             check: "cluster-quorum-lost",
             level: Level::Warn,
             message: format!(
                 "the leader, member {id}, has lost its quorum {} time(s): fewer than a \
-                 majority of the members reported within 10 s, and nothing is committed \
-                 while that lasts. Check that a majority of the members in {} run and reach \
-                 this member's consensus endpoint",
+                 majority of the members reported within 10 s, and {then}. Check that a \
+                 majority of the members in {} run and reach this member's consensus \
+                 endpoint",
                 member.leader_quorum_losses, MEMBERS_KEY.env
             ),
             doc: DOC_CLUSTER,
@@ -5056,8 +5175,10 @@ mod tests {
     /// A member that elects, one whose counters hold the two gauges and no counter of
     /// the appointed leader's, is told where its election stands, why it began and
     /// what elects a leader, and nothing of an appointed leader or of starting the
-    /// cluster again (ADR 0100, ADR 0102). The elections it has failed are named with
-    /// the three counters that say which rule failed each.
+    /// cluster again (ADR 0100, ADR 0102). In canvass it is told what a canvass after
+    /// a replication waits for. The elections it has failed are counted against the
+    /// three counters that each name a rule, and those the three do not hold are
+    /// counted out, with what else fails an election.
     #[test]
     fn a_member_that_elects_and_has_no_leader_is_told_why_its_election_began() {
         let cluster = Cluster::of(Some(THREE_MEMBERS)).expect("the members string parses");
@@ -5100,13 +5221,77 @@ mod tests {
             message.contains("waits in canvass up to 60 s for every member to report"),
             "{message}"
         );
+        let replicated = "the third field of its entry in CAVALRY_CLUSTER_MEMBERS. A member \
+                          that has replicated a term it missed from a leader's recordings \
+                          also canvasses again, with no leader, in the same election: it \
+                          waits there for that leader to answer its canvass position with \
+                          the next new leadership term, and if it stays, this host and that \
+                          leader's host do not reach each other's consensus endpoints.";
+        assert!(message.ends_with(replicated), "{message}");
+        for absent in [
+            "appointed",
+            "new cluster",
+            "lowest id",
+            "elections have failed",
+        ] {
+            assert!(!message.contains(absent), "{absent}: {message}");
+        }
+
+        // The canvass after a replication: no leader, the cause as it was, and the
+        // same sentence. A state that is not canvass does not say it.
+        let after_replication = [
+            (CLUSTER_ROLE, 0),
+            (CLUSTER_ELECTION_STATE, 1),
+            (CLUSTER_LEADERSHIP_TERM_ID, 4),
+            (CLUSTER_LEADER_MEMBER_ID, -1),
+            (CLUSTER_ELECTION_CAUSE, 4),
+        ];
+        let (_, findings) =
+            cluster_findings_in("elects-after-replication", 2, None, &after_replication);
+        let message = &findings[1].message;
+        assert!(
+            message.starts_with(
+                "member 2 follows no leader: its election is in canvass, and began because \
+                 a message carried a term above its own."
+            ),
+            "{message}"
+        );
+        assert!(message.ends_with(replicated), "{message}");
+        let nominate = [
+            (CLUSTER_ROLE, 0),
+            (CLUSTER_ELECTION_STATE, 2),
+            (CLUSTER_LEADERSHIP_TERM_ID, 4),
+            (CLUSTER_LEADER_MEMBER_ID, -1),
+            (CLUSTER_ELECTION_CAUSE, 4),
+        ];
+        let (_, findings) = cluster_findings_in("elects-nominate", 2, None, &nominate);
+        let message = &findings[1].message;
+        assert!(
+            message.contains("its election is in nominate,"),
+            "{message}"
+        );
         assert!(
             message.ends_with("the third field of its entry in CAVALRY_CLUSTER_MEMBERS."),
             "{message}"
         );
-        for absent in ["appointed", "new cluster", "lowest id"] {
-            assert!(!message.contains(absent), "{absent}: {message}");
-        }
+        // A candidate, in its ballot, is a member with no leader too.
+        let ballot = [
+            (CLUSTER_ROLE, 1),
+            (CLUSTER_ELECTION_STATE, 3),
+            (CLUSTER_LEADERSHIP_TERM_ID, 4),
+            (CLUSTER_LEADER_MEMBER_ID, -1),
+            (CLUSTER_ELECTION_CAUSE, 1),
+        ];
+        let (_, findings) = cluster_findings_in("elects-candidate", 2, None, &ballot);
+        let found: Vec<&str> = findings.iter().map(|finding| finding.check).collect();
+        assert_eq!(found, ["cluster-member", "cluster-no-leader"]);
+        assert!(
+            findings[1]
+                .message
+                .contains("its election is in candidate ballot,"),
+            "{}",
+            findings[1].message
+        );
 
         // With elections that failed: how many, and on which rule.
         let failed = [
@@ -5140,13 +5325,132 @@ mod tests {
             ),
             "{message}"
         );
-        assert!(!message.contains("new cluster"), "{message}");
+        assert!(
+            message.ends_with(
+                "(cluster.log_replications_unavailable). If the count keeps rising, run \
+                 doctor again and read which of these counters rises with it."
+            ),
+            "{message}"
+        );
+        for absent in ["new cluster", "The other"] {
+            assert!(!message.contains(absent), "{absent}: {message}");
+        }
+
+        // Elections that failed on none of the three rules: the three counters hold
+        // none of the four, and the message says so and what else fails an election.
+        let others = [
+            (CLUSTER_ROLE, 0),
+            (CLUSTER_ELECTION_STATE, 1),
+            (CLUSTER_LEADERSHIP_TERM_ID, 6),
+            (CLUSTER_LEADER_MEMBER_ID, -1),
+            (CLUSTER_ELECTION_CAUSE, 5),
+            (CLUSTER_ELECTIONS_FAILED, 4),
+            (CLUSTER_LEADER_QUORUM_LOSSES, 1),
+        ];
+        let (_, findings) = cluster_findings_in("elects-failed-others", 2, None, &others);
+        let message = &findings[1].message;
+        assert!(
+            message.contains(
+                " 4 of its elections have failed, and it began again after each: 0 on an \
+                 image"
+            ),
+            "{message}"
+        );
+        assert!(
+            message.ends_with(
+                "(cluster.log_replications_unavailable). The other 4 failed on none of \
+                 these three: a step that made no progress for the leader heartbeat \
+                 timeout, 10 s, a log this member cannot join its leader with, or, while \
+                 this member led and before its election closed, a term above its own or \
+                 active members that fell below a quorum. cluster.leader_quorum_losses \
+                 counts each time this member lost its quorum as a leader, before its \
+                 election closed or after: 1 on this member. If the count keeps rising, \
+                 run doctor again and read which of these counters rises with it."
+            ),
+            "{message}"
+        );
+        // One the three hold and one they do not.
+        let mixed = [
+            (CLUSTER_ROLE, 0),
+            (CLUSTER_ELECTION_STATE, 1),
+            (CLUSTER_LEADERSHIP_TERM_ID, 6),
+            (CLUSTER_LEADER_MEMBER_ID, -1),
+            (CLUSTER_ELECTION_CAUSE, 5),
+            (CLUSTER_ELECTIONS_FAILED, 2),
+            (CLUSTER_LOG_REPLICATIONS_UNAVAILABLE, 1),
+        ];
+        let (_, findings) = cluster_findings_in("elects-failed-mixed", 2, None, &mixed);
+        let message = &findings[1].message;
+        assert!(
+            message.contains(
+                "and 1 on a replication that did not move for the leader heartbeat timeout \
+                 (cluster.log_replications_unavailable). The other 1 failed on none of \
+                 these three:"
+            ),
+            "{message}"
+        );
+        assert!(message.contains(": 0 on this member."), "{message}");
+    }
+
+    /// Every cause `cluster.election_cause` holds has its words, and a code this
+    /// doctor does not know says what to run (`spec/cluster.md`, "Counters"; ADR 0102).
+    #[test]
+    fn every_election_cause_has_its_words() {
+        let causes = [
+            (0, "the member started"),
+            (
+                1,
+                "its leader said nothing for the leader heartbeat timeout",
+            ),
+            (2, "its image of the leader's log was no longer available"),
+            (3, "it led and its active members fell below a quorum"),
+            (4, "a message carried a term above its own"),
+            (5, "its election before failed"),
+            (
+                6,
+                "of cause 6, one this doctor does not know: run the doctor of the driver's \
+                 own version",
+            ),
+        ];
+        for (code, words) in causes {
+            assert_eq!(election_cause_text(code), words, "cause {code}");
+        }
+        // The member's own line carries them, a leader's too.
+        let lost = [
+            (CLUSTER_ROLE, 2),
+            (CLUSTER_ELECTION_STATE, 17),
+            (CLUSTER_LEADERSHIP_TERM_ID, 5),
+            (CLUSTER_LEADER_MEMBER_ID, 1),
+            (CLUSTER_ELECTION_CAUSE, 3),
+            (CLUSTER_LEADER_QUORUM_LOSSES, 2),
+        ];
+        let (_, findings) = cluster_findings_in("elects-quorum-lost", 1, None, &lost);
+        let found: Vec<&str> = findings.iter().map(|finding| finding.check).collect();
+        assert_eq!(found, ["cluster-member", "cluster-quorum-lost"]);
+        assert!(
+            findings[0].message.ends_with(
+                "; its last election began because it led and its active members fell \
+                 below a quorum"
+            ),
+            "{}",
+            findings[0].message
+        );
+        // A leader that elects stopped leading at each loss, and leads again.
+        assert!(
+            findings[1].message.starts_with(
+                "the leader, member 1, has lost its quorum 2 time(s): fewer than a \
+                 majority of the members reported within 10 s, and each time it stopped \
+                 leading and held an election, and it leads again now. Check that"
+            ),
+            "{}",
+            findings[1].message
+        );
     }
 
     /// A member that elects and has taken a leader names the member its gauge holds,
     /// which need not be the one with the lowest id, and is told what its state does:
-    /// the live log's image, a replication, or a catch-up, each with the endpoint it
-    /// needs (ADR 0102).
+    /// the live log's image, a replication, its own replay, or a catch-up, each with
+    /// the endpoint it needs and the endpoints to check (ADR 0102).
     #[test]
     fn a_member_that_elects_and_joins_names_the_leader_its_gauge_holds() {
         let cluster = Cluster::of(Some(THREE_MEMBERS)).expect("the members string parses");
@@ -5198,28 +5502,97 @@ mod tests {
             assert!(!message.contains(absent), "{absent}: {message}");
         }
 
+        // A replication's replay arrives on the catchup endpoint, so that is the
+        // endpoint named and the one to check, with its address from the string.
         let message = joining("elects-replication", 9, Some(&cluster));
         assert!(
             message.contains(
                 "its election is in follower log replication. It replicates a term it \
                  missed from its leader's recordings, one replay for each request. The \
-                 leader's replay must arrive, over UDP, on this member's catchup endpoint, \
-                 the fifth field of its entry in CAVALRY_CLUSTER_MEMBERS."
+                 leader's replay must arrive, over UDP, on this member's catchup endpoint \
+                 in CAVALRY_CLUSTER_MEMBERS, 127.0.0.1:9023. Each wait is bounded by the \
+                 leader heartbeat timeout, 10 s;"
+            ),
+            "{message}"
+        );
+        assert!(
+            message.ends_with(
+                "If it does not close, check that member 1's host reaches this member's \
+                 catchup endpoint over UDP, and that this host reaches member 1's \
+                 consensus endpoint, 127.0.0.1:9011."
+            ),
+            "{message}"
+        );
+        assert!(!message.contains("log endpoint"), "{message}");
+        let message = joining("elects-replication-no-string", 9, None);
+        assert!(
+            message.contains(
+                "on this member's catchup endpoint, the fifth field of its entry in \
+                 CAVALRY_CLUSTER_MEMBERS. Each wait"
             ),
             "{message}"
         );
 
-        let message = joining("elects-catch-up", 12, Some(&cluster));
+        // Its own replay has no timeout and needs no other member; what follows has
+        // both.
+        let message = joining("elects-replay", 10, Some(&cluster));
         assert!(
             message.contains(
-                "its election is in follower catch-up await. It catches up within its \
-                 leader's term:"
+                "its election is in follower replay. It replays its own log first, for as \
+                 long as that takes: no timeout bounds the replay, and it needs no other \
+                 member. Then it joins its leader's log, through a catch-up when its \
+                 append position is behind the leader's log position. Each wait after the \
+                 replay is bounded by the leader heartbeat timeout, 10 s;"
             ),
             "{message}"
         );
         assert!(
-            message
-                .contains("the fifth field of its entry in CAVALRY_CLUSTER_MEMBERS, and an image"),
+            message.contains(
+                "check that member 1's host reaches this member's log endpoint and its \
+                 catchup endpoint over UDP, and that this host reaches"
+            ),
+            "{message}"
+        );
+
+        // A catch-up, in each of its three states, needs the replay and the live log.
+        for (state, name) in [
+            (11, "follower catch-up init"),
+            (12, "follower catch-up await"),
+            (13, "follower catch-up"),
+        ] {
+            let message = joining(&format!("elects-catch-up-{state}"), state, Some(&cluster));
+            assert!(
+                message.contains(&format!(
+                    "its election is in {name}. It catches up within its leader's term:"
+                )),
+                "{message}"
+            );
+            assert!(
+                message.contains(
+                    "The leader's replay must arrive, over UDP, on this member's catchup \
+                     endpoint in CAVALRY_CLUSTER_MEMBERS, 127.0.0.1:9023, and an image of \
+                     the leader's log on this member's log endpoint in \
+                     CAVALRY_CLUSTER_MEMBERS, 127.0.0.1:9022. Each wait is bounded"
+                ),
+                "{message}"
+            );
+            assert!(
+                message.contains(
+                    "check that member 1's host reaches this member's catchup endpoint and \
+                     its log endpoint over UDP, and that this host reaches"
+                ),
+                "{message}"
+            );
+        }
+
+        // Follower log init waits for what follower log await does.
+        let message = joining("elects-log-init", 14, Some(&cluster));
+        assert!(
+            message.contains(
+                "its election is in follower log init. An image of the leader's log must \
+                 arrive, over UDP, on this member's log endpoint in \
+                 CAVALRY_CLUSTER_MEMBERS, 127.0.0.1:9022,"
+            ),
             "{message}"
         );
 
@@ -5237,8 +5610,10 @@ mod tests {
 
     /// A member whose leader is appointed keeps the texts of that path, with the two
     /// gauges read: it says who it follows and why its last election began, and once
-    /// it has taken its leader the path names that member from the gauge. Its counters
-    /// hold `cluster.appointed_leader_behind`, which a member that elects never adds.
+    /// it has taken its leader the path names that member from the gauge and still
+    /// calls it the appointed leader, the words by which `docs/how-to/run-a-cluster.md`
+    /// tells this path's findings from the election's. Its counters hold
+    /// `cluster.appointed_leader_behind`, which a member that elects never adds.
     #[test]
     fn a_member_whose_leader_is_appointed_keeps_its_texts_with_the_gauges_read() {
         let cluster = Cluster::of(Some(THREE_MEMBERS)).expect("the members string parses");
@@ -5289,14 +5664,34 @@ mod tests {
         );
         assert!(
             findings[1].message.starts_with(
-                "member 2 has taken its leader, member 0, and joins its log: its election \
-                 is in follower log await."
+                "member 2 has taken its leader, member 0, the appointed leader, and joins \
+                 its log: its election is in follower log await."
+            ),
+            "{}",
+            findings[1].message
+        );
+        assert!(
+            findings[1].message.ends_with(
+                "then check that member 0's host, the appointed leader's, reaches this \
+                 member's log endpoint over UDP, and that this host reaches member 0's \
+                 consensus endpoint, 127.0.0.1:9001"
             ),
             "{}",
             findings[1].message
         );
 
-        // A leader says nothing more of itself.
+        // A leader says nothing more of itself, on this path or the election's.
+        let leader = [
+            (CLUSTER_ROLE, 2),
+            (CLUSTER_ELECTION_STATE, 17),
+            (CLUSTER_LEADERSHIP_TERM_ID, 0),
+            (CLUSTER_APPOINTED_LEADER_BEHIND, 0),
+            (CLUSTER_LEADER_MEMBER_ID, 0),
+            (CLUSTER_ELECTION_CAUSE, 0),
+        ];
+        let (_, findings) = cluster_findings_in("appointed-leader", 0, Some(&cluster), &leader);
+        let found: Vec<&str> = findings.iter().map(|finding| finding.check).collect();
+        assert_eq!(found, ["cluster-member"]);
         let leader = [
             (CLUSTER_ROLE, 2),
             (CLUSTER_ELECTION_STATE, 17),
