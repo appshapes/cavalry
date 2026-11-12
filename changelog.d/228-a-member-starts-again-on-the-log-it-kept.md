@@ -7,5 +7,3 @@
   refused as before, with what to do
   ([Run a cluster of three members](docs/how-to/run-a-cluster.md), step 7;
   [ADR 0108](docs/decisions/0108-list-the-recordings-of-a-members-log-in-its-log-directory-and-start-a-member-on-the-log-it-kept.md)).
-- The durable log's format is version 3: the log recordings file is new, and no
-  other file changes (`spec/durable-log.md`, "Log recordings").
