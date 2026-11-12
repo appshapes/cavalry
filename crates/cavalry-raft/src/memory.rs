@@ -27,6 +27,9 @@
 //!   interval, so a loss delays the cluster and never stops it.
 //! - A message is late by at most [`MAX_DELAY_MS`], the leader heartbeat timeout;
 //!   [`Cluster::set_delivery`] holds a longer delay to it.
+//! - A member runs at most one replay to each other member: one started to a member
+//!   that has one takes its place, and one that stopped is dropped when the member that
+//!   started it asks how it ended. So eight members hold 56 replays at most.
 //! - The logs and the records of terms have no bound: a log publication holds every
 //!   entry appended to it for the cluster's life, each member's log holds every entry
 //!   that reached it, and a member's record of terms holds every term it records. A
