@@ -12,8 +12,9 @@
 //! cycle reads the clock once, allocates nothing and sends no command; the commands, a
 //! round trip each, come at the member's start, where its election adds, leaves or
 //! gives up the log, where a leader starts or stops a replay for a member that is
-//! behind (ADR 0091), and where a member that is behind subscribes on its `catchup`
-//! endpoint for a replay or removes that subscription (ADR 0094).
+//! behind (ADR 0091), where a member that is behind subscribes on its `catchup`
+//! endpoint for a replay or removes that subscription (ADR 0094), and where a member
+//! truncates its log (ADR 0095).
 
 use std::collections::VecDeque;
 use std::path::Path;
@@ -384,7 +385,9 @@ struct ClientIo {
     /// The end of the contiguous span the recordings this member has stopped hold.
     stopped_at: i64,
     /// The position its recording of the log had written when this member last asked
-    /// the recorder to sync it ([`ask_sync`]).
+    /// the recorder to sync it ([`ask_sync`]), `NO_SYNC_ASKED` from the moment the
+    /// member takes a recording in hand: the mark is one recording's, and the next
+    /// may write a position the one before it was asked at.
     sync_asked_at: i64,
     /// The same for its recording of a replay.
     catchup_sync_asked_at: i64,
@@ -559,6 +562,9 @@ impl ClientIo {
             floor,
         )? {
             self.catchup_held = Some(held);
+            // The mark is of the recording before this one: a position this one
+            // writes may equal it, and its sync must still be asked.
+            self.catchup_sync_asked_at = NO_SYNC_ASKED;
         }
         Ok(())
     }
@@ -647,6 +653,9 @@ impl ClientIo {
             self.log_floor,
         )? {
             self.held = Some(held);
+            // The mark is of the recording before this one: a position this one
+            // writes may equal it, and its sync must still be asked.
+            self.sync_asked_at = NO_SYNC_ASKED;
         }
         Ok(())
     }
@@ -729,6 +738,7 @@ impl Io for ClientIo {
                 self.client
                     .start_recording(&self.log_control_channel, LOG_STREAM_ID)?,
             );
+            self.sync_asked_at = NO_SYNC_ASKED;
         }
         Ok(self.log_recording.as_ref().map(|recording| Log {
             session_id: publication.session_id(),
@@ -864,16 +874,65 @@ impl Io for ClientIo {
         Ok(())
     }
 
-    /// Refused: only a member that elects truncates, and the module's member is
-    /// appointed (ADR 0081, ADR 0083). The module's own, `truncate recording`,
-    /// `purge recording` and the `terms` file's `truncate_above`, comes with the rest
-    /// of its I/O for the election, and forgets, or cuts at the position, each
-    /// recording the module keeps (ADR 0091) that holds bytes above it, so that no
-    /// replay brings entries the log no longer holds.
-    fn truncate_log(&mut self, _position: i64) -> Result<Option<i64>, Self::Fault> {
-        Err(RaftError::Unsupported {
-            what: "a member that truncates its log to join a leader",
-        })
+    /// Truncates the member's log to `position` (ADR 0083, ADR 0095): of the
+    /// recordings it keeps, the ones it stopped, `purge recording` on each that
+    /// begins above the position and `truncate recording` on each that begins at or
+    /// below it and stopped above it, which with a catch-up can be two that overlap
+    /// (ADR 0094); then the `terms` file's `truncate_above`, each write synced. The
+    /// kept table is cut with each command, so that no replay of this member's own
+    /// brings entries its log no longer holds, and a recording left holding nothing
+    /// is forgotten. Then the log ends at the position, and the highest term the
+    /// record holds is returned.
+    ///
+    /// Every command waits for the driver's answer, so the truncation is one step
+    /// and `Ok(None)` is returned in one case alone: the member still holds a
+    /// recording of the log or of a replay, which the core never asks of. A command
+    /// that faults returns with what was cut so far cut in the table too, and the
+    /// leader's next new leadership term asks again: a purge of a recording already
+    /// purged, or a truncation to where a recording already stops, changes nothing.
+    /// The module's own core is appointed and never asks (ADR 0081).
+    fn truncate_log(&mut self, position: i64) -> Result<Option<i64>, Self::Fault> {
+        if self.log_recording.is_some()
+            || self.held.is_some()
+            || self.starting.is_some()
+            || self.catchup_held.is_some()
+            || self.catchup_starting.is_some()
+        {
+            return Ok(None);
+        }
+        // The table is in the order its recordings begin, so the ones that begin
+        // above the position are at its end.
+        while let Some(last) = self.kept.back().copied()
+            && last.start > position
+        {
+            match self.client.purge_recording(last.recording_id) {
+                Ok(()) => {}
+                // Purged by a call before this one whose answer was not read.
+                Err(ClientError::Refused {
+                    code: Some(ErrorCode::UnknownRecording),
+                    ..
+                }) => {}
+                Err(error) => return Err(error.into()),
+            }
+            self.kept.pop_back();
+        }
+        for index in 0..self.kept.len() {
+            let Some(kept) = self.kept.get(index).copied() else {
+                break;
+            };
+            if kept.stop > position {
+                self.client
+                    .truncate_recording(kept.recording_id, position)?;
+                if let Some(slot) = self.kept.get_mut(index) {
+                    slot.stop = position;
+                }
+            }
+        }
+        // A recording cut to where it begins holds nothing to replay.
+        self.kept.retain(|kept| kept.stop > kept.start);
+        self.terms.truncate_above(position)?;
+        self.stopped_at = self.stopped_at.min(position);
+        Ok(Some(self.terms.log_leadership_term_id()))
     }
 
     fn append_position(&mut self) -> i64 {
