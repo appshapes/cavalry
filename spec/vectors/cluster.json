@@ -2437,6 +2437,7 @@
         "append_position": 1100,
         "candidate_term": 5,
         "in_canvass": true,
+        "own_base_above": -1,
         "message": {
           "log_leadership_term_id": 4,
           "next_leadership_term_id": 5,
@@ -2466,6 +2467,7 @@
         "append_position": 960,
         "candidate_term": 5,
         "in_canvass": true,
+        "own_base_above": -1,
         "message": {
           "log_leadership_term_id": 4,
           "next_leadership_term_id": 5,
@@ -2492,6 +2494,7 @@
         "append_position": 200,
         "candidate_term": 5,
         "in_canvass": true,
+        "own_base_above": -1,
         "message": {
           "log_leadership_term_id": 2,
           "next_leadership_term_id": 3,
@@ -2518,6 +2521,7 @@
         "append_position": 3000,
         "candidate_term": 5,
         "in_canvass": true,
+        "own_base_above": -1,
         "message": {
           "log_leadership_term_id": 5,
           "next_leadership_term_id": -1,
@@ -2544,6 +2548,7 @@
         "append_position": 900,
         "candidate_term": 5,
         "in_canvass": true,
+        "own_base_above": -1,
         "message": {
           "log_leadership_term_id": 4,
           "next_leadership_term_id": 5,
@@ -2570,6 +2575,7 @@
         "append_position": 960,
         "candidate_term": 5,
         "in_canvass": true,
+        "own_base_above": -1,
         "message": {
           "log_leadership_term_id": 4,
           "next_leadership_term_id": -1,
@@ -2596,6 +2602,7 @@
         "append_position": 1100,
         "candidate_term": 2,
         "in_canvass": true,
+        "own_base_above": -1,
         "message": {
           "log_leadership_term_id": 1,
           "next_leadership_term_id": 2,
@@ -2625,6 +2632,7 @@
         "append_position": 300,
         "candidate_term": 5,
         "in_canvass": true,
+        "own_base_above": -1,
         "message": {
           "log_leadership_term_id": 2,
           "next_leadership_term_id": 4,
@@ -2651,6 +2659,7 @@
         "append_position": 500,
         "candidate_term": 5,
         "in_canvass": true,
+        "own_base_above": -1,
         "message": {
           "log_leadership_term_id": 3,
           "next_leadership_term_id": 4,
@@ -2677,6 +2686,7 @@
         "append_position": 100,
         "candidate_term": 4,
         "in_canvass": true,
+        "own_base_above": -1,
         "message": {
           "log_leadership_term_id": 2,
           "next_leadership_term_id": 3,
@@ -2703,6 +2713,7 @@
         "append_position": 3000,
         "candidate_term": 2,
         "in_canvass": true,
+        "own_base_above": -1,
         "message": {
           "log_leadership_term_id": 5,
           "next_leadership_term_id": -1,
@@ -2729,6 +2740,7 @@
         "append_position": 960,
         "candidate_term": 4,
         "in_canvass": false,
+        "own_base_above": -1,
         "message": {
           "log_leadership_term_id": 4,
           "next_leadership_term_id": 5,
@@ -2744,6 +2756,141 @@
         "stop_position": -1,
         "records": null,
         "action": "ignore"
+      }
+    },
+    {
+      "kind": "arithmetic",
+      "name": "new-leadership-term-term-the-leader-lacks-is-dropped",
+      "rule": "new-leadership-term",
+      "inputs": {
+        "log_leadership_term_id": 3,
+        "append_position": 500,
+        "candidate_term": 5,
+        "in_canvass": true,
+        "own_base_above": 500,
+        "message": {
+          "log_leadership_term_id": 2,
+          "next_leadership_term_id": 5,
+          "next_term_base_log_position": 1000,
+          "next_log_position": -1,
+          "leadership_term_id": 5,
+          "term_base_log_position": 1000,
+          "log_position": 5000
+        }
+      },
+      "fields": {
+        "truncate_to": -1,
+        "stop_position": -1,
+        "records": null,
+        "action": "drop"
+      }
+    },
+    {
+      "kind": "arithmetic",
+      "name": "new-leadership-term-term-the-leader-lacks-with-a-tail-truncates",
+      "rule": "new-leadership-term",
+      "inputs": {
+        "log_leadership_term_id": 3,
+        "append_position": 700,
+        "candidate_term": 5,
+        "in_canvass": true,
+        "own_base_above": 500,
+        "message": {
+          "log_leadership_term_id": 2,
+          "next_leadership_term_id": 5,
+          "next_term_base_log_position": 1000,
+          "next_log_position": -1,
+          "leadership_term_id": 5,
+          "term_base_log_position": 1000,
+          "log_position": 5000
+        }
+      },
+      "fields": {
+        "truncate_to": 500,
+        "stop_position": -1,
+        "records": null,
+        "action": "drop"
+      }
+    },
+    {
+      "kind": "arithmetic",
+      "name": "new-leadership-term-term-the-leader-lacks-in-ballot-is-dropped",
+      "rule": "new-leadership-term",
+      "inputs": {
+        "log_leadership_term_id": 3,
+        "append_position": 500,
+        "candidate_term": 5,
+        "in_canvass": false,
+        "own_base_above": 500,
+        "message": {
+          "log_leadership_term_id": 2,
+          "next_leadership_term_id": 5,
+          "next_term_base_log_position": 1000,
+          "next_log_position": -1,
+          "leadership_term_id": 5,
+          "term_base_log_position": 1000,
+          "log_position": 5000
+        }
+      },
+      "fields": {
+        "truncate_to": -1,
+        "stop_position": -1,
+        "records": null,
+        "action": "drop"
+      }
+    },
+    {
+      "kind": "arithmetic",
+      "name": "new-leadership-term-answer-to-an-older-report-canvasses",
+      "rule": "new-leadership-term",
+      "inputs": {
+        "log_leadership_term_id": 4,
+        "append_position": 900,
+        "candidate_term": 5,
+        "in_canvass": true,
+        "own_base_above": 200,
+        "message": {
+          "log_leadership_term_id": 2,
+          "next_leadership_term_id": 3,
+          "next_term_base_log_position": 200,
+          "next_log_position": 500,
+          "leadership_term_id": 5,
+          "term_base_log_position": 1000,
+          "log_position": 5000
+        }
+      },
+      "fields": {
+        "truncate_to": -1,
+        "stop_position": -1,
+        "records": null,
+        "action": "canvass"
+      }
+    },
+    {
+      "kind": "arithmetic",
+      "name": "new-leadership-term-no-term-of-the-leaders-drops-every-term",
+      "rule": "new-leadership-term",
+      "inputs": {
+        "log_leadership_term_id": 1,
+        "append_position": 0,
+        "candidate_term": 2,
+        "in_canvass": true,
+        "own_base_above": 0,
+        "message": {
+          "log_leadership_term_id": -1,
+          "next_leadership_term_id": 2,
+          "next_term_base_log_position": 0,
+          "next_log_position": -1,
+          "leadership_term_id": 2,
+          "term_base_log_position": 0,
+          "log_position": 0
+        }
+      },
+      "fields": {
+        "truncate_to": -1,
+        "stop_position": -1,
+        "records": null,
+        "action": "drop"
       }
     },
     {
@@ -3136,6 +3283,161 @@
       },
       "fields": {
         "action": "table"
+      }
+    },
+    {
+      "kind": "arithmetic",
+      "name": "answered-term-the-reported-term",
+      "rule": "answered-term",
+      "inputs": {
+        "terms": [
+          [
+            2,
+            0,
+            200
+          ],
+          [
+            3,
+            200,
+            500
+          ],
+          [
+            4,
+            500,
+            1000
+          ],
+          [
+            5,
+            1000,
+            -1
+          ]
+        ],
+        "reported_term": 4
+      },
+      "fields": {
+        "log_leadership_term_id": 4
+      }
+    },
+    {
+      "kind": "arithmetic",
+      "name": "answered-term-the-term-below-one-the-record-lacks",
+      "rule": "answered-term",
+      "inputs": {
+        "terms": [
+          [
+            2,
+            0,
+            200
+          ],
+          [
+            4,
+            200,
+            1000
+          ],
+          [
+            5,
+            1000,
+            -1
+          ]
+        ],
+        "reported_term": 3
+      },
+      "fields": {
+        "log_leadership_term_id": 2
+      }
+    },
+    {
+      "kind": "arithmetic",
+      "name": "answered-term-none-at-or-below",
+      "rule": "answered-term",
+      "inputs": {
+        "terms": [
+          [
+            2,
+            0,
+            200
+          ],
+          [
+            4,
+            200,
+            1000
+          ],
+          [
+            5,
+            1000,
+            -1
+          ]
+        ],
+        "reported_term": 1
+      },
+      "fields": {
+        "log_leadership_term_id": -1
+      }
+    },
+    {
+      "kind": "arithmetic",
+      "name": "answered-term-no-term-reported",
+      "rule": "answered-term",
+      "inputs": {
+        "terms": [
+          [
+            2,
+            0,
+            200
+          ],
+          [
+            3,
+            200,
+            500
+          ],
+          [
+            4,
+            500,
+            1000
+          ],
+          [
+            5,
+            1000,
+            -1
+          ]
+        ],
+        "reported_term": -1
+      },
+      "fields": {
+        "log_leadership_term_id": -1
+      }
+    },
+    {
+      "kind": "arithmetic",
+      "name": "answered-term-the-leaders-own",
+      "rule": "answered-term",
+      "inputs": {
+        "terms": [
+          [
+            2,
+            0,
+            200
+          ],
+          [
+            3,
+            200,
+            500
+          ],
+          [
+            4,
+            500,
+            1000
+          ],
+          [
+            5,
+            1000,
+            -1
+          ]
+        ],
+        "reported_term": 5
+      },
+      "fields": {
+        "log_leadership_term_id": 5
       }
     },
     {

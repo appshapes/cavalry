@@ -27,6 +27,7 @@ under `docs/` is listed here; `just lint-docs` fails on one that is not.
 - [Set up a bench host for the latency gate](how-to/set-up-a-bench-host.md)
 - [Set up a soak host](how-to/set-up-a-soak-host.md)
 - [Send the weekly release-notes email](how-to/send-the-release-notes.md)
+- [Run a test many times in a row](how-to/run-a-test-many-times.md)
 
 # Reference
 
@@ -146,3 +147,5 @@ under `docs/` is listed here; `just lint-docs` fails on one that is not.
 - [0101. Read a publisher held by its recorder from its limit, in doctor](decisions/0101-read-a-publisher-held-by-its-recorder-from-its-limit-in-doctor.md)
 - [0095. Truncate a member's log over a driver, recording by recording, then its record of terms](decisions/0095-truncate-a-members-log-over-a-driver-recording-by-recording-then-its-record-of-terms.md)
 - [0098. Let a recording connect a cavalry:udp publication whose channel names ssc](decisions/0098-let-a-recording-connect-a-cavalry-udp-publication-whose-channel-names-ssc.md)
+- [0110. Let a person's session re-record a bench baseline, after telling the person](decisions/0110-let-a-persons-session-re-record-a-bench-baseline-after-telling-the-person.md)
+- [0096. Answer a member for a term the leader's record holds, and drop from a member's record the terms its leader's lacks](decisions/0096-answer-a-member-for-a-term-the-leaders-record-holds-and-drop-the-terms-its-leaders-lacks.md)
