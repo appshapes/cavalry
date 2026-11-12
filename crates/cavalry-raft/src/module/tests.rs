@@ -1828,3 +1828,369 @@ fn a_recording_taken_by_an_image_that_went_is_not_the_noted_images() {
     assert_eq!(pair.member.io.append_position(), 0);
     assert!(pair.member.io.kept.is_empty());
 }
+
+impl Pair {
+    /// Member 1 follows the leader's log of `term` from `base` through the entries
+    /// `payloads`, armed before the leader's log exists, then leaves it; the leader
+    /// gives the log up. Returns where the log then ends, and the member's recording.
+    fn follow_and_leave(&mut self, term: i64, base: i64, payloads: &[&[u8]]) -> (i64, i64) {
+        self.member.io.join_log().expect("subscribed and armed");
+        let log = self
+            .leader
+            .io
+            .add_log(term, base)
+            .expect("the driver takes the commands")
+            .expect("the log has its recording");
+        let mut end = base;
+        for payload in payloads {
+            end = self.append(payload, end);
+        }
+        self.observe_both("the log is told", |io| {
+            io.log_image(log.session_id).expect("the image is read")
+        });
+        self.observe_both("the member holds the term", |io| {
+            (io.append_position() == end).then_some(())
+        });
+        let recording_id = self
+            .member
+            .log_recording_id()
+            .expect("the recording is named");
+        self.member.io.leave_log().expect("the log is left");
+        self.leader.io.remove_log().expect("the log is given up");
+        (end, recording_id)
+    }
+
+    /// Where the catalog of member 1's driver says a recording stopped, `None` for one
+    /// that is purged.
+    fn stop_of(&self, recording_id: i64) -> Option<i64> {
+        CatalogReader::open(&self.member_log_dir)
+            .expect("the catalog opens")
+            .stop_position(recording_id)
+            .expect("the slot is read")
+    }
+}
+
+/// A member truncates its log over a driver (ADR 0095). It holds term 0 in one
+/// recording, two entries to 192, and term 1 in another, two more to 384, with both
+/// terms in its record. Truncated inside the second recording, to 288, that
+/// recording is cut there and the record keeps both terms. Truncated again to where
+/// the second recording begins, 192, that recording holds nothing and is forgotten;
+/// term 1, whose base is not above 192, stays in the record. Truncated to 96, inside
+/// the first recording, the first is cut. Each time the log ends at the position.
+#[test]
+fn a_member_truncates_its_log_recording_by_recording() {
+    let mut pair = pair("truncate");
+    let (two, first) = pair.follow_and_leave(0, 0, &[b"one", b"two"]);
+    let (four, second) = pair.follow_and_leave(1, two, &[b"three", b"four"]);
+    let one = two / 2;
+    let three = two + (four - two) / 2;
+    pair.member
+        .io
+        .record_term(0, 0)
+        .expect("term 0 is recorded");
+    pair.member
+        .io
+        .record_term(1, two)
+        .expect("term 1 is recorded");
+    assert_eq!(pair.member.io.append_position(), four);
+
+    assert_eq!(
+        pair.member.io.truncate_log(three).expect("truncated"),
+        Some(1)
+    );
+    assert_eq!(pair.member.io.append_position(), three);
+    assert_eq!(pair.stop_of(second), Some(three));
+    assert_eq!(
+        pair.member.io.kept.iter().copied().collect::<Vec<_>>(),
+        vec![
+            Kept {
+                recording_id: first,
+                start: 0,
+                stop: two,
+            },
+            Kept {
+                recording_id: second,
+                start: two,
+                stop: three,
+            },
+        ]
+    );
+    // Asked again, as a leader's next new leadership term would: nothing changes.
+    assert_eq!(
+        pair.member.io.truncate_log(three).expect("truncated"),
+        Some(1)
+    );
+    assert_eq!(pair.member.io.kept.len(), 2);
+
+    assert_eq!(
+        pair.member.io.truncate_log(two).expect("truncated"),
+        Some(1),
+        "a term based at the position stays in the record"
+    );
+    assert_eq!(pair.member.io.append_position(), two);
+    assert_eq!(pair.stop_of(second), Some(two));
+    assert_eq!(
+        pair.member.io.kept.iter().copied().collect::<Vec<_>>(),
+        vec![Kept {
+            recording_id: first,
+            start: 0,
+            stop: two,
+        }]
+    );
+
+    assert_eq!(
+        pair.member.io.truncate_log(one).expect("truncated"),
+        Some(0),
+        "term 1's base is above the position"
+    );
+    assert_eq!(pair.member.io.append_position(), one);
+    assert_eq!(pair.stop_of(first), Some(one));
+    assert_eq!(
+        pair.member.io.kept.iter().copied().collect::<Vec<_>>(),
+        vec![Kept {
+            recording_id: first,
+            start: 0,
+            stop: one,
+        }]
+    );
+}
+
+/// A truncation below where a recording begins purges it: the member holds two
+/// recordings and truncates inside the first. The second is gone from the driver's
+/// catalog and from the table, the first is cut, term 1 leaves the record, and a
+/// replay of this member's own from the position finds nothing. Asked again,
+/// nothing changes.
+#[test]
+fn a_truncation_below_a_recording_purges_it() {
+    let mut pair = pair("truncate-purge");
+    let (two, first) = pair.follow_and_leave(0, 0, &[b"one", b"two"]);
+    let (_four, second) = pair.follow_and_leave(1, two, &[b"three", b"four"]);
+    let one = two / 2;
+    pair.member
+        .io
+        .record_term(0, 0)
+        .expect("term 0 is recorded");
+    pair.member
+        .io
+        .record_term(1, two)
+        .expect("term 1 is recorded");
+
+    assert_eq!(
+        pair.member.io.truncate_log(one).expect("truncated"),
+        Some(0)
+    );
+    assert_eq!(pair.member.io.append_position(), one);
+    assert_eq!(pair.stop_of(first), Some(one));
+    assert_eq!(pair.stop_of(second), None, "purged");
+    assert_eq!(
+        pair.member.io.kept.iter().copied().collect::<Vec<_>>(),
+        vec![Kept {
+            recording_id: first,
+            start: 0,
+            stop: one,
+        }]
+    );
+    assert_eq!(pair.member.io.recording_at(one), None);
+    assert_eq!(
+        pair.member.io.truncate_log(one).expect("truncated"),
+        Some(0)
+    );
+    assert_eq!(pair.member.io.kept.len(), 1);
+}
+
+/// A purge whose answer was never read is done (ADR 0095). The member's client purges
+/// the second of its two recordings, as a truncation before this one would have, and
+/// the table still names it. A truncation below it is answered "unknown recording"
+/// for that purge, takes it as done, forgets the recording and cuts the first.
+#[test]
+fn a_truncation_takes_a_recording_already_purged_as_purged() {
+    let mut pair = pair("truncate-purged");
+    let (two, first) = pair.follow_and_leave(0, 0, &[b"one", b"two"]);
+    let (_four, second) = pair.follow_and_leave(1, two, &[b"three", b"four"]);
+    let one = two / 2;
+    pair.member
+        .io
+        .record_term(0, 0)
+        .expect("term 0 is recorded");
+    pair.member
+        .io
+        .record_term(1, two)
+        .expect("term 1 is recorded");
+    pair.member
+        .io
+        .client
+        .purge_recording(second)
+        .expect("the driver purges the recording");
+    assert_eq!(pair.stop_of(second), None, "purged");
+    assert_eq!(pair.member.io.kept.len(), 2, "the table still names it");
+
+    assert_eq!(
+        pair.member.io.truncate_log(one).expect("truncated"),
+        Some(0)
+    );
+    assert_eq!(pair.member.io.append_position(), one);
+    assert_eq!(pair.stop_of(first), Some(one));
+    assert_eq!(
+        pair.member.io.kept.iter().copied().collect::<Vec<_>>(),
+        vec![Kept {
+            recording_id: first,
+            start: 0,
+            stop: one,
+        }]
+    );
+}
+
+/// A member that still holds a recording is not out of the log, and a truncation
+/// asked of it does nothing and says a step is under way.
+#[test]
+fn a_truncation_asked_of_a_member_in_the_log_does_nothing() {
+    let mut pair = pair("truncate-in-log");
+    pair.member.io.join_log().expect("subscribed and armed");
+    let log = pair
+        .leader
+        .io
+        .add_log(0, 0)
+        .expect("the driver takes the commands")
+        .expect("the log has its recording");
+    let one = pair.append(b"one", 0);
+    pair.observe_both("the log is told", |io| {
+        io.log_image(log.session_id).expect("the image is read")
+    });
+    pair.observe_both("the member holds the entry", |io| {
+        (io.append_position() == one).then_some(())
+    });
+    assert_eq!(pair.member.io.truncate_log(0).expect("asked"), None);
+    assert_eq!(pair.member.io.append_position(), one);
+}
+
+/// After a catch-up a member keeps two recordings that overlap, the replay's and the
+/// live one (ADR 0094). A truncation to a position both hold cuts both there, so
+/// that neither brings a replay of this member's own what its log no longer holds.
+#[test]
+fn a_truncation_cuts_both_of_two_recordings_that_overlap() {
+    let mut pair = pair("truncate-overlap");
+    let _receiver = pair.receive_log();
+    let log = pair
+        .leader
+        .io
+        .add_log(0, 0)
+        .expect("the driver takes the commands")
+        .expect("the log has its recording");
+    let one = pair.append(b"one", 0);
+    pair.member.io.add_catchup().expect("subscribed and armed");
+    assert!(
+        pair.leader
+            .io
+            .start_replay(1, 0, None)
+            .expect("the replay starts")
+    );
+    pair.observe_both("the replay's image is told", |io| {
+        io.catchup_image().expect("the image is read")
+    });
+    pair.observe_both("the append position reaches the leader's", |io| {
+        (io.append_position() == one).then_some(())
+    });
+    // The live add, and two more entries that both recordings hold.
+    pair.member.io.join_log().expect("subscribed and armed");
+    let two = pair.append(b"two", one);
+    let three = pair.append(b"three", two);
+    wait_for("the replay brings both entries", || {
+        pair.member
+            .io
+            .observe_catchup()
+            .expect("the catch-up is observed");
+        (pair.member.io.append_position() == three).then_some(())
+    });
+    let live_start = pair.observe_both("the live recording's start is told", |io| {
+        io.log_image(log.session_id).expect("the image is read")
+    });
+    assert!(live_start < two, "{live_start}");
+    pair.observe_both("the live recording holds both entries", |io| {
+        io.held
+            .as_ref()
+            .filter(|held| held.recording.synced_position() >= three)
+            .map(|_| ())
+    });
+    pair.leader
+        .io
+        .stop_replay(1)
+        .expect("the replay is stopped");
+    pair.observe_both("the replay's recording has stopped", |io| {
+        io.catchup_held
+            .as_ref()
+            .and_then(|held| held.recording.stop_position())
+    });
+    pair.member.io.leave_log().expect("the log is left");
+    pair.member
+        .io
+        .remove_catchup()
+        .expect("the catch-up subscription is removed");
+    let kept: Vec<_> = pair.member.io.kept.iter().copied().collect();
+    assert_eq!(kept.len(), 2, "{kept:?}");
+    assert!(kept.iter().all(|kept| kept.stop >= three), "{kept:?}");
+    pair.member
+        .io
+        .record_term(0, 0)
+        .expect("term 0 is recorded");
+
+    assert_eq!(
+        pair.member.io.truncate_log(two).expect("truncated"),
+        Some(0)
+    );
+    assert_eq!(pair.member.io.append_position(), two);
+    let cut: Vec<_> = pair.member.io.kept.iter().copied().collect();
+    assert_eq!(
+        cut.iter()
+            .map(|kept| (kept.start, kept.stop))
+            .collect::<Vec<_>>(),
+        vec![(0, two), (live_start, two)]
+    );
+    for kept in cut {
+        assert_eq!(pair.stop_of(kept.recording_id), Some(two));
+    }
+    assert_eq!(pair.member.io.recording_at(two), None);
+}
+
+/// The mark of the last sync asked is one recording's. A member follows term 0 to
+/// 192, and its last request was for the position written then, 192. It truncates
+/// to 96 and follows term 1 from there: the new recording will write 192 again with
+/// its first entry. Taken in hand, the recording starts with no mark, so that sync
+/// is asked; with the mark left at 192 it was skipped, and the entry counted toward
+/// a commit only at the recorder's own sync, up to a second later.
+#[test]
+fn a_recording_taken_in_hand_starts_with_no_sync_asked() {
+    let mut pair = pair("sync-mark");
+    let (two, _) = pair.follow_and_leave(0, 0, &[b"one", b"two"]);
+    let one = two / 2;
+    pair.member
+        .io
+        .record_term(0, 0)
+        .expect("term 0 is recorded");
+    assert_eq!(pair.member.io.sync_asked_at, two);
+    assert_eq!(
+        pair.member.io.truncate_log(one).expect("truncated"),
+        Some(0)
+    );
+    assert_eq!(pair.member.io.sync_asked_at, two, "the mark is the old one");
+
+    pair.member.io.join_log().expect("subscribed and armed");
+    let log = pair
+        .leader
+        .io
+        .add_log(1, one)
+        .expect("the driver takes the commands")
+        .expect("the log has its recording");
+    pair.observe("the recording is taken in hand", |io| {
+        io.held.as_ref().map(|_| ())
+    });
+    assert_eq!(pair.member.io.sync_asked_at, NO_SYNC_ASKED);
+
+    assert_eq!(pair.append(b"two", one), two);
+    pair.observe_both("the log is told", |io| {
+        io.log_image(log.session_id).expect("the image is read")
+    });
+    pair.observe_both("the member holds the entry", |io| {
+        (io.append_position() == two).then_some(())
+    });
+    assert_eq!(pair.member.io.sync_asked_at, two);
+}
