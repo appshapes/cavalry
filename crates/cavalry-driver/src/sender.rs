@@ -33,7 +33,7 @@ use cavalry_proto::udp::{
 };
 use cavalry_shm::counters::generated::{
     LOG_BUFFER_REJECTED_FRAME, LOG_BUFFER_REJECTED_POSITION, PUBLICATION_CONNECTED,
-    PUBLICATION_DISCONNECTED, RECEIVER_RECEIVE_FAILED, SENDER_BYTES_SENT, SENDER_BYTES_UNSENT,
+    PUBLICATION_DISCONNECTED, RECEIVER_RECEIVE_FAILED, SENDER_BYTES_SENT,
     SENDER_FLOW_CONTROL_LIMITED, SENDER_FLOW_CONTROL_RECEIVERS_FULL,
     SENDER_FLOW_CONTROL_RECEIVERS_TIMED_OUT, SENDER_FRAMES_SENT, SENDER_HEARTBEATS_SENT,
     SENDER_NAKS_IGNORED, SENDER_NAKS_RECEIVED, SENDER_RETRANSMIT_OVERFLOW, SENDER_RETRANSMITS_SENT,
@@ -106,6 +106,9 @@ pub(crate) struct AddPublication {
     /// [`cavalry_proto::udp::MAX_FLOW_CONTROL_RECEIVERS`] and empty, or with no room
     /// under `max`; the sender never grows it.
     pub receiver_table: Vec<Receiver>,
+    /// Its `sender.bytes_unsent` counter, which a publication on a channel that names
+    /// `ssc=true` has and no other (`spec/udp.md`, "The sender"; ADR 0098).
+    pub unsent: Option<Counter>,
 }
 
 /// One receiver in a `min` publication's table, by its receiver id: the position plus
@@ -241,7 +244,6 @@ pub(crate) struct Statics {
     publication_disconnected: Counter,
     receive_failed: Counter,
     rejected_frame: Counter,
-    bytes_unsent: Counter,
     rejected_position: Counter,
 }
 
@@ -272,7 +274,6 @@ impl Statics {
             publication_disconnected: counter(PUBLICATION_DISCONNECTED)?,
             receive_failed: counter(RECEIVER_RECEIVE_FAILED)?,
             rejected_frame: counter(LOG_BUFFER_REJECTED_FRAME)?,
-            bytes_unsent: counter(SENDER_BYTES_UNSENT)?,
             rejected_position: counter(LOG_BUFFER_REJECTED_POSITION)?,
         })
     }
@@ -359,6 +360,8 @@ struct Live {
     /// no data goes (`spec/udp.md`, "The sender"; ADR 0098). `None` for every other
     /// publication, and once the recording has stopped.
     recording: Option<Counter>,
+    /// Its `sender.bytes_unsent`: what the sender position passed while following.
+    unsent: Option<Counter>,
 }
 
 impl Live {
@@ -401,7 +404,9 @@ impl Live {
         if reached <= self.sender_position {
             return false;
         }
-        statics.bytes_unsent.add(reached - self.sender_position);
+        if let Some(unsent) = &self.unsent {
+            unsent.add(reached - self.sender_position);
+        }
         self.sender_position = reached;
         self.position.store_release(reached);
         true
@@ -909,6 +914,7 @@ impl Sender {
                     receivers: add.receiver_table,
                     receivers_gauge: add.receivers,
                     recording: None,
+                    unsent: add.unsent,
                 });
             }
             Request::Close {

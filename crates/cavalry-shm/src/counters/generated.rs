@@ -419,7 +419,7 @@ pub const CLUSTER_LOG_REPLICATIONS_UNAVAILABLE: CounterId = CounterId(136);
 /// `cluster.catchups`, a client counter: Times one cluster member began, or served, a catch-up within the leader's term: on a follower, a catch-up position it sent from follower catch-up init; on the leader, a replay of its live recording that it started for such a member, which follows the recording until the leader stops it (spec/cluster.md, follower catch-up init, Messages outside an election, and Counters; ADR 0087, ADR 0088); key: member id (i32), little-endian; label text: the member id in decimal.
 pub const CLUSTER_CATCHUPS: CounterId = CounterId(137);
 
-/// `sender.bytes_unsent`, a static counter: Bytes the sender passed without sending, for every cavalry:udp publication whose channel names ssc=true while it was alone with its recording: a live recording and no receiver answering. They went to the recording and to no receiver (spec/udp.md, The sender; ADR 0098).
+/// `sender.bytes_unsent`, a instance counter: Bytes the sender position of one cavalry:udp publication passed without sending, while the publication was alone with its recording: its channel names ssc=true, a recording of it is live and no receiver answers. They went to the recording and to no receiver. Allocated for a publication whose channel names ssc=true and no other; key and label as sender.position (spec/udp.md, The sender; ADR 0098).
 pub const SENDER_BYTES_UNSENT: CounterId = CounterId(139);
 
 /// Every entry of `counters.toml`, in the file's order.
@@ -1532,8 +1532,8 @@ pub const COUNTERS: &[CounterDef] = &[
         id: SENDER_BYTES_UNSENT,
         name: "sender.bytes_unsent",
         kind: Kind::Counter,
-        scope: Scope::Static,
-        doc: "Bytes the sender passed without sending, for every cavalry:udp publication whose channel names ssc=true while it was alone with its recording: a live recording and no receiver answering. They went to the recording and to no receiver (spec/udp.md, The sender; ADR 0098).",
+        scope: Scope::Instance,
+        doc: "Bytes the sender position of one cavalry:udp publication passed without sending, while the publication was alone with its recording: its channel names ssc=true, a recording of it is live and no receiver answers. They went to the recording and to no receiver. Allocated for a publication whose channel names ssc=true and no other; key and label as sender.position (spec/udp.md, The sender; ADR 0098).",
         doctor: "A publication on a channel that names ssc=true took messages while no receiver answered: they are in its recording, and a receiver that joins later joins at the sender position and replays the recording for what came before. Nothing was lost. If receivers were expected, `udp-publication-recorded-alone` names the publication and its destinations.",
     },
 ];
