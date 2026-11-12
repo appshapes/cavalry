@@ -233,18 +233,21 @@ state:
   recording that is still being made, and finishes no truncation that its stop cut
   short.
 - The module gives none of that paragraph's other refusals: a record of terms
-  beside no list, a log beside no record of terms, a file that fails a check or
-  names another member, and a catalog that holds something else in place of a
-  recording the file names.
+  beside no list, a log that ends above 0 beside a record of terms that holds no
+  term, a file that fails a check or names another member, a log that does not
+  begin at 0 or is in more recordings than a member keeps, and a catalog that holds
+  something else in place of a recording the file names. The refusal it has had
+  since ADR 0104, a recording of the log's stream in a directory with no `terms`
+  file, it gives.
 - A member's append position is what its recordings hold since it started on an
   empty log directory, and not where the recordings that a file names end.
+- The four counters ADR 0108 adds are in `counters.toml` and count nothing:
+  `cluster.log_recordings_listed`, `cluster.log_recordings_unsynced`,
+  `cluster.log_recordings_forgotten` and `cluster.truncations_finished`. A member
+  that forgets a recording, its table at 1,024, counts nowhere.
 
 Until then a member that stopped stays out, and a cluster that lost a member goes on
 with the members that remain while they are a quorum.
-
-A truncation whose command faults after an earlier one succeeded leaves the member
-reporting the end and the log term it had until the leader asks again; ADR 0095's
-Consequences say where that is tested.
 
 A truncation whose command faults after an earlier one succeeded leaves the member
 reporting the end and the log term it had until the leader asks again; ADR 0095's

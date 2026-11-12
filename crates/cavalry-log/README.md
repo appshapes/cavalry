@@ -12,7 +12,8 @@ The durable log: recording and replay. Data plane.
 - Keeps a cluster member's log recordings file, `recordings::RecordingsFile`, the
   list of the recordings that hold the member's log and the position that list
   begins at. A write puts the whole list into one of two slots and syncs once, so a
-  write a crash tore reads as the list before it. The file is never created for a
+  write a crash tore reads as the list before it. A creation syncs the file and then
+  the log directory. The file is never created for a
   member whose terms file holds a term: such a member holds a log, and an empty list
   would say that it holds none (`spec/durable-log.md`, "Log recordings"; ADR 0108).
 - Holds the log directory for the driver: `dir::LogDir` opens it under an exclusive

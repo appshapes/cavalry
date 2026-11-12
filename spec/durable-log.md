@@ -309,9 +309,10 @@ refuses the file with that check's name.
 
 A recording is part of the member's log from the write that names it, once that
 write is synced, and never before ("The driver"). The recordings a list names carry
-the log on from the floor position: each begins at or below where the ones before it
-end, and two can overlap, a replay's recording and the recording of the live log a
-catch-up joined (`spec/cluster.md`, "The log"). A recording's end is not in the
+the log on from the floor position: each begins at or below the furthest end of the
+ones before it, and two can overlap, a replay's recording and the recording of the
+live log a catch-up joined, so that the log ends at the furthest end of them all and
+not always at the last one's (`spec/cluster.md`, "The log"). A recording's end is not in the
 file: it is the stop position the catalog holds for the recording, which the driver
 writes at a stop and rebuilds from the files at its start. A list names at most 1026
 recordings, the newest: the 1024 a member keeps once it has stopped them and the two
@@ -476,11 +477,16 @@ thread (ADR 0108). At the start of a member whose terms file holds no term, the
 module creates the file when there is none, as it creates the terms file: every
 field after the magic, slot 0 as the list of no entry with sequence 0 and floor
 position 0 under its checksum, the file extended to its length, and a sync, then the
-magic and a sync. A file shorter than its header, or whose magic is zero while no
-slot whose checksum matches holds an entry, a sequence above 0 or a floor position
-above 0, was torn while the module created it, and the module writes it again; a
-zero magic over such a slot is damage, since creation writes none, and the member
-refuses to start with `not-ready`. At the start of a member whose terms file holds a
+magic and a sync, then a sync of the log directory, so that a power loss does not
+take the file's name from a directory in which the member has since recorded a
+term. A file shorter than its header, or whose magic is zero while each slot either
+fails its checksum or is the list a creation writes, with no entry, sequence 0 and
+floor position 0, was torn while the module created it, and the module writes it
+again; a zero magic over any other slot whose checksum matches, one that holds a
+list a write made or one that fails a later check, is damage, since creation writes
+none, and the member refuses to start with `not-ready`. A creation, the first or one
+written again, is counted in `cluster.log_recordings_listed` once the member has
+its counters, as each list written after it is. At the start of a member whose terms file holds a
 term, the module creates nothing and writes nothing before it has read the file: a
 member that has recorded a term holds a log, and a list created for it would say
 that it holds none. Such a member with no file refuses to start with `absent`,
@@ -499,22 +505,34 @@ list names its recording of that log, which begins at the term's base. Third, in
 truncation, after the last `purge recording` and `truncate recording` has been
 answered and before the terms file's entries are deleted: the list names the
 recordings that are left, and when none is left its floor position is the position
-truncated to. Fourth, at a member's start, when the list it read names a recording
-that is gone or that holds nothing: the list then names the recordings the start
-took ("A member's start" of `spec/cluster.md` says which those are). A list that
+truncated to. Fourth, at a member's start, when the recordings the start took are
+not the ones the list names, one being gone from the catalog or holding nothing:
+the list then names the recordings the start took ("A member's start" of
+`spec/cluster.md` says which those are, and that a start which cannot write the
+list ends before it deletes a term). Each list written is counted in
+`cluster.log_recordings_listed`. A list that
 cannot be written or synced leaves the recording out of the member's log, the duty
-cycle reports the error with what to do, and the next cycle writes again; a sync
+cycle reports the error with what to do and counts it in
+`cluster.log_recordings_unsynced`, and the next cycle writes again; a sync
 that failed is not tried again on the same bytes, since the next write is the whole
-list into the same slot. A member that stops a recording, at a step back to an
+list into the same slot. The retry is one write for each duty cycle and no more,
+and a member started with `cavalry run` is given up after 10 s of cycles that fail.
+A member that stops a recording, at a step back to an
 election or at its close, writes nothing: the list already names the recording, and
-its stop position is the catalog's. The recovery pass of this section leaves the
+its stop position is the catalog's. A recording the member forgets, its table
+holding 1,024 stopped ones already, is counted in `cluster.log_recordings_forgotten`
+and leaves the list at the next write, whose floor position is where the oldest
+recording left begins; a list at a member's start that still names it, or whose
+floor position is above 0, is a log the member does not start on
+(`spec/cluster.md`, "A member's start"). The recovery pass of this section leaves the
 file alone, as it leaves the terms file.
 
 What the order of a truncation leaves after a crash: before the list is written,
 recordings the list names are gone from the catalog, the last ones it names, since
-the module purges from the last recording back; after the list and before the terms
-file, a term whose base is above the end of the log. A member's start reads both as
-that truncation and finishes it.
+the module purges from the last recording back and cuts no recording before it has
+purged them all; after the list and before the terms file, a term whose base is
+above the end of the log. A member's start reads both as that truncation and
+finishes it, counted in `cluster.truncations_finished`.
 
 ## What a reader rejects
 
@@ -625,10 +643,13 @@ The two slots together, slot 0's checks and then slot 1's:
 | a slot's check | A slot passes `checksum` and fails `sequence`, `position` or `recording`: the file is damaged, since a writer writes no such slot. Slot 0's failure is reported before slot 1's. |
 | `sequence` | Both slots pass every check and hold the same sequence. |
 
-A member that opens its file reports two more, which no vector pins since neither
-is a property of the file's bytes: `absent`, when the terms file holds a term and
-there is no log recordings file ("The driver"), and `recordings-full`, when a list
-of more than 1026 recordings is given to a write, which writes nothing.
+A member that opens its file reports three more, which no vector pins since none
+is a property of the bytes a reader is given: `absent`, when the terms file holds a
+term and there is no log recordings file ("The driver"); `log-recordings-full`, when
+a list of more than 1026 recordings is given to a write, which writes nothing; and
+`sequence`, when a write is asked of a file whose list holds the sequence
+9223372036854775807, which no count of writes reaches and above which there is
+none, and that write writes nothing either.
 
 ## Vectors
 
