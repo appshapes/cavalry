@@ -34,9 +34,9 @@ use cavalry_proto::cluster::{
 use cavalry_proto::udp::UDP_TERM_LENGTH;
 use cavalry_shm::counters::CounterId;
 use cavalry_shm::counters::generated::{
-    CLUSTER_APPEND_POSITION, CLUSTER_COMMIT_POSITION, CLUSTER_ELECTION_STATE,
-    CLUSTER_LEADERSHIP_TERM_ID, CLUSTER_LOG_RECORDING_ID, CLUSTER_MESSAGES_REJECTED, CLUSTER_ROLE,
-    COUNTERS,
+    CLUSTER_APPEND_POSITION, CLUSTER_COMMIT_POSITION, CLUSTER_ELECTION_CAUSE,
+    CLUSTER_ELECTION_STATE, CLUSTER_LEADER_MEMBER_ID, CLUSTER_LEADERSHIP_TERM_ID,
+    CLUSTER_LOG_RECORDING_ID, CLUSTER_MESSAGES_REJECTED, CLUSTER_ROLE, COUNTERS,
 };
 
 use crate::consensus::{
@@ -1285,6 +1285,11 @@ struct Counters {
     role: Stored,
     election_state: Stored,
     leadership_term_id: Stored,
+    /// `cluster.leader_member_id`: the member this one leads as or follows, −1 while
+    /// it has none (ADR 0102).
+    leader_member_id: Stored,
+    /// `cluster.election_cause`: why its last election began (ADR 0102).
+    election_cause: Stored,
     append_position: Stored,
     /// `cluster.log_recording_id`, added before `cluster.commit_position` and stored
     /// before it (`spec/cluster.md`, "The service").
@@ -1315,6 +1320,16 @@ impl Counters {
                 CLUSTER_LEADERSHIP_TERM_ID,
                 "cluster.leadership_term_id",
                 core.leadership_term_id(),
+            )?,
+            leader_member_id: add(
+                CLUSTER_LEADER_MEMBER_ID,
+                "cluster.leader_member_id",
+                core.leader_gauge(),
+            )?,
+            election_cause: add(
+                CLUSTER_ELECTION_CAUSE,
+                "cluster.election_cause",
+                i64::from(core.election_cause().code()),
             )?,
             append_position: add(
                 CLUSTER_APPEND_POSITION,
@@ -1361,6 +1376,9 @@ impl Counters {
         self.election_state
             .store(i64::from(core.election_state().code()));
         self.leadership_term_id.store(core.leadership_term_id());
+        self.leader_member_id.store(core.leader_gauge());
+        self.election_cause
+            .store(i64::from(core.election_cause().code()));
         self.append_position.store(core.append_position());
         if self.log_recording_id.store(log_recording_id) {
             self.commit_position.store(core.commit_position());
