@@ -541,7 +541,8 @@ What the driver does with each, after the checks of "What the driver rejects":
   position, and keeps the publication's limit at the sender position plus the
   publication window while the publication is connected and at the sender position
   otherwise, so that the replay goes no faster than the receivers' window and does not
-  move until the publication is connected; no `available image` goes to any
+  move until the publication is connected, a recording of the replay's own publication
+  counted as `spec/udp.md`, "The sender", counts one of any publication (ADR 0097); no `available image` goes to any
   subscription on this driver for the replay stream, since the image is the receiving
   driver's, created from the sender's setup frame, and a `cavalry:udp` subscription on
   this driver on the same resolved channel gets its image from the receiver when that

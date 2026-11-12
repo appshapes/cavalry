@@ -286,7 +286,10 @@ struct Held {
     /// image joined below the member's append position (ADR 0094). It is taken at
     /// the subscription and not when the driver hands the recording over: in a
     /// catch-up the replay goes on meanwhile and may carry the log past where the
-    /// live recording begins before the module has the recording in hand.
+    /// live recording begins before the module has the recording in hand. A
+    /// recording of a replay's image is given the end of the recordings the member
+    /// stopped, at the hand-over, and nothing reads it: a replay's recording counts
+    /// by where it begins alone ([`ClientIo::end_below_live`]).
     floor: i64,
     /// Whether the election has been told this recording's image: [`Io::log_image`]
     /// has returned its start for the image's session, or [`Io::catchup_image`] has
@@ -297,7 +300,8 @@ struct Held {
 impl Held {
     /// Whether this recording of the live log carries the member's log on from
     /// `end`: the election was told its image, it began at or past where the log
-    /// ended when it was handed over, and the log has since reached where it begins.
+    /// ended when the member subscribed, and the log has since reached where it
+    /// begins.
     /// With no catch-up that is a recording that began where the log ended (ADR
     /// 0093). In follower catch-up it is the live recording, which begins ahead of
     /// the log and counts once the replay's recording has reached its start (ADR
