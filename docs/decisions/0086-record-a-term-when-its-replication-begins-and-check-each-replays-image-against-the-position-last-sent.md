@@ -1,6 +1,6 @@
 # 0086. Record a term when its replication begins, and check each replay's image against the position last sent
 
-- **Status:** Accepted
+- **Status:** Superseded by 0092
 - **Date:** 2026-11-11
 - **Invariants affected:** 1, 3, 4, 6
 - **Supersedes:** none. Changes row 9 of `spec/cluster.md`, "Roles and the election",

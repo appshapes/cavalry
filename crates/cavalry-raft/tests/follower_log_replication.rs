@@ -311,13 +311,32 @@ fn an_image_that_joins_elsewhere_fails_the_election() {
     assert_eq!(io.count(|call| *call == Call::RemoveCatchup), 1);
 }
 
-/// Where the span lies in two recordings the leader sends two replays, the second
-/// begun on the member's report of the first's end. Its image must join at the
-/// position the member last sent. The check is against that position and not the
-/// append position of the cycle that first sees the image, which the image's own
-/// bytes may have moved already. An image that joins anywhere else fails.
+/// The calls that subscribe, ask and unsubscribe, in the order the member made them.
+fn asks(io: &Stub) -> Vec<Call> {
+    io.calls
+        .iter()
+        .flatten()
+        .filter(|call| {
+            matches!(
+                call,
+                Call::AddCatchup | Call::RemoveCatchup | Call::CatchupPosition(..)
+            )
+        })
+        .copied()
+        .collect()
+}
+
+/// Where the term lies in two of the leader's recordings the member asks twice (ADR
+/// 0092). The first replay ends at its recording's end, 32, below the stop, and its
+/// image goes. The member removes its subscription. On the next cycle its log ends
+/// further on than where it asked from, so it subscribes again, which arms a recording
+/// for the next image, and asks from where its log ends. Each catch-up position is
+/// counted. The second image must join where the member asked from: the check is
+/// against that position and not the append position of the cycle that first sees
+/// the image, which the image's own bytes may have moved already. An image that joins
+/// anywhere else fails.
 #[test]
-fn a_later_image_must_join_where_the_member_last_reported() {
+fn a_member_asks_again_when_its_replays_image_has_gone_and_its_log_has_moved() {
     let mut io = Stub::new();
     let (mut member, ms) = after_term_zero(&mut io, 0);
     read(&mut member, &mut io, ms, &told(1, 64, 0, [1, 64, -1], 64));
@@ -326,12 +345,43 @@ fn a_later_image_must_join_where_the_member_last_reported() {
     io.append_position = 32;
     work(&mut member, &mut io, ms + 2);
     assert_eq!(io.last_append, Some((2, 0, 32)));
+    // The image is there: the member has reported its end and asks for nothing.
+    work(&mut member, &mut io, ms + 3);
+    assert_eq!(
+        asks(&io),
+        vec![Call::AddCatchup, Call::CatchupPosition(2, 1, 0)]
+    );
+
+    // The replay ended at its recording's end, and its image goes.
+    io.catchup_image = None;
+    work(&mut member, &mut io, ms + 4);
+    assert_eq!(
+        asks(&io),
+        vec![
+            Call::AddCatchup,
+            Call::CatchupPosition(2, 1, 0),
+            Call::RemoveCatchup
+        ],
+        "the cycle that removes the subscription asks for nothing"
+    );
+    work(&mut member, &mut io, ms + 5);
+    assert_eq!(
+        asks(&io),
+        vec![
+            Call::AddCatchup,
+            Call::CatchupPosition(2, 1, 0),
+            Call::RemoveCatchup,
+            Call::AddCatchup,
+            Call::CatchupPosition(2, 1, 32),
+        ]
+    );
+    assert_eq!(member.counts().log_replications, 2);
 
     // The second replay's image joined at 32 and its first 16 bytes are synced
     // before this cycle looks.
     io.catchup_image = Some(32);
     io.append_position = 48;
-    work(&mut member, &mut io, ms + 3);
+    work(&mut member, &mut io, ms + 6);
     assert_eq!(
         member.election_state(),
         ElectionState::FollowerLogReplication
@@ -339,11 +389,56 @@ fn a_later_image_must_join_where_the_member_last_reported() {
     assert_eq!(member.counts().join_position_mismatches, 0);
     assert_eq!(io.last_append, Some((2, 0, 48)));
 
-    // A third image that joins at 40, where the member reported 48.
+    // That image goes too, and the member asks from 48. An image that joins at 40
+    // is not the answer to it.
+    io.catchup_image = None;
+    work(&mut member, &mut io, ms + 7);
+    work(&mut member, &mut io, ms + 8);
+    assert_eq!(io.count(|call| *call == Call::CatchupPosition(2, 1, 48)), 1);
+    assert_eq!(member.counts().log_replications, 3);
     io.catchup_image = Some(40);
-    work(&mut member, &mut io, ms + 4);
+    work(&mut member, &mut io, ms + 9);
     assert_eq!(member.election_state(), ElectionState::Init);
     assert_eq!(member.counts().join_position_mismatches, 1);
+}
+
+/// A member asks from a position once (ADR 0092). A replay whose image went and
+/// left the member's log where it asked from brought nothing. The member removes its
+/// subscription, asks no more and subscribes to nothing, however many cycles pass,
+/// and the progress timer fails its election, counted as a replication that is
+/// unavailable: a replay that ends at once is not asked for again and again.
+#[test]
+fn a_member_whose_replay_brought_nothing_does_not_ask_again() {
+    let mut io = Stub::new();
+    let (mut member, ms) = after_term_zero(&mut io, 32);
+    read(&mut member, &mut io, ms, &told(1, 64, 0, [1, 64, -1], 64));
+    work(&mut member, &mut io, ms + 1);
+    io.catchup_image = Some(32);
+    work(&mut member, &mut io, ms + 2);
+    io.catchup_image = None;
+    for step in 3..200 {
+        work(&mut member, &mut io, ms + step);
+    }
+    assert_eq!(
+        asks(&io),
+        vec![
+            Call::AddCatchup,
+            Call::CatchupPosition(2, 1, 32),
+            Call::RemoveCatchup
+        ]
+    );
+    assert_eq!(
+        member.election_state(),
+        ElectionState::FollowerLogReplication
+    );
+    work(&mut member, &mut io, ms + TIMEOUT_MS);
+    assert_eq!(member.election_state(), ElectionState::Init);
+    assert_eq!(member.counts().log_replications, 1);
+    assert_eq!(member.counts().log_replications_unavailable, 1);
+    assert_eq!(member.counts().elections_failed, 1);
+    // Init has no subscription to remove.
+    work(&mut member, &mut io, ms + TIMEOUT_MS + 1);
+    assert_eq!(io.count(|call| *call == Call::RemoveCatchup), 1);
 }
 
 /// Below its stop, a member whose append position has not moved for the leader

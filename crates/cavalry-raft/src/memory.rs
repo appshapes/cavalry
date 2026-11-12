@@ -130,6 +130,13 @@ struct Replay {
     unheard_since_ns: Option<u64>,
     /// Whether its image has reached the member's subscription.
     joined: bool,
+    /// Whether the member records its image, `None` until the image has reached the
+    /// subscription the member holds now: the image that reaches a subscription first
+    /// takes the recording armed on it, and one that comes after finds none and
+    /// brings the member's log nothing, as over a driver, which arms a recording only
+    /// on a stream with no image (`spec/client-protocol.md`, "Commands", start
+    /// recording; ADR 0092).
+    recorded: Option<bool>,
     /// Asked to stop: it stops on the next step.
     stopping: bool,
     /// How it ended, until the member that started it has asked.
@@ -165,6 +172,10 @@ struct Disk {
     /// The position up to which its recording is synced: its append position.
     synced: i64,
     sync_paused: bool,
+    /// Where one of its recordings of the log ends and the next begins, below where
+    /// its log ends: what [`Cluster::end_recording`] marked. A replication's replay
+    /// of its log ends at the first of these above where the replay began.
+    recording_ends: Vec<i64>,
     /// When its cut began, for the image liveness timeout.
     cut_since_ns: Option<u64>,
     /// Its image of the log is gone, until it leaves the log and joins again.
@@ -172,9 +183,13 @@ struct Disk {
     halted: bool,
     /// Its consensus module stands still while its driver runs ([`Cluster::stall`]).
     stalled: bool,
-    /// Subscribed on its catch-up endpoint, with a recording armed.
+    /// Subscribed on its catch-up endpoint.
     catchup: bool,
-    /// The join position of the replay's image now on that subscription.
+    /// Whether the recording armed on that subscription still waits for an image:
+    /// from [`Io::add_catchup`] until the first image reaches the subscription.
+    catchup_armed: bool,
+    /// The join position of the replay's image the member records on that
+    /// subscription.
     catchup_image: Option<i64>,
 }
 
@@ -191,11 +206,13 @@ impl Disk {
             received: 0,
             synced: 0,
             sync_paused: false,
+            recording_ends: Vec::new(),
             cut_since_ns: None,
             image_lost: false,
             halted: false,
             stalled: false,
             catchup: false,
+            catchup_armed: false,
             catchup_image: None,
         }
     }
@@ -447,6 +464,7 @@ impl Io for MemberIo<'_> {
         disk.received = disk.received.min(position);
         disk.synced = disk.synced.min(position);
         disk.terms.retain(|&(_, base)| base <= position);
+        disk.recording_ends.retain(|&end| end < position);
         Ok(Some(
             disk.terms.iter().map(|&(term, _)| term).max().unwrap_or(-1),
         ))
@@ -503,6 +521,7 @@ impl Io for MemberIo<'_> {
             end,
             unheard_since_ns: None,
             joined: false,
+            recorded: None,
             stopping: false,
             stopped: None,
         });
@@ -528,8 +547,15 @@ impl Io for MemberIo<'_> {
     }
 
     fn add_catchup(&mut self) -> Result<(), Self::Fault> {
+        // A new subscription: an image a replay brings to it is new to it.
+        for replay in &mut self.world.replays {
+            if replay.to == self.own {
+                replay.recorded = None;
+            }
+        }
         if let Some(disk) = self.world.disks.get_mut(self.own) {
             disk.catchup = true;
+            disk.catchup_armed = true;
             disk.catchup_image = None;
             // The recording armed here begins where the member's log ends, its append
             // position. What it received above that and never synced, which needs a
@@ -566,8 +592,15 @@ impl Io for MemberIo<'_> {
     }
 
     fn remove_catchup(&mut self) -> Result<(), Self::Fault> {
+        // The subscription goes, with the recording armed on it and every image.
+        for replay in &mut self.world.replays {
+            if replay.to == self.own {
+                replay.recorded = None;
+            }
+        }
         if let Some(disk) = self.world.disks.get_mut(self.own) {
             disk.catchup = false;
+            disk.catchup_armed = false;
             disk.catchup_image = None;
         }
         Ok(())
@@ -865,12 +898,21 @@ impl Cluster {
                 let entries: Vec<Entry> = disks
                     .get(replay.from)
                     .map(|disk| {
+                        // A replication's replay is of one recording: it ends where
+                        // the recording it began in ends, when that is below its end.
+                        let recording_end = disk
+                            .recording_ends
+                            .iter()
+                            .copied()
+                            .filter(|&end| replay.end.is_some() && end > replay.start)
+                            .min();
                         disk.log
                             .iter()
                             .filter(|entry| {
                                 entry.position >= replay.position
                                     && entry.position_after <= disk.synced
                                     && replay.end.is_none_or(|end| entry.position_after <= end)
+                                    && recording_end.is_none_or(|end| entry.position_after <= end)
                             })
                             .cloned()
                             .collect()
@@ -888,10 +930,17 @@ impl Cluster {
                     ended = Some(true);
                 } else if let Some(disk) = disks.get_mut(replay.to) {
                     replay.joined = true;
-                    disk.catchup_image = Some(replay.start);
+                    // The image takes the recording armed on the subscription, when
+                    // one still waits; an image that finds none is not recorded.
+                    let recorded = *replay
+                        .recorded
+                        .get_or_insert_with(|| std::mem::take(&mut disk.catchup_armed));
+                    if recorded {
+                        disk.catchup_image = Some(replay.start);
+                    }
                     for entry in entries {
                         replay.position = entry.position_after;
-                        if entry.position == disk.received {
+                        if recorded && entry.position == disk.received {
                             disk.received = entry.position_after;
                             disk.log.push(entry);
                         }
@@ -904,7 +953,7 @@ impl Cluster {
                     ended,
                 });
                 // The replay's image goes with it.
-                if replay.joined
+                if replay.recorded == Some(true)
                     && let Some(disk) = disks.get_mut(replay.to)
                     && disk.catchup_image == Some(replay.start)
                 {
@@ -1217,6 +1266,7 @@ impl Cluster {
             disk.halted = false;
             disk.stalled = false;
             disk.catchup = false;
+            disk.catchup_armed = false;
             disk.catchup_image = None;
         }
         self.world
@@ -1285,6 +1335,21 @@ impl Cluster {
     pub fn unstall(&mut self, member: i32) {
         if let Some(disk) = self.disk_mut(member) {
             disk.stalled = false;
+        }
+    }
+
+    /// Ends the member's recording of the log where its log ends now, so that what
+    /// reaches it after is in another recording: what a member that left the log and
+    /// joined it again within a term holds, a term in two recordings
+    /// (`spec/cluster.md`, "The log"). The member's log is the same bytes. A
+    /// replication's replay of its log is of one recording, and ends there (ADR
+    /// 0092).
+    pub fn end_recording(&mut self, member: i32) {
+        if let Some(disk) = self.disk_mut(member) {
+            let end = disk.received;
+            if end > 0 && !disk.recording_ends.contains(&end) {
+                disk.recording_ends.push(end);
+            }
         }
     }
 
