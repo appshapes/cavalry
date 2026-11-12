@@ -132,6 +132,35 @@ impl ElectionState {
     }
 }
 
+/// Why a member's last election began, with the value of the `cluster.election_cause`
+/// gauge (`spec/cluster.md`, "Counters"; ADR 0077, ADR 0102): the election the member
+/// is in, or the one that closed last. A member whose leader is appointed never has
+/// [`ElectionCause::QuorumLost`] or [`ElectionCause::HigherTerm`]: its leader stays
+/// the leader below a quorum, and it holds no election on a term above its own.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+#[repr(u8)]
+pub enum ElectionCause {
+    /// The member started.
+    Started = 0,
+    /// It followed, and its leader said nothing for the leader heartbeat timeout.
+    LeaderHeartbeatTimeout = 1,
+    /// It followed, and its image of the leader's log was no longer available.
+    LogImageLost = 2,
+    /// It led, and its active members fell below a quorum.
+    QuorumLost = 3,
+    /// Its election had closed, and a message carried a term above its own.
+    HigherTerm = 4,
+    /// Its election before failed.
+    ElectionFailed = 5,
+}
+
+impl ElectionCause {
+    /// The cause's code, the value of the `cluster.election_cause` gauge.
+    pub const fn code(self) -> u8 {
+        self as u8
+    }
+}
+
 /// The two clocks of one duty cycle, read once by the caller: a monotonic clock for
 /// every timeout, and the cluster's time for what the leader writes into the log
 /// (`spec/cluster.md`, "Values").
@@ -925,6 +954,8 @@ pub struct Consensus {
     /// The catch-up this member is in, in follower catch-up await and follower
     /// catch-up.
     catching: Option<Catchup>,
+    /// Why this member's last election began: set where an election begins at init.
+    cause: ElectionCause,
 }
 
 impl Consensus {
@@ -1006,6 +1037,7 @@ impl Consensus {
             replication: None,
             catchup: false,
             catching: None,
+            cause: ElectionCause::Started,
         })
     }
 
@@ -1054,6 +1086,28 @@ impl Consensus {
     /// member leads a term or takes a leader's new leadership term.
     pub fn leader_member_id(&self) -> i32 {
         self.leader_id
+    }
+
+    /// What the `cluster.leader_member_id` gauge holds (`spec/cluster.md`,
+    /// "Counters"; ADR 0102): the id of the member this member leads as or follows,
+    /// and −1 while it has none, in init, canvass, nominate and the two ballots.
+    /// Where the leader is appointed its id is known from the start, and a member
+    /// that has neither led nor taken its new leadership term still has no leader.
+    pub fn leader_gauge(&self) -> i64 {
+        match self.state {
+            ElectionState::Init
+            | ElectionState::Canvass
+            | ElectionState::Nominate
+            | ElectionState::CandidateBallot
+            | ElectionState::FollowerBallot => -1,
+            _ => i64::from(self.leader_id),
+        }
+    }
+
+    /// Why this member's last election began, the one it is in or the one that
+    /// closed last: the value of the `cluster.election_cause` gauge.
+    pub fn election_cause(&self) -> ElectionCause {
+        self.cause
     }
 
     /// This member's role.
@@ -1672,6 +1726,7 @@ impl Consensus {
     fn fail(&mut self, clock: Clock) {
         count(&mut self.counts.elections_failed);
         self.role = Role::Follower;
+        self.cause = ElectionCause::ElectionFailed;
         self.enter(ElectionState::Init, clock);
     }
 
@@ -1719,6 +1774,7 @@ impl Consensus {
             &mut self.counts.higher_terms_seen
         });
         self.role = Role::Follower;
+        self.cause = ElectionCause::HigherTerm;
         self.enter(ElectionState::Init, clock);
     }
 
@@ -2577,6 +2633,7 @@ impl Consensus {
         if self.report_own(clock) {
             // Counted in `cluster.leader_quorum_losses` by the quorum's watch.
             self.role = Role::Follower;
+            self.cause = ElectionCause::QuorumLost;
             return self.enter(ElectionState::Init, clock);
         }
         let commit = commit_position(
@@ -2992,10 +3049,12 @@ impl Consensus {
     fn follow<I: Io>(&mut self, clock: Clock, io: &mut I) -> Result<usize, I::Fault> {
         if clock.now_ns.saturating_sub(self.last_leader_word_ns) >= LEADER_HEARTBEAT_TIMEOUT_NS {
             count(&mut self.counts.leader_heartbeat_timeouts);
+            self.cause = ElectionCause::LeaderHeartbeatTimeout;
             return Ok(self.enter(ElectionState::Init, clock));
         }
         if io.log_image(self.log_session_id)?.is_none() {
             count(&mut self.counts.log_images_lost);
+            self.cause = ElectionCause::LogImageLost;
             return Ok(self.enter(ElectionState::Init, clock));
         }
         if self.append_position != self.last_append_sent
