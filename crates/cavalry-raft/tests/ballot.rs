@@ -172,22 +172,30 @@ fn a_ballot_waits_the_election_timeout_for_a_member_heard_that_has_not_voted() {
     assert_eq!(member.counts().ballots_lost, 0);
 }
 
-/// A vote against ends the ballot with no leader, whatever the votes for: at the
-/// election timeout the candidate canvasses again, a follower, and counts the ballot.
+/// A vote against ends the ballot with no leader, whatever the votes for, and ends it
+/// at once: no ballot with a vote against makes a leader, so the candidate does not
+/// wait out the election timeout. On its next cycle it canvasses again, a follower,
+/// and counts the ballot (ADR 0105). With a quorum for it and no vote against, it had
+/// waited for the member it heard.
 #[test]
-fn a_vote_against_sends_the_candidate_back_to_canvass_at_the_election_timeout() {
+fn a_vote_against_sends_the_candidate_back_to_canvass_at_once() {
     let mut io = Stub::new();
     let mut member = elector(4);
     let ms = to_candidate_ballot(&mut member, &mut io, &[1, 2]);
     member
         .on_message(at(ms + 1), &vote(1, 0, true), &mut io)
         .expect("no fault");
-    member
-        .on_message(at(ms + 2), &vote(2, 0, false), &mut io)
-        .expect("no fault");
-    member.do_work(at(ms + 999), &mut io).expect("no fault");
+    member.do_work(at(ms + 2), &mut io).expect("no fault");
     assert_eq!(member.election_state(), ElectionState::CandidateBallot);
-    member.do_work(at(ms + 1_000), &mut io).expect("no fault");
+    member
+        .on_message(at(ms + 3), &vote(2, 0, false), &mut io)
+        .expect("no fault");
+    assert_eq!(
+        member.election_state(),
+        ElectionState::CandidateBallot,
+        "the vote is recorded, and the ballot is counted on the member's own cycle"
+    );
+    member.do_work(at(ms + 4), &mut io).expect("no fault");
     assert_eq!(member.election_state(), ElectionState::Canvass);
     assert_eq!(member.role(), Role::Follower);
     let counts = member.counts();
@@ -313,8 +321,9 @@ fn a_vote_that_is_not_sent_moves_the_term_and_nothing_else() {
 
 /// A candidate that takes a higher term during its ballot, voting against a candidate
 /// whose log is behind its own, holds no vote for its new term, its own included:
-/// votes for the term it proposed count for nothing, and it canvasses again at the
-/// election timeout, never leading a term with votes cast for another.
+/// votes for the term it proposed count for nothing, and it canvasses again on its
+/// next cycle, since it can lead nothing in this ballot (ADR 0105), never leading a
+/// term with votes cast for another.
 #[test]
 fn a_candidate_whose_term_rose_during_its_ballot_leads_no_term() {
     let mut io = Stub::new();
@@ -332,10 +341,9 @@ fn a_candidate_whose_term_rose_during_its_ballot_leads_no_term() {
             .expect("no fault");
     }
     member.do_work(at(ms + 3), &mut io).expect("no fault");
-    assert_eq!(member.election_state(), ElectionState::CandidateBallot);
-    member.do_work(at(ms + 1_000), &mut io).expect("no fault");
     assert_eq!(member.election_state(), ElectionState::Canvass);
-    assert_eq!(member.counts().terms_led, 0);
+    let counts = member.counts();
+    assert_eq!((counts.ballots_lost, counts.terms_led), (1, 0));
     assert!(
         io.first(|call| matches!(call, Call::RecordTerm(..)))
             .is_none()
@@ -347,7 +355,7 @@ fn a_candidate_whose_term_rose_during_its_ballot_leads_no_term() {
 /// term from a log behind its own raises its candidate term, in which it holds no vote,
 /// its own included (`spec/cluster.md`, state 3). Its next cycle sends no request vote:
 /// one for the raised term would spend the other member's one vote in that term on a
-/// candidate that cannot win it.
+/// candidate that cannot win it. That cycle ends its ballot, and it canvasses again.
 #[test]
 fn a_candidate_whose_term_rose_asks_no_member_for_a_vote_in_it() {
     let mut io = Stub::new();
@@ -366,18 +374,17 @@ fn a_candidate_whose_term_rose_asks_no_member_for_a_vote_in_it() {
     io.clear();
     member.do_work(at(ms + 3), &mut io).expect("no fault");
     assert_eq!(sends(&io, Template::RequestVote), 0);
-    member.do_work(at(ms + 1_000), &mut io).expect("no fault");
-    assert_eq!(sends(&io, Template::RequestVote), 0);
     assert_eq!(member.election_state(), ElectionState::Canvass);
     assert_eq!(member.counts().ballots_lost, 1);
 }
 
 /// In a cluster of five, the case where a request for the raised term could win it. The
 /// candidate's requests to all four members are refused on its first cycle, and member
-/// 1's request vote from a log behind raises its term to 5. It asks nobody for a vote
-/// in term 5, and votes for term 5 from the three others, a quorum, do not make it the
+/// 1's request vote from a log behind raises its term to 5. Votes for term 5 from the
+/// three others, a quorum, reach it before its next cycle, and do not make it the
 /// leader: the votes for a term make a candidate the leader with its own among them
-/// (`spec/cluster.md`, state 3). It canvasses again at the election timeout.
+/// (`spec/cluster.md`, state 3). That cycle asks nobody for a vote in term 5 and ends
+/// its ballot, and it canvasses again.
 #[test]
 fn a_candidate_whose_term_rose_leads_no_term_on_votes_cast_in_it() {
     let mut io = Stub::new();
@@ -391,16 +398,14 @@ fn a_candidate_whose_term_rose_leads_no_term_on_votes_cast_in_it() {
         .on_message(at(ms + 2), &request_vote(1, 5, 0), &mut io)
         .expect("no fault");
     io.clear();
-    member.do_work(at(ms + 3), &mut io).expect("no fault");
-    assert_eq!(sends(&io, Template::RequestVote), 0);
     for voter in [2, 3, 4] {
         member
-            .on_message(at(ms + 4), &vote(voter, 5, true), &mut io)
+            .on_message(at(ms + 3), &vote(voter, 5, true), &mut io)
             .expect("no fault");
     }
-    member.do_work(at(ms + 999), &mut io).expect("no fault");
     assert_eq!(member.election_state(), ElectionState::CandidateBallot);
-    member.do_work(at(ms + 1_000), &mut io).expect("no fault");
+    member.do_work(at(ms + 4), &mut io).expect("no fault");
+    assert_eq!(sends(&io, Template::RequestVote), 0);
     assert_eq!(member.election_state(), ElectionState::Canvass);
     assert_eq!(member.role(), Role::Follower);
     let counts = member.counts();

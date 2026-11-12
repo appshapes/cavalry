@@ -1769,7 +1769,8 @@
       },
       "fields": {
         "leader": true,
-        "unanimous": true
+        "unanimous": true,
+        "lost": false
       }
     },
     {
@@ -1800,7 +1801,8 @@
       },
       "fields": {
         "leader": false,
-        "unanimous": false
+        "unanimous": false,
+        "lost": false
       }
     },
     {
@@ -1831,7 +1833,8 @@
       },
       "fields": {
         "leader": true,
-        "unanimous": false
+        "unanimous": false,
+        "lost": false
       }
     },
     {
@@ -1867,7 +1870,8 @@
       },
       "fields": {
         "leader": false,
-        "unanimous": false
+        "unanimous": false,
+        "lost": true
       }
     },
     {
@@ -1897,7 +1901,8 @@
       },
       "fields": {
         "leader": false,
-        "unanimous": false
+        "unanimous": false,
+        "lost": false
       }
     },
     {
@@ -1939,7 +1944,8 @@
       },
       "fields": {
         "leader": false,
-        "unanimous": false
+        "unanimous": false,
+        "lost": false
       }
     },
     {
@@ -1963,7 +1969,8 @@
       },
       "fields": {
         "leader": true,
-        "unanimous": true
+        "unanimous": true,
+        "lost": false
       }
     },
     {
@@ -1993,7 +2000,8 @@
       },
       "fields": {
         "leader": true,
-        "unanimous": true
+        "unanimous": true,
+        "lost": false
       }
     },
     {
@@ -2029,7 +2037,8 @@
       },
       "fields": {
         "leader": true,
-        "unanimous": true
+        "unanimous": true,
+        "lost": false
       }
     },
     {
@@ -2059,7 +2068,8 @@
       },
       "fields": {
         "leader": false,
-        "unanimous": false
+        "unanimous": false,
+        "lost": false
       }
     },
     {
@@ -2095,7 +2105,8 @@
       },
       "fields": {
         "leader": false,
-        "unanimous": false
+        "unanimous": false,
+        "lost": true
       }
     },
     {
@@ -2131,7 +2142,141 @@
       },
       "fields": {
         "leader": false,
-        "unanimous": false
+        "unanimous": false,
+        "lost": false
+      }
+    },
+    {
+      "kind": "arithmetic",
+      "name": "ballot-lost-at-the-first-vote-against-before-the-others-vote",
+      "rule": "ballot",
+      "inputs": {
+        "members": 5,
+        "candidate_term": 3,
+        "votes": [
+          {
+            "member": 0,
+            "vote": true,
+            "term": 3
+          },
+          {
+            "member": 2,
+            "vote": false,
+            "term": 3
+          }
+        ],
+        "heard": [
+          0,
+          1,
+          2,
+          3
+        ],
+        "timeout_passed": false
+      },
+      "fields": {
+        "leader": false,
+        "unanimous": false,
+        "lost": true
+      }
+    },
+    {
+      "kind": "arithmetic",
+      "name": "ballot-lost-with-a-quorum-for-and-one-against-before-timeout",
+      "rule": "ballot",
+      "inputs": {
+        "members": 5,
+        "candidate_term": 3,
+        "votes": [
+          {
+            "member": 0,
+            "vote": true,
+            "term": 3
+          },
+          {
+            "member": 1,
+            "vote": true,
+            "term": 3
+          },
+          {
+            "member": 3,
+            "vote": true,
+            "term": 3
+          },
+          {
+            "member": 4,
+            "vote": false,
+            "term": 3
+          }
+        ],
+        "heard": [
+          0,
+          1,
+          3,
+          4
+        ],
+        "timeout_passed": false
+      },
+      "fields": {
+        "leader": false,
+        "unanimous": false,
+        "lost": true
+      }
+    },
+    {
+      "kind": "arithmetic",
+      "name": "ballot-a-vote-against-an-older-term-loses-nothing",
+      "rule": "ballot",
+      "inputs": {
+        "members": 3,
+        "candidate_term": 4,
+        "votes": [
+          {
+            "member": 0,
+            "vote": true,
+            "term": 4
+          },
+          {
+            "member": 1,
+            "vote": false,
+            "term": 3
+          }
+        ],
+        "heard": [
+          0,
+          1
+        ],
+        "timeout_passed": false
+      },
+      "fields": {
+        "leader": false,
+        "unanimous": false,
+        "lost": false
+      }
+    },
+    {
+      "kind": "arithmetic",
+      "name": "ballot-short-of-a-quorum-with-none-against-waits",
+      "rule": "ballot",
+      "inputs": {
+        "members": 3,
+        "candidate_term": 3,
+        "votes": [
+          {
+            "member": 0,
+            "vote": true,
+            "term": 3
+          }
+        ],
+        "heard": [
+          0,
+          1
+        ],
+        "timeout_passed": false
+      },
+      "fields": {
+        "leader": false,
+        "unanimous": false,
+        "lost": false
       }
     },
     {

@@ -397,15 +397,17 @@ def ballot(count, candidate_term, votes, heard, timeout_passed):
     """spec/cluster.md, "candidate ballot" (ADR 0077): over the votes cast for the candidate's
     current candidate term alone, its own among them: leader at once when they make a quorum,
     none is against and every member heard has cast one for; else at the election timeout when a
-    quorum voted for and none against, Aeron's isQuorumLeader. `heard` is the ids of the members
-    the candidate has read a consensus message from since its election began."""
+    quorum voted for and none against, Aeron's isQuorumLeader; and lost, at once, when one is
+    against, since no ballot with a vote against makes a leader (ADR 0105). `heard` is the ids of
+    the members the candidate has read a consensus message from since its election began."""
     cast = {v["member"]: v["vote"] for v in votes if v["term"] == candidate_term}
     quorate = all(cast.values()) and sum(1 for v in cast.values() if v) >= quorum(count)
+    lost = not all(cast.values())
     if quorate and all(member in cast for member in heard):
-        return {"leader": True, "unanimous": True}
+        return {"leader": True, "unanimous": True, "lost": False}
     if timeout_passed and quorate:
-        return {"leader": True, "unanimous": False}
-    return {"leader": False, "unanimous": False}
+        return {"leader": True, "unanimous": False, "lost": False}
+    return {"leader": False, "unanimous": False, "lost": lost}
 
 
 OLDER_TERM_VOTES = [{"member": 2, "vote": True, "term": 4}, {"member": 0, "vote": True, "term": 4},
@@ -652,46 +654,61 @@ VECTORS += [
     arithmetic("ballot-unanimous", "ballot",
                {"members": 3, "candidate_term": 3, "votes": [{"member": 0, "vote": True, "term": 3}, {"member": 1, "vote": True, "term": 3},
                                         {"member": 2, "vote": True, "term": 3}], "heard": [0, 1, 2], "timeout_passed": False},
-               {"leader": True, "unanimous": True}),
+               {"leader": True, "unanimous": True, "lost": False}),
     arithmetic("ballot-quorum-before-timeout", "ballot",
                {"members": 3, "candidate_term": 3, "votes": [{"member": 0, "vote": True, "term": 3}, {"member": 1, "vote": True, "term": 3}],
-                "heard": [0, 1, 2], "timeout_passed": False}, {"leader": False, "unanimous": False}),
+                "heard": [0, 1, 2], "timeout_passed": False}, {"leader": False, "unanimous": False, "lost": False}),
     arithmetic("ballot-quorum-at-timeout", "ballot",
                {"members": 3, "candidate_term": 3, "votes": [{"member": 0, "vote": True, "term": 3}, {"member": 1, "vote": True, "term": 3}],
-                "heard": [0, 1, 2], "timeout_passed": True}, {"leader": True, "unanimous": False}),
+                "heard": [0, 1, 2], "timeout_passed": True}, {"leader": True, "unanimous": False, "lost": False}),
     arithmetic("ballot-one-against", "ballot",
                {"members": 3, "candidate_term": 3, "votes": [{"member": 0, "vote": True, "term": 3}, {"member": 1, "vote": True, "term": 3},
                                         {"member": 2, "vote": False, "term": 3}], "heard": [0, 1, 2], "timeout_passed": True},
-               {"leader": False, "unanimous": False}),
+               {"leader": False, "unanimous": False, "lost": True}),
     arithmetic("ballot-short-of-quorum", "ballot",
                {"members": 5, "candidate_term": 3, "votes": [{"member": 0, "vote": True, "term": 3}, {"member": 1, "vote": True, "term": 3}],
-                "heard": [0, 1], "timeout_passed": True}, {"leader": False, "unanimous": False}),
+                "heard": [0, 1], "timeout_passed": True}, {"leader": False, "unanimous": False, "lost": False}),
     arithmetic("ballot-votes-for-an-older-term-not-leader", "ballot",
                {"members": 5, "candidate_term": 5, "votes": OLDER_TERM_VOTES, "heard": [0, 1, 2, 4], "timeout_passed": True},
                ballot(5, 5, OLDER_TERM_VOTES, [0, 1, 2, 4], True)),
     arithmetic("ballot-single-member", "ballot",
                {"members": 1, "candidate_term": 3, "votes": [{"member": 0, "vote": True, "term": 3}], "heard": [0], "timeout_passed": False},
-               {"leader": True, "unanimous": True}),
+               {"leader": True, "unanimous": True, "lost": False}),
     # The members heard (ADR 0077): a member that has said nothing since the candidate's election
     # began, a leader that was killed, is not waited for; a member heard is.
     arithmetic("ballot-quorum-of-the-members-heard-before-timeout", "ballot",
                {"members": 3, "candidate_term": 3, "votes": [{"member": 0, "vote": True, "term": 3}, {"member": 1, "vote": True, "term": 3}],
-                "heard": [0, 1], "timeout_passed": False}, {"leader": True, "unanimous": True}),
+                "heard": [0, 1], "timeout_passed": False}, {"leader": True, "unanimous": True, "lost": False}),
     arithmetic("ballot-five-with-two-silent-before-timeout", "ballot",
                {"members": 5, "candidate_term": 3, "votes": [{"member": 0, "vote": True, "term": 3}, {"member": 1, "vote": True, "term": 3},
                                         {"member": 3, "vote": True, "term": 3}], "heard": [0, 1, 3], "timeout_passed": False},
-               {"leader": True, "unanimous": True}),
+               {"leader": True, "unanimous": True, "lost": False}),
     arithmetic("ballot-the-members-heard-short-of-a-quorum", "ballot",
                {"members": 5, "candidate_term": 3, "votes": [{"member": 0, "vote": True, "term": 3}, {"member": 1, "vote": True, "term": 3}],
-                "heard": [0, 1], "timeout_passed": False}, {"leader": False, "unanimous": False}),
+                "heard": [0, 1], "timeout_passed": False}, {"leader": False, "unanimous": False, "lost": False}),
     arithmetic("ballot-a-member-heard-against-before-timeout", "ballot",
                {"members": 3, "candidate_term": 3, "votes": [{"member": 0, "vote": True, "term": 3}, {"member": 1, "vote": True, "term": 3},
                                         {"member": 2, "vote": False, "term": 3}], "heard": [0, 1, 2], "timeout_passed": False},
-               {"leader": False, "unanimous": False}),
+               {"leader": False, "unanimous": False, "lost": True}),
     arithmetic("ballot-a-member-heard-voted-in-an-older-term", "ballot",
                {"members": 3, "candidate_term": 4, "votes": [{"member": 0, "vote": True, "term": 4}, {"member": 1, "vote": True, "term": 4},
                                         {"member": 2, "vote": True, "term": 3}], "heard": [0, 1, 2], "timeout_passed": False},
-               {"leader": False, "unanimous": False}),
+               {"leader": False, "unanimous": False, "lost": False}),
+    # A vote against the candidate's term loses the ballot at once, whoever has yet to vote
+    # (ADR 0105); a vote against an older term of the candidate's loses nothing.
+    arithmetic("ballot-lost-at-the-first-vote-against-before-the-others-vote", "ballot",
+               {"members": 5, "candidate_term": 3, "votes": [{"member": 0, "vote": True, "term": 3}, {"member": 2, "vote": False, "term": 3}],
+                "heard": [0, 1, 2, 3], "timeout_passed": False}, {"leader": False, "unanimous": False, "lost": True}),
+    arithmetic("ballot-lost-with-a-quorum-for-and-one-against-before-timeout", "ballot",
+               {"members": 5, "candidate_term": 3, "votes": [{"member": 0, "vote": True, "term": 3}, {"member": 1, "vote": True, "term": 3},
+                                        {"member": 3, "vote": True, "term": 3}, {"member": 4, "vote": False, "term": 3}],
+                "heard": [0, 1, 3, 4], "timeout_passed": False}, {"leader": False, "unanimous": False, "lost": True}),
+    arithmetic("ballot-a-vote-against-an-older-term-loses-nothing", "ballot",
+               {"members": 3, "candidate_term": 4, "votes": [{"member": 0, "vote": True, "term": 4}, {"member": 1, "vote": False, "term": 3}],
+                "heard": [0, 1], "timeout_passed": False}, {"leader": False, "unanimous": False, "lost": False}),
+    arithmetic("ballot-short-of-a-quorum-with-none-against-waits", "ballot",
+               {"members": 3, "candidate_term": 3, "votes": [{"member": 0, "vote": True, "term": 3}],
+                "heard": [0, 1], "timeout_passed": False}, {"leader": False, "unanimous": False, "lost": False}),
     arithmetic("candidate-unanimous", "candidate",
                {"members": 3, "reports": [[3, 98304], [3, 98304], [2, 65536]], "own": [3, 98304],
                 "deadline_passed": False}, {"nominate": True, "unanimous": True}),
@@ -1016,9 +1033,13 @@ VECTORS += [
                    log_recordings_bytes(1, 3, 96, [(0, 64, 32)]), 1),
 ]
 
-assert ballot(3, 3, [{"member": 0, "vote": True, "term": 3}, {"member": 1, "vote": True, "term": 3}], [0, 1, 2], True) == {"leader": True, "unanimous": False}
-assert ballot(3, 3, [{"member": 0, "vote": True, "term": 3}, {"member": 1, "vote": True, "term": 3}], [0, 1], False) == {"leader": True, "unanimous": True}
-assert ballot(3, 4, [{"member": 0, "vote": True, "term": 3}, {"member": 1, "vote": True, "term": 3}], [0, 1, 2], True) == {"leader": False, "unanimous": False}
+assert ballot(3, 3, [{"member": 0, "vote": True, "term": 3}, {"member": 1, "vote": True, "term": 3}], [0, 1, 2], True) == {"leader": True, "unanimous": False, "lost": False}
+assert ballot(3, 3, [{"member": 0, "vote": True, "term": 3}, {"member": 1, "vote": True, "term": 3}], [0, 1], False) == {"leader": True, "unanimous": True, "lost": False}
+assert ballot(3, 4, [{"member": 0, "vote": True, "term": 3}, {"member": 1, "vote": True, "term": 3}], [0, 1, 2], True) == {"leader": False, "unanimous": False, "lost": False}
+for v in VECTORS:
+    if v["kind"] == "arithmetic" and v["rule"] == "ballot":
+        i = v["inputs"]
+        assert v["fields"] == ballot(i["members"], i["candidate_term"], i["votes"], i["heard"], i["timeout_passed"]), v["name"]
 assert at_least(3, 0, 2, 98304) and not at_least(2, 98304, 3, 0)
 assert candidate(3, [(NULL, 0), (NULL, 0), (0, 4096)], (NULL, 0), True)["nominate"]
 for v in VECTORS:
