@@ -27,7 +27,9 @@ commit path runs per message.
   its ballot, one that has read a vote against its term or holds no vote of its own
   for it, canvasses again on its next cycle and does not wait out the election
   timeout, so a split vote costs a second delay of at most 500 ms and not a second
-  (ADR 0105). A leader tells a member whose
+  (ADR 0105). A member that replicated a term it lacked canvasses again with no
+  member's report, so that it waits for its leader's answer and does not nominate
+  itself against a leader it has caught up with (ADR 0106). A leader tells a member whose
   log is of an older term which term its own record of terms holds next, with that
   term's base and its end, read through `Io::terms_after`: the member truncates what it
   holds above that base, so the leader names the next term and never a later one, over
