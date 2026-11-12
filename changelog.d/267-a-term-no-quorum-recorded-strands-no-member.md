@@ -6,6 +6,8 @@
   own record holds at or below the one reported, and a member told a term below its
   own drops the terms its leader's record lacks, counted in the new
   `cluster.terms_dropped`. `Io` has two more operations, `term_at_or_below` and
-  `drop_terms_above`, and `cavalry_log::terms::TermsFile` has `drop_above_term`. No
+  `drop_terms_above`; `cavalry_proto::cluster` has `answered_term`,
+  `cavalry_raft::consensus` has `term_at_or_below`, and
+  `cavalry_log::terms::TermsFile` has `drop_above_term`. No
   member started with `cavalry run` elects yet
   ([ADR 0096](docs/decisions/0096-answer-a-member-for-a-term-the-leaders-record-holds-and-drop-the-terms-its-leaders-lacks.md)).
