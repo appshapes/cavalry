@@ -390,9 +390,24 @@ fn a_service_reads_the_committed_log_through_the_c_handler_with_each_entrys_posi
         assert!(!log.is_null(), "the follower has a recording of the log");
         let mut constants = std::mem::zeroed::<cavalry_committed_log_constants_t>();
         assert_eq!(cavalry_committed_log_constants(log, &mut constants), 0);
+        // The recording a service at position 0 reads: the first that the member's
+        // file names as holding it, which is not the live one beside a follower that
+        // joined late and caught up through a replay.
+        let recording_at_0 = {
+            use cavalry_proto::cluster::{LOG_RECORDINGS_FILE_PREFIX, LogRecordings};
+            let bytes = std::fs::read(
+                cluster.members[1]
+                    .2
+                    .join(format!("{LOG_RECORDINGS_FILE_PREFIX}{member_id}")),
+            )
+            .expect("the member's file of its log's recordings");
+            LogRecordings::read(&bytes, member_id)
+                .expect("the file passes its checks")
+                .recording_at(0)
+        };
         assert_eq!(
             (constants.member_id, constants.recording_id),
-            (member_id, 0)
+            (member_id, recording_at_0)
         );
         assert_eq!(cavalry_committed_log_position(log), 0);
         assert_eq!(cavalry_committed_log_commit_position(log), 0);

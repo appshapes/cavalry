@@ -1204,7 +1204,7 @@ id = 113
 name = "cluster.appointed_leader_behind"
 kind = "counter"
 scope = "client"
-doc = "Members an appointed leader found holding a log ahead of its own, in canvass or in leader ready, once for each such member in an election. No member of this version counts it or adds it: a member elects its leader. It stays registered while cavalry doctor reads it, and leaves with that check (ADR 0100); key and label as cluster.elections."
+doc = "Members an appointed leader found holding a log ahead of its own, in canvass or in leader ready, once for each such member in an election. No member of this version counts it or adds it: a member elects its leader. It stays registered while cavalry doctor reads it, and leaves with that check (ADR 0104); key and label as cluster.elections."
 doctor = "No member of this version has this counter: it counted a member that an appointed leader found holding more of the log than itself, before a cluster elected its leader. A member that has it is of an earlier version: run every member of a cluster at one version."
 
 [[counter]]

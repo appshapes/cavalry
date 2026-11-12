@@ -27,6 +27,17 @@ committed once a quorum, two of three, has it on disk.
 - Log directories that hold no cluster yet. A member does not start again on a log
   directory that holds a term of an earlier run: this version does not yet read back
   the log a member kept.
+- Each member's log directory on storage that outlives the member's host or
+  container: a volume, not the container's own file system. The directory holds the
+  member's votes. A member that comes back on an empty one, beside the others, votes
+  with no record of them, and with a member whose log is behind it can elect a leader
+  that lacks an entry the cluster committed. `cavalry run` cannot tell an empty
+  directory from a new cluster's, so nothing stops it: never start one member alone on
+  a new log directory.
+- Every member on this version of Cavalry. A member of a version in which the member
+  with the lowest id was the leader casts no vote, so the two are not one cluster. To
+  move a cluster from that version, stop every member and start the cluster again as
+  a new one, as "When it does not work" says for `member refused (restart)`.
 
 ## Steps
 
@@ -80,8 +91,8 @@ committed once a quorum, two of three, has it on disk.
    election closed`, with the same two positions once their recorders have synced,
    which each member asks its recorder for as soon as an entry is written, and name
    the leader: `; it follows member 2; its last election began because the member
-   started`. The term is 1 where two members asked for votes at the same moment and
-   a second ballot was taken.
+   started`. The term is 1 or more where two members asked for votes at the same
+   moment and another ballot was taken.
 
 5. Stop a follower with Ctrl-C or SIGTERM. It prints `cavalry run: stopping` and
    `cavalry run: closed`. The other two are a quorum and go on.
@@ -158,6 +169,12 @@ committed once a quorum, two of three, has it on disk.
   new log directory beside the other two. It would join them and replicate the log,
   but it has lost the record of the votes it cast, and with a member whose log is
   behind it could then elect a leader that lacks an entry the cluster committed.
+- `cavalry run: member refused (terms-lost)`: the log directory holds recordings of
+  the cluster's log and no `terms` file. The file held the member's votes, and it was
+  removed. Leave the member stopped, and do what `member refused (restart)` says:
+  the cluster goes on with the other two, and has three members again when it is
+  started again as a new cluster. Do not put an older copy of the file back, and do
+  not start the member on a new log directory by itself.
 - `WARN cluster-no-leader`: the member is in an election and has no leader to follow.
   The message says which state its election is in and why it began, from
   `cluster.election_cause`. A leader needs the votes of two of three members. At a
@@ -194,9 +211,9 @@ committed once a quorum, two of three, has it on disk.
   9022 and 9023 for member 2 in step 1, and the member's host must reach the
   leader's `consensus` endpoint.
 - `WARN cluster-quorum-lost`: the leader heard from fewer than two of three members
-  within 10 s, and nothing was committed while that lasted. A leader that elects
-  stopped leading each time and held an election, and the finding is on a member that
-  leads again. Check that two members run and that each reaches the leader's consensus
+  within 10 s, and nothing was committed while that lasted. The leader stopped
+  leading each time and held an election, and the finding is on a member that leads
+  again. Check that two members run and that each reaches the leader's consensus
   endpoint.
 - `WARN cluster.messages_rejected`: the member rejected consensus messages it cannot
   read, and acted on none of them. Another member sends them from another version of

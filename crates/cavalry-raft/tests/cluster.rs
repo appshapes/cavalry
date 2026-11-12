@@ -176,11 +176,24 @@ fn three_members_replicate_a_hundred_thousand_entries_and_their_recordings_are_e
     // The term is 0 when the first ballot elects, and the one after for each ballot
     // that two candidates split: it is whatever the leader leads.
     let term = members[0].module.leadership_term_id();
-    for member in &members {
+    for (index, member) in members.iter().enumerate() {
         assert_eq!(member.module.leadership_term_id(), term);
-        assert_eq!(member.module.counts().elections, 1);
-        assert_eq!(member.module.counts().elections_failed, 0);
-        assert_eq!(member.module.counts().join_position_mismatches, 0);
+        // The leader closes its election on a quorum, so a follower that was slow
+        // can meet the log after the term's first entry: its image then joins past
+        // where its log ends, its election fails once, and it catches up in the
+        // next (ADR 0104, Evidence). The leader's own election fails for nothing.
+        let counts = member.module.counts();
+        let late = u64::from(index != 0);
+        assert!(
+            counts.elections >= 1 && counts.elections <= 1 + late,
+            "member {}: {counts:?}",
+            member.module.member_id()
+        );
+        assert_eq!(counts.elections_failed, counts.elections - 1, "{counts:?}");
+        assert!(
+            counts.join_position_mismatches <= counts.elections_failed,
+            "{counts:?}"
+        );
     }
     assert_eq!(members[1].module.role(), Role::Follower);
     assert_eq!(members[2].module.role(), Role::Follower);
@@ -229,19 +242,12 @@ fn three_members_replicate_a_hundred_thousand_entries_and_their_recordings_are_e
         },
     );
 
-    // Each member's recording holds the same bytes up to the commit position: the
-    // leader's of its publication and each follower's of the leader's image.
+    // Each member's recordings hold the same bytes up to the commit position: the
+    // leader's of its publication and each follower's of the leader's image, and, for
+    // a follower that joined late, of the replay it caught up by before it.
     let recordings: Vec<Vec<u8>> = members
         .iter()
-        .map(|member| {
-            let id = member
-                .module
-                .log_recording_id()
-                .expect("a recording of the log");
-            let file = member.log_dir.join(format!("{id}-0.rec"));
-            let bytes = std::fs::read(&file).expect("the segment file is read");
-            bytes[..usize::try_from(end).expect("a position")].to_vec()
-        })
+        .map(|member| log_bytes(member, end))
         .collect();
     assert_eq!(
         recordings[1], recordings[0],
@@ -313,7 +319,9 @@ fn three_members_replicate_a_hundred_thousand_entries_and_their_recordings_are_e
         // ballot that two candidates split sends both back to canvass, with steps of
         // its own.
         let steps = counter(member, CLUSTER_ELECTION_STEPS.0);
-        if term == 0 {
+        // A count of steps is exact only for a member whose one election closed with
+        // no catch-up: one that joined late took the steps of a catch-up too.
+        if term == 0 && counts.elections == 1 && counts.catchups == 0 {
             assert_eq!(counts.candidacies, u64::from(index == 0));
             assert!(
                 if index == 0 {
@@ -366,6 +374,29 @@ fn three_members_replicate_a_hundred_thousand_entries_and_their_recordings_are_e
         text.contains("docs/reference/cluster.md#roles-and-the-election"),
         "{text}"
     );
+
+    // With its `terms` file removed the directory still holds the member's
+    // recordings of the log. It is not a new one: the member is refused, and the
+    // file is not made again, so the directory is left as it was.
+    let terms_file = log_dir.join("terms");
+    std::fs::remove_file(&terms_file).expect("the terms file is removed");
+    let lost = ConsensusModule::start(&driver_dir, &log_dir, &members_string, member_id)
+        .expect_err("a log directory that holds the log and no terms file");
+    assert!(
+        matches!(lost, RaftError::TermsLost { recording_id } if recording_id >= 0),
+        "{lost}"
+    );
+    let text = lost.to_string();
+    assert!(
+        text.starts_with("member refused (terms-lost): the log directory holds recording"),
+        "{text}"
+    );
+    assert!(
+        text.contains("Do not start this member alone on a new log directory")
+            && text.contains("docs/reference/cluster.md#roles-and-the-election"),
+        "{text}"
+    );
+    assert!(!terms_file.exists(), "the refusal made no terms file");
     driver.close().expect("the driver closes");
 
     for member in members {
@@ -769,8 +800,9 @@ fn a_lost_leader_is_replaced_by_the_two_that_remain_and_they_commit() {
         ),
         "{last:?}, first leader {first_leader}"
     );
+    // An election that failed and began again is the election's own remedy, a
+    // late joiner's among them, and is no fault: a truncation refused would be one.
     for member in &members {
-        assert_eq!(member.module.counts().elections_failed, 0);
         assert_eq!(member.module.counts().truncations_refused, 0);
     }
 
@@ -1471,6 +1503,34 @@ fn a_service_whose_image_was_withdrawn_unread_is_told_where_its_entries_stop() {
 /// The member's file of its log's recordings, read as a service reads it
 /// (`spec/cluster.md`, "The log's recordings"): the live recording's id and start, and
 /// the recordings below it, each as its id, its start and its stop.
+/// The member's log from position 0 to `end`, as a service reads it: from the
+/// recordings its file names, in their order, each from where the one before it left
+/// off, and then from its live recording (`spec/cluster.md`, "The log's recordings").
+/// Every recording here lies in its first segment file, whose base is position 0.
+fn log_bytes(member: &Member, end: i64) -> Vec<u8> {
+    let (live, live_start, below) = log_recordings(member);
+    let at = |position: i64| usize::try_from(position).expect("a position");
+    let mut bytes = Vec::with_capacity(at(end));
+    let mut position = 0;
+    for (id, start, stop) in below.into_iter().chain([(live, live_start, end)]) {
+        let stop = stop.min(end);
+        if stop <= position {
+            continue;
+        }
+        assert!(
+            start <= position,
+            "member {}: recording {id} begins at {start}, past {position}",
+            member.module.member_id()
+        );
+        let file = std::fs::read(member.log_dir.join(format!("{id}-0.rec")))
+            .expect("the segment file is read");
+        bytes.extend_from_slice(&file[at(position)..at(stop)]);
+        position = stop;
+    }
+    assert_eq!(position, end, "member {}", member.module.member_id());
+    bytes
+}
+
 fn log_recordings(member: &Member) -> (i64, i64, Vec<(i64, i64, i64)>) {
     let id = member.module.member_id();
     let bytes = std::fs::read(member.dir.join(format!("{LOG_RECORDINGS_FILE_PREFIX}{id}")))

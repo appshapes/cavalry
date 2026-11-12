@@ -344,7 +344,7 @@ pub const CLUSTER_TERMS_LED: CounterId = CounterId(111);
 /// `cluster.leader_quorum_losses`, a client counter: Times the active members of one cluster leader fell below a quorum, a member being active while its last report is younger than the leader heartbeat timeout, 10 s; the leader holds an election, beginning at init, a failed election when it was in leader log replication or leader ready (spec/cluster.md, The commit position; ADR 0082); key and label as cluster.elections.
 pub const CLUSTER_LEADER_QUORUM_LOSSES: CounterId = CounterId(112);
 
-/// `cluster.appointed_leader_behind`, a client counter: Members an appointed leader found holding a log ahead of its own, in canvass or in leader ready, once for each such member in an election. No member of this version counts it or adds it: a member elects its leader. It stays registered while cavalry doctor reads it, and leaves with that check (ADR 0100); key and label as cluster.elections.
+/// `cluster.appointed_leader_behind`, a client counter: Members an appointed leader found holding a log ahead of its own, in canvass or in leader ready, once for each such member in an election. No member of this version counts it or adds it: a member elects its leader. It stays registered while cavalry doctor reads it, and leaves with that check (ADR 0104); key and label as cluster.elections.
 pub const CLUSTER_APPOINTED_LEADER_BEHIND: CounterId = CounterId(113);
 
 /// `cluster.log_images_lost`, a client counter: Times one cluster follower's image of its leader's log was no longer available, so that it began its election again at init (spec/cluster.md, Roles and the election); key and label as cluster.elections.
@@ -1342,7 +1342,7 @@ pub const COUNTERS: &[CounterDef] = &[
         name: "cluster.appointed_leader_behind",
         kind: Kind::Counter,
         scope: Scope::Client,
-        doc: "Members an appointed leader found holding a log ahead of its own, in canvass or in leader ready, once for each such member in an election. No member of this version counts it or adds it: a member elects its leader. It stays registered while cavalry doctor reads it, and leaves with that check (ADR 0100); key and label as cluster.elections.",
+        doc: "Members an appointed leader found holding a log ahead of its own, in canvass or in leader ready, once for each such member in an election. No member of this version counts it or adds it: a member elects its leader. It stays registered while cavalry doctor reads it, and leaves with that check (ADR 0104); key and label as cluster.elections.",
         doctor: "No member of this version has this counter: it counted a member that an appointed leader found holding more of the log than itself, before a cluster elected its leader. A member that has it is of an earlier version: run every member of a cluster at one version.",
     },
     CounterDef {
