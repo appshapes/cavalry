@@ -22,6 +22,19 @@ is Archive's `startRecording` ([glossary](../glossary.md)).
   ([Publish and subscribe in ten minutes](../tutorials/publish-and-subscribe.md)); a
   program of your own adds one with `Cavalry::add_publication`. A publication closes
   with its client, and a recording follows its publication to the end of stream.
+- Over `cavalry:udp`, a receiver for the publication, or `ssc=true` on its channel. A
+  `cavalry:udp` publication takes no message until a receiver answers, whether it is
+  recorded or not. A stream that is recorded before any host receives it names the
+  key on the publication's channel, `cavalry:udp?endpoint=<host>:<port>|ssc=true`: the
+  recording then connects the publication, and a receiver that joins later is given
+  the stream from where the sender stands and replays the recording for what came
+  before ([Replay a recording](replay-a-recording.md)). While no receiver answers,
+  `doctor` has a `note udp-publication-recorded-alone` line for the publication, with
+  the bytes that went to the recording alone. A channel that also names a short
+  `term-length` needs a term that holds what the publisher writes in 16 milliseconds
+  at its fastest, 64 KiB for 4 MiB a second: with a shorter one a receiver cannot join
+  while the publication is alone, and `doctor` warns with
+  `udp-publication-join-refused`.
 
 ## Steps
 
@@ -54,6 +67,9 @@ is Archive's `startRecording` ([glossary](../glossary.md)).
    stream back-pressures the publisher and never loses a byte; `doctor` says
    `recording-stalled` when the publisher's position has reached its limit and the
    recorder is the reader the limit waits for: the recorder holds the publisher then.
+   When the room between the recorder and the limit is 4 MiB or less the finding says
+   that the window is a short term's, and names `term-length`: a burst longer than
+   half the term waits for the recorder on any disk.
 
 3. Stop it:
 

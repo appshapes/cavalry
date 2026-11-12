@@ -34,7 +34,7 @@ use cavalry_proto::cluster::{
 };
 #[cfg(target_os = "linux")]
 use cavalry_proto::udp::DATAGRAMS_PER_BURST;
-use cavalry_proto::udp::{LINGER, MTU_LENGTH_DEFAULT, SOCKET_RCVBUF_LENGTH};
+use cavalry_proto::udp::{LINGER, MTU_LENGTH_DEFAULT, SOCKET_RCVBUF_LENGTH, UDP_TERM_LENGTH};
 use cavalry_shm::command_ring::{CommandRing, CommandRingError, layout::DRIVER_CLOSED};
 use cavalry_shm::counters::generated::{
     CHANNEL_DESTINATIONS, CHANNEL_IMAGES, CHANNEL_PUBLICATIONS, CHANNEL_SOCKET_RCVBUF,
@@ -43,8 +43,9 @@ use cavalry_shm::counters::generated::{
     IMAGE_HWM_POSITION, IMAGE_REBUILD_POSITION, PUBLICATION_LIMIT, PUBLICATION_POSITION,
     RECORDING_ARMED, RECORDING_ARMED_DROPPED, RECORDING_ARMED_FAILED, RECORDING_ARMED_STARTED,
     RECORDING_BYTES, RECORDING_INVALIDATED, RECORDING_POSITION, RECORDING_SYNCED_POSITION,
-    RECORDING_WRITE_FAILED, SENDER_FLOW_CONTROL_RECEIVERS, SENDER_FLOW_CONTROL_RECEIVERS_FULL,
-    SENDER_FLOW_CONTROL_RECEIVERS_TIMED_OUT, SENDER_LIMIT, SENDER_POSITION, SUBSCRIPTION_POSITION,
+    RECORDING_WRITE_FAILED, SENDER_BYTES_UNSENT, SENDER_FLOW_CONTROL_RECEIVERS,
+    SENDER_FLOW_CONTROL_RECEIVERS_FULL, SENDER_FLOW_CONTROL_RECEIVERS_TIMED_OUT,
+    SENDER_JOINS_REFUSED, SENDER_LIMIT, SENDER_POSITION, SUBSCRIPTION_POSITION,
 };
 use cavalry_shm::counters::generated::{
     CLUSTER_APPEND_POSITION, CLUSTER_APPOINTED_LEADER_BEHIND, CLUSTER_COMMIT_POSITION,
@@ -2007,7 +2008,16 @@ struct ImageCounters {
 /// with no image, whose subscriptions wait for a setup frame that has not come; and
 /// ADR 0053's three, a `min` publication with fewer receivers answering than its
 /// endpoint has destinations, read from the gauges whose label names `fc=min`, a
-/// receiver dropped from a `min` table and a table that was full. Every endpoint is
+/// receiver dropped from a `min` table and a table that was full. A publication no
+/// receiver has answered whose channel names `ssc=true`, which is one with a
+/// `sender.bytes_unsent` of its own, and whose stream has a live recording is
+/// connected by that recording: a note, `udp-publication-recorded-alone`, and not the
+/// warning; and the warning names the key where it would help, a recorded stream
+/// without it, or a recording where the key waits for one (ADR 0098). Such a
+/// publication whose `sender.joins_refused` is above 0 is a warning,
+/// `udp-publication-join-refused`: a receiver tried to join it and named a position
+/// more than a term behind, which is a term too short for the publisher's rate, and
+/// the finding names `term-length` (ADR 0099). Every endpoint is
 /// listed as a note, as recordings are, with its status,
 /// its publications or images, its destinations on a control channel, and its buffers.
 fn udp_checks(reader: &CountersReader, running: bool, findings: &mut Vec<Finding>) -> usize {
@@ -2018,6 +2028,13 @@ fn udp_checks(reader: &CountersReader, running: bool, findings: &mut Vec<Finding
     let mut endpoints: Vec<EndpointCounters> = Vec::new();
     let mut buffers: Vec<(i64, i32, i64)> = Vec::new();
     let mut unanswered: Vec<(i64, i32, i32, i64)> = Vec::new();
+    // The publications whose channel names `ssc=true`, by correlation id, each with
+    // the bytes its sender passed unsent; and the live recordings' streams, by session
+    // id and stream id, each with its recording id (ADR 0098).
+    let mut spied: Vec<(i64, i64)> = Vec::new();
+    // The joins each of those publications refused, by correlation id (ADR 0099).
+    let mut refused: Vec<(i64, i64)> = Vec::new();
+    let mut recorded: Vec<(i32, i32, i64)> = Vec::new();
     let mut images: Vec<ImageCounters> = Vec::new();
     let mut positions: Vec<([u8; 16], i32, i64)> = Vec::new();
     // Every `sender.flow_control_receivers` gauge of a `min` publication: its
@@ -2114,6 +2131,20 @@ fn udp_checks(reader: &CountersReader, running: bool, findings: &mut Vec<Finding
                     rebuild: None,
                 });
             }
+        } else if type_id == SENDER_BYTES_UNSENT.0 {
+            spied.push((endpoint_id(fields.key()), value));
+        } else if type_id == SENDER_JOINS_REFUSED.0 {
+            refused.push((endpoint_id(fields.key()), value));
+        } else if type_id == RECORDING_POSITION.0 {
+            // The label: the name, the recording id, the session id and the stream id.
+            let mut words = fields.label().split_whitespace().skip(1);
+            if let (Some(Ok(recording)), Some(Ok(session)), Some(Ok(stream))) = (
+                words.next().map(str::parse::<i64>),
+                words.next().map(str::parse::<i32>),
+                words.next().map(str::parse::<i32>),
+            ) {
+                recorded.push((session, stream, recording));
+            }
         } else if type_id == SENDER_LIMIT.0 && value == 0 {
             // The label: the name, the correlation id, the session id, the stream id
             // and the endpoint's registration id.
@@ -2181,6 +2212,83 @@ fn udp_checks(reader: &CountersReader, running: bool, findings: &mut Vec<Finding
     };
     for (correlation_id, session_id, stream_id, endpoint_id) in &unanswered {
         let channel = channel_of(*endpoint_id);
+        let unsent = spied
+            .iter()
+            .find(|(correlation, _)| correlation == correlation_id)
+            .map(|(_, unsent)| *unsent);
+        let recording = recorded
+            .iter()
+            .find(|(session, stream, _)| session == session_id && stream == stream_id)
+            .map(|(_, _, recording)| *recording);
+        // Connected by its recording alone: what the channel asked for, so a note,
+        // unless a receiver tried to join it and could not: a term too short for what
+        // the publisher writes while a join takes, so a warning (ADR 0099).
+        if let (Some(unsent), Some(recording)) = (unsent, recording) {
+            let joins_refused = refused
+                .iter()
+                .find(|(correlation, _)| correlation == correlation_id)
+                .map_or(0, |(_, refused)| *refused);
+            if joins_refused > 0 {
+                findings.push(Finding {
+                    check: "udp-publication-join-refused",
+                    level: Level::Warn,
+                    message: format!(
+                        "publication {correlation_id} on stream {stream_id} (session \
+                         {session_id}) names ssc=true and is alone with recording \
+                         {recording}, and {joins_refused} status message(s) of a receiver \
+                         that would join it on {channel} named a position more than a term \
+                         behind its sender: the publisher writes more than a term between a \
+                         setup frame and the receiver's answer, so the receiver's image \
+                         receives nothing, times out and tries again; name a longer \
+                         term-length on the publication's channel, one that holds what the \
+                         publisher writes in 16 milliseconds at its fastest, or leave the \
+                         key out for the 16 MiB term; what the receiver missed is in \
+                         recording {recording}, for a replay"
+                    ),
+                    doc: DOC_UDP_SENDER,
+                });
+                continue;
+            }
+            let destinations = if is_control(*endpoint_id) {
+                format!(
+                    "the control channel {channel}, {} destination(s)",
+                    destinations_of(*endpoint_id).unwrap_or(0)
+                )
+            } else {
+                channel.clone()
+            };
+            findings.push(Finding {
+                check: "udp-publication-recorded-alone",
+                level: Level::Note,
+                message: format!(
+                    "publication {correlation_id} on stream {stream_id} (session \
+                     {session_id}) names ssc=true and is connected by recording {recording} \
+                     alone: no receiver has answered on {destinations}, its sender has \
+                     passed {unsent} bytes without sending them, and they are in the \
+                     recording; a receiver that joins is sent the stream from where its own \
+                     image begins and replays recording {recording} for what came before; if a \
+                     receiver was expected, check that a subscription on stream {stream_id} \
+                     exists on its host and that its driver receives on that port; if a \
+                     stop of recording {recording} has been asked, the publication is not \
+                     connected from that moment, though the recording's counters stay \
+                     until the stop is done, which the counters do not tell apart"
+                ),
+                doc: DOC_UDP_SENDER,
+            });
+            continue;
+        }
+        // What `ssc` would change, when one half of it is there (ADR 0098).
+        let ssc_hint = match (unsent, recording) {
+            (Some(_), None) => format!(
+                "; its channel names ssc=true, so a live recording of stream {stream_id} \
+                 would connect it: start one with `cavalry record` or start recording"
+            ),
+            (None, Some(recording)) => format!(
+                "; recording {recording} records the stream: if it should take messages \
+                 with no receiver, name ssc=true on the publication's channel"
+            ),
+            _ => String::new(),
+        };
         let message = if is_control(*endpoint_id) && destinations_of(*endpoint_id) == Some(0) {
             format!(
                 "publication {correlation_id} on stream {stream_id} (session {session_id}) \
@@ -2215,7 +2323,7 @@ fn udp_checks(reader: &CountersReader, running: bool, findings: &mut Vec<Finding
         findings.push(Finding {
             check: "udp-publication-not-connected",
             level: Level::Warn,
-            message,
+            message: format!("{message}{ssc_hint}"),
             doc: DOC_UDP_SENDER,
         });
     }
@@ -2797,6 +2905,17 @@ fn recording_checks(
         // Held now: the publisher's position has reached its limit, which is what its
         // next claim is refused on, and the limit waits for the recorder.
         if !slower_reader && room > 0 && *publisher >= limit {
+            // A window of a quarter of the default term or less is a short term's: a
+            // burst fills it on any disk, and the remedy is the term (ADR 0099).
+            let short = if room <= i64::from(UDP_TERM_LENGTH / 4) {
+                "; a window this short is a short term's, which a term-length on a \
+                 cavalry:udp publication's channel or the driver's term length gives, \
+                 and a burst longer than it waits for the recorder on any disk: if the \
+                 recorder has caught up when doctor runs again and the publisher reads \
+                 back-pressured, name a longer term-length"
+            } else {
+                ""
+            };
             findings.push(Finding {
                 check: "recording-stalled",
                 level: Level::Warn,
@@ -2808,7 +2927,7 @@ fn recording_checks(
                      stays behind is on a slow or failing disk, so check \
                      recording.write_failed and the log directory's disk, and `recording \
                      stopped` if it gives up, and run doctor again, since a recorder that \
-                     has caught up by then was waiting for a sync",
+                     has caught up by then was waiting for a sync{short}",
                     recording.recording_id
                 ),
                 doc: DOC_RECORDING_COMMANDS,
@@ -3450,6 +3569,159 @@ mod tests {
             "{report}"
         );
         assert!(report.findings.iter().any(|f| f.check == "udp-endpoint"));
+    }
+
+    /// ADR 0098's readings of a publication no receiver has answered, from the counters
+    /// file alone. Its channel names `ssc=true`, which a `sender.bytes_unsent` of its
+    /// own says, and its stream has a live recording: connected by the recording, a
+    /// note that gives the bytes passed unsent, and no warning. The key and no
+    /// recording: the warning, saying that a recording would connect it. A recording
+    /// and no key: the warning, naming the key.
+    #[test]
+    fn a_publication_connected_by_its_recording_alone_is_a_note_and_the_warning_names_ssc() {
+        let dir = TestDir::new("udp-ssc");
+        let mut counters = CountersFile::create(&dir.0, 128).expect("counters");
+        let ring = CommandRing::create(&dir.0, 4096).expect("ring");
+        let _consumer = ring.consumer(Duration::from_secs(10)).expect("consumer");
+        let channel = "cavalry:udp?control=10.0.0.1:40456|control-mode=manual";
+        let endpoint_key = 9i64.to_le_bytes();
+        counters
+            .allocate(
+                CHANNEL_STATUS,
+                &endpoint_key,
+                &format!("channel.status {channel}"),
+            )
+            .expect("room")
+            .set(1);
+        counters
+            .allocate(
+                CHANNEL_DESTINATIONS,
+                &endpoint_key,
+                &format!("channel.destinations {channel}"),
+            )
+            .expect("room")
+            .set(2);
+        let mut key = [0u8; 16];
+        key[..8].copy_from_slice(&7i64.to_le_bytes());
+        key[8..12].copy_from_slice(&5i32.to_le_bytes());
+        key[12..].copy_from_slice(&1001i32.to_le_bytes());
+        counters
+            .allocate(SENDER_LIMIT, &key, "sender.limit 7 5 1001 9")
+            .expect("room")
+            .set(0);
+        let warning = |report: &Report| -> Option<String> {
+            report
+                .findings
+                .iter()
+                .find(|finding| finding.check == "udp-publication-not-connected")
+                .map(|finding| finding.message.clone())
+        };
+
+        // Neither the key nor a recording: the warning as it was, with no word of ssc.
+        let plain = warning(&examine(&dir.0)).expect("the warning");
+        assert!(!plain.contains("ssc"), "{plain}");
+
+        // A recording and no key: the warning names the key.
+        let recording = counters
+            .allocate(
+                RECORDING_POSITION,
+                &3i64.to_le_bytes(),
+                "recording.position 3 5 1001",
+            )
+            .expect("room");
+        let recorded = warning(&examine(&dir.0)).expect("the warning");
+        assert!(
+            recorded.ends_with(
+                "; recording 3 records the stream: if it should take messages with no \
+                 receiver, name ssc=true on the publication's channel"
+            ),
+            "{recorded}"
+        );
+
+        // The key and the recording: connected by it, a note and no warning.
+        let unsent = counters
+            .allocate(SENDER_BYTES_UNSENT, &key, "sender.bytes_unsent 7 5 1001 9")
+            .expect("room");
+        unsent.set(64_000);
+        let report = examine(&dir.0);
+        assert_eq!(warning(&report), None, "{report}");
+        let note = finding(&report, "udp-publication-recorded-alone");
+        assert_eq!(note.level, Level::Note);
+        assert!(
+            note.message.starts_with(
+                "publication 7 on stream 1001 (session 5) names ssc=true and is connected \
+                 by recording 3 alone: no receiver has answered on the control channel \
+                 cavalry:udp?control=10.0.0.1:40456|control-mode=manual, 2 destination(s), \
+                 its sender has passed 64000 bytes without sending them"
+            ),
+            "{}",
+            note.message
+        );
+        // The recording connects it until its stop is asked, which no counter marks:
+        // the note says so and claims no more (`spec/udp.md`, "The sender").
+        assert!(
+            note.message.contains(
+                "if a stop of recording 3 has been asked, the publication is not connected"
+            ),
+            "{}",
+            note.message
+        );
+
+        // A receiver that could not join it: the warning that names term-length, and
+        // no note (ADR 0099).
+        let joins_refused = counters
+            .allocate(
+                SENDER_JOINS_REFUSED,
+                &key,
+                "sender.joins_refused 7 5 1001 9",
+            )
+            .expect("room");
+        joins_refused.add(3);
+        let report = examine(&dir.0);
+        let refused = finding(&report, "udp-publication-join-refused");
+        assert_eq!(refused.level, Level::Warn);
+        assert!(
+            refused.message.starts_with(
+                "publication 7 on stream 1001 (session 5) names ssc=true and is alone \
+                 with recording 3, and 3 status message(s) of a receiver that would join \
+                 it on cavalry:udp?control=10.0.0.1:40456|control-mode=manual named a \
+                 position more than a term behind its sender"
+            ),
+            "{}",
+            refused.message
+        );
+        assert!(
+            refused.message.contains("name a longer term-length"),
+            "{}",
+            refused.message
+        );
+        assert!(
+            !report
+                .findings
+                .iter()
+                .any(|finding| finding.check == "udp-publication-recorded-alone"),
+            "{report}"
+        );
+        counters.free(joins_refused.id(), 0).expect("freed");
+
+        // The key and no recording: the warning, saying what would connect it.
+        counters.free(recording.id(), 0).expect("freed");
+        let report = examine(&dir.0);
+        assert!(
+            !report
+                .findings
+                .iter()
+                .any(|finding| finding.check == "udp-publication-recorded-alone"),
+            "{report}"
+        );
+        let keyed = warning(&report).expect("the warning");
+        assert!(
+            keyed.contains(
+                "; its channel names ssc=true, so a live recording of stream 1001 would \
+                 connect it"
+            ),
+            "{keyed}"
+        );
     }
 
     /// ADR 0053's checks from the counters file alone: a control channel with no
@@ -4374,6 +4646,14 @@ mod tests {
             "{}",
             found[1]
         );
+        // The short window is named as one, with its remedy, and the default is not
+        // (ADR 0099).
+        assert!(
+            found[1].ends_with("name a longer term-length"),
+            "{}",
+            found[1]
+        );
+        assert!(!found[0].contains("term-length"), "{}", found[0]);
 
         // A frame short of the limit: the next claim is reserved, nobody is held. At
         // the limit: the warning.
@@ -4402,6 +4682,40 @@ mod tests {
         let found = stalled(&examine(&dir.0));
         assert_eq!(found.len(), 1, "{found:?}");
         assert!(found[0].starts_with("recording 3 "), "{}", found[0]);
+    }
+
+    /// A limit the recorder has reached or passed is not the recorder's hold: a
+    /// `cavalry:udp` publication that lost its receivers has its limit lowered to the
+    /// sender position, and once the recorder has written what the sender sent, the
+    /// publisher stands at or past a limit that does not wait for the recorder. Nothing
+    /// is said (ADR 0101, Consequences; the review of pull request 244 asked for it).
+    #[test]
+    fn a_limit_the_recorder_has_reached_is_not_its_hold() {
+        let dir = TestDir::new("recordings-limit-reached");
+        let mut counters = CountersFile::create(&dir.0, 128).expect("counters");
+        let ring = CommandRing::create(&dir.0, 4096).expect("ring");
+        let _consumer = ring.consumer(Duration::from_secs(10)).expect("consumer");
+        let mib = 1024 * 1024;
+        let lost = recorded(&mut counters, 7, -5, 1001, 3);
+        let sender = counters
+            .allocate(
+                SENDER_POSITION,
+                &position_key(7, -5, 1001),
+                "sender.position 7 -5 1001 9",
+            )
+            .expect("its sender position");
+        // The limit fell to the sender position; the publisher wrote a message past it.
+        sender.store_release(8 * mib);
+        lost.limit.store_release(8 * mib);
+        lost.position.store_release(8 * mib + 4096);
+        // The recorder at the limit, and then past it with the publisher's last bytes.
+        lost.recorder.store_release(8 * mib);
+        assert!(stalled(&examine(&dir.0)).is_empty());
+        lost.recorder.store_release(8 * mib + 4096);
+        assert!(stalled(&examine(&dir.0)).is_empty());
+        // Still behind the sender, the check is met, as the ADR says.
+        lost.recorder.store_release(8 * mib - 4096);
+        assert_eq!(stalled(&examine(&dir.0)).len(), 1);
     }
 
     /// A recording's label names a session id and a stream id and not what it reads, so
