@@ -47,6 +47,13 @@ The client API implementation, re-exported by the `cavalry` crate. Data plane.
   the sender sends every datagram to each destination, multi-destination cast (ADR
   0053); `|fc=min` on the control channel lets the slowest destination's receiver pace
   the sender.
+- Appends to a recorded `cavalry:udp` stream that nobody receives yet, when the
+  publication's channel names `|ssc=true`: a live recording of the publication then
+  connects it, so `offer` and `try_claim` succeed with no receiver, and are back
+  pressured by the recorder alone. A receiver that joins later is given the stream
+  from where the sender stands, and what came before is in the recording, for
+  `Cavalry::start_replay`. Without the key a `cavalry:udp` publication is connected by
+  a receiver, recorded or not (ADR 0098).
 - Records a stream to the durable log: `Cavalry::start_recording(channel, stream_id)`
   asks the driver to record the stream's live publication and returns a `Recording`
   whose `position()` and `synced_position()` read the recorder's two counters;

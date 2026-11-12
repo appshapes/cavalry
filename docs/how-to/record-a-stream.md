@@ -22,6 +22,15 @@ is Archive's `startRecording` ([glossary](../glossary.md)).
   ([Publish and subscribe in ten minutes](../tutorials/publish-and-subscribe.md)); a
   program of your own adds one with `Cavalry::add_publication`. A publication closes
   with its client, and a recording follows its publication to the end of stream.
+- Over `cavalry:udp`, a receiver for the publication, or `ssc=true` on its channel. A
+  `cavalry:udp` publication takes no message until a receiver answers, whether it is
+  recorded or not. A stream that is recorded before any host receives it names the
+  key on the publication's channel, `cavalry:udp?endpoint=<host>:<port>|ssc=true`: the
+  recording then connects the publication, and a receiver that joins later is given
+  the stream from where the sender stands and replays the recording for what came
+  before ([Replay a recording](replay-a-recording.md)). While no receiver answers,
+  `doctor` has a `note udp-publication-recorded-alone` line for the publication, with
+  the bytes that went to the recording alone.
 
 ## Steps
 
