@@ -233,7 +233,7 @@ fn open(service: &mut Cavalry, position: i64) -> CommittedLog {
 
 /// A member whose log is two recordings, the first stopped at 640 and the live one
 /// from there, and a service that starts at 0. It reads the first recording no
-/// further than the member's commit position, though the replay has played all of
+/// further than the member's commit position, though the recording holds all of
 /// it; reads on when the commit position covers the rest; is ended at the
 /// recording's stop with nothing reported; and opens the log again there, on the
 /// live recording. Every entry once, in order.

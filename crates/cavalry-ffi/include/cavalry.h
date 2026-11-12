@@ -1021,7 +1021,9 @@ bool cavalry_committed_log_failed_at(const cavalry_committed_log_t *log,
  begin is written through `position`. The driver keeps a replay's image for the
  publication linger, 5 s, after the replay ends, and then withdraws it, read or
  not: a service that did not poll for that long after its member closed or left
- the log ends so. The entries from that position on were played and not
+ the log ends so, and so does a handle on a recording below the member's live one
+ while the member's commit position stays below that recording's stop for that
+ long (ADR 0103). The entries from that position on were played and not
  delivered. A replay that failed is withdrawn so too, and both functions then
  return `true`, with this position the lower. Read it once
  `cavalry_committed_log_is_ended` returns `true`. A null `position` is refused as

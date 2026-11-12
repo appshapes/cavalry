@@ -252,8 +252,8 @@ fn run(args: &Args) -> Result<(), Box<dyn std::error::Error>> {
                 );
                 continue;
             }
-            // No member names a recording: the member left its log or closed, and the
-            // next run starts here.
+            // No member names a recording: the member left its log, closed, or is
+            // between two recordings, and the next run starts here.
             eprintln!(
                 "cluster-service: the member's log ended; read to position {}",
                 log.position()
