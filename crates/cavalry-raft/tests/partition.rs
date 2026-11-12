@@ -139,9 +139,15 @@ fn leader_first(members: &mut [Member]) {
 /// The leader, `members[0]`, appends `count` entries numbered from `from`, a
 /// back-pressured offer made again once every member has run.
 fn offer(members: &mut [Member], from: u32, count: u32) {
+    let deadline = Instant::now() + Duration::from_secs(60);
     for i in from..from + count {
         let payload = [i.to_le_bytes(), (!i).to_le_bytes()].concat();
         loop {
+            assert!(
+                Instant::now() < deadline,
+                "the leader's offer of entry {i} was back-pressured for 60 s: {:?}",
+                states(members)
+            );
             match members[0].module.offer(&payload) {
                 Ok(()) => break,
                 Err(RaftError::Offer(Refused::BackPressured)) => {

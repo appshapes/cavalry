@@ -588,21 +588,37 @@ fn throttle(
             let process = cluster.process(id);
             let before = states(&cluster.dir).expect("three members");
             let started = Instant::now();
+            // The intervals in which the leader's commit position rose while the
+            // member was stopped outright: commits that the two others made alone.
+            let mut alone = 0u32;
+            let mut intervals = 0u32;
             while started.elapsed() < THROTTLED {
                 assert!(ran("kill", &["-STOP", &process]), "member {id} is stopped");
+                let stopped = states(&cluster.dir).expect("three members")[leader].commit;
                 std::thread::sleep(STOPPED);
+                let still = states(&cluster.dir).expect("three members")[leader].commit;
                 assert!(
                     ran("kill", &["-CONT", &process]),
                     "member {id} is continued"
                 );
+                intervals += 1;
+                alone += u32::from(still > stopped);
                 std::thread::sleep(RUNS);
             }
+            // A quorum is the leader and the other follower. A cluster that needed
+            // all three to commit would commit nothing while one is stopped.
+            assert!(
+                alone > 0,
+                "the leader's commit position rose in none of the {intervals} intervals \
+                 in which member {id} was stopped: the two others did not commit alone"
+            );
             let after = states(&cluster.dir).expect("three members");
             (
                 (after[leader].commit - before[leader].commit) / FRAME,
                 after,
                 format!(
-                    "by SIGSTOP and SIGCONT, stopped {STOPPED:?} in every {:?} ({why})",
+                    "by SIGSTOP and SIGCONT, stopped {STOPPED:?} in every {:?} ({why}); \
+                     the two others committed alone in {alone} of its {intervals} stops",
                     STOPPED + RUNS
                 ),
             )

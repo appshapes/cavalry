@@ -223,8 +223,13 @@ fn serve(links: &mut [Link], faults: Faults, shared: &Shared) {
     while !shared.stop.load(Ordering::Acquire) {
         let mut moved = 0;
         for link in links.iter_mut() {
-            let cut = shared.cut[link.from].load(Ordering::Acquire)
-                || shared.cut[link.to].load(Ordering::Acquire);
+            // Whether the link is cut is read once a datagram has arrived, never
+            // once for a batch: a datagram sent after `cut` returned arrives after
+            // the flag was stored, so the read then sees it, and none gets through.
+            let is_cut = || {
+                shared.cut[link.from].load(Ordering::Acquire)
+                    || shared.cut[link.to].load(Ordering::Acquire)
+            };
             // The sender's datagrams, on to the receiver's endpoint.
             for _ in 0..BATCH {
                 let Ok((length, from)) = link.facing_sender.recv_from(&mut buffer) else {
@@ -233,7 +238,7 @@ fn serve(links: &mut [Link], faults: Faults, shared: &Shared) {
                 moved += 1;
                 link.sender = Some(from);
                 let datagram = &buffer[..length];
-                if cut {
+                if is_cut() {
                     shared.cut_count.fetch_add(1, Ordering::AcqRel);
                     continue;
                 }
@@ -264,6 +269,7 @@ fn serve(links: &mut [Link], faults: Faults, shared: &Shared) {
             }
             // A frame held back with none after it goes once its time is up, and is
             // lost with the rest while a member is cut.
+            let cut = is_cut();
             if let Some((_, since)) = &link.holding
                 && (cut || since.elapsed() >= HOLD)
                 && let Some((late, _)) = link.holding.take()
@@ -281,7 +287,7 @@ fn serve(links: &mut [Link], faults: Faults, shared: &Shared) {
                     break;
                 };
                 moved += 1;
-                if cut {
+                if is_cut() {
                     shared.cut_count.fetch_add(1, Ordering::AcqRel);
                     continue;
                 }

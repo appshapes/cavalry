@@ -80,7 +80,12 @@ process by its id. The test prints which of the two ran, and why.
 **The tests assert what must hold and print what it costs.** They assert that
 entries are committed while a quorum remains, that a member cut off or throttled
 unseats nobody, and that afterwards every member's service reads every committed
-entry. They print, with no bound asserted, how long a member cut off took to join
+entry. Under the throttle, "while a quorum remains" is asserted where it can be
+seen: with the member stopped outright, the leader's commit position must rise in
+at least one stop, which a cluster that needed all three members would not do.
+Under a cgroup's quota the member runs a part of every period and paces the
+leader (`fc=min`), so no moment shows the two others alone, and there the test
+asserts that commits continue. They print, with no bound asserted, how long a member cut off took to join
 again and how many entries a second the cluster committed under the throttle.
 Both are costs of rules the pages already have, and a bound on either would be a
 guess at a runner's speed.
@@ -90,7 +95,13 @@ guess at a runner's speed.
 - **A facility of the driver: a loss rate, or a list of peers to drop.** Lost. It
   is a branch for each datagram on the sender's or the receiver's path, there for
   tests alone, and a key that an operator can set wrong (invariant 5). It would
-  also test the driver's account of a network, not a network.
+  also test the driver's account of a network, not a network. In Aeron, this is
+  the driver's debug channel endpoints, `DebugSendChannelEndpoint` and
+  `DebugReceiveChannelEndpoint` with a `LossGenerator`, set by properties of
+  `DebugChannelEndpointConfiguration` (`io.aeron.driver.ext`, read on 2026-11-12).
+  Cavalry departs from it for the two reasons above: a key that is there for
+  tests is a key to set wrong, and a zero-configuration driver has no place for
+  one.
 - **The operating system's own tools**: a packet filter, or a traffic control
   queue. Lost. Each needs root on the runner and is a different tool on Linux and
   on macOS, and a rule on the loopback reaches every other test that runs beside
@@ -140,7 +151,7 @@ and `tests/throttle.rs`, all passed.
 - Gate 3's cluster tests run with `just test` on both runners, about 40 s more of
   it.
 - Two costs are now measured and in the crate's README: a member cut off for 10 s
-  or more joins again up to 10 s after the cut is mended, and one throttled
+  or more joins again about 10 s after the cut is mended, and one throttled
   follower slows the cluster's commits to about one receiver window each 100 ms,
   though the other two members are a quorum.
 - The relay follows the members string's shape. A change to the endpoints of a
