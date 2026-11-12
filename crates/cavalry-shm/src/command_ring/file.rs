@@ -20,7 +20,8 @@ use super::layout::{
     self, DRIVER_CLOSED, FILE_NAME, HEADER_LENGTH, HeaderFields, RECORD_HEADER_LENGTH, ReadStop,
     RecordHeader, TRAILER_LENGTH,
 };
-use crate::ring::{Words, now_nanos};
+use crate::clock::epoch_time;
+use crate::ring::Words;
 use crate::sync::AtomicU64;
 
 /// The writable mapping of the driver and the clients, or the read-only mapping of
@@ -189,7 +190,7 @@ impl CommandRing {
     /// [`CommandRingError::Capacity`]; a file already at that path is
     /// [`CommandRingError::Io`].
     pub fn create(dir: &Path, capacity: u32) -> Result<Self, CommandRingError> {
-        let fields = HeaderFields::new(capacity, i64::from(std::process::id()), now_nanos())?;
+        let fields = HeaderFields::new(capacity, i64::from(std::process::id()), epoch_time())?;
         let file = OpenOptions::new()
             .read(true)
             .write(true)
@@ -400,7 +401,7 @@ impl Producer {
     }
 
     /// Claims a record for a message of `length` bytes and type `type_id`, with
-    /// `now_nanos` the client's clock for the heartbeat check: the message is written
+    /// `now_nanos` the client's epoch clock for the heartbeat check: the message is written
     /// in place through [`Claim::body`] and published by [`Claim::commit`]. A type below
     /// 1 is [`CommandRingError::Type`] and a message over
     /// [`Producer::max_message_length`] is [`CommandRingError::Message`], both before
@@ -624,7 +625,7 @@ impl Consumer {
         })
     }
 
-    /// The driver's unblock, called on its duty cycle with its clock `now_nanos`. It acts
+    /// The driver's unblock, called on its duty cycle with its nano clock `now_nanos`. It acts
     /// only once the head has not moved for the unblock timeout while the tail is beyond
     /// it (`spec/command-ring.md`, "Unblocking"): the consumer keeps that clock itself,
     /// from the first call that finds the head where it is with the tail elsewhere, and
@@ -687,7 +688,7 @@ impl Consumer {
         self.rejected
     }
 
-    /// Stores the driver's clock, `now_nanos` since the Unix epoch, in the consumer
+    /// Stores the driver's epoch clock, `now_nanos` since the Unix epoch, in the consumer
     /// heartbeat with a release store; at least once per heartbeat interval.
     pub fn store_heartbeat(&self, now_nanos: i64) {
         self.mapped.trailer().heartbeat.store_release(now_nanos);
