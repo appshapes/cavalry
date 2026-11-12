@@ -7,7 +7,7 @@
 # 228), and a test that failed once in `ci` is found again by running it until it
 # fails (card 197 and issue 245 are of that kind). This workflow is
 # those runs: `scripts/test-times.sh` with the arguments given, on the Linux runner and
-# on the macOS runner, at the branch or commit it is started on.
+# on the macOS runner, at the branch or tag it is started on.
 #
 #   gh workflow run test-times.yml --ref <branch> -f arguments='-p cavalry-raft --test cluster'
 #   gh workflow run test-times.yml --ref <branch> -f arguments='-p cavalry-raft --test cluster' -f times=50
@@ -44,8 +44,9 @@ jobs:
     name: test times (${{ matrix.name }})
     runs-on: ${{ matrix.runner }}
     # A bound for a hung runner, not a measurement. Twenty runs of the slowest test
-    # program there is today, `cavalry-raft`'s `cluster`, about a minute a run with a
-    # cold build before them, end inside half of it.
+    # program there is today, `cavalry-client`'s `image_announced`, 72 s a run on the
+    # Linux runner, with a cold build before them, end inside half of it; `cluster`
+    # of `cavalry-raft` takes about 15 s a run.
     timeout-minutes: 90
     strategy:
       fail-fast: false

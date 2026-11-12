@@ -40,7 +40,7 @@ tests' twenty runs on both runners among it.
    own output, one line after each run, and one line at the end:
 
    ```text
-   test-times: run 1 of 20 passed in 58 s
+   test-times: run 1 of 20 passed in 15 s
    ...
    test-times: 20 of 20 runs passed
    ```
@@ -49,7 +49,7 @@ tests' twenty runs on both runners among it.
    line and the run's exit code as its own:
 
    ```text
-   test-times: run 7 of 20 failed with exit code 101 after 61 s; its output is above, and the 13 runs after it were not made
+   test-times: run 7 of 20 failed with exit code 101 after 14 s; its output is above, and the 13 runs after it were not made
    ```
 
    To see what a test prints, give the test program `--nocapture` after `--`, as
@@ -110,9 +110,11 @@ tests' twenty runs on both runners among it.
   minutes, the workflow's `timeout-minutes`, and the checkout, the toolchain and a
   build from a cold cache take part of them before the first run. The count times the
   time of one run, the `passed in N s` of step 2, has to fit in the rest, and a
-  runner can be slower than your laptop. At about a minute a run, as `cluster` takes,
-  about 60 runs fit and 1000 do not. The runs whose `passed` lines the log holds did
-  pass. Ask for fewer, or start the workflow more than once and put each workflow
+  runner can be slower than your laptop. Measured on the Linux runner, in the
+  `gates (linux)` job of run 43240054411: `cluster` takes 14.34 s a run, so about
+  300 runs of it fit; the slowest test program in the workspace, `cavalry-client`'s
+  `image_announced`, takes 72.05 s, so about 65 runs of it fit; 1000 runs fit for
+  neither. The runs whose `passed` lines the log holds did pass. Ask for fewer, or start the workflow more than once and put each workflow
   run's link and count on the card.
 - `gh workflow run` stops with `HTTP 422` and `Workflow does not have
   'workflow_dispatch' trigger`: the branch does not hold
