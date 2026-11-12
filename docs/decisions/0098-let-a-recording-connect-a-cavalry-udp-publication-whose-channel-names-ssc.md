@@ -152,9 +152,10 @@ to version 9; no frame changes.
   the bench that create a counters file of 128 records do not hold.
 - A receiver cannot join while the publisher writes more than a term between the
   setup frame and the receiver's status message: it is rejected, its image times out,
-  and it tries again. With the 16 MiB term that is a publisher above about a gigabyte
-  a second with nobody receiving. A channel that names a short term (card 272) meets
-  it sooner, and that card's decision says what term a stream of a given rate needs.
+  and it tries again. With the 16 MiB term that takes a publisher that writes 16 MiB
+  to its recording in the time one join takes. A channel that names a short term
+  (card 272) meets it sooner, and that card's decision says what term a stream of a
+  given rate needs.
 - The sender holds one more counter per such publication, the recording's position,
   given and taken away by the conductor. The conductor frees a stopped recording's
   position counter only once the sender has answered that it reads it no more, as it
