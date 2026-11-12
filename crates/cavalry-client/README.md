@@ -76,7 +76,8 @@ The client API implementation, re-exported by the `cavalry` crate. Data plane.
   holds, in order, each once, with its position. The log is read from the member's
   own recording through a replay that follows it, on the leader and on a follower
   alike, and no further than the member's commit position, which is taken only while
-  the member's counters say the log is still that recording (ADR 0066). A member's
+  the member's counter still names the live recording it named when the log was
+  opened (ADR 0066, ADR 0103). A member's
   log is one recording or several in a row, which the member lists in a file in its
   driver directory: a handle replays the one that holds the position it was opened
   at, is ended at that recording's stop, and the log opened again at

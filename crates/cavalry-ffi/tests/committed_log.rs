@@ -939,3 +939,82 @@ fn a_service_whose_image_faulted_reads_the_fault_for_the_life_of_its_handle() {
         assert_eq!(cavalry_context_close(context), 0);
     }
 }
+
+/// What the open answers through the ABI for the member's file of its log's recordings
+/// (`spec/c-abi.md`, the committed log's row; ADR 0103). A file that names another
+/// live recording than the member's counter is a member between two recordings: 0
+/// with a null handle and no error set, as for a driver with no member. A file that
+/// fails a check is −1 with `CAVALRY_ERR_IO`, a null handle and a message that names
+/// the file and the check. The member's own file opens the log.
+#[test]
+fn the_open_answers_for_the_members_file_of_its_logs_recordings() {
+    use cavalry_proto::cluster::{
+        LOG_RECORDINGS_FILE_PREFIX, LogRecording, MAX_LOG_RECORDINGS_LENGTH, write_log_recordings,
+    };
+
+    let mut cluster = Cluster::start("recordings-file");
+    cluster.offer(0, 10);
+    cluster.commit(96 + 10 * 96);
+    let member_id = cluster.members[1].1.member_id();
+    let live = cluster.members[1]
+        .1
+        .log_recording_id()
+        .expect("the follower names its recording");
+    let file = cluster.members[1]
+        .2
+        .join(format!("{LOG_RECORDINGS_FILE_PREFIX}{member_id}"));
+    let own = std::fs::read(&file).expect("the member wrote its file");
+    let (context, client) = connect(&cluster.members[1].2);
+    // SAFETY: the ABI's conventions, held by this test.
+    unsafe {
+        // Between two recordings: the file names a live recording the counter does not.
+        let mut bytes = vec![0; MAX_LOG_RECORDINGS_LENGTH];
+        let length = write_log_recordings(
+            &mut bytes,
+            member_id,
+            live + 1_000,
+            0,
+            std::iter::empty::<LogRecording>(),
+        )
+        .expect("the file is written");
+        std::fs::write(&file, &bytes[..length]).expect("the file is stored");
+        let before = cavalry_errcode();
+        let mut log = ptr::null_mut();
+        assert_eq!(
+            cavalry_committed_log(&mut log, client, 0),
+            0,
+            "{}",
+            errmsg()
+        );
+        assert!(log.is_null(), "no log between two recordings");
+        assert_eq!(cavalry_errcode(), before, "no error is set");
+
+        // A file that fails a check: its magic.
+        std::fs::write(&file, vec![0u8; 64]).expect("the file is stored");
+        let mut log = ptr::null_mut();
+        assert_eq!(cavalry_committed_log(&mut log, client, 0), -1);
+        assert_eq!(cavalry_errcode(), CAVALRY_ERR_IO);
+        assert_eq!(CAVALRY_ERR_IO, 113);
+        assert!(log.is_null(), "no handle for a file that failed");
+        let message = errmsg();
+        assert!(
+            message.contains(&format!("{LOG_RECORDINGS_FILE_PREFIX}{member_id}"))
+                && message.contains("recordings-magic"),
+            "{message}"
+        );
+
+        // The member's own file again: the log opens.
+        std::fs::write(&file, &own).expect("the file is stored");
+        let mut log = ptr::null_mut();
+        assert_eq!(
+            cavalry_committed_log(&mut log, client, 0),
+            0,
+            "{}",
+            errmsg()
+        );
+        assert!(!log.is_null(), "the follower has a recording of the log");
+        assert_eq!(cavalry_committed_log_close(log, client), 0, "{}", errmsg());
+        assert_eq!(cavalry_close(client), 0);
+        assert_eq!(cavalry_context_close(context), 0);
+    }
+}
