@@ -678,13 +678,21 @@ impl Io for ClientIo {
 
     /// Replays the recording that holds `position` to `member`, on stream 100 at the
     /// member's `catchup` endpoint as this member's members string names it (ADR 0085,
-    /// ADR 0091): to `end` or to the recording's stop, whichever comes first, and with
-    /// no end the live recording for as long as it grows. `false`, with nothing
-    /// started, when no recording this member keeps holds the position, or the driver
-    /// no longer holds the recording or the position. A replay still held for the
-    /// member is stopped first. The command waits for the driver's answer, as the
-    /// commands of [`Io::add_log`] do. The module's own core is appointed and never
-    /// asks (ADR 0081).
+    /// ADR 0091). With `end`, a replication's, it runs to `end` or to the recording's
+    /// stop, whichever comes first. With none, a catch-up's, it follows the live
+    /// recording of the term this member leads for as long as it grows, and a
+    /// position in a recording that has stopped starts nothing: a catch-up is within
+    /// the leader's term (ADR 0087). `false`, with nothing started, when no recording
+    /// this member keeps holds the position, or the driver no longer holds the
+    /// recording or the position.
+    ///
+    /// A replay still held for the member is stopped first, and the new one starts
+    /// once it has stopped, the order [`Io::start_replay`] leaves to the I/O: the
+    /// driver answers `stop replay` once its replayer has written the replay's last
+    /// frame (`spec/client-protocol.md`, "Commands"), and this waits for that answer,
+    /// as the commands of [`Io::add_log`] wait for theirs. How the earlier replay
+    /// ended is forgotten. The module's own core is appointed and never asks
+    /// (ADR 0081).
     fn start_replay(
         &mut self,
         member: i32,
@@ -700,7 +708,10 @@ impl Io for ClientIo {
         let length = match (end, stop) {
             (Some(end), Some(stop)) => end.min(stop).saturating_sub(position),
             (Some(end), None) => end.saturating_sub(position),
-            (None, Some(stop)) => stop.saturating_sub(position),
+            // A catch-up follows the recording of the term this member leads. One
+            // that has stopped is of an earlier term, and a member behind it
+            // replicates, with an end.
+            (None, Some(_)) => return Ok(false),
             (None, None) => FOLLOW_LENGTH,
         };
         if length <= 0 {
@@ -734,7 +745,9 @@ impl Io for ClientIo {
     }
 
     /// Stops the replay held for `member`, when it has not ended: `stop replay`, which
-    /// waits for the driver's answer. Nothing for a member with no replay.
+    /// waits for the driver's answer, sent once the replayer has written the replay's
+    /// last frame. A second stop of one replay is answered at once. Nothing for a
+    /// member with no replay.
     fn stop_replay(&mut self, member: i32) -> Result<(), Self::Fault> {
         let Some(index) = self.peers.iter().position(|peer| peer.id == member) else {
             return Ok(());

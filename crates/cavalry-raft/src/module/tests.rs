@@ -318,22 +318,54 @@ impl Leader {
         after
     }
 
-    /// Reads what the replay held for member 1 brings to its `catchup` endpoint until
-    /// the driver has said how it ended: the position its image joined at, the
-    /// payloads in order, and how it ended.
-    fn read_replay(&mut self) -> (i64, Vec<Vec<u8>>, ReplayStopped) {
-        let session_id = self.module.io.replays[0]
+    /// The session id of the replay held for member 1, which its image carries.
+    fn replay_session(&self) -> i32 {
+        self.module.io.replays[0]
             .as_ref()
             .expect("a replay is held for member 1")
-            .session_id();
-        let joined = wait_for("the replay's image", || {
+            .session_id()
+    }
+
+    /// The position the image of the replay with `session_id` joined member 1's
+    /// `catchup` endpoint at, read before a frame of it is.
+    fn replay_joined(&mut self, session_id: i32) -> i64 {
+        wait_for("the replay's image", || {
             self.catchup.poll(|_, _| {}, 0).expect("the follower polls");
             self.catchup
                 .images()
                 .iter()
                 .find(|image| image.session_id() == session_id)
                 .map(|image| image.position())
+        })
+    }
+
+    /// Reads the entries the replay with `session_id` brings to member 1's `catchup`
+    /// endpoint into `payloads`, until it holds `count` of them.
+    fn read_entries(&mut self, session_id: i32, payloads: &mut Vec<Vec<u8>>, count: usize) {
+        wait_for("the replay brings the entries", || {
+            self.catchup
+                .poll(
+                    |body, header| {
+                        if header.session_id() == session_id
+                            && let Ok(Message::SessionMessage { payload, .. }) =
+                                Message::parse(Stream::Log, body)
+                        {
+                            payloads.push(payload.to_vec());
+                        }
+                    },
+                    16,
+                )
+                .expect("the follower polls");
+            (payloads.len() == count).then_some(())
         });
+    }
+
+    /// Reads what the replay held for member 1 brings to its `catchup` endpoint until
+    /// the driver has said how it ended: the position its image joined at, the
+    /// payloads in order, and how it ended.
+    fn read_replay(&mut self) -> (i64, Vec<Vec<u8>>, ReplayStopped) {
+        let session_id = self.replay_session();
+        let joined = self.replay_joined(session_id);
         let mut payloads = Vec::new();
         let stopped = wait_for("the replay's end", || {
             self.catchup
@@ -547,6 +579,16 @@ fn a_leader_replays_the_recordings_it_stopped_to_a_members_catchup_endpoint() {
         }
     );
 
+    // A catch-up's replay, with no end, is of the log this member leads: a position
+    // in a recording that has stopped starts none.
+    assert!(
+        !leader
+            .module
+            .io
+            .start_replay(1, 0, None)
+            .expect("an answer")
+    );
+
     // The end of the log, with no live recording: nothing holds it. Nor does
     // anything for a member the cluster does not have.
     for (member, position) in [(1, three), (1, three + 64), (7, 0)] {
@@ -585,34 +627,12 @@ fn a_leader_follows_its_live_recording_until_it_stops_the_replay() {
             .start_replay(1, 0, None)
             .expect("the replay starts")
     );
-    let session_id = leader.module.io.replays[0]
-        .as_ref()
-        .expect("a replay is held")
-        .session_id();
+    let session_id = leader.replay_session();
     let mut payloads: Vec<Vec<u8>> = Vec::new();
-    let read = |leader: &mut Leader, payloads: &mut Vec<Vec<u8>>, count: usize| {
-        wait_for("the replay brings the entries", || {
-            leader
-                .catchup
-                .poll(
-                    |body, header| {
-                        if header.session_id() == session_id
-                            && let Ok(Message::SessionMessage { payload, .. }) =
-                                Message::parse(Stream::Log, body)
-                        {
-                            payloads.push(payload.to_vec());
-                        }
-                    },
-                    16,
-                )
-                .expect("the follower polls");
-            (payloads.len() == count).then_some(())
-        });
-    };
-    read(&mut leader, &mut payloads, 1);
+    leader.read_entries(session_id, &mut payloads, 1);
     assert_eq!(leader.module.io.replay_stopped(1).expect("read"), None);
     let two = leader.append(b"two", one);
-    read(&mut leader, &mut payloads, 2);
+    leader.read_entries(session_id, &mut payloads, 2);
     assert_eq!(payloads, vec![b"one".to_vec(), b"two".to_vec()]);
 
     leader
@@ -631,6 +651,83 @@ fn a_leader_follows_its_live_recording_until_it_stops_the_replay() {
         }
     );
     leader.module.io.stop_replay(1).expect("nothing to stop");
+}
+
+/// A replay asked for a member the leader still replays to: the one running is
+/// stopped first, and the new one starts once it has stopped, the order the core
+/// leaves to the I/O. The earlier replay's end is forgotten. The new one is a
+/// catch-up's from where the leader's log ends, which holds nothing yet: its image
+/// joins there and brings what the leader appends after.
+#[test]
+fn a_replay_asked_while_one_runs_stops_it_first_and_may_begin_where_the_log_ends() {
+    let mut leader = leader("replay-again");
+    leader
+        .module
+        .io
+        .add_log(0, 0)
+        .expect("the driver takes the commands")
+        .expect("the log has its recording");
+    let one = leader.append(b"one", 0);
+    assert!(
+        leader
+            .module
+            .io
+            .start_replay(1, 0, None)
+            .expect("the replay starts")
+    );
+    let first = leader.replay_session();
+    let mut payloads: Vec<Vec<u8>> = Vec::new();
+    leader.read_entries(first, &mut payloads, 1);
+
+    assert!(
+        leader
+            .module
+            .io
+            .start_replay(1, one, None)
+            .expect("the replay starts")
+    );
+    let second = leader.replay_session();
+    assert_ne!(second, first);
+    assert_eq!(leader.replay_joined(second), one);
+    // The first follows a live recording and has a subscriber: it ends only when it
+    // is stopped, and its image goes from the subscription once it has.
+    wait_for("the first replay's image goes", || {
+        leader
+            .catchup
+            .poll(|_, _| {}, 16)
+            .expect("the follower polls");
+        (!leader
+            .catchup
+            .images()
+            .iter()
+            .any(|image| image.session_id() == first))
+        .then_some(())
+    });
+    assert_eq!(
+        leader.module.io.replay_stopped(1).expect("read"),
+        None,
+        "the first replay's end is forgotten, and the second runs"
+    );
+
+    let two = leader.append(b"two", one);
+    let mut payloads: Vec<Vec<u8>> = Vec::new();
+    leader.read_entries(second, &mut payloads, 1);
+    assert_eq!(payloads, vec![b"two".to_vec()]);
+    leader
+        .module
+        .io
+        .stop_replay(1)
+        .expect("the replay is stopped");
+    let stopped = wait_for("the replay's end", || {
+        leader.module.io.replay_stopped(1).expect("read")
+    });
+    assert_eq!(
+        stopped,
+        ReplayStopped {
+            position: two,
+            ended: false
+        }
+    );
 }
 
 /// A replay that no subscription takes ends by itself after the replay connect

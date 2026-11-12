@@ -100,15 +100,17 @@ commit path runs per message.
 - Gives a leader's log up and serves replays over a driver, for a core that elects
   (ADR 0091). The module keeps the recordings of the log it has stopped, in position
   order: the last 1,024, each with where it begins and where it stopped. `remove_log`
-  closes the log publication of the term the member led and stops its recording, and
-  that stop is where the member's log ends. `start_replay` replays the recording that
-  holds the position asked onto stream 100 at the asking member's `catchup` endpoint,
-  as this member's own members string names it: to the end asked or to the
-  recording's own, whichever comes first, and with no end asked it follows the live
-  recording. `stop_replay` stops it, and `replay_stopped` says once where it ended and
-  whether it ended by itself. A position that no recording kept holds starts nothing.
-  The module's own core is appointed and asks for none of this yet; the tests drive
-  the module's I/O over two drivers.
+  stops the recording of the term the member led, whose stop is where the member's
+  log ends, and then closes that term's log publication. `start_replay` replays the
+  recording that holds the position asked onto stream 100 at the asking member's
+  `catchup` endpoint, as this member's own members string names it: to the end asked
+  or to the recording's own, whichever comes first, and with no end asked it follows
+  the live recording of the term the member leads. A replay still running to the
+  member is stopped first. `stop_replay` stops it, and `replay_stopped` says once
+  where it ended and whether it ended by itself. A position that no recording kept
+  holds starts nothing. The module's own core is appointed and asks for none of this
+  yet; the tests drive the module's I/O over a driver, with the other member played
+  by the test.
 - Asks for the sync a commit waits for: a member's append position is its
   recording's synced position, and the driver's recorder syncs a recording by itself
   once a second. So the module asks its driver to sync its recording of the log,

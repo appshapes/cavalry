@@ -12,8 +12,9 @@
 
 ADR 0081 built the election in the core, one step at a time, and left the consensus
 module on the appointed leader until its I/O can do what an elected member needs.
-The core's steps are on `master`. The module's `Io` refuses nine operations as
-`unsupported`. This is the first slice of that I/O: the four a leader needs. A
+The core's steps are on `master`. The module's `Io` refuses eight operations as
+`unsupported` and sends no catch-up position. This is the first slice of that I/O:
+the four a leader needs. A
 leader that holds an election gives its log up in init (`remove_log`, ADR 0082), and
 a leader serves a member that is behind with replays of its own recordings
 (`start_replay`, `stop_replay`, `replay_stopped`; ADR 0085, ADR 0087).
@@ -65,12 +66,22 @@ replay that recording from the position onto stream 100 at
 own members string gives the member (ADR 0085). With an end, the replay's length is
 to that end or to the recording's stop, whichever comes first, so a replication
 that spans two recordings is two replays, as the core serves it. With no end, a
-catch-up, it follows the live recording. No recording holding the position starts
-nothing and returns `false`: the position is below what the table still holds, or
-above the member's log.
+catch-up, it follows the live recording, and a position in a recording that has
+stopped starts nothing: a catch-up is within the term the member leads (ADR 0087),
+and a member behind that term replicates, with an end. A catch-up may begin where
+the live recording ends now, with nothing to bring yet. No recording holding the
+position starts nothing and returns `false`: the position is below what the table
+still holds, or above the member's log.
 
 **One replay a member, by its handle.** The module holds the handle of the replay
 it started for each member, eight at most. `stop_replay` sends `stop replay` for it.
+A replay asked for a member whose last one has not ended stops that one first and
+starts once it has stopped. The core leaves that order to the I/O for one case: a
+leader that asked a replay to stop, held an election and leads again does not wait
+for the stop before it serves the member (`Io::start_replay`). Over a driver the
+order needs no state: the driver answers `stop replay` once its replayer has
+written the replay's last frame (`spec/client-protocol.md`, "Commands"), the module
+waits for that answer, and a second stop of one replay is answered at once.
 `replay_stopped` reads the handle: once the driver has said the replay ended, it
 returns the position reached and whether the reason was that the replay reached its
 end, and forgets the handle, so the answer is given once. A replay that ended
@@ -110,7 +121,7 @@ it tries again each cycle still shows its role, its state and its counts.
 
 ## Evidence
 
-- `crates/cavalry-raft/src/module/tests.rs`, five tests that drive the module's
+- `crates/cavalry-raft/src/module/tests.rs`, six tests that drive the module's
   `Io` over a driver, with the other member played by the test: a subscription on
   its `log` endpoint and one on its `catchup` endpoint.
   - A leader appends two entries and gives its log up. Its publication, its
@@ -124,19 +135,25 @@ it tries again each cycle still shows its role, its state and its counts.
     ends by itself at the first recording's stop. One from there to the same end
     brings the third entry and ends at the end asked. One from the middle of the
     first recording to its stop brings one entry. Each end is handed over once.
-    The log's end, a position past it, and a member the cluster does not have
-    start nothing.
+    The log's end, a position past it, a member the cluster does not have, and a
+    replay with no end from a recording that has stopped start nothing.
   - A replay with no end joins at 0 on the live recording, brings the entry
     appended before it and the one appended after, and ends when the leader stops
     it, at the second entry's end and not by itself. A stop for a member with no
     replay does nothing.
+  - A replay with no end asked while one runs to the same member, from where the
+    leader's log ends: the first replay's image goes from the member's
+    subscription, which it does only once it is stopped; the second's joins at the
+    log's end and brings the entry appended after; the module says no end of the
+    first. With the stop taken out of `start_replay` the test fails at the first
+    replay's image, which stays.
   - A replay that no subscription takes ends after the replay connect timeout,
     5 s, at the position it began at, and not by itself.
   - The table holds 1,024 recordings without growing: one more forgets the oldest,
     whose position then finds no recording, and the others are found in order.
-- The five ran fifteen times in a row on a macOS laptop with no failure, 5.3 s a
+- The six ran fifteen times in a row on a macOS laptop with no failure, 5.3 s a
   run, most of it the replay connect timeout.
-- `cargo test -p cavalry-raft`: 143 passed. The tests over three drivers, `cluster`,
+- `cargo test -p cavalry-raft`: 144 passed. The tests over three drivers, `cluster`,
   pass unchanged: the module's core is appointed and calls none of the four.
 - `do_work` storing the counters before it returns the core's fault is read from
   the code and not shown by a test: no fault of an appointed core is one the
@@ -147,9 +164,9 @@ it tries again each cycle still shows its role, its state and its counts.
 - A leader over a driver can give its log up and lead a second term in one
   process, and can replay what it holds to a member's catch-up endpoint. Nothing
   asks it to until the module moves to the election.
-- The module refuses five operations where it refused nine: `truncate_log`,
-  `add_catchup`, `catchup_image`, `remove_catchup` and the catch-up position it
-  does not send. They are the member's side and the next slices.
+- The module refuses four operations where it refused eight, `truncate_log`,
+  `add_catchup`, `catchup_image` and `remove_catchup`, and still sends no catch-up
+  position. They are the member's side and the next slices.
 - A member whose table has forgotten a recording cannot replay it. With 1,024
   recordings that is a member that has led or joined a log more than a thousand
   times in one process.
