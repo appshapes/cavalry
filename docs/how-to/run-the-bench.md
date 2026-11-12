@@ -319,7 +319,14 @@ shared runner is
    gate there with no data-plane change behind it, from the tree's first three
    processes and every one after them; the commit lists every gated row's slowest run
    before and after and names the cause of every row that loosens by more than 5
-   percent, or the card that will find it. It is re-recorded at master's tree as well
+   percent, or the card that will find it. It is re-recorded at a new tree as well
+   after a change to the harness under `bench/`, with no data-plane crate changed,
+   when that change's Accepted ADR asks for it in its Consequences, as
+   [ADR 0090](../decisions/0090-keep-a-subscribers-samples-out-of-the-histogram-until-its-loop-is-over.md)
+   did: from every process each host has run at the change's tree, three at least, in
+   a change of its own, with the same commit message and the harness change named in
+   it ([ADR 0110](../decisions/0110-let-a-persons-session-re-record-a-bench-baseline-after-telling-the-person.md)).
+   The third case is at master's tree: a baseline is re-recorded there
    when pull requests at that tree read red while master's own runs there pass,
    against an entry recorded at an older tree, and no commit on the guard's paths,
    item 4 below, lies between the entry's tree and master's
@@ -455,8 +462,9 @@ shared runner is
    gh api repos/appshapes/cavalry/issues/comments/<comment id> --jq '.body | gsub("\r"; "") | split("\n~~~json grip-linux-unchecked-<time>.json\n")[1] | split("\n~~~")[0]' > grip-linux-unchecked-<time>.json
    ```
 
-   The re-record is made by a person or by a person's session, a Claude Code session
-   that works a card for that person, on a branch of its own through the review loop.
+   The re-record, in any of the three cases above, is made by a person or by a person's
+   session, a Claude Code session that works a card for that person, on a branch of its
+   own through the review loop.
    A session tells the person before it starts, which case this is, at which tree and
    how long it holds the hosts, and does not wait for an answer
    ([ADR 0110](../decisions/0110-let-a-persons-session-re-record-a-bench-baseline-after-telling-the-person.md)).
