@@ -68,8 +68,14 @@ struct Member {
     log_dir: PathBuf,
 }
 
+/// Starts the three members in the order 1, 2, 0, so that no member's place in the
+/// vector is its id, before the leader is put first and after: a test that needs the
+/// leader finds it (`run_until_led`), and none may take a member's place for its id.
+/// While the leader is appointed it is member 0, in the last place; `run_until_led`
+/// leaves the members in the order 0, 2, 1, where the second place is member 2.
 fn start(dir: &Path, members: &str) -> Vec<Member> {
-    (0..3)
+    [1, 2, 0]
+        .into_iter()
         .map(|id| {
             let driver_dir = dir.join(format!("member-{id}"));
             let log_dir = dir.join(format!("member-{id}-log"));
@@ -99,6 +105,27 @@ fn run_until(members: &mut [Member], what: &str, mut done: impl FnMut(&[Member])
             std::thread::sleep(Duration::from_micros(200));
         }
     }
+}
+
+/// Runs the members until every election has closed, then puts the member that leads
+/// first: from here `members[0]` is the leader and `members[1..]` are its followers,
+/// whichever member the cluster has for a leader (ADR 0100, change 3). Where the
+/// leader is appointed it is the member with the lowest id, which `start` puts last,
+/// so every test takes the swap, and no place is its member's id after it.
+/// Returns the place the leader was in: a test that holds a vector beside `members`,
+/// one item for each member, swaps that place with the first there too.
+fn run_until_led(members: &mut [Member]) -> usize {
+    run_until(members, "every election closed", |members| {
+        members
+            .iter()
+            .all(|m| m.module.election_state() == ElectionState::Closed)
+    });
+    let leader = members
+        .iter()
+        .position(|m| m.module.role() == Role::Leader)
+        .expect("one member leads");
+    members.swap(0, leader);
+    leader
 }
 
 fn states(members: &[Member]) -> Vec<String> {
@@ -143,12 +170,9 @@ fn three_members_replicate_a_hundred_thousand_entries_and_their_recordings_are_e
         assert_eq!(counter(member, CLUSTER_ELECTION_CAUSE.0), 0);
     }
 
-    run_until(&mut members, "every election closed", |members| {
-        members
-            .iter()
-            .all(|m| m.module.election_state() == ElectionState::Closed)
-    });
+    run_until_led(&mut members);
     assert_eq!(members[0].module.role(), Role::Leader);
+    let leader_id = members[0].module.member_id();
     for member in &members {
         assert_eq!(member.module.leadership_term_id(), 0);
         assert_eq!(member.module.counts().elections, 1);
@@ -216,8 +240,14 @@ fn three_members_replicate_a_hundred_thousand_entries_and_their_recordings_are_e
             bytes[..usize::try_from(end).expect("a position")].to_vec()
         })
         .collect();
-    assert_eq!(recordings[1], recordings[0], "member 1's recording");
-    assert_eq!(recordings[2], recordings[0], "member 2's recording");
+    assert_eq!(
+        recordings[1], recordings[0],
+        "the first follower's recording"
+    );
+    assert_eq!(
+        recordings[2], recordings[0],
+        "the second follower's recording"
+    );
     // The first entry is the term's event and the last is the hundred thousandth offer.
     let first = Message::parse(Stream::Log, &recordings[0][32..32 + 56]).expect("an entry");
     assert!(matches!(
@@ -225,9 +255,9 @@ fn three_members_replicate_a_hundred_thousand_entries_and_their_recordings_are_e
         Message::NewLeadershipTermEvent {
             leadership_term_id: 0,
             log_position: 0,
-            leader_member_id: 0,
+            leader_member_id,
             ..
-        }
+        } if leader_member_id == leader_id
     ));
     let last_frame = &recordings[0][recordings[0].len() - 96..];
     let last = Message::parse(Stream::Log, &last_frame[32..32 + 40]).expect("an entry");
@@ -257,7 +287,10 @@ fn three_members_replicate_a_hundred_thousand_entries_and_their_recordings_are_e
         assert_eq!(counter(member, CLUSTER_ELECTIONS.0), 1);
         // Every member names the leader, the leader itself among them, and none has
         // held an election since it started (ADR 0102).
-        assert_eq!(counter(member, CLUSTER_LEADER_MEMBER_ID.0), 0);
+        assert_eq!(
+            counter(member, CLUSTER_LEADER_MEMBER_ID.0),
+            i64::from(leader_id)
+        );
         assert_eq!(counter(member, CLUSTER_ELECTION_CAUSE.0), 0);
         assert_eq!(
             counter(member, CLUSTER_ROLE.0),
@@ -282,8 +315,9 @@ fn three_members_replicate_a_hundred_thousand_entries_and_their_recordings_are_e
         dir: driver_dir,
         log_dir,
     } = members.remove(2);
+    let member_id = module.member_id();
     module.close().expect("the member closes");
-    let again = ConsensusModule::start(&driver_dir, &log_dir, &members_string, 2)
+    let again = ConsensusModule::start(&driver_dir, &log_dir, &members_string, member_id)
         .expect_err("a log directory that holds a term");
     assert!(matches!(
         again,
@@ -321,11 +355,7 @@ fn ten_entries_each_appended_once_the_last_was_committed_do_not_wait_a_second_ea
     let dir = TestDir::new("commit-on-sync");
     let members_string = members_string();
     let mut members = start(dir.path(), &members_string);
-    run_until(&mut members, "every election closed", |members| {
-        members
-            .iter()
-            .all(|m| m.module.election_state() == ElectionState::Closed)
-    });
+    run_until_led(&mut members);
     // The term event, 56 bytes in a frame of 96, then each entry in a frame of 96.
     let mut end = 96;
     run_until(
@@ -371,11 +401,7 @@ fn a_follower_lost_leaves_a_quorum_that_goes_on_committing() {
     let dir = TestDir::new("follower-lost");
     let members_string = members_string();
     let mut members = start(dir.path(), &members_string);
-    run_until(&mut members, "every election closed", |members| {
-        members
-            .iter()
-            .all(|m| m.module.election_state() == ElectionState::Closed)
-    });
+    run_until_led(&mut members);
     members[0]
         .module
         .offer(b"three of three")
@@ -437,11 +463,7 @@ fn a_leader_lost_leaves_each_follower_at_the_end_its_recording_stopped() {
     let dir = TestDir::new("leader-lost");
     let members_string = members_string();
     let mut members = start(dir.path(), &members_string);
-    run_until(&mut members, "every election closed", |members| {
-        members
-            .iter()
-            .all(|m| m.module.election_state() == ElectionState::Closed)
-    });
+    run_until_led(&mut members);
     const ENTRIES: i64 = 100;
     offer_entries(&mut members, ENTRIES);
     // The term's event and a hundred entries, each in a frame of 96.
@@ -572,11 +594,7 @@ fn a_follower_that_leaves_the_log_joins_it_again_where_its_recording_stopped() {
     let dir = TestDir::new("join-again");
     let members_string = members_string();
     let mut members = start(dir.path(), &members_string);
-    run_until(&mut members, "every election closed", |members| {
-        members
-            .iter()
-            .all(|m| m.module.election_state() == ElectionState::Closed)
-    });
+    run_until_led(&mut members);
     const ENTRIES: i64 = 10;
     offer_entries(&mut members, ENTRIES);
     let first = 96 + ENTRIES * 96;
@@ -751,7 +769,7 @@ fn a_service_reads_the_committed_log_on_every_member_and_nothing_past_the_commit
     );
     let mut logs: Vec<CommittedLog> = logs.into_iter().flatten().collect();
     for (index, log) in logs.iter().enumerate() {
-        assert_eq!(log.member_id(), i32::try_from(index).expect("an id"));
+        assert_eq!(log.member_id(), members[index].module.member_id());
         assert_eq!(
             Some(log.recording_id()),
             members[index].module.log_recording_id()
@@ -762,11 +780,10 @@ fn a_service_reads_the_committed_log_on_every_member_and_nothing_past_the_commit
     // A member names its recording before the leader's election closes, state 5 on
     // the leader and 15 on a follower, and the leader refuses an offer until it has
     // closed: the offers below wait for every election to close.
-    run_until(&mut members, "every election closed", |members| {
-        members
-            .iter()
-            .all(|m| m.module.election_state() == ElectionState::Closed)
-    });
+    let led_from = run_until_led(&mut members);
+    clients.swap(0, led_from);
+    logs.swap(0, led_from);
+    let leader_id = members[0].module.member_id();
     let mut reads: Vec<Read> = vec![Vec::new(); 3];
 
     // Five hundred entries while every member runs: each service reads the term's
@@ -793,9 +810,9 @@ fn a_service_reads_the_committed_log_on_every_member_and_nothing_past_the_commit
                 Message::NewLeadershipTermEvent {
                     leadership_term_id: 0,
                     log_position: 0,
-                    leader_member_id: 0,
+                    leader_member_id,
                     ..
-                }
+                } if leader_member_id == leader_id
             ));
         } else {
             let i = u32::try_from(index - 1).expect("an index");
@@ -1015,11 +1032,7 @@ impl BehindItsBound {
     fn start(dir: &Path) -> Self {
         let members_string = members_string();
         let mut members = start(dir, &members_string);
-        run_until(&mut members, "every election closed", |members| {
-            members
-                .iter()
-                .all(|m| m.module.election_state() == ElectionState::Closed)
-        });
+        run_until_led(&mut members);
         let mut client =
             Cavalry::connect_to(&members[2].dir).expect("the service's client connects");
         let mut opened = None;
@@ -1079,10 +1092,11 @@ impl BehindItsBound {
             dir: driver_dir,
             ..
         } = self.members.remove(2);
+        let member_id = module.member_id();
         module.close().expect("the member closes");
         let counters = CountersReader::open(&driver_dir).expect("the counters file opens");
         let deadline = Instant::now() + Duration::from_secs(30);
-        while has_member_counter(&counters, 2, CLUSTER_COMMIT_POSITION.0) {
+        while has_member_counter(&counters, member_id, CLUSTER_COMMIT_POSITION.0) {
             assert!(Instant::now() < deadline, "the member's counters went");
             std::thread::sleep(Duration::from_millis(1));
         }
@@ -1249,11 +1263,7 @@ fn a_service_reads_on_where_the_recording_its_member_joined_again_on_begins() {
     let dir = TestDir::new("service-joins-again");
     let members_string = members_string();
     let mut members = start(dir.path(), &members_string);
-    run_until(&mut members, "every election closed", |members| {
-        members
-            .iter()
-            .all(|m| m.module.election_state() == ElectionState::Closed)
-    });
+    run_until_led(&mut members);
     const ENTRIES: i64 = 10;
     offer_entries(&mut members, ENTRIES);
     let first = 96 + ENTRIES * 96;
@@ -1390,11 +1400,7 @@ fn a_service_whose_image_faulted_reads_the_fault_for_the_life_of_its_handle() {
     let dir = TestDir::new("service-faulted");
     let members_string = members_string();
     let mut members = start(dir.path(), &members_string);
-    run_until(&mut members, "every election closed", |members| {
-        members
-            .iter()
-            .all(|m| m.module.election_state() == ElectionState::Closed)
-    });
+    run_until_led(&mut members);
     let member_dir = members[1].dir.clone();
     let mut client = Cavalry::connect_to(&member_dir).expect("the service's client connects");
     let before = publication_logs(&member_dir);

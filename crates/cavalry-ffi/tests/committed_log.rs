@@ -65,7 +65,10 @@ mod ports;
 use ports::free_ports;
 
 /// Three members over three drivers on the loopback, as `cavalry-raft`'s own cluster
-/// test starts them; member 0 is the appointed leader.
+/// test starts them. `members[0]` is the member that leads and `members[1..]` are its
+/// followers, whichever member the cluster has for a leader: `start` finds it, and
+/// starts the members in the order 1, 2, 0, so that no member's place is its id,
+/// before the leader is put first or after (ADR 0100, change 3).
 struct Cluster {
     members: Vec<(Driver, ConsensusModule, PathBuf)>,
     _dir: TestDir,
@@ -85,7 +88,8 @@ impl Cluster {
             })
             .collect::<Vec<_>>()
             .join("|");
-        let members = (0..3)
+        let members = [1, 2, 0]
+            .into_iter()
             .map(|id| {
                 let driver_dir = dir.path().join(format!("member-{id}"));
                 let log_dir = dir.path().join(format!("member-{id}-log"));
@@ -102,6 +106,12 @@ impl Cluster {
                 .iter()
                 .all(|(_, module, _)| module.election_state() == ElectionState::Closed)
         });
+        let leader = cluster
+            .members
+            .iter()
+            .position(|(_, module, _)| module.role() == Role::Leader)
+            .expect("one member leads");
+        cluster.members.swap(0, leader);
         assert_eq!(cluster.members[0].1.role(), Role::Leader);
         cluster
     }
@@ -168,6 +178,9 @@ struct Collected {
     log: Option<*mut cavalry_committed_log_t>,
     client: Option<*mut cavalry_t>,
     reentrant: Vec<(&'static str, i64, i32)>,
+    /// The id of the member the log is read beside, which the handler's own call for
+    /// the constants must name.
+    member_id: i32,
 }
 
 unsafe extern "C" fn collect(
@@ -259,7 +272,10 @@ unsafe extern "C" fn collect(
         ));
         let mut constants = std::mem::zeroed::<cavalry_committed_log_constants_t>();
         let filled = cavalry_committed_log_constants(log, &mut constants);
-        assert_eq!((constants.member_id, constants.recording_id), (1, 0));
+        assert_eq!(
+            (constants.member_id, constants.recording_id),
+            (collected.member_id, 0)
+        );
         answers.push(("constants", i64::from(filled), 0));
         collected.reentrant = answers;
     }
@@ -344,7 +360,7 @@ fn a_driver_with_no_member_answers_the_open_with_a_null_handle_and_no_error() {
     driver.close().expect("closes");
 }
 
-/// A service through the ABI beside a follower, member 1: a hundred entries committed
+/// A service through the ABI beside a follower: a hundred entries committed
 /// by a quorum are handed to the C handler in order, each at the position the log
 /// gives it, the term's first entry at 0 and the hundred after it 96 bytes apart; the
 /// handle's position and bound are the end of the last; and nothing arrives while
@@ -359,6 +375,8 @@ fn a_service_reads_the_committed_log_through_the_c_handler_with_each_entrys_posi
     let end = 96 + i64::from(ENTRIES) * 96;
     cluster.commit(end);
 
+    // The service is beside a follower, whichever member that is.
+    let member_id = cluster.members[1].1.member_id();
     let (context, client) = connect(&cluster.members[1].2);
     // SAFETY: the ABI's conventions, held by this test.
     unsafe {
@@ -369,10 +387,13 @@ fn a_service_reads_the_committed_log_through_the_c_handler_with_each_entrys_posi
             "{}",
             errmsg()
         );
-        assert!(!log.is_null(), "member 1 has a recording of the log");
+        assert!(!log.is_null(), "the follower has a recording of the log");
         let mut constants = std::mem::zeroed::<cavalry_committed_log_constants_t>();
         assert_eq!(cavalry_committed_log_constants(log, &mut constants), 0);
-        assert_eq!((constants.member_id, constants.recording_id), (1, 0));
+        assert_eq!(
+            (constants.member_id, constants.recording_id),
+            (member_id, 0)
+        );
         assert_eq!(cavalry_committed_log_position(log), 0);
         assert_eq!(cavalry_committed_log_commit_position(log), 0);
 
@@ -436,6 +457,7 @@ fn a_service_reads_the_committed_log_through_the_c_handler_with_each_entrys_posi
         let mut reentrant = Collected {
             log: Some(log),
             client: Some(client),
+            member_id,
             ..Collected::default()
         };
         let clientd = ptr::addr_of_mut!(reentrant).cast::<c_void>();
@@ -708,7 +730,7 @@ fn a_log_opened_where_no_entry_begins_fails_there_and_says_so() {
             "{}",
             errmsg()
         );
-        assert!(!log.is_null(), "member 1 has a recording of the log");
+        assert!(!log.is_null(), "the follower has a recording of the log");
         let mut collected = Collected::default();
         let clientd = ptr::addr_of_mut!(collected).cast::<c_void>();
         let deadline = Instant::now() + Duration::from_secs(30);
@@ -788,7 +810,7 @@ fn a_service_whose_image_faulted_reads_the_fault_for_the_life_of_its_handle() {
             "{}",
             errmsg()
         );
-        assert!(!log.is_null(), "member 1 has a recording of the log");
+        assert!(!log.is_null(), "the follower has a recording of the log");
         let replayed: Vec<PathBuf> = publication_logs(&member_dir)
             .into_iter()
             .filter(|path| !before.contains(path))
