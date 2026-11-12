@@ -27,7 +27,8 @@ is allowed here.
   command is that call behind a `main`.
 - Explains a cluster member from the counters its consensus module stores, while its
   driver runs: who the member is and what it knows, its role, term, election state,
-  append position and commit position (`cluster-member`, a note); a member that follows
+  append position and commit position, and from its two gauges who it follows and why
+  its last election began (`cluster-member`, a note; ADR 0102); a member that follows
   no leader, told by the members string `examine_config` has whether it is the appointed
   leader the others wait for (`cluster-no-leader`); a member that has taken its leader
   and joins its log, with what is still to come in its election's state and the path
@@ -41,7 +42,12 @@ is allowed here.
   doctor sentence from `counters.toml`, consensus messages the member rejected, as from
   a member of another version (`cluster.messages_rejected`), a leader it stopped hearing
   (`cluster.leader_heartbeat_timeouts`) and a leader's log stream it lost
-  (`cluster.log_images_lost`). [Run a cluster of three
+  (`cluster.log_images_lost`). A member that elects its leader, one whose counters
+  hold `cluster.leader_member_id` and no `cluster.appointed_leader_behind`, is told
+  what such a member does instead: why its election began and that a quorum elects a
+  leader (`cluster-no-leader`), and what a replication or a catch-up waits for
+  (`cluster-joining`), with the elections it has failed and the counter of each rule;
+  it is never told to start the cluster again (ADR 0100). [Run a cluster of three
   members](../../docs/how-to/run-a-cluster.md#when-it-does-not-work) says what an
   operator does about each.
 - May use `async` and an executor: nothing a message passes through lives here.

@@ -76,7 +76,9 @@ committed once a quorum, two of three, has it on disk.
    commit position 96`. For members 1 and 2, with their own id and directories in the
    command, the line says `a follower in term 0, election closed`, with the same two
    positions once their recorders have synced, which each member asks its recorder
-   for as soon as an entry is written.
+   for as soon as an entry is written. The line ends with who the member follows and
+   why its last election began: on members 1 and 2, `; it follows member 0; its last
+   election began because the member started`.
 
 5. Stop a member with Ctrl-C or SIGTERM. It prints `cavalry run: stopping` and
    `cavalry run: closed`. The other two are a quorum and go on.
@@ -211,3 +213,18 @@ committed once a quorum, two of three, has it on disk.
   on that member's driver counts the refusals. If the commit position stays where it
   is while the append position moves, run `doctor` on each member's host: the leader's
   own disk is one of the quorum's.
+- `WARN cluster-no-leader` or `note cluster-joining` whose message names no appointed
+  leader: the member elects its leader. No member started with `cavalry run` does
+  yet; `doctor` knows such a member by its counters, which hold
+  `cluster.leader_member_id` and no `cluster.appointed_leader_behind`. With no leader,
+  the message says which state the election is in and why it began, from
+  `cluster.election_cause`. A leader needs the votes of two of three members, so run
+  `doctor` on each member's host and check that each reaches the `consensus` endpoint
+  of every other. With a leader taken, the message names that member, from
+  `cluster.leader_member_id`, and what the state waits for: an image of the leader's
+  log on the member's `log` endpoint, or the leader's replay on its `catchup`
+  endpoint, the fifth field of its entry. A member that elects begins again after an
+  election that fails, so neither message says to start the cluster again. Both end
+  with how many elections have failed and on which rule, by the names of three
+  counters: `cluster.join_position_mismatches`, `cluster.truncations_refused` and
+  `cluster.log_replications_unavailable`.
