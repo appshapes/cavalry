@@ -1558,16 +1558,17 @@ impl Conductor {
         else {
             return;
         };
-        // A destination names its endpoint and nothing else: `interface`, `fc`, `ssc`
-        // or a position key on it is refused, as a subscription's channel refuses a
-        // publication's keys, since a key that does nothing is a key the reader cannot
-        // check (ADR 0053, ADR 0059, ADR 0098).
+        // A destination names its endpoint and nothing else: `interface`, `fc`, `ssc`,
+        // `term-length` or a position key on it is refused, as a subscription's channel
+        // refuses a publication's keys, since a key that does nothing is a key the
+        // reader cannot check (ADR 0053, ADR 0059, ADR 0098, ADR 0099).
         let destination = match parsed {
             Channel::Udp(udp)
                 if !udp.is_control()
                     && udp.interface().is_none()
                     && !udp.names_flow_control()
                     && !udp.names_ssc()
+                    && !udp.names_term_length()
                     && !udp.names_position() =>
             {
                 udp.endpoint()
@@ -1921,6 +1922,18 @@ impl Conductor {
         };
         let flow_control = channel.flow_control();
         let ssc = channel.spies_simulate_connection();
+        // The term length the channel names (`spec/udp.md`, version 4; ADR 0099), or,
+        // when it names none, the spec's UDP term or the smaller one a test at a
+        // registry's capacity sets, since every log is made resident when it is
+        // created (ADR 0027). Nothing depends on the log's term matching what the
+        // sender parses a frame against: the sender holds a status message's and a
+        // NAK's offsets against the publication's own term, as it must for a replay's
+        // publication, whose log keeps its recording's term (ADR 0043).
+        let term_length = if channel.names_term_length() {
+            channel.term_length()
+        } else {
+            self.term_length.min(spec::UDP_TERM_LENGTH)
+        };
         let registration = Registration {
             client_id,
             correlation_id,
@@ -1981,6 +1994,27 @@ impl Conductor {
                              stream {stream_id} and this channel was created with {held}, and \
                              a join keeps one; {to_join} to join it, or use another stream; \
                              see {ERRORS_DOC}"
+                        ),
+                    );
+                    return;
+                }
+                // A shared log has one term length: a join has the live publication's,
+                // named or the default (`spec/udp.md`, version 4; ADR 0099).
+                let held_term_length = self.publications[index]
+                    .udp
+                    .as_ref()
+                    .map_or(i64::from(term_length), |udp| udp.term_length);
+                if held_term_length != i64::from(term_length) {
+                    self.statics.rejected_command.increment();
+                    self.send_error(
+                        correlation_id,
+                        ErrorCode::InvalidChannel,
+                        &format!(
+                            "the channel: channel refused (term-length): the live publication \
+                             on stream {stream_id} and this channel has a term length of \
+                             {held_term_length} bytes and this add asks for {term_length}, \
+                             and a join keeps one; name term-length={held_term_length} to join \
+                             it, or use another stream; see {ERRORS_DOC}"
                         ),
                     );
                     return;
@@ -2060,13 +2094,6 @@ impl Conductor {
             LogType::Concurrent
         };
         let reuse = now.saturating_add(spec::nanos(spec::COUNTER_REUSE_TIMEOUT));
-        // The spec's UDP term, or the smaller one a test at a registry's capacity sets,
-        // since every log is made resident when it is created (ADR 0027). Nothing
-        // depends on the log's term matching what the sender parses a frame against:
-        // the sender holds a status message's and a NAK's offsets against the
-        // publication's own term, as it must for a replay's publication, whose log
-        // keeps its recording's term (ADR 0043).
-        let term_length = self.term_length.min(spec::UDP_TERM_LENGTH);
         // Version 2's position keys create the log at a position with their initial
         // term id, as a replay's log is created (`spec/udp.md`, "The channel URI"; ADR
         // 0059), the position counted in the log's own term, the spec's unless a test
@@ -3097,12 +3124,14 @@ impl Conductor {
             self.registry_full(correlation_id, "subscriptions", spec::MAX_SUBSCRIPTIONS);
             return;
         }
-        // `control`, `control-mode`, `fc`, `ssc` and the position keys are a
-        // publication's (`spec/udp.md`, "The channel URI"; `spec/client-protocol.md`,
-        // "Commands", add subscription; ADR 0059, ADR 0098).
+        // `control`, `control-mode`, `fc`, `ssc`, `term-length` and the position keys
+        // are a publication's (`spec/udp.md`, "The channel URI";
+        // `spec/client-protocol.md`, "Commands", add subscription; ADR 0059, ADR 0098,
+        // ADR 0099).
         if channel.is_control()
             || channel.names_flow_control()
             || channel.names_ssc()
+            || channel.names_term_length()
             || channel.names_position()
         {
             self.statics.rejected_command.increment();
@@ -3111,9 +3140,10 @@ impl Conductor {
                 ErrorCode::InvalidChannel,
                 &format!(
                     "the channel: channel refused (subscription): it names control, \
-                     control-mode, fc, ssc, init-term-id, term-id or term-offset, which this \
-                     version reads on a publication's channel only; remove them, since a \
-                     subscription receives on its endpoint; see {ERRORS_DOC}"
+                     control-mode, fc, ssc, term-length, init-term-id, term-id or term-offset, \
+                     which this version reads on a publication's channel only; remove them, \
+                     since a subscription receives on its endpoint and an image takes its \
+                     sender's term length; see {ERRORS_DOC}"
                 ),
             );
             return;
@@ -5698,6 +5728,25 @@ impl Conductor {
                     "the replay channel: channel refused (ssc): it names ssc, by which a \
                      recording connects a client's publication; a replay goes to its \
                      receivers and moves only while one answers, so remove the key; see \
+                     {ERRORS_DOC}"
+                ),
+            );
+            return;
+        }
+        // A replay's publication keeps its recording's term length, so `term-length` on
+        // its channel would do nothing and is refused at the same point (`spec/udp.md`,
+        // version 4, "The channel URI"; ADR 0099).
+        if let Channel::Udp(udp) = &channel
+            && udp.names_term_length()
+        {
+            self.statics.rejected_command.increment();
+            self.send_error(
+                correlation_id,
+                ErrorCode::InvalidChannel,
+                &format!(
+                    "the replay channel: channel refused (term-length): it names \
+                     term-length, which gives a client's publication its term length; a \
+                     replay's publication keeps its recording's, so remove the key; see \
                      {ERRORS_DOC}"
                 ),
             );
@@ -8757,6 +8806,56 @@ mod recording {
         assert_eq!(h.last_error(208), None);
         h.conductor.remove_publication(1, 209, 208, now);
         assert_eq!(h.last_error(209), None);
+        // Version 4's `term-length` is a publication's too: refused on a subscription,
+        // a destination and a replay channel, the last with the reason `term-length`;
+        // and a join has the live publication's term length, publication 2's being the
+        // default, which a join may name (ADR 0099).
+        h.conductor.add_subscription(
+            1,
+            210,
+            7,
+            b"cavalry:udp?endpoint=127.0.0.1:40123|term-length=1m",
+            h.now,
+        );
+        let (code, message) = h.last_error(210).expect("an error");
+        assert_eq!(code, 1, "{message}");
+        assert!(message.contains("(subscription)"), "{message}");
+        assert!(h.conductor.receive_endpoints.is_empty());
+        h.conductor.change_destination(
+            1,
+            211,
+            6,
+            b"cavalry:udp?endpoint=127.0.0.1:41000|term-length=1m",
+            true,
+        );
+        let (code, message) = h.last_error(211).expect("an error");
+        assert_eq!(code, 1, "{message}");
+        assert!(message.contains("(destination)"), "{message}");
+        h.conductor.start_replay(
+            212,
+            0,
+            cavalry_proto::client_protocol::NULL_POSITION,
+            NULL_LENGTH,
+            7,
+            b"cavalry:udp?endpoint=127.0.0.1:40123|term-length=1m",
+        );
+        let (code, message) = h.last_error(212).expect("an error");
+        assert_eq!(code, 1, "{message}");
+        assert!(message.contains("(term-length)"), "{message}");
+        assert!(h.conductor.replays.is_empty());
+        let shorter = format!("{unicast}|term-length=1m");
+        h.conductor
+            .add_publication(1, 213, 7, shorter.as_bytes(), false, now);
+        let (code, message) = h.last_error(213).expect("an error");
+        assert_eq!(code, 1, "{message}");
+        assert!(message.contains("(term-length)"), "{message}");
+        assert!(message.contains("term-length=16777216"), "{message}");
+        let named = format!("{unicast}|term-length=16m");
+        h.conductor
+            .add_publication(1, 214, 7, named.as_bytes(), false, now);
+        assert_eq!(h.last_error(214), None);
+        h.conductor.remove_publication(1, 215, 214, now);
+        assert_eq!(h.last_error(215), None);
         // A publication that names them is created at their position, and a start
         // recording on a subscription with no image arms the recording: each its own
         // test (ADR 0059).
@@ -8778,10 +8877,11 @@ mod recording {
         );
         assert_eq!(h.conductor.publications.len(), 2);
         // Ten of version 5's refusals, the position keys refused on a subscription, on
-        // a destination and on a replay channel, `ssc` refused on the same three, and
-        // a join under another `ssc`; the code 11 answers count nothing, and a
-        // recording channel's keys take no part (ADR 0059, ADR 0098).
-        assert_eq!(h.counter(CLIENT_PROTOCOL_REJECTED_COMMAND), 17);
+        // a destination and on a replay channel, `ssc` refused on the same three and a
+        // join under another `ssc`, and `term-length` refused on the same three and a
+        // join under another term length; the code 11 answers count nothing, and a
+        // recording channel's keys take no part (ADR 0059, ADR 0098, ADR 0099).
+        assert_eq!(h.counter(CLIENT_PROTOCOL_REJECTED_COMMAND), 21);
     }
 
     /// An RTT measurement that reaches a control channel's socket is answered to the
@@ -10149,6 +10249,254 @@ mod recording {
             h.sender.positions_of(2).map(|(position, _)| position),
             Some(alone)
         );
+    }
+
+    /// A publication whose channel names `term-length` has a log of that term: its
+    /// header, its window, its longest message and its setup frame say so, and the
+    /// position keys count in it (`spec/udp.md`, version 4, "The channel URI"; ADR
+    /// 0099).
+    #[test]
+    fn a_udp_publication_takes_its_term_length_from_its_channel() {
+        let mut h = Harness::new("udp-term-length");
+        let mut receiver = TestReceiver::bind();
+        let unicast = String::from_utf8(receiver.channel()).expect("utf-8");
+        let now = h.now;
+        let short = format!("{unicast}|term-length=64k");
+        h.conductor
+            .add_publication(1, 2, 7, short.as_bytes(), false, now);
+        assert_eq!(h.last_error(2), None);
+        let keyed =
+            format!("{unicast}|term-length=65536|init-term-id=7|term-id=9|term-offset=4096");
+        h.conductor
+            .add_publication(1, 3, 8, keyed.as_bytes(), false, now);
+        assert_eq!(h.last_error(3), None);
+        {
+            let publication = &h.conductor.publications[0];
+            let header = publication.log.header();
+            assert_eq!(header.term_length(), 65536);
+            assert_eq!(header.publication_window_length(), 32768);
+            assert_eq!(header.max_message_length(), 8192);
+            assert!(
+                h.dir
+                    .path()
+                    .join("publications/2.logbuffer")
+                    .metadata()
+                    .is_ok_and(|file| file.len() == 3 * 65536 + 4096),
+                "the log is three terms and its metadata page"
+            );
+            let keyed = &h.conductor.publications[1];
+            assert_eq!(keyed.log.header().term_length(), 65536);
+            assert_eq!(
+                keyed.limit.get(),
+                2 * 65536 + 4096,
+                "created at its position"
+            );
+        }
+        h.sender.duty_cycle(now);
+        let mut setups = Vec::new();
+        while let Some(ControlFrame::Setup(setup)) = receiver.next_control() {
+            setups.push(setup);
+            if setups.len() == 2 {
+                break;
+            }
+        }
+        setups.sort_by_key(|setup| setup.stream_id);
+        assert_eq!(setups.len(), 2, "a setup frame for each");
+        assert_eq!(setups[0].term_length, 65536);
+        assert_eq!((setups[0].stream_id, setups[0].term_offset), (7, 0));
+        assert_eq!(setups[1].term_length, 65536);
+        assert_eq!(
+            (
+                setups[1].stream_id,
+                setups[1].initial_term_id,
+                setups[1].active_term_id,
+                setups[1].term_offset
+            ),
+            (8, 7, 9, 4096)
+        );
+    }
+
+    /// A stream with a 64 KiB term crosses seven terms while it is recorded and alone
+    /// under `ssc=true`, each term ending in a padding frame, and a receiver that
+    /// answers a setup frame late is then sent every frame from its own position, over
+    /// a term's end, in order: the sender, the recorder, the conductor's cleaning and
+    /// the join all count in the publication's own term (ADR 0098, ADR 0099).
+    #[test]
+    fn a_short_term_stream_is_recorded_alone_across_terms_and_joined_over_a_terms_end() {
+        const TERM: i64 = 65536;
+        // A 100-byte message is a 132-byte frame, 160 aligned: 409 of them fill 65,440
+        // bytes of a term, and a 96-byte padding frame ends it.
+        const ALIGNED: i64 = 160;
+        const PER_TERM: i64 = 409;
+        let mut h = Harness::new("udp-short-term");
+        let mut receiver = TestReceiver::bind();
+        let channel = format!(
+            "{}|term-length=64k|ssc=true",
+            String::from_utf8(receiver.channel()).expect("utf-8")
+        );
+        let now = h.now;
+        h.conductor
+            .add_publication(1, 2, 7, channel.as_bytes(), false, now);
+        assert_eq!(h.last_error(2), None);
+        h.conductor.start_recording(3, 7, &receiver.channel(), now);
+        assert_eq!(h.last_error(3), None);
+        let mut appender = h.conductor.publications[0]
+            .log
+            .appender()
+            .expect("an appender");
+        let message = |n: i64| {
+            let mut body = [0u8; 100];
+            body[..8].copy_from_slice(&n.to_le_bytes());
+            body
+        };
+        // The position after the first `count` messages: whole terms, each with its
+        // padding frame, and the messages of the term in progress.
+        let position_after = |count: i64| (count / PER_TERM) * TERM + (count % PER_TERM) * ALIGNED;
+        let mut offered = 0i64;
+        let mut fold = 0u64;
+        let mut publish = |h: &mut Harness, upto: i64, offered: &mut i64, fold: &mut u64| {
+            let deadline = Instant::now() + Duration::from_secs(60);
+            while h.sender.positions_of(2).map(|(position, _)| position)
+                != Some(position_after(upto))
+            {
+                let now = now_nanos();
+                let limit = h.conductor.publications[0].limit.get();
+                while *offered < upto {
+                    match appender.offer(&message(*offered), limit, 0) {
+                        Ok(_) => {
+                            *fold = fold_bytes(*fold, &message(*offered));
+                            *offered += 1;
+                        }
+                        Err(ClaimError::AdminAction) => {}
+                        Err(_) => break,
+                    }
+                }
+                h.recorder.duty_cycle(now);
+                h.sender.duty_cycle(now);
+                h.conductor.duty_cycle(now);
+                assert!(
+                    Instant::now() < deadline,
+                    "the sender reached {:?} of {}",
+                    h.sender.positions_of(2),
+                    position_after(upto)
+                );
+            }
+        };
+        // Seven terms and a part of the eighth, alone: recorded, cleaned and followed.
+        let alone = 7 * PER_TERM + 100;
+        publish(&mut h, alone, &mut offered, &mut fold);
+        assert_eq!(
+            unsent(&h),
+            position_after(alone),
+            "padding frames among them"
+        );
+        assert!(
+            h.conductor.publications[0].clean_position >= 5 * TERM,
+            "the log is cleaned a term behind the sender: {}",
+            h.conductor.publications[0].clean_position
+        );
+        // A setup frame at where the sender stands, 16,000 bytes into the eighth term.
+        receiver.set_read_timeout(Duration::from_millis(20));
+        let positions =
+            |setup: &SetupFrame| cavalry_shm::log::Positions::new(setup.initial_term_id, 65536);
+        let deadline = Instant::now() + Duration::from_secs(30);
+        let setup = loop {
+            h.sender
+                .duty_cycle(now_nanos() + spec::nanos(Duration::from_millis(200)));
+            match receiver.next_control() {
+                Some(ControlFrame::Setup(setup))
+                    if positions(&setup)
+                        .position(setup.active_term_id, setup.term_offset as u32)
+                        == position_after(alone) =>
+                {
+                    break setup;
+                }
+                Some(ControlFrame::Setup(_)) | None => {}
+                other => panic!("expected a setup frame, got {other:?}"),
+            }
+            assert!(
+                Instant::now() < deadline,
+                "a setup frame at {}",
+                position_after(alone)
+            );
+        };
+        assert_eq!(setup.term_length, 65536);
+        // The publisher goes on into the ninth term before the receiver answers.
+        let late = 8 * PER_TERM + 50;
+        publish(&mut h, late, &mut offered, &mut fold);
+        // The answer, from the setup frame's position: the sender goes back for it,
+        // over the end of the eighth term.
+        let status = |position: i64| StatusMessage {
+            flags: 0,
+            session_id: setup.session_id,
+            stream_id: 7,
+            consumption_term_id: positions(&setup).term_id_of(position),
+            consumption_term_offset: positions(&setup).term_offset_of(position) as i32,
+            receiver_window_length: 32768,
+            receiver_id: 9,
+            group_tag: None,
+        };
+        receiver.send_status_message(&status(position_after(alone)));
+        let mut next = alone;
+        let mut at = position_after(alone);
+        let mut padding = 0;
+        let deadline = Instant::now() + Duration::from_secs(30);
+        while next < late {
+            let now = now_nanos();
+            h.recorder.duty_cycle(now);
+            h.sender.duty_cycle(now);
+            h.conductor.duty_cycle(now);
+            if let Some(frames) = receiver.next_data(65536) {
+                for (header, body) in &frames {
+                    assert_eq!(
+                        positions(&setup).position(header.term_id(), header.term_offset() as u32),
+                        at,
+                        "frames in order from the join position"
+                    );
+                    if header.frame_type() == FrameType::Pad {
+                        padding += 1;
+                        at += i64::from(header.frame_length());
+                    } else {
+                        assert_eq!(body.as_slice(), message(next).as_slice());
+                        next += 1;
+                        at += ALIGNED;
+                    }
+                }
+                if !frames.is_empty() {
+                    receiver.send_status_message(&status(at));
+                }
+            }
+            assert!(
+                Instant::now() < deadline,
+                "the receiver got to message {next} of {late}"
+            );
+        }
+        assert_eq!(padding, 1, "the eighth term's padding frame came too");
+        assert_eq!(at, position_after(late));
+        assert_eq!(
+            unsent(&h),
+            position_after(alone),
+            "what was gone back over is sent"
+        );
+        assert_eq!(
+            h.counter(cavalry_shm::counters::generated::SENDER_NAKS_RECEIVED),
+            0
+        );
+        // The recording holds every message of the nine terms, in order.
+        drop(publish);
+        h.conductor.stop_recording(50, 0);
+        let deadline = Instant::now() + Duration::from_secs(30);
+        while !h.conductor.recordings.is_empty() {
+            let now = now_nanos();
+            h.recorder.duty_cycle(now);
+            h.conductor.duty_cycle(now);
+            assert!(Instant::now() < deadline, "the recording did not stop");
+        }
+        let (stop, recorded) = fold_recording(&h.log_dir, 0);
+        assert_eq!(stop, position_after(late));
+        assert_eq!(recorded, fold);
+        assert_eq!(h.counter(RECORDING_WRITE_FAILED), 0);
+        assert_eq!(h.counter(LOG_BUFFER_REJECTED_FRAME), 0);
     }
 
     /// A recording does not connect a `cavalry:udp` publication whose channel names no
