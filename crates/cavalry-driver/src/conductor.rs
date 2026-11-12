@@ -10026,6 +10026,38 @@ mod recording {
         }
         assert_eq!(unsent(&h), alone + 5 * 64);
         assert_eq!(h.counter(SENDER_BYTES_SENT), 640);
+
+        // A status message that names a position ahead of the sender position, while
+        // the publication is alone again, is no join to go back for: it is taken as any
+        // status message is, connects the publication with the sender position where it
+        // stands, and counts no rejection (`spec/udp.md`, "The sender").
+        let rejected = h.counter(cavalry_shm::counters::generated::SENDER_STATUS_MESSAGES_REJECTED);
+        let ahead = positions(&setup);
+        receiver.send_status_message(&StatusMessage {
+            flags: 0,
+            session_id: setup.session_id,
+            stream_id: 7,
+            consumption_term_id: ahead.term_id_of(end + 640),
+            consumption_term_offset: ahead.term_offset_of(end + 640) as i32,
+            receiver_window_length: 131072,
+            receiver_id: 9,
+            group_tag: None,
+        });
+        let deadline = Instant::now() + Duration::from_secs(30);
+        while h.sender.positions_of(2) != Some((end, end + 640 + 131072)) {
+            h.sender.duty_cycle(later);
+            std::thread::sleep(Duration::from_millis(1));
+            assert!(
+                Instant::now() < deadline,
+                "the status message ahead was taken: {:?}",
+                h.sender.positions_of(2)
+            );
+        }
+        assert_eq!(
+            h.counter(cavalry_shm::counters::generated::SENDER_STATUS_MESSAGES_REJECTED),
+            rejected
+        );
+        assert_eq!(unsent(&h), alone + 5 * 64, "nothing gone back over");
     }
 
     /// A receiver whose status message names a position the sender has passed while
