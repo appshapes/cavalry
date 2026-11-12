@@ -97,6 +97,17 @@ impl Safety {
         }
     }
 
+    /// Starts `member` again on the log directory it kept ([`Cluster::restart`]). A
+    /// member that starts knows no commit position until a leader tells it one, so
+    /// the last it knew is forgotten here; what the cluster committed is not, and
+    /// every check of it goes on.
+    fn restart(&mut self, cluster: &mut Cluster, member: i32) {
+        cluster.restart(member);
+        if let Some(index) = self.ids.iter().position(|&id| id == member) {
+            self.last_commit[index] = 0;
+        }
+    }
+
     /// Steps until `done`, for at most `limit_ms`, and returns how many steps it took.
     fn run_until(
         &mut self,
@@ -1344,6 +1355,191 @@ fn a_leader_closes_with_a_quorum_and_a_member_that_stood_still_catches_up() {
         safety.run(&mut cluster, 500);
         for &id in &ids {
             assert_eq!(cluster.commit_position(id), Some(last), "seed {seed}");
+        }
+    }
+}
+
+/// A follower starts again on the log directory it kept (ADR 0089): a new process
+/// over its stored candidate term, its record of terms and what its recordings had
+/// synced. It canvasses with the term its record holds, the leader answers with its
+/// term, which is that one, and the member joins the leader's log again under the
+/// same leader and term, with the record it had and the log the leader holds. The
+/// leader leads on with the other follower meanwhile and commits an entry, which the
+/// member that started again holds when it has joined.
+#[test]
+fn a_follower_that_starts_again_on_its_log_joins_its_leader_again() {
+    let ids = [0, 1, 2];
+    for seed in [1, 2, 3, 12] {
+        let mut safety = Safety::new(&ids);
+        let (mut cluster, leader) = elected(seed, &mut safety);
+        let term = cluster
+            .member(leader)
+            .expect("a member")
+            .leadership_term_id();
+        let follower = ids
+            .iter()
+            .copied()
+            .find(|&id| id != leader)
+            .expect("a follower");
+        let first = cluster
+            .offer(b"before it starts again")
+            .expect("the leader appends");
+        safety.run(&mut cluster, 500);
+        for &id in &ids {
+            assert_eq!(cluster.commit_position(id), Some(first), "seed {seed}");
+        }
+        let record = cluster.record_of_terms(follower).expect("a member");
+
+        safety.restart(&mut cluster, follower);
+        let member = cluster.member(follower).expect("a member");
+        assert_eq!(member.leadership_term_id(), -1, "seed {seed}");
+        assert_eq!(member.leader_member_id(), -1, "seed {seed}");
+        assert_eq!(member.commit_position(), 0, "seed {seed}");
+        assert_eq!(member.election_state(), ElectionState::Init, "seed {seed}");
+        let second = cluster
+            .offer(b"while it starts")
+            .expect("the leader appends");
+        let steps = safety.run_until(
+            &mut cluster,
+            3_000,
+            "the member that started again joins",
+            |cluster| settled(cluster, &ids) && cluster.append_position(follower) == Some(second),
+        );
+        assert!(steps < 1_000, "seed {seed}: {steps} ms");
+        assert_eq!(cluster.leader(), Some(leader), "seed {seed}");
+        let member = cluster.member(follower).expect("a member");
+        assert_eq!(member.leadership_term_id(), term, "seed {seed}");
+        assert_eq!(
+            cluster.record_of_terms(follower),
+            Some(record),
+            "seed {seed}"
+        );
+        assert_eq!(cluster.log(follower), cluster.log(leader), "seed {seed}");
+        assert!(
+            holds(&cluster.log(follower), b"before it starts again"),
+            "seed {seed}"
+        );
+        let counts = member.counts();
+        assert_eq!(counts.elections_closed, 1, "seed {seed}: {counts:?}");
+        assert_eq!(counts.log_truncations, 0, "seed {seed}: {counts:?}");
+        assert_eq!(counts.candidacies, 0, "seed {seed}: {counts:?}");
+        let counts = cluster.counts(leader).expect("a member");
+        assert_eq!(counts.terms_led, 1, "seed {seed}: {counts:?}");
+        assert_eq!(counts.leader_step_downs, 0, "seed {seed}: {counts:?}");
+        assert_eq!(counts.leader_quorum_losses, 0, "seed {seed}: {counts:?}");
+        safety.run(&mut cluster, 500);
+        assert_eq!(
+            cluster.commit_position(follower),
+            Some(second),
+            "seed {seed}"
+        );
+    }
+}
+
+/// A leader starts again on the log directory it kept. Its log publication went with
+/// its process, so its followers lose their images of the log and hold an election;
+/// the member that started again canvasses with them, with the term it led in its
+/// record and the candidate term it stored. One of the three, at two of these seeds
+/// the member that started again, leads a later term within a second, and all three
+/// end on its log, which holds every entry the first leader committed.
+#[test]
+fn a_leader_that_starts_again_on_its_log_ends_on_the_log_of_the_next_leader() {
+    let ids = [0, 1, 2];
+    for seed in [1, 2, 3, 12] {
+        let mut safety = Safety::new(&ids);
+        let (mut cluster, first) = elected(seed, &mut safety);
+        let first_term = cluster
+            .member(first)
+            .expect("a member")
+            .leadership_term_id();
+        let committed = cluster
+            .offer(b"committed by all")
+            .expect("the leader appends");
+        safety.run(&mut cluster, 500);
+        for &id in &ids {
+            assert_eq!(cluster.commit_position(id), Some(committed), "seed {seed}");
+        }
+
+        safety.restart(&mut cluster, first);
+        assert_eq!(cluster.leader(), None, "seed {seed}");
+        safety.run_until(&mut cluster, 1_000, "a leader of a later term", |cluster| {
+            cluster.leader().is_some()
+        });
+        let second = cluster.leader().expect("a leader");
+        let second_term = cluster
+            .member(second)
+            .expect("a member")
+            .leadership_term_id();
+        assert!(second_term > first_term, "seed {seed}");
+        safety.run_until(&mut cluster, 3_000, "the second election", |cluster| {
+            settled(cluster, &ids)
+        });
+        let last = cluster.offer(b"and again").expect("the new leader appends");
+        safety.run(&mut cluster, 500);
+        for &id in &ids {
+            assert_eq!(cluster.commit_position(id), Some(last), "seed {seed}");
+            assert_eq!(cluster.log(id), cluster.log(second), "seed {seed}");
+            assert!(holds(&cluster.log(id), b"committed by all"), "seed {seed}");
+        }
+    }
+}
+
+/// Every member starts again at once, each on the log directory it kept, as a
+/// cluster does when its hosts lose power together. Each canvasses with the term its
+/// record holds and hears the other two, none ahead of it, so each is a candidate at
+/// once, as at the cluster's first start, and one leads the next term in under two
+/// seconds: no member waits the startup canvass timeout, 60 s. Every entry that was
+/// committed is in every member's log, at its position, and the cluster commits
+/// again. An entry that the leader had appended and no recording had synced is gone,
+/// as a power loss takes it; it was never committed.
+#[test]
+fn every_member_starts_again_and_the_cluster_keeps_what_it_committed() {
+    let ids = [0, 1, 2];
+    for seed in [1, 2, 3, 12] {
+        let mut safety = Safety::new(&ids);
+        let (mut cluster, first) = elected(seed, &mut safety);
+        let first_term = cluster
+            .member(first)
+            .expect("a member")
+            .leadership_term_id();
+        let committed = cluster
+            .offer(b"committed by all")
+            .expect("the leader appends");
+        safety.run(&mut cluster, 500);
+        let before = cluster.log_to(first, committed);
+        cluster
+            .offer(b"appended and not synced")
+            .expect("the leader appends");
+        for &id in &ids {
+            safety.restart(&mut cluster, id);
+        }
+        assert_eq!(cluster.leader(), None, "seed {seed}");
+
+        let steps = safety.run_until(
+            &mut cluster,
+            3_000,
+            "a leader after every member started again",
+            |cluster| settled(cluster, &ids),
+        );
+        assert!(steps < 2_000, "seed {seed}: {steps} ms");
+        let second = cluster.leader().expect("a leader");
+        let second_term = cluster
+            .member(second)
+            .expect("a member")
+            .leadership_term_id();
+        assert!(second_term > first_term, "seed {seed}");
+        for &id in &ids {
+            assert_eq!(cluster.log_to(id, committed), before, "seed {seed}");
+            assert!(
+                !holds(&cluster.log(id), b"appended and not synced"),
+                "seed {seed}"
+            );
+        }
+        let last = cluster.offer(b"and again").expect("the new leader appends");
+        safety.run(&mut cluster, 500);
+        for &id in &ids {
+            assert_eq!(cluster.commit_position(id), Some(last), "seed {seed}");
+            assert_eq!(cluster.log(id), cluster.log(second), "seed {seed}");
         }
     }
 }
