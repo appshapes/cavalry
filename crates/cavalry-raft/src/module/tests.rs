@@ -807,3 +807,365 @@ fn the_recordings_kept_are_the_last_1024() {
     assert_eq!(io.recording_at(32_768), Some((5_000, Some(32_800))));
     assert_eq!(io.recording_at(32_800), None);
 }
+
+/// Members 0 and 1 of two, each a module over a driver of its own, as in a cluster:
+/// member 0 leads and member 1 follows, and the test drives the [`Io`] of both.
+struct Pair {
+    leader: ConsensusModule,
+    member: ConsensusModule,
+    leader_driver_dir: PathBuf,
+    member_driver_dir: PathBuf,
+    member_log_dir: PathBuf,
+    _drivers: Vec<Driver>,
+    _dir: TestDir,
+}
+
+fn pair(test: &str) -> Pair {
+    let dir = TestDir::new(test);
+    let ports = free_ports(10);
+    let member = |id: usize| {
+        let endpoints: Vec<String> = ports[id * 5..id * 5 + 5]
+            .iter()
+            .map(|port| format!("127.0.0.1:{port}"))
+            .collect();
+        format!("{id},{}", endpoints.join(","))
+    };
+    let members = format!("{}|{}", member(0), member(1));
+    let mut drivers = Vec::new();
+    let mut modules = Vec::new();
+    for id in 0..2 {
+        let driver_dir = dir.0.join(format!("driver-{id}"));
+        let log_dir = dir.0.join(format!("log-{id}"));
+        drivers.push(Driver::start(&driver_dir, &log_dir).expect("the driver starts"));
+        modules.push(
+            ConsensusModule::start(&driver_dir, &log_dir, &members, id).expect("the member starts"),
+        );
+    }
+    let member = modules.pop().expect("member 1");
+    let leader = modules.pop().expect("member 0");
+    Pair {
+        leader,
+        member,
+        leader_driver_dir: dir.0.join("driver-0"),
+        member_driver_dir: dir.0.join("driver-1"),
+        member_log_dir: dir.0.join("log-1"),
+        _drivers: drivers,
+        _dir: dir,
+    }
+}
+
+impl Pair {
+    /// Appends `payload` on the leader and returns the position after it, once the
+    /// leader's append position has reached it.
+    fn append(&mut self, payload: &[u8], from: i64) -> i64 {
+        let message = entry(payload);
+        let mut encoded = [0u8; 256];
+        let length = message.write(&mut encoded).expect("the entry is encoded");
+        wait_for("the entry is appended", || {
+            self.leader
+                .io
+                .append(&message)
+                .expect("the publication takes the entry")
+                .then_some(())
+        });
+        let after = from + i64::try_from((32 + length).div_ceil(32) * 32).expect("a length");
+        wait_for(
+            "the leader's append position reaches the entry's end",
+            || (self.leader.io.append_position() == after).then_some(()),
+        );
+        after
+    }
+}
+
+impl Pair {
+    /// The start position the catalog of member 1's driver holds for a recording.
+    fn start_of(&self, recording_id: i64) -> i64 {
+        let catalog = CatalogReader::open(&self.member_log_dir).expect("the catalog opens");
+        catalog
+            .get(recording_id)
+            .expect("the slot is read")
+            .expect("the recording's descriptor")
+            .start_position()
+    }
+
+    /// Runs member 1's observation of its log subscription until `done` says so.
+    fn observe<T>(&mut self, what: &str, mut done: impl FnMut(&mut ClientIo) -> Option<T>) -> T {
+        wait_for(what, || {
+            self.member.io.observe_log().expect("the log is observed");
+            done(&mut self.member.io)
+        })
+    }
+}
+
+/// A follower's recording that was armed before the leader's image arrived begins at
+/// the image's join position. The election is told that position once the driver
+/// has started the recording, and from then the recording is the member's log: its
+/// append position follows what the recording has synced, the module names the
+/// recording, and when the member leaves the log the recording is kept from where it
+/// begins to where it stopped (ADR 0093).
+#[test]
+fn a_recording_armed_before_its_image_is_told_at_the_join_and_counted() {
+    let mut pair = pair("armed-first");
+    pair.member.io.join_log().expect("subscribed and armed");
+    let log = pair
+        .leader
+        .io
+        .add_log(0, 0)
+        .expect("the driver takes the commands")
+        .expect("the log has its recording");
+    let one = pair.append(b"one", 0);
+    let start = pair.observe("the recording's start is told", |io| {
+        io.log_image(log.session_id).expect("the image is read")
+    });
+    assert_eq!(start, 0);
+    let recording_id = pair
+        .member
+        .log_recording_id()
+        .expect("the recording is named");
+    assert_eq!(pair.start_of(recording_id), 0);
+    pair.observe(
+        "the member's append position reaches the entry's end",
+        |io| (io.append_position() == one).then_some(()),
+    );
+    pair.member.io.leave_log().expect("the log is left");
+    assert_eq!(pair.member.io.append_position(), one);
+    assert_eq!(
+        pair.member.io.kept.iter().copied().collect::<Vec<_>>(),
+        vec![Kept {
+            recording_id,
+            start: 0,
+            stop: one,
+        }]
+    );
+}
+
+/// Card 269. A follower joins the log with two commands, and an image that arrives
+/// between them is there before the recording is armed: the recording then begins
+/// at what the image had received, past its join position. The test makes the gap
+/// wide: the member subscribes, the leader's first entry reaches the member's
+/// driver, and only then does the member arm.
+///
+/// The module takes where the recording begins from the catalog. It tells the
+/// election that position, 96, where the image joined at 0: an image that joined past
+/// the member's append position, which follower log await fails on. The recording is
+/// no part of the member's log: the append position stays 0 while the recording
+/// syncs a second entry, the module names no recording, and the member that leaves
+/// the log keeps nothing. Before ADR 0093 the module told the election 0 and
+/// reported an append position of 192, with the first entry in no recording.
+#[test]
+fn a_recording_armed_after_its_image_arrived_is_told_where_it_begins_and_never_counted() {
+    let mut pair = pair("armed-late");
+    let log = pair
+        .leader
+        .io
+        .add_log(0, 0)
+        .expect("the driver takes the commands")
+        .expect("the log has its recording");
+    // The first of `join_log`'s two commands, and not yet the second.
+    {
+        let io = &mut pair.member.io;
+        io.log_subscription = Some(
+            io.client
+                .add_subscription(&io.log_endpoint_channel, LOG_STREAM_ID)
+                .expect("the member subscribes"),
+        );
+    }
+    // A second subscriber on the member's driver, to know what the image has
+    // received: the member's own subscription reads nothing of it.
+    let mut watcher = Cavalry::connect_to(&pair.member_driver_dir).expect("the watcher");
+    let channel = pair.member.io.log_endpoint_channel.clone();
+    let mut watch = watcher
+        .add_subscription(&channel, LOG_STREAM_ID)
+        .expect("the watcher subscribes");
+    let one = pair.append(b"one", 0);
+    let mut seen = 0;
+    wait_for("the entry reaches the member's driver", || {
+        seen += watch.poll(|_, _| {}, 16).expect("the watcher polls");
+        (seen >= 1).then_some(())
+    });
+    assert_eq!(
+        pair.member.io.log_image(log.session_id).expect("read"),
+        None,
+        "no recording has started"
+    );
+
+    pair.member.io.join_log().expect("armed, late");
+    let start = pair.observe("the recording's start is told", |io| {
+        io.log_image(log.session_id).expect("the image is read")
+    });
+    assert_eq!(
+        start, one,
+        "where the recording begins, not where the image joined"
+    );
+    let recording_id = pair
+        .member
+        .io
+        .held
+        .as_ref()
+        .expect("the recording is held")
+        .recording
+        .recording_id();
+    assert_eq!(pair.start_of(recording_id), one);
+
+    let two = pair.append(b"two", one);
+    pair.observe("the member's recording syncs the second entry", |io| {
+        io.held
+            .as_ref()
+            .filter(|held| held.recording.synced_position() >= two)
+            .map(|_| ())
+    });
+    assert_eq!(
+        pair.member.io.append_position(),
+        0,
+        "the recording begins past where the member's log ends"
+    );
+    assert_eq!(pair.member.log_recording_id(), None);
+    pair.member.io.leave_log().expect("the log is left");
+    assert_eq!(pair.member.io.append_position(), 0);
+    assert!(pair.member.io.kept.is_empty());
+}
+
+/// An armed recording takes the next image on the endpoint, whatever its session.
+/// One taken by an image the election does not ask for, here a publication of the
+/// test's own on the member's `log` endpoint, is never told to the election and is no
+/// part of the member's log, though it begins where that log ends: the append
+/// position does not move as it syncs, the module names no recording, and the member
+/// that leaves the log keeps nothing (ADR 0093).
+#[test]
+fn a_recording_of_another_sessions_image_is_never_told_and_never_counted() {
+    let mut pair = pair("another-session");
+    pair.member.io.join_log().expect("subscribed and armed");
+    let mut stranger = Cavalry::connect_to(&pair.leader_driver_dir).expect("the stranger");
+    let channel = pair.member.io.log_endpoint_channel.clone();
+    let mut stray = stranger
+        .add_exclusive_publication(&channel, LOG_STREAM_ID)
+        .expect("the stray publication");
+    let message = entry(b"of no term");
+    let mut encoded = [0u8; 256];
+    let length = message.write(&mut encoded).expect("the entry is encoded");
+    wait_for("the stray entry is published", || {
+        pair.member.io.observe_log().expect("the log is observed");
+        stray.offer(&encoded[..length]).is_ok().then_some(())
+    });
+    let end = i64::try_from((32 + length).div_ceil(32) * 32).expect("a length");
+    pair.observe("the stray image's recording syncs the entry", |io| {
+        io.held
+            .as_ref()
+            .filter(|held| held.recording.synced_position() >= end)
+            .map(|_| ())
+    });
+    let held = pair.member.io.held.as_ref().expect("the recording is held");
+    assert_eq!(held.start, 0, "it begins where the member's log ends");
+    let stray_session = held.recording.session_id();
+    let wanted = stray_session.wrapping_add(1);
+    assert_eq!(
+        pair.member.io.log_image(wanted).expect("read"),
+        None,
+        "the election asks for another session's image"
+    );
+    assert_eq!(pair.member.io.append_position(), 0);
+    assert_eq!(pair.member.log_recording_id(), None);
+    pair.member.io.leave_log().expect("the log is left");
+    assert_eq!(pair.member.io.append_position(), 0);
+    assert!(pair.member.io.kept.is_empty());
+}
+
+/// A member whose log directory is not its driver's is refused at its start, before
+/// anything is written there (ADR 0093). The directory holds no catalog: the error is
+/// `RaftError::Catalog`, its reason `catalog`, its message names the page's "Members
+/// and streams", and the directory is as empty as it was, with no `terms` file.
+#[test]
+fn a_member_started_on_a_directory_with_no_catalog_is_refused_and_writes_nothing_there() {
+    let dir = TestDir::new("no-catalog");
+    let driver_dir = dir.0.join("driver");
+    let other = dir.0.join("not-the-drivers");
+    std::fs::create_dir_all(&other).expect("the other directory");
+    let ports = free_ports(10);
+    let member = |id: usize| {
+        let endpoints: Vec<String> = ports[id * 5..id * 5 + 5]
+            .iter()
+            .map(|port| format!("127.0.0.1:{port}"))
+            .collect();
+        format!("{id},{}", endpoints.join(","))
+    };
+    let members = format!("{}|{}", member(0), member(1));
+    let _driver = Driver::start(&driver_dir, dir.0.join("log")).expect("the driver starts");
+
+    let Err(error) = ConsensusModule::start(&driver_dir, &other, &members, 0) else {
+        panic!("a member started on a directory with no catalog");
+    };
+    assert!(matches!(error, RaftError::Catalog(_)), "{error}");
+    assert_eq!(error.reason(), "catalog");
+    let message = error.to_string();
+    assert!(message.contains(DOC_MEMBERS), "{message}");
+    assert_eq!(
+        std::fs::read_dir(&other)
+            .expect("the other directory is read")
+            .count(),
+        0,
+        "nothing was written into the directory"
+    );
+}
+
+/// A catalog that is not the driver's gives no start position (ADR 0093). The
+/// leader's driver holds a recording of another stream in slot 0 of its catalog.
+/// The member's driver starts the member's recording of the log, recording 0 of its
+/// own catalog. With the leader's catalog in the member's hands, the slot holds a
+/// recording of another session and stream: the hand-over is `RaftError::Catalog`
+/// with `unknown`, on every duty cycle, the election is told nothing and nothing is
+/// counted. With its own driver's catalog the member takes the recording on its next
+/// duty cycle, and tells the election where it begins.
+#[test]
+fn a_catalog_slot_that_holds_another_recording_gives_no_start() {
+    let mut pair = pair("another-catalog");
+    let leader_log_dir = pair._dir.0.join("log-0");
+    let mut stranger = Cavalry::connect_to(&pair.leader_driver_dir).expect("the stranger");
+    let _other = stranger
+        .add_exclusive_publication("cavalry:ipc", 7)
+        .expect("a publication of another stream");
+    let other = stranger
+        .start_recording("cavalry:ipc", 7)
+        .expect("its recording");
+    assert_eq!(other.recording_id(), 0);
+
+    pair.member.io.join_log().expect("subscribed and armed");
+    let log = pair
+        .leader
+        .io
+        .add_log(0, 0)
+        .expect("the driver takes the commands")
+        .expect("the log has its recording");
+    pair.member.io.catalog = CatalogReader::open(&leader_log_dir).expect("the catalog opens");
+    let error = wait_for("the hand-over is refused", || {
+        pair.member.io.observe_log().err()
+    });
+    assert!(
+        matches!(
+            error,
+            RaftError::Catalog(CatalogError::Unknown { recording_id: 0 })
+        ),
+        "{error}"
+    );
+    assert_eq!(error.reason(), "catalog");
+    for _ in 0..3 {
+        assert!(matches!(
+            pair.member.io.observe_log(),
+            Err(RaftError::Catalog(CatalogError::Unknown {
+                recording_id: 0
+            }))
+        ));
+    }
+    assert!(pair.member.io.held.is_none());
+    assert_eq!(
+        pair.member.io.log_image(log.session_id).expect("read"),
+        None
+    );
+    assert_eq!(pair.member.io.append_position(), 0);
+
+    pair.member.io.catalog = CatalogReader::open(&pair.member_log_dir).expect("the catalog opens");
+    let start = pair.observe("the recording's start is told", |io| {
+        io.log_image(log.session_id).expect("the image is read")
+    });
+    assert_eq!(start, 0);
+    assert_eq!(pair.member.log_recording_id(), Some(0));
+}
