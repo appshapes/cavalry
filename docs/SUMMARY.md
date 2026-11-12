@@ -147,3 +147,4 @@ under `docs/` is listed here; `just lint-docs` fails on one that is not.
 - [0096. Answer a member for a term the leader's record holds, and drop from a member's record the terms its leader's lacks](decisions/0096-answer-a-member-for-a-term-the-leaders-record-holds-and-drop-the-terms-its-leaders-lacks.md)
 - [0102. Publish who a member follows, and why its last election began, as two gauges on both paths](decisions/0102-publish-who-a-member-follows-and-why-its-last-election-began-as-two-gauges-on-both-paths.md)
 - [0103. List the recordings of a member's log in its driver directory, for a service to read in order](decisions/0103-list-the-recordings-of-a-members-log-in-its-driver-directory-for-a-service-to-read-in-order.md)
+- [0104. Have the consensus module elect its leader, and take the appointed leader out](decisions/0104-have-the-consensus-module-elect-its-leader-and-take-the-appointed-leader-out.md)
