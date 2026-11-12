@@ -16,7 +16,8 @@ use crate::pretouch;
 use super::BroadcastError;
 use super::cells::{self, Received, ReceiverState, TrailerCells};
 use super::layout::{self, FILE_NAME, HEADER_LENGTH, HeaderFields, Positions, TRAILER_LENGTH};
-use crate::ring::{Words, now_nanos};
+use crate::clock::epoch_time;
+use crate::ring::Words;
 use crate::sync::AtomicU64;
 
 /// The writable mapping of the driver, or the read-only mapping of a client or
@@ -135,7 +136,7 @@ impl BroadcastBuffer {
     /// [`layout::MAX_CAPACITY`], or the error is [`BroadcastError::Capacity`]; a file
     /// already at that path is [`BroadcastError::Io`].
     pub fn create(dir: &Path, capacity: u32) -> Result<Self, BroadcastError> {
-        let fields = HeaderFields::new(capacity, i64::from(std::process::id()), now_nanos())?;
+        let fields = HeaderFields::new(capacity, i64::from(std::process::id()), epoch_time())?;
         let file = OpenOptions::new()
             .read(true)
             .write(true)

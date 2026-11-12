@@ -149,3 +149,4 @@ under `docs/` is listed here; `just lint-docs` fails on one that is not.
 - [0098. Let a recording connect a cavalry:udp publication whose channel names ssc](decisions/0098-let-a-recording-connect-a-cavalry-udp-publication-whose-channel-names-ssc.md)
 - [0110. Let a person's session re-record a bench baseline, after telling the person](decisions/0110-let-a-persons-session-re-record-a-bench-baseline-after-telling-the-person.md)
 - [0096. Answer a member for a term the leader's record holds, and drop from a member's record the terms its leader's lacks](decisions/0096-answer-a-member-for-a-term-the-leaders-record-holds-and-drop-the-terms-its-leaders-lacks.md)
+- [0109. Measure every interval on a nano clock, and keep the epoch clock for what another process reads](decisions/0109-measure-every-interval-on-a-nano-clock-and-keep-the-epoch-clock-for-what-another-process-reads.md)
