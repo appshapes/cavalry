@@ -89,12 +89,13 @@ fn place(io: &Stub, call: Call) -> usize {
 
 /// The whole of a catch-up. The member subscribes on its catch-up endpoint, then
 /// asks from its append position, counted. The image joins there. It reports with
-/// the catch-up flag and its leader's term, and adds the live log at once, being
-/// within the live-add window of the leader's position. The replay brings it to 160,
-/// past where the live image joined, 128. The leader says stop: the catch-up
-/// subscription goes. It is then on the live log, at or past the commit position it
-/// was told, and goes through follower log init, already subscribed, to follower
-/// ready, where its report without the flag closes its election.
+/// its leader's term, and adds the live log at once, being within the live-add window
+/// of the leader's position. The replay brings it to 160, past where the live image
+/// joined, 128: from there its report carries the catch-up flag. The leader says
+/// stop: the catch-up subscription goes. It is then on the live log, at or past the
+/// commit position it was told, and goes through follower log init, already
+/// subscribed, to follower ready, where its report without the flag closes its
+/// election.
 #[test]
 fn a_member_behind_its_leaders_log_catches_up_and_joins() {
     let mut io = Stub::new();
@@ -110,7 +111,7 @@ fn a_member_behind_its_leaders_log_catches_up_and_joins() {
     assert_eq!(member.election_state(), ElectionState::FollowerCatchup);
     work(&mut member, &mut io, ms + 2);
     assert_eq!(io.last_append, Some((2, 1, 64)));
-    assert_eq!(io.last_append_flags, APPEND_POSITION_FLAG_CATCHUP);
+    assert_eq!(io.last_append_flags, 0, "not on the live log yet");
     assert_eq!(io.count(|call| *call == Call::JoinLog), 1, "the live add");
 
     // The replay brings the log to 160; the live image joined at 128.
@@ -206,10 +207,72 @@ fn an_image_that_joins_elsewhere_or_never_fails_the_election() {
     assert_eq!(member.counts().elections_failed, 1);
 }
 
+/// A member's report carries the catch-up flag only once it is on the live log: its
+/// live image has joined and its append position has reached where it joined. The
+/// flag tells the leader that it may stop its replay. A member told to stop sooner
+/// would hold the log to its append position and from the live image's join
+/// position, and nothing between: here the leader has appended to 192 and synced to
+/// 160, its replay reads no further than 160, and the member at 160 reports without
+/// the flag until the replay has brought it to 192. The report that first carries
+/// the flag is sent in the cycle the member is first on the live log, whatever the
+/// interval.
+#[test]
+fn a_report_carries_the_catch_up_flag_only_once_the_member_is_on_the_live_log() {
+    let mut io = Stub::new();
+    let (mut member, ms) = catching_up(&mut io, 160, 64);
+
+    // No live image yet: no flag, at 64 and at 160.
+    work(&mut member, &mut io, ms);
+    assert_eq!(io.last_append, Some((2, 1, 64)));
+    assert_eq!(io.last_append_flags, 0);
+    io.append_position = 160;
+    work(&mut member, &mut io, ms + 1);
+    assert_eq!(io.last_append, Some((2, 1, 160)));
+    assert_eq!(io.last_append_flags, 0);
+
+    // The live image joined at 192, past its append position: still no flag, and a
+    // stop catch-up is not the answer to anything it sent.
+    io.image = Some(192);
+    work(&mut member, &mut io, ms + 2);
+    assert_eq!(io.last_append_flags, 0);
+    read(&mut member, &mut io, ms + 3, &stop_catchup(1, 0));
+    assert_eq!(io.count(|call| *call == Call::RemoveCatchup), 0);
+
+    // The replay brings it to 192: the flag, in that cycle.
+    io.clear();
+    io.append_position = 192;
+    work(&mut member, &mut io, ms + 4);
+    assert_eq!(io.last_append, Some((2, 1, 192)));
+    assert_eq!(io.last_append_flags, APPEND_POSITION_FLAG_CATCHUP);
+    assert_eq!(member.election_state(), ElectionState::FollowerCatchup);
+
+    // A member already at the join position when the image comes reports at once
+    // with the flag, though its position has not moved and no interval has passed.
+    let mut io = Stub::new();
+    let (mut member, ms) = catching_up(&mut io, 160, 64);
+    io.append_position = 160;
+    work(&mut member, &mut io, ms);
+    assert_eq!(io.last_append_flags, 0);
+    io.clear();
+    io.image = Some(160);
+    work(&mut member, &mut io, ms + 1);
+    assert_eq!(
+        io.count(|call| matches!(
+            call,
+            Call::Send {
+                to: 2,
+                template: Template::AppendPosition
+            }
+        )),
+        1
+    );
+    assert_eq!(io.last_append_flags, APPEND_POSITION_FLAG_CATCHUP);
+}
+
 /// What holds a member in the catch-up after it has the leader's log: a stop
-/// catch-up that is not for its term or not for it; the live image not yet there; an
-/// append position below where the live image joined; an append position below the
-/// commit position it was told.
+/// catch-up read before it has reported with the flag, one that is not for its term
+/// or not for it; the live image not yet there; an append position below where the
+/// live image joined; an append position below the commit position it was told.
 #[test]
 fn a_member_leaves_the_catch_up_only_stopped_on_the_live_log_and_committed() {
     let mut io = Stub::new();
@@ -217,13 +280,19 @@ fn a_member_leaves_the_catch_up_only_stopped_on_the_live_log_and_committed() {
     io.append_position = 160;
     work(&mut member, &mut io, ms);
 
-    // Not for its term, and not for it.
-    read(&mut member, &mut io, ms + 1, &stop_catchup(0, 0));
-    read(&mut member, &mut io, ms + 1, &stop_catchup(1, 1));
+    // For its term and for it, before it has reported with the flag: the answer to
+    // an earlier catch-up, which it does not take.
+    read(&mut member, &mut io, ms + 1, &stop_catchup(1, 0));
     assert_eq!(io.count(|call| *call == Call::RemoveCatchup), 0);
     io.image = Some(128);
     work(&mut member, &mut io, ms + 2);
+    assert_eq!(io.last_append_flags, APPEND_POSITION_FLAG_CATCHUP);
     assert_eq!(member.election_state(), ElectionState::FollowerCatchup);
+
+    // Not for its term, and not for it.
+    read(&mut member, &mut io, ms + 2, &stop_catchup(0, 0));
+    read(&mut member, &mut io, ms + 2, &stop_catchup(1, 1));
+    assert_eq!(io.count(|call| *call == Call::RemoveCatchup), 0);
 
     // Stopped, with no live image yet.
     io.image = None;

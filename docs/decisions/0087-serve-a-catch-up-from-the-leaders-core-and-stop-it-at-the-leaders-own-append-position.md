@@ -75,10 +75,13 @@ review noted it.
 with the catch-up flag and for the leader's term, an append position at or past the
 leader's own, the leader asks the replay it runs to that member to stop, once, and
 sends stop catch-up. Both sides of the comparison are then positions that
-recordings have synced. Under a steady load a follower's synced position trails the
-leader's publication by the follower's own sync, and might never be reported at or
-past it; it reaches the leader's synced position whenever the follower syncs as
-fast as the leader does.
+recordings have synced. Once a follower's append position follows its live
+recording, it reaches the leader's synced position whenever the follower syncs as
+fast as the leader does; under a steady load it trails the leader's publication by
+the follower's own sync, and might never be reported at or past that. Before then,
+while the follower's append position comes from the replay alone, this comparison
+can end the catch-up short of where the follower's live log joined, and under load
+it does so often: "Alternatives considered" says when, and what that costs.
 
 **Stop catch-up is sent for every such report.** The member reports with the flag
 until it has read stop catch-up and left the catch-up. A stop catch-up that was
@@ -96,14 +99,47 @@ brings the in-memory one.
 
 ## Alternatives considered
 
-- **End the catch-up at the publication's position, as Aeron does.** Lost, for the
-  reason above, and because it needs an operation of `Io` that reads a position no
-  other rule of the core uses. Its merit is real: a leader whose own sync stalls can
-  end a catch-up before the follower holds the bytes up to where its live image
-  joined, since the replay reads what the recording wrote and not what it synced.
-  That follower's catch-up then stops moving, fails after the leader heartbeat
-  timeout and begins again. The member's half shows whether that happens over
-  drivers.
+- **End the catch-up at the publication's position, as Aeron does.** Lost, on the
+  trade-off below, and because it needs an operation of `Io` that reads a position
+  no other rule of the core uses. Its merit is real, and this decision pays for
+  losing it.
+  - A replay of a live recording reads only up to the recording's synced position,
+    and waits for that position to move (`spec/client-protocol.md`, "Commands",
+    start replay; `spec/cluster.md`, "The service", says the same). So until a
+    follower's append position reaches the start of its live recording, the
+    position its live image joined at, its append position comes from the replay
+    alone, and is never above the leader's synced append position.
+  - The follower's live image joins where the leader's live log is when the
+    follower adds its live subscription (state 13). Under load that is ahead of the
+    leader's synced position: a commit waits for one sync (`crates/cavalry-raft`'s
+    README, "Asks for the sync a commit waits for"), so the leader's publication is
+    ahead of its synced position by what the leader appended since its last sync
+    completed.
+  - So a catch-up stopped at the leader's synced append position ends short of the
+    follower's live join position whenever two things hold: the leader's
+    publication was ahead of its synced position when the follower's live image
+    joined, and the leader has not synced past the join position by the time it
+    reads the follower's report. That is the ordinary state of a leader appending
+    under load, not only of one whose sync stalls. With the evidence's numbers: the
+    leader has synced 160 and its publication is at 192. The follower asks at 160,
+    and the replay reads to 160 and waits. The follower is within the live-add
+    window, adds its live subscription, and its live image joins at 192. It reports
+    160 with the catch-up flag, and the leader, still synced to 160, stops the
+    replay and sends stop catch-up. The bytes from 160 to 192 never arrive.
+  - The follower's append position is the contiguous end of its log, so it skips
+    nothing, and no delivery is at risk. But it stays below the live recording's
+    start: the catch-up makes no progress, fails the election after the leader
+    heartbeat timeout, counted in `cluster.elections_failed`, and the member begins
+    again at init, into the same race. A member that catches up from close behind
+    a leader that keeps appending can fail this way again and again.
+  - The publication's position has no such cost. It is never below the follower's
+    live join position, so a follower can report it only from its live recording,
+    past that join. Its own cost is the one under "Decision": under a steady load
+    the follower's synced append position trails the leader's publication and
+    might never be reported at or past it, so the follower stays in the catch-up,
+    its replay running, until the leader's appends pause for a round trip. This
+    decision takes the earlier end, and the race with it, until the member's half
+    measures both (Revisit, below).
 - **Send stop catch-up once.** Lost. One lost message would leave the member in the
   catch-up until its timer failed its election.
 - **A second table for catch-ups.** Lost. A member is in one of the two, and the
@@ -153,9 +189,21 @@ brings the in-memory one.
   the position (ADR 0085). A member that waits for a catch-up's image reports no
   position, so such a request is in practice dropped by the canvass position the
   member sends when its own wait runs out.
-- Revisit: with the member's half and the tests over drivers, whether a catch-up
-  can end short of the live image's join position; then `Io` gains the
-  publication's position and this decision is superseded.
+- A member that catches up from close behind a leader appending under load can
+  have its catch-up end at the leader's synced append position, short of where its
+  live image joined, and then fail its election and begin again, as "Alternatives
+  considered" says. Nothing is lost or delivered twice; the member is late.
+- Revisit when the member's half lands. Its tests over drivers run a catch-up from
+  within the live-add window while the leader appends. The condition this decision
+  fails on: the leader's publication was ahead of its synced position when the
+  member's live image joined, and the leader has not synced past that join
+  position when it reads the member's report at its synced position. A test that
+  meets the condition shows it as the member's append position stopped below its
+  live recording's start after stop catch-up, then `cluster.elections_failed` on
+  the member and `cluster.catchups` on the leader rising again for it. If that
+  happens, the catch-up's end moves where the condition cannot hold: `Io` gains the
+  publication's position, or the member tells the leader that its append position
+  has passed its live recording's start, and a new ADR supersedes this one.
 
 ## References
 
