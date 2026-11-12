@@ -133,9 +133,15 @@ The daemon: conductor, sender, receiver and idle strategies. Data plane.
   the sender sends no data and moves its position with the recorder's, counting what
   it passed in `sender.bytes_unsent`; a receiver whose first status message names a
   position at most a term behind is joined there, the sender going back to send from
-  it, and one further behind is rejected; and when the recording stops, the conductor
+  it, and one further behind is rejected and counted in the publication's
+  `sender.joins_refused`; and when the recording stops, the conductor
   frees its position counter only after the sender has answered that it reads it no
-  more (ADR 0098). On a control channel, `cavalry:udp?control=<host>:<port>|control-mode=manual`,
+  more (ADR 0098). A publication's log has the term length its channel names with
+  `term-length=<length>`, a power of two from 65536 to 67108864, and the 16 MiB term
+  when it names none: the conductor creates the log, counts the position keys and
+  cleans in that term, the sender and the recorder read it from the log's header, and
+  an `add publication` that would join under another term length is refused (ADR
+  0099). On a control channel, `cavalry:udp?control=<host>:<port>|control-mode=manual`,
   the endpoint's socket is bound to the control address and connected to nothing, and
   the sender sends every datagram to each destination a client added with `add
   destination`, at most 64 per endpoint, each resolved when it is added to an address
