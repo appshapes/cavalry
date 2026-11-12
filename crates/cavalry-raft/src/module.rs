@@ -22,6 +22,7 @@ use cavalry_client::{
     ArmedRecording, Cavalry, ClientError, Counter, Fault, Flags, Offer, Publication, Recording,
     Replay, Subscription,
 };
+use cavalry_log::catalog::{CatalogError, CatalogReader};
 use cavalry_log::terms::{NO_RECORDING, TermsError, TermsFile};
 use cavalry_proto::client_protocol::{ErrorCode, FOLLOW_LENGTH, ReplayStopReason};
 use cavalry_proto::cluster::{
@@ -81,6 +82,12 @@ pub enum RaftError {
     },
     /// The `terms` file could not be read or written.
     Terms(TermsError),
+    /// The driver's catalog could not be read in the member's log directory, at the
+    /// member's start or when a recording of the log was handed over, or its slot for
+    /// that recording is empty or holds a recording of another session or stream,
+    /// which is `unknown`: the member takes where a recording begins from it, and a
+    /// catalog that is not its driver's would give another recording's (ADR 0093).
+    Catalog(CatalogError),
     /// The driver refused a command, or the client is closed.
     Client(ClientError),
     /// A poll of the consensus stream or of the log stopped: an image that failed a
@@ -108,14 +115,15 @@ pub enum RaftError {
 }
 
 impl RaftError {
-    /// The reason's name: `members`, `member`, `restart`, `terms`, `client`, `poll`,
-    /// `unsupported`, `payload-too-long`, `offer` or `stop-timeout`.
+    /// The reason's name: `members`, `member`, `restart`, `terms`, `catalog`, `client`,
+    /// `poll`, `unsupported`, `payload-too-long`, `offer` or `stop-timeout`.
     pub const fn reason(&self) -> &'static str {
         match self {
             RaftError::Members(_) => "members",
             RaftError::Member(_) => "member",
             RaftError::Restart { .. } => "restart",
             RaftError::Terms(_) => "terms",
+            RaftError::Catalog(_) => "catalog",
             RaftError::Client(_) => "client",
             RaftError::Poll(_) => "poll",
             RaftError::Unsupported { .. } => "unsupported",
@@ -147,6 +155,15 @@ impl core::fmt::Display for RaftError {
                  member alone joins nothing; see {DOC}"
             ),
             RaftError::Terms(error) => write!(f, "member stopped ({reason}): {error}"),
+            RaftError::Catalog(error) => write!(
+                f,
+                "member stopped ({reason}): {error}. The member reads where each of its \
+                 recordings of the log begins from the catalog in its log directory, \
+                 which must be its driver's. Start the member with the log directory its \
+                 driver was started with. If that is the directory it has, the catalog \
+                 there could not be read, and the error above names the file and the \
+                 cause; see {DOC_MEMBERS}"
+            ),
             RaftError::Client(error) => write!(f, "member stopped ({reason}): {error}"),
             RaftError::Poll(fault) => write!(f, "member stopped ({reason}): {fault}"),
             RaftError::Unsupported { what } => write!(
@@ -179,6 +196,7 @@ impl std::error::Error for RaftError {
             RaftError::Members(error) => Some(error),
             RaftError::Member(error) => Some(error),
             RaftError::Terms(error) => Some(error),
+            RaftError::Catalog(error) => Some(error),
             RaftError::Client(error) => Some(error),
             RaftError::Poll(fault) => Some(fault),
             RaftError::Offer(error) => Some(error),
@@ -196,6 +214,12 @@ impl From<ClientError> for RaftError {
 impl From<TermsError> for RaftError {
     fn from(error: TermsError) -> Self {
         RaftError::Terms(error)
+    }
+}
+
+impl From<CatalogError> for RaftError {
+    fn from(error: CatalogError) -> Self {
+        RaftError::Catalog(error)
     }
 }
 
@@ -248,10 +272,17 @@ struct Kept {
     stop: i64,
 }
 
-/// A recording of the log this member made, with the position its image joined at.
+/// A recording of the log this member is making, with where it begins.
 struct Held {
     recording: Recording,
+    /// The recording's start position as the catalog holds it: where its first frame
+    /// is. It is the image's join position when the recording was armed before the
+    /// image arrived, and past it when the image came first (ADR 0093).
     start: i64,
+    /// Whether the election has been told this recording's image: [`Io::log_image`]
+    /// has returned its start for the image's session. Only then is the recording
+    /// part of the member's log.
+    checked: bool,
 }
 
 /// The image of the log on a follower's subscription, as the module noted it.
@@ -260,13 +291,13 @@ enum LogImage {
     /// No image has joined the subscription yet.
     Awaited,
     /// The first image that joined the subscription, noted after the poll that applied
-    /// it and before a frame of it was read.
+    /// it. Where this member's recording of it begins is the catalog's to say, not the
+    /// image's (ADR 0093).
     Joined {
         /// The id the driver gave the image, which tells it from a later image of the
         /// same session.
         correlation_id: i64,
         session_id: i32,
-        join_position: i64,
     },
     /// The image noted is no longer available. No other image of the subscription is
     /// noted or read until the member leaves the log, so that the core sees the loss.
@@ -300,9 +331,15 @@ struct ClientIo {
     // A follower's log.
     log_subscription: Option<Subscription>,
     armed: Option<ArmedRecording>,
+    /// A recording the driver has started and handed over whose start position has
+    /// not yet been read from the catalog.
+    starting: Option<Recording>,
     /// The image on the log subscription and where it joined.
     image: LogImage,
     held: Option<Held>,
+    /// The driver's catalog, in the member's log directory: where a recording of the
+    /// log begins is read from it, once for each recording handed over (ADR 0093).
+    catalog: CatalogReader,
     /// The end of the contiguous span the recordings this member has stopped hold.
     stopped_at: i64,
     /// The position its recording of the log had written when this member last asked
@@ -354,6 +391,15 @@ fn stop_recording(client: &mut Cavalry, recording: &Recording) -> Result<i64, Ra
 }
 
 impl ClientIo {
+    /// The recording of the leader's image that is part of this member's log: the one
+    /// held, once the election has been told its image and when it begins where the
+    /// log ended before it (ADR 0093).
+    fn counted(&self) -> Option<&Held> {
+        self.held
+            .as_ref()
+            .filter(|held| held.checked && held.start == self.stopped_at)
+    }
+
     /// Keeps a recording this member stopped, for the replays a leader serves. A full
     /// table forgets its oldest: that recording stays in the driver's catalog, and
     /// this member no longer replays it (ADR 0091).
@@ -414,7 +460,6 @@ impl ClientIo {
                 .map_or(LogImage::Awaited, |image| LogImage::Joined {
                     correlation_id: image.correlation_id(),
                     session_id: image.session_id(),
-                    join_position: image.position(),
                 }),
             LogImage::Joined { correlation_id, .. }
                 if subscription
@@ -426,12 +471,7 @@ impl ClientIo {
             }
             LogImage::Joined { .. } | LogImage::Gone => LogImage::Gone,
         };
-        let LogImage::Joined {
-            session_id,
-            join_position,
-            ..
-        } = self.image
-        else {
+        let LogImage::Joined { session_id, .. } = self.image else {
             return Ok(());
         };
         subscription
@@ -440,11 +480,42 @@ impl ClientIo {
         if let Some(armed) = self.armed.as_mut()
             && let Some(recording) = armed.poll()?
         {
-            self.held = Some(Held {
-                recording,
-                start: join_position,
-            });
+            self.starting = Some(recording);
             self.armed = None;
+        }
+        // Where the recording begins is the catalog's word, never the image's: an
+        // image that arrived between this member's `add subscription` and its `start
+        // recording` is recorded from what it had received by then, past its join
+        // position (ADR 0093). The driver writes the descriptor before it says the
+        // recording started, so its slot in the driver's catalog holds this recording
+        // by now. A slot that is empty, or that holds a recording of another session
+        // or stream, is in a catalog that is not the driver's, and its start position
+        // would be another recording's: it is `unknown`, as a slot the catalog does
+        // not have is. A read that fails leaves the recording waiting, and the next
+        // cycle reads again.
+        if let Some(recording) = self.starting.take() {
+            let recording_id = recording.recording_id();
+            let found = self.catalog.get(recording_id).and_then(|descriptor| {
+                descriptor
+                    .filter(|descriptor| {
+                        descriptor.session_id() == recording.session_id()
+                            && descriptor.stream_id() == recording.stream_id()
+                    })
+                    .ok_or(CatalogError::Unknown { recording_id })
+            });
+            match found {
+                Ok(descriptor) => {
+                    self.held = Some(Held {
+                        recording,
+                        start: descriptor.start_position(),
+                        checked: false,
+                    });
+                }
+                Err(error) => {
+                    self.starting = Some(recording);
+                    return Err(error.into());
+                }
+            }
         }
         Ok(())
     }
@@ -541,7 +612,7 @@ impl Io for ClientIo {
                     .add_subscription(&self.log_endpoint_channel, LOG_STREAM_ID)?,
             );
         }
-        if self.armed.is_none() && self.held.is_none() {
+        if self.armed.is_none() && self.starting.is_none() && self.held.is_none() {
             self.armed = Some(
                 self.client
                     .arm_recording(&self.log_endpoint_channel, LOG_STREAM_ID)?,
@@ -550,15 +621,33 @@ impl Io for ClientIo {
         Ok(())
     }
 
+    /// Where this member's recording of the image with `session_id` begins, which is
+    /// the image's join position as the election is to check it (ADR 0093): `None`
+    /// until that image is on the subscription and the driver has started this
+    /// member's recording of it, and again once the image is no longer available. A
+    /// recording that began past the image's join, the image having arrived before
+    /// the recording was armed, is reported where it begins, so that the election
+    /// finds an image that joined past the member's append position. A recording of
+    /// another session's image is never reported. Reporting a recording is what makes
+    /// it part of the member's log: [`Io::append_position`] counts none before.
     fn log_image(&mut self, session_id: i32) -> Result<Option<i64>, Self::Fault> {
-        Ok(match self.image {
-            LogImage::Joined {
-                session_id: noted,
-                join_position,
-                ..
-            } if noted == session_id => Some(join_position),
-            _ => None,
-        })
+        let LogImage::Joined {
+            session_id: noted, ..
+        } = self.image
+        else {
+            return Ok(None);
+        };
+        if noted != session_id {
+            return Ok(None);
+        }
+        Ok(self
+            .held
+            .as_mut()
+            .filter(|held| held.recording.session_id() == session_id)
+            .map(|held| {
+                held.checked = true;
+                held.start
+            }))
     }
 
     /// Stops the recording held and takes its stop as the log's end, then drops the
@@ -577,14 +666,21 @@ impl Io for ClientIo {
                 start: held.start,
                 stop,
             };
-            // The recording's stop is where this member's log ends when the recording
-            // began where the log ended before it; one that began past it is no part of
-            // the member's contiguous log, and is not kept for a replay.
-            if kept.start == self.stopped_at {
+            // The recording's stop is where this member's log ends when the election
+            // was told its image and it began where the log ended before it. One that
+            // began past that, or whose image the election never asked for, is no part
+            // of the member's contiguous log, and is not kept for a replay.
+            if held.checked && kept.start == self.stopped_at {
                 self.stopped_at = stop;
                 self.keep(kept);
             }
             self.held = None;
+        }
+        // A recording handed over whose start was never read is stopped the same way,
+        // and is no part of the log: the election was never told its image.
+        if let Some(recording) = self.starting.as_ref() {
+            stop_recording(&mut self.client, recording)?;
+            self.starting = None;
         }
         // The driver drops a recording still armed with the stream's last subscription.
         self.armed = None;
@@ -643,13 +739,15 @@ impl Io for ClientIo {
             ask_sync(&mut self.client, recording, &mut self.sync_asked_at);
             return recording.synced_position();
         }
-        match &self.held {
-            Some(held) if held.start == self.stopped_at => {
-                ask_sync(&mut self.client, &held.recording, &mut self.sync_asked_at);
-                held.recording.synced_position()
-            }
-            _ => self.stopped_at,
-        }
+        let Some(held) = self
+            .held
+            .as_ref()
+            .filter(|held| held.checked && held.start == self.stopped_at)
+        else {
+            return self.stopped_at;
+        };
+        ask_sync(&mut self.client, &held.recording, &mut self.sync_asked_at);
+        held.recording.synced_position()
     }
 
     fn terms_after(&mut self, term: i64) -> [Option<(i64, i64)>; 2] {
@@ -1014,9 +1112,12 @@ impl ConsensusModule {
     /// adds a publication to every other member's, and adds its counters; the log comes
     /// with its election.
     ///
-    /// A log directory that holds a term or a vote is [`RaftError::Restart`]: a member
-    /// of this version starts on a new log directory, with every other member of its
-    /// cluster.
+    /// A log directory with no catalog is [`RaftError::Catalog`], and nothing is
+    /// written into it: `log_dir` must be the directory the driver in `dir` was started
+    /// with, whose catalog says where each of the member's recordings of the log
+    /// begins (ADR 0093). A log directory that holds a term or a vote is
+    /// [`RaftError::Restart`]: a member of this version starts on a new log directory,
+    /// with every other member of its cluster.
     pub fn start(
         dir: impl AsRef<Path>,
         log_dir: impl AsRef<Path>,
@@ -1039,6 +1140,11 @@ impl ConsensusModule {
             }));
         };
 
+        // The driver's catalog, which the driver created when it started on this
+        // directory: a directory without one is not the driver's. It is opened before
+        // the `terms` file, which is created when it is not there, so that a
+        // directory the module refuses is left as it was.
+        let catalog = CatalogReader::open(log_dir.as_ref())?;
         let terms = TermsFile::open(log_dir.as_ref())?;
         if terms.log_leadership_term_id() != -1 || terms.candidate_term() != -1 {
             return Err(RaftError::Restart {
@@ -1089,8 +1195,10 @@ impl ConsensusModule {
                 replays,
                 log_subscription: None,
                 armed: None,
+                starting: None,
                 image: LogImage::Awaited,
                 held: None,
+                catalog,
                 stopped_at: 0,
                 sync_asked_at: NO_SYNC_ASKED,
             },
@@ -1207,7 +1315,9 @@ impl ConsensusModule {
     }
 
     /// The id of this member's recording of the log, once it has one: the leader's of
-    /// its publication, a follower's of the leader's image; `None` before the first and
+    /// its publication, a follower's of the leader's image once its election has been
+    /// told where that recording begins and it begins where the member's log ended
+    /// (ADR 0093); `None` before the first and
     /// from when the member has left the log, its recording's stop read, until it has
     /// joined it again. A leave that failed holds the recording, named, while the next
     /// cycle tries it again. Each duty
@@ -1217,7 +1327,7 @@ impl ConsensusModule {
         self.io
             .log_recording
             .as_ref()
-            .or(self.io.held.as_ref().map(|held| &held.recording))
+            .or(self.io.counted().map(|held| &held.recording))
             .map(Recording::recording_id)
     }
 

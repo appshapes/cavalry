@@ -86,7 +86,16 @@ commit path runs per message.
   member as a destination and records it, the publication created at the term's base log
   position so that the recording begins there and every frame of the term lies at its
   position in the cluster's log (ADR 0059), or subscribes to the leader's log and arms
-  the recording that holds it from its first frame, keeps the record of terms in the
+  the recording that holds it from its first frame. Where that recording begins it
+  reads from the driver's catalog in `log_dir`, which must be the driver's log
+  directory: a directory with no catalog is refused at the member's start with
+  `RaftError::Catalog`, before anything is written there, and a catalog whose slot
+  does not hold the recording the driver started gives no start. It does not read
+  it from the image: an image that arrived between its two commands
+  is recorded from what it had received by then, so the module tells its election
+  where the recording begins, and counts a recording as the member's log only once
+  the election has been told its image and when it begins where the log ended (ADR
+  0093). It keeps the record of terms in the
   `terms` file of `log_dir`, and stores what it counts in the driver's counters file:
   `cluster.role`, `cluster.election_state`, `cluster.leadership_term_id`,
   `cluster.append_position`, `cluster.commit_position`, `cluster.messages_rejected`,
