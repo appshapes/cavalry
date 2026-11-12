@@ -122,7 +122,10 @@ The daemon: conductor, sender, receiver and idle strategies. Data plane.
   and with EOS once the publication is closed, and the frames a NAK names from the
   log's own term; the conductor keeps the publisher's limit at the sender position plus
   the publication window while a status message arrived within the connection timeout,
-  cleans the log a term behind the sender position so that the resend window stays, and
+  cleans the log a term behind the sender position so that the resend window stays,
+  counts a recording of the publication as one more reader, so that the limit is the
+  window past the lesser of the sender position and the recorder's and nothing is
+  cleaned that the recorder has not written (ADR 0097), and
   lingers a closed publication until the receiver acknowledges the end of stream or the
   linger passes. On a control channel, `cavalry:udp?control=<host>:<port>|control-mode=manual`,
   the endpoint's socket is bound to the control address and connected to nothing, and

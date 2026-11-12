@@ -305,8 +305,9 @@ struct Publication {
 
 /// A `cavalry:udp` publication as the conductor sees it: the sender puts its log on the
 /// wire, and the conductor keeps its limit from the sender position, the consumer
-/// position over UDP, and its connected flag from the sender's replies
-/// (`spec/udp.md`, "The sender"; ADR 0041).
+/// position over UDP, or from the recorder's position when the publication is recorded
+/// and the recorder is behind the sender, and its connected flag from the sender's
+/// replies (`spec/udp.md`, "The sender"; ADR 0041, ADR 0097).
 struct UdpPublication {
     /// The send endpoint's registration id.
     endpoint_id: i64,
@@ -319,7 +320,8 @@ struct UdpPublication {
     /// The id of the sender's `sender.limit` counter, which the sender alone reads and
     /// moves; kept so that the conductor frees its record with the others.
     sender_limit_id: u32,
-    /// The log's term length: the log is cleaned a term behind the sender position.
+    /// The log's term length: the log is cleaned a term behind the sender position,
+    /// and no further than the recorder of a recorded publication.
     term_length: i64,
     /// A status message arrived within the connection timeout, as the sender last said.
     connected: bool,
@@ -4122,34 +4124,47 @@ impl Conductor {
             publication.consumer_position = max;
             moved = true;
         }
-        // The consumer position bounds everything below: the slowest subscriber, or the
-        // recorder when it is slower (`spec/log-buffer.md`, "The driver"); with neither,
-        // the largest position any subscriber reached, so that the publisher is told not
-        // connected.
-        let (connected, consumer, clean_to) = match &publication.udp {
-            // Over UDP the sender position is the consumer position: the limit runs a
-            // window ahead of it while a receiver answers, and the log is cleaned a term
-            // behind it, Aeron's rule, so that the resend window stays (`spec/udp.md`,
-            // "The sender"; ADR 0041).
+        // The consumer position bounds the limit and the cleaning below: the slowest
+        // subscriber, or the recorder when it is slower (`spec/log-buffer.md`, "The
+        // driver"); with neither, the largest position any subscriber reached, so that
+        // the publisher is told not connected. `rest` is where the limit rests while
+        // the publication is not connected, and where unblocking looks.
+        let lesser = |reader: Option<i64>, recorder: Option<i64>| match (reader, recorder) {
+            (Some(reader), Some(recorder)) => Some(reader.min(recorder)),
+            (reader, recorder) => reader.or(recorder),
+        };
+        let (connected, consumer, clean_to, rest) = match &publication.udp {
+            // Over UDP the sender position stands where the subscribers' positions stand
+            // over `cavalry:ipc`: the limit runs a window ahead of it while a receiver
+            // answers, rests at it otherwise, the log is unblocked at it and cleaned a
+            // term behind it, Aeron's rule, so that the resend window stays
+            // (`spec/udp.md`, "The sender"; ADR 0041). A recording of the publication is
+            // one more reader here as it is there: the consumer position is the lesser
+            // of the sender position and the recorder's, and the cleaning goes no
+            // further than the recorder's, so that a recorder that fell behind
+            // back-pressures the publisher and no recorded byte is cleaned before it is
+            // written (ADR 0025, ADR 0097).
             Some(udp) => {
                 let sender_position = udp.sender_position.load_acquire();
                 if sender_position > publication.consumer_position {
                     publication.consumer_position = sender_position;
                     moved = true;
                 }
+                let consumer =
+                    lesser(Some(sender_position), recording_floor).unwrap_or(sender_position);
                 (
                     udp.connected,
+                    consumer,
+                    sender_position
+                        .saturating_sub(udp.term_length)
+                        .min(consumer),
                     sender_position,
-                    sender_position.saturating_sub(udp.term_length),
                 )
             }
             None => {
-                let floor = match (min_subscriber, recording_floor) {
-                    (Some(subscriber), Some(recorder)) => Some(subscriber.min(recorder)),
-                    (subscriber, recorder) => subscriber.or(recorder),
-                };
+                let floor = lesser(min_subscriber, recording_floor);
                 let consumer = floor.unwrap_or(publication.consumer_position);
-                (floor.is_some(), consumer, consumer)
+                (floor.is_some(), consumer, consumer, consumer)
             }
         };
         // Cleaning behind the slowest subscriber, one term at a time; a clean that does
@@ -4162,8 +4177,9 @@ impl Conductor {
             moved = true;
         }
         // The limit: consumer + window once cleaned, raised in steps of window ÷ 8; the
-        // consumer position alone with neither a subscriber nor a recording, so the
-        // publisher is told not connected. The window is the log's own, from its header:
+        // resting position alone with neither a subscriber nor a recording, or over UDP
+        // with no receiver, so the publisher is told not connected. The window is the
+        // log's own, from its header:
         // half this conductor's term for a publication's log, and half the recording's
         // term for a replay's, which is the same number in this version and the right
         // one if the two ever differ, since rotation into a partition a subscriber still
@@ -4172,7 +4188,7 @@ impl Conductor {
         let candidate = if connected {
             consumer.saturating_add(window)
         } else {
-            consumer
+            rest
         };
         let step = window / 8;
         let raise = candidate > publication.last_limit
@@ -4207,22 +4223,24 @@ impl Conductor {
             publication.connected_flag = true;
             moved = true;
         }
-        // Unblocking: a consumer position stalled for the timeout with the producer beyond it.
-        if producer > consumer {
+        // Unblocking: a reader's position stalled for the timeout with the producer
+        // beyond it: the consumer position, or over UDP the sender position, whose
+        // sender a blocked claim stops wherever a recorder stands.
+        if producer > rest {
             match publication.stalled {
-                Some((stalled_at, since)) if stalled_at == consumer => {
+                Some((stalled_at, since)) if stalled_at == rest => {
                     if now.saturating_sub(since) >= spec::nanos(spec::PUBLICATION_UNBLOCK_TIMEOUT) {
-                        match publication.log.unblock(consumer) {
+                        match publication.log.unblock(rest) {
                             Ok(LogUnblock::Unblocked | LogUnblock::UnblockedToEnd) => {
                                 self.statics.publication_unblocked.increment();
                             }
                             Ok(LogUnblock::Rotated | LogUnblock::NoAction) | Err(_) => {}
                         }
-                        publication.stalled = Some((consumer, now));
+                        publication.stalled = Some((rest, now));
                         moved = true;
                     }
                 }
-                _ => publication.stalled = Some((consumer, now)),
+                _ => publication.stalled = Some((rest, now)),
             }
         } else {
             publication.stalled = None;
@@ -9135,6 +9153,180 @@ mod recording {
         assert_eq!(
             reused, held,
             "the freed records are the ones allocated again"
+        );
+    }
+
+    /// A recorded `cavalry:udp` publication waits for its recorder, as a recorded
+    /// `cavalry:ipc` publication does: the recorder is one more reader beside the sender
+    /// (`spec/udp.md`, "The sender"; ADR 0097). With the recorder stalled and a receiver
+    /// taking everything the sender sends, the publisher is back pressured one window
+    /// past the recorder's position and nothing is cleaned; once the recorder writes
+    /// again the stream goes on past a term and a half, cleaned a term behind the
+    /// sender position and never past the recorder's; and the recording, stopped, holds
+    /// every message that was offered, in order.
+    #[test]
+    fn a_recorded_udp_publication_waits_for_its_recorder() {
+        let mut h = Harness::new("udp-recorded-waits");
+        let mut receiver = TestReceiver::bind();
+        let setup = connect_udp(&mut h, &mut receiver, 2, 7, 131072);
+        let now = h.now;
+        h.conductor.start_recording(3, 7, &receiver.channel(), now);
+        assert_eq!(h.last_error(3), None);
+        // The recorder takes the start and attaches its counter, and then stalls: the
+        // test runs it no more, as a disk that stopped taking writes would hold it.
+        let deadline = Instant::now() + Duration::from_secs(30);
+        while h.conductor.recordings[0].position.is_none() {
+            let now = now_nanos();
+            h.conductor.duty_cycle(now);
+            h.recorder.duty_cycle(now);
+            assert!(Instant::now() < deadline, "the recorder's counter");
+        }
+        h.conductor.duty_cycle(now_nanos());
+        let recorded = |h: &Harness| {
+            h.conductor.recordings[0]
+                .position
+                .as_ref()
+                .expect("the recorder attached its counter")
+                .get()
+        };
+        let stalled_at = recorded(&h);
+        receiver
+            .socket
+            .set_nonblocking(true)
+            .expect("a socket that does not wait");
+        let positions =
+            cavalry_shm::log::Positions::new(setup.initial_term_id, spec::UDP_TERM_LENGTH);
+        let term = i64::from(spec::UDP_TERM_LENGTH);
+        let window = i64::from(
+            h.conductor.publications[0]
+                .log
+                .header()
+                .publication_window_length(),
+        );
+        let mut appender = h.conductor.publications[0]
+            .log
+            .appender()
+            .expect("an appender");
+        let mut offered = 0i64;
+        let mut scratch = [0u8; 2048];
+        // One round: the publisher appends up to its limit, the sender sends a burst,
+        // and the receiver says it has everything the sender sent, with room for more.
+        let mut round = |h: &mut Harness, offered: &mut i64, run_recorder: bool, offer: bool| {
+            let now = now_nanos();
+            let limit = h.conductor.publications[0].limit.get();
+            if offer {
+                offer_to(&mut appender, limit, offered);
+            }
+            h.sender.duty_cycle(now);
+            while receiver.socket.recv_from(&mut scratch).is_ok() {}
+            let (position, _) = h.sender.positions_of(2).expect("the sender holds it");
+            receiver.send_status_message(&StatusMessage {
+                flags: 0,
+                session_id: setup.session_id,
+                stream_id: 7,
+                consumption_term_id: positions.term_id_of(position),
+                consumption_term_offset: positions.term_offset_of(position) as i32,
+                receiver_window_length: 4 * 1024 * 1024,
+                receiver_id: 9,
+                group_tag: None,
+            });
+            if run_recorder {
+                h.recorder.duty_cycle(now);
+            }
+            h.conductor.duty_cycle(now);
+            position
+        };
+
+        // The recorder stalled: the sender reaches the publisher's limit, one window
+        // past the recorder, and stays there; nothing behind the recorder is cleaned.
+        let deadline = Instant::now() + Duration::from_secs(30);
+        loop {
+            let position = round(&mut h, &mut offered, false, true);
+            let publication = &h.conductor.publications[0];
+            assert!(
+                publication.clean_position <= stalled_at,
+                "cleaned to {} past a recorder at {stalled_at}, with the sender at {position}",
+                publication.clean_position
+            );
+            assert!(
+                publication.limit.get() <= stalled_at + window,
+                "the limit is {} with the recorder at {stalled_at}",
+                publication.limit.get()
+            );
+            if position == stalled_at + window {
+                break;
+            }
+            assert!(Instant::now() < deadline, "the sender reached {position}");
+        }
+        for _ in 0..50 {
+            let position = round(&mut h, &mut offered, false, true);
+            assert_eq!(position, stalled_at + window, "the sender has nothing more");
+        }
+        assert_eq!(
+            h.conductor.publications[0].limit.get(),
+            stalled_at + window,
+            "back pressured a window past the recorder"
+        );
+        assert_eq!(recorded(&h), stalled_at, "the recorder wrote nothing");
+        assert!(
+            h.conductor.publications[0].log.is_connected(),
+            "back pressured, not disconnected: a receiver answers"
+        );
+
+        // The recorder writes again: the limit follows it, the stream passes a term
+        // and a half, and the cleaning stays behind both the recorder and the resend
+        // window.
+        let deadline = Instant::now() + Duration::from_secs(60);
+        loop {
+            let position = round(&mut h, &mut offered, true, true);
+            let publication = &h.conductor.publications[0];
+            let recorder = recorded(&h);
+            assert!(
+                publication.clean_position <= recorder
+                    && publication.clean_position <= (position - term).max(0),
+                "cleaned to {} with the recorder at {recorder} and the sender at {position}",
+                publication.clean_position
+            );
+            assert!(publication.limit.get() <= recorder.min(position) + window);
+            if position >= term + term / 2 {
+                break;
+            }
+            assert!(Instant::now() < deadline, "the sender reached {position}");
+        }
+        assert!(
+            h.conductor.publications[0].clean_position > stalled_at,
+            "the log is cleaned again once the recorder has written it"
+        );
+
+        // The publisher stops and the recorder writes what is left. Each message is a
+        // 64-byte frame and a term holds a whole number of them, so no padding frame
+        // stands between the count offered and the position. Stopped, the recording
+        // holds every message, in order, the ones the stall held back among them.
+        let end = stalled_at + offered * 64;
+        let deadline = Instant::now() + Duration::from_secs(30);
+        while recorded(&h) < end {
+            round(&mut h, &mut offered, true, false);
+            assert!(
+                Instant::now() < deadline,
+                "the recorder reached {}",
+                recorded(&h)
+            );
+        }
+        h.conductor.stop_recording(50, 0);
+        while !h.conductor.recordings.is_empty() {
+            let now = now_nanos();
+            h.conductor.duty_cycle(now);
+            h.recorder.duty_cycle(now);
+            assert!(Instant::now() < deadline, "the recording did not stop");
+        }
+        assert_eq!(h.counter(RECORDING_WRITE_FAILED), 0);
+        assert_eq!(h.counter(LOG_BUFFER_REJECTED_FRAME), 0);
+        let (stop, fold) = fold_recording(&h.log_dir, 0);
+        assert_eq!(stop, end, "the recording stopped at everything published");
+        assert_eq!(
+            fold,
+            fold_offered(offered),
+            "and holds it as it was offered"
         );
     }
 
