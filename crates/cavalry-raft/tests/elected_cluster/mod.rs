@@ -15,7 +15,7 @@ use cavalry_raft::{ElectionState, Role};
 /// below the append positions of a quorum, no member's commit position falls, and no
 /// two members lead one term, running or stopped.
 pub struct Safety {
-    pub ids: Vec<i32>,
+    ids: Vec<i32>,
     committed: Vec<u8>,
     last_commit: Vec<i64>,
 }

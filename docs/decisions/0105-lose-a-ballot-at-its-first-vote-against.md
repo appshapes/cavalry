@@ -41,9 +41,9 @@ branch, three drivers on the loopback:
   the leader heartbeat timeout. The 30 of the last batch that were not closed in
   142 ms at the least, 327 ms at the median and 548 ms at the most.
 
-ADR 0077's Revisit reads: when an election takes more than the election timeout
-in more than one run in a hundred. It has fired, before any cluster elects on
-`master`.
+ADR 0077's Revisit has this case: "when the loopback tests' reported election times
+are above a second in more than one run in a hundred, for the split vote". It has
+fired, before any cluster elects on `master`.
 
 ## Decision
 
@@ -52,7 +52,10 @@ cycle.** That is a candidate that has recorded a vote against its current
 candidate term, and a candidate that holds no vote of its own for its candidate
 term. It counts the ballot in `cluster.ballots_lost` and canvasses as a follower,
 with the reports and the members heard that it has, as it did at the election
-timeout. `cavalry_proto::cluster::ballot` says so in a third answer, `lost`.
+timeout. `cavalry_proto::cluster::ballot` says the first of the two in a third
+answer, `lost`: it is given the votes and not which member is the candidate, so the
+core checks the candidate's own vote itself, and the `ballot` vectors hold no such
+case.
 
 **The election timeout stays for what it still decides.** A candidate with a
 quorum and no vote against waits it for a member it has heard that has not voted.
@@ -109,8 +112,8 @@ there, as it did.
   ballot lost each and the third member none; no member records term 0, and all
   three follow term 1. The check that no committed entry is lost runs after every
   step.
-- `cargo test -p cavalry-raft`: 193 passed, the tests of every other seed and
-  path unchanged.
+- `cargo test -p cavalry-raft` at the commit that made the change: 193 passed, the
+  tests of every other seed and path unchanged.
 - Not shown here: the rate over drivers after this change. No cluster elects over
   drivers on `master` until the consensus module moves (ADR 0100); the test that
   stops a leader comes with that change and prints each election's time.

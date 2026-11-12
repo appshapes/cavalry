@@ -2,18 +2,22 @@
 
 - **Status:** Accepted
 - **Date:** 2026-11-12
-- **Invariants affected:** 1, 3, 5, 6
+- **Invariants affected:** 1, 3, 4, 5, 6
 - **Supersedes:** none. Decides what ADR 0066 left to this card under "To maintain":
   how a service reads a log of more than one recording. Changes `spec/cluster.md`:
   "The service" says which recording a service replays and when it moves to the
   next; a new section, "The log's recordings", gives the file's layout; "Counters"
-  and "The service" gain a third rule of order; "What a reader rejects" and
-  "Vectors" gain the file; "Out of this version" loses its last paragraph. Adds one
-  row to "The driver directory" of `spec/client-protocol.md` and changes two
-  sentences of the committed log's row in `spec/c-abi.md`. No message's layout
+  and "The service" gain a third rule of order, and "Counters" a row,
+  `cluster.log_recordings_unwritten`; "Messages during an election" says when a
+  member may truncate; "What a reader rejects" and "Vectors" gain the file; "Out of
+  this version" loses its last paragraph. Adds one row to "The driver directory" of
+  `spec/client-protocol.md` and a sentence after it, and in `spec/c-abi.md` changes
+  two sentences of the committed log's row and adds two. No message's layout
   changes and no function of the C ABI: the cluster page stays at version 0, the
-  client protocol and the C ABI at theirs. Amends ADR 0100: this is one change more
-  in its order, before its fifth, the move.
+  client protocol and the C ABI at theirs. Amends ADR 0100 twice: this is one change
+  more in its order, before its fifth, the move; and it lands in three pull
+  requests, with `spec/cluster.md` true of a member started with `cavalry run` only
+  after the third ("Three pull requests", below).
 
 ## Context
 
@@ -88,8 +92,15 @@ table that is full forgets its oldest recording and leaves it as it is in the
 catalog. So a file whose live recording is the id the counter holds lists
 recordings that hold the member's log as it is now. A file that cannot be written
 is the duty cycle's error, with what to do, and the member stores −1 until a later
-cycle has written it: it records and replicates, and names no recording to a
-service.
+cycle has written it: in each such cycle it records and replicates, and names no
+recording to a service. Each cycle in which the write fails is counted in
+`cluster.log_recordings_unwritten`, so that an operator who reads the counters
+tells a member that names no recording because it cannot write its file from one
+whose recording never started. What runs the module decides how long that may
+last: `cavalry run` treats it as it treats every error of a duty cycle, tries the
+cycle again every 100 ms, and gives the member up after 10 s of cycles that fail,
+the leader heartbeat timeout. The cluster then goes on with the members that
+remain, and the member's last error says which file and why.
 
 **A service takes each position from the first recording in the file that holds
 it, and from the live recording when none does**, which is the rule the page
@@ -125,6 +136,26 @@ none changes its type.
 that does not begin at 0: the member's table forgot it, past 1,024 recordings.
 The replay is asked of the live recording and the driver refuses it with code 23,
 as before.
+
+**A reader reads a bounded file.** It opens the file once and reads at most 24,641
+bytes, one more than the longest file, so a longer file fails a check whatever it
+holds: the check of its length, when the checks before it pass. A file that fails a
+check, or that the operating system will
+not let it read, is the reader's error, which names the file and the check; over
+the C ABI it is code 113, `IO`.
+
+**Three pull requests.** A change to `spec/` lands with the Accepted decision behind
+it, and an Accepted decision is not edited, so every sentence this decision puts
+on the pages lands with it, in the first pull request: the decision, the pages,
+the vectors, and the file's reader and writer in `cavalry-proto`. The second holds
+the member's write of the file, the truncation's wait and the counter. The third
+holds the service's read. Between the first and the third the pages say what a
+member and a service will do, and the code does what it did: a member writes no
+file, and a service below the recording its member names is refused with code 23.
+ADR 0100 asks that every sentence of `spec/cluster.md` be true of a member started
+with `cavalry run` after each pull request; this change keeps that only after its
+third. The crates' READMEs list, until then, each thing the pages state and no code
+does yet.
 
 ## Alternatives considered
 
@@ -170,7 +201,8 @@ as before.
 - `spec/vectors/cluster.json`, kind `log recordings`, 31 vectors: six files with
   the fields a reader decodes and the recording each of several positions is read
   from, two entries that overlap, one inside another and two that begin together
-  among them; and 25 rejections, each check and the order of two that both fail.
+  among them; and 25 rejections: each check, and five pairs of checks that both
+  fail, in the order the checks run.
   `crates/cavalry-proto/tests/cluster_conformance.rs` reads each, writes its fields
   back to the same bytes and answers each position; a file of 1,025 entries is
   written and read, and one entry more is refused. `cluster_no_panic.rs` reads over
@@ -209,6 +241,10 @@ as before.
     error that named the file and the check, and no replay started.
 - The tests this decision lands with are named in the pull requests that build
   it, as ADR 0066's were: those of the prototype above, over drivers.
+- Not shown: `cluster.log_recordings_unwritten`. A review of this decision before
+  its first pull request asked what counts a write that fails, after the prototype
+  was run, and the counter was added then. Its test is the test of the file that
+  cannot be written, in the pull request that builds the write.
 
 ## Consequences
 
@@ -226,7 +262,10 @@ the directory must be writable by the member's user, which it is where `cavalry
 run` hosts both.
 
 To maintain. The third rule of order, beside ADR 0066's two. The file's version:
-a reader refuses one it does not know. The rule that a member cuts no recording
+a reader refuses one it does not know, so a member that wrote a later layout
+under this name would stop every service of this version beside it; a later
+layout is written under a name of its own for as long as such services run
+(invariant 3). The rule that a member cuts no recording
 while it names one, which ADR 0095's truncation holds and this decision now
 depends on. `cavalry doctor` does not read the file yet; a finding that says from
 which position a member's log can be read on its host would use it.
