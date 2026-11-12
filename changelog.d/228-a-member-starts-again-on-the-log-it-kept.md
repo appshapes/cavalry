@@ -4,7 +4,8 @@
   member could only be started again as a new one. The member keeps a list of the
   recordings that hold its log in a new file in its log directory, `log-recordings`.
   A log directory written before this change has no such file, and its member is
-  refused as before, with what to do. Two members are still not started again: one
+  refused as before, now with `member stopped (recordings)` where the message was
+  `member refused (restart)`, and with what to do. Two members are still not started again: one
   whose host lost power or whose operating system crashed while it ran, which
   nothing refuses and the how-to tells you to leave stopped, and one whose log is
   in more than 1,024 recordings, which `cavalry run` refuses with `log-forgotten`.

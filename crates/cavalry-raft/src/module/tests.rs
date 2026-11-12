@@ -3034,6 +3034,152 @@ fn a_member_starts_again_on_the_log_it_kept_and_takes_no_recording_it_never_coun
     );
 }
 
+/// A recording the record names that holds nothing is no truncation cut short (ADR
+/// 0108). The member follows term 0 to two entries, then joins the log of term 1
+/// where its own ends and leaves it before an entry arrives: its record names both
+/// recordings, and the second begins and stops at the end of the first. Started
+/// again, the member's log is the first recording; the start writes the record
+/// without the one that holds nothing, which is counted as a list written, and it
+/// counts no truncation finished: no recording was gone, and term 1, based at the
+/// end of the log, is not above it and stays.
+#[test]
+fn a_start_leaves_out_a_recording_that_holds_nothing_and_counts_no_truncation() {
+    let mut pair = pair("start-empty");
+    let (two, first) = pair.follow_and_leave(0, 0, &[b"one", b"two"]);
+    let (end, second) = pair.follow_and_leave(1, two, &[]);
+    assert_eq!(end, two);
+    for (term, base) in [(0, 0), (1, two)] {
+        pair.member
+            .io
+            .record_term(term, base)
+            .expect("the term is recorded");
+    }
+    assert_eq!(
+        record_in(&pair.member_log_dir, 1),
+        (0, 2, vec![(first, 0), (second, two)])
+    );
+    assert_eq!(pair.stop_of(second), Some(two), "it holds nothing");
+    let Pair {
+        leader: _leader,
+        member,
+        member_driver_dir,
+        member_log_dir,
+        members,
+        _drivers,
+        _dir,
+        ..
+    } = pair;
+    member.close().expect("the member closes");
+
+    let mut member = ConsensusModule::start(&member_driver_dir, &member_log_dir, &members, 1)
+        .expect("the member starts on the log it kept");
+    assert_eq!(member.io.append_position(), two);
+    assert_eq!(
+        member.io.kept.iter().copied().collect::<Vec<_>>(),
+        vec![Kept {
+            recording_id: first,
+            start: 0,
+            stop: two,
+        }]
+    );
+    assert_eq!(record_in(&member_log_dir, 1), (0, 3, vec![(first, 0)]));
+    assert_eq!(
+        member.io.list_counts,
+        ListCounts {
+            listed: 1,
+            ..ListCounts::default()
+        },
+        "a list written, and no truncation finished"
+    );
+    assert_eq!(member.io.log_leadership_term_id(), 1);
+}
+
+/// A member's process is lost while its driver runs on, and the recording it was
+/// making of its leader's log is still being made when it starts again (ADR 0108,
+/// Context). The start stops that recording by its id, reads where it stopped from
+/// the catalog, and the member's log ends there: at the entry it held, since nothing
+/// arrived after it. The record named the recording already and is not written
+/// again.
+#[test]
+fn a_start_stops_a_recording_its_driver_went_on_making() {
+    let mut pair = pair("start-live");
+    pair.member.io.join_log().expect("subscribed and armed");
+    let log = pair
+        .leader
+        .io
+        .add_log(0, 0)
+        .expect("the driver takes the commands")
+        .expect("the log has its recording");
+    let one = pair.append(b"one", 0);
+    pair.observe_both("the log is told", |io| {
+        io.log_image(log.session_id).expect("the image is read")
+    });
+    pair.observe_both("the member holds the entry", |io| {
+        (io.append_position() == one).then_some(())
+    });
+    let recording_id = pair
+        .member
+        .io
+        .held
+        .as_ref()
+        .map(|held| held.recording.recording_id())
+        .expect("the recording held");
+    pair.member
+        .io
+        .record_term(0, 0)
+        .expect("term 0 is recorded");
+    assert_eq!(
+        record_in(&pair.member_log_dir, 1),
+        (0, 1, vec![(recording_id, 0)])
+    );
+    let Pair {
+        leader: _leader,
+        member,
+        member_driver_dir,
+        member_log_dir,
+        members,
+        _drivers,
+        _dir,
+        ..
+    } = pair;
+    // The process is lost: nothing of the module runs again, and nothing of it is
+    // closed, so no stop is sent. Its driver, and the leader's log, go on.
+    std::mem::forget(member);
+    let catalog = CatalogReader::open(&member_log_dir).expect("the catalog opens");
+    assert!(
+        matches!(
+            cataloged(&catalog, recording_id),
+            Ok(Cataloged::Held { stop: None, .. })
+        ),
+        "the recording is still being made"
+    );
+
+    let mut member = ConsensusModule::start(&member_driver_dir, &member_log_dir, &members, 1)
+        .expect("the member starts on the log it kept");
+    assert_eq!(
+        catalog
+            .stop_position(recording_id)
+            .expect("the slot is read"),
+        Some(one),
+        "the start stopped it"
+    );
+    assert_eq!(member.io.append_position(), one);
+    assert_eq!(
+        member.io.kept.iter().copied().collect::<Vec<_>>(),
+        vec![Kept {
+            recording_id,
+            start: 0,
+            stop: one,
+        }]
+    );
+    assert_eq!(
+        record_in(&member_log_dir, 1),
+        (0, 1, vec![(recording_id, 0)]),
+        "not written again"
+    );
+    assert_eq!(member.io.list_counts, ListCounts::default());
+}
+
 /// A member that stopped inside a truncation starts where its recordings end, and
 /// drops the terms based above that (ADR 0095's Revisit, ADR 0108). The member
 /// holds term 0 to two entries and term 1 to four, in a recording each, and has

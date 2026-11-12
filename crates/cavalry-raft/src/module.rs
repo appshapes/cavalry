@@ -162,6 +162,16 @@ pub enum RaftError {
         /// The recording held.
         recording_id: i64,
     },
+    /// A member's start stopped a recording that its record of its log's recordings
+    /// names and that was still being made, the driver having run on while the
+    /// member was away, and 1 s later the catalog did not show where the recording
+    /// stopped (`spec/cluster.md`, "A member's start"; ADR 0108). The member does
+    /// not start. The recordings the start had stopped before it stay stopped, and
+    /// nothing else was changed, so a start asked again does the same.
+    StartStopTimeout {
+        /// The recording the start stopped.
+        recording_id: i64,
+    },
     /// The file of the member's log's recordings could not be written in the driver
     /// directory (`spec/cluster.md`, "The log's recordings"; ADR 0103). The member
     /// names no recording to its service until a later duty cycle has written it,
@@ -204,7 +214,8 @@ pub enum ListedFound {
 impl RaftError {
     /// The reason's name: `members`, `member`, `recordings`, `terms-lost`,
     /// `log-forgotten`, `listed-recording`, `terms`, `catalog`, `client`, `poll`,
-    /// `unsupported`, `payload-too-long`, `offer`, `stop-timeout` or `log-recordings`.
+    /// `unsupported`, `payload-too-long`, `offer`, `stop-timeout`,
+    /// `start-stop-timeout` or `log-recordings`.
     pub const fn reason(&self) -> &'static str {
         match self {
             RaftError::Members(_) => "members",
@@ -221,6 +232,7 @@ impl RaftError {
             RaftError::PayloadTooLong { .. } => "payload-too-long",
             RaftError::Offer(_) => "offer",
             RaftError::StopTimeout { .. } => "stop-timeout",
+            RaftError::StartStopTimeout { .. } => "start-stop-timeout",
             RaftError::LogRecordings { .. } => "log-recordings",
         }
     }
@@ -380,6 +392,17 @@ impl core::fmt::Display for RaftError {
                  recording. Call do_work again, which stops it again and waits; if this \
                  repeats, run `cavalry doctor`: the driver or this process is starved of CPU; \
                  see {DOC}"
+            ),
+            RaftError::StartStopTimeout { recording_id } => write!(
+                f,
+                "member refused ({reason}): the member's record of its log's recordings \
+                 names recording {recording_id}, which its driver was still making; the \
+                 start stopped it, and 1 s later the driver's catalog did not show where \
+                 it stopped, so the member does not know where its log ends and does not \
+                 start. Nothing else was changed. Start the member again: the start \
+                 stops the recording again, which changes nothing, and waits again. If \
+                 this repeats, run `cavalry doctor`: the driver is starved of CPU or \
+                 cannot write its log directory; see {DOC_KEPT_LOG}"
             ),
             RaftError::LogRecordings { path, source } => {
                 // The module's own writer refuses a list only if the module made one
@@ -858,9 +881,15 @@ enum Cataloged {
 /// reported it would let the member vote for a candidate that lacks a committed
 /// entry, so nothing here shortens the log but that one truncation.
 ///
-/// Every recording is checked before any is stopped, so a start that is refused
-/// for what a recording is has changed nothing. A recording that holds nothing is
-/// left out of the table, as a truncation leaves it out.
+/// What each recording is in the catalog, and that none is missing before one that
+/// is held, is checked before any is stopped, so a start refused for that has
+/// changed nothing. Where a recording ends is known only once it is stopped, so a
+/// recording that begins past the end of the ones before it, and a count that a
+/// recording still being made takes past the table's bound, are refused after
+/// the recordings before them were stopped; a stop changes nothing a later start
+/// needs, since the record names the recording and its end is the catalog's. A
+/// recording that holds nothing is left out of the table, as a truncation leaves
+/// it out.
 ///
 /// A start forgets nothing. A record whose floor is above 0, or one that names more
 /// recordings that hold bytes than the table keeps, [`KEPT_RECORDINGS`], is a log
@@ -999,7 +1028,7 @@ fn stop_listed(
             return Ok(stop);
         }
         if Instant::now() >= deadline {
-            return Err(RaftError::StopTimeout { recording_id });
+            return Err(RaftError::StartStopTimeout { recording_id });
         }
         std::thread::sleep(Duration::from_micros(50));
     }
@@ -1132,6 +1161,12 @@ impl ClientIo {
     /// start on a record that still names it, nor on one whose floor is above 0: a
     /// member that has forgotten a recording runs on and does not start again on its
     /// log directory ([`RaftError::LogForgotten`]; ADR 0108).
+    ///
+    /// A recording that holds nothing is kept too, though a start leaves it out:
+    /// the record names it until its next write, and a truncation purges what the
+    /// table holds from its last recording back. Were it not in the table, a
+    /// truncation that a stop cut short could leave it in the catalog after a
+    /// recording that was purged, which a start refuses.
     fn keep(&mut self, kept: Kept) {
         if self.kept.len() >= KEPT_RECORDINGS {
             self.kept.pop_front();
@@ -1144,7 +1179,10 @@ impl ClientIo {
     /// leader's of its publication, from the base it was created at, or a follower's
     /// of the leader's image once it is part of the member's log ([`Self::counted`]).
     fn live_recording(&self) -> Option<(i64, i64)> {
-        match &self.log_recording {
+        // A leader's recording once the record of the log's recordings names it,
+        // as a follower's ([`Self::counted`]): no service is told of a recording
+        // that is not yet part of the member's log (ADR 0108).
+        match self.log_recording.as_ref().filter(|_| self.log_listed) {
             Some(recording) => Some((recording.recording_id(), self.log_base)),
             None => self
                 .counted()

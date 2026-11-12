@@ -99,8 +99,17 @@ committed once a quorum, two of three, has it on disk.
 5. Stop a follower with Ctrl-C or SIGTERM. It prints `cavalry run: stopping` and
    `cavalry run: closed`. The other two are a quorum and go on.
 
-6. Start again from step 3 with new directories, and stop the leader this time. The
-   two followers hear nothing from it for 10 s, the leader heartbeat timeout, and
+6. Start a new cluster, and stop the leader this time. Stop the two members that
+   still run, remove every member's directories, and start the three again with
+   the commands of step 3:
+
+   ```sh
+   rm -rf /tmp/cavalry-member-0 /tmp/cavalry-member-0-log /tmp/cavalry-member-1 /tmp/cavalry-member-1-log /tmp/cavalry-member-2 /tmp/cavalry-member-2-log
+   ```
+
+   Without the `rm`, the members start again on the log they kept, as step 7
+   shows, and the positions below are higher. Stop the leader that `doctor` names.
+   The two followers hear nothing from it for 10 s, the leader heartbeat timeout, and
    elect one of them. About 11 s after the stop, `doctor` on one of them says `the
    leader in term 1, election closed: append position 192, commit position 192; its
    last election began because its leader said nothing for the leader heartbeat
@@ -196,11 +205,26 @@ committed once a quorum, two of three, has it on disk.
   beside the other two. It would join them and replicate the log, but it has lost
   the record of the votes it cast and the log it held, and with a member whose log
   is behind it could then elect a leader that lacks an entry the cluster committed.
-- `cavalry run: member stopped (recordings)` with any other message: the
-  `log-recordings` file is another member's, and the message names both members,
-  or it is damaged, and the message names the check it failed. Start the member with
-  its own log directory. If the file is damaged, do as for a directory with no
-  file, above.
+- `cavalry run: member stopped (recordings)` with any other message. Read the
+  message, since three causes share the prefix:
+  - It begins `could not` and names the file and the operating system's reason. The
+    member could not open, read, write or sync `log-recordings`: the log directory
+    is not writable by the member's user, or its file system is full. Correct the
+    permissions or free space, and start the member again on the same log
+    directory. A running member prints the same message after `cavalry run: cluster
+    member <id>:` and is not stopped by it: it tries the write again in each duty
+    cycle, and `cavalry run` gives the member up after 10 s of cycles that fail.
+    Start it again on the same log directory once the directory can be written.
+  - It says the log directory is another member's, and names both members. Start
+    the member with its own log directory.
+  - It says the file is damaged, and names the check it failed. Do as for a
+    directory with no file, above.
+- `cavalry run: member refused (start-stop-timeout)`: the member's driver was still
+  making a recording of the member's log, which happens when the member's process
+  was ended and its driver ran on. The start stopped the recording, and the driver
+  did not say where it stopped within 1 s. Nothing else was changed. Start the
+  member again. If the message repeats, run `cavalry doctor --dir` on the member's
+  driver directory: the driver is starved of CPU or cannot write its log directory.
 - `cavalry run: member refused (terms-lost)`: the member's log directory holds its
   log and no record of its terms. Either there is no `terms` file, or the file holds
   no term: it was removed or replaced, and the member's votes and the terms of its
@@ -222,16 +246,14 @@ committed once a quorum, two of three, has it on disk.
   The cluster goes on while the other two run. To have three members again, do as
   for a directory with no `log-recordings` file, above.
 - The member's host lost power, or its operating system crashed, while the member
-  ran. Do not start the member on that log directory again: leave it stopped, as for
-  a directory with no `log-recordings` file, above. Nothing refuses this start, so
-  the rule is yours to keep. After such a crash the member's last recording can end
-  in entries whose bytes were not written whole, and this version cannot tell them
-  from whole ones. A member that starts on them can hand them to the others, and a
-  service then reads an entry nobody sent. No counter tells this crash from a
-  process that was ended, which is safe: the driver counts both in
-  `recording.recovered`. When two of three hosts lost power together, no start
-  is known to be safe: start the cluster again as a new cluster when you cannot
-  accept that risk
+  ran. Do not start the member on that log directory again. Leave it stopped, and
+  do as for a directory with no `log-recordings` file, above. Nothing refuses this
+  start, and no counter tells this crash from a process that was ended, so the rule
+  is yours to keep. A process that was ended is safe to start again. When two of
+  the three hosts lost power together, do not start any member on its log
+  directory: start the cluster again as a new cluster. After such a crash a
+  member's log can end in entries that were not written whole, and a member that
+  starts on them can hand them to the others
   ([ADR 0108](../decisions/0108-list-the-recordings-of-a-members-log-in-its-log-directory-and-start-a-member-on-the-log-it-kept.md),
   "What a start does not hold").
 - `WARN cluster-no-leader`: the member is in an election and has no leader to follow.
