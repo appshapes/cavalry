@@ -23,7 +23,11 @@ commit path runs per message.
   voted for it (ADR 0077). It stores a term before the vote or the request vote that
   raises it, and votes once in a term. A candidate asks for votes in the term it
   nominated itself for and no other: one whose term another candidate's request raised
-  asks for none in the raised term and does not lead it. A leader tells a member whose
+  asks for none in the raised term and does not lead it. A candidate that cannot win
+  its ballot, one that has read a vote against its term or holds no vote of its own
+  for it, canvasses again on its next cycle and does not wait out the election
+  timeout, so a split vote costs a second delay of at most 500 ms and not a second
+  (ADR 0105). A leader tells a member whose
   log is of an older term which term its own record of terms holds next, with that
   term's base and its end, read through `Io::terms_after`: the member truncates what it
   holds above that base, so the leader names the next term and never a later one, over

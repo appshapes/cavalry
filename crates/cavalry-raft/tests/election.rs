@@ -84,34 +84,49 @@ fn members_that_start_together_elect_one_leader() {
 /// A split vote. At this seed two members' delays end within a round trip of each
 /// other: each stores term 0, votes for itself and asks for the others' votes, and
 /// each answers the other against, having voted in that term. The third member votes
-/// for the one it heard first. Neither ballot has every vote it waits for, and the one
-/// with a quorum has a vote against, so at the election timeout both candidates, and
-/// the member that waited for one of them, canvass again; they draw new delays, and
-/// one leads term 1. The election takes one election timeout longer, and every member
-/// counts the ballot it lost.
+/// for the one it heard first. A ballot with a vote against makes no leader, so each
+/// candidate canvasses again as it reads the other's vote, and does not wait out the
+/// election timeout (ADR 0105): they draw new delays, the first to end asks for votes
+/// in term 1, and the member that waited for a candidate of term 0 votes again, for
+/// the higher term. One leads term 1 within the election timeout of the cluster's
+/// start, where the same seed took one election timeout longer before. Each of the two
+/// candidates counts the ballot it lost; the third member lost none.
 #[test]
-fn a_split_vote_costs_one_election_timeout_and_the_next_ballot_elects() {
+fn a_split_vote_costs_a_second_delay_and_not_the_election_timeout() {
     let ids = [0, 1, 2];
     let mut safety = Safety::new(&ids);
     let mut cluster = Cluster::with_election(&ids, 12).expect("three members");
     let took = safety.run_until(&mut cluster, 3_000, "the first election", |cluster| {
         settled(cluster, &ids)
     });
-    assert!(
-        (1_000..2_000).contains(&took),
-        "the election took {took} ms: one election timeout and a second ballot"
+    assert_eq!(
+        took, 132,
+        "the election took {took} ms: two ballots, and no election timeout between them"
     );
     let leader = cluster.leader().expect("a leader");
     let mut candidates = 0;
+    let mut voters = 0;
     for id in ids {
         let member = cluster.member(id).expect("a member");
         assert_eq!(member.leadership_term_id(), 1, "member {id}");
         let counts = member.counts();
-        assert_eq!(counts.ballots_lost, 1, "member {id}: {counts:?}");
-        assert_eq!(counts.votes_against, 1, "member {id}: {counts:?}");
         assert_eq!(counts.elections_failed, 0, "member {id}: {counts:?}");
-        // The two that split it were candidates of term 0; the winner was one again.
-        candidates += u64::from(counts.candidacies > 0);
+        if counts.candidacies > 0 {
+            // A candidate of term 0: it lost that ballot on the other's vote against,
+            // and answered the other against.
+            candidates += 1;
+            assert_eq!(counts.ballots_lost, 1, "member {id}: {counts:?}");
+            assert_eq!(counts.votes_against, 1, "member {id}: {counts:?}");
+        } else {
+            // The member that voted for one of them, and then for the winner.
+            voters += 1;
+            assert_eq!(counts.ballots_lost, 0, "member {id}: {counts:?}");
+            assert_eq!(
+                (counts.votes_for, counts.votes_against),
+                (2, 1),
+                "member {id}: {counts:?}"
+            );
+        }
         let (terms, candidate_term) = cluster.record_of_terms(id).expect("a member");
         assert_eq!(
             terms,
@@ -120,7 +135,7 @@ fn a_split_vote_costs_one_election_timeout_and_the_next_ballot_elects() {
         );
         assert_eq!(candidate_term, 1, "member {id}");
     }
-    assert_eq!(candidates, 2);
+    assert_eq!((candidates, voters), (2, 1));
     assert_eq!(cluster.counts(leader).expect("the leader").candidacies, 2);
     let entry = cluster
         .offer(b"after the split")

@@ -2247,6 +2247,10 @@ pub struct Ballot {
     /// Whether every member the candidate has heard voted for it and those votes make a
     /// quorum, which decides at once.
     pub unanimous: bool,
+    /// Whether the ballot can no longer be won: a vote against the candidate's term
+    /// has been cast, and no ballot with one makes a leader, at once or at the
+    /// election timeout. The candidate canvasses again at once (ADR 0105).
+    pub lost: bool,
 }
 
 /// One vote a candidate recorded against a member.
@@ -2265,9 +2269,10 @@ pub struct Vote {
 /// candidate's current candidate term alone, its own among them: leader at once when
 /// they make a quorum, none is against and every member heard has cast one for; else
 /// leader once the election timeout has passed when a quorum voted for and none
-/// against. A vote for an older candidate term of the candidate's counts for nothing,
-/// and a member that has said nothing since the election began is not waited for. A
-/// member past the end of `heard` counts as not heard.
+/// against; and lost, at once, when one is against. A vote for an older candidate term
+/// of the candidate's counts for nothing, for or against, and a member that has said
+/// nothing since the election began is not waited for. A member past the end of
+/// `heard` counts as not heard.
 pub fn ballot(
     members: usize,
     candidate_term: i64,
@@ -2301,11 +2306,13 @@ pub fn ballot(
         return Ballot {
             leader: true,
             unanimous: true,
+            lost: false,
         };
     }
     Ballot {
         leader: timeout_passed && quorate,
         unanimous: false,
+        lost: against > 0,
     }
 }
 
