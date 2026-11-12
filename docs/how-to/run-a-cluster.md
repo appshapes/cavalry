@@ -97,20 +97,19 @@ committed once a quorum, two of three, has it on disk.
    they lost.
 
 7. Start the member you stopped again, with its command of step 3: the same id, the
-   same driver directory and the log directory it had. For member 1:
+   same driver directory and the log directory it had. When member 2 led and was
+   stopped:
 
    ```sh
-   CAVALRY_CLUSTER_MEMBER_ID=1 target/release/cavalry run --dir /tmp/cavalry-member-1 --log-dir /tmp/cavalry-member-1-log
+   CAVALRY_CLUSTER_MEMBER_ID=2 target/release/cavalry run --dir /tmp/cavalry-member-2 --log-dir /tmp/cavalry-member-2-log
    ```
 
-   It prints `cavalry run: cluster member 1 started`. The member reads back the log
+   It prints `cavalry run: cluster member 2 started`. The member reads back the log
    its log directory holds, joins the leader the other two elected, and replicates
    from it what was committed while it was away. Within a second, `doctor` on it
    says `a follower in term 1, election closed: append position 192, commit position
    192; it follows member 0; its last election began because the member started`,
-   with the id of the member that leads now. Its log directory now lists
-   `log-recordings`, the member's record of which recordings there hold its log,
-   beside `terms`, `catalog` and the recordings.
+   with the id of the member that leads now in place of 0.
 
 ## How to verify it worked
 
@@ -121,8 +120,10 @@ committed once a quorum, two of three, has it on disk.
   member`.
 - Every member reports `election closed` and the same `commit position`.
 - `ls /tmp/cavalry-member-1-log` lists `terms`, the member's record of the terms it
-  has joined, beside `catalog` and the recording of the leader's log, `0-0.rec` with
-  its time index `0.idx`.
+  has joined, and `log-recordings`, its record of which recordings hold its log,
+  beside `catalog` and the recording of the leader's log, `0-0.rec` with its time
+  index `0.idx`. A member that was started again holds more recordings: one for each
+  time it joined a log or caught up.
 - A member that started before another may show `WARN receiver.receive_failed`: the
   datagrams it sent before the other member listened were refused by this host's
   kernel. The count stops rising once every member runs.
