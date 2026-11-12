@@ -1534,6 +1534,6 @@ pub const COUNTERS: &[CounterDef] = &[
         kind: Kind::Gauge,
         scope: Scope::Instance,
         doc: "Bytes of one cavalry:udp publication that went to its recording and to no receiver: what its sender position passed while the publication was alone with its recording, its channel naming ssc=true, a recording of it live and no receiver answering, less what the sender position went back over when a receiver joined. Allocated for a publication whose channel names ssc=true and no other; key and label as sender.position (spec/udp.md, The sender; ADR 0098).",
-        doctor: "A publication on a channel that names ssc=true took messages while no receiver answered: they are in its recording, and a receiver that joins later is sent the stream from its own position, at most a term back, and replays the recording for what came before. Nothing was lost. If receivers were expected, check that a subscription on the stream exists on each destination's host and that its driver receives on that port.",
+        doctor: "A publication on a channel that names ssc=true took messages while no receiver answered: they are in its recording, and a receiver that joins later is sent the stream from its own position, at most a term back, and replays the recording for what came before. Nothing was lost. `cavalry doctor` names the publication in `udp-publication-recorded-alone` while no receiver has answered; if receivers were expected, check that a subscription on the stream exists on each destination's host and that its driver receives on that port.",
     },
 ];

@@ -1841,8 +1841,8 @@ fn udp_checks(reader: &CountersReader, running: bool, findings: &mut Vec<Finding
                      {session_id}) names ssc=true and is connected by recording {recording} \
                      alone: no receiver has answered on {destinations}, its sender has \
                      passed {unsent} bytes without sending them, and they are in the \
-                     recording; a receiver that joins is given the stream from the sender \
-                     position and replays recording {recording} for what came before; if a \
+                     recording; a receiver that joins is sent the stream from where its own \
+                     image begins and replays recording {recording} for what came before; if a \
                      receiver was expected, check that a subscription on stream {stream_id} \
                      exists on its host and that its driver receives on that port"
                 ),
