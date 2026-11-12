@@ -468,18 +468,29 @@ def replication_stop(append_position, next_term_base_log_position, next_log_posi
     return {"replicate": False, "stop_position": NULL}
 
 
-def new_leadership_term_action(log_term, append, msg, candidate_term, in_canvass):
+def new_leadership_term_action(log_term, append, msg, candidate_term, in_canvass, own_base_above=NULL):
     """spec/cluster.md, "Messages during an election", new leadership term: what a reader with log
     leadership term id `log_term`, append position `append` and candidate term `candidate_term`, in
     canvass or in a ballot state, does with the message's fields, and the term it records, the
     leader's term at its base when the reader's append position, after any truncation, is at the
     leader's term base log position. A term below the candidate term is ignored, as is, in a ballot
-    state, any term but the candidate term; Aeron reads any term in canvass (ADR 0058)."""
+    state, any term but the candidate term; Aeron reads any term in canvass (ADR 0058).
+
+    `own_base_above` is the base of the lowest term in the reader's own record above the message's
+    log leadership term id, −1 for none. A message that names a term below the reader's log term
+    says that the leader's record holds none of the reader's terms above it. When its next
+    leadership term id is above the reader's log term it answers the term the reader reported, and
+    the reader drops those terms: it truncates to `own_base_above` when its append position is above
+    it, and reads the message again with the log it then holds (ADR 0096). A next term at or below
+    the reader's log term is an answer to an older report, and the reader canvasses."""
     none = {"truncate_to": NULL, "stop_position": NULL, "records": None}
     term = msg["leadership_term_id"]
     if term < candidate_term or (not in_canvass and term != candidate_term):
         return dict(none, action="ignore")
     if msg["log_leadership_term_id"] != log_term:
+        if msg["log_leadership_term_id"] < log_term and msg["next_leadership_term_id"] > log_term \
+                and own_base_above != NULL:
+            return dict(none, action="drop", truncate_to=own_base_above if append > own_base_above else NULL)
         return dict(none, action="canvass")
     truncate_to = NULL
     nb = msg["next_term_base_log_position"]
@@ -548,6 +559,15 @@ def canvass_vector(name, leader_term, state, leadership_term_id, log_leadership_
     msg = {"leadership_term_id": leadership_term_id, "log_leadership_term_id": log_leadership_term_id}
     inputs = {"leader_term": leader_term, "state": state, "message": msg}
     return arithmetic(name, "canvass-position", inputs, canvass_position_action(leader_term, state, msg))
+
+
+def answered_term(terms, reported_term):
+    """spec/cluster.md, new leadership term's log leadership term id: the highest term in the
+    leader's record at or below the term the reader reported, −1 when the record holds none, so
+    that the term a leader answers for is one its own record holds (ADR 0096). `terms` is
+    [term, base, end]."""
+    held = [t[0] for t in terms if t[0] <= reported_term]
+    return {"log_leadership_term_id": max(held) if held else NULL}
 
 
 def next_fields(terms, reported_term, leader_term, leader_base):
@@ -740,52 +760,72 @@ VECTORS += [
                replication_stop(960, NULL, NULL)),
     arithmetic("new-leadership-term-returning-leader-truncates", "new-leadership-term",
                {"log_leadership_term_id": 4, "append_position": 1100, "candidate_term": 5,
-                "in_canvass": True, "message": nlt(4, 5, 1000, NULL, 5, 1000, 5000)},
+                "in_canvass": True, "own_base_above": NULL, "message": nlt(4, 5, 1000, NULL, 5, 1000, 5000)},
                new_leadership_term_action(4, 1100, nlt(4, 5, 1000, NULL, 5, 1000, 5000), 5, True)),
     arithmetic("new-leadership-term-behind-replicates", "new-leadership-term",
                {"log_leadership_term_id": 4, "append_position": 960, "candidate_term": 5,
-                "in_canvass": True, "message": nlt(4, 5, 1000, NULL, 5, 1000, 5000)},
+                "in_canvass": True, "own_base_above": NULL, "message": nlt(4, 5, 1000, NULL, 5, 1000, 5000)},
                new_leadership_term_action(4, 960, nlt(4, 5, 1000, NULL, 5, 1000, 5000), 5, True)),
     arithmetic("new-leadership-term-two-terms-behind", "new-leadership-term",
                {"log_leadership_term_id": 2, "append_position": 200, "candidate_term": 5,
-                "in_canvass": True, "message": nlt(2, 3, 200, 500, 5, 1000, 5000)},
+                "in_canvass": True, "own_base_above": NULL, "message": nlt(2, 3, 200, 500, 5, 1000, 5000)},
                new_leadership_term_action(2, 200, nlt(2, 3, 200, 500, 5, 1000, 5000), 5, True)),
     arithmetic("new-leadership-term-own-term-replays", "new-leadership-term",
                {"log_leadership_term_id": 5, "append_position": 3000, "candidate_term": 5,
-                "in_canvass": True, "message": nlt(5, NULL, NULL, NULL, 5, 1000, 5000)},
+                "in_canvass": True, "own_base_above": NULL, "message": nlt(5, NULL, NULL, NULL, 5, 1000, 5000)},
                new_leadership_term_action(5, 3000, nlt(5, NULL, NULL, NULL, 5, 1000, 5000), 5, True)),
     arithmetic("new-leadership-term-other-log-term-canvasses", "new-leadership-term",
                {"log_leadership_term_id": 3, "append_position": 900, "candidate_term": 5,
-                "in_canvass": True, "message": nlt(4, 5, 1000, NULL, 5, 1000, 5000)},
+                "in_canvass": True, "own_base_above": NULL, "message": nlt(4, 5, 1000, NULL, 5, 1000, 5000)},
                new_leadership_term_action(3, 900, nlt(4, 5, 1000, NULL, 5, 1000, 5000), 5, True)),
     arithmetic("new-leadership-term-no-next-term-fails", "new-leadership-term",
                {"log_leadership_term_id": 4, "append_position": 960, "candidate_term": 5,
-                "in_canvass": True, "message": nlt(4, NULL, NULL, NULL, 5, 1000, 5000)},
+                "in_canvass": True, "own_base_above": NULL, "message": nlt(4, NULL, NULL, NULL, 5, 1000, 5000)},
                new_leadership_term_action(4, 960, nlt(4, NULL, NULL, NULL, 5, 1000, 5000), 5, True)),
     arithmetic("new-leadership-term-at-leaders-base-records", "new-leadership-term",
                {"log_leadership_term_id": 1, "append_position": 1100, "candidate_term": 2,
-                "in_canvass": True, "message": nlt(1, 2, 1100, NULL, 2, 1100, 1100)},
+                "in_canvass": True, "own_base_above": NULL, "message": nlt(1, 2, 1100, NULL, 2, 1100, 1100)},
                new_leadership_term_action(1, 1100, nlt(1, 2, 1100, NULL, 2, 1100, 1100), 2, True)),
     arithmetic("new-leadership-term-stale-tail-truncates", "new-leadership-term",
                {"log_leadership_term_id": 2, "append_position": 300, "candidate_term": 5,
-                "in_canvass": True, "message": nlt(2, 4, 200, 1000, 5, 1000, 1000)},
+                "in_canvass": True, "own_base_above": NULL, "message": nlt(2, 4, 200, 1000, 5, 1000, 1000)},
                new_leadership_term_action(2, 300, nlt(2, 4, 200, 1000, 5, 1000, 1000), 5, True)),
     arithmetic("new-leadership-term-at-next-base-no-end-waits", "new-leadership-term",
                {"log_leadership_term_id": 3, "append_position": 500, "candidate_term": 5,
-                "in_canvass": True, "message": nlt(3, 4, 500, NULL, 5, 1000, 5000)},
+                "in_canvass": True, "own_base_above": NULL, "message": nlt(3, 4, 500, NULL, 5, 1000, 5000)},
                new_leadership_term_action(3, 500, nlt(3, 4, 500, NULL, 5, 1000, 5000), 5, True)),
     arithmetic("new-leadership-term-below-candidate-term-ignored", "new-leadership-term",
                {"log_leadership_term_id": 2, "append_position": 100, "candidate_term": 4,
-                "in_canvass": True, "message": nlt(2, 3, 200, NULL, 3, 200, 200)},
+                "in_canvass": True, "own_base_above": NULL, "message": nlt(2, 3, 200, NULL, 3, 200, 200)},
                new_leadership_term_action(2, 100, nlt(2, 3, 200, NULL, 3, 200, 200), 4, True)),
     arithmetic("new-leadership-term-above-candidate-term-in-canvass-replays", "new-leadership-term",
                {"log_leadership_term_id": 5, "append_position": 3000, "candidate_term": 2,
-                "in_canvass": True, "message": nlt(5, NULL, NULL, NULL, 5, 1000, 5000)},
+                "in_canvass": True, "own_base_above": NULL, "message": nlt(5, NULL, NULL, NULL, 5, 1000, 5000)},
                new_leadership_term_action(5, 3000, nlt(5, NULL, NULL, NULL, 5, 1000, 5000), 2, True)),
     arithmetic("new-leadership-term-other-term-in-ballot-ignored", "new-leadership-term",
                {"log_leadership_term_id": 4, "append_position": 960, "candidate_term": 4,
-                "in_canvass": False, "message": nlt(4, 5, 1000, NULL, 5, 1000, 5000)},
+                "in_canvass": False, "own_base_above": NULL, "message": nlt(4, 5, 1000, NULL, 5, 1000, 5000)},
                new_leadership_term_action(4, 960, nlt(4, 5, 1000, NULL, 5, 1000, 5000), 4, False)),
+    arithmetic("new-leadership-term-term-the-leader-lacks-is-dropped", "new-leadership-term",
+               {"log_leadership_term_id": 3, "append_position": 500, "candidate_term": 5,
+                "in_canvass": True, "own_base_above": 500, "message": nlt(2, 5, 1000, NULL, 5, 1000, 5000)},
+               new_leadership_term_action(3, 500, nlt(2, 5, 1000, NULL, 5, 1000, 5000), 5, True, 500)),
+    arithmetic("new-leadership-term-term-the-leader-lacks-with-a-tail-truncates", "new-leadership-term",
+               {"log_leadership_term_id": 3, "append_position": 700, "candidate_term": 5,
+                "in_canvass": True, "own_base_above": 500, "message": nlt(2, 5, 1000, NULL, 5, 1000, 5000)},
+               new_leadership_term_action(3, 700, nlt(2, 5, 1000, NULL, 5, 1000, 5000), 5, True, 500)),
+    arithmetic("new-leadership-term-term-the-leader-lacks-in-ballot-is-dropped", "new-leadership-term",
+               {"log_leadership_term_id": 3, "append_position": 500, "candidate_term": 5,
+                "in_canvass": False, "own_base_above": 500, "message": nlt(2, 5, 1000, NULL, 5, 1000, 5000)},
+               new_leadership_term_action(3, 500, nlt(2, 5, 1000, NULL, 5, 1000, 5000), 5, False, 500)),
+    arithmetic("new-leadership-term-answer-to-an-older-report-canvasses", "new-leadership-term",
+               {"log_leadership_term_id": 4, "append_position": 900, "candidate_term": 5,
+                "in_canvass": True, "own_base_above": 200, "message": nlt(2, 3, 200, 500, 5, 1000, 5000)},
+               new_leadership_term_action(4, 900, nlt(2, 3, 200, 500, 5, 1000, 5000), 5, True, 200)),
+    arithmetic("new-leadership-term-no-term-of-the-leaders-drops-every-term", "new-leadership-term",
+               {"log_leadership_term_id": 1, "append_position": 0, "candidate_term": 2,
+                "in_canvass": True, "own_base_above": 0, "message": nlt(NULL, 2, 0, NULL, 2, 0, 0)},
+               new_leadership_term_action(1, 0, nlt(NULL, 2, 0, NULL, 2, 0, 0), 2, True, 0)),
     vote_vector("request-vote-at-candidate-term-against", 3, [2, 200], 1, (3, 2, 200)),
     vote_vector("request-vote-below-candidate-term-against", 4, [2, 200], 1, (3, 2, 300)),
     vote_vector("request-vote-higher-term-log-behind-against-takes-term", 2, [2, 200], 1, (3, 2, 100)),
@@ -806,6 +846,18 @@ VECTORS += [
     canvass_vector("canvass-position-log-term-behind-during-election-answered", 3, 8, 2, 2),
     canvass_vector("canvass-position-own-term-closed-answered", 3, CLOSED, 3, 3),
     canvass_vector("canvass-position-own-term-during-election-table", 3, 8, 3, 3),
+    arithmetic("answered-term-the-reported-term", "answered-term",
+               {"terms": LEADER_TERMS, "reported_term": 4}, answered_term(LEADER_TERMS, 4)),
+    arithmetic("answered-term-the-term-below-one-the-record-lacks", "answered-term",
+               {"terms": [[2, 0, 200], [4, 200, 1000], [5, 1000, NULL]], "reported_term": 3},
+               answered_term([[2, 0, 200], [4, 200, 1000], [5, 1000, NULL]], 3)),
+    arithmetic("answered-term-none-at-or-below", "answered-term",
+               {"terms": [[2, 0, 200], [4, 200, 1000], [5, 1000, NULL]], "reported_term": 1},
+               answered_term([[2, 0, 200], [4, 200, 1000], [5, 1000, NULL]], 1)),
+    arithmetic("answered-term-no-term-reported", "answered-term",
+               {"terms": LEADER_TERMS, "reported_term": NULL}, answered_term(LEADER_TERMS, NULL)),
+    arithmetic("answered-term-the-leaders-own", "answered-term",
+               {"terms": LEADER_TERMS, "reported_term": 5}, answered_term(LEADER_TERMS, 5)),
     arithmetic("next-fields-term-behind", "next-fields",
                {"terms": LEADER_TERMS, "reported_term": 2, "leader_term": 5, "leader_base": 1000},
                next_fields(LEADER_TERMS, 2, 5, 1000)),

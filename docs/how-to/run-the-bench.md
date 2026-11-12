@@ -319,7 +319,14 @@ shared runner is
    gate there with no data-plane change behind it, from the tree's first three
    processes and every one after them; the commit lists every gated row's slowest run
    before and after and names the cause of every row that loosens by more than 5
-   percent, or the card that will find it. It is re-recorded at master's tree as well
+   percent, or the card that will find it. It is re-recorded at a new tree as well
+   after a change to the harness under `bench/`, with no data-plane crate changed,
+   when that change's Accepted ADR asks for it in its Consequences, as
+   [ADR 0090](../decisions/0090-keep-a-subscribers-samples-out-of-the-histogram-until-its-loop-is-over.md)
+   did: from every process each host has run at the change's tree, three at least, in
+   a change of its own, with the same commit message and the harness change named in
+   it ([ADR 0110](../decisions/0110-let-a-persons-session-re-record-a-bench-baseline-after-telling-the-person.md)).
+   It is re-recorded at master's tree as well
    when pull requests at that tree read red while master's own runs there pass,
    against an entry recorded at an older tree, and no commit on the guard's paths,
    item 4 below, lies between the entry's tree and master's
@@ -442,7 +449,7 @@ shared runner is
      change's own tree could not tell the two apart. A person's session opens a card
      that names the two reds and the commits on the row's path. The pull request
      waits until the card's answer is on master. The answer is either a fix, which
-     begins a new tree, or a person's re-record whose message says why each row
+     begins a new tree, or a re-record, made as below, whose message says why each row
      loosened, by any amount, as `REGRESSION` on a p99.99 under
      [When it does not work](#when-it-does-not-work) says.
 
@@ -455,8 +462,14 @@ shared runner is
    gh api repos/appshapes/cavalry/issues/comments/<comment id> --jq '.body | gsub("\r"; "") | split("\n~~~json grip-linux-unchecked-<time>.json\n")[1] | split("\n~~~")[0]' > grip-linux-unchecked-<time>.json
    ```
 
-   The re-record is a person's commit on a branch of its own, and so is the re-run of
-   a first red: an agent's job can read runs and start none. The agent's session that
+   The re-record, in any of the three cases above, is made by a person or by a person's
+   session, a Claude Code session that works a card for that person, on a branch of its
+   own through the review loop.
+   A session tells the person before it starts, which case this is, at which tree and
+   how long it holds the hosts, and does not wait for an answer
+   ([ADR 0110](../decisions/0110-let-a-persons-session-re-record-a-bench-baseline-after-telling-the-person.md)).
+   The re-run of a first red is theirs as well: an agent's job can read runs and
+   start none. The agent's session that
    holds a red is the fixer, when the reviewer blocked on a red bench job at the head
    before it; the writer's session ends before its pull request's first run. The
    fixer records the red as above, re-runs nothing, changes no `bench/baseline.json`
@@ -777,9 +790,10 @@ shared runner is
   measured, while the `_client` rows, whose driver reads its clock once per duty cycle,
   did not move. Before believing one run, run the same binary in several
   processes on the host and compare their medians, since one process lands in one mode
-  ([ADR 0016](../decisions/0016-run-the-latency-gate-on-a-dedicated-host.md)). A person
-  decides whether to re-record the baseline from that run, as step 4 says, in a commit
-  whose message names the harness change and carries both histograms. A change to the
+  ([ADR 0016](../decisions/0016-run-the-latency-gate-on-a-dedicated-host.md)). Step 4
+  says whether the baseline is re-recorded from that run and who makes the re-record,
+  a person or a person's session; its commit's message names the harness change and
+  carries both histograms. A change to the
   harness's code can also move the raw rows through the compiler alone: 60 ns at p99.99
   and 20 ns at p50 on the `one_way` rows, blamed on a 16 KiB heap allocation at startup,
   was `TermReader::poll` compiled out of line in one binary and inlined into the

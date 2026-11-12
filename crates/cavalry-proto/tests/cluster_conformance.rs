@@ -10,7 +10,7 @@ use cavalry_proto::cluster::{
     ClusterAction, ClusterError, CommitPosition, EMPTY_MEMBER, EventCode, LogReport, MAX_MEMBERS,
     Member, MemberPosition, Message, NewLeadershipTermAction, NextFields, RecordedTerms, ReplayEnd,
     ReplicationStop, SnapshotMark, Stream, TermFields, TermSpan, TimeUnit, VERSION, Vote,
-    VoteAnswer, VoteRequest, appointed_canvass, appointed_leader, ballot, candidate,
+    VoteAnswer, VoteRequest, answered_term, appointed_canvass, appointed_leader, ballot, candidate,
     canvass_position_action, commit_position, entry_position, leader_ready, log_at_least,
     new_leadership_term_action, next_fields, parse_members, quorum, replay_end, replication_record,
     replication_stop, request_vote,
@@ -465,6 +465,7 @@ fn arithmetic_vector(name: &str, vector: &Value) {
                 int(inputs, "append_position"),
                 int(inputs, "candidate_term"),
                 inputs["in_canvass"].as_bool().expect("in_canvass"),
+                int(inputs, "own_base_above"),
                 TermFields {
                     leadership_term_id: int(m, "leadership_term_id"),
                     log_leadership_term_id: int(m, "log_leadership_term_id"),
@@ -509,6 +510,19 @@ fn arithmetic_vector(name: &str, vector: &Value) {
                 },
             );
             json!({"action": action.name()})
+        }
+        "answered-term" => {
+            let terms: Vec<TermSpan> = inputs["terms"]
+                .as_array()
+                .expect("terms")
+                .iter()
+                .map(|t| TermSpan {
+                    term: t[0].as_i64().expect("term"),
+                    base: t[1].as_i64().expect("base"),
+                    end: t[2].as_i64().expect("end"),
+                })
+                .collect();
+            json!({"log_leadership_term_id": answered_term(&terms, int(inputs, "reported_term"))})
         }
         "next-fields" => {
             let terms: Vec<TermSpan> = inputs["terms"]

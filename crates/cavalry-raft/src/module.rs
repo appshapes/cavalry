@@ -41,7 +41,7 @@ use cavalry_shm::counters::generated::{
 
 use crate::consensus::{
     Clock, Consensus, Counts, ElectionState, Io, Log, MembersRefused, Refused, ReplayStopped, Role,
-    base_above, terms_above,
+    base_above, term_at_or_below, terms_above,
 };
 
 /// The longest payload [`ConsensusModule::offer`] takes: what one frame of the log
@@ -972,6 +972,23 @@ impl Io for ClientIo {
                 .map(|entry| (entry.leadership_term_id, entry.term_base_log_position)),
             term,
         )
+    }
+
+    /// From the `terms` file's entries in memory, as [`Io::terms_after`] reads them.
+    fn term_at_or_below(&mut self, term: i64) -> i64 {
+        term_at_or_below(
+            self.terms
+                .terms()
+                .map(|entry| (entry.leadership_term_id, entry.term_base_log_position)),
+            term,
+        )
+    }
+
+    /// Deletes every term above `term` from the `terms` file, each write synced
+    /// (`spec/durable-log.md`; ADR 0096). The module's own core is appointed and never
+    /// asks (ADR 0081).
+    fn drop_terms_above(&mut self, term: i64) -> Result<i64, Self::Fault> {
+        Ok(self.terms.drop_above_term(term)?)
     }
 
     fn term_base_above(&mut self, position: i64) -> Option<i64> {
