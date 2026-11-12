@@ -412,11 +412,11 @@ is the publication's start position until the sender has sent, and the sender li
 stands where it stood. Its setup frames before the first status message and its
 heartbeats after it go on, at the sender position. The recording's position is a frame
 boundary at most the producer position, so the sender position stays one. A value of
-that counter that is not a multiple of the frame alignment, or that lies more than two
-term lengths past the sender position, is not a position this publication's recorder
-writes, and the sender does not follow it: it stays where it is, counts each such
-value once in `log_buffer.rejected_position`, evicts no client, and follows again
-when the counter holds a position it can follow (ADR 0112). And since
+that counter ahead of the sender position that is not a multiple of the frame
+alignment, or that lies more than two term lengths past it, is not a position this
+publication's recorder writes, and the sender does not follow it: it stays where it is,
+counts each such value once in `log_buffer.rejected_position`, evicts no client, and
+follows again when the counter holds a position it can follow (ADR 0112). And since
 the consumer position is then the sender position, which follows the recorder, a
 publisher alone with its recording is back-pressured one window past its recorder, as
 over `cavalry:ipc`.
@@ -431,10 +431,14 @@ position plus the receiver's window; then the status message connects the public
 as any does. The receiver is sent every frame from its own position on and has nothing
 to NAK: the term behind the sender position is never cleaned. What the sender goes
 back over above its sent position was passed while the publication was alone and is
-sent now for the first time. What it goes back over below it went to a receiver
-before, the one that comes back among them: it was never counted in the gauge, is not
-taken off it, and is sent again, counted in `sender.bytes_sent` and
-`sender.frames_sent` as any data frame is. So the gauge is never below 0 (ADR 0112). A status
+sent now for the first time. What it goes back over below it is not taken off the
+gauge, and is sent again, counted in `sender.bytes_sent` and `sender.frames_sent` as
+any data frame is. While one receiver at a time is joined, those bytes went to a
+receiver before, the one that comes back among them, and were never counted. Two
+receivers, or two images of one, can begin at different positions within a term. Then
+a byte passed while alone can lie below the sent position and be sent later, by a
+retransmit or after the sender went back, and it stays counted. So the gauge is never
+below 0. It may read more than went to no receiver, and never less (ADR 0112). A status
 message whose position is further behind is rejected and counted in
 `sender.status_messages_rejected`, since the frames it would need are no longer in the
 log. Every heartbeat that receiver is then sent is an over-run, which is no activity
@@ -701,7 +705,7 @@ lands: the sender's and the endpoint's rows, the publication's connection and
 | `sender.flow_control_receivers_timed_out` | a receiver is dropped from a `min` publication's table for no status message within the flow control receiver timeout; one dropped because its last status message carried end of stream is not counted (ADR 0054) |
 | `sender.flow_control_receivers_full` | a status message from a receiver a `min` publication's full table does not hold: accepted, not tracked |
 | `sender.position`, `sender.limit`, `sender.flow_control_receivers` | keyed as `publication.position` is: the sender position and the sender limit of one publication, and the receivers in its `min` table now, a closed publication's ended receivers among them until the linger ends (ADR 0056), 0 under `max` |
-| `sender.bytes_unsent` | keyed as `publication.position` is, for a publication whose channel names `ssc=true` and no other, a gauge, never below 0: the bytes that went to its recording and to no receiver, what its sender position passed above its sent position while it was alone with its recording, less what it went back over above its sent position for a receiver that joined (ADR 0098, ADR 0112) |
+| `sender.bytes_unsent` | keyed as `publication.position` is, for a publication whose channel names `ssc=true` and no other, a gauge, never below 0: the bytes that went to its recording and to no receiver, or more where receivers began at different positions within a term, what its sender position passed above its sent position while it was alone with its recording, less what it went back over above its sent position for a receiver that joined (ADR 0098, ADR 0112) |
 | `receiver.bytes_received`, `receiver.frames_received` | a data or padding frame is accepted: the bytes as they came off the wire, 32 for a padding frame, and one frame each |
 | `receiver.setups_received`, `receiver.setups_unwanted`, `receiver.setups_elicited` | a setup frame arrives; one names a stream nobody wants; a status message asked a sender for one |
 | `receiver.heartbeats_received` | a heartbeat is accepted |
