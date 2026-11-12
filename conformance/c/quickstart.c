@@ -263,6 +263,28 @@ static void publish_and_receive_all(cavalry_publication_t *publication, receiver
     }
 }
 
+/* Polls until the receiver's subscription holds an image, within the bound. A stream
+ * to two destinations is published only once each destination has its image. The
+ * publication is connected, and can be claimed on, as soon as one destination's
+ * status message arrives; the other destination's image then joins at the position
+ * the stream has reached, and what was published before it is never sent to it
+ * again (spec/udp.md, "The sender"). So a program that claims at once reads all of
+ * the stream at the second destination only when the driver is quicker than it. */
+static void await_image(receiver_t *r) {
+    struct timespec until = deadline();
+    for (;;) {
+        if (cavalry_subscription_poll(r->subscription, on_fragment, r, 16) < 0)
+            fail("cavalry_subscription_poll");
+        int count = cavalry_subscription_image_count(r->subscription);
+        if (count < 0) fail("cavalry_subscription_image_count");
+        if (count > 0) return;
+        if (passed(&until)) {
+            fprintf(stderr, "conformance/c: %s: no image in %d s\n", r->name, WAIT_SECONDS);
+            exit(1);
+        }
+    }
+}
+
 static void publish_and_receive(cavalry_publication_t *publication, receiver_t *r) {
     receiver_t *rs[1] = {r};
     publish_and_receive_all(publication, rs, 1);
@@ -392,6 +414,10 @@ int main(void) {
     mdc_a.subscription = sub_a;
     mdc_b.subscription = sub_b;
     receiver_t *both[2] = {&mdc_a, &mdc_b};
+    /* Each destination has its image before the first message, so that neither joins
+     * the stream after it. */
+    await_image(&mdc_a);
+    await_image(&mdc_b);
     publish_and_receive_all(mdc_pub, both, 2);
     printf("conformance/c: %d messages over %s to two destinations by session %" PRId32
            " received once, in order, at each\n", MESSAGES, control_channel, mdc_a.session_id);
