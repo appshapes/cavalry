@@ -1060,7 +1060,11 @@ impl Sender {
         // back to it and sends from there, so the receiver has nothing to NAK; the
         // term behind the sender position is never cleaned, and nothing in it was sent.
         // Further behind, what it would need is no longer in the log: rejected, and its
-        // image times out and joins again. The limit is set anew from this receiver.
+        // image times out and joins again. The limit is set anew from this receiver. A
+        // receiver ahead of the sender position, whose image began where an earlier
+        // setup frame put it before the sender went back for another, is no join to go
+        // back for: its status message is taken below as any is, and it drops what the
+        // sender sends below its position as under-runs.
         if live.alone(now) {
             let position = cavalry_proto::udp::position(
                 message.consumption_term_id,
@@ -1069,18 +1073,20 @@ impl Sender {
                 live.positions.term_length(),
             );
             let behind = live.sender_position.wrapping_sub(position);
-            if behind < 0 || behind > i64::from(live.positions.term_length()) {
+            if behind > i64::from(live.positions.term_length()) {
                 self.statics.status_messages_rejected.increment();
                 return;
             }
-            if let Some(unsent) = &live.unsent {
-                unsent.add(-behind);
+            if behind >= 0 {
+                if let Some(unsent) = &live.unsent {
+                    unsent.add(-behind);
+                }
+                live.sender_position = position;
+                live.position.store_release(position);
+                live.sender_limit = position;
+                live.limit.store_release(position);
+                live.limited = false;
             }
-            live.sender_position = position;
-            live.position.store_release(position);
-            live.sender_limit = position;
-            live.limit.store_release(position);
-            live.limited = false;
         }
         let limit = sender_limit(
             live.sender_position,

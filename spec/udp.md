@@ -422,15 +422,21 @@ sender sets its sender position back to it, takes the bytes it goes back over of
 receiver's window; then the status message connects the publication as any does. The
 receiver is sent every frame from its own position on and has nothing to NAK: the
 term behind the sender position is never cleaned, and nothing in it was sent. A status
-message whose position is further behind, or ahead of the sender position, is rejected
-and counted in `sender.status_messages_rejected`, since the frames it would need are
-no longer in the log. Every heartbeat that receiver is then sent is an over-run, which
-is no activity ("The receiver", steps 2 and 5): its image times out, its subscribers
-are told with `unavailable image`, and after the cool-down a new image joins at the
-sender position. So no image is left waiting for frames that will not come, nothing is
-counted as sent that no receiver took, and what a receiver's image begins after is in
-the recording, for a replay (`spec/client-protocol.md`, "Commands", start replay; ADR
-0098).
+message whose position is further behind is rejected and counted in
+`sender.status_messages_rejected`, since the frames it would need are no longer in the
+log. Every heartbeat that receiver is then sent is an over-run, which is no activity
+("The receiver", steps 2 and 5): its image times out, its subscribers are told with
+`unavailable image`, and after the cool-down a new image joins at the sender position.
+A status message whose position is ahead of the sender position is no join to go back
+for: it is taken as any status message is, accepted within the window above and
+rejected outside it, and an accepted one connects the publication with the sender
+position where it stands. That receiver's image began where an earlier setup frame put
+it, before the sender went back for another receiver, so what the sender sends below
+the receiver's position the receiver drops as under-runs ("The receiver", step 2)
+until the sender position reaches it. So no image is left waiting for frames that will
+not come, nothing is counted as sent that no receiver took, and what a receiver's image
+begins after is in the recording, for a replay (`spec/client-protocol.md`, "Commands",
+start replay; ADR 0098).
 After the publication is closed
 it lingers for the linger timeout, sending heartbeats with EOS and answering NAKs; then
 its log is removed. On a channel with an endpoint a status message with the

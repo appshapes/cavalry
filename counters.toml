@@ -688,7 +688,7 @@ id = 61
 name = "sender.limit"
 kind = "gauge"
 scope = "instance"
-doc = "The sender limit of one cavalry:udp publication: the consumption position of the last accepted status message plus its receiver window length, never lowered; key and label as sender.position."
+doc = "The sender limit of one cavalry:udp publication: the consumption position of the last accepted status message plus its receiver window length, never lowered but for one case: a receiver that joins a publication alone with its recording, under ssc=true, has the limit set anew from its own position, which is behind the sender position the publication had moved to (spec/udp.md, The sender; ADR 0098); key and label as sender.position."
 doctor = "A sender.limit that stays at 0 is a publication no receiver has answered: see sender.setups_sent; one that stops rising while sender.position reaches it is a receiver whose subscriber is slow."
 
 [[counter]]
