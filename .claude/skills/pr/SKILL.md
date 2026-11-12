@@ -56,6 +56,23 @@ conflict: a conflict is resolved in place, as step 4 says.
    `tail` printed `exit 0` under its own `CONFLICT` line, and a background job of two
    gates read `completed (exit code 0)` whatever either gate had done (card 266).
 
+   A change under `crates/cavalry-shm` runs two more before the push, because `gates
+   (linux)` runs them for every pull request and the four gates above do not:
+
+   ```
+   just loom; echo "loom exit $?"
+   just miri; echo "miri exit $?"
+   ```
+
+   `rustup toolchain install nightly` and `rustup +nightly component add miri`, once,
+   install what `just miri` needs. Miri runs with isolation on, so a test that reads
+   the host's wall clock, `SystemTime::now()`, stops the whole run with "`clock_gettime`
+   with `REALTIME` clocks not available when isolation is enabled"; such a test carries
+   `#[cfg_attr(miri, ignore)]` and its reason. Both exit lines go in the body
+   (`.claude/rules/data-plane.md`, "Evidence in the commit message"). Pull request
+   253's first review on 2026-11-12 was that stop, in two tests the four gates had
+   passed.
+
    The laptop's gates compile the laptop's platform alone. A change that adds or
    touches a `cfg(target_os = "linux")` block, or its `not` twin, is type-checked for
    Linux before the push, because the Linux gates and both bench hosts build it:
