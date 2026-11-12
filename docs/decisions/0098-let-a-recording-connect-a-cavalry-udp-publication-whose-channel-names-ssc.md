@@ -112,12 +112,17 @@ to version 9; no frame changes.
 - **A late receiver is not left stalled.** The receiver drops a data datagram, and a
   heartbeat, whose position is more than half a term past its last status message, as
   an over-run, and an over-run is not activity (`crates/cavalry-driver/src/receiver.rs`,
-  `on_heartbeat`; `spec/udp.md`, "The receiver", steps 2 and 5). So an image whose
-  sender moved on by more than half a term while it was away times out after the image
-  liveness timeout and is retired with `unavailable image`, and its subscribers are
-  told. One within half a term is accepted by the sender, since its status message
-  lies in the window, and NAKs what it missed, which lies in the resend window: both
-  are half a term.
+  `on_heartbeat`; `spec/udp.md`, "The receiver", steps 2 and 5). A receiver whose
+  status message arrives while the publication is alone with its recording, and names
+  a position more than a term behind the sender position, is rejected. Every heartbeat
+  it is then sent lies more than a term, so more than half a term, past its last
+  status message, and is an over-run. Its image therefore times out after the image
+  liveness timeout and is retired with `unavailable image`, its subscribers are told,
+  and after the cool-down a new image joins at the sender position. A receiver at most
+  a term behind is gone back for, as the Decision says, and has nothing to NAK. While
+  another receiver keeps the publication connected, the publication is not alone and
+  the sender goes back for no receiver: one that comes back then is taken in the
+  ordinary window, as before this decision (`spec/udp.md`, "The sender").
 - **Going back is safe.** The conductor cleans a `cavalry:udp` log up to a term length
   behind the sender position and no further, from a position the sender itself
   stored, so the term behind the sender position is whole. A publisher is at most a
