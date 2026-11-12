@@ -3017,6 +3017,55 @@ fn a_member_whose_record_holds_a_term_and_no_record_of_its_recordings_is_refused
     );
 }
 
+/// A log directory that holds a log and a record of terms with no term in it has
+/// lost its `terms` file: removed, or replaced by an empty one. The member's votes
+/// and the terms of its log were in it. A start on it would report a log of no
+/// term, be told to cut it all, and vote meanwhile with no record of its votes, so
+/// the start is refused with what to do.
+#[test]
+fn a_member_whose_log_has_lost_its_record_of_terms_is_refused() {
+    let mut pair = pair("start-no-terms");
+    let (one, _first) = pair.follow_and_leave(0, 0, &[b"one"]);
+    pair.member
+        .io
+        .record_term(0, 0)
+        .expect("term 0 is recorded");
+    let Pair {
+        leader: _leader,
+        member,
+        member_driver_dir,
+        member_log_dir,
+        members,
+        _drivers,
+        _dir,
+        ..
+    } = pair;
+    member.close().expect("the member closes");
+    std::fs::remove_file(TermsFile::path_in(&member_log_dir)).expect("the terms file is removed");
+
+    let refused = ConsensusModule::start(&member_driver_dir, &member_log_dir, &members, 1)
+        .expect_err("a log and no term");
+    assert!(
+        matches!(&refused, RaftError::TermsLost { log_end } if *log_end == one),
+        "{refused}"
+    );
+    assert_eq!(refused.reason(), "terms-lost");
+    let text = refused.to_string();
+    assert!(text.contains(&format!("to position {one}")), "{text}");
+    assert!(
+        text.contains("Do not start this member alone on a new log directory"),
+        "{text}"
+    );
+    assert!(
+        text.contains("docs/reference/cluster.md#roles-and-the-election"),
+        "{text}"
+    );
+    // Asked again, it is refused again: the file the first start made holds no term.
+    let again = ConsensusModule::start(&member_driver_dir, &member_log_dir, &members, 1)
+        .expect_err("a log and no term");
+    assert_eq!(again.reason(), "terms-lost");
+}
+
 /// A truncation that leaves no recording in the table still leaves the member
 /// knowing where its log ends, across a start (ADR 0108). The table holds three
 /// recordings that begin at 256 and above, having forgotten the ones below (ADR
@@ -3045,7 +3094,9 @@ fn a_truncation_that_empties_the_table_keeps_where_the_log_ends() {
         });
     }
     member.io.stopped_at = 448;
-    assert_eq!(member.io.truncate_log(128).expect("truncated"), Some(-1));
+    // The term of that log, based at 0: a log with no term is refused at a start.
+    member.io.record_term(0, 0).expect("term 0 is recorded");
+    assert_eq!(member.io.truncate_log(128).expect("truncated"), Some(0));
     assert!(member.io.kept.is_empty());
     assert_eq!(member.io.append_position(), 128);
     assert_eq!(record_in(&member_log_dir, 1), (128, 1, vec![]));
@@ -3055,5 +3106,6 @@ fn a_truncation_that_empties_the_table_keeps_where_the_log_ends() {
         .expect("the member starts on the log it kept");
     assert_eq!(member.io.append_position(), 128);
     assert!(member.io.kept.is_empty());
+    assert_eq!(member.io.log_leadership_term_id(), 0);
     assert_eq!(record_in(&member_log_dir, 1), (128, 1, vec![]));
 }

@@ -183,6 +183,11 @@ committed once a quorum, two of three, has it on disk.
   or it is damaged, and the message names the check it failed. Start the member with
   its own log directory. If the file is damaged, do as for a directory with no
   file, above.
+- `cavalry run: member refused (terms-lost)`: the member's log directory holds its
+  log and a `terms` file that holds no term. The file was removed or replaced, and
+  the member's votes and the terms of its log were in it. Start the member with the
+  log directory it had, whole. If the file is lost, do as for a directory with no
+  `log-recordings` file, above.
 - `cavalry run: member refused (listed-recording)`: the `catalog` in the member's
   log directory does not hold the recordings that its `log-recordings` file names.
   The message names the recording and what the catalog holds in its place. The

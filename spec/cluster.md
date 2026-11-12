@@ -764,7 +764,10 @@ member starts with.
 A member does not start, and says why and what to do, in each of these cases. Its
 record of terms holds a term and its log directory holds no log recordings file:
 the directory is one a version before ADR 0108 wrote, or the file was removed, and
-the member cannot tell its log from the other recordings in the catalog. The file
+the member cannot tell its log from the other recordings in the catalog. Its log
+directory holds a log, one that ends above 0, and its record of terms holds no
+term: the `terms` file was removed or replaced, and the terms of the log and the
+votes the member cast went with it. The file
 fails a check of `spec/durable-log.md`, "What a reader rejects", or names another
 member. Or the catalog holds, in place of a recording the file names: no recording,
 before one that it does hold; a recording the driver found damaged; a recording that

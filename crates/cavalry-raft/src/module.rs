@@ -88,6 +88,16 @@ pub enum RaftError {
     /// the recording that was to join the member's log is no part of it yet, and the
     /// next cycle writes the record again.
     Recordings(RecordingsError),
+    /// The member's log directory holds a log and a record of terms that holds no
+    /// term (`spec/cluster.md`, "A member's start"; ADR 0108): the `terms` file was
+    /// removed or replaced, and with it went the terms of the log and the votes the
+    /// member cast. A member records a term before its record of the log's
+    /// recordings names a recording of that term, and a truncation that deletes
+    /// every term has cut the log to nothing first, so no stop leaves this.
+    TermsLost {
+        /// Where the log the directory holds ends.
+        log_end: i64,
+    },
     /// The catalog in the member's log directory does not hold the member's log as
     /// its record of the log's recordings names it (`spec/cluster.md`, "A member's
     /// start"; ADR 0108): the directory is not as the member left it, and the member
@@ -169,14 +179,15 @@ pub enum ListedFound {
 }
 
 impl RaftError {
-    /// The reason's name: `members`, `member`, `recordings`, `listed-recording`,
-    /// `terms`, `catalog`, `client`, `poll`, `unsupported`, `payload-too-long`, `offer`,
+    /// The reason's name: `members`, `member`, `recordings`, `terms-lost`,
+    /// `listed-recording`, `terms`, `catalog`, `client`, `poll`, `unsupported`, `payload-too-long`, `offer`,
     /// `stop-timeout` or `log-recordings`.
     pub const fn reason(&self) -> &'static str {
         match self {
             RaftError::Members(_) => "members",
             RaftError::Member(_) => "member",
             RaftError::Recordings(_) => "recordings",
+            RaftError::TermsLost { .. } => "terms-lost",
             RaftError::ListedRecording { .. } => "listed-recording",
             RaftError::Terms(_) => "terms",
             RaftError::Catalog(_) => "catalog",
@@ -200,6 +211,19 @@ impl core::fmt::Display for RaftError {
             }
             RaftError::Member(error) => write!(f, "member refused ({reason}): {error}"),
             RaftError::Recordings(error) => write!(f, "member stopped ({reason}): {error}"),
+            RaftError::TermsLost { log_end } => write!(
+                f,
+                "member refused ({reason}): the member's log directory holds its log to \
+                 position {log_end}, and its record of terms, the `terms` file, holds no \
+                 term: that file was removed or replaced. The terms of the log and the \
+                 votes the member cast were in it, and the member does not start without \
+                 them. Start it with the log directory it had, whole, as its driver left \
+                 it. If the file is lost, leave the member stopped: the cluster goes on \
+                 while a quorum of the others runs, and a cluster is brought back to its \
+                 full count by starting it again as a new cluster, every member on a new \
+                 log directory. Do not start this member alone on a new log directory; \
+                 see {DOC}"
+            ),
             RaftError::ListedRecording {
                 recording_id,
                 listed_start,
@@ -1895,9 +1919,10 @@ impl ConsensusModule {
     /// stop cut short. Nothing else shortens the log a member starts on. A directory
     /// of another member's, a record of terms that holds a term beside no record of
     /// the log's recordings, which a version before ADR 0108 left
-    /// ([`RaftError::Recordings`]), and a catalog that does not hold the recordings
-    /// the record names ([`RaftError::ListedRecording`]) are each refused with what
-    /// to do, and the member does not start.
+    /// ([`RaftError::Recordings`]), a log beside a record of terms that holds no
+    /// term ([`RaftError::TermsLost`]), and a catalog that does not hold the
+    /// recordings the record names ([`RaftError::ListedRecording`]) are each refused
+    /// with what to do, and the member does not start.
     pub fn start(
         dir: impl AsRef<Path>,
         log_dir: impl AsRef<Path>,
@@ -1961,6 +1986,13 @@ impl ConsensusModule {
             |recording_id| cataloged(&catalog, recording_id),
             |recording_id| stop_listed(&mut client, &catalog, recording_id),
         )?;
+        // A log and no term of it: the record of terms is not the one this log was
+        // recorded beside, and the member's votes went with it.
+        if stopped_at > 0 && terms.log_leadership_term_id() == -1 {
+            return Err(RaftError::TermsLost {
+                log_end: stopped_at,
+            });
+        }
         let floor = kept.front().map_or(stopped_at, |first| first.start);
         let unchanged = recordings.floor_position() == floor
             && recordings.entries().len() == kept.len()

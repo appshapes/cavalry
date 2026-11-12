@@ -112,8 +112,15 @@ driver marked damaged; a recording that begins elsewhere or is of another stream
 or a recording that begins past where the ones before it end. Nor does it start
 on a file that fails a check or names another member. Each of these would read
 back a shorter log, and a member that stays out is a member the cluster already
-tolerates. Every recording is checked before any is stopped, so a refused start
-has changed nothing.
+tolerates. Every recording is checked before any is stopped, so a start refused
+for what a recording is has changed nothing.
+
+**A log with no term refuses the start too.** A member records a term before its
+list names a recording of that term, and a truncation that deletes every term has
+cut the log to nothing first. So a directory whose log ends above 0 and whose
+`terms` file holds no term has lost that file, or had it replaced, and the member's
+votes with it. Started on it, the member would report a log of no term, be told to
+cut all of it, and vote meanwhile as a member that had never voted.
 
 **No list is created beside a term.** A member whose `terms` file holds a term
 holds a log. For such a member the module opens the file and never creates it: no
@@ -135,8 +142,9 @@ process alone the scan finds every byte the recorder wrote, whole. This answers
 ADR 0089's Revisit: the read at a start is behind a check of the recordings, and
 that check is as strong as the durable log's own.
 
-`RaftError::Restart` goes. `RaftError::Recordings` carries the file's refusals and
-`RaftError::ListedRecording` the catalog's.
+`RaftError::Restart` goes. `RaftError::Recordings` carries the file's refusals,
+`RaftError::ListedRecording` the catalog's, and `RaftError::TermsLost` the log with
+no term.
 
 ## Alternatives considered
 
@@ -207,7 +215,8 @@ that check is as strong as the durable log's own.
     recording it never counted; a member stopped after a truncation's first
     command, and one stopped after its write of the list, each started on the
     recordings that were left with the term above them deleted; a directory with a
-    term and no file refused, and left as it was; a truncation that empties a
+    term and no file refused, and left as it was; a directory with a log and no
+    `terms` file refused, twice; a truncation that empties a
     table of three recordings above 128, and a start that reads 128 back.
   - Over three drivers, each member's driver closed and started with it, twenty
     runs of three tests, all passed. A follower lost and started again held the
