@@ -6,13 +6,12 @@
 //! alone; `just test` runs it with the rest.
 
 use cavalry_proto::cluster::{
-    AppointedCanvass, Ballot, Candidate, CanvassAction, CanvassTerms, ChangeType, CloseReason,
-    ClusterAction, ClusterError, CommitPosition, EMPTY_MEMBER, EventCode, LogRecording,
-    LogRecordings, LogReport, MAX_LOG_RECORDINGS, MAX_LOG_RECORDINGS_LENGTH, MAX_MEMBERS, Member,
-    MemberPosition, Message, NewLeadershipTermAction, NextFields, RecordedTerms, ReplayEnd,
-    ReplicationStop, SnapshotMark, Stream, TermFields, TermSpan, TimeUnit, VERSION, Vote,
-    VoteAnswer, VoteRequest, answered_term, appointed_canvass, appointed_leader, ballot, candidate,
-    canvass_position_action, commit_position, entry_position, leader_ready, log_at_least,
+    Ballot, Candidate, CanvassAction, CanvassTerms, ChangeType, CloseReason, ClusterAction,
+    ClusterError, CommitPosition, EMPTY_MEMBER, EventCode, LogRecording, LogRecordings, LogReport,
+    MAX_LOG_RECORDINGS, MAX_LOG_RECORDINGS_LENGTH, MAX_MEMBERS, Member, MemberPosition, Message,
+    NewLeadershipTermAction, NextFields, RecordedTerms, ReplayEnd, ReplicationStop, SnapshotMark,
+    Stream, TermFields, TermSpan, TimeUnit, VERSION, Vote, VoteAnswer, VoteRequest, answered_term,
+    ballot, candidate, canvass_position_action, commit_position, entry_position, log_at_least,
     new_leadership_term_action, next_fields, parse_members, quorum, replay_end, replication_record,
     replication_stop, request_vote, write_log_recordings,
 };
@@ -638,56 +637,6 @@ fn arithmetic_vector(name: &str, vector: &Value) {
             )
             .unwrap_or_else(|| panic!("{name}: no position after the entry"));
             json!({"fragments": after.fragments, "position_after": after.position_after})
-        }
-        "appointed-leader" => {
-            let ids: Vec<i32> = inputs["members"]
-                .as_array()
-                .expect("members")
-                .iter()
-                .map(|id| i32::try_from(id.as_i64().expect("id")).expect("id"))
-                .collect();
-            json!({"leader": appointed_leader(&ids)})
-        }
-        "appointed-canvass" => {
-            let members = usize::try_from(int(inputs, "members")).expect("members");
-            let log = |value: &Value| {
-                value.as_array().map(|pair| LogReport {
-                    term: pair[0].as_i64().expect("term"),
-                    position: pair[1].as_i64().expect("position"),
-                })
-            };
-            let reports: Vec<Option<LogReport>> = inputs["reports"]
-                .as_array()
-                .expect("reports")
-                .iter()
-                .map(log)
-                .collect();
-            let AppointedCanvass {
-                leads,
-                unanimous,
-                ahead,
-            } = appointed_canvass(
-                members,
-                &reports,
-                log(&inputs["own"]).expect("own"),
-                inputs["deadline_passed"]
-                    .as_bool()
-                    .expect("deadline_passed"),
-            );
-            json!({"leads": leads, "unanimous": unanimous, "ahead": ahead})
-        }
-        "leader-ready" => {
-            let count = |name: &str| usize::try_from(int(inputs, name)).expect("a count");
-            let closes = leader_ready(
-                count("members"),
-                count("heard"),
-                count("counted"),
-                count("ahead"),
-                inputs["deadline_passed"]
-                    .as_bool()
-                    .expect("deadline_passed"),
-            );
-            json!({"closes": closes})
         }
         other => panic!("{name}: unknown rule {other}"),
     };
