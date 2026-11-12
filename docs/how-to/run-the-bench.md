@@ -39,8 +39,8 @@ shared runner is
    `$CAVALRY_BENCH_PROFILE` when set, as CI sets `bench-linux`, `grip-linux`, `linux`
    or `macos`, and `local-<os>-<arch>` otherwise. Pass arguments after the recipe:
    `just bench --messages 5000000` runs longer and makes p99.99 steadier (at most
-   100,000,000: a message row has room for its samples, 16 bytes a message and 24
-   in the link rows, until its loop is over),
+   100,000,000: a message row's subscriber has room for its samples, 8 bytes a
+   message and 16 in the link rows, until its loop is over),
    `just bench --pin 8,10,12,14` binds the publisher, the subscriber and the driver's
    conductor to the first three CPUs, on Linux only, with the driver's recorder and
    replayer and the client's conductor on the lowest CPU outside them, so each pinned
@@ -605,10 +605,11 @@ shared runner is
   inside one of those mappings, whose ranges are the first column of the process's
   `maps` taken during the same benchmark; a fault there is a bug, not a cost. The faults
   that remain on a pinned CPU are the harness's own, and each is a burst at a row's
-  setup, before its measured loop: the pages of the buffer a message row's thread
-  keeps its late samples in, with room for eight bytes a message
-  ([ADR 0090](../decisions/0090-keep-a-message-rows-samples-out-of-the-histogram-until-its-loop-is-over.md)),
-  and in the timer, slot and record rows the 54 pages of a histogram's counts, each
+  setup, before its measured loop: the pages of the buffer a message row's
+  subscriber keeps its late samples in, with room for eight bytes a message
+  ([ADR 0090](../decisions/0090-keep-a-subscribers-samples-out-of-the-histogram-until-its-loop-is-over.md)),
+  and the 54 pages of a histogram's counts, for the publisher's samples and for the
+  timer, slot and record rows, each
   written once when it is made, so that no sample first-touches one inside the
   loop. A fault spread through a loop is a bug. `sched:sched_waking` to the pinned CPUs
   names no Cavalry thread as the wakee, apart from the driver's conductor waking from
