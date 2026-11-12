@@ -13,7 +13,9 @@
   file and the rule of order, "Messages during an election" says where a
   truncation writes it, and "A member's start" is written again. No message's
   layout changes and no function of the C ABI: the cluster page stays at version
-  0.
+  0. Amends ADR 0100 in one clause, for this change alone: the change lands in two
+  pull requests, and the two pages are true of a member started with `cavalry run`
+  only after the second ("Two pull requests", below).
 
 ## Context
 
@@ -141,6 +143,17 @@ frames past it are the path that is not covered. After a crash of the member's
 process alone the scan finds every byte the recorder wrote, whole. This answers
 ADR 0089's Revisit: the read at a start is behind a check of the recordings, and
 that check is as strong as the durable log's own.
+
+**Two pull requests.** A change to `spec/` lands with the Accepted decision behind
+it, and an Accepted decision is not edited, so every sentence this decision puts
+on the two pages lands with it, in the first pull request: the decision, the
+pages, the vectors and the file's reader and writer in `cavalry-log`. The second
+holds the consensus module's use of the file, its tests over drivers and the
+how-to. Between the two, the pages say what a member will do and `cavalry run`
+still refuses a log directory that holds a term: ADR 0100 asks that every
+sentence of `spec/cluster.md` be true after each pull request, and this change
+keeps that only after its second. The crates' READMEs say, between the two, each
+thing the pages state and no code does yet.
 
 `RaftError::Restart` goes. `RaftError::Recordings` carries the file's refusals,
 `RaftError::ListedRecording` the catalog's, and `RaftError::TermsLost` the log with
