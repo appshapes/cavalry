@@ -6,7 +6,9 @@
 - **Supersedes:** none. Settles who makes the re-record that ADR 0032 calls "a
   person's commit", that ADR 0050 calls "a person's commit (ADR 0032)" and "a
   re-record that a person makes under ADR 0032", and that
-  `docs/how-to/run-the-bench.md`, step 4, describes. When a baseline is re-recorded
+  `docs/how-to/run-the-bench.md`, step 4, describes. Its third case settles as well
+  the sentence in ADR 0050's Alternatives, "The how-to already gives the re-record
+  after a harness change to a person". When a baseline is re-recorded
   and from which processes stay ADR 0033's and ADR 0050's, and, after a change to the
   harness, that change's own ADR's.
 
@@ -123,7 +125,8 @@ is judged against ADR 0033, ADR 0050 and this ADR.
 - [ADR 0033](0033-record-a-bench-baseline-from-every-process-at-one-tree.md) and
   [ADR 0050](0050-re-record-at-a-tree-where-pull-requests-read-red.md): when, and
   from which processes. ADR 0050: "The re-record is a person's commit (ADR 0032)"
-  and "a re-record that a person makes under ADR 0032".
+  and "a re-record that a person makes under ADR 0032", and, in its Alternatives,
+  "The how-to already gives the re-record after a harness change to a person".
 - [ADR 0090](0090-keep-a-subscribers-samples-out-of-the-histogram-until-its-loop-is-over.md):
   the harness change behind pull request 243, and the third case's instance.
 - `.claude/agents/reviewer.md`, the blocker checklist under Latency (2): the line on
