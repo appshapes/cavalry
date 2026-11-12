@@ -95,6 +95,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(miri, ignore)] // Miri's isolation refuses the host's wall clock (CLOCK_REALTIME)
     fn a_nano_reading_is_no_epoch_time() {
         // The origin is the process's first reading, so a nano reading taken for an
         // epoch time is decades old: the mistake fails the first heartbeat check.
@@ -107,6 +108,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(miri, ignore)] // Miri's isolation refuses the host's wall clock (CLOCK_REALTIME)
     fn the_epoch_clock_is_the_wall_clock() {
         let before = SystemTime::now()
             .duration_since(UNIX_EPOCH)
