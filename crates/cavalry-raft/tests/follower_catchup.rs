@@ -93,9 +93,9 @@ fn place(io: &Stub, call: Call) -> usize {
 /// of the leader's position. The replay brings it to 160, past where the live image
 /// joined, 128: from there its report carries the catch-up flag. The leader says
 /// stop: the catch-up subscription goes. It is then on the live log, at or past the
-/// commit position it was told, and goes through follower log init, already
-/// subscribed, to follower ready, where its report without the flag closes its
-/// election.
+/// commit position it had been told when it read stop catch-up, and goes through
+/// follower log init, already subscribed, to follower ready, where its report without
+/// the flag closes its election.
 #[test]
 fn a_member_behind_its_leaders_log_catches_up_and_joins() {
     let mut io = Stub::new();

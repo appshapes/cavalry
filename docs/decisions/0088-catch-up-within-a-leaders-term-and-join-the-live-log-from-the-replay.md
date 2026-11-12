@@ -8,8 +8,9 @@
   unchanged. Changes rows 11 and 13 of `spec/cluster.md`, "Roles and the election":
   row 11 counts the catch-up position in `cluster.catchups` when it has left; row 13
   names the leader's position the live-add window is measured from, says that "no
-  progress" is an append position that has not moved, and says when a report
-  carries the catch-up flag. Changes what the catch-up flag of append position
+  progress" is an append position that has not moved, says when a report carries
+  the catch-up flag, and says which commit position the member must reach. Changes
+  what the catch-up flag of append position
   means, and in "Messages outside an election" when a leader sends stop catch-up
   and when a follower takes it. Adds the steps of the catch-up to the row of
   `cluster.election_steps` in "Counters". The page's version stays 0: no message's
@@ -226,7 +227,7 @@ the replay has brought the log to where it joined.
 
 ## Evidence
 
-- `crates/cavalry-raft/tests/follower_catchup.rs`, eight tests on one core through
+- `crates/cavalry-raft/tests/follower_catchup.rs`, nine tests on one core through
   an `Io` that remembers what it was asked.
   - A member at its leader's term base, told the leader's log is 96 bytes on,
     subscribes, then asks from its append position, counted. The image joins there.
@@ -248,9 +249,18 @@ the replay has brought the log to where it joined.
     comes before the member has reported with the flag. A member that
     was told to stop stays while the live image is not there, while its append
     position is below where the live image joined, and while it is below the commit
-    position it was told.
+    position it had been told when it read stop catch-up.
+  - A member told a commit position of 192 and then to stop stays while it is below
+    192, and leaves at 192, though it has been told 256 since. With the member
+    waiting for the commit position the leader goes on sending, the test fails: the
+    member is still in follower catch-up at 192.
   - An append position that does not move for the leader heartbeat timeout fails
     the election; init then leaves the live log and removes the subscription.
+  - A member whose replay's image joins 9.9 s after it asked is still in follower
+    catch-up at the leader heartbeat timeout after the asking, and fails at the
+    timeout after the joining. With the time run from the asking, the test fails:
+    the member has failed its election and is in init at the timeout after the
+    asking.
   - An appointed member behind its leader's log fails in follower replay.
 - `crates/cavalry-raft/tests/election.rs`, in memory, with the check after every
   step that no committed entry is lost. Five tests that ended with a member behind
