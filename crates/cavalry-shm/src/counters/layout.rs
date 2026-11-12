@@ -299,7 +299,8 @@ impl RecordFields {
         self.type_id
     }
 
-    /// When a reclaimed record may be reused, in nanoseconds since the Unix epoch; 0
+    /// When a reclaimed record may be reused, a reading of the driver's nano clock
+    /// ([`crate::clock::nano_time`]) in nanoseconds; 0
     /// when not reclaimed.
     pub const fn reclaim_deadline(&self) -> i64 {
         self.reclaim_deadline

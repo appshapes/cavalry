@@ -6,10 +6,10 @@ use core::fmt;
 use std::fs::OpenOptions;
 use std::path::Path;
 use std::sync::Arc;
-use std::time::{SystemTime, UNIX_EPOCH};
 
 use memmap2::{Mmap, MmapMut, MmapOptions};
 
+use crate::clock;
 use crate::pretouch;
 
 use super::cells::{HeaderCells, RecordCells, SlotCells};
@@ -151,15 +151,6 @@ impl Mapped {
     }
 }
 
-/// Nanoseconds since the Unix epoch, as every timestamp in `spec/`; 0 before the epoch.
-fn now_nanos() -> i64 {
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map_or(0, |since| {
-            i64::try_from(since.as_nanos()).unwrap_or(i64::MAX)
-        })
-}
-
 /// The record a static counter occupies: its id. [`CountersError::Full`] when the file
 /// has no such record, because `counters.toml` has a static counter beyond this
 /// capacity.
@@ -196,7 +187,8 @@ impl CountersFile {
     /// [`CountersError::Io`]; a static counter beyond the capacity is
     /// [`CountersError::Full`].
     pub fn create(dir: &Path, capacity: u32) -> Result<Self, CountersError> {
-        let fields = HeaderFields::new(capacity, i64::from(std::process::id()), now_nanos())?;
+        let fields =
+            HeaderFields::new(capacity, i64::from(std::process::id()), clock::epoch_time())?;
         let file = OpenOptions::new()
             .read(true)
             .write(true)
@@ -259,7 +251,9 @@ impl CountersFile {
     }
 
     /// Allocates a counter of type `type_id` with `key` and `label` in the first record
-    /// that is unused or reclaimed past its deadline, sets its value to 0, publishes
+    /// that is unused or reclaimed past its deadline, read against this process's nano
+    /// clock ([`crate::clock::nano_time`], as [`free`](Self::free) says), sets its value
+    /// to 0, publishes
     /// the record, and adds one to `counters.allocated` and to `counters.allocations`,
     /// the transition's own count (invariant 4). When no record is free the
     /// error is [`CountersError::Full`] and `counters.allocation_failed` gains one
@@ -275,7 +269,8 @@ impl CountersFile {
     ) -> Result<Counter, CountersError> {
         let fields = RecordFields::new(State::Allocated, type_id.0, 0, key, label)?;
         let capacity = self.capacity();
-        let now = now_nanos();
+        // The deadline is a reading of the nano clock, the conductor's own (ADR 0109).
+        let now = clock::nano_time();
         let mut free = None;
         for id in 0..capacity {
             let record = self.mapped.record(id)?;
@@ -301,7 +296,10 @@ impl CountersFile {
     }
 
     /// Frees counter `id`: its record becomes reclaimed and may be allocated again after
-    /// `reusable_after` nanoseconds since the Unix epoch, `counters.allocated` loses one
+    /// `reusable_after`, a reading of this process's nano clock
+    /// ([`crate::clock::nano_time`]) and of no other clock: [`allocate`](Self::allocate)
+    /// compares it with its own reading of that clock, which a step of the host's clock
+    /// does not move (ADR 0109). `counters.allocated` loses one
     /// and `counters.freed` gains one, so that how often records were freed is read from
     /// a counter and not inferred from a gauge that moved back (invariant 4). A handle
     /// on the counter keeps working on its slot; readers see no counter.
