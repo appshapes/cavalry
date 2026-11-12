@@ -499,7 +499,9 @@ What the driver does with each, after the checks of "What the driver rejects":
   replay's publication is created at the replay's position under its recording's
   initial term id (ADR 0059). One that names `ssc` is error code 1 with the reason
   `ssc`, at the same point, since a replay moves only while a receiver answers and a
-  recording of the replay's publication must not move it (ADR 0098). A replay channel that is neither `cavalry:ipc` nor a `cavalry:udp`
+  recording of the replay's publication must not move it (ADR 0098); a channel that
+  names both is refused for the position key, the first of the two this protocol
+  read. A replay channel that is neither `cavalry:ipc` nor a `cavalry:udp`
   channel this version accepts is error code 1; a `cavalry:udp` replay channel's host is
   resolved once as the command is handled, as every command's is (`spec/udp.md`, "The
   channel URI"; ADR 0043), code 9 when it does not resolve; a length below
