@@ -138,8 +138,9 @@ The replay is asked of the live recording and the driver refuses it with code 23
 as before.
 
 **A reader reads a bounded file.** It opens the file once and reads at most 24,641
-bytes, one more than the longest file, so a longer file is refused by its length
-whatever it holds. A file that fails a check, or that the operating system will
+bytes, one more than the longest file, so a longer file fails a check whatever it
+holds: the check of its length, when the checks before it pass. A file that fails a
+check, or that the operating system will
 not let it read, is the reader's error, which names the file and the check; over
 the C ABI it is code 113, `IO`.
 

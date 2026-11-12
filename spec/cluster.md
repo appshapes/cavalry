@@ -966,7 +966,8 @@ service ("The service"; ADR 0103). The module writes the file whole under the na
 `log-recordings-<member id>.tmp` and renames it over the file, so a reader reads one
 whole file or the one before it; a reader opens the file once and reads at most
 24,641 bytes of it, one byte more than the longest file, 40 + 1,025 × 24, so that a
-file longer than that is refused with `recordings-length` whatever it holds; a file
+file longer than that fails a check whatever it holds, `recordings-length` when the
+checks before it pass ("What a reader rejects"); a file
 the operating system will not let it open or read is the reader's error, which
 names the file. The module writes it each time it names a recording, before it
 stores the recording's id in `cluster.log_recording_id`, and removes it when it
