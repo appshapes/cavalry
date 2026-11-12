@@ -7,11 +7,12 @@
 //! `just test`, in a debug build, where an overflow would panic.
 
 use cavalry_proto::cluster::{
-    CLOSED_STATE, CanvassTerms, EMPTY_MEMBER, LogReport, MAX_MEMBERS, MemberPosition, Message,
+    CLOSED_STATE, CanvassTerms, EMPTY_MEMBER, LogRecording, LogRecordings, LogReport,
+    MAX_LOG_RECORDINGS_LENGTH, MAX_MEMBERS, MemberPosition, Message,
     Stream, TermFields, TermSpan, Vote, VoteRequest, answered_term, appointed_canvass,
     appointed_leader, ballot, candidate, canvass_position_action, commit_position, entry_position,
     leader_ready, log_at_least, new_leadership_term_action, next_fields, parse_members, quorum,
-    replay_end, replication_record, replication_stop, request_vote,
+    replay_end, replication_record, replication_stop, request_vote, write_log_recordings,
 };
 
 /// Deterministic, so a failure reproduces: xorshift64.
@@ -151,6 +152,98 @@ fn no_byte_string_panics_the_members_parser() {
         let bytes: Vec<u8> = (0..64).map(|_| random.next() as u8).collect();
         let mut members = [EMPTY_MEMBER; MAX_MEMBERS];
         let _ = parse_members(&bytes, &mut members, None);
+    }
+}
+
+const LOG_RECORDINGS_REASONS: [&str; 7] = [
+    "recordings-too-short",
+    "recordings-magic",
+    "recordings-version",
+    "recordings-member",
+    "recordings-length",
+    "recordings-live",
+    "recordings-entry",
+];
+
+/// A file of a member's log's recordings is read to a file that is written again to
+/// the same bytes, or refused with one of its seven reasons, whatever its bytes; a
+/// position is read from a recording the file names, at any position; and a writer
+/// given any entries writes a file a reader takes or is refused the same way
+/// (`spec/cluster.md`, "The log's recordings").
+#[test]
+fn no_byte_string_panics_the_reader_of_a_file_of_recordings() {
+    let mut random = XorShift(0xD1B5_4A32_D192_ED03);
+    let check = |bytes: &[u8], member: i32| match LogRecordings::read(bytes, member) {
+        Ok(file) => {
+            let entries: Vec<LogRecording> = file.entries().collect();
+            let mut out = vec![0; MAX_LOG_RECORDINGS_LENGTH];
+            let length = write_log_recordings(
+                &mut out,
+                file.member_id(),
+                file.live_recording_id(),
+                file.live_start_position(),
+                entries.iter().copied(),
+            )
+            .expect("a file that was read is written");
+            // The reserved bytes are written as 0 and never read.
+            let mut expected = bytes.to_vec();
+            expected[36..40].fill(0);
+            assert_eq!(&out[..length], &expected[..]);
+            for position in EXTREMES {
+                let id = file.recording_at(position);
+                assert!(
+                    id == file.live_recording_id()
+                        || entries.iter().any(|entry| entry.recording_id == id)
+                );
+            }
+        }
+        Err(error) => assert!(
+            LOG_RECORDINGS_REASONS.contains(&error.reason()),
+            "{bytes:?}: {error}"
+        ),
+    };
+    let mut seed = vec![0; MAX_LOG_RECORDINGS_LENGTH];
+    let entries = [(2, 0, 96), (4, 96, 288), (7, 288, 4096)].map(|(id, start, stop)| {
+        LogRecording {
+            recording_id: id,
+            start_position: start,
+            stop_position: stop,
+        }
+    });
+    let length = write_log_recordings(&mut seed, 2, 9, 4096, entries).expect("a seed");
+    seed.truncate(length);
+    check(&seed, 2);
+    for cut in 0..seed.len() {
+        check(&seed[..cut], 2);
+    }
+    for _ in 0..20_000 {
+        let mut bytes = seed.clone();
+        for _ in 0..1 + random.next() % 3 {
+            let at = (random.next() as usize) % bytes.len();
+            bytes[at] = random.next() as u8;
+        }
+        check(&bytes, 2);
+        bytes.extend_from_slice(&random.next().to_le_bytes()[..(random.next() % 8) as usize]);
+        check(&bytes, 2);
+    }
+    for _ in 0..20_000 {
+        let length = (random.next() % 200) as usize;
+        let bytes: Vec<u8> = (0..length).map(|_| random.next() as u8).collect();
+        check(&bytes, (random.next() % 4) as i32 - 1);
+    }
+    // A writer given entries at the edges of their types: written, or refused.
+    for _ in 0..20_000 {
+        let mut pick = || EXTREMES[(random.next() as usize) % EXTREMES.len()];
+        let entries = [(); 3].map(|()| LogRecording {
+            recording_id: pick(),
+            start_position: pick(),
+            stop_position: pick(),
+        });
+        let mut out = [0; 40 + 3 * 24];
+        match write_log_recordings(&mut out, pick() as i32, pick(), pick(), entries) {
+            Ok(length) => assert_eq!(length, out.len()),
+            Err(error) => assert!(LOG_RECORDINGS_REASONS.contains(&error.reason()), "{error}"),
+        }
     }
 }
 

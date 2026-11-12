@@ -2999,3 +2999,372 @@ const fn aligned_frame(payload: usize) -> Option<usize> {
         None => None,
     }
 }
+
+// ---- the file of a member's log's recordings -------------------------------------------
+
+/// Where the file of a member's log's recordings is explained.
+const LOG_RECORDINGS_DOC: &str = "docs/reference/cluster.md#the-logs-recordings";
+
+/// What the name of a member's file of its log's recordings begins with, in its
+/// driver's directory; the member's id in decimal follows (`spec/cluster.md`, "The
+/// log's recordings"; ADR 0103).
+pub const LOG_RECORDINGS_FILE_PREFIX: &str = "log-recordings-";
+
+/// What the name the file is written under ends with, before it is renamed.
+pub const LOG_RECORDINGS_TMP_SUFFIX: &str = ".tmp";
+
+/// The file's magic, `CVLYLREC`.
+pub const LOG_RECORDINGS_MAGIC: [u8; 8] = *b"CVLYLREC";
+
+/// The file's version.
+pub const LOG_RECORDINGS_VERSION: i32 = 0;
+
+/// The length of the file's header.
+pub const LOG_RECORDINGS_HEADER_LENGTH: usize = 40;
+
+/// The length of one entry.
+pub const LOG_RECORDING_ENTRY_LENGTH: usize = 24;
+
+/// The most entries a file holds: the 1,024 recordings a member keeps and its
+/// recording of a catch-up's replay.
+pub const MAX_LOG_RECORDINGS: usize = 1025;
+
+/// The length of the longest file.
+pub const MAX_LOG_RECORDINGS_LENGTH: usize =
+    LOG_RECORDINGS_HEADER_LENGTH + MAX_LOG_RECORDINGS * LOG_RECORDING_ENTRY_LENGTH;
+
+/// One recording that holds a member's log below its live recording.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub struct LogRecording {
+    /// The recording's id in the member's driver's catalog.
+    pub recording_id: i64,
+    /// The position its first frame is at.
+    pub start_position: i64,
+    /// The position it stopped at, or, for a recording still being made, the position
+    /// it had synced when the file was written.
+    pub stop_position: i64,
+}
+
+/// Why a file of a member's log's recordings was refused: the checks of
+/// `spec/cluster.md`, "What a reader rejects", for that file, in their order, and
+/// [`LogRecordingsError::reason`] their names.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum LogRecordingsError {
+    /// Fewer than [`LOG_RECORDINGS_HEADER_LENGTH`] bytes.
+    TooShort {
+        /// The length found.
+        length: usize,
+    },
+    /// The magic is not [`LOG_RECORDINGS_MAGIC`].
+    Magic,
+    /// The version is not [`LOG_RECORDINGS_VERSION`].
+    Version {
+        /// The version found.
+        found: i32,
+    },
+    /// The member id is below 0, or is not the one the file's name gives.
+    Member {
+        /// The member id found.
+        found: i32,
+        /// The id in the file's name.
+        expected: i32,
+    },
+    /// The entry count is below 0 or above [`MAX_LOG_RECORDINGS`], or the length is
+    /// not the header's and that many entries'.
+    Length {
+        /// The entry count found.
+        count: i32,
+        /// The length found.
+        length: usize,
+    },
+    /// The live recording id is below 0, or the live start position is below 0 or
+    /// not a multiple of 32.
+    Live {
+        /// The live recording id found.
+        recording_id: i64,
+        /// The live start position found.
+        start_position: i64,
+    },
+    /// An entry's recording id is below 0; its start position is below 0, not a
+    /// multiple of 32 or below the start position of the entry before it; or its
+    /// stop position is not a multiple of 32 or not above its start position.
+    Entry {
+        /// Which entry, counting from 0.
+        index: usize,
+    },
+}
+
+impl LogRecordingsError {
+    /// The reason's name in the spec and the vectors.
+    pub const fn reason(self) -> &'static str {
+        match self {
+            LogRecordingsError::TooShort { .. } => "recordings-too-short",
+            LogRecordingsError::Magic => "recordings-magic",
+            LogRecordingsError::Version { .. } => "recordings-version",
+            LogRecordingsError::Member { .. } => "recordings-member",
+            LogRecordingsError::Length { .. } => "recordings-length",
+            LogRecordingsError::Live { .. } => "recordings-live",
+            LogRecordingsError::Entry { .. } => "recordings-entry",
+        }
+    }
+}
+
+impl fmt::Display for LogRecordingsError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let reason = self.reason();
+        write!(
+            f,
+            "the file of a cluster member's log's recordings was rejected ({reason}): "
+        )?;
+        match *self {
+            LogRecordingsError::TooShort { length } => write!(
+                f,
+                "it is {length} bytes, fewer than its header's {LOG_RECORDINGS_HEADER_LENGTH}"
+            )?,
+            LogRecordingsError::Magic => write!(f, "its first eight bytes are not `CVLYLREC`")?,
+            LogRecordingsError::Version { found } => write!(
+                f,
+                "its version is {found} and this reader knows {LOG_RECORDINGS_VERSION}; run \
+                 the service and the member at versions that share one"
+            )?,
+            LogRecordingsError::Member { found, expected } => write!(
+                f,
+                "it names member {found} and its name gives member {expected}"
+            )?,
+            LogRecordingsError::Length { count, length } => write!(
+                f,
+                "it counts {count} entries, of at most {MAX_LOG_RECORDINGS}, in {length} bytes, \
+                 which is not {LOG_RECORDINGS_HEADER_LENGTH} and {LOG_RECORDING_ENTRY_LENGTH} \
+                 for each"
+            )?,
+            LogRecordingsError::Live {
+                recording_id,
+                start_position,
+            } => write!(
+                f,
+                "its live recording is {recording_id} from position {start_position}, and an \
+                 id is 0 or more and a position 0 or more and a multiple of 32"
+            )?,
+            LogRecordingsError::Entry { index } => write!(
+                f,
+                "entry {index} has an id below 0, a position that is not a multiple of 32, a \
+                 start below the entry before it, or a stop that is not above its start"
+            )?,
+        }
+        // Every reason but the version's is a file no member of this version writes.
+        if !matches!(self, LogRecordingsError::Version { .. }) {
+            write!(
+                f,
+                "; the member writes the file again when it next names a recording, so stop \
+                 whatever else writes in the driver directory and open the log again"
+            )?;
+        }
+        write!(f, "; see {LOG_RECORDINGS_DOC}")
+    }
+}
+
+impl core::error::Error for LogRecordingsError {}
+
+/// A file of a member's log's recordings, read and checked (`spec/cluster.md`, "The
+/// log's recordings"): the member's live recording, and the recordings that hold its
+/// log below it, in the order they begin.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct LogRecordings<'a> {
+    member_id: i32,
+    live_recording_id: i64,
+    live_start_position: i64,
+    /// The entries' bytes, a whole number of entries, each checked.
+    entries: &'a [u8],
+}
+
+/// The `i32` at `at` of `bytes`, 0 when the bytes are not there.
+fn i32_at(bytes: &[u8], at: usize) -> i32 {
+    bytes
+        .get(at..at.saturating_add(4))
+        .and_then(|field| field.try_into().ok())
+        .map_or(0, i32::from_le_bytes)
+}
+
+/// The `i64` at `at` of `bytes`, 0 when the bytes are not there.
+fn i64_at(bytes: &[u8], at: usize) -> i64 {
+    bytes
+        .get(at..at.saturating_add(8))
+        .and_then(|field| field.try_into().ok())
+        .map_or(0, i64::from_le_bytes)
+}
+
+/// The entry in the `LOG_RECORDING_ENTRY_LENGTH` bytes of `entry`.
+fn log_recording(entry: &[u8]) -> LogRecording {
+    LogRecording {
+        recording_id: i64_at(entry, 0),
+        start_position: i64_at(entry, 8),
+        stop_position: i64_at(entry, 16),
+    }
+}
+
+impl<'a> LogRecordings<'a> {
+    /// Reads the file's `bytes`, of the member `member_id` whose id the file's name
+    /// gives, running the checks of "What a reader rejects" in their order.
+    pub fn read(bytes: &'a [u8], member_id: i32) -> Result<Self, LogRecordingsError> {
+        let length = bytes.len();
+        if length < LOG_RECORDINGS_HEADER_LENGTH {
+            return Err(LogRecordingsError::TooShort { length });
+        }
+        if bytes.get(..8) != Some(&LOG_RECORDINGS_MAGIC[..]) {
+            return Err(LogRecordingsError::Magic);
+        }
+        let version = i32_at(bytes, 8);
+        if version != LOG_RECORDINGS_VERSION {
+            return Err(LogRecordingsError::Version { found: version });
+        }
+        let found = i32_at(bytes, 12);
+        if found < 0 || found != member_id {
+            return Err(LogRecordingsError::Member {
+                found,
+                expected: member_id,
+            });
+        }
+        let count = i32_at(bytes, 32);
+        let entries = usize::try_from(count)
+            .ok()
+            .filter(|count| *count <= MAX_LOG_RECORDINGS)
+            .and_then(|count| {
+                let end = LOG_RECORDINGS_HEADER_LENGTH + count * LOG_RECORDING_ENTRY_LENGTH;
+                (end == length)
+                    .then(|| bytes.get(LOG_RECORDINGS_HEADER_LENGTH..end))
+                    .flatten()
+            })
+            .ok_or(LogRecordingsError::Length { count, length })?;
+        let live_recording_id = i64_at(bytes, 16);
+        let live_start_position = i64_at(bytes, 24);
+        if live_recording_id < 0 || live_start_position < 0 || live_start_position % 32 != 0 {
+            return Err(LogRecordingsError::Live {
+                recording_id: live_recording_id,
+                start_position: live_start_position,
+            });
+        }
+        let mut before = 0;
+        for (index, entry) in entries.chunks_exact(LOG_RECORDING_ENTRY_LENGTH).enumerate() {
+            let entry = log_recording(entry);
+            let valid = entry.recording_id >= 0
+                && entry.start_position >= before
+                && entry.start_position % 32 == 0
+                && entry.stop_position % 32 == 0
+                && entry.stop_position > entry.start_position;
+            if !valid {
+                return Err(LogRecordingsError::Entry { index });
+            }
+            before = entry.start_position;
+        }
+        Ok(Self {
+            member_id,
+            live_recording_id,
+            live_start_position,
+            entries,
+        })
+    }
+
+    /// The member whose log this is.
+    pub const fn member_id(&self) -> i32 {
+        self.member_id
+    }
+
+    /// The recording the member records the live log into: the id it stores in
+    /// `cluster.log_recording_id` once it has written this file.
+    pub const fn live_recording_id(&self) -> i64 {
+        self.live_recording_id
+    }
+
+    /// Where the live recording begins.
+    pub const fn live_start_position(&self) -> i64 {
+        self.live_start_position
+    }
+
+    /// How many recordings the file lists below the live one.
+    pub const fn len(&self) -> usize {
+        self.entries.len() / LOG_RECORDING_ENTRY_LENGTH
+    }
+
+    /// Whether the file lists no recording below the live one.
+    pub const fn is_empty(&self) -> bool {
+        self.entries.is_empty()
+    }
+
+    /// The recordings below the live one, in the order they begin.
+    pub fn entries(&self) -> impl Iterator<Item = LogRecording> + '_ {
+        self.entries
+            .chunks_exact(LOG_RECORDING_ENTRY_LENGTH)
+            .map(log_recording)
+    }
+
+    /// The recording `position` is read from: the first the file lists whose start is
+    /// at or below the position and whose stop is above it, and the live recording
+    /// when none is so (`spec/cluster.md`, "The log"). The live recording is the
+    /// answer for a position below everything the file lists too, which the driver
+    /// then refuses a replay of.
+    pub fn recording_at(&self, position: i64) -> i64 {
+        self.entries()
+            .find(|entry| entry.start_position <= position && position < entry.stop_position)
+            .map_or(self.live_recording_id, |entry| entry.recording_id)
+    }
+}
+
+/// Writes a file of the log's recordings of member `member_id` into `out` and returns
+/// its length: the live recording, where it begins, and `entries`, the recordings
+/// below it in the order they begin. What is written is read back through
+/// [`LogRecordings::read`], so a writer is refused whatever a reader would refuse,
+/// with the same reason; more than [`MAX_LOG_RECORDINGS`] entries, or an `out` too
+/// short for them, is [`LogRecordingsError::Length`].
+pub fn write_log_recordings(
+    out: &mut [u8],
+    member_id: i32,
+    live_recording_id: i64,
+    live_start_position: i64,
+    entries: impl IntoIterator<Item = LogRecording>,
+) -> Result<usize, LogRecordingsError> {
+    let capacity = out.len();
+    let mut count: usize = 0;
+    let mut at = LOG_RECORDINGS_HEADER_LENGTH;
+    for entry in entries {
+        let slot = (count < MAX_LOG_RECORDINGS)
+            .then(|| out.get_mut(at..at + LOG_RECORDING_ENTRY_LENGTH))
+            .flatten();
+        let Some(slot) = slot else {
+            return Err(LogRecordingsError::Length {
+                count: i32::try_from(count.saturating_add(1)).unwrap_or(i32::MAX),
+                length: capacity,
+            });
+        };
+        let (id, positions) = slot.split_at_mut(8);
+        let (start, stop) = positions.split_at_mut(8);
+        id.copy_from_slice(&entry.recording_id.to_le_bytes());
+        start.copy_from_slice(&entry.start_position.to_le_bytes());
+        stop.copy_from_slice(&entry.stop_position.to_le_bytes());
+        count += 1;
+        at += LOG_RECORDING_ENTRY_LENGTH;
+    }
+    // `count` is at most `MAX_LOG_RECORDINGS`, which fits an `i32`.
+    let entry_count = i32::try_from(count).unwrap_or(i32::MAX);
+    let Some(header) = out.get_mut(..LOG_RECORDINGS_HEADER_LENGTH) else {
+        return Err(LogRecordingsError::Length {
+            count: entry_count,
+            length: capacity,
+        });
+    };
+    header.fill(0);
+    let fields: [(usize, &[u8]); 6] = [
+        (0, &LOG_RECORDINGS_MAGIC),
+        (8, &LOG_RECORDINGS_VERSION.to_le_bytes()),
+        (12, &member_id.to_le_bytes()),
+        (16, &live_recording_id.to_le_bytes()),
+        (24, &live_start_position.to_le_bytes()),
+        (32, &entry_count.to_le_bytes()),
+    ];
+    for (offset, field) in fields {
+        if let Some(slot) = header.get_mut(offset..offset + field.len()) {
+            slot.copy_from_slice(field);
+        }
+    }
+    LogRecordings::read(out.get(..at).unwrap_or(&[]), member_id)?;
+    Ok(at)
+}
