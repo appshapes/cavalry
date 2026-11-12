@@ -119,7 +119,7 @@ member's recordings is not in this version (`spec/cluster.md`, "The service").
 
 ## Evidence
 
-- `crates/cavalry-raft/src/module/tests.rs`, eight tests. In seven, the leader and
+- `crates/cavalry-raft/src/module/tests.rs`, nine tests. In eight, the leader and
   the member are each a module on a driver of its own, and the test drives the `Io`
   of both.
   - A term in two of the leader's recordings, 0 to 192 and 192 to 288. For each,
@@ -162,13 +162,22 @@ member's recordings is not in this version (`spec/cluster.md`, "The service").
     this test fails: the append position stays at 192.
   - A catch-up position with a host name of 240 characters does not fit 128 bytes
     and fits 1,408.
+  - A recording taken by an image that went. A stranger's publication on the
+    member's `log` endpoint takes the armed recording, publishes an entry and
+    closes, and its image goes before the member looks at its log subscription.
+    The leader's log arrives and is the image the member notes. Asked for the
+    leader's session, the module holds a recording of the stranger's: it says
+    nothing, counts nothing and keeps nothing. It is a rule of ADR 0093 that no
+    test reached, which the second review of pull request 239 noted.
 - Each rule taken out fails the test written for it: the floor; a live recording
   held to begin exactly where the stopped ones end; an image said to be gone as
   soon as its recording stopped, told or not; `leave_log` without stopping the
-  replay's recording first.
-- The twenty in-crate tests ran ten times in a row with no failure on a macOS
-  laptop, about 11 s a run, which is the image liveness timeout of one test. `cargo test -p cavalry-raft`: 157
-  passed. The tests over three drivers, `cluster`, pass unchanged.
+  replay's recording first; a recording held whose session is not the one asked
+  for, reported all the same.
+- The twenty-three in-crate tests ran ten times in a row with no failure on a
+  macOS laptop, about 11 s a run, which is the image liveness timeout of one test.
+  `cargo test -p cavalry-raft`: 160 passed. The tests over three drivers,
+  `cluster`, pass unchanged.
 - Not shown: a member's whole election over drivers, which comes when the module
   moves (ADR 0081); and a stale sender on either endpoint, which Consequences
   leaves to the fault-injection tests.
@@ -197,6 +206,14 @@ member's recordings is not in this version (`spec/cluster.md`, "The service").
   it.
 - The kept table can hold recordings that overlap. `truncate_log` must cut or
   forget each one that holds bytes above the position, as its doc comment says.
+- The hand-over of a recording, the live one or a replay's, reads its descriptor
+  from the catalog once: a file read with an allocation, at a join or in a
+  catch-up, never once an entry. The read tries again for up to 100 ms, 1 ms at a
+  time, when a stop checksum does not match, since the driver may be between the
+  two writes of a stop (`cavalry-log`, `read_slot`). So a recording that stops
+  while it is handed over, the read falling between those two writes, can hold
+  one duty cycle for that long. ADR 0093 calls the read a file read with an
+  allocation and leaves this bound out.
 
 ## References
 
