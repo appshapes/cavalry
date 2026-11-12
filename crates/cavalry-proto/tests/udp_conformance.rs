@@ -284,6 +284,23 @@ fn channel_vector(name: &str, vector: &Value) {
         string.contains("ssc="),
         "{name}: names_ssc"
     );
+    // Version 4: `term-length`, the UDP term length when the string names none (ADR
+    // 0099), which the position keys count in.
+    assert_eq!(
+        i64::from(udp.term_length()),
+        fields["term_length"].as_i64().expect("term_length"),
+        "{name}: term_length"
+    );
+    assert_eq!(
+        udp.names_term_length(),
+        string.contains("term-length="),
+        "{name}: names_term_length"
+    );
+    assert_eq!(
+        udp.position(),
+        fields["position"].as_i64(),
+        "{name}: the channel's position"
+    );
     // Version 2: the position keys and the position they make (ADR 0059).
     match fields["initial_term_id"].as_i64() {
         None => {
@@ -311,7 +328,7 @@ fn channel_vector(name: &str, vector: &Value) {
                 "{name}: term-offset"
             );
             assert_eq!(
-                Some(keys.position()),
+                Some(keys.position(udp.term_length())),
                 fields["position"].as_i64(),
                 "{name}: position"
             );
@@ -433,7 +450,7 @@ fn arithmetic_vector(name: &str, vector: &Value) {
 #[test]
 fn every_vector_in_spec_vectors_udp_json() {
     let doc: Value = serde_json::from_str(VECTORS).expect("udp.json parses");
-    assert_eq!(doc["version"], 3, "the vectors are for version 3");
+    assert_eq!(doc["version"], 4, "the vectors are for version 4");
     let vectors = doc["vectors"].as_array().expect("vectors is an array");
     assert!(vectors.len() >= 96, "udp.py writes at least 96 vectors");
     for vector in vectors {
