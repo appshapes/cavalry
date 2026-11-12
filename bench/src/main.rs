@@ -166,6 +166,12 @@ const MAX_NS: u64 = 60_000_000_000;
 /// and a tenth of the messages measures the same percentile in the same time (ADR
 /// 0044). The link rows take `--messages` as given, since they run alone.
 const UDP_SHARE: u64 = 10;
+/// The most `--messages` may be: a message row has room for every sample of its loop,
+/// eight bytes each ([`Samples`]), on the publisher's thread and on the subscriber's,
+/// and a link row's subscriber takes two samples a message. So the bound is 1.6 GB
+/// for a row and 2.4 GB for the link rows, where CI's 5,000,000 are 80 MB and its
+/// link rows' 100,000 are 2.4 MB.
+const MAX_MESSAGES: u64 = 100_000_000;
 /// The warm-up of every UDP row, on the loopback and across the link, in place of the
 /// rotation the shared-memory rows warm up with: a rotation's warm-up is so that no
 /// measured message first-touches a page, and the driver pre-touches the publication's
@@ -380,7 +386,8 @@ const USAGE: &str = "\
 cavalry-bench: the latency harness of `just bench` (CLAUDE.md, gate 2; ADR 0015).
 
 Options:
-  --messages N      messages per benchmark after the warm-up (default 1000000)
+  --messages N      messages per benchmark after the warm-up (default 1000000, at most
+                    100000000)
   --warmup N        messages before recording starts; the default is one rotation through
                     all three terms, so no measured message first-touches a page (196608
                     for the default body and term), and 10000 for the UDP rows, whose
@@ -499,6 +506,14 @@ fn parse(args: &[String]) -> Result<Options, String> {
     }
     if options.messages == 0 {
         return Err("--messages must be at least 1".to_string());
+    }
+    if options.messages > MAX_MESSAGES {
+        return Err(format!(
+            "--messages {} is over {MAX_MESSAGES}: a message row has room for every sample, \
+             16 bytes a message and 24 in the link rows, until its loop is over (ADR 0090); \
+             run the rows more than once with --repeat instead",
+            options.messages
+        ));
     }
     if options.repeat == 0 {
         return Err("--repeat must be at least 1".to_string());
@@ -763,6 +778,13 @@ struct Summary {
     rate_per_s: f64,
 }
 
+/// A histogram with the bounds and the precision every row is reported in: 1 ns to
+/// [`MAX_NS`], three significant digits. Its counts are not resident: a measured loop
+/// records in one from [`histogram`], and [`Samples`] makes one after its loop.
+fn empty_histogram() -> Histogram<u64> {
+    Histogram::new_with_bounds(1, MAX_NS, 3).expect("the fixed bounds are valid")
+}
+
 /// A histogram with the fixed bounds, every page of its counts resident. The counts are
 /// allocated zeroed and lazily, so a rare value's first landing in a new bucket took a
 /// page fault inside the measured loop, on the sample that was rare by construction:
@@ -772,7 +794,7 @@ struct Summary {
 /// compiler from folding those writes into the zeroed allocation, which it did to a
 /// plain `reset` (the faults stayed, spread over the loop, in the trace on kip).
 fn histogram() -> Histogram<u64> {
-    let mut hist = Histogram::new_with_bounds(1, MAX_NS, 3).expect("the fixed bounds are valid");
+    let mut hist = empty_histogram();
     // Three significant digits is 2048 sub-buckets per doubling: a step of value ÷ 2048
     // lands in every one of them, about 38,000 records in all, once.
     let mut value: u64 = 1;
@@ -784,6 +806,112 @@ fn histogram() -> Histogram<u64> {
     hist.reset();
     std::hint::black_box(&mut hist);
     hist
+}
+
+/// The samples of a message row's measured loop, kept so that taking one never touches
+/// memory that is cold for it; the histogram is made of them once the loop is over
+/// (ADR 0090; card 198).
+///
+/// A message row's loop does not record in a histogram. A histogram's counts are 54
+/// pages, and a thread that streams a log through its cache keeps warm only the lines
+/// of the latencies it usually sees. A sample that was late landed in a line that was
+/// cold, and the record of it was a load that missed, in the subscriber's handler,
+/// before the next delivery: so the next delivery was later by it and landed in another
+/// cold line. On `grip`, where the subscriber has little to spare over the publisher's
+/// 70 ns a message, that was most of the one-way rows' tail: 187 deliveries of a loop's
+/// 5,000,000 were 600 ns late or more with the record in the handler and 4 without it,
+/// and now and then it ran to a backlog of a hundred messages and a run whose p99.99
+/// read up to three times its row's.
+///
+/// Here a sample under [`NEAR_NS`] is counted in an array of that many counts, one a
+/// nanosecond, a kilobyte that every row's usual samples keep in the first-level cache.
+/// A sample of [`NEAR_NS`] or more is written after the last such one into a buffer
+/// made and written through at setup: a store to the next eight bytes, which waits for
+/// no load whatever the sample's value, so a late sample costs what a usual one does.
+/// The first form of this kept every sample in the buffer; the stream of stores cost
+/// the fastest row, the exclusive log's claim, 7 ns at p99.99 on `grip`.
+struct Samples {
+    /// How many samples were each nanosecond under [`NEAR_NS`].
+    near: [u32; NEAR_NS],
+    /// Room for the samples of [`NEAR_NS`] or more, in the order they were taken: the
+    /// first `kept` of it are samples.
+    far: Vec<u64>,
+    kept: usize,
+    /// Samples of [`NEAR_NS`] or more that a loop took beyond its room, which are not
+    /// kept: there is nowhere to put them, and growing the room would allocate inside
+    /// the counting window. No loop takes one, and `histogram` refuses to report a row
+    /// that did.
+    beyond: u64,
+}
+
+/// Where a message row's samples stop being counted and start being kept in order
+/// ([`Samples`]): 256 ns. Under it are the claim rows' whole bodies on both bench hosts
+/// and the one-way rows' on `grip` up to their p99, so the counts stay in the cache;
+/// at it and above, a one-way row sends a few samples in a thousand to the buffer,
+/// which keeps the line being written warm too.
+const NEAR_NS: usize = 256;
+
+impl Samples {
+    /// Room for the samples of a loop that measures `count` messages, every page of it
+    /// written, so that no sample is the first touch of a page, as none is in
+    /// [`histogram`]. Every sample of a UDP row is [`NEAR_NS`] or more, and the harness
+    /// cannot know a row's samples before it has run, so the room is for all `count`.
+    /// `--messages` is bounded ([`MAX_MESSAGES`]), so this is. The publisher's thread
+    /// makes both threads' room before the subscriber is started: writing 40 MB
+    /// through takes milliseconds, and a subscriber that made its own would start that
+    /// much of the stream behind.
+    fn with_capacity(count: u64) -> Self {
+        let count = usize::try_from(count).unwrap_or(usize::MAX);
+        let mut far = vec![u64::MAX; count];
+        std::hint::black_box(&mut far);
+        Self {
+            near: [0; NEAR_NS],
+            far,
+            kept: 0,
+            beyond: 0,
+        }
+    }
+
+    /// Keeps one sample, in nanoseconds: a count, or a store to the next eight bytes
+    /// of the room. Nothing here grows, allocates or can fail.
+    #[inline]
+    fn record(&mut self, ns: u64) {
+        if let Some(count) = self.near.get_mut(ns as usize) {
+            *count += 1;
+        } else if let Some(next) = self.far.get_mut(self.kept) {
+            *next = ns;
+            self.kept += 1;
+        } else {
+            self.beyond += 1;
+        }
+    }
+
+    /// The histogram of the samples, with the bounds and precision of every row
+    /// ([`empty_histogram`]), so a row reads to the nanosecond as it did; or what to do
+    /// about a loop that took more samples than it was sized for.
+    fn histogram(&self) -> Result<Histogram<u64>, String> {
+        if self.beyond > 0 {
+            return Err(format!(
+                "a measured loop took {} samples more than the {} it was sized for, so its \
+                 row would leave them out; report this line as a bug in the harness \
+                 (bench/src/main.rs, Samples)",
+                self.beyond,
+                self.far.len()
+            ));
+        }
+        let mut hist = empty_histogram();
+        // A count of none is skipped: recording none of a value still moves the
+        // histogram's least and largest value to it.
+        for (ns, count) in self.near.iter().enumerate() {
+            if *count > 0 {
+                hist.saturating_record_n(ns as u64, u64::from(*count));
+            }
+        }
+        for value in &self.far[..self.kept] {
+            hist.saturating_record(*value);
+        }
+        Ok(hist)
+    }
 }
 
 /// The lowest CPU in the calling thread's allowed set outside the pins: where the
@@ -1115,21 +1243,21 @@ fn run_log(options: &Options, log_type: LogType, dir: &std::path::Path) -> Resul
         let dir = dir.to_path_buf();
         let position = subscriber_position.clone();
         let cpu = options.pin.map(|pin| pin.subscriber);
+        let mut hist = Samples::with_capacity(total - warmup);
         thread::Builder::new()
             .name("subscriber".into())
-            .spawn(move || -> Result<Histogram<u64>, String> {
+            .spawn(move || -> Result<Samples, String> {
                 pin_to(cpu)?;
                 let log =
                     LogBuffers::open(&dir, CORRELATION_ID, false).map_err(|e| e.to_string())?;
                 let mut reader = log.reader(0).map_err(|e| e.to_string())?;
-                let mut hist = histogram();
                 let mut received: u64 = 0;
                 while received < total {
                     let poll = reader
                         .poll(1024, |body, _| {
                             let stamp = u64::from_le_bytes(body[..8].try_into().expect("8 bytes"));
                             if received >= warmup {
-                                hist.saturating_record(nanos(epoch).saturating_sub(stamp));
+                                hist.record(nanos(epoch).saturating_sub(stamp));
                             }
                             received += 1;
                         })
@@ -1208,7 +1336,7 @@ fn run_log(options: &Options, log_type: LogType, dir: &std::path::Path) -> Resul
     // The publisher, on this thread, with its own writable mapping.
     let publisher_log = LogBuffers::open(dir, CORRELATION_ID, true).map_err(|e| e.to_string())?;
     let mut appender = publisher_log.appender().map_err(|e| e.to_string())?;
-    let mut hist = histogram();
+    let mut hist = Samples::with_capacity(total - warmup);
     let mut retries: u64 = 0;
     let mut counting: Option<Counting> = None;
     let mut start = Instant::now();
@@ -1234,7 +1362,7 @@ fn run_log(options: &Options, log_type: LogType, dir: &std::path::Path) -> Resul
             }
         }
         if i >= warmup {
-            hist.saturating_record(span_ns(t0, tick()));
+            hist.record(span_ns(t0, tick()));
         }
     }
     let elapsed = start.elapsed();
@@ -1246,6 +1374,11 @@ fn run_log(options: &Options, log_type: LogType, dir: &std::path::Path) -> Resul
     let producer_position_loads = conductor
         .join()
         .map_err(|_| "the conductor thread panicked".to_string())??;
+    // The histograms are made once both threads are joined: making one allocates and
+    // reads the samples through, which the subscriber's last deliveries should not
+    // meet, and a loop it refuses leaves no thread behind.
+    let hist = hist.histogram()?;
+    let one_way = one_way.histogram()?;
     Ok(LogRun {
         claim_commit: summarize(&hist, elapsed),
         one_way: summarize(&one_way, elapsed),
@@ -1617,6 +1750,7 @@ fn run_client(
 
     let subscriber = {
         let cpu = options.pin.map(|pin| pin.subscriber);
+        let mut hist = Samples::with_capacity(total - warmup);
         thread::Builder::new()
             .name("client-subscriber".into())
             // The subscription comes back with the histogram and is closed by the
@@ -1626,9 +1760,8 @@ fn run_client(
             // once in twenty million messages, and the driver's conductor ran
             // `drop_subscription` on its next duty cycle; that allocates, and the
             // window counted it (card 176).
-            .spawn(move || -> Result<(Subscription, Histogram<u64>), String> {
+            .spawn(move || -> Result<(Subscription, Samples), String> {
                 pin_to(cpu)?;
-                let mut hist = histogram();
                 let mut received: u64 = 0;
                 while received < total {
                     let delivered = subscription
@@ -1637,7 +1770,7 @@ fn run_client(
                                 let stamp =
                                     u64::from_le_bytes(body[..8].try_into().expect("8 bytes"));
                                 if received >= warmup {
-                                    hist.saturating_record(nanos(epoch).saturating_sub(stamp));
+                                    hist.record(nanos(epoch).saturating_sub(stamp));
                                 }
                                 received += 1;
                             },
@@ -1653,7 +1786,7 @@ fn run_client(
             .map_err(|e| e.to_string())?
     };
 
-    let mut hist = histogram();
+    let mut hist = Samples::with_capacity(total - warmup);
     let mut retries: u64 = 0;
     // The retries of the message being claimed. A subscriber that has returned, or one
     // that has stopped reading, leaves the publisher back-pressured for ever; the retry is
@@ -1701,7 +1834,7 @@ fn run_client(
         }
         stalled = 0;
         if i >= warmup {
-            hist.saturating_record(span_ns(t0, tick()));
+            hist.record(span_ns(t0, tick()));
         }
     }
     let elapsed = start.elapsed();
@@ -1754,6 +1887,9 @@ fn run_client(
     pins.check(DriverThread::Conductor)?;
     pins.check(DriverThread::Recorder)?;
     pins.check(DriverThread::Replayer)?;
+    // The histograms are made last, as in `run_log`.
+    let hist = hist.histogram()?;
+    let one_way = one_way.histogram()?;
     Ok(LogRun {
         claim_commit: summarize(&hist, elapsed),
         one_way: summarize(&one_way, elapsed),
@@ -1818,12 +1954,12 @@ fn run_ffi(options: &Options, dir: &std::path::Path) -> Result<LogRun, String> {
 
     let subscriber = {
         let cpu = options.pin.map(|pin| pin.subscriber);
+        let mut hist = Samples::with_capacity(total - warmup);
         thread::Builder::new()
             .name("ffi-subscriber".into())
             .spawn(
-                move || -> Result<(harness::Subscription, Histogram<u64>), String> {
+                move || -> Result<(harness::Subscription, Samples), String> {
                     pin_to(cpu)?;
-                    let mut hist = histogram();
                     let mut received: u64 = 0;
                     while received < total {
                         let delivered = subscription.poll(
@@ -1831,7 +1967,7 @@ fn run_ffi(options: &Options, dir: &std::path::Path) -> Result<LogRun, String> {
                                 let stamp =
                                     u64::from_le_bytes(body[..8].try_into().expect("8 bytes"));
                                 if received >= warmup {
-                                    hist.saturating_record(nanos(epoch).saturating_sub(stamp));
+                                    hist.record(nanos(epoch).saturating_sub(stamp));
                                 }
                                 received += 1;
                             },
@@ -1847,7 +1983,7 @@ fn run_ffi(options: &Options, dir: &std::path::Path) -> Result<LogRun, String> {
             .map_err(|e| e.to_string())?
     };
 
-    let mut hist = histogram();
+    let mut hist = Samples::with_capacity(total - warmup);
     let mut retries: u64 = 0;
     let mut stalled: u64 = 0;
     const STALL_CHECK: u64 = 4096;
@@ -1892,7 +2028,7 @@ fn run_ffi(options: &Options, dir: &std::path::Path) -> Result<LogRun, String> {
         }
         stalled = 0;
         if i >= warmup {
-            hist.saturating_record(span_ns(t0, tick()));
+            hist.record(span_ns(t0, tick()));
         }
     }
     let elapsed = start.elapsed();
@@ -1910,6 +2046,9 @@ fn run_ffi(options: &Options, dir: &std::path::Path) -> Result<LogRun, String> {
     pins.check(DriverThread::Conductor)?;
     pins.check(DriverThread::Recorder)?;
     pins.check(DriverThread::Replayer)?;
+    // The histograms are made last, as in `run_log`.
+    let hist = hist.histogram()?;
+    let one_way = one_way.histogram()?;
     Ok(LogRun {
         claim_commit: summarize(&hist, elapsed),
         one_way: summarize(&one_way, elapsed),
@@ -2517,7 +2656,7 @@ fn swept_line(swept: &Swept, dir: &std::path::Path) -> Option<String> {
 
 /// What a run with one message in flight produced on the publisher's side.
 struct Published {
-    claim_commit: Histogram<u64>,
+    claim_commit: Samples,
     elapsed: Duration,
     retries: u64,
     allocations: usize,
@@ -2559,7 +2698,7 @@ fn publish_one_in_flight<T>(
     } = run;
     const STALL_CHECK: u64 = 4096;
     const STALL_LIMIT: Duration = Duration::from_secs(10);
-    let mut hist = histogram();
+    let mut hist = Samples::with_capacity(total - warmup);
     let mut retries: u64 = 0;
     let mut counting: Option<Counting> = None;
     let mut start = Instant::now();
@@ -2622,7 +2761,7 @@ fn publish_one_in_flight<T>(
             }
         }
         if i >= warmup {
-            hist.saturating_record(span_ns(t0, tick()));
+            hist.record(span_ns(t0, tick()));
         }
     }
     let elapsed = start.elapsed();
@@ -2640,7 +2779,7 @@ fn publish_one_in_flight<T>(
 /// link, and how many one-way samples read below zero. A tuple and not a `Vec`: the
 /// thread returns as soon as it has handled the last message, when the publisher's
 /// counting region can still be open, so nothing on its way out may allocate.
-type Received = Result<(Subscription, Histogram<u64>, Option<Histogram<u64>>, u64), String>;
+type Received = Result<(Subscription, Samples, Option<Samples>, u64), String>;
 
 /// The subscriber of a run with one message in flight, on its own thread: polls until
 /// `total` messages have come, times each from the harness's stamp in its first eight
@@ -2663,12 +2802,12 @@ fn spawn_subscriber(
         link,
         ..
     } = run;
+    let mut first = Samples::with_capacity(total - warmup);
+    let mut second = link.then(|| Samples::with_capacity(total - warmup));
     thread::Builder::new()
         .name(name.into())
         .spawn(move || -> Received {
             pin_to(cpu)?;
-            let mut first = histogram();
-            let mut second = link.then(histogram);
             let mut below_zero: u64 = 0;
             let mut count: u64 = 0;
             while count < total {
@@ -2677,7 +2816,7 @@ fn spawn_subscriber(
                         |body, _| {
                             let stamp = u64::from_le_bytes(body[..8].try_into().expect("8 bytes"));
                             if count >= warmup {
-                                first.saturating_record(nanos(epoch).saturating_sub(stamp));
+                                first.record(nanos(epoch).saturating_sub(stamp));
                                 if let Some(second) = second.as_mut() {
                                     let sent = u64::from_le_bytes(
                                         body[8..16].try_into().expect("8 bytes"),
@@ -2686,9 +2825,9 @@ fn spawn_subscriber(
                                         body[16..24].try_into().expect("8 bytes"),
                                     );
                                     match peer.checked_sub(sent) {
-                                        Some(one_way) => second.saturating_record(one_way),
+                                        Some(one_way) => second.record(one_way),
                                         None => {
-                                            second.saturating_record(0);
+                                            second.record(0);
                                             below_zero += 1;
                                         }
                                     }
@@ -2942,8 +3081,8 @@ fn mdc_rows(
         drained.close().map_err(|e| e.to_string())?;
     }
     Ok(LogRun {
-        claim_commit: summarize(&published.claim_commit, published.elapsed),
-        one_way: summarize(&one_way, published.elapsed),
+        claim_commit: summarize(&published.claim_commit.histogram()?, published.elapsed),
+        one_way: summarize(&one_way.histogram()?, published.elapsed),
         retries: published.retries,
         allocations: published.allocations,
         producer_position_loads: None,
@@ -3039,8 +3178,8 @@ fn run_udp(options: &Options, dir: &std::path::Path) -> Result<LogRun, String> {
     };
     close_stream(dir, publication, subscription, client, driver, &pins, false)?;
     Ok(LogRun {
-        claim_commit: summarize(&published.claim_commit, published.elapsed),
-        one_way: summarize(&one_way, published.elapsed),
+        claim_commit: summarize(&published.claim_commit.histogram()?, published.elapsed),
+        one_way: summarize(&one_way.histogram()?, published.elapsed),
         retries: published.retries,
         allocations: published.allocations,
         producer_position_loads: None,
@@ -3122,8 +3261,8 @@ fn run_link(
             return Err("the link subscriber measured no one-way row".to_string());
         };
         runs.push(LinkRun {
-            round_trip: summarize(&round_trip, published.elapsed),
-            one_way: summarize(&one_way, published.elapsed),
+            round_trip: summarize(&round_trip.histogram()?, published.elapsed),
+            one_way: summarize(&one_way.histogram()?, published.elapsed),
             retries: published.retries,
             allocations: published.allocations,
             below_zero,
@@ -4380,6 +4519,99 @@ mod tests {
         assert_eq!(defaults.udp_warmup(), 10_000);
         assert_eq!(options(&["--messages", "5"]).udp_messages(), 1);
         assert_eq!(options(&["--warmup", "7"]).udp_warmup(), 7);
+    }
+
+    /// A message row keeps every sample, so `--messages` has a bound and says why.
+    #[test]
+    fn messages_are_bounded_by_what_a_row_keeps() {
+        assert_eq!(options(&["--messages", "100000000"]).messages, 100_000_000);
+        let error = parsed(&["--messages", "100000001"])
+            .err()
+            .expect("over the bound");
+        assert!(error.contains("ADR 0090"), "{error}");
+        assert!(error.contains("--repeat"), "{error}");
+    }
+
+    /// A loop's samples are kept in the order they were taken and its histogram is made
+    /// of them afterwards, with the harness's bounds and precision: the same count, the
+    /// same percentiles and the same largest sample as recording each one as it came.
+    /// The room is made at setup and is never grown: a loop that took more than it was
+    /// sized for does not get a row.
+    #[test]
+    fn a_loops_samples_make_the_histogram_recording_them_would_have() {
+        let values: Vec<u64> = (0..100_000u64)
+            .map(|i| 20 + (i * 2_654_435_761) % 977 + if i % 9_973 == 0 { 250_000 } else { 0 })
+            .collect();
+        let mut samples = Samples::with_capacity(values.len() as u64);
+        assert_eq!(samples.far.len(), values.len());
+        assert_eq!(samples.kept, 0);
+        let mut direct = histogram();
+        for value in &values {
+            samples.record(*value);
+            direct.saturating_record(*value);
+        }
+        assert_eq!(samples.far.len(), values.len(), "the room was grown");
+        // The usual samples were counted and the others kept, in order.
+        let near = values.iter().filter(|v| **v < NEAR_NS as u64).count();
+        assert!(near > 10_000 && near < 90_000, "{near}");
+        let counted: u64 = samples.near.iter().map(|c| u64::from(*c)).sum();
+        assert_eq!(counted, near as u64);
+        let far: Vec<u64> = values
+            .iter()
+            .copied()
+            .filter(|v| *v >= NEAR_NS as u64)
+            .collect();
+        assert_eq!(samples.far[..samples.kept], far);
+        let at_255 = values.iter().filter(|v| **v == 255).count();
+        assert_eq!(samples.near[255] as usize, at_255);
+        let made = samples.histogram().expect("no sample beyond the room");
+        assert_eq!(made.len(), direct.len());
+        for quantile in [0.5, 0.99, 0.9999, 1.0] {
+            assert_eq!(
+                made.value_at_quantile(quantile),
+                direct.value_at_quantile(quantile),
+                "{quantile}"
+            );
+        }
+        assert_eq!(made.max(), direct.max());
+        // A value past the histogram's range saturates there, as it did.
+        let mut far = Samples::with_capacity(1);
+        far.record(u64::MAX);
+        assert_eq!(
+            far.histogram().expect("one sample").max(),
+            histogram_with(&[u64::MAX]).max()
+        );
+        // One sample too many for the buffer is counted, not kept, and the row is
+        // refused; samples under the bound need no room.
+        let mut small = Samples::with_capacity(2);
+        for value in [5, 300, 6, 400, 7, 500] {
+            small.record(value);
+        }
+        assert_eq!(small.far, vec![300, 400]);
+        assert_eq!((small.kept, small.beyond), (2, 1));
+        assert_eq!((small.near[5], small.near[6], small.near[7]), (1, 1, 1));
+        let error = small.histogram().expect_err("one sample beyond the room");
+        assert!(error.contains("1 samples more than the 2"), "{error}");
+        // A loop whose samples are all usual ones reports its own least and largest:
+        // a count of none moves neither, as recording none of a value would.
+        let mut usual = Samples::with_capacity(4);
+        for value in [40, 41, 41, 90] {
+            usual.record(value);
+        }
+        let made = usual.histogram().expect("four samples");
+        assert_eq!((made.len(), made.min(), made.max()), (4, 40, 90));
+        assert_eq!(usual.kept, 0);
+        // A loop of no messages has no samples and an empty histogram.
+        let empty = Samples::with_capacity(0).histogram().expect("empty");
+        assert_eq!((empty.len(), empty.max()), (0, 0));
+    }
+
+    fn histogram_with(values: &[u64]) -> Histogram<u64> {
+        let mut hist = histogram();
+        for value in values {
+            hist.saturating_record(*value);
+        }
+        hist
     }
 
     /// A pass keeps each message benchmark's allocations under its name, so that the
