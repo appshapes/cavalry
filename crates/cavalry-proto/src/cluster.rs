@@ -2613,6 +2613,11 @@ pub enum TermAction {
     Ignore,
     /// The message's log leadership term id is not the reader's: back to canvass.
     Canvass,
+    /// The message names a term below the reader's log term and a next term above it:
+    /// the leader's record holds none of the reader's terms above the one named. The
+    /// reader drops them, truncating to the base of the lowest when it holds bytes
+    /// above it, and reads the message again with the log it then holds (ADR 0096).
+    Drop,
     /// Below the leader's term base with a stop position: follower log replication.
     Replicate,
     /// At or above the leader's term base: follower replay.
@@ -2629,6 +2634,7 @@ impl TermAction {
         match self {
             TermAction::Ignore => "ignore",
             TermAction::Canvass => "canvass",
+            TermAction::Drop => "drop",
             TermAction::Replicate => "replicate",
             TermAction::Replay => "replay",
             TermAction::Wait => "wait",
@@ -2642,7 +2648,9 @@ impl TermAction {
 pub struct NewLeadershipTermAction {
     /// What the reader does next.
     pub action: TermAction,
-    /// The position it truncates its log to first, or −1 for no truncation.
+    /// The position it truncates its log to first, or −1 for no truncation. For
+    /// [`TermAction::Drop`] it is the base of the lowest of the terms dropped, when
+    /// the reader's append position is above it.
     pub truncate_to: i64,
     /// The stop position of a replication, or −1.
     pub stop_position: i64,
@@ -2674,14 +2682,25 @@ pub struct TermFields {
 /// leadership term whose fields are `message` (`spec/cluster.md`, "Messages during an
 /// election"): ignore a term below the candidate term, or in a ballot state any term but
 /// the candidate term, so that a member that voted in a term follows no leader of a
-/// lower one; canvass when the log terms differ; else truncate to a next term base log
+/// lower one; when the log terms differ, drop the reader's terms above the one named
+/// when the message names a lower term and a next term above the reader's log term, and
+/// canvass otherwise; else truncate to a next term base log
 /// position the message carries when above it; then, below the leader's term base, fail
 /// with no next term, replicate to the stop position, or wait; at or above it, replay.
+///
+/// `own_base_above` is the base of the lowest term in the reader's own record above the
+/// message's log leadership term id, −1 for none. A message that names a term below the
+/// reader's log term says that the leader's record holds none of the reader's terms
+/// above it. Its next leadership term id is the lowest term in the leader's record
+/// above the term the reader reported, so one above the reader's log term answers the
+/// log the reader holds, and the reader drops those terms; one at or below it answers
+/// an older report, and the reader canvasses (ADR 0096).
 pub const fn new_leadership_term_action(
     log_leadership_term_id: i64,
     append_position: i64,
     candidate_term: i64,
     in_canvass: bool,
+    own_base_above: i64,
     message: TermFields,
 ) -> NewLeadershipTermAction {
     let term = message.leadership_term_id;
@@ -2694,6 +2713,21 @@ pub const fn new_leadership_term_action(
         };
     }
     if message.log_leadership_term_id != log_leadership_term_id {
+        if message.log_leadership_term_id < log_leadership_term_id
+            && message.next_leadership_term_id > log_leadership_term_id
+            && own_base_above != NULL_VALUE
+        {
+            return NewLeadershipTermAction {
+                action: TermAction::Drop,
+                truncate_to: if append_position > own_base_above {
+                    own_base_above
+                } else {
+                    NULL_VALUE
+                },
+                stop_position: NULL_VALUE,
+                records: None,
+            };
+        }
         return NewLeadershipTermAction {
             action: TermAction::Canvass,
             truncate_to: NULL_VALUE,
@@ -2753,6 +2787,20 @@ pub struct NextFields {
     pub next_term_base_log_position: i64,
     /// The next log position, or −1.
     pub next_log_position: i64,
+}
+
+/// The log leadership term id a leader with `terms`, its record, writes into new
+/// leadership term for a member that reported `reported_term` (`spec/cluster.md`, "New
+/// leadership term, template 53"): the highest term its record holds at or below the
+/// reported one, −1 when it holds none, so that the term a leader answers for is one
+/// its own record holds and a member's record converges on its leader's (ADR 0096).
+pub fn answered_term(terms: &[TermSpan], reported_term: i64) -> i64 {
+    terms
+        .iter()
+        .map(|span| span.term)
+        .filter(|&term| term <= reported_term)
+        .max()
+        .unwrap_or(NULL_VALUE)
 }
 
 /// The next fields a leader with `terms`, its record, of `leader_term` based at
