@@ -172,7 +172,7 @@ as before.
   among them; and 25 rejections, each check and the order of two that both fail.
   `crates/cavalry-proto/tests/cluster_conformance.rs` reads each, writes its fields
   back to the same bytes and answers each position; a file of 1,025 entries is
-  written and read, and one entry more is refused. `cluster_no_panic.rs` reads
+  written and read, and one entry more is refused. `cluster_no_panic.rs` reads over
   60,000 byte strings and writes 20,000 files from entries at the edges of their
   types: each is taken or refused by name.
 - `crates/cavalry-raft/tests/cluster.rs`, three members over three drivers.
