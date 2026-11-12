@@ -5,8 +5,9 @@
 # conformance/node/quickstart.js through clients/node with the runner's Node, then
 # clients/node/README.md's example through conformance/node/readme.js; then starts three
 # cluster members on the loopback, each a `cavalry run` in a member's role, and runs
-# conformance/node/committed_log.js beside member 1, the client's committed log against a
-# cluster (spec/c-abi.md, version 2; ADR 0070); and cleans up.
+# conformance/node/committed_log.js beside one of them, member 1 unless it joined late
+# (conformance/log-member.sh), the client's committed log against a cluster
+# (spec/c-abi.md, version 2; ADR 0070); and cleans up.
 # `just conformance` runs this after conformance/python (clients/README.md; ADR 0046, card
 # 206). The runner takes `--expose-gc` so that its allocation round can read the heap after
 # a full collection.
@@ -101,9 +102,19 @@ done
     exit 1
 }
 
-echo "conformance/node: run committed_log.js beside member 1"
-node conformance/node/committed_log.js "$cluster/member-1" 1 || {
-    echo "conformance/node: committed_log.js failed beside member 1; the members said:" >&2
+# The member the round reads beside, and the recording that holds its log: member 1,
+# unless it joined its leader's log late and so holds its log in two recordings, and
+# then another (conformance/log-member.sh; ADR 0103).
+chosen=$(conformance/log-member.sh "$cluster") || {
+    echo "conformance/node: no member holds its log in one recording; the members said:" >&2
+    cat "$cluster"/member-*.out >&2 || true
+    exit 1
+}
+read -r member recording <<<"$chosen"
+
+echo "conformance/node: run committed_log.js beside member $member"
+node conformance/node/committed_log.js "$cluster/member-$member" "$member" "$recording" || {
+    echo "conformance/node: committed_log.js failed beside member $member; the members said:" >&2
     cat "$cluster"/member-*.out >&2 || true
     exit 1
 }

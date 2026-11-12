@@ -5,8 +5,9 @@
 # CommittedLogRound, starts a driver on a directory of its own, runs Quickstart through
 # clients/jvm with the runner's java, then clients/jvm/README.md's example through Readme;
 # then starts three cluster members on the loopback, each a `cavalry run` in a member's
-# role, and runs CommittedLogRound beside member 1, the client's committed log against a
-# cluster (spec/c-abi.md, version 2; ADR 0070); and cleans up.
+# role, and runs CommittedLogRound beside one of them, member 1 unless it joined late
+# (conformance/log-member.sh), the client's committed log against a cluster
+# (spec/c-abi.md, version 2; ADR 0070); and cleans up.
 # `just conformance` runs this after conformance/go (clients/README.md; ADR 0046, card
 # 208).
 set -euo pipefail
@@ -106,10 +107,20 @@ done
     exit 1
 }
 
-echo "conformance/jvm: run CommittedLogRound beside member 1"
+# The member the round reads beside, and the recording that holds its log: member 1,
+# unless it joined its leader's log late and so holds its log in two recordings, and
+# then another (conformance/log-member.sh; ADR 0103).
+chosen=$(conformance/log-member.sh "$cluster") || {
+    echo "conformance/jvm: no member holds its log in one recording; the members said:" >&2
+    cat "$cluster"/member-*.out >&2 || true
+    exit 1
+}
+read -r member recording <<<"$chosen"
+
+echo "conformance/jvm: run CommittedLogRound beside member $member"
 java --enable-native-access=ALL-UNNAMED -cp clients/jvm/build/classes:conformance/jvm/build CommittedLogRound \
-    "$cluster/member-1" 1 || {
-    echo "conformance/jvm: CommittedLogRound failed beside member 1; the members said:" >&2
+    "$cluster/member-$member" "$member" "$recording" || {
+    echo "conformance/jvm: CommittedLogRound failed beside member $member; the members said:" >&2
     cat "$cluster"/member-*.out >&2 || true
     exit 1
 }

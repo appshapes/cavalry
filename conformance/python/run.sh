@@ -4,8 +4,8 @@
 # the runner's Python 3, then clients/python/README.md's example through
 # conformance/python/readme.py; then starts three cluster members on the loopback, each a
 # `cavalry run` in a member's role, and runs conformance/python/committed_log.py beside
-# member 1, the client's committed log against a cluster (spec/c-abi.md, version 2; ADR
-# 0070); and cleans up. `just conformance` runs this after conformance/c
+# one of them, member 1 unless it joined late (conformance/log-member.sh), the client's
+# committed log against a cluster (spec/c-abi.md, version 2; ADR 0070); and cleans up. `just conformance` runs this after conformance/c
 # (clients/README.md; ADR 0046, card 205). Nothing is installed: ctypes is in the standard
 # library.
 set -euo pipefail
@@ -95,9 +95,19 @@ done
     exit 1
 }
 
-echo "conformance/python: run committed_log.py beside member 1"
-python3 conformance/python/committed_log.py "$cluster/member-1" 1 || {
-    echo "conformance/python: committed_log.py failed beside member 1; the members said:" >&2
+# The member the round reads beside, and the recording that holds its log: member 1,
+# unless it joined its leader's log late and so holds its log in two recordings, and
+# then another (conformance/log-member.sh; ADR 0103).
+chosen=$(conformance/log-member.sh "$cluster") || {
+    echo "conformance/python: no member holds its log in one recording; the members said:" >&2
+    cat "$cluster"/member-*.out >&2 || true
+    exit 1
+}
+read -r member recording <<<"$chosen"
+
+echo "conformance/python: run committed_log.py beside member $member"
+python3 conformance/python/committed_log.py "$cluster/member-$member" "$member" "$recording" || {
+    echo "conformance/python: committed_log.py failed beside member $member; the members said:" >&2
     cat "$cluster"/member-*.out >&2 || true
     exit 1
 }

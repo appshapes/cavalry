@@ -22,6 +22,13 @@ bounded at 10 s, and one that runs out says how far it got.
 | `jvm/` | Java 25, `Quickstart.java` and then `Readme.java`, the example of `clients/jvm/README.md`, then `CommittedLogRound.java` beside one of three cluster members that `run.sh` starts with `cavalry run`, through `run.sh` over `clients/jvm` | the runner's `javac` and `java`, whose `java.lang.foreign` binds the shared library when the client loads | ADR 0046 (card 208) |
 | `dotnet/` | C#, `Quickstart` and then `Readme`, the example of `clients/dotnet/README.md`, then `CommittedLog` beside one of three cluster members that `run.sh` starts with `cavalry run`, through `run.sh` over `clients/dotnet` | the runner's `dotnet`, whose SDK builds the client and whose runtime binds the shared library when the client loads | ADR 0046 (card 209) |
 
+A committed log round reads beside a member whose log is one recording that begins at
+position 0, and checks the recording's id. Each `run.sh` asks `log-member.sh` which
+member that is: member 1, unless it joined its leader's log late and holds its log in
+two recordings, and then member 0 or member 2. The script reads each member's file of
+its log's recordings in its driver directory (`spec/cluster.md`, "The log's
+recordings"; ADR 0103) and prints the member's id and the recording's.
+
 The Python runner is the shape the Node, Go, JVM and .NET runners copy (ADR 0046,
 cards 206 to 209): a package of another ABI version refused when it loads the library; the C
 runner's checks through the client; the client's own edges, where a handler's exception

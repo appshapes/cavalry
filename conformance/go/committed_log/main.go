@@ -98,11 +98,15 @@ type refusal struct {
 }
 
 func main() {
-	if len(os.Args) != 3 {
-		fail("usage: committed_log <the member's driver directory> <the member's id>")
+	if len(os.Args) != 4 {
+		fail("usage: committed_log <the member's driver directory> <the member's id> <its recording's id>")
 	}
 	memberDir := os.Args[1]
 	memberID, err := strconv.Atoi(os.Args[2])
+	mustOK(err)
+	// The recording that holds the member's log, one that begins at 0, which
+	// conformance/log-member.sh read from the member's file of its log's recordings.
+	recordingID, err := strconv.ParseInt(os.Args[3], 10, 64)
 	mustOK(err)
 	client, err := cavalry.NewClient(memberDir)
 	mustOK(err)
@@ -124,8 +128,8 @@ func main() {
 	say("twenty logs opened and closed with no poll between left the client open")
 	held := cavalry.Registered()
 	log := openLog(client, 0)
-	if log.MemberID != int32(memberID) || log.RecordingID != 0 {
-		fail("the log is member %d's recording %d, not member %d's recording 0", log.MemberID, log.RecordingID, memberID)
+	if log.MemberID != int32(memberID) || log.RecordingID != recordingID {
+		fail("the log is member %d's recording %d, not member %d's recording %d", log.MemberID, log.RecordingID, memberID, recordingID)
 	}
 	if log.Position() != 0 || log.CommitPosition() != 0 {
 		fail("a log opened at 0 began at %d with bound %d", log.Position(), log.CommitPosition())
