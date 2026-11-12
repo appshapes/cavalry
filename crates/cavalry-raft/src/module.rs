@@ -85,8 +85,10 @@ pub enum RaftError {
     /// The `terms` file could not be read or written.
     Terms(TermsError),
     /// The driver's catalog could not be read in the member's log directory, at the
-    /// member's start or when a recording of the log was handed over: the member
-    /// takes where a recording begins from it (ADR 0093).
+    /// member's start or when a recording of the log was handed over, or its slot for
+    /// that recording is empty or holds a recording of another session or stream,
+    /// which is `unknown`: the member takes where a recording begins from it, and a
+    /// catalog that is not its driver's would give another recording's (ADR 0093).
     Catalog(CatalogError),
     /// The driver refused a command, or the client is closed.
     Client(ClientError),
@@ -159,8 +161,10 @@ impl core::fmt::Display for RaftError {
                 f,
                 "member stopped ({reason}): {error}. The member reads where each of its \
                  recordings of the log begins from the catalog in its log directory, \
-                 which must be its driver's: start the member with the log directory its \
-                 driver was started with; see {DOC}"
+                 which must be its driver's. Start the member with the log directory its \
+                 driver was started with. If that is the directory it has, the catalog \
+                 there could not be read, and the error above names the file and the \
+                 cause; see {DOC_MEMBERS}"
             ),
             RaftError::Client(error) => write!(f, "member stopped ({reason}): {error}"),
             RaftError::Poll(fault) => write!(f, "member stopped ({reason}): {fault}"),
@@ -430,9 +434,13 @@ fn stop_recording(client: &mut Cavalry, recording: &Recording) -> Result<i64, Ra
 /// reads where it begins. That is the catalog's word, never the image's: an image
 /// that arrived between this member's `add subscription` and its `start recording`
 /// is recorded from what it had received by then, past its join position (ADR 0093).
-/// The driver writes the descriptor before it says the recording started; a read
-/// that fails leaves the recording waiting in `starting`, and the next cycle reads
-/// again. `floor` is where the member's log ended when it subscribed.
+/// The driver writes the descriptor before it says the recording started, so its
+/// slot in the driver's catalog holds this recording by now. A slot that is empty, or
+/// that holds a recording of another session or stream, is in a catalog that is not
+/// the driver's, and its start position would be another recording's: it is
+/// `unknown`, as a slot the catalog does not have is. A read that fails leaves the
+/// recording waiting in `starting`, and the next cycle reads again. `floor` is where
+/// the member's log ended when it subscribed.
 fn take_started(
     armed: &mut Option<ArmedRecording>,
     starting: &mut Option<Recording>,
@@ -448,17 +456,22 @@ fn take_started(
     let Some(recording) = starting.take() else {
         return Ok(None);
     };
-    match catalog.get(recording.recording_id()) {
-        Ok(Some(descriptor)) => Ok(Some(Held {
+    let recording_id = recording.recording_id();
+    let found = catalog.get(recording_id).and_then(|descriptor| {
+        descriptor
+            .filter(|descriptor| {
+                descriptor.session_id() == recording.session_id()
+                    && descriptor.stream_id() == recording.stream_id()
+            })
+            .ok_or(CatalogError::Unknown { recording_id })
+    });
+    match found {
+        Ok(descriptor) => Ok(Some(Held {
             recording,
             start: descriptor.start_position(),
             floor,
             checked: false,
         })),
-        Ok(None) => {
-            *starting = Some(recording);
-            Ok(None)
-        }
         Err(error) => {
             *starting = Some(recording);
             Err(error.into())
@@ -1367,9 +1380,12 @@ impl ConsensusModule {
     /// adds a publication to every other member's, and adds its counters; the log comes
     /// with its election.
     ///
-    /// A log directory that holds a term or a vote is [`RaftError::Restart`]: a member
-    /// of this version starts on a new log directory, with every other member of its
-    /// cluster.
+    /// A log directory with no catalog is [`RaftError::Catalog`], and nothing is
+    /// written into it: `log_dir` must be the directory the driver in `dir` was started
+    /// with, whose catalog says where each of the member's recordings of the log
+    /// begins (ADR 0093). A log directory that holds a term or a vote is
+    /// [`RaftError::Restart`]: a member of this version starts on a new log directory,
+    /// with every other member of its cluster.
     pub fn start(
         dir: impl AsRef<Path>,
         log_dir: impl AsRef<Path>,
@@ -1392,10 +1408,12 @@ impl ConsensusModule {
             }));
         };
 
-        let terms = TermsFile::open(log_dir.as_ref())?;
         // The driver's catalog, which the driver created when it started on this
-        // directory: a directory without one is not the driver's.
+        // directory: a directory without one is not the driver's. It is opened before
+        // the `terms` file, which is created when it is not there, so that a
+        // directory the module refuses is left as it was.
         let catalog = CatalogReader::open(log_dir.as_ref())?;
+        let terms = TermsFile::open(log_dir.as_ref())?;
         if terms.log_leadership_term_id() != -1 || terms.candidate_term() != -1 {
             return Err(RaftError::Restart {
                 log_leadership_term_id: terms.log_leadership_term_id(),
