@@ -99,7 +99,10 @@ then treats the file as a dead driver's.
 
 The starter then writes its pid in `pid`, removes everything else in the directory and
 creates its files, each with create-new semantics. A driver of this version never
-removes a file whose creator is alive: a creator that is alive holds the lock. A
+removes a file whose creator is alive: a creator that is alive holds the lock. The
+one file a client creates in the directory, a cluster member's
+`log-recordings-<member id>`, is removed with the rest: its member is a client of
+the driver that is gone, and writes the file again beside the next. A
 driver that stops stores −1 in the consumer heartbeat, lets go of the lock and leaves
 the directory in place, so that `doctor` can read the counters of a driver that has
 gone; the next driver removes them. A driver of an earlier version that starts in the

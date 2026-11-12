@@ -383,7 +383,7 @@ pub const CLUSTER_APPEND_POSITION: CounterId = CounterId(124);
 /// `cluster.messages_rejected`, a client counter: Messages of the consensus stream one cluster member rejected, for any reason of spec/cluster.md, What a reader rejects; key: member id (i32), little-endian; label text: the member id in decimal.
 pub const CLUSTER_MESSAGES_REJECTED: CounterId = CounterId(125);
 
-/// `cluster.log_recording_id`, a client gauge: The id of the recording one cluster member records the live log into, -1 while it records none: the leader's recording of its log publication, or a follower's recording of the leader's image it joined last; the recording its service replays (spec/cluster.md, The service; ADR 0066). The member's consensus module adds the counter and stores -1 in it before it adds cluster.commit_position, and stores a new value in it before it stores a commit position the recording does not hold; key: member id (i32), little-endian; label text: the member id in decimal.
+/// `cluster.log_recording_id`, a client gauge: The id of the recording one cluster member records the live log into, -1 while it records none: the leader's recording of its log publication, or a follower's recording of the leader's image it joined last; the recording its service replays, or reads below through the member's file of its log's recordings (spec/cluster.md, The service and The log's recordings; ADR 0066, ADR 0103). The member's consensus module adds the counter and stores -1 in it before it adds cluster.commit_position, stores a new value in it before it stores a commit position the recording does not hold, and writes the file of its log's recordings before it stores a recording's id in it; key: member id (i32), little-endian; label text: the member id in decimal.
 pub const CLUSTER_LOG_RECORDING_ID: CounterId = CounterId(126);
 
 /// `cluster.candidacies`, a client counter: Ballots one cluster member began as a candidate: it stored candidate term + 1, voted for itself and asked every other member for its vote, going from nominate to candidate ballot (spec/cluster.md, Roles and the election, state 3; ADR 0081); key: member id (i32), little-endian; label text: the member id in decimal.
@@ -427,6 +427,9 @@ pub const CLUSTER_LEADER_MEMBER_ID: CounterId = CounterId(140);
 
 /// `cluster.election_cause`, a client gauge: Why one cluster member's last election began, the election it is in or the one that closed last: 0 the member started; 1 it followed and its leader said nothing for the leader heartbeat timeout; 2 it followed and its image of the leader's log was no longer available; 3 it led and its active members fell below a quorum; 4 its election had closed and a message carried a term above its own; 5 its election before failed (spec/cluster.md, Counters; ADR 0077, ADR 0102); key: member id (i32), little-endian; label text: the member id in decimal.
 pub const CLUSTER_ELECTION_CAUSE: CounterId = CounterId(141);
+
+/// `cluster.log_recordings_unwritten`, a client counter: Duty cycles in which one cluster member had a recording of its log to name and could not write the file of its log's recordings, log-recordings-<member id> in its driver directory: the member stored -1 in cluster.log_recording_id, named no recording to a service, and wrote the file again in the next cycle (spec/cluster.md, The log's recordings, and Counters; ADR 0103). Ids 139 and 142 are other changes'; key: member id (i32), little-endian; label text: the member id in decimal.
+pub const CLUSTER_LOG_RECORDINGS_UNWRITTEN: CounterId = CounterId(143);
 
 /// Every entry of `counters.toml`, in the file's order.
 pub const COUNTERS: &[CounterDef] = &[
@@ -1443,8 +1446,8 @@ pub const COUNTERS: &[CounterDef] = &[
         name: "cluster.log_recording_id",
         kind: Kind::Gauge,
         scope: Scope::Client,
-        doc: "The id of the recording one cluster member records the live log into, -1 while it records none: the leader's recording of its log publication, or a follower's recording of the leader's image it joined last; the recording its service replays (spec/cluster.md, The service; ADR 0066). The member's consensus module adds the counter and stores -1 in it before it adds cluster.commit_position, and stores a new value in it before it stores a commit position the recording does not hold; key: member id (i32), little-endian; label text: the member id in decimal.",
-        doctor: "A cluster.log_recording_id that stays at -1 on a member whose cluster.election_state is 17, its election closed, is a follower whose recording of the leader's image never started, so that its cluster.append_position does not move: its driver's recording.armed_failed counts the failure and names the counter of the step that failed. A member in an election holds -1 until it has joined the log.",
+        doc: "The id of the recording one cluster member records the live log into, -1 while it records none: the leader's recording of its log publication, or a follower's recording of the leader's image it joined last; the recording its service replays, or reads below through the member's file of its log's recordings (spec/cluster.md, The service and The log's recordings; ADR 0066, ADR 0103). The member's consensus module adds the counter and stores -1 in it before it adds cluster.commit_position, stores a new value in it before it stores a commit position the recording does not hold, and writes the file of its log's recordings before it stores a recording's id in it; key: member id (i32), little-endian; label text: the member id in decimal.",
+        doctor: "A cluster.log_recording_id that stays at -1 on a member whose cluster.election_state is 17, its election closed, is one of two members. A follower whose recording of the leader's image never started, so that its cluster.append_position does not move: its driver's recording.armed_failed counts the failure and names the counter of the step that failed. Or a member that cannot write the file of its log's recordings, whose cluster.log_recordings_unwritten rises while its cluster.append_position moves: see that counter's text. A member in an election holds -1 until it has joined the log.",
     },
     CounterDef {
         id: CLUSTER_CANDIDACIES,
@@ -1557,5 +1560,13 @@ pub const COUNTERS: &[CounterDef] = &[
         scope: Scope::Client,
         doc: "Why one cluster member's last election began, the election it is in or the one that closed last: 0 the member started; 1 it followed and its leader said nothing for the leader heartbeat timeout; 2 it followed and its image of the leader's log was no longer available; 3 it led and its active members fell below a quorum; 4 its election had closed and a message carried a term above its own; 5 its election before failed (spec/cluster.md, Counters; ADR 0077, ADR 0102); key: member id (i32), little-endian; label text: the member id in decimal.",
         doctor: "0 is a start and nothing to act on. 1 and 2 on a follower say its leader stopped or could not be reached: look at the leader's process and at the path between the two members' consensus and log endpoints. 3 on a member that led says it could no longer hear a quorum: it is the member that was cut off. 4 says another member held a later term, which is what a member sees when it comes back from a partition. 5 says the election before this one did not close: read cluster.elections_failed and the counters beside it, cluster.join_position_mismatches, cluster.truncations_refused and cluster.log_replications_unavailable, for which rule failed it.",
+    },
+    CounterDef {
+        id: CLUSTER_LOG_RECORDINGS_UNWRITTEN,
+        name: "cluster.log_recordings_unwritten",
+        kind: Kind::Counter,
+        scope: Scope::Client,
+        doc: "Duty cycles in which one cluster member had a recording of its log to name and could not write the file of its log's recordings, log-recordings-<member id> in its driver directory: the member stored -1 in cluster.log_recording_id, named no recording to a service, and wrote the file again in the next cycle (spec/cluster.md, The log's recordings, and Counters; ADR 0103). Ids 139 and 142 are other changes'; key: member id (i32), little-endian; label text: the member id in decimal.",
+        doctor: "A member that counts here cannot write in its driver's directory, and no service beside it reads the log while that lasts. The member's own error names the file and the cause: check that the driver directory is writable by the member's user and that its file system has room. The count stops rising once a cycle has written the file, and cluster.log_recording_id then names the recording.",
     },
 ];
