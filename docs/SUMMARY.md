@@ -27,6 +27,7 @@ under `docs/` is listed here; `just lint-docs` fails on one that is not.
 - [Set up a bench host for the latency gate](how-to/set-up-a-bench-host.md)
 - [Set up a soak host](how-to/set-up-a-soak-host.md)
 - [Send the weekly release-notes email](how-to/send-the-release-notes.md)
+- [Run a test many times in a row](how-to/run-a-test-many-times.md)
 
 # Reference
 
