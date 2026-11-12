@@ -1169,3 +1169,662 @@ fn a_catalog_slot_that_holds_another_recording_gives_no_start() {
     assert_eq!(start, 0);
     assert_eq!(pair.member.log_recording_id(), Some(0));
 }
+
+impl Pair {
+    /// A subscriber on member 1's `log` endpoint that is no part of the member: with
+    /// it the leader's log publication has a receiver and takes appends while the
+    /// member itself is behind and out of the log.
+    fn receive_log(&mut self) -> (Cavalry, Subscription) {
+        let mut client = Cavalry::connect_to(&self.member_driver_dir).expect("a receiver");
+        let channel = self.member.io.log_endpoint_channel.clone();
+        let subscription = client
+            .add_subscription(&channel, LOG_STREAM_ID)
+            .expect("the receiver subscribes");
+        (client, subscription)
+    }
+
+    /// Runs member 1's observation of both its subscriptions until `done` says so.
+    fn observe_both<T>(
+        &mut self,
+        what: &str,
+        mut done: impl FnMut(&mut ClientIo) -> Option<T>,
+    ) -> T {
+        wait_for(what, || {
+            self.member.io.observe_log().expect("the log is observed");
+            self.member
+                .io
+                .observe_catchup()
+                .expect("the catch-up is observed");
+            done(&mut self.member.io)
+        })
+    }
+}
+
+/// A member replicates a term that lies in two of its leader's recordings, asking
+/// for each replay as its core does (ADR 0092), over two drivers (ADR 0094). For
+/// each: it subscribes on its `catchup` endpoint with a recording armed, and its
+/// catch-up position carries its id and that endpoint; the leader replays the
+/// recording that holds the position; the election is told where the member's
+/// recording of the image begins, which is where it asked from; the append position
+/// follows what that recording syncs; when the replay has ended the image is said to
+/// have gone; and the member removes the subscription, keeping the recording from
+/// where it begins to where it stopped, which is where its log ends.
+#[test]
+fn a_member_records_each_replay_it_asks_for_and_its_log_ends_where_each_stopped() {
+    let mut pair = pair("replicate");
+    let _receiver = pair.receive_log();
+    pair.leader
+        .io
+        .add_log(0, 0)
+        .expect("the driver takes the commands")
+        .expect("the log has its recording");
+    let one = pair.append(b"one", 0);
+    let two = pair.append(b"two", one);
+    pair.leader.io.remove_log().expect("the log is given up");
+    pair.leader
+        .io
+        .add_log(1, two)
+        .expect("the driver takes the commands")
+        .expect("the log has its recording");
+    let three = pair.append(b"three", two);
+    pair.leader.io.remove_log().expect("the log is given up");
+
+    assert_eq!(pair.member.io.catchup_image().expect("read"), None);
+    let mut kept = Vec::new();
+    for (from, to) in [(0, two), (two, three)] {
+        pair.member.io.add_catchup().expect("subscribed and armed");
+        wait_for("the catch-up position leaves", || {
+            pair.member
+                .io
+                .send_catchup_position(0, 1, from)
+                .then_some(())
+        });
+        let asked = wait_for("the leader reads the catch-up position", || {
+            let mut read = None;
+            pair.leader
+                .consensus
+                .poll(
+                    |body, _| {
+                        if let Ok(Message::CatchupPosition {
+                            leadership_term_id,
+                            log_position,
+                            follower_member_id,
+                            catchup_endpoint,
+                        }) = Message::parse(Stream::Consensus, body)
+                        {
+                            read = Some((
+                                leadership_term_id,
+                                log_position,
+                                follower_member_id,
+                                catchup_endpoint.to_vec(),
+                            ));
+                        }
+                    },
+                    16,
+                )
+                .expect("the leader polls");
+            read
+        });
+        assert_eq!(
+            asked,
+            (
+                1,
+                from,
+                1,
+                pair.member.io.catchup_endpoint.as_bytes().to_vec()
+            )
+        );
+
+        assert!(
+            pair.leader
+                .io
+                .start_replay(1, from, Some(three))
+                .expect("the replay starts")
+        );
+        let start = pair.observe_both("the replay's image is told", |io| {
+            io.catchup_image().expect("the image is read")
+        });
+        assert_eq!(start, from, "where the member asked from");
+        pair.observe_both("the append position reaches the recording's end", |io| {
+            (io.append_position() == to).then_some(())
+        });
+        pair.observe_both("the image is said to have gone", |io| {
+            io.catchup_image()
+                .expect("the image is read")
+                .is_none()
+                .then_some(())
+        });
+        let recording_id = pair
+            .member
+            .io
+            .catchup_held
+            .as_ref()
+            .expect("the recording is held")
+            .recording
+            .recording_id();
+        assert_eq!(pair.start_of(recording_id), from);
+        pair.member
+            .io
+            .remove_catchup()
+            .expect("the subscription is removed");
+        assert!(pair.member.io.catchup_subscription.is_none());
+        assert_eq!(pair.member.io.append_position(), to);
+        kept.push(Kept {
+            recording_id,
+            start: from,
+            stop: to,
+        });
+        assert_eq!(
+            pair.member.io.kept.iter().copied().collect::<Vec<_>>(),
+            kept
+        );
+        assert_eq!(pair.member.io.catchup_image().expect("read"), None);
+    }
+    pair.member.io.remove_catchup().expect("nothing to remove");
+    assert_eq!(pair.member.log_recording_id(), None, "it is in no log");
+}
+
+/// A catch-up within the leader's term, with the live add (state 13) over two
+/// drivers: the member records a replay that follows the leader's live recording,
+/// then adds its `log` endpoint's subscription while the replay runs. The election
+/// is told where the live recording begins, at or past the member's append position.
+/// From there the two recordings overlap and the append position follows either.
+/// The leader stops the replay and the member removes its catch-up subscription: its
+/// log ends at the further of what the two hold, and goes on by the live recording
+/// alone. When it leaves the log it keeps both recordings, the replay's first.
+#[test]
+fn a_member_that_catches_up_adds_the_live_log_and_goes_on_by_it() {
+    let mut pair = pair("catch-up");
+    let _receiver = pair.receive_log();
+    let log = pair
+        .leader
+        .io
+        .add_log(0, 0)
+        .expect("the driver takes the commands")
+        .expect("the log has its recording");
+    let one = pair.append(b"one", 0);
+    let two = pair.append(b"two", one);
+
+    pair.member.io.add_catchup().expect("subscribed and armed");
+    assert!(
+        pair.leader
+            .io
+            .start_replay(1, 0, None)
+            .expect("the replay starts")
+    );
+    let start = pair.observe_both("the replay's image is told", |io| {
+        io.catchup_image().expect("the image is read")
+    });
+    assert_eq!(start, 0);
+    pair.observe_both("the append position reaches the leader's", |io| {
+        (io.append_position() == two).then_some(())
+    });
+    assert_eq!(
+        pair.member.log_recording_id(),
+        None,
+        "not on the live log yet"
+    );
+
+    // The live add: the image of the leader's log is there already, so the recording
+    // begins at what it has received, at or past the member's append position.
+    pair.member.io.join_log().expect("subscribed and armed");
+    let live_start = pair.observe_both("the live recording's start is told", |io| {
+        io.log_image(log.session_id).expect("the image is read")
+    });
+    assert!(live_start >= two, "{live_start}");
+    let three = pair.append(b"three", two);
+    pair.observe_both("the append position reaches the third entry", |io| {
+        (io.append_position() == three).then_some(())
+    });
+    let live_id = pair
+        .member
+        .log_recording_id()
+        .expect("the live recording is the member's log now");
+
+    pair.leader
+        .io
+        .stop_replay(1)
+        .expect("the replay is stopped");
+    let replay_id = pair
+        .member
+        .io
+        .catchup_held
+        .as_ref()
+        .expect("the replay's recording is held")
+        .recording
+        .recording_id();
+    pair.member
+        .io
+        .remove_catchup()
+        .expect("the catch-up subscription is removed");
+    assert_eq!(pair.member.io.append_position(), three);
+    let replay_stop = pair.member.io.stopped_at;
+    assert!(replay_stop >= live_start, "{replay_stop} {live_start}");
+
+    let four = pair.append(b"four", three);
+    pair.observe_both("the append position follows the live recording", |io| {
+        (io.append_position() == four).then_some(())
+    });
+    pair.member.io.leave_log().expect("the log is left");
+    assert_eq!(pair.member.io.append_position(), four);
+    assert_eq!(
+        pair.member.io.kept.iter().copied().collect::<Vec<_>>(),
+        vec![
+            Kept {
+                recording_id: replay_id,
+                start: 0,
+                stop: replay_stop,
+            },
+            Kept {
+                recording_id: live_id,
+                start: live_start,
+                stop: four,
+            },
+        ]
+    );
+    // Where the two overlap, a replay of this member's own is of the one that
+    // begins first.
+    assert_eq!(
+        pair.member.io.recording_at(0),
+        Some((replay_id, Some(replay_stop)))
+    );
+    assert_eq!(
+        pair.member.io.recording_at(three),
+        Some((live_id, Some(four)))
+    );
+}
+
+/// The live recording begins where the member's log ended when it subscribed, or
+/// past it, and the replay goes on meanwhile. By the duty cycle in which the driver
+/// hands the live recording over, the replay's recording may have carried the log
+/// past the live recording's start: the live recording counts all the same, since
+/// what it must not begin below is where the log ended when the member subscribed,
+/// not where it ends when the recording is handed over. Here the member subscribes
+/// on its `log` endpoint, the leader appends a second entry, which the replay
+/// brings, and only then does the member look at its log subscription. The replay
+/// is stopped, and a third entry reaches the member by the live recording alone.
+#[test]
+fn a_live_recording_counts_though_the_replay_passed_its_start_before_it_was_handed_over() {
+    let mut pair = pair("handed-over-late");
+    let _receiver = pair.receive_log();
+    let log = pair
+        .leader
+        .io
+        .add_log(0, 0)
+        .expect("the driver takes the commands")
+        .expect("the log has its recording");
+    let one = pair.append(b"one", 0);
+    pair.member.io.add_catchup().expect("subscribed and armed");
+    assert!(
+        pair.leader
+            .io
+            .start_replay(1, 0, None)
+            .expect("the replay starts")
+    );
+    pair.observe_both("the replay's image is told", |io| {
+        io.catchup_image().expect("the image is read")
+    });
+    pair.observe_both("the append position reaches the leader's", |io| {
+        (io.append_position() == one).then_some(())
+    });
+
+    pair.member.io.join_log().expect("subscribed and armed");
+    let two = pair.append(b"two", one);
+    wait_for("the replay brings the second entry", || {
+        pair.member
+            .io
+            .observe_catchup()
+            .expect("the catch-up is observed");
+        (pair.member.io.append_position() == two).then_some(())
+    });
+    let live_start = pair.observe_both("the live recording's start is told", |io| {
+        io.log_image(log.session_id).expect("the image is read")
+    });
+    assert!(
+        (one..two).contains(&live_start),
+        "it began before the replay passed it: {live_start}"
+    );
+
+    pair.leader
+        .io
+        .stop_replay(1)
+        .expect("the replay is stopped");
+    pair.observe_both("the replay's recording has stopped", |io| {
+        io.catchup_held
+            .as_ref()
+            .and_then(|held| held.recording.stop_position())
+    });
+    let three = pair.append(b"three", two);
+    pair.observe_both("the append position follows the live recording", |io| {
+        (io.append_position() == three).then_some(())
+    });
+}
+
+/// A replay short enough to come and go between two of the member's duty cycles is
+/// still told to the election: its recording has stopped before the election first
+/// asks, and the first answer is where it begins all the same, so that its image is
+/// checked and its bytes counted. The answer after is that the image has gone.
+#[test]
+fn a_replay_that_ended_before_the_election_asked_is_told_once_and_then_gone() {
+    let mut pair = pair("short-replay");
+    let _receiver = pair.receive_log();
+    pair.leader
+        .io
+        .add_log(0, 0)
+        .expect("the driver takes the commands")
+        .expect("the log has its recording");
+    let one = pair.append(b"one", 0);
+    pair.leader.io.remove_log().expect("the log is given up");
+
+    pair.member.io.add_catchup().expect("subscribed and armed");
+    assert!(
+        pair.leader
+            .io
+            .start_replay(1, 0, Some(one))
+            .expect("the replay starts")
+    );
+    // The duty cycles observe; the election does not ask until the replay is over.
+    pair.observe_both("the replay's recording has stopped", |io| {
+        io.catchup_held
+            .as_ref()
+            .and_then(|held| held.recording.stop_position())
+    });
+    assert_eq!(pair.member.io.append_position(), 0, "not told yet");
+    assert_eq!(pair.member.io.catchup_image().expect("read"), Some(0));
+    assert_eq!(pair.member.io.append_position(), one);
+    assert_eq!(pair.member.io.catchup_image().expect("read"), None);
+    pair.member
+        .io
+        .remove_catchup()
+        .expect("the subscription is removed");
+    assert_eq!(pair.member.io.append_position(), one);
+    assert_eq!(pair.member.io.kept.len(), 1);
+}
+
+/// A member that begins again in follower catch-up leaves the log before it removes
+/// its catch-up subscription, as init does. It holds two recordings then, and the
+/// live one begins inside what the replay's holds: the replay's is stopped first, so
+/// that both are kept in order and the log ends at the further of the two stops,
+/// here the live recording's, which holds an entry the replay never brought.
+#[test]
+fn a_member_that_leaves_in_a_catch_up_keeps_both_recordings() {
+    let mut pair = pair("leave-in-catch-up");
+    let _receiver = pair.receive_log();
+    let log = pair
+        .leader
+        .io
+        .add_log(0, 0)
+        .expect("the driver takes the commands")
+        .expect("the log has its recording");
+    let one = pair.append(b"one", 0);
+    pair.member.io.add_catchup().expect("subscribed and armed");
+    assert!(
+        pair.leader
+            .io
+            .start_replay(1, 0, None)
+            .expect("the replay starts")
+    );
+    pair.observe_both("the replay's image is told", |io| {
+        io.catchup_image().expect("the image is read")
+    });
+    pair.observe_both("the append position reaches the leader's", |io| {
+        (io.append_position() == one).then_some(())
+    });
+    pair.member.io.join_log().expect("subscribed and armed");
+    let live_start = pair.observe_both("the live recording's start is told", |io| {
+        io.log_image(log.session_id).expect("the image is read")
+    });
+    // The replay stops; what the leader appends after reaches the live recording
+    // alone.
+    pair.leader
+        .io
+        .stop_replay(1)
+        .expect("the replay is stopped");
+    pair.observe_both("the replay's recording has stopped", |io| {
+        io.catchup_held
+            .as_ref()
+            .and_then(|held| held.recording.stop_position())
+    });
+    let two = pair.append(b"two", one);
+    pair.observe_both("the append position follows the live recording", |io| {
+        (io.append_position() == two).then_some(())
+    });
+
+    pair.member.io.leave_log().expect("the log is left");
+    pair.member
+        .io
+        .remove_catchup()
+        .expect("the catch-up subscription is removed");
+    assert_eq!(pair.member.io.append_position(), two);
+    let kept: Vec<_> = pair.member.io.kept.iter().copied().collect();
+    assert_eq!(kept.len(), 2, "{kept:?}");
+    assert_eq!((kept[0].start, kept[1].start), (0, live_start));
+    assert_eq!(kept[1].stop, two);
+    assert!(kept[0].stop >= live_start, "{kept:?}");
+}
+
+/// A recording of the live log whose image joined below where the member's log ends
+/// is no part of that log: the election is told where it begins, which is a join
+/// position mismatch, and the member's append position never moves by it (ADR 0094).
+/// The member follows term 0 to its first entry and leaves; the test's leader then
+/// leads a log that begins at 0 again.
+#[test]
+fn a_live_recording_that_begins_below_the_members_log_end_is_never_counted() {
+    let mut pair = pair("below");
+    pair.member.io.join_log().expect("subscribed and armed");
+    let log = pair
+        .leader
+        .io
+        .add_log(0, 0)
+        .expect("the driver takes the commands")
+        .expect("the log has its recording");
+    let one = pair.append(b"one", 0);
+    pair.observe_both("the first log is told", |io| {
+        io.log_image(log.session_id).expect("the image is read")
+    });
+    pair.observe_both("the member holds the first entry", |io| {
+        (io.append_position() == one).then_some(())
+    });
+    pair.member.io.leave_log().expect("the log is left");
+    pair.leader.io.remove_log().expect("the log is given up");
+
+    // A log of another term that begins at 0, below where the member's log ends.
+    pair.member.io.join_log().expect("subscribed and armed");
+    let again = pair
+        .leader
+        .io
+        .add_log(1, 0)
+        .expect("the driver takes the commands")
+        .expect("the log has its recording");
+    let start = pair.observe_both("the second log is told", |io| {
+        io.log_image(again.session_id).expect("the image is read")
+    });
+    assert_eq!(start, 0, "below the member's append position, {one}");
+    let message = entry(b"of another log, two entries long");
+    let mut encoded = [0u8; 256];
+    let length = message.write(&mut encoded).expect("the entry is encoded");
+    let end = i64::try_from((32 + length).div_ceil(32) * 32).expect("a length") * 2;
+    for _ in 0..2 {
+        wait_for("the entry is appended", || {
+            pair.leader
+                .io
+                .append(&message)
+                .expect("the publication takes the entry")
+                .then_some(())
+        });
+    }
+    assert!(end > one);
+    pair.observe_both("the member's recording syncs past its log's end", |io| {
+        io.held
+            .as_ref()
+            .filter(|held| held.recording.synced_position() >= end)
+            .map(|_| ())
+    });
+    assert_eq!(pair.member.io.append_position(), one);
+    assert_eq!(pair.member.log_recording_id(), None);
+    pair.member.io.leave_log().expect("the log is left");
+    assert_eq!(pair.member.io.append_position(), one);
+    assert_eq!(pair.member.io.kept.len(), 1);
+}
+
+/// Why the catch-up position is encoded into the module's scratch: with a host name
+/// of the length DNS allows, the message is longer than the 128 bytes the other
+/// consensus messages are encoded into, and fits 1,408.
+#[test]
+fn a_catch_up_position_with_a_long_host_name_does_not_fit_128_bytes() {
+    let endpoint = format!("{}.example:65535", "a".repeat(240));
+    let message = Message::CatchupPosition {
+        leadership_term_id: 1,
+        log_position: 0,
+        follower_member_id: 1,
+        catchup_endpoint: endpoint.as_bytes(),
+    };
+    assert!(message.write(&mut [0u8; 128]).is_err());
+    let length = message
+        .write(&mut [0u8; 1408])
+        .expect("the scratch holds it");
+    assert!(length > 128, "{length}");
+}
+
+/// A replay whose sender vanishes, here the leader's driver stopped, sends no end of
+/// stream. The member's image of it goes at the image liveness timeout, 10 s, and
+/// only then is the image said to have gone: the driver stops the member's recording
+/// when it retires the image. What the replay had brought is the member's log. The
+/// leader heartbeat timeout is 10 s too, so a member's election fails for want of
+/// progress no later than this, and it does not ask again (ADR 0094).
+#[test]
+fn a_replay_whose_sender_vanished_is_said_gone_at_the_image_liveness_timeout() {
+    let mut pair = pair("sender-vanishes");
+    let _receiver = pair.receive_log();
+    pair.leader
+        .io
+        .add_log(0, 0)
+        .expect("the driver takes the commands")
+        .expect("the log has its recording");
+    let one = pair.append(b"one", 0);
+    pair.member.io.add_catchup().expect("subscribed and armed");
+    assert!(
+        pair.leader
+            .io
+            .start_replay(1, 0, None)
+            .expect("the replay starts")
+    );
+    pair.observe_both("the replay's image is told", |io| {
+        io.catchup_image().expect("the image is read")
+    });
+    pair.observe_both("the append position reaches the leader's", |io| {
+        (io.append_position() == one).then_some(())
+    });
+
+    let Pair {
+        leader,
+        mut member,
+        mut _drivers,
+        _dir,
+        ..
+    } = pair;
+    let vanished = Instant::now();
+    drop(leader);
+    drop(_drivers.remove(0));
+    let deadline = vanished + cavalry_proto::udp::IMAGE_LIVENESS_TIMEOUT + Duration::from_secs(5);
+    let gone = loop {
+        member
+            .io
+            .observe_catchup()
+            .expect("the catch-up is observed");
+        if member.io.catchup_image().expect("read").is_none() {
+            break vanished.elapsed();
+        }
+        assert!(Instant::now() < deadline, "the image never went");
+        std::thread::sleep(Duration::from_millis(5));
+    };
+    assert!(
+        gone >= cavalry_proto::udp::IMAGE_LIVENESS_TIMEOUT - Duration::from_secs(1),
+        "{gone:?}"
+    );
+    assert_eq!(member.io.append_position(), one);
+    member
+        .io
+        .remove_catchup()
+        .expect("the subscription is removed");
+    assert_eq!(member.io.append_position(), one);
+    assert_eq!(member.io.kept.len(), 1);
+}
+
+/// A recording of another session's image is not the log, though the image the
+/// election asks for is the one the member noted (ADR 0093). A stranger's publication
+/// on the member's `log` endpoint takes the armed recording, publishes an entry and
+/// closes, and its image goes before the member looks at its log subscription. The
+/// leader's log then arrives and is the image the member notes. Asked for the
+/// leader's session, the module holds a recording of the stranger's session: it says
+/// nothing, counts nothing, and keeps nothing when it leaves.
+#[test]
+fn a_recording_taken_by_an_image_that_went_is_not_the_noted_images() {
+    let mut pair = pair("stale-recording");
+    pair.member.io.join_log().expect("subscribed and armed");
+    let mut stranger = Cavalry::connect_to(&pair.leader_driver_dir).expect("the stranger");
+    let channel = pair.member.io.log_endpoint_channel.clone();
+    let mut stray = stranger
+        .add_exclusive_publication(&channel, LOG_STREAM_ID)
+        .expect("the stray publication");
+    let stray_session = stray.session_id();
+    let message = entry(b"of no term");
+    let mut encoded = [0u8; 256];
+    let length = message.write(&mut encoded).expect("the entry is encoded");
+    // The member's subscription is polled here and not by the module, which is not
+    // to look at it yet: the stray image is read to its end, so that it can go.
+    fn images(io: &mut ClientIo) -> usize {
+        let subscription = io.log_subscription.as_mut().expect("subscribed");
+        subscription.poll(|_, _| {}, 16).expect("polled");
+        subscription.images().len()
+    }
+    wait_for("the stray entry is published", || {
+        images(&mut pair.member.io);
+        stray.offer(&encoded[..length]).is_ok().then_some(())
+    });
+    wait_for("the stray image is there", || {
+        (images(&mut pair.member.io) == 1).then_some(())
+    });
+    stray.close().expect("the stray publication closes");
+    let gone = Instant::now() + Duration::from_secs(15);
+    while images(&mut pair.member.io) != 0 {
+        assert!(Instant::now() < gone, "the stray image has gone");
+        std::thread::sleep(Duration::from_millis(1));
+    }
+    assert!(matches!(pair.member.io.image, LogImage::Awaited));
+
+    let log = pair
+        .leader
+        .io
+        .add_log(0, 0)
+        .expect("the driver takes the commands")
+        .expect("the log has its recording");
+    assert_ne!(log.session_id, stray_session);
+    pair.observe("the leader's image is noted", |io| {
+        matches!(io.image, LogImage::Joined { session_id, .. } if session_id == log.session_id)
+            .then_some(())
+    });
+    pair.observe("the stray recording is handed over", |io| {
+        io.held.as_ref().map(|_| ())
+    });
+    let held = pair.member.io.held.as_ref().expect("the recording is held");
+    assert_eq!(held.recording.session_id(), stray_session);
+    assert_eq!(
+        pair.member.io.log_image(log.session_id).expect("read"),
+        None,
+        "the recording held is of another session's image"
+    );
+    assert!(
+        !pair
+            .member
+            .io
+            .held
+            .as_ref()
+            .is_some_and(|held| held.checked)
+    );
+    assert_eq!(pair.member.io.append_position(), 0);
+    assert_eq!(pair.member.log_recording_id(), None);
+    pair.member.io.leave_log().expect("the log is left");
+    assert_eq!(pair.member.io.append_position(), 0);
+    assert!(pair.member.io.kept.is_empty());
+}

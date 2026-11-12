@@ -225,8 +225,10 @@ pub trait Io {
     /// Leaves the log: removes the follower's subscription and stops the recording its
     /// image started. A follower leaves in init, so that the image it joins next is a
     /// new one, checked against its append position where it joins. A recording whose
-    /// image joined past the member's append position is not part of its contiguous
-    /// log, and [`Io::append_position`] never counts it.
+    /// image joined past the member's append position is part of its contiguous log
+    /// only once that log has reached where the recording begins, which a catch-up's
+    /// replay brings about (ADR 0094): until then, and for ever when nothing brings
+    /// it there, [`Io::append_position`] does not count it.
     fn leave_log(&mut self) -> Result<(), Self::Fault>;
 
     /// Gives the leader's log up: closes the log publication [`Io::add_log`] made and
@@ -325,9 +327,11 @@ pub trait Io {
     /// The join position of the image the member records on the catch-up
     /// subscription, the one that took the recording [`Io::add_catchup`] armed:
     /// `None` before that image has arrived, and again once it has gone, its replay
-    /// ended or stopped. What an image carries counts in [`Io::append_position`] no
-    /// sooner than this reports the image, so that the core checks where an image
-    /// joined before it reports a position the image gave it.
+    /// ended or stopped, though never before it was reported once, so that a replay
+    /// short enough to come and go between two duty cycles is still checked (ADR
+    /// 0094). What an image carries counts in [`Io::append_position`] no sooner than
+    /// this reports the image, so that the core checks where an image joined before
+    /// it reports a position the image gave it.
     fn catchup_image(&mut self) -> Result<Option<i64>, Self::Fault>;
 
     /// Removes the catch-up subscription and stops the recording its image started,
