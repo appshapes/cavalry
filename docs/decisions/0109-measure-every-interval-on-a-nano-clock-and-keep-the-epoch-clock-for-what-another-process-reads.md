@@ -93,7 +93,12 @@ heartbeat again, a step forward of F makes the heartbeat read F older than it is
 client that loads it then, with F above the driver timeout less the heartbeat's
 age, reports `driver-timeout` and closes. A step back of B makes it read B newer
 until the driver stores the stepped clock, and a client that stopped sending is
-timed out B later, as it always was. On disk, the time index already writes a
+timed out B later, as it always was. The store at once has a cost of its own after
+a step back of more than the driver timeout: a reader that took its epoch clock
+before the step and loads the heartbeat after that store reports `driver-timeout`.
+The window is the time between the reader's two reads, and it is left open here:
+closing it means confirming a timeout against a second reading of the clock in
+each reader, which is card 273's. On disk, the time index already writes a
 clock that went back as the last entry's timestamp (`spec/durable-log.md`, "Time
 index"), and a recording's stop timestamp is its last entry's.
 

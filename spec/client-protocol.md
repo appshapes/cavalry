@@ -948,7 +948,11 @@ reports a driver that stopped. A driver that starts then is not misled, since it
 by the lock ("The driver directory"), except about a driver of an earlier version,
 which holds none. After a step back of B the heartbeat reads B newer than it is, so a
 driver that stopped before it stored the stepped clock is found B later than the
-driver timeout.
+driver timeout. Once the driver has stored the stepped clock, a reader that took its
+own epoch clock before the step and loads the heartbeat after that store reads the
+heartbeat as B older than it is, and with B above the driver timeout it reports
+`driver-timeout`. That window is the time between the reader's clock read and its
+load of the heartbeat: nanoseconds, or as long as the reader is held between the two.
 
 A host that is suspended is such a step forward, by the time it slept, where the nano
 clock does not count that time, as on Linux and macOS: every interval then has as long

@@ -47,7 +47,8 @@ pub fn epoch_time() -> i64 {
 /// and a step of the host's clock does not move it, so every interval a process
 /// measures by itself is the difference of two readings of it. Every thread of the
 /// process reads the one clock, so a reading one thread hands to another compares with
-/// the other's own. The first reading is 0.
+/// the other's own. The first reading is near 0: what the first call took after it set
+/// the origin.
 ///
 /// It is the standard library's `Instant`: `CLOCK_MONOTONIC` on Linux and
 /// `CLOCK_UPTIME_RAW` on macOS, neither of which counts the time a host is suspended.
