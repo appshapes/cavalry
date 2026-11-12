@@ -377,7 +377,8 @@ more recordings than the table keeps.
   directory of an earlier version: none was released, and the refusal is tested
   on a directory whose file was removed. No test has the operating system fail a
   write of the list: the test of the count gives the file a list it refuses. No
-  member has run to 1024 recordings: the table is filled by the test.
+  member has run to 1024 recordings: the table is filled by the test. No test
+  makes a truncation's command fault and then has the member lead (card 277).
 
 ## Consequences
 
@@ -405,6 +406,13 @@ more recordings than the table keeps.
 - The file's creation syncs the log directory; the `terms` file's does not yet,
   and nothing keeps a second consensus module off a log directory, for either
   file (card 276).
+- A truncation whose command faults after an earlier one succeeded leaves the
+  member's table cut short of the end it goes on reporting, until its leader asks
+  again (ADR 0095's Consequences). That is older than this decision, and this
+  decision adds to its cost: a member that leads before a leader has asked again
+  lists its recording past the cut, and its next start refuses that list for the
+  hole, `listed-recording`. Card 277 keeps such a member from leading or joining
+  until a truncation has finished.
 - Revisit when the durable log carries a data checksum or a synced position (card
   275): a start then cuts the log to what was synced, "What a start does not
   hold" goes, and ADR 0089's Revisit is answered.
