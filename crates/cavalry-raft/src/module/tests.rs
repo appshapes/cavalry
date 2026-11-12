@@ -2202,3 +2202,47 @@ fn a_member_drops_a_term_from_its_record_by_term_where_a_truncation_leaves_it() 
         vec![(0, 0), (3, two)]
     );
 }
+
+/// A recording the driver no longer knows is taken as purged (ADR 0095). The member
+/// holds two recordings, and the second is purged with the member's own client, as a
+/// truncation whose purge was done and whose answer was never read leaves it. A
+/// truncation below that recording is answered as done: the table forgets the
+/// recording, the first is cut, and the record of terms follows. The review of pull
+/// request 246 asked for this test.
+#[test]
+fn a_truncation_takes_a_recording_the_driver_no_longer_knows_as_purged() {
+    let mut pair = pair("truncate-unknown");
+    let (two, first) = pair.follow_and_leave(0, 0, &[b"one", b"two"]);
+    let (_four, second) = pair.follow_and_leave(1, two, &[b"three", b"four"]);
+    let one = two / 2;
+    pair.member
+        .io
+        .record_term(0, 0)
+        .expect("term 0 is recorded");
+    pair.member
+        .io
+        .record_term(1, two)
+        .expect("term 1 is recorded");
+    pair.member
+        .io
+        .client
+        .purge_recording(second)
+        .expect("the recording is purged behind the member's table");
+    assert_eq!(pair.stop_of(second), None, "purged");
+    assert_eq!(pair.member.io.kept.len(), 2, "the table still holds it");
+
+    assert_eq!(
+        pair.member.io.truncate_log(one).expect("truncated"),
+        Some(0)
+    );
+    assert_eq!(pair.member.io.append_position(), one);
+    assert_eq!(pair.stop_of(first), Some(one));
+    assert_eq!(
+        pair.member.io.kept.iter().copied().collect::<Vec<_>>(),
+        vec![Kept {
+            recording_id: first,
+            start: 0,
+            stop: one,
+        }]
+    );
+}
