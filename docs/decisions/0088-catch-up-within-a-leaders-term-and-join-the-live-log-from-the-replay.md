@@ -91,7 +91,8 @@ one the leader goes on sending, and it never passes the leader's log. When it re
 stop catch-up for its term and its own id, it removes its catch-up subscription.
 It goes on to follower log init when three things hold: stop catch-up was read; its
 append position has reached the position the live image joined at; and its append
-position has reached the commit position it was told. An append position that has
+position has reached the commit position it had been told when it read stop
+catch-up. An append position that has
 not moved for the leader heartbeat timeout fails the election; the time runs from
 when the replay's image joined, so what the image took to come, which is follower
 catch-up await's to bound, is not counted against the replay's first byte.
@@ -124,6 +125,17 @@ or one that waited for a replay being stopped, is dropped. The third review of
 pull request 229 noted that such a replay would be started to a member that waits
 for none, find no subscriber, end at the replay connect timeout, 5 s, and count a
 catch-up nobody asked for.
+
+**The commit position a member must reach is fixed at the stop.** It is the one
+the member knew when it read stop catch-up, and the commit positions its leader
+sends after that do not raise it. Row 13 had "the commit position it was told",
+which rises with every commit: under a steady load, a member whose sync trails the
+quorum's by more than a report's round trip would stay in follower catch-up, on the
+live log and told to stop, for as long as the load lasted. The second review of
+pull request 231 found it. A member on the live log is a follower like any other,
+and a follower's append position trails the commit position whenever a quorum
+syncs sooner than it does; nothing rests on it having caught up with a later
+commit before its election closes.
 
 **A stop catch-up before the flag is not an answer.** A member takes stop catch-up
 only after it has reported with the flag in this catch-up. The leader sends it for
@@ -202,6 +214,11 @@ the replay has brought the log to where it joined.
   tell a replay stopped short from one that is slow, and ask from a position the
   leader may by then have passed with a new term. Not being stopped short needs no
   second request.
+- **Wait for the commit position the leader goes on sending, as Aeron does.** Lost.
+  In Aeron, this is `Election.followerCatchup`, which waits for the notified commit
+  position, and `onCommitPosition` raises it. It leaves the state with no bound
+  under load, as "The commit position a member must reach is fixed at the stop"
+  says, to hold back an election whose close changes nothing a commit depends on.
 - **Mark every report of follower catch-up with the flag, as Aeron does, and add a
   second bit for "on the live log".** Lost. The leader has no use for the first
   meaning: it counts a member's append position toward a commit by its term and its
@@ -282,12 +299,19 @@ the replay has brought the log to where it joined.
   protocols differs in which reports carry the bit.
 - Follower catch-up is bounded under load: by the replay reaching the member's live
   recording's start, then one report and its answer, then the commit position the
-  member was told.
+  member had been told at that answer, which the live log brings it to. One case
+  is left with no bound but the replay's own progress, as row 13 had it: a live
+  image that never joins while the replay goes on moving. The member is brought
+  the whole log by the replay, reports, and counts toward commits, and stays in the
+  state.
 - Revisit with the module's I/O for the election, over drivers: a member's
   `Io::log_image` must give the join position of the live image while the catch-up
   subscription is still there, and `Io::append_position` the end of what the two
   recordings hold together. If either cannot be had from the driver, the member
-  cannot know that it is on the live log, and this decision is taken again.
+  cannot know that it is on the live log, and this decision is taken again. And
+  there, whether a live image that has not joined within the leader heartbeat
+  timeout of its subscription should fail the election, as follower log await
+  does, so that the case above is counted and bounded.
 
 ## References
 
