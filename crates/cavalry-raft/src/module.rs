@@ -88,19 +88,17 @@ pub enum RaftError {
     /// the recording that was to join the member's log is no part of it yet, and the
     /// next cycle writes the record again.
     Recordings(RecordingsError),
-    /// The catalog in the member's log directory holds, under an id the member's
-    /// record of its log's recordings names, a recording that begins elsewhere or is
-    /// of another stream: the catalog is not the one the record was written beside
-    /// (ADR 0108).
+    /// The catalog in the member's log directory does not hold the member's log as
+    /// its record of the log's recordings names it (`spec/cluster.md`, "A member's
+    /// start"; ADR 0108): the directory is not as the member left it, and the member
+    /// does not start on a log it cannot vouch for.
     ListedRecording {
         /// The recording the record names.
         recording_id: i64,
         /// Where the record says it begins.
         listed_start: i64,
-        /// Where the catalog says it begins.
-        catalog_start: i64,
-        /// The stream the catalog says it is of.
-        catalog_stream_id: i32,
+        /// What the catalog holds instead.
+        found: ListedFound,
     },
     /// The `terms` file could not be read or written.
     Terms(TermsError),
@@ -145,6 +143,31 @@ pub enum RaftError {
     },
 }
 
+/// What a member's start found in the catalog in place of a recording its record of
+/// the log's recordings names ([`RaftError::ListedRecording`]).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ListedFound {
+    /// A recording under that id that begins elsewhere or is of another stream: the
+    /// catalog is not the one the record was written beside.
+    Other {
+        /// Where the catalog says it begins.
+        start_position: i64,
+        /// The stream the catalog says it is of.
+        stream_id: i32,
+    },
+    /// A recording the driver found damaged, state 2 in the catalog.
+    Invalid,
+    /// No recording, while the catalog holds one the record names after it. A
+    /// truncation purges a member's recordings from the last one back, so the ones
+    /// a stop in the middle of it left missing are the record's last.
+    Missing,
+    /// A recording that begins past where the ones before it end.
+    Gap {
+        /// Where the recordings before it end.
+        end_position: i64,
+    },
+}
+
 impl RaftError {
     /// The reason's name: `members`, `member`, `recordings`, `listed-recording`,
     /// `terms`, `catalog`, `client`, `poll`, `unsupported`, `payload-too-long`, `offer`,
@@ -180,19 +203,50 @@ impl core::fmt::Display for RaftError {
             RaftError::ListedRecording {
                 recording_id,
                 listed_start,
-                catalog_start,
-                catalog_stream_id,
-            } => write!(
-                f,
-                "member refused ({reason}): the member's record of its log's recordings \
-                 names recording {recording_id} as part of its log from position \
-                 {listed_start}, and the catalog in its log directory holds under that id a \
-                 recording of stream {catalog_stream_id} that begins at {catalog_start}: \
-                 the `log-recordings` file and the `catalog` are not of one directory. \
-                 Start the member with the log directory it had, whole, as its driver \
-                 left it. If that directory is lost, the cluster goes on without this \
-                 member while a quorum of the others runs; see {DOC_KEPT_LOG}"
-            ),
+                found,
+            } => {
+                write!(
+                    f,
+                    "member refused ({reason}): the member's record of its log's \
+                     recordings, the `log-recordings` file in its log directory, names \
+                     recording {recording_id} as part of its log from position \
+                     {listed_start}, and the `catalog` beside it holds "
+                )?;
+                match found {
+                    ListedFound::Other {
+                        start_position,
+                        stream_id,
+                    } => write!(
+                        f,
+                        "under that id a recording of stream {stream_id} that begins at \
+                         {start_position}: the two files are not of one directory"
+                    )?,
+                    ListedFound::Invalid => write!(
+                        f,
+                        "that recording as damaged, state 2, which `cavalry doctor` names"
+                    )?,
+                    ListedFound::Missing => write!(
+                        f,
+                        "no such recording, and holds one the record names after it: \
+                         a recording of the member's log was removed"
+                    )?,
+                    ListedFound::Gap { end_position } => write!(
+                        f,
+                        "the recordings before it ending at {end_position}, below where \
+                         it begins: part of the member's log is gone"
+                    )?,
+                }
+                write!(
+                    f,
+                    ". The member does not start on a log it cannot vouch for. Start it \
+                     with the log directory it had, whole, as its driver left it. If that \
+                     directory is lost or damaged, leave the member stopped: the cluster \
+                     goes on while a quorum of the others runs, and a cluster is brought \
+                     back to its full count by starting it again as a new cluster, every \
+                     member on a new log directory. Do not start this member alone on a \
+                     new log directory; see {DOC_KEPT_LOG}"
+                )
+            }
             RaftError::Terms(error) => write!(f, "member stopped ({reason}): {error}"),
             RaftError::Catalog(error) => write!(
                 f,
@@ -579,12 +633,15 @@ fn take_started(
 /// recordings"; ADR 0108): the recordings it keeps, in the order they begin, and after
 /// them the ones it is making that are part of its log or are to be, `open`, its
 /// recording of a replay and then its recording of the live log or of the log it
-/// leads. One write and one sync, when a recording joins the log or a truncation has
-/// cut it, and no allocation.
+/// leads. With them goes the floor position: where the first of them begins, and
+/// `end`, where the member's log ends, when there is none, which is a log wholly in
+/// recordings the table has forgotten, or no log. One write and one sync, when a
+/// recording joins the log or a truncation has cut it, and no allocation.
 fn write_list(
     recordings: &mut RecordingsFile,
     kept: &VecDeque<Kept>,
     open: [Option<ListedRecording>; 2],
+    end: i64,
 ) -> Result<(), RaftError> {
     let entries = kept
         .iter()
@@ -593,89 +650,165 @@ fn write_list(
             start_position: kept.start,
         })
         .chain(open.into_iter().flatten());
-    Ok(recordings.write(entries)?)
+    let floor = entries
+        .clone()
+        .next()
+        .map_or(end, |first| first.start_position);
+    Ok(recordings.write(floor, entries)?)
+}
+
+/// What the catalog holds under the id of a recording the member's record of its
+/// log's recordings names.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Cataloged {
+    /// A valid recording: where it begins, its stream, and where it stopped, `None`
+    /// for one still being made.
+    Held {
+        start: i64,
+        stream_id: i32,
+        stop: Option<i64>,
+    },
+    /// A recording the driver found damaged, state 2.
+    Invalid,
+    /// No recording: a slot the catalog does not have, an empty one, or one whose
+    /// recording was purged, state 3.
+    Missing,
 }
 
 /// The log a member kept, read back at its start (`spec/cluster.md`, "A member's
-/// start"; ADR 0108): the recordings its record names that the catalog still holds,
-/// from the first of them, each carrying the log on from where the ones before it
-/// end. Returns the table of them and where the log ends.
+/// start"; ADR 0108): the recordings its record names, each carrying the log on from
+/// where the ones before it end, the first from `floor`, the record's floor position.
+/// Returns the table of them and where the log ends. `cataloged` says what the
+/// catalog holds under a recording id, and `stop` stops a recording still being
+/// made, the driver having run on while the member was away, and returns where it
+/// stopped, so that a stop is read once and is final.
 ///
-/// A recording the record names and the catalog no longer holds was purged, by a
-/// truncation the member's stop cut short or by retention: before the first one held
-/// it is skipped, and after it the log ends there, as it does at a recording that
-/// begins past where the ones before it end. A recording still being made, the
-/// driver having run on while the member was away, is stopped first, so that its
-/// stop is read once and is final. Under an id the record names, a recording that
-/// begins elsewhere or is of another stream is [`RaftError::ListedRecording`].
+/// The catalog may lack the record's last recordings and no others: a truncation
+/// purges a member's recordings from the last one back and writes the record after
+/// them, so a member that stopped in the middle of one finds them missing, and its
+/// log ends where the recordings the catalog holds end. With all of them missing
+/// that is the floor. Everything else the catalog can hold in place of a recording
+/// the record names is [`RaftError::ListedRecording`], and the member does not
+/// start: a recording missing before one that is held, one the driver found
+/// damaged, one that begins elsewhere or is of another stream, and one that begins
+/// past where the ones before it end. A log read back shorter than the member
+/// reported it would let the member vote for a candidate that lacks a committed
+/// entry, so nothing here shortens the log but that one truncation.
+///
+/// Every recording is checked before any is stopped, so a start that is refused
+/// for what a recording is has changed nothing. A recording that holds nothing is
+/// left out of the table, as a truncation leaves it out. The table keeps the last
+/// [`KEPT_RECORDINGS`], as [`ClientIo::keep`] does.
 fn kept_log(
-    client: &mut Cavalry,
-    catalog: &CatalogReader,
+    floor: i64,
     listed: &[ListedRecording],
+    mut cataloged: impl FnMut(i64) -> Result<Cataloged, RaftError>,
+    mut stop: impl FnMut(i64) -> Result<i64, RaftError>,
 ) -> Result<(VecDeque<Kept>, i64), RaftError> {
-    let mut kept = VecDeque::with_capacity(KEPT_RECORDINGS);
-    let mut end: Option<i64> = None;
+    let refused = |entry: &ListedRecording, found| RaftError::ListedRecording {
+        recording_id: entry.recording_id,
+        listed_start: entry.start_position,
+        found,
+    };
+    // What each recording is, before anything is stopped: `None` from the first
+    // one missing.
+    let mut stops: Vec<Option<i64>> = Vec::with_capacity(listed.len());
+    let mut missing: Option<&ListedRecording> = None;
     for entry in listed {
-        let recording_id = entry.recording_id;
-        let descriptor = match catalog.get(recording_id) {
-            Ok(Some(descriptor)) if descriptor.state() == State::Valid => descriptor,
-            Ok(_) | Err(CatalogError::Unknown { .. }) => {
-                if end.is_none() {
-                    continue;
-                }
-                break;
+        match cataloged(entry.recording_id)? {
+            Cataloged::Missing => {
+                missing.get_or_insert(entry);
             }
-            Err(error) => return Err(error.into()),
-        };
-        if descriptor.start_position() != entry.start_position
-            || descriptor.stream_id() != LOG_STREAM_ID
-        {
-            return Err(RaftError::ListedRecording {
-                recording_id,
-                listed_start: entry.start_position,
-                catalog_start: descriptor.start_position(),
-                catalog_stream_id: descriptor.stream_id(),
-            });
+            Cataloged::Invalid => return Err(refused(entry, ListedFound::Invalid)),
+            Cataloged::Held {
+                start,
+                stream_id,
+                stop,
+            } => {
+                if let Some(missing) = missing {
+                    return Err(refused(missing, ListedFound::Missing));
+                }
+                if start != entry.start_position || stream_id != LOG_STREAM_ID {
+                    return Err(refused(
+                        entry,
+                        ListedFound::Other {
+                            start_position: start,
+                            stream_id,
+                        },
+                    ));
+                }
+                stops.push(stop);
+            }
         }
-        if end.is_some_and(|end| entry.start_position > end) {
-            break;
+    }
+    let mut kept = VecDeque::with_capacity(KEPT_RECORDINGS);
+    let mut end = floor;
+    for (entry, stopped) in listed.iter().zip(stops) {
+        if entry.start_position > end {
+            return Err(refused(entry, ListedFound::Gap { end_position: end }));
         }
-        let stop = if descriptor.is_live() {
-            match client.stop_recording(recording_id) {
-                Ok(()) => {}
-                // Stopped between the catalog's read and the command.
-                Err(ClientError::Refused {
-                    code: Some(ErrorCode::UnknownRecording),
-                    ..
-                }) => {}
-                Err(error) => return Err(error.into()),
-            }
-            let deadline = Instant::now() + STOP_TIMEOUT;
-            loop {
-                if let Some(stop) = catalog.stop_position(recording_id)? {
-                    break stop;
-                }
-                if Instant::now() >= deadline {
-                    return Err(RaftError::StopTimeout { recording_id });
-                }
-                std::thread::sleep(Duration::from_micros(50));
-            }
-        } else {
-            descriptor.stop_position()
+        let stop = match stopped {
+            Some(stop) => stop,
+            None => stop(entry.recording_id)?,
         };
-        end = Some(end.map_or(stop, |end| end.max(stop)));
+        end = end.max(stop);
         if stop > entry.start_position {
             if kept.len() >= KEPT_RECORDINGS {
                 kept.pop_front();
             }
             kept.push_back(Kept {
-                recording_id,
+                recording_id: entry.recording_id,
                 start: entry.start_position,
                 stop,
             });
         }
     }
-    Ok((kept, end.unwrap_or(0)))
+    Ok((kept, end))
+}
+
+/// What the driver's catalog holds under `recording_id`, for [`kept_log`].
+fn cataloged(catalog: &CatalogReader, recording_id: i64) -> Result<Cataloged, RaftError> {
+    match catalog.get(recording_id) {
+        Ok(Some(descriptor)) => Ok(match descriptor.state() {
+            State::Valid => Cataloged::Held {
+                start: descriptor.start_position(),
+                stream_id: descriptor.stream_id(),
+                stop: (!descriptor.is_live()).then(|| descriptor.stop_position()),
+            },
+            State::Invalid => Cataloged::Invalid,
+            State::Empty | State::Deleted => Cataloged::Missing,
+        }),
+        Ok(None) | Err(CatalogError::Unknown { .. }) => Ok(Cataloged::Missing),
+        Err(error) => Err(error.into()),
+    }
+}
+
+/// Stops a recording of the member's log that is still being made at the member's
+/// start, and waits for its stop position in the catalog, within [`STOP_TIMEOUT`].
+fn stop_listed(
+    client: &mut Cavalry,
+    catalog: &CatalogReader,
+    recording_id: i64,
+) -> Result<i64, RaftError> {
+    match client.stop_recording(recording_id) {
+        Ok(()) => {}
+        // Stopped between the catalog's read and the command.
+        Err(ClientError::Refused {
+            code: Some(ErrorCode::UnknownRecording),
+            ..
+        }) => {}
+        Err(error) => return Err(error.into()),
+    }
+    let deadline = Instant::now() + STOP_TIMEOUT;
+    loop {
+        if let Some(stop) = catalog.stop_position(recording_id)? {
+            return Ok(stop);
+        }
+        if Instant::now() >= deadline {
+            return Err(RaftError::StopTimeout { recording_id });
+        }
+        std::thread::sleep(Duration::from_micros(50));
+    }
 }
 
 impl ClientIo {
@@ -702,7 +835,7 @@ impl ClientIo {
         }
         let open = [replay.map(Held::as_listed), live.map(Held::as_listed)];
         let (replay, live) = (replay.is_some(), live.is_some());
-        write_list(&mut self.recordings, &self.kept, open)?;
+        write_list(&mut self.recordings, &self.kept, open, end)?;
         if let Some(held) = self.catchup_held.as_mut().filter(|_| replay) {
             held.listed = true;
         }
@@ -1051,7 +1184,12 @@ impl Io for ClientIo {
                 recording_id: recording.recording_id(),
                 start_position: self.log_base,
             };
-            write_list(&mut self.recordings, &self.kept, [None, Some(own)])?;
+            write_list(
+                &mut self.recordings,
+                &self.kept,
+                [None, Some(own)],
+                self.stopped_at,
+            )?;
             self.log_listed = true;
         }
         Ok(self.log_recording.as_ref().map(|recording| Log {
@@ -1256,10 +1394,12 @@ impl Io for ClientIo {
         self.kept.retain(|kept| kept.stop > kept.start);
         // The record of the log's recordings, without what was purged, before the
         // record of terms: a member that stops between the two starts again with a
-        // term based above the end of its log, which it then deletes (ADR 0108).
-        write_list(&mut self.recordings, &self.kept, [None, None])?;
+        // term based above the end of its log, which it then deletes (ADR 0108). With
+        // no recording left in the table, the record's floor says where the log ends.
+        let end = self.stopped_at.min(position);
+        write_list(&mut self.recordings, &self.kept, [None, None], end)?;
         self.terms.truncate_above(position)?;
-        self.stopped_at = self.stopped_at.min(position);
+        self.stopped_at = end;
         Ok(Some(self.terms.log_leadership_term_id()))
     }
 
@@ -1752,8 +1892,12 @@ impl ConsensusModule {
     /// of terms, and the recordings its record of the log's recordings names, each
     /// with the stop the catalog holds for it, which is where its log ends. A term
     /// the record of terms holds above that end is deleted: a truncation the member's
-    /// stop cut short. A directory of another member's, or a record the catalog does
-    /// not match, is refused with what to do.
+    /// stop cut short. Nothing else shortens the log a member starts on. A directory
+    /// of another member's, a record of terms that holds a term beside no record of
+    /// the log's recordings, which a version before ADR 0108 left
+    /// ([`RaftError::Recordings`]), and a catalog that does not hold the recordings
+    /// the record names ([`RaftError::ListedRecording`]) are each refused with what
+    /// to do, and the member does not start.
     pub fn start(
         dir: impl AsRef<Path>,
         log_dir: impl AsRef<Path>,
@@ -1791,7 +1935,14 @@ impl ConsensusModule {
         // directory the module refuses is left as it was.
         let catalog = CatalogReader::open(log_dir.as_ref())?;
         let mut terms = TermsFile::open(log_dir.as_ref())?;
-        let mut recordings = RecordingsFile::open(log_dir.as_ref(), member_id)?;
+        // A member whose record holds a term holds a log, and is given no new record
+        // of its recordings: an empty one would say that it holds none, and the
+        // member would start with a log shorter than it reported (ADR 0108).
+        let mut recordings = if terms.log_leadership_term_id() == -1 {
+            RecordingsFile::open(log_dir.as_ref(), member_id)?
+        } else {
+            RecordingsFile::open_kept(log_dir.as_ref(), member_id)?
+        };
 
         let recordings_path = dir
             .as_ref()
@@ -1800,19 +1951,28 @@ impl ConsensusModule {
             "{LOG_RECORDINGS_FILE_PREFIX}{member_id}{LOG_RECORDINGS_TMP_SUFFIX}"
         ));
         let mut client = Cavalry::connect_to(dir)?;
-        // The log the member kept, before it reads a message: its recordings, where
-        // they end, and a record of terms that holds no term above that end.
-        let (kept, stopped_at) = kept_log(&mut client, &catalog, recordings.entries())?;
-        terms.truncate_above(stopped_at)?;
-        let unchanged = recordings.entries().len() == kept.len()
+        // The log the member kept, before it reads a message: its recordings and
+        // where they end. Then, in a truncation's order, the record of them as the
+        // catalog holds them, and a record of terms that holds no term above that
+        // end: a truncation the member's stop cut short ends here.
+        let (kept, stopped_at) = kept_log(
+            recordings.floor_position(),
+            recordings.entries(),
+            |recording_id| cataloged(&catalog, recording_id),
+            |recording_id| stop_listed(&mut client, &catalog, recording_id),
+        )?;
+        let floor = kept.front().map_or(stopped_at, |first| first.start);
+        let unchanged = recordings.floor_position() == floor
+            && recordings.entries().len() == kept.len()
             && recordings
                 .entries()
                 .iter()
                 .zip(&kept)
                 .all(|(listed, kept)| listed.recording_id == kept.recording_id);
         if !unchanged {
-            write_list(&mut recordings, &kept, [None, None])?;
+            write_list(&mut recordings, &kept, [None, None], stopped_at)?;
         }
+        terms.truncate_above(stopped_at)?;
         let consensus =
             client.add_subscription(&endpoint_channel(&own.consensus), CONSENSUS_STREAM_ID)?;
         let mut peers = Vec::with_capacity(MAX_MEMBERS);

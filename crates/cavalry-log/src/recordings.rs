@@ -10,15 +10,24 @@
 //! log once this file names it, and the member reports no position a recording holds
 //! before then.
 //!
+//! The file names at most [`MAX_ENTRIES`] recordings, the newest. Beside them it
+//! holds one position, the floor: where the first recording named begins, and, when
+//! none is named, where the member's log ends. So a list that names no recording
+//! still says where the log ends, which a list alone could not after the member's
+//! table has forgotten its oldest recordings and a truncation has purged the rest.
+//!
 //! The consensus module of `cavalry-raft` is the file's only writer, from its own
-//! thread: [`RecordingsFile::open`] at the member's start, which creates the file when
-//! there is none, and [`RecordingsFile::write`] each time the list changes, which
-//! syncs before it returns. The list is written whole, into the slot of two that the
-//! list is not read from, under a checksum and a sequence one above the other slot's:
-//! a crash tears at most the slot being written, whose checksum then fails, and the
-//! reader takes the other, the list as it was. [`RecordingsHeader::parse`],
-//! [`parse_slot`] and [`choose`] are the checks of "What a reader rejects", in order,
-//! which the vectors of `spec/vectors/durable-log.json` pin.
+//! thread: [`RecordingsFile::open`] at the start of a member whose record of terms
+//! holds no term, which creates the file when there is none,
+//! [`RecordingsFile::open_kept`] at the start of a member whose record holds a term,
+//! which never creates it, and [`RecordingsFile::write`] each time the list changes,
+//! which syncs before it returns. The list is written whole, into the slot of two
+//! that the list is not read from, under a checksum and a sequence one above the
+//! other slot's: a crash tears at most the slot being written, whose checksum then
+//! fails, and the reader takes the other, the list as it was.
+//! [`RecordingsHeader::parse`], [`parse_slot`] and [`choose`] are the checks of "What
+//! a reader rejects", in order, which the vectors of `spec/vectors/durable-log.json`
+//! pin.
 //!
 //! Nothing here runs per message: the file is written when a member joins a log,
 //! catches up, leads a term or truncates.
@@ -45,8 +54,8 @@ pub const MAX_ENTRIES: usize = 1026;
 /// An entry's length in bytes: the recording id and its start position.
 pub const ENTRY_LENGTH: usize = 16;
 /// The length of a slot's own fields, before its entries: the checksum, the entry
-/// count and the sequence.
-pub const SLOT_HEADER_LENGTH: usize = 16;
+/// count, the sequence and the floor position.
+pub const SLOT_HEADER_LENGTH: usize = 24;
 /// A slot's length in bytes: its fields and room for [`MAX_ENTRIES`] entries.
 pub const SLOT_LENGTH: usize = SLOT_HEADER_LENGTH + MAX_ENTRIES * ENTRY_LENGTH;
 /// The file's length in bytes, fixed: the header and two slots.
@@ -68,6 +77,13 @@ pub enum RecordingsError {
         /// The operating system's reason.
         source: io::Error,
     },
+    /// The directory holds no file, and [`RecordingsFile::open_kept`] creates none:
+    /// the member's record of terms holds a term, so a list created now, empty, would
+    /// say that the member holds no log.
+    Absent {
+        /// Where the file would be.
+        path: PathBuf,
+    },
     /// The file is shorter than its fixed length.
     TooShort {
         /// The length found.
@@ -78,9 +94,10 @@ pub enum RecordingsError {
         /// The length found.
         found: u64,
     },
-    /// The magic is eight zero bytes: the creator has not finished. The writer writes
-    /// a torn creation again, so [`RecordingsFile::open`] returns this only for a zero
-    /// magic over a list, which creation never writes: damage.
+    /// The magic is eight zero bytes: the creator has not finished.
+    /// [`RecordingsFile::open`] writes a torn creation again, and returns this only
+    /// for a zero magic over a list, which creation never writes: damage.
+    /// [`RecordingsFile::open_kept`] returns it for every zero magic.
     NotReady,
     /// The magic is not `CVLYLOGR`.
     Magic,
@@ -121,10 +138,12 @@ pub enum RecordingsError {
         /// The recording id found.
         found: i64,
     },
-    /// An entry's start position is below 0, not a multiple of 32, or below the start
-    /// position of the entry before it.
+    /// The floor position is below 0 or not a multiple of 32; or an entry's start
+    /// position is below 0, not a multiple of 32, or below the start position of the
+    /// entry before it; or the first entry's start position is not the floor
+    /// position.
     Position {
-        /// The start position found.
+        /// The position found.
         found: i64,
     },
     /// A list of more than [`MAX_ENTRIES`] recordings was given to
@@ -137,6 +156,7 @@ impl RecordingsError {
     pub const fn reason(&self) -> &'static str {
         match self {
             RecordingsError::Io { .. } => "io",
+            RecordingsError::Absent { .. } => "absent",
             RecordingsError::TooShort { .. } => "too-short",
             RecordingsError::Length { .. } => "length",
             RecordingsError::NotReady => "not-ready",
@@ -158,9 +178,15 @@ const DOC: &str = "docs/reference/durable-log.md#log-recordings";
 
 impl std::fmt::Display for RecordingsError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        let damaged = "the file is damaged, and the member's log cannot be told from the \
-                       other recordings in the directory: start this member on a new log \
-                       directory, and it replicates the log from its leader";
+        // What an operator does when the member cannot tell its log: never a new log
+        // directory for this member alone (`spec/cluster.md`, "A member's start").
+        let stay_out = "Without the list this member cannot tell its log from the other \
+                        recordings in the directory, and it does not start. Leave it \
+                        stopped: the cluster goes on while a quorum of the others runs. To \
+                        have every member again, start the cluster again as a new cluster, \
+                        every member on a new log directory. Do not start this member \
+                        alone on a new log directory: it would vote with no record of its \
+                        votes or its log";
         match self {
             RecordingsError::Io { what, path, source } => write!(
                 f,
@@ -169,36 +195,44 @@ impl std::fmt::Display for RecordingsError {
                  {DOC}",
                 path.display()
             ),
+            RecordingsError::Absent { path } => write!(
+                f,
+                "the log directory holds a term in its record of terms and no log \
+                 recordings file, {}: a version of Cavalry before this one wrote the \
+                 directory, or the file was removed. {stay_out}; see {DOC}",
+                path.display()
+            ),
             RecordingsError::TooShort { found } => write!(
                 f,
                 "the log recordings file is {found} bytes, shorter than its {FILE_LENGTH}: \
-                 {damaged}; see {DOC}"
+                 the file is damaged. {stay_out}; see {DOC}"
             ),
             RecordingsError::Length { found } => write!(
                 f,
                 "the log recordings file is {found} bytes, longer than its {FILE_LENGTH}: \
-                 {damaged}; see {DOC}"
+                 the file is damaged. {stay_out}; see {DOC}"
             ),
             RecordingsError::NotReady => write!(
                 f,
-                "the log recordings file has no magic over a list of recordings, which \
-                 its creation never leaves: {damaged}; see {DOC}"
+                "the log recordings file has no magic, over a list of recordings or \
+                 beside a record of terms that holds a term, which its creation never \
+                 leaves: the file is damaged. {stay_out}; see {DOC}"
             ),
             RecordingsError::Magic => write!(
                 f,
                 "the log recordings file does not begin with CVLYLOGR: it is not a log \
-                 recordings file, or {damaged}; see {DOC}"
+                 recordings file, or it is damaged. {stay_out}; see {DOC}"
             ),
             RecordingsError::Version { found } => write!(
                 f,
-                "the log recordings file is version {found}, and this version reads \
-                 version {VERSION}: run the version of Cavalry that wrote the directory, \
-                 or start this member on a new log directory; see {DOC}"
+                "the log recordings file is version {found}, and this version of Cavalry \
+                 reads version {VERSION}: start the member with the version of Cavalry \
+                 that wrote the directory; see {DOC}"
             ),
             RecordingsError::SlotLength { found } => write!(
                 f,
                 "the log recordings file names a slot length of {found}, not \
-                 {SLOT_LENGTH}: {damaged}; see {DOC}"
+                 {SLOT_LENGTH}: the file is damaged. {stay_out}; see {DOC}"
             ),
             RecordingsError::Member {
                 found,
@@ -206,8 +240,8 @@ impl std::fmt::Display for RecordingsError {
             } => write!(
                 f,
                 "the log directory is member {found}'s, and this is member {expected}: \
-                 start member {expected} on its own log directory, the one given to it \
-                 before, or on a new one; see {DOC}"
+                 start member {expected} with its own log directory, the one it was \
+                 started with before; see {DOC}"
             ),
             RecordingsError::Member {
                 found,
@@ -215,33 +249,35 @@ impl std::fmt::Display for RecordingsError {
             } => write!(
                 f,
                 "the log recordings file names member {found}, which is no member id: \
-                 {damaged}; see {DOC}"
+                 the file is damaged. {stay_out}; see {DOC}"
             ),
             RecordingsError::Checksum => write!(
                 f,
                 "a slot of the log recordings file fails its checksum: the write a crash \
-                 tore, which the other slot stands in for; see {DOC}"
+                 tore, which the other slot stands in for. Nothing is to be done; see \
+                 {DOC}"
             ),
             RecordingsError::Slots => write!(
                 f,
                 "neither slot of the log recordings file passes its checksum, and a \
-                 crash tears one at most: {damaged}; see {DOC}"
+                 crash tears one at most: the file is damaged. {stay_out}; see {DOC}"
             ),
             RecordingsError::Sequence { found } => write!(
                 f,
                 "a slot of the log recordings file holds the sequence {found}, below 0 \
-                 or the other slot's own: {damaged}; see {DOC}"
+                 or the other slot's own: the file is damaged. {stay_out}; see {DOC}"
             ),
             RecordingsError::Recording { found } => write!(
                 f,
                 "the log recordings file names the recording {found}, which is no \
-                 recording id: {damaged}; see {DOC}"
+                 recording id: the file is damaged. {stay_out}; see {DOC}"
             ),
             RecordingsError::Position { found } => write!(
                 f,
-                "the log recordings file names a recording that begins at {found}, \
-                 which is below 0, not a multiple of 32 or below the recording before \
-                 it: {damaged}; see {DOC}"
+                "the log recordings file holds the position {found}, which is below 0, \
+                 not a multiple of 32, below the recording before it, or a first \
+                 recording's that is not the floor position: the file is damaged. \
+                 {stay_out}; see {DOC}"
             ),
             RecordingsError::Full => write!(
                 f,
@@ -343,23 +379,35 @@ fn i64_at(bytes: &[u8], at: usize) -> i64 {
         .map_or(0, |eight| i64::from_le_bytes(*eight))
 }
 
-/// Writes a slot into `out`: the sequence, the entries and the checksum over both.
+/// A slot's own fields, after its checksum and its entry count.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct SlotFields {
+    /// The list's sequence: 0 for the list the file was created with, and one more
+    /// for each write.
+    pub sequence: i64,
+    /// Where the first recording the list names begins, and, when it names none,
+    /// where the member's log ends.
+    pub floor_position: i64,
+}
+
+/// Writes a slot into `out`: its fields, the entries and the checksum over them.
 /// Returns how many bytes the slot's fields and entries take, which is what a write
 /// puts in the file; the rest of the slot is not read. More than [`MAX_ENTRIES`]
-/// entries are [`RecordingsError::Full`], and an entry a reader would refuse is the
-/// reader's refusal, with nothing written.
+/// entries are [`RecordingsError::Full`], and a floor position or an entry a reader
+/// would refuse is the reader's refusal, with nothing written.
 pub fn encode_slot(
-    sequence: i64,
+    fields: SlotFields,
     entries: impl IntoIterator<Item = ListedRecording>,
     out: &mut [u8; SLOT_LENGTH],
 ) -> Result<usize, RecordingsError> {
+    check_floor(fields.floor_position)?;
     let mut count = 0usize;
-    let mut previous = 0i64;
+    let mut previous = fields.floor_position;
     for entry in entries {
         if count == MAX_ENTRIES {
             return Err(RecordingsError::Full);
         }
-        check_entry(&entry, previous)?;
+        check_entry(&entry, previous, count == 0)?;
         previous = entry.start_position;
         let at = SLOT_HEADER_LENGTH + count * ENTRY_LENGTH;
         if let Some(bytes) = out.get_mut(at..at + ENTRY_LENGTH) {
@@ -370,15 +418,16 @@ pub fn encode_slot(
     }
     let length = SLOT_HEADER_LENGTH + count * ENTRY_LENGTH;
     out[4..8].copy_from_slice(&(count as i32).to_le_bytes());
-    out[8..16].copy_from_slice(&sequence.to_le_bytes());
+    out[8..16].copy_from_slice(&fields.sequence.to_le_bytes());
+    out[16..24].copy_from_slice(&fields.floor_position.to_le_bytes());
     let checksum = slot_checksum(out, count);
     out[..4].copy_from_slice(&checksum.to_le_bytes());
     Ok(length)
 }
 
 /// The checksum of a slot that holds `count` entries: the zlib CRC32 of everything
-/// after the checksum itself, the entry count, the sequence and the entries, bytes 4
-/// to 16 + 16 × count.
+/// after the checksum itself, the entry count, the sequence, the floor position and
+/// the entries, bytes 4 to 24 + 16 × count.
 fn slot_checksum(slot: &[u8], count: usize) -> u32 {
     crc32(
         slot.get(4..SLOT_HEADER_LENGTH + count * ENTRY_LENGTH)
@@ -386,14 +435,25 @@ fn slot_checksum(slot: &[u8], count: usize) -> u32 {
     )
 }
 
-fn check_entry(entry: &ListedRecording, previous: i64) -> Result<(), RecordingsError> {
+fn check_floor(floor_position: i64) -> Result<(), RecordingsError> {
+    if floor_position < 0 || floor_position % ALIGNMENT != 0 {
+        return Err(RecordingsError::Position {
+            found: floor_position,
+        });
+    }
+    Ok(())
+}
+
+/// An entry's checks. `previous` is the start position of the entry before it, and
+/// for the first entry the floor position, which the first entry begins at.
+fn check_entry(entry: &ListedRecording, previous: i64, first: bool) -> Result<(), RecordingsError> {
     if entry.recording_id < 0 {
         return Err(RecordingsError::Recording {
             found: entry.recording_id,
         });
     }
     let start = entry.start_position;
-    if start < 0 || start % ALIGNMENT != 0 || start < previous {
+    if start < 0 || start % ALIGNMENT != 0 || start < previous || (first && start != previous) {
         return Err(RecordingsError::Position { found: start });
     }
     Ok(())
@@ -401,13 +461,14 @@ fn check_entry(entry: &ListedRecording, previous: i64) -> Result<(), RecordingsE
 
 /// Reads a slot from `bytes`, which begin at the slot's first byte and hold at least
 /// its fields and its entries; `entries` is emptied and takes the slot's entries.
-/// Returns the slot's sequence. The checks are `checksum`, which an entry count
-/// outside 0 to [`MAX_ENTRIES`] or bytes shorter than the count needs also fail,
-/// then `sequence`, then `recording` and `position` for each entry in order.
+/// Returns the slot's fields. The checks are `checksum`, which an entry count outside
+/// 0 to [`MAX_ENTRIES`] or bytes shorter than the count needs also fail, then
+/// `sequence`, then `position` for the floor position, then `recording` and
+/// `position` for each entry in order.
 pub fn parse_slot(
     bytes: &[u8],
     entries: &mut Vec<ListedRecording>,
-) -> Result<i64, RecordingsError> {
+) -> Result<SlotFields, RecordingsError> {
     entries.clear();
     if bytes.len() < SLOT_HEADER_LENGTH {
         return Err(RecordingsError::Checksum);
@@ -430,18 +491,23 @@ pub fn parse_slot(
     if sequence < 0 {
         return Err(RecordingsError::Sequence { found: sequence });
     }
-    let mut previous = 0i64;
+    let floor_position = i64_at(bytes, 16);
+    check_floor(floor_position)?;
+    let mut previous = floor_position;
     for index in 0..count {
         let at = SLOT_HEADER_LENGTH + index * ENTRY_LENGTH;
         let entry = ListedRecording {
             recording_id: i64_at(bytes, at),
             start_position: i64_at(bytes, at + 8),
         };
-        check_entry(&entry, previous)?;
+        check_entry(&entry, previous, index == 0)?;
         previous = entry.start_position;
         entries.push(entry);
     }
-    Ok(sequence)
+    Ok(SlotFields {
+        sequence,
+        floor_position,
+    })
 }
 
 /// Which slot holds the list, from what [`parse_slot`] made of each: the one whose
@@ -450,8 +516,8 @@ pub fn parse_slot(
 /// matches and whose fields fail a check is that check's refusal; two slots of one
 /// sequence are `sequence`.
 pub fn choose(
-    slot_0: Result<i64, RecordingsError>,
-    slot_1: Result<i64, RecordingsError>,
+    slot_0: Result<SlotFields, RecordingsError>,
+    slot_1: Result<SlotFields, RecordingsError>,
 ) -> Result<usize, RecordingsError> {
     match (slot_0, slot_1) {
         (Err(RecordingsError::Checksum), Err(RecordingsError::Checksum)) => {
@@ -460,10 +526,12 @@ pub fn choose(
         (Ok(_), Err(RecordingsError::Checksum)) => Ok(0),
         (Err(RecordingsError::Checksum), Ok(_)) => Ok(1),
         (Err(error), _) | (_, Err(error)) => Err(error),
-        (Ok(first), Ok(second)) if first == second => {
-            Err(RecordingsError::Sequence { found: first })
+        (Ok(first), Ok(second)) if first.sequence == second.sequence => {
+            Err(RecordingsError::Sequence {
+                found: first.sequence,
+            })
         }
-        (Ok(first), Ok(second)) => Ok(usize::from(second > first)),
+        (Ok(first), Ok(second)) => Ok(usize::from(second.sequence > first.sequence)),
     }
 }
 
@@ -478,9 +546,9 @@ const fn slot_offset(slot: usize) -> u64 {
 pub struct RecordingsFile {
     path: PathBuf,
     file: File,
-    /// The slot the list is read from, and its sequence.
+    /// The slot the list is read from, and its fields.
     slot: usize,
-    sequence: i64,
+    fields: SlotFields,
     /// The list, at most [`MAX_ENTRIES`], allocated when the file is opened.
     entries: Vec<ListedRecording>,
     /// One slot's bytes, allocated when the file is opened, so that a write
@@ -495,24 +563,47 @@ impl RecordingsFile {
     }
 
     /// Opens member `member_id`'s file in `dir` and reads its list, and creates the
-    /// file with an empty list when there is none. A file a crash tore while it was
-    /// created, shorter than its header or with a zero magic over no list, is written
-    /// again; a zero magic over a list is [`RecordingsError::NotReady`]. A file of
-    /// another member's is [`RecordingsError::Member`]. The file's length is checked
-    /// before a byte is read, and what is read is its fixed length at most.
+    /// file with an empty list and a floor position of 0 when there is none: for a
+    /// member whose record of terms holds no term, which holds no log. A file a crash
+    /// tore while it was created, shorter than its header or with a zero magic over
+    /// no list, is written again; a zero magic over a list is
+    /// [`RecordingsError::NotReady`]. A file of another member's is
+    /// [`RecordingsError::Member`]. The file's length is checked before a byte is
+    /// read, and what is read is its fixed length at most.
     pub fn open(dir: &Path, member_id: i32) -> Result<Self, RecordingsError> {
+        Self::open_with(dir, member_id, true)
+    }
+
+    /// Opens member `member_id`'s file in `dir` and reads its list, and never
+    /// creates or writes it: for a member whose record of terms holds a term. Such a
+    /// member holds a log, and a file created for it now would say that it holds
+    /// none. No file is [`RecordingsError::Absent`]; a file a crash tore while it was
+    /// created is [`RecordingsError::TooShort`] or [`RecordingsError::NotReady`],
+    /// since creation ends before a member records its first term. Every other
+    /// refusal is [`RecordingsFile::open`]'s.
+    pub fn open_kept(dir: &Path, member_id: i32) -> Result<Self, RecordingsError> {
+        Self::open_with(dir, member_id, false)
+    }
+
+    fn open_with(dir: &Path, member_id: i32, create: bool) -> Result<Self, RecordingsError> {
         let path = Self::path_in(dir);
         let io = |what: &'static str| {
             let path = path.clone();
             move |source| RecordingsError::Io { what, path, source }
         };
-        let file = OpenOptions::new()
+        let file = match OpenOptions::new()
             .read(true)
             .write(true)
-            .create(true)
+            .create(create)
             .truncate(false)
             .open(&path)
-            .map_err(io("open"))?;
+        {
+            Ok(file) => file,
+            Err(source) if !create && source.kind() == io::ErrorKind::NotFound => {
+                return Err(RecordingsError::Absent { path });
+            }
+            Err(source) => return Err(io("open")(source)),
+        };
         let file_length = file.metadata().map_err(io("stat"))?.len();
         if file_length > FILE_LENGTH as u64 {
             return Err(RecordingsError::Length { found: file_length });
@@ -534,13 +625,13 @@ impl RecordingsFile {
             ),
         ];
         // A creation a crash tore: creation writes one list, the empty one of
-        // sequence 0, so a zero magic over any other list is not one.
-        let written = |slot: &Result<i64, RecordingsError>, list: &Vec<ListedRecording>| matches!(slot, Ok(sequence) if *sequence > 0 || !list.is_empty());
+        // sequence 0 and floor 0, so a zero magic over any other list is not one.
+        let written = |slot: &Result<SlotFields, RecordingsError>, list: &Vec<ListedRecording>| matches!(slot, Ok(fields) if *fields != SlotFields::CREATED || !list.is_empty());
         let zero_magic = bytes.get(..8).is_some_and(|magic| magic == [0u8; 8]);
         let torn_creation = file_length < HEADER_LENGTH as u64
             || (zero_magic && !written(&slots[0], &lists[0]) && !written(&slots[1], &lists[1]));
         let mut scratch = Box::new([0u8; SLOT_LENGTH]);
-        if torn_creation {
+        if torn_creation && create {
             Self::create(&file, &path, member_id, &mut scratch)?;
             let [mut entries, _] = lists;
             entries.clear();
@@ -548,7 +639,7 @@ impl RecordingsFile {
                 path,
                 file,
                 slot: 0,
-                sequence: 0,
+                fields: SlotFields::CREATED,
                 entries,
                 scratch,
             });
@@ -561,14 +652,18 @@ impl RecordingsFile {
             });
         }
         let [slot_0, slot_1] = slots;
-        let sequences = [slot_0.as_ref().ok().copied(), slot_1.as_ref().ok().copied()];
+        let read = [slot_0.as_ref().ok().copied(), slot_1.as_ref().ok().copied()];
         let slot = choose(slot_0, slot_1)?;
         let [list_0, list_1] = lists;
         Ok(Self {
             path,
             file,
             slot,
-            sequence: sequences.get(slot).copied().flatten().unwrap_or(0),
+            fields: read
+                .get(slot)
+                .copied()
+                .flatten()
+                .unwrap_or(SlotFields::CREATED),
             entries: if slot == 0 { list_0 } else { list_1 },
             scratch,
         })
@@ -588,7 +683,7 @@ impl RecordingsFile {
             move |source| RecordingsError::Io { what, path, source }
         };
         let header = RecordingsHeader { member_id }.encode();
-        let length = encode_slot(0, [], scratch)?;
+        let length = encode_slot(SlotFields::CREATED, [], scratch)?;
         file.set_len(0).map_err(io("empty"))?;
         file.write_all_at(&header[8..], 8)
             .map_err(io("write the header of"))?;
@@ -607,23 +702,34 @@ impl RecordingsFile {
         &self.entries
     }
 
+    /// The floor position: where the first recording of the list begins, and, when
+    /// the list names none, where the member's log ends.
+    pub const fn floor_position(&self) -> i64 {
+        self.fields.floor_position
+    }
+
     /// The sequence of the list the file holds: 0 for the list it was created with,
     /// and one more for each write.
     pub const fn sequence(&self) -> i64 {
-        self.sequence
+        self.fields.sequence
     }
 
-    /// Replaces the list with `entries` and syncs: one write of the slot the list is
-    /// not read from, with the next sequence, and one sync. A crash before the sync
-    /// has ended leaves the list as it was. A list a reader would refuse, or one of
-    /// more than [`MAX_ENTRIES`], is refused and nothing is written. On an error the
-    /// list in memory is the one before the call, as the file's is.
+    /// Replaces the list with `entries` over `floor_position` and syncs: one write of
+    /// the slot the list is not read from, with the next sequence, and one sync. A
+    /// crash before the sync has ended leaves the list as it was. A list a reader
+    /// would refuse, or one of more than [`MAX_ENTRIES`], is refused and nothing is
+    /// written. On an error the list in memory is the one before the call, as the
+    /// file's is.
     pub fn write(
         &mut self,
+        floor_position: i64,
         entries: impl IntoIterator<Item = ListedRecording> + Clone,
     ) -> Result<(), RecordingsError> {
-        let sequence = self.sequence + 1;
-        let length = encode_slot(sequence, entries.clone(), &mut self.scratch)?;
+        let fields = SlotFields {
+            sequence: self.fields.sequence + 1,
+            floor_position,
+        };
+        let length = encode_slot(fields, entries.clone(), &mut self.scratch)?;
         let next = 1 - self.slot;
         let io = |what: &'static str, path: &Path| {
             let path = path.to_path_buf();
@@ -634,11 +740,20 @@ impl RecordingsFile {
             .map_err(io("write", &self.path))?;
         self.file.sync_all().map_err(io("sync", &self.path))?;
         self.slot = next;
-        self.sequence = sequence;
+        self.fields = fields;
         self.entries.clear();
         self.entries.extend(entries);
         Ok(())
     }
+}
+
+impl SlotFields {
+    /// The fields of the list a file is created with: sequence 0, and a floor
+    /// position of 0, the end of a log that holds nothing.
+    pub const CREATED: SlotFields = SlotFields {
+        sequence: 0,
+        floor_position: 0,
+    };
 }
 
 #[cfg(test)]
@@ -668,6 +783,7 @@ mod tests {
         let mut file = RecordingsFile::open(&dir, 2).expect("the file is created");
         assert_eq!(file.entries(), &[]);
         assert_eq!(file.sequence(), 0);
+        assert_eq!(file.floor_position(), 0);
         assert_eq!(
             std::fs::metadata(RecordingsFile::path_in(&dir))
                 .expect("the file")
@@ -675,24 +791,25 @@ mod tests {
             FILE_LENGTH as u64
         );
         let first = [listed(0, 0)];
-        file.write(first).expect("the list is written");
+        file.write(0, first).expect("the list is written");
         let second = [listed(0, 0), listed(3, 192), listed(4, 160)];
         // An entry that begins below the one before it is refused, and nothing changes.
         assert_eq!(
-            file.write(second)
+            file.write(0, second)
                 .expect_err("an entry out of order")
                 .reason(),
             "position"
         );
         assert_eq!(file.entries(), &first);
         let second = [listed(0, 0), listed(3, 160), listed(4, 192)];
-        file.write(second).expect("the list is written");
+        file.write(0, second).expect("the list is written");
         assert_eq!(file.entries(), &second);
         assert_eq!(file.sequence(), 2);
         drop(file);
         let file = RecordingsFile::open(&dir, 2).expect("the file opens");
         assert_eq!(file.entries(), &second);
         assert_eq!(file.sequence(), 2);
+        assert_eq!(file.floor_position(), 0);
         // Another member's directory is refused, with both ids.
         let refused = RecordingsFile::open(&dir, 1).expect_err("another member's");
         assert_eq!(refused.reason(), "member");
@@ -701,14 +818,52 @@ mod tests {
     }
 
     #[test]
+    fn the_floor_is_where_the_first_recording_begins_or_where_an_empty_list_ends() {
+        let dir = dir("floor");
+        let mut file = RecordingsFile::open(&dir, 0).expect("the file is created");
+        // The table forgot the recordings below 320: the list begins there.
+        let list = [listed(7, 320), listed(8, 320), listed(9, 416)];
+        file.write(320, list).expect("the list is written");
+        assert_eq!(file.floor_position(), 320);
+        // A first recording that does not begin at the floor is refused, above it
+        // and below it, as is a floor that is no position; nothing changes.
+        for (floor, entries) in [
+            (288, &list[..]),
+            (352, &list[..]),
+            (-32, &[][..]),
+            (48, &[][..]),
+        ] {
+            assert_eq!(
+                file.write(floor, entries.iter().copied())
+                    .expect_err("a floor the list does not begin at")
+                    .reason(),
+                "position",
+                "floor {floor}"
+            );
+        }
+        assert_eq!(file.entries(), &list);
+        // A truncation purged every recording named: the list is empty, and the
+        // floor says where the log ends, in recordings the table forgot.
+        file.write(256, []).expect("the empty list is written");
+        assert_eq!(file.entries(), &[]);
+        assert_eq!(file.floor_position(), 256);
+        drop(file);
+        let file = RecordingsFile::open_kept(&dir, 0).expect("the file opens");
+        assert_eq!(file.entries(), &[]);
+        assert_eq!(file.floor_position(), 256);
+        assert_eq!(file.sequence(), 2);
+        std::fs::remove_dir_all(&dir).expect("the directory is removed");
+    }
+
+    #[test]
     fn a_torn_write_reads_as_the_list_before_it() {
         let dir = dir("torn-write");
         let mut file = RecordingsFile::open(&dir, 0).expect("the file is created");
-        file.write([listed(0, 0)]).expect("the list is written");
-        file.write([listed(0, 0), listed(1, 96)])
+        file.write(0, [listed(0, 0)]).expect("the list is written");
+        file.write(0, [listed(0, 0), listed(1, 96)])
             .expect("the list is written");
         // Sequence 2 is in slot 0, sequence 1 in slot 1. A crash tore the write of
-        // sequence 3 into slot 1: its sequence and count are there, its entries not.
+        // sequence 3 into slot 1: its count and sequence are there, its entries not.
         drop(file);
         let path = RecordingsFile::path_in(&dir);
         let raw = OpenOptions::new()
@@ -725,7 +880,7 @@ mod tests {
         assert_eq!(file.entries(), &[listed(0, 0), listed(1, 96)]);
         assert_eq!(file.sequence(), 2);
         // The next write goes over the torn slot.
-        file.write([listed(0, 0), listed(1, 96), listed(2, 96)])
+        file.write(0, [listed(0, 0), listed(1, 96), listed(2, 96)])
             .expect("the list is written");
         drop(file);
         let file = RecordingsFile::open(&dir, 0).expect("the file opens");
@@ -742,7 +897,7 @@ mod tests {
         std::fs::write(&path, vec![0u8; FILE_LENGTH]).expect("a file of zeros");
         let mut file = RecordingsFile::open(&dir, 1).expect("the file is created again");
         assert_eq!(file.entries(), &[]);
-        file.write([listed(5, 0)]).expect("the list is written");
+        file.write(0, [listed(5, 0)]).expect("the list is written");
         drop(file);
         // A zero magic over a list is damage: creation never writes one.
         let raw = OpenOptions::new()
@@ -794,17 +949,76 @@ mod tests {
     }
 
     #[test]
+    fn a_member_that_holds_a_log_is_given_no_new_list() {
+        let dir = dir("kept");
+        let path = RecordingsFile::path_in(&dir);
+        // No file: nothing is created, and the refusal says what to do.
+        let absent = RecordingsFile::open_kept(&dir, 1).expect_err("no file");
+        assert_eq!(absent.reason(), "absent");
+        assert!(!path.exists(), "the refusal created the file");
+        let text = absent.to_string();
+        assert!(
+            text.contains("every member on a new log directory"),
+            "{text}"
+        );
+        assert!(
+            text.contains("Do not start this member alone on a new log directory"),
+            "{text}"
+        );
+        assert!(
+            text.contains("docs/reference/durable-log.md#log-recordings"),
+            "{text}"
+        );
+        // A creation a crash tore, cut short or whole with no magic: refused, and
+        // left as it was, where `open` would write it again.
+        std::fs::write(&path, [0u8; 40]).expect("a short file");
+        assert_eq!(
+            RecordingsFile::open_kept(&dir, 1)
+                .expect_err("a file cut short")
+                .reason(),
+            "too-short"
+        );
+        assert_eq!(std::fs::metadata(&path).expect("the file").len(), 40);
+        std::fs::write(&path, vec![0u8; FILE_LENGTH]).expect("a file of zeros");
+        assert_eq!(
+            RecordingsFile::open_kept(&dir, 1)
+                .expect_err("no magic")
+                .reason(),
+            "not-ready"
+        );
+        assert_eq!(
+            std::fs::read(&path).expect("the file"),
+            vec![0u8; FILE_LENGTH]
+        );
+        // The file a start created, and then a list: both open.
+        drop(RecordingsFile::open(&dir, 1).expect("the file is created"));
+        let mut file = RecordingsFile::open_kept(&dir, 1).expect("the created file opens");
+        assert_eq!((file.entries().len(), file.floor_position()), (0, 0));
+        file.write(0, [listed(0, 0)]).expect("the list is written");
+        drop(file);
+        let file = RecordingsFile::open_kept(&dir, 1).expect("the file opens");
+        assert_eq!(file.entries(), &[listed(0, 0)]);
+        assert_eq!(
+            RecordingsFile::open_kept(&dir, 2)
+                .expect_err("another member's")
+                .reason(),
+            "member"
+        );
+        std::fs::remove_dir_all(&dir).expect("the directory is removed");
+    }
+
+    #[test]
     fn a_list_at_the_bound_is_written_and_one_past_it_is_refused() {
         let dir = dir("bound");
         let mut file = RecordingsFile::open(&dir, 0).expect("the file is created");
         let full: Vec<ListedRecording> = (0..MAX_ENTRIES as i64)
             .map(|index| listed(index, index * 32))
             .collect();
-        file.write(full.iter().copied()).expect("a full list");
+        file.write(0, full.iter().copied()).expect("a full list");
         let mut over = full.clone();
         over.push(listed(MAX_ENTRIES as i64, MAX_ENTRIES as i64 * 32));
         assert_eq!(
-            file.write(over.iter().copied())
+            file.write(0, over.iter().copied())
                 .expect_err("one past the bound")
                 .reason(),
             "recordings-full"

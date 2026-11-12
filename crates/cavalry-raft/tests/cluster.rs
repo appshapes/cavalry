@@ -325,8 +325,10 @@ fn three_members_replicate_a_hundred_thousand_entries_and_their_recordings_are_e
         }
     }
 
-    // A member over a driver does not start again on the log it has: the refusal
-    // says why and what to do.
+    // A member over a driver starts again on the log it has (ADR 0108). Closed, and
+    // started over the driver it had, which ran on, it reads its log back, the
+    // term's event and a hundred thousand entries, before it has heard another
+    // member; `tests/restart.rs` has the members that join the cluster again.
     let Member {
         driver,
         module,
@@ -335,29 +337,22 @@ fn three_members_replicate_a_hundred_thousand_entries_and_their_recordings_are_e
     } = members.remove(2);
     let member_id = module.member_id();
     module.close().expect("the member closes");
-    let again = ConsensusModule::start(&driver_dir, &log_dir, &members_string, member_id)
-        .expect_err("a log directory that holds a term");
-    // Its directory holds the term, and the candidate term it stored when it voted
-    // in a ballot, or none when it took the term from canvass.
-    assert!(
-        matches!(
-            again,
-            RaftError::Restart {
-                log_leadership_term_id,
-                candidate_term,
-            } if log_leadership_term_id == term && (-1..=term).contains(&candidate_term)
-        ),
-        "{again}"
+    let mut again = ConsensusModule::start(&driver_dir, &log_dir, &members_string, member_id)
+        .expect("the member starts on the log it kept");
+    let deadline = Instant::now() + Duration::from_secs(10);
+    while again.append_position() != end {
+        assert!(
+            Instant::now() < deadline,
+            "the member read its log back to {end}: {again:?}"
+        );
+        again.do_work().expect("the member's duty cycle");
+    }
+    assert_eq!(
+        again.commit_position(),
+        0,
+        "it knows no commit position until a leader tells it one"
     );
-    let text = again.to_string();
-    assert!(
-        text.contains("every member on a new log directory"),
-        "{text}"
-    );
-    assert!(
-        text.contains("docs/reference/cluster.md#roles-and-the-election"),
-        "{text}"
-    );
+    again.close().expect("the member closes");
     driver.close().expect("the driver closes");
 
     for member in members {
