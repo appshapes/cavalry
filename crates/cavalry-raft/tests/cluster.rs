@@ -19,10 +19,11 @@ use cavalry_proto::cluster::{
 use cavalry_raft::{ConsensusModule, ElectionState, NO_SESSION, RaftError, Refused, Role};
 use cavalry_shm::counters::CountersReader;
 use cavalry_shm::counters::generated::{
-    CLUSTER_APPEND_POSITION, CLUSTER_COMMIT_POSITION, CLUSTER_ELECTION_CAUSE,
-    CLUSTER_ELECTION_STATE, CLUSTER_ELECTION_STEPS, CLUSTER_ELECTIONS, CLUSTER_ELECTIONS_CLOSED,
-    CLUSTER_LEADER_MEMBER_ID, CLUSTER_LEADERSHIP_TERM_ID, CLUSTER_LOG_RECORDING_ID,
-    CLUSTER_LOG_RECORDINGS_UNWRITTEN, CLUSTER_ROLE, CLUSTER_TERMS_LED, SUBSCRIPTION_POSITION,
+    CLUSTER_APPEND_POSITION, CLUSTER_APPOINTED_LEADER_BEHIND, CLUSTER_COMMIT_POSITION,
+    CLUSTER_ELECTION_CAUSE, CLUSTER_ELECTION_STATE, CLUSTER_ELECTION_STEPS, CLUSTER_ELECTIONS,
+    CLUSTER_ELECTIONS_CLOSED, CLUSTER_LEADER_MEMBER_ID, CLUSTER_LEADERSHIP_TERM_ID,
+    CLUSTER_LOG_RECORDING_ID, CLUSTER_LOG_RECORDINGS_UNWRITTEN, CLUSTER_ROLE, CLUSTER_TERMS_LED,
+    SUBSCRIPTION_POSITION,
 };
 
 struct TestDir(PathBuf);
@@ -152,6 +153,18 @@ fn counter(member: &Member, type_id: i32) -> i64 {
     );
 }
 
+/// Whether the member's driver holds a counter of `type_id` under the member's id.
+fn has_counter(member: &Member, type_id: i32) -> bool {
+    let reader = CountersReader::open(&member.dir).expect("the counters file opens");
+    let key = member.module.member_id().to_le_bytes();
+    (0..reader.capacity()).any(|id| {
+        reader
+            .record(id)
+            .expect("a record")
+            .is_some_and(|record| record.type_id() == type_id && record.key().starts_with(&key))
+    })
+}
+
 #[test]
 fn three_members_replicate_a_hundred_thousand_entries_and_their_recordings_are_equal() {
     let dir = TestDir::new("replicate");
@@ -168,6 +181,13 @@ fn three_members_replicate_a_hundred_thousand_entries_and_their_recordings_are_e
         // It names no leader, and the cause of its election is its start (ADR 0102).
         assert_eq!(counter(member, CLUSTER_LEADER_MEMBER_ID.0), -1);
         assert_eq!(counter(member, CLUSTER_ELECTION_CAUSE.0), 0);
+        // No member adds the counter of the appointed leader's check: that it is
+        // not there is how `cavalry doctor` knows a member that elects (ADR 0104).
+        assert!(
+            !has_counter(member, CLUSTER_APPOINTED_LEADER_BEHIND.0),
+            "member {} added cluster.appointed_leader_behind",
+            member.module.member_id()
+        );
     }
 
     run_until_led(&mut members);
@@ -367,7 +387,8 @@ fn three_members_replicate_a_hundred_thousand_entries_and_their_recordings_are_e
     );
     let text = again.to_string();
     assert!(
-        text.contains("every member on a new log directory"),
+        text.contains("every member on a new log directory")
+            && text.contains("Do not start this member alone on a new log directory"),
         "{text}"
     );
     assert!(
@@ -658,10 +679,6 @@ fn a_lost_leader_is_replaced_by_the_two_that_remain_and_they_commit() {
     // The term the first leader leads is 0 unless its election took more than one
     // ballot, which a vote split between two candidates does.
     let first_term = members[0].module.leadership_term_id();
-    let first_recordings: Vec<i64> = members[1..]
-        .iter()
-        .map(|m| m.module.log_recording_id().expect("a follower's recording"))
-        .collect();
 
     let leader = members.remove(0);
     drop(leader.module);
@@ -687,11 +704,6 @@ fn a_lost_leader_is_replaced_by_the_two_that_remain_and_they_commit() {
         .iter()
         .position(|m| m.module.role() == Role::Leader)
         .expect("one member leads");
-    let first_recordings = if at == 0 {
-        first_recordings
-    } else {
-        first_recordings.into_iter().rev().collect()
-    };
     members.swap(0, at);
     let new_leader = members[0].module.member_id();
     assert_ne!(new_leader, first_leader);
@@ -755,37 +767,16 @@ fn a_lost_leader_is_replaced_by_the_two_that_remain_and_they_commit() {
          seconds past the leader heartbeat timeout"
     );
 
-    // Nothing committed was lost. Each member's recording of the first leader's
-    // image holds the same bytes from where the later of the two begins to the end
-    // of that term. A follower that was slow at the start joined after the term's
-    // first entry: its recording begins past 0, and what lies below is in the
-    // recording of the replay it caught up by, which its append position counts.
-    let begins: Vec<i64> = members
-        .iter()
-        .zip(&first_recordings)
-        .map(|(member, id)| {
-            CatalogReader::open(&member.log_dir)
-                .expect("the catalog opens")
-                .get(*id)
-                .expect("the slot is read")
-                .expect("the recording's descriptor")
-                .start_position()
-        })
-        .collect();
-    let from = usize::try_from(begins[0].max(begins[1])).expect("a position");
+    // Nothing committed was lost. Each member's log of the first term holds the
+    // same bytes from position 0 to the end of that term, read across the
+    // recordings its file names: a follower that was slow at the start joined after
+    // the term's first entry, and holds what lies below in the recording of the
+    // replay it caught up by.
     let held: Vec<Vec<u8>> = members
         .iter()
-        .zip(&first_recordings)
-        .map(|(member, id)| {
-            let file = member.log_dir.join(format!("{id}-0.rec"));
-            let bytes = std::fs::read(&file).expect("the segment file is read");
-            bytes[from..usize::try_from(end).expect("a position")].to_vec()
-        })
+        .map(|member| log_bytes(member, end))
         .collect();
-    assert_eq!(
-        held[0], held[1],
-        "the two logs of the first term from {from}"
-    );
+    assert_eq!(held[0], held[1], "the two logs of the first term");
     // The last of the hundred entries is the last frame of both.
     let last_frame = &held[0][held[0].len() - 96..];
     let last = Message::parse(Stream::Log, &last_frame[32..32 + 40]).expect("an entry");

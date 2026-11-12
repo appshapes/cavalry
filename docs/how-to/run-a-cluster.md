@@ -120,7 +120,9 @@ committed once a quorum, two of three, has it on disk.
 - Every member reports `election closed` and the same `commit position`.
 - `ls /tmp/cavalry-member-1-log` lists `terms`, the member's record of the terms it
   has joined, beside `catalog` and the recording of the leader's log, `0-0.rec` with
-  its time index `0.idx`.
+  its time index `0.idx`. A member that joined its leader after the term's first
+  entry holds its log in two recordings: `0-0.rec` is then the replay it caught up
+  by, and `1-0.rec` the recording of the leader's log from where that replay ended.
 - A member that started before another may show `WARN receiver.receive_failed`: the
   datagrams it sent before the other member listened were refused by this host's
   kernel. The count stops rising once every member runs.
@@ -144,7 +146,8 @@ committed once a quorum, two of three, has it on disk.
   term's first entry, which the leader appended when its election closed. Every
   member's recording gives the same line. `just replay-check` is that check as a gate:
   three members replicate and commit 100,000 entries whose payloads carry a hash
-  chain, each member's recording is replayed through a driver of its own, and the gate
+  chain, each member's log is replayed through a driver of its own, across its
+  recordings where it holds two, and the gate
   fails unless the three members' lines hash the same and their payloads are the ones
   the leader was offered, in order (`scripts/replay-check.sh`).
 - A program beside a member reads the entries as the cluster commits them:
