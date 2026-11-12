@@ -842,7 +842,8 @@ pub enum Message<'a> {
     },
     /// Template 53.
     NewLeadershipTerm {
-        /// The term the receiver reported, −1 for none.
+        /// The highest term in the leader's record at or below the term the receiver
+        /// reported ([`answered_term`]), −1 when the record holds none.
         log_leadership_term_id: i64,
         /// The lowest term in the leader's record above the log leadership term id, the
         /// leader's own when none lies between; −1 when the log leadership term id is
@@ -2519,7 +2520,8 @@ pub struct CanvassTerms {
 /// What a leader does with a canvass position.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum CanvassAction {
-    /// Answer with new leadership term for the reported log leadership term id.
+    /// Answer with new leadership term for the highest term in the leader's record at
+    /// or below the reported log leadership term id ([`answered_term`]).
     Answer,
     /// Hold an election from init: Raft's step-down once closed, a failed election in
     /// leader log replication or leader ready.
@@ -2611,7 +2613,8 @@ pub enum TermAction {
     /// A term below the reader's candidate term, or in a ballot state any term but the
     /// candidate term: the message is ignored.
     Ignore,
-    /// The message's log leadership term id is not the reader's: back to canvass.
+    /// The message's log leadership term id is not the reader's, and the message
+    /// drops none of the reader's terms: back to canvass.
     Canvass,
     /// The message names a term below the reader's log term and a next term above it:
     /// the leader's record holds none of the reader's terms above the one named. The
@@ -2665,7 +2668,8 @@ pub struct NewLeadershipTermAction {
 pub struct TermFields {
     /// The leader's term.
     pub leadership_term_id: i64,
-    /// The term the message describes, the reader's reported log leadership term id.
+    /// The term the message describes: the highest term in the leader's record at or
+    /// below the log leadership term id the reader reported.
     pub log_leadership_term_id: i64,
     /// The term after it in the leader's log, or −1.
     pub next_leadership_term_id: i64,

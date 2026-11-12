@@ -4,12 +4,15 @@
 - **Date:** 2026-11-12
 - **Invariants affected:** 1, 3, 4, 6
 - **Supersedes:** none. Changes `spec/cluster.md`: the first field of "New leadership
-  term, template 53", the reader's rule in "Messages during an election", and a row
-  of "Counters". Changes one sentence of `spec/durable-log.md`, "The driver": what
-  the module writes state 3 over. No message's layout changes and no file's format
-  changes; both pages stay at their versions, since no member over a driver elects
-  yet (ADR 0081). Adds the `answered-term` vectors and five `new-leadership-term`
-  vectors.
+  term, template 53"; in "Roles and the election", the leader's answer and the
+  reader's rule in "Messages during an election", and the answer of a leader whose
+  election is closed; and two rows of "Counters", a new one for
+  `cluster.terms_dropped` and what `cluster.ballots_lost` counts for a message that
+  is not for the reader's log term. Changes one sentence of `spec/durable-log.md`,
+  "The driver": what the module writes state 3 over. No message's layout changes and
+  no file's format changes; both pages stay at their versions, since no member over
+  a driver elects yet (ADR 0081). Adds the `answered-term` vectors and five
+  `new-leadership-term` vectors.
 
 ## Context
 

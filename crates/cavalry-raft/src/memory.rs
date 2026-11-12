@@ -97,8 +97,9 @@ struct Publication {
     position: i64,
     /// Every entry appended to it, for the cluster's life.
     entries: Vec<Entry>,
-    /// Gone: the member that added it was started again on an empty log directory, or
-    /// gave its log up to hold an election ([`Io::remove_log`]).
+    /// Gone: the member that added it was started again, on an empty log directory
+    /// ([`Cluster::wipe`]) or on the one it kept ([`Cluster::restart`]), or gave its log
+    /// up to hold an election ([`Io::remove_log`]).
     closed: bool,
 }
 

@@ -567,7 +567,8 @@ election in failure and begins again at init, counted in `cluster.elections_fail
 while one in leader replay or leader init updates its table alone, the sender's next
 canvass position reaching leader ready; a leader reads a canvass position whose log
 leadership term id is below its own term, neither term above it, and answers with new
-leadership term for that term, its next fields as the table gives them, the leader's term base log
+leadership term for the highest term in its record at or below that term, −1 when its
+record holds none (ADR 0096), its next fields as the table gives them, the leader's term base log
 position standing for the next term's base when that term is the leader's own, and
 one at its own term updates its table alone during its election, since states 5 and 8
 send new leadership term to every member. The `canvass-position` vectors pin each
@@ -691,8 +692,9 @@ canvasses again never joins a stale replay or finds two started for one request;
 during its election it then does with the message as "Messages during an election"
 says; its election closed, it answers one whose leadership term id, the sender's
 candidate term, and log leadership term id are both at or below its own term with new
-leadership term for the reported log leadership term id, its next fields as the table
-gives them, the three −1 when that term is its own, so that a restarted member finds
+leadership term for the highest term in its record at or below the reported log
+leadership term id (ADR 0096), its next fields as the table
+gives them, the three −1 when the reported term is its own, so that a restarted member finds
 the leader and truncates no more than it must, and holds an election, beginning at
 init, on one with either term above its own, Raft's step-down, counted in
 `cluster.leader_step_downs`, a departure from Aeron, whose leader reads a canvass
@@ -960,7 +962,7 @@ that a reader of a counters file knows which transition it saw.
 | `cluster.terms_dropped` | a member that dropped from its record of terms the terms its leader's record lacks, on a new leadership term whose log leadership term id was below its own and whose next leadership term id was above it ("Messages during an election"; ADR 0096) |
 | `cluster.votes_for`, `cluster.votes_against` | a vote sent, by its value |
 | `cluster.candidacies` | a ballot begun: a member in nominate that stored candidate term + 1, voted for itself and went to candidate ballot, `cluster.role` going to candidate (ADR 0081) |
-| `cluster.ballots_lost` | a ballot that ended with no leader for the member, which canvasses again: a candidate at the election timeout short of a quorum or with a vote against, a member in follower ballot whose candidate's new leadership term did not come within the election timeout, or either that reads a new leadership term for a log term it did not report; two members that count one with `cluster.candidacies` each are a split vote (ADR 0081) |
+| `cluster.ballots_lost` | a ballot that ended with no leader for the member, which canvasses again: a candidate at the election timeout short of a quorum or with a vote against, a member in follower ballot whose candidate's new leadership term did not come within the election timeout, or either that reads a new leadership term for a log term that is not its own and that drops none of its terms ("Messages during an election"; ADR 0096); two members that count one with `cluster.candidacies` each are a split vote (ADR 0081) |
 | `cluster.leadership_terms_ignored` | a new leadership term ignored for its term: below the reader's candidate term in canvass, or not the candidate term in a ballot state |
 | `cluster.sessions` | a gauge: open sessions |
 | `cluster.sessions_refused` | a session connect refused, with the version, the response channel or the limit as the detail |

@@ -1930,3 +1930,53 @@ fn a_truncation_cuts_both_of_two_recordings_that_overlap() {
     }
     assert_eq!(pair.member.io.recording_at(two), None);
 }
+
+/// A member drops a term its leader's record lacks from its record, over a driver
+/// (ADR 0096). It holds term 0 to 192 and has recorded term 1 at 192, where its log
+/// ends, with no byte of it. A truncation to 192 leaves term 1, whose base is not
+/// above the position. `drop_terms_above(0)` deletes it from the `terms` file, by
+/// term, and returns term 0; asked again it changes nothing. The file read again
+/// from the member's log directory holds term 0 and a term recorded after the drop
+/// at the same base.
+#[test]
+fn a_member_drops_a_term_from_its_record_by_term_where_a_truncation_leaves_it() {
+    let mut pair = pair("drop-terms");
+    let (two, _) = pair.follow_and_leave(0, 0, &[b"one", b"two"]);
+    pair.member
+        .io
+        .record_term(0, 0)
+        .expect("term 0 is recorded");
+    pair.member
+        .io
+        .record_term(1, two)
+        .expect("term 1 is recorded");
+    assert_eq!(pair.member.io.term_at_or_below(1), 1);
+    assert_eq!(pair.member.io.term_at_or_below(-1), -1);
+    assert_eq!(
+        pair.member.io.truncate_log(two).expect("truncated"),
+        Some(1),
+        "a term based at the position stays in the record"
+    );
+
+    assert_eq!(pair.member.io.drop_terms_above(0).expect("dropped"), 0);
+    assert_eq!(pair.member.io.log_leadership_term_id(), 0);
+    assert_eq!(pair.member.io.term_at_or_below(1), 0);
+    assert_eq!(pair.member.io.terms_after(0), [None, None]);
+    assert_eq!(pair.member.io.append_position(), two);
+    assert_eq!(
+        pair.member.io.drop_terms_above(0).expect("nothing to drop"),
+        0
+    );
+
+    pair.member
+        .io
+        .record_term(3, two)
+        .expect("a term after the dropped one is recorded");
+    let file = TermsFile::open(&pair.member_log_dir).expect("the terms file opens");
+    assert_eq!(
+        file.terms()
+            .map(|entry| (entry.leadership_term_id, entry.term_base_log_position))
+            .collect::<Vec<_>>(),
+        vec![(0, 0), (3, two)]
+    );
+}

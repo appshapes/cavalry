@@ -47,10 +47,10 @@ fn record(io: &Stub) -> Vec<(i64, i64)> {
     io.terms.iter().flatten().copied().collect()
 }
 
-/// The member holds term 1 at 64 and no byte of it. Its leader's record has no term
-/// 1. Nothing is cut; term 1 leaves the record, counted; and the message is read
-/// again by a member whose log is of term 0 and ends at 64, below the leader's base:
-/// it replicates the rest of term 0, to 128, from that leader.
+/// The member holds term 1 at 64 and no byte of it, and its leader's record has no
+/// such term. Nothing is cut; term 1 leaves the record, counted; and the message is
+/// read again by a member whose log is of term 0 and ends at 64, below the leader's
+/// base: it replicates the rest of term 0, to 128, from that leader.
 #[test]
 fn a_member_drops_a_term_its_leaders_record_lacks_and_reads_the_message_again() {
     let mut io = Stub::new();

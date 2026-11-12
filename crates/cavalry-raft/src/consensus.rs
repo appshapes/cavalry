@@ -523,9 +523,9 @@ pub struct Counts {
     /// canvasses again: a candidate at the election timeout short of a quorum or with
     /// a vote against, a member in follower ballot whose candidate's new leadership
     /// term did not come within the election timeout, or either that reads a new
-    /// leadership term for a log term it did not report. A candidate that follows
-    /// another member's new leadership term for its own candidate term has a leader
-    /// and counts none (ADR 0081).
+    /// leadership term for a log term that is not its own and that drops none of its
+    /// terms (ADR 0096). A candidate that follows another member's new leadership term
+    /// for its own candidate term has a leader and counts none (ADR 0081).
     pub ballots_lost: u64,
     /// `cluster.votes_for`: a vote the member sent for a candidate.
     pub votes_for: u64,
@@ -1355,9 +1355,10 @@ impl Consensus {
                         count(&mut self.counts.leadership_terms_ignored);
                         Ok(())
                     }
-                    // The message is for a log term this member did not report: the
-                    // member takes neither the leader nor the term, and canvasses, a
-                    // ballot it was in being lost.
+                    // The message is for a log term that is not this member's, and
+                    // says nothing of the terms this member holds: the member takes
+                    // neither the leader nor the term, and canvasses, a ballot it
+                    // was in being lost.
                     TermAction::Canvass => {
                         if !in_canvass {
                             self.lose_ballot(clock);
@@ -1709,9 +1710,9 @@ impl Consensus {
     }
 
     /// A ballot that ended with no leader, this member's own or its candidate's, at the
-    /// election timeout or on a new leadership term for a log term it did not report:
-    /// counted, and the member canvasses again as a follower, with the reports and the
-    /// members heard that it has.
+    /// election timeout or on a new leadership term for a log term that is not its own
+    /// and that drops none of its terms: counted, and the member canvasses again as a
+    /// follower, with the reports and the members heard that it has.
     fn lose_ballot(&mut self, clock: Clock) -> usize {
         count(&mut self.counts.ballots_lost);
         self.role = Role::Follower;
