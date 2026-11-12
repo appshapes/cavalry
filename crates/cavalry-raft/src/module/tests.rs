@@ -2427,6 +2427,14 @@ fn stopped(start: i64, stop: i64) -> Cataloged {
     }
 }
 
+/// What a start made of a record of the log's recordings: the table of recordings
+/// and where the log ends, or its refusal.
+type KeptLog = Result<(Vec<Kept>, i64), RaftError>;
+
+/// A case of a refusal: what it is, the catalog, the recording the refusal names,
+/// and what the catalog holds in its place.
+type Refusal = (&'static str, Vec<(i64, Cataloged)>, i64, ListedFound);
+
 /// [`kept_log`] over a catalog given as a table, a recording id the table lacks
 /// being one the catalog does not hold. Returns what the start made of it, and the
 /// recordings it stopped, each of which is given `live_stop` as its stop.
@@ -2435,7 +2443,7 @@ fn read_back(
     list: &[ListedRecording],
     catalog: &[(i64, Cataloged)],
     live_stop: i64,
-) -> (Result<(Vec<Kept>, i64), RaftError>, Vec<i64>) {
+) -> (KeptLog, Vec<i64>) {
     let mut stops = Vec::new();
     let result = kept_log(
         floor,
@@ -2583,7 +2591,7 @@ fn a_start_is_refused_when_the_catalog_does_not_hold_the_log_the_record_names() 
         stream_id: LOG_STREAM_ID + 1,
         stop: Some(192),
     };
-    let cases: [(&str, Vec<(i64, Cataloged)>, i64, ListedFound); 5] = [
+    let cases: [Refusal; 5] = [
         (
             "a recording missing before one that is held",
             vec![(0, live), (3, stopped(192, 288))],
@@ -2954,8 +2962,7 @@ fn a_member_whose_record_holds_a_term_and_no_record_of_its_recordings_is_refused
     std::fs::remove_file(&record).expect("the record is removed");
 
     let refused = ConsensusModule::start(&member_driver_dir, &member_log_dir, &members, 1)
-        .err()
-        .expect("a term and no record of the log's recordings");
+        .expect_err("a term and no record of the log's recordings");
     assert!(
         matches!(
             &refused,
