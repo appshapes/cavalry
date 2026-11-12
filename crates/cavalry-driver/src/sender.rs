@@ -1418,7 +1418,11 @@ impl Sender {
                 statics.bytes_sent.add(delivery.bytes as i64);
                 statics.frames_sent.add(delivery.frames as i64);
                 live.sender_position += advanced as i64;
-                // A burst ends at its term, so the seek is within the term.
+                // A burst ends at its term, so the seek is within the term. The reader's
+                // own position is read by nothing: every read names its position, and a
+                // sender position that followed a recording or went back for a receiver
+                // leaves the reader's behind or ahead, where the seek is refused and
+                // nothing depends on it (ADR 0098).
                 let _ = live.reader.seek(live.sender_position);
                 live.position.store_release(live.sender_position);
                 live.last_sent_at = now;
