@@ -4283,6 +4283,40 @@ mod tests {
         assert!(found[0].starts_with("recording 3 "), "{}", found[0]);
     }
 
+    /// A limit the recorder has reached or passed is not the recorder's hold: a
+    /// `cavalry:udp` publication that lost its receivers has its limit lowered to the
+    /// sender position, and once the recorder has written what the sender sent, the
+    /// publisher stands at or past a limit that does not wait for the recorder. Nothing
+    /// is said (ADR 0101, Consequences; the review of pull request 244 asked for it).
+    #[test]
+    fn a_limit_the_recorder_has_reached_is_not_its_hold() {
+        let dir = TestDir::new("recordings-limit-reached");
+        let mut counters = CountersFile::create(&dir.0, 128).expect("counters");
+        let ring = CommandRing::create(&dir.0, 4096).expect("ring");
+        let _consumer = ring.consumer(Duration::from_secs(10)).expect("consumer");
+        let mib = 1024 * 1024;
+        let lost = recorded(&mut counters, 7, -5, 1001, 3);
+        let sender = counters
+            .allocate(
+                SENDER_POSITION,
+                &position_key(7, -5, 1001),
+                "sender.position 7 -5 1001 9",
+            )
+            .expect("its sender position");
+        // The limit fell to the sender position; the publisher wrote a message past it.
+        sender.store_release(8 * mib);
+        lost.limit.store_release(8 * mib);
+        lost.position.store_release(8 * mib + 4096);
+        // The recorder at the limit, and then past it with the publisher's last bytes.
+        lost.recorder.store_release(8 * mib);
+        assert!(stalled(&examine(&dir.0)).is_empty());
+        lost.recorder.store_release(8 * mib + 4096);
+        assert!(stalled(&examine(&dir.0)).is_empty());
+        // Still behind the sender, the check is met, as the ADR says.
+        lost.recorder.store_release(8 * mib - 4096);
+        assert_eq!(stalled(&examine(&dir.0)).len(), 1);
+    }
+
     /// A recording's label names a session id and a stream id and not what it reads, so
     /// `recording-stalled` judges none it cannot place: two publications on this driver
     /// with them, or an image with them, which a driver that receives its own stream
