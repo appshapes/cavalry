@@ -58,8 +58,9 @@ tests' twenty runs on both runners among it.
 
 3. Run it twenty times in a row on both of CI's runners, at a branch that is pushed
    and holds both `scripts/test-times.sh` and `.github/workflows/test-times.yml`. A
-   branch made from `master` after card 228's change landed holds both; a branch made
-   before it holds neither until it merges `master` ("When it does not work", below):
+   branch made from `master` after `.github/workflows/test-times.yml` landed on
+   `master` holds both; a branch made before that holds neither until it merges
+   `master` ("When it does not work", below):
 
    ```sh
    gh workflow run test-times.yml --ref <branch> -f arguments='-p cavalry-raft --test cluster'
@@ -115,8 +116,8 @@ tests' twenty runs on both runners among it.
   run's link and count on the card.
 - `gh workflow run` stops with `HTTP 422` and `Workflow does not have
   'workflow_dispatch' trigger`: the branch does not hold
-  `.github/workflows/test-times.yml`, because it was made from `master` before card
-  228's change landed. Merge `master` into the branch and push it, then start the
+  `.github/workflows/test-times.yml`, because it was made from `master` before that
+  file landed on `master`. Merge `master` into the branch and push it, then start the
   workflow again:
 
   ```sh
