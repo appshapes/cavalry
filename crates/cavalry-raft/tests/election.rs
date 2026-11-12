@@ -842,8 +842,10 @@ fn late_new_leadership_terms_cut_nothing_that_was_committed() {
             );
         }
     }
-    // The rule ran under these messages, and so did its cut: the check above held
-    // through drops and truncations, not in their absence.
+    // The rule ran under these messages, and members truncated under them: the check
+    // above held through drops and truncations, not in their absence. The count of
+    // truncations is every cut, one to a next term's base as well as one before a
+    // drop; `dropped_terms.rs` holds the cut that a drop makes.
     println!(
         "election: late messages at eight seeds: {dropped} terms dropped, {truncated} logs \
          truncated"

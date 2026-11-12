@@ -221,8 +221,17 @@ term that fewer than a quorum recorded stays in a member's record there.
   this one, are cut and replicated again when a leader's record lacks the term,
   unless the member knows a commit position among them: then it fails its election
   as before. No such version has run over a driver.
+- Mixed versions (invariant 3). A member of a version before this one has no rule to
+  drop a term. One that recorded a term a leader of this version does not hold reads
+  an answer for a lower term than it reported, canvasses, reports the same term
+  again, and does not join that leader. A leader of the version before answered for
+  the term reported, and the member joined with a record its leader did not hold,
+  which is the fault this decision ends. Nothing changes today: no member started
+  with `cavalry run` elects (ADR 0081), so no such member runs over a driver.
 - Revisit with the fault-injection tests of ADR 0077, over drivers: a history that
-  makes a term no quorum recorded there, and a late answer.
+  makes a term no quorum recorded there, and a late answer. Revisit in
+  `conformance/upgrade/` once a member started with `cavalry run` elects: a member
+  of the version before that recorded a term its leader lacks.
 
 ## References
 
