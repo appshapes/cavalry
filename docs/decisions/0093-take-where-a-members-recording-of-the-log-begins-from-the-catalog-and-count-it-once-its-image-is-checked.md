@@ -75,9 +75,20 @@ the driver's catalog.
 **A catalog that cannot be opened stops the member at its start.** The module's log
 directory must be its driver's, as `ConsensusModule::start` has always said. A
 directory with no catalog is `RaftError::Catalog`, whose message says to start the
-member on its driver's log directory. A recording whose descriptor cannot be read
-when it is handed over is the same error from that duty cycle; the module holds the
-recording and reads again on the next.
+member on its driver's log directory. The module opens the catalog before the
+`terms` file, which it creates when there is none, so a directory it refuses is left
+as it was. A recording whose descriptor cannot be read when it is handed over is the
+same error from that duty cycle; the module holds the recording and reads again on
+the next.
+
+**A slot that does not hold the recording gives no start.** The driver writes a
+recording's descriptor before it says the recording started, so the slot of the
+driver's catalog holds the recording when the module reads it. A slot that is empty,
+or that holds a recording of another session id or stream id, is in a catalog that
+is not the driver's, and its start position would be another recording's, which is
+the fault this decision removes. The module takes it as `RaftError::Catalog` with
+the catalog's `unknown`, as it takes a slot the catalog does not have: the election
+is told nothing, nothing is counted, and the next duty cycle reads again.
 
 ## Alternatives considered
 
@@ -120,10 +131,22 @@ recording and reads again on the next.
     ends, and syncs an entry. Asked for another session's image the module says
     nothing; the append position stays 0, no recording is named, and nothing is
     kept.
+- Two tests of a directory that is not the driver's.
+  - No catalog. A member started on a directory with no catalog is refused with
+    `RaftError::Catalog`, reason `catalog`, its message naming "Members and
+    streams", and the directory is still empty: no `terms` file was written.
+  - Another driver's catalog. The leader's driver holds a recording of another
+    stream in slot 0. With that catalog in the member's hands, the hand-over of the
+    member's recording 0 is `RaftError::Catalog` with `unknown` on every duty
+    cycle, the election is told nothing and the append position stays 0. With its
+    own driver's catalog the member takes the recording on the next duty cycle and
+    tells the election 0.
 - Each rule taken out. With a recording's start taken to be where the member's log
   ends, the first test fails. With a recording counted before its image is told,
-  the third fails.
-- `cargo test -p cavalry-raft`: 149 passed. The tests over three drivers, `cluster`,
+  the third fails. With the `terms` file opened first, the test of no catalog
+  fails; with the slot's session id and stream id not compared, the test of
+  another driver's catalog fails.
+- `cargo test -p cavalry-raft`: 151 passed. The tests over three drivers, `cluster`,
   pass unchanged: their followers arm before the leader appends.
 - Not measured: how often the gap is met. It needs an image and data after it
   between two commands a few hundred microseconds apart.
@@ -142,6 +165,13 @@ recording and reads again on the next.
   catalog with nothing that refers to them. Retention removes them as any recording.
 - The member's catch-up subscription (the next change) uses the same two rules for
   the recording of a replay's image.
+- Not caught: a catalog of another driver whose slot holds a recording of the same
+  session id and stream id, which is what another member's recording of the same
+  log is, in a cluster whose members run on one host with their log directories
+  exchanged. Its start position can differ from this member's. Such a member also
+  reads and writes another member's `terms` file, which no check of this decision
+  sees. Telling the two apart needs the driver to say which log directory is its
+  own, or the start position in `recording ready`.
 - Revisit if `recording ready` gains the start position: the module then needs no
   catalog for this.
 
