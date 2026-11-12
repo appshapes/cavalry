@@ -317,10 +317,10 @@ committed once a quorum, two of three, has it on disk.
   its log's recordings in its driver directory, and no service beside it read the
   log while that lasted. Check that the driver directory is writable and has room.
 - `WARN cluster.log_recordings_forgotten`: the member's log is in more than 1,024
-  recordings, and it has forgotten the oldest. It runs on. It will not start again
-  on this log directory: when it stops, `cavalry run` refuses it with `member
-  refused (log-forgotten)`, above. Plan to start the cluster again as a new
-  cluster before you next stop this member.
+  recordings, and it has forgotten the oldest. It runs on, and there is nothing to
+  do while it runs. It will not start again on this log directory: once it stops,
+  `cavalry run` refuses it with `member refused (log-forgotten)`, above, and the
+  cluster goes on with the other two. Keep this member running where you can.
 - `note cluster-commit-waits`: the leader has appended more than a quorum has
   recorded. Each member asks its recorder to sync an entry as soon as it is written,
   so what waits at any moment is what was appended since the syncs now running began.
