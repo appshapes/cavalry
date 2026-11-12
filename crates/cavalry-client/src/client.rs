@@ -1306,10 +1306,10 @@ impl Cavalry {
     /// The recording the member names begins at 0 on a member that has not left the
     /// log. A member that left the log and joined it again records into a new
     /// recording, which begins where it joined, and the entries below that are in the
-    /// recording it left, which this version names to no service. A service whose
-    /// position is below the new recording's start is refused here, with code 23, and
-    /// reads no more of that member's log (`spec/cluster.md`, "The service" and "Out
-    /// of this version").
+    /// recording it left. The member's file of its log's recordings names that
+    /// recording to a service (`spec/cluster.md`, "The log's recordings"; ADR 0103),
+    /// and the read of it is not built yet: until it is, a service whose position is
+    /// below the new recording's start is refused here, with code 23.
     ///
     /// A service reads a handle until [`CommittedLog::is_ended`] says that no poll will
     /// deliver another entry, and not until a poll returns 0: when its member closes or
