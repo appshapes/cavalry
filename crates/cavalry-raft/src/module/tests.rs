@@ -1750,3 +1750,81 @@ fn a_replay_whose_sender_vanished_is_said_gone_at_the_image_liveness_timeout() {
     assert_eq!(member.io.append_position(), one);
     assert_eq!(member.io.kept.len(), 1);
 }
+
+/// A recording of another session's image is not the log, though the image the
+/// election asks for is the one the member noted (ADR 0093). A stranger's publication
+/// on the member's `log` endpoint takes the armed recording, publishes an entry and
+/// closes, and its image goes before the member looks at its log subscription. The
+/// leader's log then arrives and is the image the member notes. Asked for the
+/// leader's session, the module holds a recording of the stranger's session: it says
+/// nothing, counts nothing, and keeps nothing when it leaves.
+#[test]
+fn a_recording_taken_by_an_image_that_went_is_not_the_noted_images() {
+    let mut pair = pair("stale-recording");
+    pair.member.io.join_log().expect("subscribed and armed");
+    let mut stranger = Cavalry::connect_to(&pair.leader_driver_dir).expect("the stranger");
+    let channel = pair.member.io.log_endpoint_channel.clone();
+    let mut stray = stranger
+        .add_exclusive_publication(&channel, LOG_STREAM_ID)
+        .expect("the stray publication");
+    let stray_session = stray.session_id();
+    let message = entry(b"of no term");
+    let mut encoded = [0u8; 256];
+    let length = message.write(&mut encoded).expect("the entry is encoded");
+    // The member's subscription is polled here and not by the module, which is not
+    // to look at it yet: the stray image is read to its end, so that it can go.
+    fn images(io: &mut ClientIo) -> usize {
+        let subscription = io.log_subscription.as_mut().expect("subscribed");
+        subscription.poll(|_, _| {}, 16).expect("polled");
+        subscription.images().len()
+    }
+    wait_for("the stray entry is published", || {
+        images(&mut pair.member.io);
+        stray.offer(&encoded[..length]).is_ok().then_some(())
+    });
+    wait_for("the stray image is there", || {
+        (images(&mut pair.member.io) == 1).then_some(())
+    });
+    stray.close().expect("the stray publication closes");
+    let gone = Instant::now() + Duration::from_secs(15);
+    while images(&mut pair.member.io) != 0 {
+        assert!(Instant::now() < gone, "the stray image has gone");
+        std::thread::sleep(Duration::from_millis(1));
+    }
+    assert!(matches!(pair.member.io.image, LogImage::Awaited));
+
+    let log = pair
+        .leader
+        .io
+        .add_log(0, 0)
+        .expect("the driver takes the commands")
+        .expect("the log has its recording");
+    assert_ne!(log.session_id, stray_session);
+    pair.observe("the leader's image is noted", |io| {
+        matches!(io.image, LogImage::Joined { session_id, .. } if session_id == log.session_id)
+            .then_some(())
+    });
+    pair.observe("the stray recording is handed over", |io| {
+        io.held.as_ref().map(|_| ())
+    });
+    let held = pair.member.io.held.as_ref().expect("the recording is held");
+    assert_eq!(held.recording.session_id(), stray_session);
+    assert_eq!(
+        pair.member.io.log_image(log.session_id).expect("read"),
+        None,
+        "the recording held is of another session's image"
+    );
+    assert!(
+        !pair
+            .member
+            .io
+            .held
+            .as_ref()
+            .is_some_and(|held| held.checked)
+    );
+    assert_eq!(pair.member.io.append_position(), 0);
+    assert_eq!(pair.member.log_recording_id(), None);
+    pair.member.io.leave_log().expect("the log is left");
+    assert_eq!(pair.member.io.append_position(), 0);
+    assert!(pair.member.io.kept.is_empty());
+}
