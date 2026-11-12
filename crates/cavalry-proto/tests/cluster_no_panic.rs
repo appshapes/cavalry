@@ -8,11 +8,11 @@
 
 use cavalry_proto::cluster::{
     CLOSED_STATE, CanvassTerms, EMPTY_MEMBER, LogRecording, LogRecordings, LogReport,
-    MAX_LOG_RECORDINGS_LENGTH, MAX_MEMBERS, MemberPosition, Message,
-    Stream, TermFields, TermSpan, Vote, VoteRequest, answered_term, appointed_canvass,
-    appointed_leader, ballot, candidate, canvass_position_action, commit_position, entry_position,
-    leader_ready, log_at_least, new_leadership_term_action, next_fields, parse_members, quorum,
-    replay_end, replication_record, replication_stop, request_vote, write_log_recordings,
+    MAX_LOG_RECORDINGS_LENGTH, MAX_MEMBERS, MemberPosition, Message, Stream, TermFields, TermSpan,
+    Vote, VoteRequest, answered_term, appointed_canvass, appointed_leader, ballot, candidate,
+    canvass_position_action, commit_position, entry_position, leader_ready, log_at_least,
+    new_leadership_term_action, next_fields, parse_members, quorum, replay_end, replication_record,
+    replication_stop, request_vote, write_log_recordings,
 };
 
 /// Deterministic, so a failure reproduces: xorshift64.
@@ -203,13 +203,12 @@ fn no_byte_string_panics_the_reader_of_a_file_of_recordings() {
         ),
     };
     let mut seed = vec![0; MAX_LOG_RECORDINGS_LENGTH];
-    let entries = [(2, 0, 96), (4, 96, 288), (7, 288, 4096)].map(|(id, start, stop)| {
-        LogRecording {
+    let entries =
+        [(2, 0, 96), (4, 96, 288), (7, 288, 4096)].map(|(id, start, stop)| LogRecording {
             recording_id: id,
             start_position: start,
             stop_position: stop,
-        }
-    });
+        });
     let length = write_log_recordings(&mut seed, 2, 9, 4096, entries).expect("a seed");
     seed.truncate(length);
     check(&seed, 2);

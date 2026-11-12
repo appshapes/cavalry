@@ -76,7 +76,12 @@ The client API implementation, re-exported by the `cavalry` crate. Data plane.
   holds, in order, each once, with its position. The log is read from the member's
   own recording through a replay that follows it, on the leader and on a follower
   alike, and no further than the member's commit position, which is taken only while
-  the member's counters say the log is still that recording (ADR 0066). A service may
+  the member's counters say the log is still that recording (ADR 0066). A member's
+  log is one recording or several in a row, which the member lists in a file in its
+  driver directory: a handle replays the one that holds the position it was opened
+  at, is ended at that recording's stop, and the log opened again at
+  `CommittedLog::position()` is the next, so a service reads every entry once, in
+  order, across them (ADR 0103). A service may
   start before its member, with it or after it, at position 0 or where it stopped.
   It reads until `CommittedLog::is_ended()`, and then three calls say whether it was
   given every entry below its bound: it was when all three return `None`. If the

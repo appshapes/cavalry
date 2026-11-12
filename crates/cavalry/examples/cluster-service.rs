@@ -12,6 +12,11 @@
 //!
 //! The program may start before its member, with it or after it: while the driver
 //! hosts no member that has a log it asks again ten times a second.
+//!
+//! A member's log is one recording or several in a row, and a handle reads one (ADR
+//! 0103). When a handle has delivered all its recording holds, the program opens the
+//! log again where the handle ended: that is the member's next recording, at once, or
+//! nothing, when the member closed or left its log, and then the program ends.
 
 use std::path::PathBuf;
 use std::process::ExitCode;
@@ -228,8 +233,23 @@ fn run(args: &Args) -> Result<(), Box<dyn std::error::Error>> {
                 )
                 .into());
             }
-            // The member left its log or closed, and every entry below the last commit
-            // position the handle took has been read: the next run starts here.
+            // Every entry this handle's recording holds below the last commit position
+            // the handle took has been read. The member's log goes on in its next
+            // recording when this one lies below its live one: the log opened again at
+            // the handle's position is that recording, at once.
+            if let Some(next) = client.committed_log(log.position())? {
+                let ended = std::mem::replace(&mut log, next);
+                ended.close(&mut client)?;
+                eprintln!(
+                    "cluster-service: reading member {}'s log, recording {}, from position {}",
+                    log.member_id(),
+                    log.recording_id(),
+                    log.position()
+                );
+                continue;
+            }
+            // No member names a recording: the member left its log or closed, and the
+            // next run starts here.
             eprintln!(
                 "cluster-service: the member's log ended; read to position {}",
                 log.position()

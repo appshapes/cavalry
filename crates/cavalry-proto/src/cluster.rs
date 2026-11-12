@@ -3193,8 +3193,8 @@ fn i64_at(bytes: &[u8], at: usize) -> i64 {
         .map_or(0, i64::from_le_bytes)
 }
 
-/// The entry in the `LOG_RECORDING_ENTRY_LENGTH` bytes of `entry`.
-fn log_recording(entry: &[u8]) -> LogRecording {
+/// The entry in the bytes of `entry`.
+fn log_recording(entry: &[u8; LOG_RECORDING_ENTRY_LENGTH]) -> LogRecording {
     LogRecording {
         recording_id: i64_at(entry, 0),
         start_position: i64_at(entry, 8),
@@ -3244,7 +3244,8 @@ impl<'a> LogRecordings<'a> {
             });
         }
         let mut before = 0;
-        for (index, entry) in entries.chunks_exact(LOG_RECORDING_ENTRY_LENGTH).enumerate() {
+        let (whole, _) = entries.as_chunks::<LOG_RECORDING_ENTRY_LENGTH>();
+        for (index, entry) in whole.iter().enumerate() {
             let entry = log_recording(entry);
             let valid = entry.recording_id >= 0
                 && entry.start_position >= before
@@ -3293,7 +3294,9 @@ impl<'a> LogRecordings<'a> {
     /// The recordings below the live one, in the order they begin.
     pub fn entries(&self) -> impl Iterator<Item = LogRecording> + '_ {
         self.entries
-            .chunks_exact(LOG_RECORDING_ENTRY_LENGTH)
+            .as_chunks::<LOG_RECORDING_ENTRY_LENGTH>()
+            .0
+            .iter()
             .map(log_recording)
     }
 

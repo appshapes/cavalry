@@ -721,11 +721,7 @@ fn every_vector_in_spec_vectors_cluster_json() {
         let count = kinds.get(kind).and_then(Value::as_u64).unwrap_or(0);
         kinds.insert(kind.to_string(), Value::from(count + 1));
     }
-    assert_eq!(
-        kinds.len(),
-        4,
-        "the four kinds of spec/cluster.md, Vectors"
-    );
+    assert_eq!(kinds.len(), 4, "the four kinds of spec/cluster.md, Vectors");
 }
 
 /// The file at its bound (`spec/cluster.md`, "The log's recordings"): 1,025 entries

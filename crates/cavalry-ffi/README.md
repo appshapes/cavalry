@@ -18,7 +18,11 @@ The `extern "C"` ABI and its cbindgen header. Data plane, and the other crate wh
   `cavalry_committed_log_faulted` say whether the handle ended short of what it was
   owed, and where: a service is never left to take a short end for a whole one, nor
   to remember what one poll returned (`spec/cluster.md`, "The service"; ADR 0070;
-  ADR 0080).
+  ADR 0080). A handle reads one recording of the member's log, the one that holds
+  the position it was opened at; after a whole end `cavalry_committed_log` at
+  `cavalry_committed_log_position` gives the member's next recording, so a service
+  in any language reads a log that is in several recordings from position 0, with
+  no call added (ADR 0103).
 - Carries every non-Rust client's messages: a claim, a commit, an offer and a poll
   cross this boundary per message, which is why it is on the data plane.
 - Is the one surface frozen between releases. Rust-to-Rust integration goes through

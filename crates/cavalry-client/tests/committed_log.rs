@@ -160,13 +160,17 @@ impl Member {
     fn stop(&mut self, recorded: Recorded) -> (i64, i64) {
         let id = recorded.recording.recording_id();
         self.client.stop_recording(id).expect("the recording stops");
-        recorded.publication.close().expect("the publication closes");
+        recorded
+            .publication
+            .close()
+            .expect("the publication closes");
         (id, recorded.end)
     }
 
     /// The path of the member's file of its log's recordings.
     fn file(&self) -> PathBuf {
-        self.dir.join(format!("{LOG_RECORDINGS_FILE_PREFIX}{MEMBER}"))
+        self.dir
+            .join(format!("{LOG_RECORDINGS_FILE_PREFIX}{MEMBER}"))
     }
 
     /// Writes the member's file: the live recording and where it begins, and the
@@ -471,8 +475,14 @@ fn the_members_file_is_read_as_missing_as_anothers_and_as_damaged() {
     let mut member = Member::start("file");
     let live = member.record(72, 4);
     let live_id = live.recording.recording_id();
-    member.log_recording_id.store_release(live_id).expect("stores");
-    member.commit_position.store_release(4 * ENTRY).expect("stores");
+    member
+        .log_recording_id
+        .store_release(live_id)
+        .expect("stores");
+    member
+        .commit_position
+        .store_release(4 * ENTRY)
+        .expect("stores");
     let mut service = Cavalry::connect_to(&member.dir).expect("the service's client connects");
 
     assert!(!member.file().exists());
@@ -496,8 +506,11 @@ fn the_members_file_is_read_as_missing_as_anothers_and_as_damaged() {
             .expect("the counter")
     };
     let replays_before = replays_started(&service);
-    std::fs::write(member.file(), b"CVLYTERM and then some more bytes, forty and over")
-        .expect("the file is stored");
+    std::fs::write(
+        member.file(),
+        b"CVLYTERM and then some more bytes, forty and over",
+    )
+    .expect("the file is stored");
     let damaged = service
         .committed_log(0)
         .expect_err("a file that is not a file of recordings");
@@ -518,7 +531,10 @@ fn the_members_file_is_read_as_missing_as_anothers_and_as_damaged() {
     std::fs::write(member.file(), vec![0u8; 4 * MAX_LOG_RECORDINGS_LENGTH])
         .expect("the file is stored");
     let too_long = service.committed_log(0).expect_err("a file too long");
-    assert!(too_long.to_string().contains("recordings-magic"), "{too_long}");
+    assert!(
+        too_long.to_string().contains("recordings-magic"),
+        "{too_long}"
+    );
     assert_eq!(
         replays_started(&service),
         replays_before,

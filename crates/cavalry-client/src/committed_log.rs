@@ -108,8 +108,9 @@ fn recording_at(
         });
     }
     match LogRecordings::read(&bytes, member_id) {
-        Ok(file) => Ok((file.live_recording_id() == live_recording_id)
-            .then(|| file.recording_at(position))),
+        Ok(file) => Ok(
+            (file.live_recording_id() == live_recording_id).then(|| file.recording_at(position))
+        ),
         Err(error) => Err(ClientError::Io {
             what: WHAT,
             path,

@@ -168,6 +168,18 @@ commit path runs per message.
   recording and reads it no further than `cluster.commit_position`:
   `cavalry-client`'s `Cavalry::committed_log` (`spec/cluster.md`, "The service"; ADR
   0066).
+- Tells a service where the log is below that recording: before the counter names a
+  recording, the module writes the file `log-recordings-<member id>` in its driver
+  directory, which lists the recordings that hold the member's log below the live
+  one, each with where it begins and where it stopped, so that a service at any
+  position the member keeps replays the recording that holds it. A member whose log
+  is in several recordings, one that left the log and joined it again or caught up
+  through a replay, is read from position 0 as one that never left. A file that
+  cannot be written is `RaftError::LogRecordings` from `do_work()`, which says what
+  to do; the member replicates meanwhile and names no recording until a later call
+  has written the file. It truncates no recording of its log while the counter
+  names one, and removes the file when it closes (`spec/cluster.md`, "The log's
+  recordings"; ADR 0103).
 - Runs the same core in memory: `memory::Cluster` is one to eight members in one process
   on a clock the caller steps, with loss, delay, a member cut from every other, two
   members parted from each other (`cut_between`) or one that the other stops hearing

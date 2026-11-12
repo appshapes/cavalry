@@ -1258,7 +1258,13 @@ fn log_recordings(member: &Member) -> (i64, i64, Vec<(i64, i64, i64)>) {
         file.live_recording_id(),
         file.live_start_position(),
         file.entries()
-            .map(|entry| (entry.recording_id, entry.start_position, entry.stop_position))
+            .map(|entry| {
+                (
+                    entry.recording_id,
+                    entry.start_position,
+                    entry.stop_position,
+                )
+            })
             .collect(),
     )
 }
@@ -1293,7 +1299,10 @@ fn a_service_reads_across_the_recordings_of_a_member_that_joined_the_log_again()
         .expect("the member has its log");
     let first_recording = log.recording_id();
     // The member's log is one recording, and its file says so.
-    assert_eq!(log_recordings(&members[1]), (first_recording, 0, Vec::new()));
+    assert_eq!(
+        log_recordings(&members[1]),
+        (first_recording, 0, Vec::new())
+    );
     let mut read = Read::new();
     run_until(&mut members, "the service read the first entries", |_| {
         poll_log(&mut log, &mut read);
@@ -1384,10 +1393,14 @@ fn a_service_reads_across_the_recordings_of_a_member_that_joined_the_log_again()
         .expect("the member has its log");
     assert_eq!(log.recording_id(), first_recording);
     let mut all = Read::new();
-    run_until(&mut members, "the service read the recording its member left", |_| {
-        poll_log(&mut log, &mut all);
-        log.is_ended()
-    });
+    run_until(
+        &mut members,
+        "the service read the recording its member left",
+        |_| {
+            poll_log(&mut log, &mut all);
+            log.is_ended()
+        },
+    );
     assert_eq!(log.position(), first, "it is ended at the recording's stop");
     assert_eq!(
         (log.failed_at(), log.withdrawn_at(), log.faulted()),
@@ -1403,10 +1416,14 @@ fn a_service_reads_across_the_recordings_of_a_member_that_joined_the_log_again()
         .expect("the driver answers")
         .expect("the member has its log");
     assert_eq!(log.recording_id(), second_recording);
-    run_until(&mut members, "the service read on in the live recording", |_| {
-        poll_log(&mut log, &mut all);
-        log.position() == second
-    });
+    run_until(
+        &mut members,
+        "the service read on in the live recording",
+        |_| {
+            poll_log(&mut log, &mut all);
+            log.position() == second
+        },
+    );
     // Every entry once, in order: what the two services read before, end to end.
     let mut expected = read;
     expected.extend(after);
@@ -1416,7 +1433,9 @@ fn a_service_reads_across_the_recordings_of_a_member_that_joined_the_log_again()
     client.close().expect("the service's client closes");
 
     // A member that closes takes its file with it.
-    let file = members[1].dir.join(format!("{LOG_RECORDINGS_FILE_PREFIX}1"));
+    let file = members[1]
+        .dir
+        .join(format!("{LOG_RECORDINGS_FILE_PREFIX}1"));
     assert!(file.exists());
 
     for member in members {
@@ -1443,7 +1462,9 @@ fn a_member_names_no_recording_until_it_has_written_the_file_of_its_logs_recordi
         .iter()
         .position(|m| m.module.member_id() == 2)
         .expect("member 2");
-    let file = members[blocked].dir.join(format!("{LOG_RECORDINGS_FILE_PREFIX}2"));
+    let file = members[blocked]
+        .dir
+        .join(format!("{LOG_RECORDINGS_FILE_PREFIX}2"));
     let tmp = members[blocked].dir.join(format!(
         "{LOG_RECORDINGS_FILE_PREFIX}2{LOG_RECORDINGS_TMP_SUFFIX}"
     ));
@@ -1506,11 +1527,15 @@ fn a_member_names_no_recording_until_it_has_written_the_file_of_its_logs_recordi
         }
     }
     let end = 96 + 10 * 96;
-    run(&mut members, "the entries committed on every member", &mut |members| {
-        members
-            .iter()
-            .all(|m| m.module.commit_position() == end && m.module.append_position() == end)
-    });
+    run(
+        &mut members,
+        "the entries committed on every member",
+        &mut |members| {
+            members
+                .iter()
+                .all(|m| m.module.commit_position() == end && m.module.append_position() == end)
+        },
+    );
     assert!(members[blocked].module.log_recording_id().is_some());
     assert_eq!(counter(&members[blocked], CLUSTER_LOG_RECORDING_ID.0), -1);
     assert!(!file.exists());
@@ -1527,15 +1552,23 @@ fn a_member_names_no_recording_until_it_has_written_the_file_of_its_logs_recordi
     // The directory goes: the next cycle writes the file, and then the counter names
     // the recording the file names.
     std::fs::remove_dir(&tmp).expect("the directory is removed");
-    let after = run(&mut members, "the member named its recording", &mut |members| {
-        counter(&members[blocked], CLUSTER_LOG_RECORDING_ID.0) >= 0
-    });
-    assert!(after.is_none(), "no cycle failed once the file could be written");
+    let after = run(
+        &mut members,
+        "the member named its recording",
+        &mut |members| counter(&members[blocked], CLUSTER_LOG_RECORDING_ID.0) >= 0,
+    );
+    assert!(
+        after.is_none(),
+        "no cycle failed once the file could be written"
+    );
     let named = members[blocked]
         .module
         .log_recording_id()
         .expect("the member's recording");
-    assert_eq!(counter(&members[blocked], CLUSTER_LOG_RECORDING_ID.0), named);
+    assert_eq!(
+        counter(&members[blocked], CLUSTER_LOG_RECORDING_ID.0),
+        named
+    );
     assert_eq!(log_recordings(&members[blocked]), (named, 0, Vec::new()));
     assert!(!tmp.exists(), "the file was renamed from its other name");
     let mut log = client
