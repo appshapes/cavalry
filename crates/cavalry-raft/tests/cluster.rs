@@ -1480,14 +1480,23 @@ fn a_member_names_no_recording_until_it_has_written_the_file_of_its_logs_recordi
         .iter()
         .position(|m| m.module.role() == Role::Leader)
         .expect("one member leads");
+    let offered_by = Instant::now() + Duration::from_secs(60);
     for index in 0..10u8 {
         loop {
+            assert!(
+                Instant::now() < offered_by,
+                "entry {index} was not taken: {:?}",
+                states(&members)
+            );
             match members[leader].module.offer(&[index]) {
                 Ok(()) => break,
                 Err(RaftError::Offer(Refused::BackPressured)) => {
-                    for member in members.iter_mut() {
-                        // The blocked member's cycle fails and still does its work.
-                        let _ = member.module.do_work();
+                    for (place, member) in members.iter_mut().enumerate() {
+                        // The blocked member's cycle fails and still does its work;
+                        // no other member's may fail.
+                        if let Err(error) = member.module.do_work() {
+                            assert_eq!(place, blocked, "member {place}: {error}");
+                        }
                     }
                 }
                 Err(error) => panic!("{error}"),
