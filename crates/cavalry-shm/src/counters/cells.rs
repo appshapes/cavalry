@@ -150,7 +150,8 @@ impl RecordCells {
         State::try_from(self.state.load(Ordering::Acquire))
     }
 
-    /// When a reclaimed record may be reused, in nanoseconds since the Unix epoch. Only
+    /// When a reclaimed record may be reused, a reading of the driver's nano clock
+    /// ([`crate::clock::nano_time`]) in nanoseconds. Only
     /// the driver reads it (spec, "Metadata record").
     pub(crate) fn reclaim_deadline(&self) -> i64 {
         self.reclaim_deadline.load(Ordering::Relaxed)

@@ -131,8 +131,7 @@ what they return and decides nothing.
 
 - A reader of one member's counters file knows who that member follows and why it
   last held an election, without reading another member's file.
-- `counters.toml` has 141 entries. Id 139 is another change's and is not in this
-  one.
+- `counters.toml` gains two entries, ids 140 and 141.
 - A duty cycle stores two more values when they have moved, which is at an
   election. Nothing is added once an entry.
 - The appointed path's two rules, that it has no cause 3 or 4, leave with the path

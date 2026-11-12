@@ -81,7 +81,12 @@ In Aeron, this is Archive, with its recordings and replay
 
 The driver's path, in one process: open the log directory, record one block of a
 stream, sync it, stop, and read the recording back by position
-(`spec/durable-log.md`). The clock is the caller's, nanoseconds since the Unix epoch.
+(`spec/durable-log.md`). The clocks are the caller's: its epoch clock, nanoseconds
+since the Unix epoch, for the timestamps that `start`, `write` and `stop` write, and
+for the interval between syncs a clock that does not step, which a caller with two
+clocks names with `sync_from`
+([ADR 0109](../../docs/decisions/0109-measure-every-interval-on-a-nano-clock-and-keep-the-epoch-clock-for-what-another-process-reads.md)).
+This example has one clock and hands it to both.
 
 ```rust
 use cavalry_log::catalog::CatalogReader;

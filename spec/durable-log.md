@@ -170,7 +170,11 @@ multiple of 32, at a frame boundary the recorder has written). The recorder appe
 first entry when the recording starts, at the start position, then an entry at most
 once per millisecond while the position moves, and one when the recording stops;
 timestamps and positions never decrease from one entry to the next, and the last
-entry's position is at most the stop position. The file holds n whole entries after
+entry's position is at most the stop position. A timestamp is the recorder's epoch
+clock (`spec/client-protocol.md`, "Liveness and timeouts"), and the millisecond is that
+clock's: after the host's clock is set back the recorder appends no entry until the
+clock has passed the last entry's timestamp, and a stop before then writes its entry
+with the last entry's timestamp. The file holds n whole entries after
 the header; only the last entry can be part-written, so a reader ignores bytes past
 the last whole entry and a last entry that breaks the order, and recovery truncates
 the file to whole entries and drops such an entry.

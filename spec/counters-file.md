@@ -51,7 +51,7 @@ Record i is at offset 128 + i × 256 and is 256 bytes, Aeron's counter metadata 
 | --- | --- | --- | --- | --- | --- | --- |
 | 0 | 4 | state | i32 | the driver, with a release store | everyone, with an acquire load | 0 unused, 1 allocated, −1 reclaimed |
 | 4 | 4 | type id | i32 | the driver | everyone | the `id` of a counter in `counters.toml` |
-| 8 | 8 | reclaim deadline | i64 | the driver | the driver | nanoseconds since the Unix epoch, or 0 |
+| 8 | 8 | reclaim deadline | i64 | the driver | the driver | a reading of the driver's nano clock, in nanoseconds, or 0 |
 | 16 | 112 | key | bytes | the driver | everyone | opaque; the counter's `doc` in `counters.toml` says its layout, a static counter's key is all zero, and a client counter's is the bytes its `add counter` gave, with zero bytes after them |
 | 128 | 4 | label length | i32 | the driver | everyone | 0 to 124 |
 | 132 | 124 | label | bytes | the driver | everyone | UTF-8; the first label-length bytes are the label, the rest are 0 |
@@ -60,7 +60,10 @@ To allocate counter i the driver writes type id, key, label length and label, se
 i's value to 0, then sets state to 1 with a release store. A reader loads state with an
 acquire load before it reads the rest of the record or the slot, and a record whose
 state is not 1 is not a counter. To free counter i the driver sets state to −1 and
-reclaim deadline to the time after which the record may be reused; it reuses the record
+reclaim deadline to the time after which the record may be reused, on its nano clock
+(`spec/client-protocol.md`, "Liveness and timeouts"), which a step of the host's clock
+does not move. The value is a number to every reader but the driver that wrote it: a
+reading of that driver's clock, as the one in the vectors is. The driver reuses the record
 by allocating it again, after the deadline, which rewrites every field. The label of a
 static counter is its name in `counters.toml`; the label of an instance counter is that
 name, a space, and the key's text as the counter's `doc` defines it. A client counter's
