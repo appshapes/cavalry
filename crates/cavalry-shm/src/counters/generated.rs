@@ -419,6 +419,9 @@ pub const CLUSTER_LOG_REPLICATIONS_UNAVAILABLE: CounterId = CounterId(136);
 /// `cluster.catchups`, a client counter: Times one cluster member began, or served, a catch-up within the leader's term: on a follower, a catch-up position it sent from follower catch-up init; on the leader, a replay of its live recording that it started for such a member, which follows the recording until the leader stops it (spec/cluster.md, follower catch-up init, Messages outside an election, and Counters; ADR 0087, ADR 0088); key: member id (i32), little-endian; label text: the member id in decimal.
 pub const CLUSTER_CATCHUPS: CounterId = CounterId(137);
 
+/// `cluster.terms_dropped`, a client counter: Times one cluster member dropped from its record of terms the terms its leader's record lacks: a new leadership term named, as the term it answers, a term below the member's own log term, with a next term above it, so the leader's record holds none of the member's terms above the one named, and the member took them out of its record, cutting first what it held above the base of the lowest of them, which is counted in cluster.log_truncations too (spec/cluster.md, Messages during an election, and Counters; ADR 0096); key: member id (i32), little-endian; label text: the member id in decimal.
+pub const CLUSTER_TERMS_DROPPED: CounterId = CounterId(138);
+
 /// Every entry of `counters.toml`, in the file's order.
 pub const COUNTERS: &[CounterDef] = &[
     CounterDef {
@@ -1524,5 +1527,13 @@ pub const COUNTERS: &[CounterDef] = &[
         scope: Scope::Client,
         doc: "Times one cluster member began, or served, a catch-up within the leader's term: on a follower, a catch-up position it sent from follower catch-up init; on the leader, a replay of its live recording that it started for such a member, which follows the recording until the leader stops it (spec/cluster.md, follower catch-up init, Messages outside an election, and Counters; ADR 0087, ADR 0088); key: member id (i32), little-endian; label text: the member id in decimal.",
         doctor: "A member that joined its leader's term behind the leader's log catches up from the leader's live recording. This rises by one on the member for each catch-up position it sends, and by one on the leader for each replay it starts for that member. It stays 0 on every member started with cavalry run, whose leader is appointed. It is how such a member returns, and nothing to act on. If it rises on a leader again and again for one member while that member's cluster.append_position does not reach the leader's, the member cannot keep up with the replay or cannot receive it: check that its catchup endpoint in the members string is the one its host listens on, and compare its cluster.append_position with the leader's over a few seconds.",
+    },
+    CounterDef {
+        id: CLUSTER_TERMS_DROPPED,
+        name: "cluster.terms_dropped",
+        kind: Kind::Counter,
+        scope: Scope::Client,
+        doc: "Times one cluster member dropped from its record of terms the terms its leader's record lacks: a new leadership term named, as the term it answers, a term below the member's own log term, with a next term above it, so the leader's record holds none of the member's terms above the one named, and the member took them out of its record, cutting first what it held above the base of the lowest of them, which is counted in cluster.log_truncations too (spec/cluster.md, Messages during an election, and Counters; ADR 0096); key: member id (i32), little-endian; label text: the member id in decimal.",
+        doctor: "The member had recorded a term that fewer than a quorum recorded: it joined a leader that never had a quorum, or led such a term itself. No entry was ever appended in that term, so nothing is lost; the member's record is its leader's again and it joins. It is how such a member returns, and nothing to act on. If cluster.truncations_refused rises with it on the same member, the member holds entries above a term it recorded so and knows a commit position among them: read cluster.leadership_term_id and cluster.commit_position on that member and on its leader.",
     },
 ];

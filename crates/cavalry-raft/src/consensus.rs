@@ -33,8 +33,8 @@ use cavalry_shm::counters::generated::{
     CLUSTER_HIGHER_TERMS_SEEN, CLUSTER_JOIN_POSITION_MISMATCHES, CLUSTER_LEADER_HEARTBEAT_TIMEOUTS,
     CLUSTER_LEADER_QUORUM_LOSSES, CLUSTER_LEADER_STEP_DOWNS, CLUSTER_LEADERSHIP_TERMS_IGNORED,
     CLUSTER_LOG_IMAGES_LOST, CLUSTER_LOG_REPLICATIONS, CLUSTER_LOG_REPLICATIONS_UNAVAILABLE,
-    CLUSTER_LOG_TRUNCATIONS, CLUSTER_TERMS_LED, CLUSTER_TRUNCATIONS_REFUSED, CLUSTER_VOTES_AGAINST,
-    CLUSTER_VOTES_FOR,
+    CLUSTER_LOG_TRUNCATIONS, CLUSTER_TERMS_DROPPED, CLUSTER_TERMS_LED, CLUSTER_TRUNCATIONS_REFUSED,
+    CLUSTER_VOTES_AGAINST, CLUSTER_VOTES_FOR,
 };
 
 /// The cluster session id of a session message of no session: one the leader's own
@@ -268,6 +268,22 @@ pub trait Io {
     /// record is the one [`Io::record_term`] wrote, read from memory: it returns at
     /// once and cannot fail.
     fn terms_after(&mut self, term: i64) -> [Option<(i64, i64)>; 2];
+
+    /// The highest term in the member's record of terms at or below `term`, −1 when
+    /// the record holds none. A leader reads it to answer a member for a term its own
+    /// record holds, and not for one the member alone recorded (`spec/cluster.md`,
+    /// "New leadership term, template 53"; ADR 0096). Read from memory, as
+    /// [`Io::terms_after`] is.
+    fn term_at_or_below(&mut self, term: i64) -> i64;
+
+    /// Drops from the member's record of terms every term above `term`, durably, and
+    /// returns the highest term the record then holds, −1 for none: the terms its
+    /// leader's record lacks (`spec/cluster.md`, "Messages during an election"; ADR
+    /// 0096). They are named by term and not by base, since the lowest of them is
+    /// based where the member's log was cut, or ends. The core calls it for a member
+    /// that is out of the log, after it has truncated what it held above the base of
+    /// the lowest of them.
+    fn drop_terms_above(&mut self, term: i64) -> Result<i64, Self::Fault>;
 
     /// The lowest term base log position in the member's record of terms above
     /// `position`, where the term that holds `position` ends in this member's log:
@@ -544,11 +560,15 @@ pub struct Counts {
     /// `cluster.catchups`: on the leader, a replay started for a member that catches
     /// up within the leader's term (ADR 0087).
     pub catchups: u64,
+    /// `cluster.terms_dropped`: a member that dropped from its record the terms its
+    /// leader's record lacks, on a new leadership term that named a term below its
+    /// own log term (ADR 0096).
+    pub terms_dropped: u64,
 }
 
 impl Counts {
     /// How many counts a member keeps: one counter of `counters.toml` each.
-    pub const LEN: usize = 22;
+    pub const LEN: usize = 23;
 
     /// Each count with the id of its counter in `counters.toml`, the constant
     /// `cavalry-shm` generates from it: what the consensus module stores, each as a
@@ -605,6 +625,7 @@ impl Counts {
                 self.log_replications_unavailable,
             ),
             (CLUSTER_CATCHUPS, self.catchups),
+            (CLUSTER_TERMS_DROPPED, self.terms_dropped),
         ]
     }
 }
@@ -676,6 +697,26 @@ pub fn terms_above(
         }
     }
     [lowest, next]
+}
+
+/// The highest term of `record` at or below `term`, −1 where the record holds none:
+/// what [`Io::term_at_or_below`] returns, from a record of terms read in any order.
+///
+/// ```
+/// use cavalry_raft::consensus::term_at_or_below;
+///
+/// let record = [(0, 0), (1, 96), (3, 160)];
+/// assert_eq!(term_at_or_below(record, 3), 3);
+/// assert_eq!(term_at_or_below(record, 2), 1);
+/// assert_eq!(term_at_or_below(record, -1), -1);
+/// ```
+pub fn term_at_or_below(record: impl IntoIterator<Item = (i64, i64)>, term: i64) -> i64 {
+    record
+        .into_iter()
+        .map(|(recorded, _)| recorded)
+        .filter(|&recorded| recorded <= term)
+        .max()
+        .unwrap_or(-1)
 }
 
 /// The lowest term base log position of `record` above `position`, `None` where the
@@ -1275,11 +1316,20 @@ impl Consensus {
                 // canvass does (ADR 0081).
                 let in_canvass =
                     matches!(self.state, ElectionState::Canvass | ElectionState::Nominate);
+                // The base of the lowest term in this member's own record above the
+                // one the message names, read where the message names a term below
+                // this member's log term: the leader's record holds none of them.
+                let own_base_above = if log_leadership_term_id < self.log_term {
+                    io.terms_after(log_leadership_term_id)[0].map_or(-1, |(_, base)| base)
+                } else {
+                    -1
+                };
                 let action = new_leadership_term_action(
                     self.log_term,
                     self.append_position,
                     self.candidate_term,
                     in_canvass,
+                    own_base_above,
                     TermFields {
                         leadership_term_id,
                         log_leadership_term_id,
@@ -1313,6 +1363,25 @@ impl Consensus {
                             self.lose_ballot(clock);
                         }
                         Ok(())
+                    }
+                    // The leader's record holds none of this member's terms above
+                    // the one named, and the message answers the log this member
+                    // holds. What it held above the base of the lowest of them is cut
+                    // by now, under the guard of a truncation; the terms leave its
+                    // record, and it reads the message again with the log it then
+                    // holds: once, since its log term is then at or below the term
+                    // named (ADR 0096).
+                    TermAction::Drop if self.election.is_some() => {
+                        self.log_term = io.drop_terms_above(log_leadership_term_id)?;
+                        count(&mut self.counts.terms_dropped);
+                        // A record that still holds a term above the one named was
+                        // not cut: the member fails its election and reads nothing
+                        // twice.
+                        if self.log_term > log_leadership_term_id {
+                            self.fail(clock);
+                            return Ok(());
+                        }
+                        self.on_message(clock, message, io)
                     }
                     TermAction::Replay if action.truncate_to < 0 || self.election.is_some() => {
                         // The term at its base, recorded before any position is
@@ -1383,7 +1452,8 @@ impl Consensus {
                     // A log the leader's does not reach, and where the leader is
                     // appointed a truncation, a replication or a wait: nothing the
                     // member can join with.
-                    TermAction::Replay
+                    TermAction::Drop
+                    | TermAction::Replay
                     | TermAction::Replicate
                     | TermAction::Wait
                     | TermAction::Fail => {
@@ -2307,7 +2377,8 @@ impl Consensus {
         positions
     }
 
-    /// New leadership term to the member at `index`, for the term it reported.
+    /// New leadership term to the member at `index`, for the highest term this
+    /// leader's record holds at or below the one it reported.
     fn announce_to<I: Io>(&mut self, index: usize, clock: Clock, io: &mut I) {
         let Some(log) = self.log else {
             return;
@@ -2327,10 +2398,15 @@ impl Consensus {
             end: after.map_or(-1, |(_, base)| base),
         });
         let next = next_fields(span.as_slice(), peer.term, self.term, self.term_base);
+        // The term this message answers for is one this leader's own record holds:
+        // the highest at or below the one the member reported. A member that
+        // recorded a term this record lacks, one that fewer than a quorum recorded,
+        // reads a term below its own and drops what lies above it (ADR 0096).
+        let answered = io.term_at_or_below(peer.term);
         io.send(
             peer.id,
             &Message::NewLeadershipTerm {
-                log_leadership_term_id: peer.term,
+                log_leadership_term_id: answered,
                 next_leadership_term_id: next.next_leadership_term_id,
                 next_term_base_log_position: next.next_term_base_log_position,
                 next_log_position: next.next_log_position,
