@@ -117,9 +117,10 @@ is one.
 
 ## Evidence
 
-All on this change's branch, on a laptop, macOS.
+All on this change's branch, `228-doctor-after-the-move`, at its commit 60c88234,
+which holds the branch of ADR 0104's change, on a laptop, macOS.
 
-- `cargo test -p cavalry-control`: 50 unit tests and 3 doctests passed.
+- `cargo test -p cavalry-control`: 53 unit tests and 3 doctests passed.
   - `a_member_that_elects_and_has_no_leader_is_told_why_its_election_began` and
     `a_member_that_elects_and_joins_names_the_leader_its_gauge_holds` pass with
     their bodies as they were before this change. What `doctor` says of a member
@@ -149,17 +150,21 @@ All on this change's branch, on a laptop, macOS.
   - Removed: `a_member_whose_leader_is_appointed_keeps_its_texts_with_the_gauges_read`
     and `a_member_with_no_leader_is_told_whether_it_is_the_appointed_leader`.
 - `cargo test -p cavalry-shm`: 109 tests and 5 doctests passed, with the table of
-  140 entries. `cargo test -p cavalry-proto`: 39 tests and 3 doctests passed.
+  141 entries: its generated file lost one constant and one entry.
+  `cargo test -p cavalry-proto`: 39 tests and 3 doctests passed.
+- `cargo test -p cavalry-raft`: 175 tests passed, the 13 of `tests/cluster.rs`
+  among them. That file named the counter's constant too, in the test that no
+  member adds the counter: it now names the type by its number, 113, and holds
+  that no member adds a counter of the retired type.
 - `just lint` exits 0. Its clippy step builds every crate and every test of the
   workspace with warnings denied, so no code names the constant that left. Its
-  `lint-counters` step prints `140 counters, 9 state machines, 2 generated files
-  current, ok` with ids 113 and 139 absent: the gate asks that the ids in the file
-  be unique, and nothing of a gap. Id 139 is another change's (ADR 0102).
-- `just docs` and `just lint-docs` exit 0.
-- Not run for this record: `just test`, `just conformance` and `just replay-check`.
-  No file of `cavalry-raft`, `cavalry-driver`, `cavalry-client`, `cavalry-ffi` or
-  `cavalry` changes, and before this change `cavalry-control` alone named the
-  counter's constant.
+  `lint-counters` step prints `141 counters, 9 state machines, 2 generated files
+  current, ok` with ids 113, 139 and 142 absent: the gate asks that the ids in the
+  file be unique, and nothing of a gap. Ids 139 and 142 are other changes', not
+  in this branch.
+- `just test`, `just docs` and `just lint-docs` over the branch's range against
+  master exit 0. So do `just replay-check` and `just conformance`: no code a
+  message passes through changes, and both were run all the same.
 
 ## Consequences
 
