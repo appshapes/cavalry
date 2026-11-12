@@ -2000,8 +2000,8 @@ impl Consensus {
         }
         let own = self.own_report();
         let reports = self.reports(own);
-        // A member of this version starts with no term, so its canvass deadline is the
-        // startup canvass timeout after the state began.
+        // The appointed leader leads once, in its first election since it started, so
+        // its canvass deadline is the startup canvass timeout after the state began.
         let deadline_passed =
             clock.now_ns.saturating_sub(self.state_since_ns) >= STARTUP_CANVASS_TIMEOUT_NS;
         self.count_ahead(own);

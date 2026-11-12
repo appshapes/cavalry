@@ -266,8 +266,8 @@ fn three_members_replicate_a_hundred_thousand_entries_and_their_recordings_are_e
         );
     }
 
-    // A member does not start again on the log it has: the refusal says why and what
-    // to do.
+    // A member over a driver, whose leader is appointed, does not start again on the
+    // log it has: the refusal says why and what to do.
     let Member {
         driver,
         module,

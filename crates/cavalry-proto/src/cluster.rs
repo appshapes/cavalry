@@ -868,7 +868,8 @@ pub enum Message<'a> {
         log_session_id: i32,
         /// The service's version, 0 for none.
         app_version: i32,
-        /// Whether the leader started with the cluster.
+        /// Whether the term is of the leader's first election since the leader
+        /// started (`spec/cluster.md`, "New leadership term, template 53").
         is_startup: bool,
         /// The leader's commit position.
         commit_position: i64,
