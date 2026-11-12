@@ -204,6 +204,18 @@ member's recordings is not in this version (`spec/cluster.md`, "The service").
   here makes. A leader that lives and whose replay's end of stream is lost costs
   the member one election. Revisit if the fault-injection tests of ADR 0077 meet
   it.
+- The floor is stricter in a catch-up than delivery needs. It is where the member's
+  log ended when the member subscribed on its `log` endpoint, the replay's synced
+  end among it, and the page has the live image join at or past the member's append
+  position (state 13). If a leader's sender that `fc=min` holds back can trail the
+  leader's own synced recording, which the replay follows, the live image of the
+  leader's session could join below that floor. Its bytes are the leader's, so
+  counting it would be right, but the module never counts it: the leader stops the
+  replay, the member's log stops moving, and its progress timer fails the election,
+  counted. It is a member that begins again, not a byte lost. Revisit with the
+  fault-injection tests of ADR 0077, beside the stale sender: if they meet it, a
+  lower floor for the live recording, the end of the recordings the member stopped,
+  is the candidate, and a decision of its own has to show it safe.
 - The kept table can hold recordings that overlap. `truncate_log` must cut or
   forget each one that holds bytes above the position, as its doc comment says.
 - The hand-over of a recording, the live one or a replay's, reads its descriptor

@@ -696,7 +696,7 @@ id = 62
 name = "publication.connected"
 kind = "counter"
 scope = "static"
-doc = "cavalry:udp publications whose first status message without the send-setup flag arrived: the publication's limit rises to the sender position plus the publication window from here (spec/udp.md, The sender)."
+doc = "cavalry:udp publications whose first status message without the send-setup flag arrived: the publication's limit rises to the consumer position plus the publication window from here, the consumer position being the sender position, or the recorder's when the publication is recorded and its recorder is behind (spec/udp.md, The sender)."
 doctor = ""
 
 [[counter]]
