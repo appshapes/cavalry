@@ -115,7 +115,8 @@ and `--request-changes` in place of `--approve` for findings.
   `tracing` or `log`. A data-plane change carries `just bench` histograms before and after in
   the pull request body; a performance claim without a histogram is not a claim. While
   `just bench` prints `not built yet`, the body must say so instead of claiming a number.
-  `bench/baseline.json` is never changed by an agent.
+  `bench/baseline.json` is never changed by the loop's writer or fixer; a re-record by a
+  person or a person's session is judged against ADR 0033, ADR 0050 and ADR 0110.
 - **Bounded (3).** Every queue, buffer, map and retry has an explicit capacity and a stated
   behaviour when full. Back-pressure is returned to the caller, never absorbed by growth.
 - **Counters (4).** Every state transition increments a counter. A log line on the data plane

@@ -192,10 +192,14 @@ fn run(args: &Args) -> Result<(), Box<dyn std::error::Error>> {
                 // read, and the next run starts where this one stopped.
                 return Err(format!(
                     "the driver withdrew the replay of member {}'s recording {} before \
-                     this program read the entries from position {position}: it did not \
-                     read them within 5 s of its member closing or leaving its log; start \
-                     it again with --from {} once the member runs; see \
-                     docs/how-to/read-the-committed-log.md#when-it-does-not-work",
+                     this program read the entries from position {position}: the \
+                     recording had stopped and this program did not read the rest of it \
+                     within 5 s. Either its member closed or left its log and this \
+                     program did not poll in that time, or the recording is one below \
+                     the member's live one and the member's commit position stayed below \
+                     its end. Run `cavalry doctor` on the member's directory to see \
+                     which, and start this program again with --from {} once the member \
+                     runs; see docs/how-to/read-the-committed-log.md#when-it-does-not-work",
                     log.member_id(),
                     log.recording_id(),
                     log.position()
@@ -248,8 +252,8 @@ fn run(args: &Args) -> Result<(), Box<dyn std::error::Error>> {
                 );
                 continue;
             }
-            // No member names a recording: the member left its log or closed, and the
-            // next run starts here.
+            // No member names a recording: the member left its log, closed, or is
+            // between two recordings, and the next run starts here.
             eprintln!(
                 "cluster-service: the member's log ended; read to position {}",
                 log.position()

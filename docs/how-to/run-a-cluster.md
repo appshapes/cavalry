@@ -200,27 +200,40 @@ committed once a quorum, two of three, has it on disk.
   start, members that have not heard every other member wait 60 s for it, the
   startup canvass timeout, before two of them elect. Run `doctor` on each member's
   host, and check that each host reaches the `consensus` endpoint of every other,
-  the second port of each entry in step 1. The message ends with how many of the
-  member's elections have failed and on which rule, by the names of three counters:
-  `cluster.join_position_mismatches`, `cluster.truncations_refused` and
-  `cluster.log_replications_unavailable`.
+  the second port of each entry in step 1. In canvass the message has one more
+  sentence, for a member that has replicated a term it missed: it canvasses again
+  with no leader, in the same election, until the leader it replicated from answers
+  it. A member that stays there waits for that one member and not for votes, so
+  check the `consensus` endpoints between the two hosts. The message ends with how
+  many of the member's elections have failed. Three counters each count one rule
+  that fails an election: `cluster.join_position_mismatches`,
+  `cluster.truncations_refused` and `cluster.log_replications_unavailable`. They do
+  not hold every failure. When more elections failed than the three count, the
+  message says how many and what else fails an election: a step that made no
+  progress for 10 s, a log the member cannot join its leader with, or, on a member
+  that led before its election closed, a term above its own or the loss of its
+  quorum, which `cluster.leader_quorum_losses` counts.
 - `note cluster-joining`: the member has taken its leader, which the message names
   from `cluster.leader_member_id`, and joins the leader's log. The message says what
   the state the member is in waits for: an image of the leader's log on the member's
   `log` endpoint, the fourth field of its entry in `CAVALRY_CLUSTER_MEMBERS`, or the
-  leader's replay on its `catchup` endpoint, the fifth, when the member is behind the
-  leader's log and catches up. Each must arrive, and the member's append position
+  leader's replay on its `catchup` endpoint, the fifth, when the member replicates a
+  term it missed, or both when it is behind the leader's log and catches up. The
+  check at the end of the message names the endpoints of that state. Each must
+  arrive, and the member's append position
   must then reach the leader, within 10 s. Once they have, the election closes, and
   the next `doctor` shows `election closed` and no `cluster-joining`. An election
   that fails begins again by itself, so the message never says to start the cluster
-  again; it ends with how many elections have failed and on which rule, as
-  `cluster-no-leader` does. A count that keeps rising is a path that stays closed:
+  again; it ends with how many elections have failed, as `cluster-no-leader`
+  does. A count that keeps rising is a path that stays closed:
   the leader's host must reach the member's `log` and `catchup` endpoints over UDP,
   9022 and 9023 for member 2 in step 1, and the member's host must reach the
   leader's `consensus` endpoint.
 - `WARN cluster-quorum-lost`: the leader heard from fewer than two of three members
-  within 10 s, and nothing was committed while that lasted. Check that two members run
-  and that each reaches the leader's consensus endpoint.
+  within 10 s, and nothing was committed while that lasted. A leader that elects
+  stopped leading each time and held an election, and the finding is on a member that
+  leads again. Check that two members run and that each reaches the leader's consensus
+  endpoint.
 - `WARN cluster.messages_rejected`: the member rejected consensus messages it cannot
   read, and acted on none of them. Another member sends them from another version of
   Cavalry, as during an upgrade, and the member may canvass with no leader for as long
