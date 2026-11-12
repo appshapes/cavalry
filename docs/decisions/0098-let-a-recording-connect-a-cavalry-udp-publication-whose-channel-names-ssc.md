@@ -122,7 +122,8 @@ to version 9; no frame changes.
   when a recorded stream should take messages with no receiver.
 - The sender holds one more counter per such publication, the recording's position,
   given and taken away by the conductor. The conductor frees a stopped recording's
-  counters only after the sender was told to stop reading them.
+  position counter only once the sender has answered that it reads it no more, as it
+  frees a publication's own counters only after the sender's close.
 - The cluster's log channel names no `ssc` and is unchanged. A cluster of one member
   over a driver can name it when the election's cards need one.
 - The change lands in three parts: this ADR with the spec pages, the vectors, the
