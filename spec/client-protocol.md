@@ -383,8 +383,8 @@ What the driver does with each, after the checks of "What the driver rejects":
   its `ssc` take none: the command matches a stream by its resolved channel, so a
   client records the publication it created at a position under the channel it holds
   (ADR 0059). A recording of a `cavalry:udp` publication whose own channel names
-  `ssc=true` connects that publication while it is live (`spec/udp.md`, "The sender";
-  ADR 0098). The driver finds the live publications whose stream id and channel
+  `ssc=true` connects that publication while it is live, from `recording ready` until
+  its stop is asked (`spec/udp.md`, "The sender"; ADR 0098). The driver finds the live publications whose stream id and channel
   match, those whose end of stream position is not stored, and takes the one with the
   lowest registration id that is not yet being recorded, so that a second command records
   the next one. None live: error code 20. Every one being recorded, or its recording
