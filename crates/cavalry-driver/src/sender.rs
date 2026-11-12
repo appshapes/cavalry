@@ -1073,7 +1073,10 @@ impl Sender {
         // publisher that writes more than a term between a setup frame and its answer,
         // one whose term is too short for it; on one whose receiver left, more than a
         // term went by while it was away (ADR 0099). The limit is set anew from this
-        // receiver.
+        // receiver. A receiver ahead of the sender position, whose image began where an
+        // earlier setup frame put it before the sender went back for another, is no
+        // join to go back for: its status message is taken below as any is, and it
+        // drops what the sender sends below its position as under-runs.
         if live.alone(now) {
             let position = cavalry_proto::udp::position(
                 message.consumption_term_id,
@@ -1082,23 +1085,23 @@ impl Sender {
                 live.positions.term_length(),
             );
             let behind = live.sender_position.wrapping_sub(position);
-            if behind < 0 || behind > i64::from(live.positions.term_length()) {
+            if behind > i64::from(live.positions.term_length()) {
                 self.statics.status_messages_rejected.increment();
-                if behind > 0
-                    && let Some(joins_refused) = &live.joins_refused
-                {
+                if let Some(joins_refused) = &live.joins_refused {
                     joins_refused.add(1);
                 }
                 return;
             }
-            if let Some(unsent) = &live.unsent {
-                unsent.add(-behind);
+            if behind >= 0 {
+                if let Some(unsent) = &live.unsent {
+                    unsent.add(-behind);
+                }
+                live.sender_position = position;
+                live.position.store_release(position);
+                live.sender_limit = position;
+                live.limit.store_release(position);
+                live.limited = false;
             }
-            live.sender_position = position;
-            live.position.store_release(position);
-            live.sender_limit = position;
-            live.limit.store_release(position);
-            live.limited = false;
         }
         let limit = sender_limit(
             live.sender_position,
