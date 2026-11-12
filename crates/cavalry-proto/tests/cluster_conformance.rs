@@ -7,13 +7,14 @@
 
 use cavalry_proto::cluster::{
     AppointedCanvass, Ballot, Candidate, CanvassAction, CanvassTerms, ChangeType, CloseReason,
-    ClusterAction, ClusterError, CommitPosition, EMPTY_MEMBER, EventCode, LogReport, MAX_MEMBERS,
-    Member, MemberPosition, Message, NewLeadershipTermAction, NextFields, RecordedTerms, ReplayEnd,
+    ClusterAction, ClusterError, CommitPosition, EMPTY_MEMBER, EventCode, LogRecording,
+    LogRecordings, LogReport, MAX_LOG_RECORDINGS, MAX_LOG_RECORDINGS_LENGTH, MAX_MEMBERS, Member,
+    MemberPosition, Message, NewLeadershipTermAction, NextFields, RecordedTerms, ReplayEnd,
     ReplicationStop, SnapshotMark, Stream, TermFields, TermSpan, TimeUnit, VERSION, Vote,
     VoteAnswer, VoteRequest, answered_term, appointed_canvass, appointed_leader, ballot, candidate,
     canvass_position_action, commit_position, entry_position, leader_ready, log_at_least,
     new_leadership_term_action, next_fields, parse_members, quorum, replay_end, replication_record,
-    replication_stop, request_vote,
+    replication_stop, request_vote, write_log_recordings,
 };
 use serde_json::{Map, Value, json};
 
@@ -348,6 +349,56 @@ fn members_vector(name: &str, vector: &Value) {
     assert_eq!(Value::Array(parsed), vector["members"], "{name}: members");
 }
 
+/// A file of a member's log's recordings (`spec/cluster.md`, "The log's recordings"):
+/// read to its fields, written from them to the same bytes, and each position read
+/// from the recording the vector names; or refused with the vector's reason.
+fn log_recordings_vector(name: &str, vector: &Value) {
+    let bytes = hex(vector["bytes"].as_str().expect("bytes"));
+    let member = i32::try_from(vector["member"].as_i64().expect("member")).expect("member fits");
+    let result = LogRecordings::read(&bytes, member);
+    if let Some(reason) = vector.get("error") {
+        let reason = reason.as_str().expect("error is a string");
+        match result {
+            Err(error) => assert_eq!(error.reason(), reason, "{name}: wrong reason: {error}"),
+            Ok(file) => panic!("{name}: accepted {file:?}, expected {reason}"),
+        }
+        return;
+    }
+    let file = result.unwrap_or_else(|error| panic!("{name}: refused: {error}"));
+    let entries: Vec<LogRecording> = file.entries().collect();
+    assert_eq!(entries.len(), file.len(), "{name}: len");
+    assert_eq!(entries.is_empty(), file.is_empty(), "{name}: is_empty");
+    let decoded = json!({
+        "member_id": file.member_id(),
+        "live_recording_id": file.live_recording_id(),
+        "live_start_position": file.live_start_position(),
+        "entries": entries.iter().map(|entry| json!({
+            "recording_id": entry.recording_id,
+            "start_position": entry.start_position,
+            "stop_position": entry.stop_position,
+        })).collect::<Vec<Value>>(),
+    });
+    assert_eq!(decoded, vector["fields"], "{name}: fields");
+    let mut out = vec![0xAA; MAX_LOG_RECORDINGS_LENGTH];
+    let length = write_log_recordings(
+        &mut out,
+        file.member_id(),
+        file.live_recording_id(),
+        file.live_start_position(),
+        entries.iter().copied(),
+    )
+    .unwrap_or_else(|error| panic!("{name}: not written: {error}"));
+    assert_eq!(to_hex(&out[..length]), to_hex(&bytes), "{name}: bytes");
+    for read in vector["reads"].as_array().expect("reads") {
+        assert_eq!(
+            file.recording_at(int(read, "position")),
+            int(read, "recording_id"),
+            "{name}: position {}",
+            read["position"]
+        );
+    }
+}
+
 fn int(value: &Value, name: &str) -> i64 {
     value[name].as_i64().unwrap_or_else(|| panic!("{name}"))
 }
@@ -664,16 +715,64 @@ fn every_vector_in_spec_vectors_cluster_json() {
             "message" => message_vector(name, vector),
             "members" => members_vector(name, vector),
             "arithmetic" => arithmetic_vector(name, vector),
+            "log recordings" => log_recordings_vector(name, vector),
             other => panic!("{name}: unknown kind {other}"),
         }
         let count = kinds.get(kind).and_then(Value::as_u64).unwrap_or(0);
         kinds.insert(kind.to_string(), Value::from(count + 1));
     }
-    assert_eq!(
-        kinds.len(),
+    assert_eq!(kinds.len(), 4, "the four kinds of spec/cluster.md, Vectors");
+}
+
+/// The file at its bound (`spec/cluster.md`, "The log's recordings"): 1,025 entries
+/// are written and read back, and one more is refused, as is a buffer too short for
+/// the entries given, each with `recordings-length` and nothing a reader would take.
+#[test]
+fn a_file_of_recordings_holds_1025_entries_and_refuses_one_more() {
+    let entry = |index: usize| {
+        let at = i64::try_from(index).expect("an index") * 96;
+        LogRecording {
+            recording_id: i64::try_from(index).expect("an index"),
+            start_position: at,
+            stop_position: at + 96,
+        }
+    };
+    let live_start = i64::try_from(MAX_LOG_RECORDINGS).expect("a count") * 96;
+    let mut out = vec![0; MAX_LOG_RECORDINGS_LENGTH + 64];
+    let length = write_log_recordings(
+        &mut out,
         3,
-        "the three kinds of spec/cluster.md, Vectors"
-    );
+        4096,
+        live_start,
+        (0..MAX_LOG_RECORDINGS).map(entry),
+    )
+    .expect("the most entries are written");
+    assert_eq!(length, MAX_LOG_RECORDINGS_LENGTH);
+    let file = LogRecordings::read(&out[..length], 3).expect("and read back");
+    assert_eq!(file.len(), MAX_LOG_RECORDINGS);
+    assert_eq!(file.entries().last(), Some(entry(MAX_LOG_RECORDINGS - 1)));
+    assert_eq!(file.recording_at(0), 0);
+    assert_eq!(file.recording_at(live_start - 32), 1024);
+    assert_eq!(file.recording_at(live_start), 4096);
+
+    let one_more = write_log_recordings(
+        &mut out,
+        3,
+        4096,
+        live_start + 96,
+        (0..=MAX_LOG_RECORDINGS).map(entry),
+    )
+    .expect_err("one entry more than the most");
+    assert_eq!(one_more.reason(), "recordings-length", "{one_more}");
+
+    let mut short = [0; 40 + 24];
+    let too_short = write_log_recordings(&mut short, 3, 4096, 192, (0..2).map(entry))
+        .expect_err("a buffer for one entry, given two");
+    assert_eq!(too_short.reason(), "recordings-length", "{too_short}");
+    let mut no_header = [0; 39];
+    let no_room = write_log_recordings(&mut no_header, 3, 4096, 0, core::iter::empty())
+        .expect_err("a buffer shorter than the header");
+    assert_eq!(no_room.reason(), "recordings-length", "{no_room}");
 }
 
 #[test]

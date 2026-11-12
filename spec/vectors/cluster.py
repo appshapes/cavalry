@@ -980,6 +980,149 @@ VECTORS += [
                 "deadline_passed": True}, leader_ready(3, 2, 2, 1, True)),
 ]
 
+# ---- the file of a member's log's recordings ("The log's recordings") -----------------
+
+LOG_RECORDINGS_MAGIC = b"CVLYLREC"
+MAX_LOG_RECORDINGS = 1025
+
+
+def log_recordings_bytes(member, live, live_start, entries, version=0,
+                         magic=LOG_RECORDINGS_MAGIC, count=None):
+    """The file's bytes: the header, then each entry as (recording id, start, stop)."""
+    count = len(entries) if count is None else count
+    out = magic + struct.pack("<iiqqi4x", version, member, live, live_start, count)
+    for recording, start, stop in entries:
+        out += struct.pack("<qqq", recording, start, stop)
+    return out
+
+
+def read_log_recordings(data, member):
+    """The reference reader: the checks of "What a reader rejects", in their order."""
+    if len(data) < 40:
+        raise ValueError("recordings-too-short")
+    if data[:8] != LOG_RECORDINGS_MAGIC:
+        raise ValueError("recordings-magic")
+    version, found, live, live_start, count = struct.unpack_from("<iiqqi", data, 8)
+    if version != 0:
+        raise ValueError("recordings-version")
+    if found < 0 or found != member:
+        raise ValueError("recordings-member")
+    if count < 0 or count > MAX_LOG_RECORDINGS or len(data) != 40 + count * 24:
+        raise ValueError("recordings-length")
+    if live < 0 or live_start < 0 or live_start % 32:
+        raise ValueError("recordings-live")
+    entries = []
+    before = 0
+    for i in range(count):
+        recording, start, stop = struct.unpack_from("<qqq", data, 40 + i * 24)
+        if recording < 0 or start < before or start % 32 or stop % 32 or stop <= start:
+            raise ValueError("recordings-entry")
+        before = start
+        entries.append({"recording_id": recording, "start_position": start,
+                        "stop_position": stop})
+    return {"member_id": found, "live_recording_id": live,
+            "live_start_position": live_start, "entries": entries}
+
+
+def read_from(fields, position):
+    """The recording a position is read from: the first entry that holds it, else the
+    live recording."""
+    for entry in fields["entries"]:
+        if entry["start_position"] <= position < entry["stop_position"]:
+            return entry["recording_id"]
+    return fields["live_recording_id"]
+
+
+def log_recordings(name, data, member, positions=()):
+    vector = {"kind": "log recordings", "name": name, "member": member, "bytes": data.hex()}
+    try:
+        fields = read_log_recordings(data, member)
+        vector["fields"] = fields
+        vector["reads"] = [{"position": p, "recording_id": read_from(fields, p)}
+                           for p in positions]
+    except ValueError as error:
+        vector["error"] = str(error)
+    return vector
+
+
+VECTORS += [
+    # A member on its first recording: nothing below it.
+    log_recordings("log-recordings-none-below", log_recordings_bytes(1, 0, 0, []), 1,
+                   [0, 96]),
+    # A member that left the log at 1056 and joined it again: the recording it left,
+    # then the live one.
+    log_recordings("log-recordings-joined-again",
+                   log_recordings_bytes(1, 3, 1056, [(0, 0, 1056)]), 1,
+                   [0, 1024, 1056, 4096]),
+    # A follower in a catch-up: a recording it stopped, its recording of the replay,
+    # synced to 288, and the live recording, which begins inside the replay's at 192.
+    # The positions the two share are read from the earlier one.
+    log_recordings("log-recordings-catch-up-overlaps-the-live-recording",
+                   log_recordings_bytes(2, 5, 192, [(2, 0, 96), (4, 96, 288)]), 2,
+                   [0, 64, 96, 192, 256, 288, 320]),
+    # A recording that lies inside the one before it: every position it holds is read
+    # from the earlier one.
+    log_recordings("log-recordings-one-inside-another",
+                   log_recordings_bytes(0, 3, 320, [(1, 0, 320), (2, 96, 192)]), 0,
+                   [0, 96, 160, 192, 320]),
+    # Two entries that begin at one position: the first is read to its stop, then the
+    # second.
+    log_recordings("log-recordings-two-begin-together",
+                   log_recordings_bytes(0, 6, 256, [(4, 0, 96), (5, 0, 256)]), 0,
+                   [0, 64, 96, 224, 256]),
+    # A table that forgot its oldest recordings: a position below the first entry is
+    # the live recording's, whose replay the driver refuses.
+    log_recordings("log-recordings-forgotten-below",
+                   log_recordings_bytes(0, 9, 8192, [(7, 4096, 8192)]), 0,
+                   [0, 4064, 4096, 8160, 8192]),
+    # The rejections, in the order the checks run.
+    log_recordings("log-recordings-too-short", log_recordings_bytes(1, 0, 0, [])[:39], 1),
+    log_recordings("log-recordings-empty", b"", 1),
+    log_recordings("log-recordings-magic",
+                   log_recordings_bytes(1, 0, 0, [], magic=b"CVLYTERM"), 1),
+    log_recordings("log-recordings-magic-before-version",
+                   log_recordings_bytes(1, 0, 0, [], magic=b"\0" * 8, version=1), 1),
+    log_recordings("log-recordings-version", log_recordings_bytes(1, 0, 0, [], version=1), 1),
+    log_recordings("log-recordings-version-before-member",
+                   log_recordings_bytes(2, 0, 0, [], version=-1), 1),
+    log_recordings("log-recordings-member-of-another-name",
+                   log_recordings_bytes(2, 0, 0, []), 1),
+    log_recordings("log-recordings-member-below-zero", log_recordings_bytes(-1, 0, 0, []), -1),
+    log_recordings("log-recordings-member-before-length",
+                   log_recordings_bytes(2, 0, 0, [], count=7), 1),
+    log_recordings("log-recordings-count-below-zero",
+                   log_recordings_bytes(1, 0, 0, [], count=-1), 1),
+    log_recordings("log-recordings-count-above-the-most",
+                   log_recordings_bytes(1, 0, 0, [], count=1026), 1),
+    log_recordings("log-recordings-fewer-entries-than-counted",
+                   log_recordings_bytes(1, 3, 96, [(0, 0, 96)], count=2), 1),
+    log_recordings("log-recordings-bytes-after-the-last-entry",
+                   log_recordings_bytes(1, 3, 96, [(0, 0, 96)]) + b"\0", 1),
+    log_recordings("log-recordings-length-before-live",
+                   log_recordings_bytes(1, -1, 0, [], count=1), 1),
+    log_recordings("log-recordings-live-id-below-zero", log_recordings_bytes(1, -1, 0, []), 1),
+    log_recordings("log-recordings-live-start-below-zero",
+                   log_recordings_bytes(1, 0, -32, []), 1),
+    log_recordings("log-recordings-live-start-not-a-multiple-of-32",
+                   log_recordings_bytes(1, 0, 48, []), 1),
+    log_recordings("log-recordings-live-before-entry",
+                   log_recordings_bytes(1, 0, 48, [(0, 0, 0)]), 1),
+    log_recordings("log-recordings-entry-id-below-zero",
+                   log_recordings_bytes(1, 3, 96, [(-1, 0, 96)]), 1),
+    log_recordings("log-recordings-entry-start-below-zero",
+                   log_recordings_bytes(1, 3, 96, [(0, -32, 96)]), 1),
+    log_recordings("log-recordings-entry-start-not-a-multiple-of-32",
+                   log_recordings_bytes(1, 3, 96, [(0, 16, 96)]), 1),
+    log_recordings("log-recordings-entry-start-below-the-one-before",
+                   log_recordings_bytes(1, 3, 192, [(0, 96, 192), (1, 64, 192)]), 1),
+    log_recordings("log-recordings-entry-stop-not-a-multiple-of-32",
+                   log_recordings_bytes(1, 3, 96, [(0, 0, 80)]), 1),
+    log_recordings("log-recordings-entry-stop-at-its-start",
+                   log_recordings_bytes(1, 3, 96, [(0, 64, 64)]), 1),
+    log_recordings("log-recordings-entry-stop-below-its-start",
+                   log_recordings_bytes(1, 3, 96, [(0, 64, 32)]), 1),
+]
+
 assert ballot(3, 3, [{"member": 0, "vote": True, "term": 3}, {"member": 1, "vote": True, "term": 3}], [0, 1, 2], True) == {"leader": True, "unanimous": False}
 assert ballot(3, 3, [{"member": 0, "vote": True, "term": 3}, {"member": 1, "vote": True, "term": 3}], [0, 1], False) == {"leader": True, "unanimous": True}
 assert ballot(3, 4, [{"member": 0, "vote": True, "term": 3}, {"member": 1, "vote": True, "term": 3}], [0, 1, 2], True) == {"leader": False, "unanimous": False}

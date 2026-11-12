@@ -864,12 +864,12 @@ not open, is ignored and counts as no activity, each counted in
 ## The service
 
 The service is a client of its member's driver, through the client API and the C ABI,
-as the consensus module is. It reads the member's own recording of the log through a
-replay that follows the recording, `start replay` with a length of 2^63 − 1
-(`spec/client-protocol.md`, "Commands"), into a `cavalry:ipc` subscription of its own
-on the service log stream ("Members and streams"), from the position of an entry: 0,
-or the position after the last entry it applied. The member names the recording in
-`cluster.log_recording_id` ("Counters"): the one it records the live log into, the
+as the consensus module is. It reads the member's own recordings of the log, one at a
+time, each through a replay that follows the recording, `start replay` with a length
+of 2^63 − 1 (`spec/client-protocol.md`, "Commands"), into a `cavalry:ipc` subscription
+of its own on the service log stream ("Members and streams"), from the position of an
+entry: 0, or the position after the last entry it applied. The member names its live
+recording in `cluster.log_recording_id` ("Counters"): the one it records the live log into, the
 leader's recording of its log publication (state 5) or a follower's recording of the
 leader's image it joined last (state 15), and never the recording of a span it
 replicated or caught up (states 9 and 13). The counter is −1 while the member records
@@ -879,12 +879,26 @@ path is the same on the leader and on a follower, and a service may start before
 member, with it or after it (ADR 0066). A service reads its own replay's session on
 that stream and reads past any other, which is another service's.
 
-A member keeps two rules of order for the service. It adds `cluster.log_recording_id`
+A member keeps three rules of order for the service. It adds `cluster.log_recording_id`
 and stores −1 in it before it adds `cluster.commit_position`, and a service reads the
 recording's id only of a member whose `cluster.commit_position` it has found: a
 counter holds 0 between its allocation and its first store, and 0 is a recording id.
-And it stores another value in `cluster.log_recording_id` before it stores a commit
-position that the recording does not hold.
+It stores another value in `cluster.log_recording_id` before it stores a commit
+position that the recording does not hold. And it writes the file of its log's
+recordings ("The log's recordings") before it stores a recording's id in
+`cluster.log_recording_id`, each time it names a recording, and truncates no recording
+of its log until it has stored −1 there (ADR 0103).
+
+The member's log below its live recording is in the recordings that file lists, and
+a service takes each position from one recording by the rule of "The log": the first
+recording in the file that holds the position, and the live recording when none does.
+It reads the file when it starts a replay, after it has loaded
+`cluster.log_recording_id`. A file whose live recording id is not the id it loaded is
+of a member that has since named another recording or none, and the service starts no
+replay: it finds its member's recording again. With no file the member is of a version
+that writes none, and the service replays the live recording. A file that fails a
+check of "What a reader rejects" is reported to the service's caller, and nothing is
+replayed.
 
 The service reads entries up to the commit position and no further: it polls the
 replay's image bounded by the member's `cluster.commit_position` ("Counters"), a read
@@ -895,29 +909,37 @@ never reads an entry its own member does not hold durably. The service takes a c
 position as its bound only when two checks hold after it has loaded it. The counter's
 record is the member's: allocated, of the counter's type, and with the member id as
 the first four bytes of its key (`spec/counters-file.md`, "Metadata record"). And
-`cluster.log_recording_id`, loaded after the commit position, is the id of the
-recording the service replays, from a record that is the member's by the same test.
+`cluster.log_recording_id`, loaded after the commit position, is the id the service
+loaded before it read the file, the member's live recording then, from a record that
+is the member's by the same test, whether the service replays that recording or one
+below it. The one check serves both: a member cuts no recording of its log while it
+names a live one, so what a replay has played from a recording the file lists is
+still the member's log at those positions when the commit position is loaded.
 From the first load at which either fails, because the member left the recording or
 its consensus module closed and the driver freed its counters, the service reads the
 counters no more and keeps the highest commit position it took. The bound never falls,
 and neither a record the driver has given to another counter nor a commit position of
-a later log is ever a bound. When the member's recording stops, the replay ends at the
-stop position; the service has read no further than its bound, and it starts a replay
-again, from its own position, when a member names a recording again.
+a later log is ever a bound. When the recording the service replays stops, or has
+stopped, the replay ends at the stop position; the service has read no further than
+its bound, and it starts a replay again, from its own position, when a member names a
+recording: of the next recording that holds that position, or of the live one.
 
 A member that left the log and joined it again names a new recording. That recording
 starts at the join position of the image the member joined, the member's append
 position (state 15), and holds nothing below it, so the member's log is then more
-than one recording ("The log"). A service whose position is the recording's start
-reads on from there. A service whose position is below it cannot: `start replay`
-refuses a position below the recording's retained position with code 23
-(`spec/client-protocol.md`, "Commands"), and the service reports the refusal to its
-caller and reads nothing from that recording. This is a service that starts at 0, or
-one whose member had recorded entries past the last commit position the service took
-when it left the log. Those entries are in the recording the member left, which no
-counter names in this version, and the service took no commit position that covers
-them. Reading a log across more than one recording is out of this version ("Out of
-this version").
+than one recording ("The log"), as it is after a later term and after a span the
+member replicated or caught up. A service whose position is the live recording's
+start reads on from there. A service whose position is below it reads the recording
+the file lists for that position to its stop, and then the next: a service that
+starts at 0, or one whose member had recorded entries past the last commit position
+the service took when it left the log. Those entries are delivered once the member's
+commit position covers them, and not before. The driver withdraws a replay's image
+the publication linger after the replay ends, so a service whose bound stays below a
+stopped recording's end for that long starts the replay of that recording again. A
+position that no recording in the file holds and that is below the live recording's
+start is one the member's table has forgotten, past 1,024 recordings: the replay is
+asked of the live recording, and `start replay` refuses it with code 23
+(`spec/client-protocol.md`, "Commands"), which the service reports to its caller.
 
 It reads session messages, timer events,
 session open and close events, cluster actions and new leadership term events in log
@@ -931,6 +953,53 @@ major version differs from the one new leadership term carries fails its electio
 from the state that read it, counted in `cluster.app_version_mismatches`, and begins
 again at init, so that it never joins a log its service cannot apply; `doctor` names
 the two versions.
+
+## The log's recordings
+
+A member's consensus module writes one file in its driver's directory
+(`spec/client-protocol.md`, "The driver directory"), `log-recordings-<member id>`, the
+member's id in decimal: the recordings that hold the member's log, for the member's
+service ("The service"; ADR 0103). The module writes the file whole under the name
+`log-recordings-<member id>.tmp` and renames it over the file, so a reader reads one
+whole file or the one before it; a reader opens the file once and reads it to its
+end. The module writes it each time it names a recording, before it stores the
+recording's id in `cluster.log_recording_id`, and removes it when it closes. A file
+the module cannot write is its duty cycle's error, and the member stores −1 in the
+counter until a later cycle has written the file. All integers are little-endian.
+
+The header, 40 bytes:
+
+| Offset | Size | Field | Type | Bound |
+| --- | --- | --- | --- | --- |
+| 0 | 8 | magic | bytes | the bytes `43 56 4C 59 4C 52 45 43` (`CVLYLREC`) |
+| 8 | 4 | version | i32 | 0 |
+| 12 | 4 | member id | i32 | 0 or more: the member whose log this is, the id in the file's name |
+| 16 | 8 | live recording id | i64 | 0 or more: the recording the member records the live log into, the id it stores in `cluster.log_recording_id` next |
+| 24 | 8 | live start position | i64 | 0 or more, a multiple of 32: where the live recording begins |
+| 32 | 4 | entry count | i32 | 0 to 1025 |
+| 36 | 4 | reserved | bytes | written as 0, never read |
+
+Entry i is at 40 + i × 24, and the file's length is 40 + entry count × 24:
+
+| Offset | Size | Field | Type | Bound |
+| --- | --- | --- | --- | --- |
+| 0 | 8 | recording id | i64 | 0 or more |
+| 8 | 8 | start position | i64 | 0 or more, a multiple of 32, at least the start position of the entry before |
+| 16 | 8 | stop position | i64 | a multiple of 32, above the entry's start position |
+
+The entries are the recordings that hold the member's log below its live recording,
+in the order they begin: each recording the member stopped and keeps, at most 1,024
+("Roles and the election", state 0), with the position it stopped at; and last,
+while the member catches up (state 13), its recording of the replay, which is still
+being made, with the position that recording had synced when the file was written,
+at or above the live start position. A recording that holds nothing, its stop at its
+start, has no entry. Two entries may overlap, and the live recording
+may begin inside the last (state 13); the positions they share hold the same bytes.
+A reader takes a position from the first entry whose start position is at or below
+it and whose stop position is above it, and from the live recording when no entry
+is so. A replay that follows an entry's recording ends where that recording stops,
+at or above the entry's stop position, and the position it ends at is read by the
+same rule.
 
 ## Counters
 
@@ -946,7 +1015,7 @@ that a reader of a counters file knows which transition it saw.
 | `cluster.leader_member_id` | a gauge: the id of the member this member leads as or follows, −1 while it has none: from init until it leads a term, on entering leader log replication, or takes a leader's new leadership term, on leaving canvass, nominate or a ballot for a follower's state (ADR 0077, ADR 0102) |
 | `cluster.election_cause` | a gauge: why the member's last election began, the election it is in or the one that closed last: 0 the member started; 1 it followed and its leader said nothing for the leader heartbeat timeout; 2 it followed and its image of the leader's log was no longer available; 3 it led and its active members fell below a quorum; 4 its election had closed and a message carried a term above its own; 5 its election before failed (ADR 0077, ADR 0102) |
 | `cluster.commit_position` | a gauge: the commit position the member knows, the bound of its service's reading |
-| `cluster.log_recording_id` | a gauge: the id of the recording the member records the live log into, −1 while it records none; the recording its service replays ("The service") |
+| `cluster.log_recording_id` | a gauge: the id of the recording the member records the live log into, −1 while it records none; the recording its service replays, or reads below through the member's file of recordings, which the member writes before it stores an id here ("The service", "The log's recordings"; ADR 0103) |
 | `cluster.append_position` | a gauge: the member's append position |
 | `cluster.elections` | an election begun, from init |
 | `cluster.terms_led` | a term the member began to lead, on entering leader log replication: `cluster.role` going to leader |
@@ -1037,6 +1106,18 @@ the string); then `host` (a name that does not resolve), `spec/client-protocol.m
 error code 9. A host that holds `:` is an IPv6 literal and is written in square
 brackets, else `members-grammar`.
 
+A file of a member's log's recordings ("The log's recordings") is checked in this
+order, and a reader that rejects it takes nothing from it: `recordings-too-short`
+(fewer than 40 bytes), `recordings-magic` (the magic is not `CVLYLREC`),
+`recordings-version` (the version is not 0), `recordings-member` (the member id is
+below 0, or is not the id in the file's name), `recordings-length` (the entry count is
+below 0 or above 1025, or the file's length is not 40 + entry count × 24),
+`recordings-live` (the live recording id is below 0, or the live start position is
+below 0 or not a multiple of 32), `recordings-entry` (an entry's recording id is below
+0; its start position is below 0, not a multiple of 32, or below the start position
+of the entry before it; or its stop position is not a multiple of 32 or not above its
+start position).
+
 ## Vectors
 
 `spec/vectors/cluster.json`, written by `spec/vectors/cluster.py`, the reference
@@ -1076,10 +1157,17 @@ encoder. Each vector has a `kind`:
   count, how many members it has heard since its canvass began, how many of those
   count for its term at its log position, how many are ahead of it and whether its
   deadline has passed.
+- `log recordings`: the `bytes` of a file of a member's log's recordings, the `member`
+  id in its name, and the `fields` a conforming reader decodes, the member id, the
+  live recording id, the live start position and the `entries`, each a recording id,
+  a start position and a stop position, with `reads`, pairs of a position and the id
+  of the recording the position is read from; or the `error` it reports, one vector
+  per rejection in the order the checks run.
 
 A conforming implementation decodes every valid vector to its fields, encodes those
 fields to the same bytes, parses every members string, computes every arithmetic
-vector's fields from its inputs, and reports the named reason for every invalid one.
+vector's fields from its inputs, answers every read of a file of recordings, and
+reports the named reason for every invalid one.
 
 ## Out of this version
 
@@ -1095,9 +1183,3 @@ contents between its markers, the serialised sessions, timers, consensus module 
 members (102 to 108), which the feature that writes the snapshot specifies. A member
 of this version appends no timer event, membership change event or session close
 event with the reason service action, and a reader accepts each.
-
-A service reads one recording of its member's log, the one the member names ("The
-service"). A service's read across a member's recordings is not in this version. A
-member that joined the log again has more than one, and so will a member after a
-later term or after a replicated or caught-up span; the features that add the
-election and the catch-up specify that read.
