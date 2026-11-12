@@ -837,11 +837,31 @@ fn run_with_the_cluster_keys_starts_a_member_and_three_of_them_appoint_a_leader(
         .expect("doctor runs");
     let text = String::from_utf8_lossy(&output.stdout);
     assert!(!text.contains("FAIL cluster-member"), "{text}");
-    // And says what the member is, from its counters.
+    // And says what the member is, who it follows and why its last election began,
+    // from its own counters (ADR 0102; `docs/how-to/run-a-cluster.md`, step 4).
     assert!(
         text.contains("note cluster-member")
             && text
-                .contains("this driver is cluster member 1, a follower in term 0, election closed"),
+                .contains("this driver is cluster member 1, a follower in term 0, election closed")
+            && text.contains(
+                "; it follows member 0; its last election began because the member started; see "
+            ),
+        "{text}"
+    );
+    // The leader follows no member, so after its positions its line says the cause alone.
+    let output = cavalry()
+        .args(["doctor", "--dir", &dirs[0].arg()])
+        .env("CAVALRY_CLUSTER_MEMBERS", &members)
+        .env("CAVALRY_CLUSTER_MEMBER_ID", "0")
+        .output()
+        .expect("doctor runs");
+    let text = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        text.contains("note cluster-member")
+            && text
+                .contains("this driver is cluster member 0, the leader in term 0, election closed")
+            && text.contains("; its last election began because the member started; see ")
+            && !text.contains("it follows member"),
         "{text}"
     );
 
