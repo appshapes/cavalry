@@ -399,12 +399,3 @@ mod tests {
         ));
     }
 }
-
-/// Nanoseconds since the Unix epoch, as every timestamp in `spec/`; 0 before the epoch.
-pub(crate) fn now_nanos() -> i64 {
-    std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map_or(0, |since| {
-            i64::try_from(since.as_nanos()).unwrap_or(i64::MAX)
-        })
-}

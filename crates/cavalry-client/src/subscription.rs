@@ -17,7 +17,7 @@ use cavalry_shm::counters::Counter;
 use cavalry_shm::log::{LogBuffers, LogError, Positions, TermReader};
 use cavalry_shm::spsc;
 
-use crate::conductor::{Shared, now_nanos};
+use crate::conductor::{Shared, epoch_time};
 use crate::error::ClientError;
 
 /// How many image events may wait for a subscription between two polls.
@@ -605,7 +605,7 @@ impl Subscription {
             let _ = self.producer.write(
                 command.command_type() as i32,
                 &self.scratch[..length],
-                now_nanos(),
+                epoch_time(),
             );
         }
         self.images.clear();

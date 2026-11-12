@@ -36,6 +36,7 @@ use cavalry_shm::counters::Counter;
 use cavalry_shm::log::{LogError, TermReader};
 use cavalry_shm::spsc::{Consumer, Producer};
 
+use crate::clock::EpochClock;
 use crate::conductor::now_nanos;
 use crate::idle::{IdleStrategy, Idler};
 use crate::spec;
@@ -307,7 +308,7 @@ impl Live {
     /// the whole scan, so the limit is halved until the block before that frame
     /// checks, and when the frame is the next one it is [`Taken::Rejected`]
     /// (invariant 1).
-    fn take(&mut self, limit: usize, now: i64) -> Taken {
+    fn take(&mut self, limit: usize, stamp: i64) -> Taken {
         let mut limit = limit;
         let block = loop {
             match self.reader.block(limit) {
@@ -325,7 +326,7 @@ impl Live {
         let reached = block.uncommitted;
         let end = block.end();
         let before = self.writer.position();
-        let written = self.writer.write(block.bytes, block.length, now);
+        let written = self.writer.write(block.bytes, block.length, stamp);
         // The block was taken exactly when the position moved, whatever `write`
         // returned; a block not taken is scanned again next cycle.
         let moved = self.writer.position() != before;
@@ -381,6 +382,10 @@ pub(crate) struct Recorder {
     live: Vec<Live>,
     /// Replies the reply queue had no room for, offered again next cycle.
     pending: VecDeque<Reply>,
+    /// The epoch clock, for what a recording is stamped with: its start, its stop and
+    /// its time index. Every interval here is measured on the `now` a duty cycle is
+    /// handed, the nano clock (ADR 0109).
+    epoch: EpochClock,
     write_failed: Counter,
     rejected_frame: Counter,
     idler: Idler,
@@ -403,6 +408,7 @@ impl Recorder {
             replies,
             live: Vec::with_capacity(spec::MAX_RECORDINGS),
             pending: VecDeque::with_capacity(PENDING_REPLIES),
+            epoch: EpochClock::new(),
             write_failed,
             rejected_frame,
             idler: Idler::new(idle),
@@ -435,7 +441,8 @@ impl Recorder {
     }
 
     /// One duty cycle; returns how much work it found, 0 when the recorder may idle. The
-    /// clock is read once by the caller and passed down.
+    /// nano clock is read once by the caller and passed down as `now`; what is stamped
+    /// takes the epoch clock at that `now`.
     pub(crate) fn duty_cycle(&mut self, now: i64) -> usize {
         let mut work = self.flush_replies();
         for _ in 0..spec::RECORDER_REQUESTS_PER_CYCLE {
@@ -586,6 +593,7 @@ impl Recorder {
     /// whose syncs failed, is not written again (ADR 0065). When the last scan reached
     /// the publisher the interval starts, as it does in `record`.
     pub(crate) fn write_blocks(&mut self, index: usize, now: i64, blocks: usize) -> Taken {
+        let stamp = self.epoch.at(now);
         let live = &mut self.live[index];
         if live.sync_failed || live.write_failed {
             return Taken::Nothing;
@@ -601,7 +609,7 @@ impl Recorder {
             else {
                 break;
             };
-            last = live.take(left, now);
+            last = live.take(left, stamp);
             match last {
                 Taken::Wrote | Taken::Filled => {}
                 Taken::Nothing | Taken::Rejected => break,
@@ -692,8 +700,15 @@ impl Recorder {
             channel: &start.channel,
             source_identity: &start.source_identity,
         };
-        match self.log.start(&recording, now) {
-            Ok(writer) => {
+        // The start timestamp is the conductor's reading of the epoch clock and what
+        // follows is this thread's: never one below it, so that no entry of the time
+        // index, and no stop, is stamped before the start.
+        let stamp = self.epoch.at(now).max(start.start_timestamp);
+        match self.log.start(&recording, stamp) {
+            Ok(mut writer) => {
+                // The writer was stamped with the epoch clock; its sync interval runs on
+                // the nano clock, from the start.
+                writer.sync_from(now);
                 let recording_id = writer.recording_id();
                 self.live.push(Live {
                     bytes: None,
@@ -732,6 +747,7 @@ impl Recorder {
     /// next cycle, since there is no room for its reply; a recording whose sync failed
     /// waits too, and is neither written nor synced again while it does.
     fn record(&mut self, index: usize, now: i64, may_stop: bool) -> Step {
+        let stamp = self.epoch.at(now);
         let live = &mut self.live[index];
         // A sync that failed, or a write that failed while a `sync recording` was
         // served: the recording is given up, or stopped, once there is room for the
@@ -747,11 +763,11 @@ impl Recorder {
         // publisher writes next, so after a block that ended there the recorder leaves
         // the recording alone for `RECORDER_TAIL_INTERVAL`. A block that ended for its
         // limit, its term or a padding frame did not reach the tail, and an empty
-        // scan wrote nothing: neither starts the interval. The clock is the wall's, so a difference below zero, a
-        // clock set back, counts as the interval passed.
+        // scan wrote nothing: neither starts the interval. The clock is the nano clock, which never goes
+        // back; a difference below zero counts as the interval passed all the same.
         let since = now.saturating_sub(live.tail_read);
         if !(0..spec::RECORDER_TAIL_INTERVAL).contains(&since) {
-            match live.take(spec::RECORDER_BLOCK_LIMIT, now) {
+            match live.take(spec::RECORDER_BLOCK_LIMIT, stamp) {
                 Taken::Wrote => {
                     live.tail_read = now;
                     worked = true;
@@ -830,7 +846,7 @@ impl Recorder {
             None
         } else {
             self.log
-                .stop(live.writer, now)
+                .stop(live.writer, self.epoch.at(now))
                 .ok()
                 .map(|descriptor| descriptor.stop_position())
         };

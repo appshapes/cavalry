@@ -10,7 +10,7 @@ use cavalry_shm::command_ring::Producer;
 use cavalry_shm::counters::CounterValue;
 use cavalry_shm::log::{BufferClaim, ClaimError, LogBuffers, TermAppender};
 
-use crate::conductor::{Shared, now_nanos};
+use crate::conductor::{Shared, epoch_time};
 use crate::error::ClientError;
 
 /// Why a claim or an offer did not write: Aeron's result codes, as a type the caller
@@ -291,7 +291,7 @@ impl Publication {
             let _ = self.producer.write(
                 command.command_type() as i32,
                 &self.scratch[..length],
-                now_nanos(),
+                epoch_time(),
             );
         }
     }

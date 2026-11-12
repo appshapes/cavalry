@@ -230,6 +230,9 @@ fn a_leader_steps_down_on_a_request_vote_or_a_commit_position_of_a_higher_term()
         assert_eq!(leader.election_state(), ElectionState::Init);
         assert_eq!(leader.role(), Role::Follower);
         assert_eq!(leader.counts().leader_step_downs, 1);
+        // The election that begins is for a term above its own, by either message.
+        assert_eq!(leader.election_cause(), ElectionCause::HigherTerm);
+        assert_eq!(leader.leader_gauge(), -1);
         assert_eq!(leader.counts().higher_terms_seen, 0);
         // No vote, and no term stored: the request is answered by nothing.
         assert_eq!(io.made, 0, "{:?}", io.calls);
