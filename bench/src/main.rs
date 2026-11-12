@@ -851,10 +851,13 @@ struct Samples {
 }
 
 /// Where a subscriber's samples stop being counted and start being kept in order
-/// ([`Samples`]): 256 ns. Under it are the one-way rows' bodies on `grip` up to their
-/// p99, so the counts stay in the cache; at it and above, a one-way row sends a few
-/// samples in a thousand to the buffer there, and most of them on `bench`, which keeps
-/// the line being written warm too.
+/// ([`Samples`]): 256 ns. Under it are the shared-memory one-way rows' bodies on both
+/// bench hosts, so the counts stay in the cache. At it and above, such a row sends the
+/// buffer a few samples in a thousand on `grip`. On `bench` the exclusive and client
+/// rows send fewer than one in a hundred, and the recorded row, whose p99 is above the
+/// bound, more (ADR 0090 has the rows). A UDP, multi-destination or link row's
+/// deliveries are all above it: such a row sends every sample to the buffer, which
+/// keeps the line being written warm.
 const NEAR_NS: usize = 256;
 
 impl Samples {

@@ -100,10 +100,15 @@ keep recording as they did too: their loops deliver nothing to another thread.
   lost for now because it puts a second pass and a choice into every loop for rows
   that show no cost: the stream of stores that cost the exclusive row is one sample
   a message at 18 million messages a second, and a row whose deliveries are above
-  256 ns writes a quarter of that or less. `bench`'s one-way rows are such rows, and
-  what the subscriber's buffer alone does to them is in the run of the pull request
-  that landed this. It is the first thing to try if such a row's tail
-  is ever the buffer's.
+  256 ns writes a quarter of that or less. The UDP, multi-destination and link rows
+  are such rows, on both hosts: each of their deliveries takes microseconds.
+  `bench`'s shared-memory one-way rows are not (Evidence). Their p50 is 140 to
+  170 ns. The exclusive row's p99.99 is under 256 ns, so it sends the buffer fewer
+  than one sample in ten thousand. The client row's p99 is under it, so it sends
+  fewer than one in a hundred. Only the recorded row's p99, 270 to 280 ns, is above
+  it, so it sends more than one in a hundred. What the subscriber's buffer alone does
+  to these rows is in the run of the pull request that landed this. Centred counts
+  are the first thing to try if a row's tail is ever the buffer's.
 
 ## Evidence
 
@@ -214,12 +219,15 @@ that landed it.
 - The two threads of a row now keep their samples in two ways, each for what its
   record must not delay. A reader of `bench/src/main.rs` finds the reason on
   `Samples`.
-- The bound of 256 ns is a choice for today's rows: under it are `grip`'s one-way
-  rows up to their p99. A row whose deliveries are all above it, as a UDP row's are,
-  keeps every sample in the buffer, which is the first form. What that costs such a
-  row was not measured apart from the publisher's part; `bench`'s one-way rows are
-  mostly above the bound, and their reading with this change is in the pull request
-  that landed it.
+- The bound of 256 ns is a choice for today's rows. Under it are the shared-memory
+  one-way rows' bodies on both hosts: `grip`'s up to their p99, and `bench`'s
+  exclusive and client rows up to their p99 too. `bench`'s recorded row has its p99
+  above the bound, so it sends the buffer more than one sample in a hundred, where
+  `grip`'s recorded row, whose p99 is 179 to 186 ns, sends fewer. A row whose
+  deliveries are all above the bound, as the UDP, multi-destination and link rows'
+  are, keeps every sample in the buffer, which is the first form. What that costs such
+  a row was not measured apart from the publisher's part. The reading of `bench`'s
+  one-way rows with this change is in the pull request that landed it.
 - A message row's late deliveries exist in order for the first time. A later change
   can keep what a histogram cannot: where in a loop its slowest samples were.
 - Revisit if a row is added whose loop cannot know its sample count at setup, if a
