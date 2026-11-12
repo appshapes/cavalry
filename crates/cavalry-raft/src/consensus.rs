@@ -1753,16 +1753,15 @@ impl Consensus {
 
     /// The member at `index` is on the live log: it reported with the catch-up flag,
     /// which a member sets once its append position has reached where its live image
-    /// joined. The leader stops the replay it runs to it and tells it so with stop
-    /// catch-up, on which the member removes its catch-up subscription. The member
-    /// reports with the flag until it has read one, so a stop catch-up that did not
-    /// leave is sent again on its next report, and the replay is asked to stop once.
+    /// joined. The leader ends what it held for it, as for a member that canvasses:
+    /// the replay it runs is asked to stop, once, and a replay it still owed the
+    /// member is dropped, since the member waits for none. It tells the member so with
+    /// stop catch-up, on which the member removes its catch-up subscription. The
+    /// member reports with the flag until it has read one, so a stop catch-up that
+    /// did not leave is sent again on its next report.
     fn stop_catchup<I: Io>(&mut self, index: usize, io: &mut I) -> Result<(), I::Fault> {
+        self.end_serving(index, io)?;
         let member = self.peer(index).id;
-        if self.serving(index) == (Serving::Running { end: None }) {
-            io.stop_replay(member)?;
-            self.serve(index, Serving::Stopping { next: None });
-        }
         io.send(
             member,
             &Message::StopCatchup {
@@ -1795,9 +1794,9 @@ impl Consensus {
         Ok(Serving::Running { end })
     }
 
-    /// Ends what this leader serves the member at `index`, which canvasses again or
-    /// asks for what the leader cannot replay: the replay it runs is stopped, and the
-    /// next it owed is dropped.
+    /// Ends what this leader serves the member at `index`, which canvasses again,
+    /// asks for what the leader cannot replay, or reports that it is on the live log:
+    /// the replay it runs is stopped, and the next it owed is dropped.
     fn end_serving<I: Io>(&mut self, index: usize, io: &mut I) -> Result<(), I::Fault> {
         let serving = match self.serving(index) {
             Serving::Idle | Serving::Next { .. } => Serving::Idle,
