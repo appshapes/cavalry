@@ -40,7 +40,10 @@ stored each duty cycle when the value has moved. Ids 140 and 141.
 leader, on both paths:** init, canvass, nominate, candidate ballot and follower
 ballot. From the state after them it holds the leader's id: the member's own from
 leader log replication, and the sender's from the new leadership term a member
-takes. It is −1 again from the init of the member's next election. So a member
+takes. It is −1 again from the init of the member's next election, and in the
+canvass a member goes back to when a follower log replication has ended: that
+canvass is no new election, the member has no leader until the next new leadership
+term, and the cause stays as it was. So a member
 whose leader is appointed reads −1 until it follows or leads, though its core has
 known the id all along: the gauge says who the member follows, and a reader that
 finds −1 knows the member has no leader, on either path.
@@ -86,12 +89,13 @@ what they return and decides nothing.
 
 ## Evidence
 
-- `crates/cavalry-raft/tests/election_gauges.rs`, six tests on one core driven by
-  hand.
+- `crates/cavalry-raft/tests/election_gauges.rs`, seven tests on one core driven
+  by hand.
   - A member that started reads no leader and cause 0, in init and in canvass, on
     both paths; the appointed core's `leader_member_id` is 0 while its gauge is −1.
-  - A follower names its leader from the new leadership term it takes, through its
-    follower states and closed, and none from the init of its next election. That
+  - A follower names its leader from the new leadership term it takes, in each of
+    follower replay, follower log init, follower log await and follower ready, and
+    closed, and none from the init of its next election. That
     election's cause is 1, and still 1 after it has closed under the leader's next
     term. Both paths.
   - A follower whose image is gone has cause 2, with `cluster.log_images_lost` at 1
@@ -101,9 +105,13 @@ what they return and decides nothing.
     once it takes its new leadership term.
   - On the appointed path a follower behind its leader's log fails its election,
     and the next has cause 5.
+  - A member that replicates a term it missed names its leader in follower log
+    replication, and none in the canvass it goes back to when the replication has
+    ended, with the cause and the count of its elections as they were.
 - `crates/cavalry-raft/tests/step_down.rs`, assertions in the tests that make each
   election: a closed leader that reads a term above its own, and a follower that
-  does, have cause 4 and name no leader from that call; a leader whose election
+  does, have cause 4 and name no leader from that call, the leader by a new
+  leadership term, a request vote or a commit position; a leader whose election
   fails has cause 5; a closed leader that loses its quorum has cause 3, and one in
   leader log replication has 5. A member whose leader is appointed reads a higher
   term, and an appointed leader loses its quorum: the cause stays 0, and each still
@@ -114,10 +122,9 @@ what they return and decides nothing.
   and cause 0. With the leader lost: each follower reads −1, and cause 2 or 1 by
   which loss its duty cycle met first, the one its counters counted.
 - Each rule taken out fails a test. With the gauge holding the core's leader id in
-  every state, four of the six tests on one core fail, the member that started
+  every state, five of the seven tests on one core fail, the member that started
   among them. With the store of cause 3, 4 or 5 taken out, the four tests of
   `step_down.rs` that make those elections fail.
-- `cargo test -p cavalry-raft`: 180 passed.
 - Not shown: `cavalry doctor` reading them, which is the next change.
 
 ## Consequences
