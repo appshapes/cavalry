@@ -909,7 +909,13 @@ int cavalry_stop_replay(cavalry_t *client,
  Opens the committed log of the cluster member on `client`'s driver at `position`,
  as the Rust `Cavalry::committed_log` does: 0 with `*log` the handle; 0 with `*log`
  null and no error set while the driver hosts no member that has a recording of its
- log; −1 with the error and `*log` null when the driver refuses or the client fails.
+ log, or while the member is between two recordings, its file of its log's
+ recordings naming another live recording than its counter does; −1 with the error
+ and `*log` null when the driver refuses or the client fails. The handle replays
+ the first recording in the member's file that holds `position`, and the member's
+ live recording when none does. A file that fails a check, or that cannot be read,
+ is −1 with `CAVALRY_ERR_IO`, 113, and a message that names the file and the check;
+ no replay is started for it (`spec/c-abi.md`; ADR 0103).
 
  # Safety
 
