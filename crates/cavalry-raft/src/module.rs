@@ -23,7 +23,7 @@ use cavalry_client::{
     Replay, Subscription,
 };
 use cavalry_log::terms::{NO_RECORDING, TermsError, TermsFile};
-use cavalry_proto::client_protocol::{FOLLOW_LENGTH, ReplayStopReason};
+use cavalry_proto::client_protocol::{ErrorCode, FOLLOW_LENGTH, ReplayStopReason};
 use cavalry_proto::cluster::{
     CONSENSUS_STREAM_ID, EMPTY_MEMBER, Endpoint, LOG_STREAM_ID, MAX_MEMBERS, MembersError, Message,
     Stream, parse_members,
@@ -60,11 +60,6 @@ const STOP_TIMEOUT: Duration = Duration::from_secs(1);
 const KEPT_RECORDINGS: usize = 1024;
 /// No sync asked for yet: no position a recording has written.
 const NO_SYNC_ASKED: i64 = -1;
-
-/// `start replay`'s error codes for a recording the catalog does not hold and for a
-/// position the recording does not hold (`spec/client-protocol.md`, "Commands").
-const RECORDING_NOT_HELD: i32 = 21;
-const POSITION_OUT_OF_RANGE: i32 = 23;
 
 const DOC: &str = "docs/reference/cluster.md#roles-and-the-election";
 const DOC_MEMBERS: &str = "docs/reference/cluster.md#members-and-streams";
@@ -736,12 +731,12 @@ impl Io for ClientIo {
             }
             // The catalog no longer holds the recording, or the recording no longer
             // holds the position, purged by retention: nothing to replay, as for a
-            // recording this member has forgotten.
-            Err(ClientError::Refused { raw_code, .. })
-                if raw_code == RECORDING_NOT_HELD || raw_code == POSITION_OUT_OF_RANGE =>
-            {
-                Ok(false)
-            }
+            // recording this member has forgotten (`spec/client-protocol.md`,
+            // "Commands", codes 21 and 23).
+            Err(ClientError::Refused {
+                code: Some(ErrorCode::UnknownRecording | ErrorCode::PositionOutOfRange),
+                ..
+            }) => Ok(false),
             Err(error) => Err(error.into()),
         }
     }
