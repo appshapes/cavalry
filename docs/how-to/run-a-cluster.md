@@ -126,6 +126,11 @@ committed once a quorum, two of three, has it on disk.
    192; it follows member 0; its last election began because the member started`,
    with the id of the member that leads now in place of 0.
 
+   Do this for a member that was stopped, or whose process was ended. Do not do it
+   for a member whose host lost power, or whose operating system crashed, while the
+   member ran: "When it does not work" says why, under "The member's host lost
+   power".
+
 ## How to verify it worked
 
 - `cavalry doctor` on each member's directory, with the member's two variables set as
@@ -208,6 +213,27 @@ committed once a quorum, two of three, has it on disk.
   directory is not as the member left it: files were removed from it, or it was put
   together from two directories. Start the member with the log directory it had,
   whole. If that directory is lost, do as for a directory with no file, above.
+- `cavalry run: member refused (log-forgotten)`: the member's `log-recordings` file
+  begins above position 0, or names more than 1,024 recordings that hold a part of
+  the log. A member makes one recording each time it joins a log, catches up or
+  leads a term, and it keeps 1,024 of them. Past that it forgets the oldest, which
+  `cluster.log_recordings_forgotten` counts while it runs. A member that starts
+  reads its log from position 0, and this one no longer can, so it does not start.
+  The cluster goes on while the other two run. To have three members again, do as
+  for a directory with no `log-recordings` file, above.
+- The member's host lost power, or its operating system crashed, while the member
+  ran. Do not start the member on that log directory again: leave it stopped, as for
+  a directory with no `log-recordings` file, above. Nothing refuses this start, so
+  the rule is yours to keep. After such a crash the member's last recording can end
+  in entries whose bytes were not written whole, and this version cannot tell them
+  from whole ones. A member that starts on them can hand them to the others, and a
+  service then reads an entry nobody sent. No counter tells this crash from a
+  process that was ended, which is safe: the driver counts both in
+  `recording.recovered`. When two of three hosts lost power together, no start
+  is known to be safe: start the cluster again as a new cluster when you cannot
+  accept that risk
+  ([ADR 0108](../decisions/0108-list-the-recordings-of-a-members-log-in-its-log-directory-and-start-a-member-on-the-log-it-kept.md),
+  "What a start does not hold").
 - `WARN cluster-no-leader`: the member is in an election and has no leader to follow.
   The message says which state its election is in and why it began, from
   `cluster.election_cause`. A leader needs the votes of two of three members. At a

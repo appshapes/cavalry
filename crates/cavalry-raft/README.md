@@ -81,14 +81,25 @@ commit path runs per message.
   recordings that hold the member's log in the file `log-recordings` in its log
   directory, each write synced, and counts a recording toward the append position
   only once a list names it. At a start it reads the list back against the driver's
-  catalog: the log is the recordings the list names, each to where it stopped. A
+  catalog: the log is the recordings the list names, each to where it stopped, and
+  it ends at the furthest of those ends. A
   truncation that the member's stop cut short is finished: the log ends where the
   recordings that are left end, and a term based above that leaves the record of
   terms. Nothing else shortens the log. A directory of another member's, a record
-  of terms that holds a term beside no list, and a catalog that holds anything
+  of terms that holds a term beside no list, a log that ends above 0 beside a
+  record of terms that holds no term, and a catalog that holds anything
   else in place of a listed recording refuse the start, with what to do: a member
   that started with a shorter log than it reported could vote for a candidate that
-  lacks a committed entry. `tests/restart.rs` stops a follower, the leader and all
+  lacks a committed entry. So does a log the member forgot a recording of, one
+  whose list begins above position 0 or names more than 1,024 recordings that hold
+  bytes (`RaftError::LogForgotten`): a start replays the log from position 0, and
+  this version takes no snapshot. The module counts what its list did in four
+  counters: `cluster.log_recordings_listed`, `cluster.log_recordings_unsynced`,
+  `cluster.log_recordings_forgotten` and `cluster.truncations_finished`. It does
+  not tell a member whose host lost power from one whose process was ended, and
+  the first can hold damaged entries at the end of its log: such a member is not
+  started again, by the operator's hand, until card 275 (ADR 0108, "What a start
+  does not hold"). `tests/restart.rs` stops a follower, the leader and all
   three members over three drivers and starts them again.
 - Counts every move of the election. `ElectionState` is the state machine
   `cluster_election` of `counters.toml`, and each of its transitions adds one to a
@@ -119,7 +130,8 @@ commit path runs per message.
   none, `cluster.election_cause`, why its last election began (ADR 0102),
   `cluster.append_position`, `cluster.commit_position`, `cluster.messages_rejected`,
   `cluster.log_recording_id`, the recording that holds its log, which its service
-  replays, and the twenty-two counts of `Counts::by_counter`. The
+  replays, the four counts of its list of its log's recordings (ADR 0108), and the
+  twenty-two counts of `Counts::by_counter`. The
   counters of sessions and of the service's version in `spec/cluster.md`, "Counters",
   come with those features. One thread calls `do_work()`; the leader's process appends
   with `offer(payload)`, up to 1,344 bytes an entry. A follower that leaves the log

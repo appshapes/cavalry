@@ -18,7 +18,10 @@ use cavalry_driver::Driver;
 use cavalry_log::recordings::RecordingsFile;
 use cavalry_raft::{ConsensusModule, ElectionState, RaftError, Refused, Role};
 use cavalry_shm::counters::CountersReader;
-use cavalry_shm::counters::generated::CLUSTER_LEADER_MEMBER_ID;
+use cavalry_shm::counters::generated::{
+    CLUSTER_LEADER_MEMBER_ID, CLUSTER_LOG_RECORDINGS_FORGOTTEN, CLUSTER_LOG_RECORDINGS_LISTED,
+    CLUSTER_LOG_RECORDINGS_UNSYNCED, CLUSTER_TRUNCATIONS_FINISHED,
+};
 
 mod ports;
 use ports::free_ports;
@@ -348,6 +351,25 @@ fn a_follower_that_stopped_starts_again_on_its_log_and_replicates_what_it_lacks(
     }
     assert_eq!(members[2].module.role(), Role::Follower);
     assert_eq!(members[2].module.counts().elections, 1);
+    // The counters of each member's record of its log's recordings (ADR 0108). The
+    // two that started on new directories counted the list their creation wrote
+    // and the one that names their recording; the member that started again
+    // created none, and counted each list that took a recording into its log. No
+    // write failed, no recording was forgotten, and no start finished a truncation.
+    for (index, member) in members.iter().enumerate() {
+        let listed = counter(member, CLUSTER_LOG_RECORDINGS_LISTED.0);
+        assert!(
+            listed >= if index == 2 { 1 } else { 2 },
+            "member {index} counted {listed} lists"
+        );
+        for id in [
+            CLUSTER_LOG_RECORDINGS_UNSYNCED,
+            CLUSTER_LOG_RECORDINGS_FORGOTTEN,
+            CLUSTER_TRUNCATIONS_FINISHED,
+        ] {
+            assert_eq!(counter(member, id.0), 0, "member {index}, counter {}", id.0);
+        }
+    }
 
     // Its record goes on from the recordings it named before the stop, and each one
     // after them begins at or above where its log ended then: nothing below was

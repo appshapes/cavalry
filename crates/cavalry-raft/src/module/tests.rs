@@ -2584,26 +2584,24 @@ fn a_start_reads_the_log_back_from_the_recordings_its_record_names() {
 /// A truncation purges a member's recordings from the last one back and writes the
 /// record after them, so a member that stopped inside one finds the record's last
 /// recordings gone from the catalog, and its log ends where the ones that are left
-/// end (ADR 0108). The record here begins at 320, its table having forgotten the
-/// recordings below. With every recording it names purged, the log ends at the
-/// record's floor, in a recording the table forgot. A record that names no
-/// recording ends the log at its floor too: the truncation finished, and the floor
-/// is where it cut.
+/// end (ADR 0108). With every recording it names purged, the log ends at the
+/// record's floor, 0. The log ends at the furthest end of the recordings, which is
+/// not the last one's when that one ends inside the one before it.
 #[test]
 fn a_start_ends_the_log_where_a_truncation_cut_short_left_its_recordings() {
-    let list = [listed(4, 320), listed(5, 416), listed(6, 512)];
+    let list = [listed(4, 0), listed(5, 96), listed(6, 192)];
     let whole = [
-        (4, stopped(320, 416)),
-        (5, stopped(416, 512)),
-        (6, stopped(512, 608)),
+        (4, stopped(0, 96)),
+        (5, stopped(96, 192)),
+        (6, stopped(192, 288)),
     ];
     for (held, end, kept_ids) in [
-        (3, 608, vec![4, 5, 6]),
-        (2, 512, vec![4, 5]),
-        (1, 416, vec![4]),
-        (0, 320, vec![]),
+        (3, 288, vec![4, 5, 6]),
+        (2, 192, vec![4, 5]),
+        (1, 96, vec![4]),
+        (0, 0, vec![]),
     ] {
-        let (read, stops) = read_back(320, &list, &whole[..held], 0);
+        let (read, stops) = read_back(0, &list, &whole[..held], 0);
         let (kept, read_end) = read.expect("the log is read back");
         assert_eq!(read_end, end, "{held} recordings held");
         assert_eq!(
@@ -2614,10 +2612,19 @@ fn a_start_ends_the_log_where_a_truncation_cut_short_left_its_recordings() {
         );
         assert!(stops.is_empty());
     }
-    let (read, _) = read_back(256, &[], &whole, 0);
-    assert_eq!(read.expect("an empty record"), (vec![], 256));
     let (read, _) = read_back(0, &[], &[], 0);
     assert_eq!(read.expect("a new member's record"), (vec![], 0));
+    // A replay's recording to 288 and the live one a catch-up joined at 192, cut
+    // to 256 by a truncation that stopped before it cut the replay's: the log ends
+    // at 288, the furthest end, and not at the last recording's.
+    let overlap = [listed(4, 0), listed(5, 96), listed(6, 192)];
+    let catalog = [
+        (4, stopped(0, 96)),
+        (5, stopped(96, 288)),
+        (6, stopped(192, 256)),
+    ];
+    let (read, _) = read_back(0, &overlap, &catalog, 0);
+    assert_eq!(read.expect("the log is read back").1, 288);
 }
 
 /// Anything else the catalog holds in place of a recording the record names
@@ -2709,37 +2716,103 @@ fn a_start_is_refused_when_the_catalog_does_not_hold_the_log_the_record_names() 
     }
 }
 
-/// A record names up to 1,026 recordings, the table's 1,024 and the two a member
-/// was making, and a start keeps the last 1,024 of them in the table, which does
-/// not grow; the log ends where the last one stopped.
+/// A member that has forgotten a recording of its log does not start on it (ADR
+/// 0108): a start replays the log from position 0, and this version takes no
+/// snapshot to begin from instead. A record whose floor is above 0 is refused
+/// before the catalog is read, whether it names recordings or none. So is a record
+/// that names more recordings that hold bytes than the table keeps, 1,024, which
+/// the start would have to forget: before anything is stopped when the stopped
+/// ones alone are too many, and after the stop when a recording that was still
+/// being made is the one too many. A record of 1,026 names of which two hold
+/// nothing is a log in 1,024 recordings, and starts.
 #[test]
-fn a_start_keeps_the_last_1024_recordings_its_record_names() {
+fn a_start_is_refused_on_a_log_the_member_forgot_a_recording_of() {
+    let refused = |read: KeptLog, floor: i64, recordings: usize| {
+        let refused = read.expect_err("a log that does not begin at 0, or in too many recordings");
+        assert!(
+            matches!(
+                &refused,
+                RaftError::LogForgotten { floor_position, recordings: named }
+                    if *floor_position == floor && *named == recordings
+            ),
+            "{refused}"
+        );
+        assert_eq!(refused.reason(), "log-forgotten");
+        let text = refused.to_string();
+        assert!(
+            text.contains("Do not start this member alone on a new log directory"),
+            "{text}"
+        );
+        assert!(
+            text.contains("docs/reference/durable-log.md#log-recordings"),
+            "{text}"
+        );
+        text
+    };
+    // A floor above 0, over three recordings and over none.
+    let list = [listed(4, 320), listed(5, 416), listed(6, 512)];
+    let catalog = [
+        (4, stopped(320, 416)),
+        (5, stopped(416, 512)),
+        (
+            6,
+            Cataloged::Held {
+                start: 512,
+                stream_id: LOG_STREAM_ID,
+                stop: None,
+            },
+        ),
+    ];
+    let (read, stops) = read_back(320, &list, &catalog, 608);
+    let text = refused(read, 320, 3);
+    assert!(
+        text.contains("begins at position 320 and not at 0"),
+        "{text}"
+    );
+    assert!(stops.is_empty(), "stopped {stops:?}");
+    let (read, _) = read_back(256, &[], &[], 0);
+    refused(read, 256, 0);
+
+    // 1,026 names, the most a record holds, every one a stopped recording that
+    // holds bytes: refused, and nothing is stopped.
     let count = i64::try_from(cavalry_log::recordings::MAX_ENTRIES).expect("a count");
     let list: Vec<ListedRecording> = (0..count).map(|id| listed(id, id * 32)).collect();
-    let catalog: Vec<(i64, Cataloged)> = (0..count)
+    let mut catalog: Vec<(i64, Cataloged)> = (0..count)
         .map(|id| (id, stopped(id * 32, id * 32 + 32)))
         .collect();
-    let mut stops = 0;
-    let (kept, end) = kept_log(
-        0,
-        &list,
-        |recording_id| {
-            Ok(catalog
-                .get(usize::try_from(recording_id).expect("an index"))
-                .map_or(Cataloged::Missing, |(_, found)| *found))
-        },
-        |_| {
-            stops += 1;
-            Ok(0)
-        },
-    )
-    .expect("the log is read back");
-    assert_eq!(end, count * 32);
+    let (read, stops) = read_back(0, &list, &catalog, 0);
+    let text = refused(read, 0, cavalry_log::recordings::MAX_ENTRIES);
+    assert!(
+        text.contains("names 1026 recordings that hold a part of its log, and a member keeps 1024"),
+        "{text}"
+    );
+    assert!(stops.is_empty(), "stopped {stops:?}");
+
+    // 1,024 stopped ones that hold bytes, one that holds nothing, and the last
+    // still being made. Stopped with bytes in it, it is the one too many.
+    let empty = usize::try_from(count - 2).expect("an index");
+    let last = usize::try_from(count - 1).expect("an index");
+    catalog[empty].1 = stopped((count - 2) * 32, (count - 2) * 32);
+    catalog[last].1 = Cataloged::Held {
+        start: (count - 2) * 32,
+        stream_id: LOG_STREAM_ID,
+        stop: None,
+    };
+    let mut list = list;
+    list[last].start_position = (count - 2) * 32;
+    let (read, stops) = read_back(0, &list, &catalog, count * 32);
+    refused(read, 0, KEPT_RECORDINGS + 1);
+    assert_eq!(stops, vec![count - 1], "the recording still being made");
+
+    // Stopped where it began, it holds nothing: the log is in 1,024 recordings,
+    // the table holds them without growing, and the member starts.
+    let (read, stops) = read_back(0, &list, &catalog, (count - 2) * 32);
+    let (kept, end) = read.expect("the log is read back");
+    assert_eq!(end, (count - 2) * 32);
     assert_eq!(kept.len(), KEPT_RECORDINGS);
-    assert_eq!(kept.capacity(), KEPT_RECORDINGS, "no growth");
-    assert_eq!(kept.front().map(|kept| kept.recording_id), Some(2));
-    assert_eq!(kept.back().map(|kept| kept.recording_id), Some(count - 1));
-    assert_eq!(stops, 0);
+    assert_eq!(kept.first().map(|kept| kept.recording_id), Some(0));
+    assert_eq!(kept.last().map(|kept| kept.recording_id), Some(count - 3));
+    assert_eq!(stops, vec![count - 1]);
 }
 
 /// The record of a member's log's recordings as its log directory holds it, read
@@ -2798,11 +2871,36 @@ fn the_record_names_a_recording_before_the_member_reports_a_position_it_holds() 
     );
     assert_eq!(pair.member.io.append_position(), 0, "told, not yet listed");
     assert_eq!(record_in(&pair.member_log_dir, 1), (0, 0, vec![]));
+    // What each has counted in `cluster.log_recordings_listed`: the list its
+    // creation wrote, and for the leader the list that names its recording.
+    assert_eq!(pair.member.io.list_counts.listed, 1);
+    assert_eq!(pair.leader.io.list_counts.listed, 2);
+
+    // A list the file refuses is a write that failed: counted, the recording
+    // stays out of the log, and the next cycle writes again.
+    pair.member.io.kept.push_back(Kept {
+        recording_id: -1,
+        start: 0,
+        stop: 0,
+    });
+    let unwritten = pair
+        .member
+        .io
+        .list_counted()
+        .expect_err("a list the file refuses");
+    assert_eq!(unwritten.reason(), "recordings");
+    assert_eq!(pair.member.io.list_counts.unsynced, 1);
+    assert_eq!(pair.member.io.list_counts.listed, 1);
+    assert_eq!(pair.member.io.append_position(), 0, "still not listed");
+    assert_eq!(record_in(&pair.member_log_dir, 1), (0, 0, vec![]));
+    pair.member.io.kept.pop_back();
 
     pair.member
         .io
         .list_counted()
         .expect("the record is written");
+    assert_eq!(pair.member.io.list_counts.listed, 2);
+    assert_eq!(pair.member.io.list_counts.unsynced, 1);
     let recording_id = pair
         .member
         .io
@@ -2820,6 +2918,21 @@ fn the_record_names_a_recording_before_the_member_reports_a_position_it_holds() 
         .list_counted()
         .expect("nothing is to be written");
     assert_eq!(pair.member.io.recordings.sequence(), 1, "no second write");
+    assert_eq!(pair.member.io.list_counts.listed, 2);
+
+    // A table at its bound forgets its oldest recording, and counts it.
+    assert_eq!(pair.member.io.list_counts.forgotten, 0);
+    let held = pair.member.io.kept.len();
+    for index in held..=KEPT_RECORDINGS {
+        let start = i64::try_from(index).expect("a position") * 32 + 4096;
+        pair.member.io.keep(Kept {
+            recording_id: 5000 + i64::try_from(index).expect("an id"),
+            start,
+            stop: start + 32,
+        });
+    }
+    assert_eq!(pair.member.io.kept.len(), KEPT_RECORDINGS);
+    assert_eq!(pair.member.io.list_counts.forgotten, 1);
 }
 
 /// A member stops and starts again on the log directory it kept (ADR 0089, ADR
@@ -2914,6 +3027,11 @@ fn a_member_starts_again_on_the_log_it_kept_and_takes_no_recording_it_never_coun
         (0, 1, vec![(first, 0)]),
         "the record was as the catalog holds the log, and was not written again"
     );
+    assert_eq!(
+        member.io.list_counts,
+        ListCounts::default(),
+        "a start that created nothing, wrote nothing and finished no truncation"
+    );
 }
 
 /// A member that stopped inside a truncation starts where its recordings end, and
@@ -2993,6 +3111,16 @@ fn stopped_inside_a_truncation(test: &str, record_written: bool) {
     );
     assert_eq!(member.io.log_leadership_term_id(), 1);
     assert_eq!(record_in(&member_log_dir, 1), (0, 3, vec![(first, 0)]));
+    // The start finished the truncation, counted once, and wrote the record only
+    // where the truncation had not.
+    assert_eq!(
+        member.io.list_counts,
+        ListCounts {
+            listed: u64::from(!record_written),
+            truncations_finished: 1,
+            ..ListCounts::default()
+        }
+    );
     assert_eq!(
         TermsFile::open(&member_log_dir)
             .expect("the record of terms opens")
@@ -3133,12 +3261,15 @@ fn a_member_whose_log_has_lost_its_record_of_terms_is_refused() {
 }
 
 /// A truncation that leaves no recording in the table still leaves the member
-/// knowing where its log ends, across a start (ADR 0108). The table holds three
-/// recordings that begin at 256 and above, having forgotten the ones below (ADR
-/// 0091); the test puts them there, and the driver has none of them, which is how a
-/// purge asked a second time finds a recording. Truncated to 128, the table is
-/// empty, the log ends at 128, and the record names no recording over a floor of
-/// 128. Started again, the member's log ends at 128.
+/// knowing where its log ends, and a start then refuses the log (ADR 0108). The
+/// table holds three recordings that begin at 256 and above, having forgotten the
+/// ones below (ADR 0091); the test puts them there, and the driver has none of
+/// them, which is how a purge asked a second time finds a recording. Truncated to
+/// 128, the table is empty, the log ends at 128, and the record names no recording
+/// over a floor of 128: without the floor the record would read back as a log that
+/// ends at 0. The member runs on. Started again, it is refused, with the position
+/// its log begins at: a start replays the log from 0, which this member forgot.
+/// Its directory is left as it was.
 #[test]
 fn a_truncation_that_empties_the_table_keeps_where_the_log_ends() {
     let pair = pair("truncate-all");
@@ -3162,16 +3293,36 @@ fn a_truncation_that_empties_the_table_keeps_where_the_log_ends() {
     member.io.stopped_at = 448;
     // The term of that log, based at 0: a log with no term is refused at a start.
     member.io.record_term(0, 0).expect("term 0 is recorded");
+    let listed_before = member.io.list_counts.listed;
     assert_eq!(member.io.truncate_log(128).expect("truncated"), Some(0));
     assert!(member.io.kept.is_empty());
     assert_eq!(member.io.append_position(), 128);
     assert_eq!(record_in(&member_log_dir, 1), (128, 1, vec![]));
+    assert_eq!(
+        member.io.list_counts.listed,
+        listed_before + 1,
+        "the truncation's write of the record is counted"
+    );
 
     member.close().expect("the member closes");
-    let mut member = ConsensusModule::start(&member_driver_dir, &member_log_dir, &members, 1)
-        .expect("the member starts on the log it kept");
-    assert_eq!(member.io.append_position(), 128);
-    assert!(member.io.kept.is_empty());
-    assert_eq!(member.io.log_leadership_term_id(), 0);
+    let refused = ConsensusModule::start(&member_driver_dir, &member_log_dir, &members, 1)
+        .expect_err("a log that does not begin at 0");
+    assert!(
+        matches!(
+            &refused,
+            RaftError::LogForgotten {
+                floor_position: 128,
+                recordings: 0
+            }
+        ),
+        "{refused}"
+    );
+    let text = refused.to_string();
+    assert!(
+        text.contains("begins at position 128 and not at 0"),
+        "{text}"
+    );
     assert_eq!(record_in(&member_log_dir, 1), (128, 1, vec![]));
+    let terms = TermsFile::open(&member_log_dir).expect("the record of terms");
+    assert_eq!(terms.log_leadership_term_id(), 0, "no term was deleted");
 }

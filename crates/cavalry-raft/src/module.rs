@@ -42,8 +42,9 @@ use cavalry_shm::counters::CounterId;
 use cavalry_shm::counters::generated::{
     CLUSTER_APPEND_POSITION, CLUSTER_COMMIT_POSITION, CLUSTER_ELECTION_CAUSE,
     CLUSTER_ELECTION_STATE, CLUSTER_LEADER_MEMBER_ID, CLUSTER_LEADERSHIP_TERM_ID,
-    CLUSTER_LOG_RECORDING_ID, CLUSTER_LOG_RECORDINGS_UNWRITTEN, CLUSTER_MESSAGES_REJECTED,
-    CLUSTER_ROLE, COUNTERS,
+    CLUSTER_LOG_RECORDING_ID, CLUSTER_LOG_RECORDINGS_FORGOTTEN, CLUSTER_LOG_RECORDINGS_LISTED,
+    CLUSTER_LOG_RECORDINGS_UNSYNCED, CLUSTER_LOG_RECORDINGS_UNWRITTEN, CLUSTER_MESSAGES_REJECTED,
+    CLUSTER_ROLE, CLUSTER_TRUNCATIONS_FINISHED, COUNTERS,
 };
 
 use crate::consensus::{
@@ -105,6 +106,17 @@ pub enum RaftError {
         /// Where the log the member's record of its recordings names ends; −1 where
         /// no `terms` file is there, and that record is not read.
         log_end: i64,
+    },
+    /// The member's log does not begin at position 0, or is in more recordings than
+    /// a member keeps (`spec/cluster.md`, "A member's start"; ADR 0108): the member
+    /// forgot a recording of its log while it ran, or would forget one as it
+    /// started. A start replays the log from position 0 into the module's own
+    /// state, since this version takes no snapshot, so the member does not start.
+    LogForgotten {
+        /// Where the recordings the member's record names begin: its floor position.
+        floor_position: i64,
+        /// How many recordings that hold bytes the record names.
+        recordings: usize,
     },
     /// The catalog in the member's log directory does not hold the member's log as
     /// its record of the log's recordings names it (`spec/cluster.md`, "A member's
@@ -191,14 +203,15 @@ pub enum ListedFound {
 
 impl RaftError {
     /// The reason's name: `members`, `member`, `recordings`, `terms-lost`,
-    /// `listed-recording`, `terms`, `catalog`, `client`, `poll`, `unsupported`, `payload-too-long`, `offer`,
-    /// `stop-timeout` or `log-recordings`.
+    /// `log-forgotten`, `listed-recording`, `terms`, `catalog`, `client`, `poll`,
+    /// `unsupported`, `payload-too-long`, `offer`, `stop-timeout` or `log-recordings`.
     pub const fn reason(&self) -> &'static str {
         match self {
             RaftError::Members(_) => "members",
             RaftError::Member(_) => "member",
             RaftError::Recordings(_) => "recordings",
             RaftError::TermsLost { .. } => "terms-lost",
+            RaftError::LogForgotten { .. } => "log-forgotten",
             RaftError::ListedRecording { .. } => "listed-recording",
             RaftError::Terms(_) => "terms",
             RaftError::Catalog(_) => "catalog",
@@ -254,6 +267,39 @@ impl core::fmt::Display for RaftError {
                      directory. Do not start this member alone on a new log directory, \
                      and do not put an older copy of the file in its place: either way \
                      the member would vote with no record of the votes it cast; see {DOC}"
+                )
+            }
+            RaftError::LogForgotten {
+                floor_position,
+                recordings,
+            } => {
+                write!(
+                    f,
+                    "member refused ({reason}): the member's record of its log's \
+                     recordings, the `log-recordings` file in its log directory, "
+                )?;
+                if *floor_position > 0 {
+                    write!(
+                        f,
+                        "begins at position {floor_position} and not at 0: the member \
+                         forgot the recordings of its log below it"
+                    )?;
+                } else {
+                    write!(
+                        f,
+                        "names {recordings} recordings that hold a part of its log, and a \
+                         member keeps {KEPT_RECORDINGS}: the member would forget the oldest"
+                    )?;
+                }
+                write!(
+                    f,
+                    ". A member that starts replays its log from position 0, which this \
+                     one cannot, so it does not start: its log directory has held more \
+                     recordings of the log than a member starts on. Leave the member \
+                     stopped: the cluster goes on while a quorum of the others runs, and \
+                     a cluster is brought back to its full count by starting it again as \
+                     a new cluster, every member on a new log directory. Do not start \
+                     this member alone on a new log directory; see {DOC_KEPT_LOG}"
                 )
             }
             RaftError::ListedRecording {
@@ -551,6 +597,9 @@ struct ClientIo {
     /// The member's record of its log's recordings, in its log directory: the ones
     /// kept and the ones being made that are part of the log (ADR 0108).
     recordings: RecordingsFile,
+    /// The counts of that record's writes, of the recordings the table forgot and of
+    /// the truncation the start finished, which the duty cycle stores (ADR 0108).
+    list_counts: ListCounts,
     /// Whether that record names `log_recording`, as [`Held::listed`].
     log_listed: bool,
     /// The replay this member started for each peer and has not yet said the end of,
@@ -743,6 +792,34 @@ fn write_list(
     Ok(recordings.write(floor, entries)?)
 }
 
+/// The module's counts of its record of the log's recordings (`spec/cluster.md`,
+/// "Counters"; ADR 0108), each stored in its counter at the end of a duty cycle.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+struct ListCounts {
+    /// `cluster.log_recordings_listed`: lists written and synced, the one a
+    /// creation writes included.
+    listed: u64,
+    /// `cluster.log_recordings_unsynced`: writes of the list that failed.
+    unsynced: u64,
+    /// `cluster.log_recordings_forgotten`: recordings the table forgot.
+    forgotten: u64,
+    /// `cluster.truncations_finished`: 1 when the member's start finished a
+    /// truncation that its stop had cut short.
+    truncations_finished: u64,
+}
+
+impl ListCounts {
+    /// Counts one write of the list: written and synced, or failed.
+    fn wrote(&mut self, written: &Result<(), RaftError>) {
+        let count = if written.is_ok() {
+            &mut self.listed
+        } else {
+            &mut self.unsynced
+        };
+        *count = count.saturating_add(1);
+    }
+}
+
 /// What the catalog holds under the id of a recording the member's record of its
 /// log's recordings names.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -783,8 +860,13 @@ enum Cataloged {
 ///
 /// Every recording is checked before any is stopped, so a start that is refused
 /// for what a recording is has changed nothing. A recording that holds nothing is
-/// left out of the table, as a truncation leaves it out. The table keeps the last
-/// [`KEPT_RECORDINGS`], as [`ClientIo::keep`] does.
+/// left out of the table, as a truncation leaves it out.
+///
+/// A start forgets nothing. A record whose floor is above 0, or one that names more
+/// recordings that hold bytes than the table keeps, [`KEPT_RECORDINGS`], is a log
+/// the member cannot replay from position 0, which a start does:
+/// [`RaftError::LogForgotten`]. The floor is refused before the catalog is read;
+/// the count is known only once the recordings still being made are stopped.
 fn kept_log(
     floor: i64,
     listed: &[ListedRecording],
@@ -796,6 +878,12 @@ fn kept_log(
         listed_start: entry.start_position,
         found,
     };
+    if floor > 0 {
+        return Err(RaftError::LogForgotten {
+            floor_position: floor,
+            recordings: listed.len(),
+        });
+    }
     // What each recording is, before anything is stopped: `None` from the first
     // one missing.
     let mut stops: Vec<Option<i64>> = Vec::with_capacity(listed.len());
@@ -827,8 +915,22 @@ fn kept_log(
             }
         }
     }
+    // The stopped recordings that hold bytes: more of them than the table keeps is
+    // refused here, before anything is stopped.
+    let stopped_holding = listed
+        .iter()
+        .zip(&stops)
+        .filter(|(entry, stop)| stop.is_some_and(|stop| stop > entry.start_position))
+        .count();
+    if stopped_holding > KEPT_RECORDINGS {
+        return Err(RaftError::LogForgotten {
+            floor_position: floor,
+            recordings: stopped_holding,
+        });
+    }
     let mut kept = VecDeque::with_capacity(KEPT_RECORDINGS);
     let mut end = floor;
+    let mut holding = 0usize;
     for (entry, stopped) in listed.iter().zip(stops) {
         if entry.start_position > end {
             return Err(refused(entry, ListedFound::Gap { end_position: end }));
@@ -839,15 +941,21 @@ fn kept_log(
         };
         end = end.max(stop);
         if stop > entry.start_position {
-            if kept.len() >= KEPT_RECORDINGS {
-                kept.pop_front();
+            holding += 1;
+            if kept.len() < KEPT_RECORDINGS {
+                kept.push_back(Kept {
+                    recording_id: entry.recording_id,
+                    start: entry.start_position,
+                    stop,
+                });
             }
-            kept.push_back(Kept {
-                recording_id: entry.recording_id,
-                start: entry.start_position,
-                stop,
-            });
         }
+    }
+    if holding > KEPT_RECORDINGS {
+        return Err(RaftError::LogForgotten {
+            floor_position: floor,
+            recordings: holding,
+        });
     }
     Ok((kept, end))
 }
@@ -921,7 +1029,9 @@ impl ClientIo {
         }
         let open = [replay.map(Held::as_listed), live.map(Held::as_listed)];
         let (replay, live) = (replay.is_some(), live.is_some());
-        write_list(&mut self.recordings, &self.kept, open, end)?;
+        let written = write_list(&mut self.recordings, &self.kept, open, end);
+        self.list_counts.wrote(&written);
+        written?;
         if let Some(held) = self.catchup_held.as_mut().filter(|_| replay) {
             held.listed = true;
         }
@@ -1015,14 +1125,17 @@ impl ClientIo {
     }
 
     /// Keeps a recording this member stopped, for the replays a leader serves. A full
-    /// table forgets its oldest: that recording stays in the driver's catalog, and
-    /// this member no longer replays it (ADR 0091). The record of the log's
-    /// recordings names it until its next write, which is of the table as it then
-    /// is; a member that starts meanwhile keeps the last [`KEPT_RECORDINGS`] the
-    /// record names, as here (ADR 0108).
+    /// table forgets its oldest, counted in `cluster.log_recordings_forgotten`: that
+    /// recording stays in the driver's catalog, and this member no longer replays it
+    /// (ADR 0091). The record of the log's recordings names it until its next write,
+    /// which is of the table as it then is, with a floor above 0. A member does not
+    /// start on a record that still names it, nor on one whose floor is above 0: a
+    /// member that has forgotten a recording runs on and does not start again on its
+    /// log directory ([`RaftError::LogForgotten`]; ADR 0108).
     fn keep(&mut self, kept: Kept) {
         if self.kept.len() >= KEPT_RECORDINGS {
             self.kept.pop_front();
+            self.list_counts.forgotten = self.list_counts.forgotten.saturating_add(1);
         }
         self.kept.push_back(kept);
     }
@@ -1272,12 +1385,14 @@ impl Io for ClientIo {
                 recording_id: recording.recording_id(),
                 start_position: self.log_base,
             };
-            write_list(
+            let written = write_list(
                 &mut self.recordings,
                 &self.kept,
                 [None, Some(own)],
                 self.stopped_at,
-            )?;
+            );
+            self.list_counts.wrote(&written);
+            written?;
             self.log_listed = true;
         }
         Ok(self.log_recording.as_ref().map(|recording| Log {
@@ -1485,7 +1600,9 @@ impl Io for ClientIo {
         // term based above the end of its log, which it then deletes (ADR 0108). With
         // no recording left in the table, the record's floor says where the log ends.
         let end = self.stopped_at.min(position);
-        write_list(&mut self.recordings, &self.kept, [None, None], end)?;
+        let written = write_list(&mut self.recordings, &self.kept, [None, None], end);
+        self.list_counts.wrote(&written);
+        written?;
         self.terms.truncate_above(position)?;
         self.stopped_at = end;
         Ok(Some(self.terms.log_leadership_term_id()))
@@ -1859,6 +1976,9 @@ struct Counters {
     /// `cluster.log_recordings_unwritten`: the duty cycles in which the file of the
     /// log's recordings could not be written (ADR 0103).
     log_recordings_unwritten: Stored,
+    /// The four counts of the record of the log's recordings in the log directory,
+    /// in the order of [`ListCounts`]'s fields (ADR 0108).
+    lists: [Stored; 4],
 }
 
 impl Counters {
@@ -1866,8 +1986,15 @@ impl Counters {
     /// store, which follows its add at once. `cluster.log_recording_id` is added and
     /// holds −1 before `cluster.commit_position` is added: a service reads the
     /// recording id only of a member whose commit position it has found
-    /// (`spec/cluster.md`, "The service").
-    fn add(client: &mut Cavalry, member_id: i32, core: &Consensus) -> Result<Self, ClientError> {
+    /// (`spec/cluster.md`, "The service"). `lists` is what the member's start
+    /// counted of its record of the log's recordings: the list a creation wrote, the
+    /// list the start wrote, and the truncation it finished.
+    fn add(
+        client: &mut Cavalry,
+        member_id: i32,
+        core: &Consensus,
+        lists: ListCounts,
+    ) -> Result<Self, ClientError> {
         let mut add = |id, name, value| Stored::add(client, id, name, member_id, value);
         Ok(Self {
             role: add(CLUSTER_ROLE, "cluster.role", role_code(core))?,
@@ -1927,6 +2054,28 @@ impl Counters {
                 "cluster.log_recordings_unwritten",
                 0,
             )?,
+            lists: [
+                add(
+                    CLUSTER_LOG_RECORDINGS_LISTED,
+                    "cluster.log_recordings_listed",
+                    count_value(lists.listed),
+                )?,
+                add(
+                    CLUSTER_LOG_RECORDINGS_UNSYNCED,
+                    "cluster.log_recordings_unsynced",
+                    count_value(lists.unsynced),
+                )?,
+                add(
+                    CLUSTER_LOG_RECORDINGS_FORGOTTEN,
+                    "cluster.log_recordings_forgotten",
+                    count_value(lists.forgotten),
+                )?,
+                add(
+                    CLUSTER_TRUNCATIONS_FINISHED,
+                    "cluster.truncations_finished",
+                    count_value(lists.truncations_finished),
+                )?,
+            ],
         })
     }
 
@@ -1937,8 +2086,15 @@ impl Counters {
     /// beside a recording id that does not hold it (`spec/cluster.md`, "The service").
     /// Returns the recording id the counter holds after it. `module` is the module's
     /// own two counts: the consensus messages it rejected, and the duty cycles in
-    /// which it could not write the file of its log's recordings.
-    fn store(&mut self, core: &Consensus, module: [u64; 2], log_recording_id: i64) -> i64 {
+    /// which it could not write the file of its log's recordings. `lists` is its
+    /// counts of the record of those recordings in its log directory.
+    fn store(
+        &mut self,
+        core: &Consensus,
+        module: [u64; 2],
+        lists: ListCounts,
+        log_recording_id: i64,
+    ) -> i64 {
         let [messages_rejected, log_recordings_unwritten] = module;
         let counts: Counts = core.counts();
         self.role.store(role_code(core));
@@ -1958,6 +2114,15 @@ impl Counters {
         self.messages_rejected.store(count_value(messages_rejected));
         self.log_recordings_unwritten
             .store(count_value(log_recordings_unwritten));
+        let values = [
+            lists.listed,
+            lists.unsynced,
+            lists.forgotten,
+            lists.truncations_finished,
+        ];
+        for (stored, value) in self.lists.iter_mut().zip(values) {
+            stored.store(count_value(value));
+        }
         self.log_recording_id.last
     }
 }
@@ -2095,10 +2260,30 @@ impl ConsensusModule {
                 .iter()
                 .zip(&kept)
                 .all(|(listed, kept)| listed.recording_id == kept.recording_id);
+        // What the start counts, stored once the member has its counters: the list
+        // a creation wrote, the list written here, and the truncation finished.
+        let mut list_counts = ListCounts {
+            listed: u64::from(recordings.was_created()),
+            ..ListCounts::default()
+        };
+        // A recording the catalog lacks at the end of the record is a truncation
+        // the member's stop cut short; one that holds nothing is not.
+        let cut_short = recordings.entries().iter().any(|listed| {
+            matches!(
+                cataloged(&catalog, listed.recording_id),
+                Ok(Cataloged::Missing)
+            )
+        });
         if !unchanged {
+            // A list that cannot be written ends the start before a term is deleted.
             write_list(&mut recordings, &kept, [None, None], stopped_at)?;
+            list_counts.listed += 1;
         }
+        let highest_term = terms.log_leadership_term_id();
         terms.truncate_above(stopped_at)?;
+        if cut_short || terms.log_leadership_term_id() != highest_term {
+            list_counts.truncations_finished = 1;
+        }
         let consensus =
             client.add_subscription(&endpoint_channel(&own.consensus), CONSENSUS_STREAM_ID)?;
         let mut peers = Vec::with_capacity(MAX_MEMBERS);
@@ -2116,7 +2301,7 @@ impl ConsensusModule {
         let replays = peers.iter().map(|_| None).collect();
         // Each counter holds the core's value from its add: −1 for the term and the
         // recording, before a duty cycle has run.
-        let counters = Counters::add(&mut client, member_id, &core)?;
+        let counters = Counters::add(&mut client, member_id, &core, list_counts)?;
         let started = Instant::now();
         Ok(Self {
             core,
@@ -2146,6 +2331,7 @@ impl ConsensusModule {
                 log_base: 0,
                 kept,
                 recordings,
+                list_counts,
                 log_listed: false,
                 replays,
                 log_subscription: None,
@@ -2246,6 +2432,7 @@ impl ConsensusModule {
         self.io.named = self.counters.store(
             &self.core,
             [self.messages_rejected, self.log_recordings_unwritten],
+            self.io.list_counts,
             log_recording_id,
         );
         let work = read + stepped?;
