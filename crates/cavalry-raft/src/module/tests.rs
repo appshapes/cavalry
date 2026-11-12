@@ -2340,7 +2340,7 @@ fn the_file_of_recordings_lists_a_catch_ups_recording_and_then_what_the_member_k
     assert!((synced..=three).contains(&to), "{to} {synced} {three}");
     assert!(
         !pair.member.io.recordings_tmp_path.exists(),
-        "written under its other name and renamed"
+        "no file is left under the other name"
     );
 
     // The member leaves the log. The file it writes for the recording it names next,

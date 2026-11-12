@@ -643,7 +643,10 @@ overlap after a catch-up (state 13; ADR 0095), and `purge
 recording` on every recording that begins above it, every recorded term whose base is
 above the position leaving its record of terms with them, so that it votes as a
 member of no term it no longer holds, and a message whose next term base log
-position is −1 truncates nothing. A truncation is counted in
+position is −1 truncates nothing. A member truncates only once
+`cluster.log_recording_id` holds −1, which the duty cycle that left the log stores:
+told to truncate before then, it cuts nothing, and the leader's next new
+leadership term tells it again ("The service"; ADR 0103). A truncation is counted in
 `cluster.log_truncations`. A reader that knows a commit position above the position
 it is told to truncate to truncates nothing and fails its election, counted in
 `cluster.truncations_refused` and `cluster.elections_failed`: a committed entry is
@@ -927,11 +930,17 @@ A member's consensus module writes one file in its driver's directory
 member's id in decimal: the recordings that hold the member's log, for the member's
 service ("The service"; ADR 0103). The module writes the file whole under the name
 `log-recordings-<member id>.tmp` and renames it over the file, so a reader reads one
-whole file or the one before it; a reader opens the file once and reads it to its
-end. The module writes it each time it names a recording, before it stores the
-recording's id in `cluster.log_recording_id`, and removes it when it closes. A file
-the module cannot write is its duty cycle's error, and the member stores −1 in the
-counter until a later cycle has written the file. All integers are little-endian.
+whole file or the one before it; a reader opens the file once and reads at most
+24,641 bytes of it, one byte more than the longest file, 40 + 1,025 × 24, so that a
+file longer than that fails a check whatever it holds, `recordings-length` when the
+checks before it pass ("What a reader rejects"); a file
+the operating system will not let it open or read is the reader's error, which
+names the file. The module writes it each time it names a recording, before it
+stores the recording's id in `cluster.log_recording_id`, and removes it when it
+closes. A file the module cannot write is its duty cycle's error, counted in
+`cluster.log_recordings_unwritten` each cycle it fails, and the member stores −1 in
+the counter until a later cycle has written the file. All integers are
+little-endian.
 
 The header, 40 bytes:
 
@@ -982,6 +991,7 @@ that a reader of a counters file knows which transition it saw.
 | `cluster.election_cause` | a gauge: why the member's last election began, the election it is in or the one that closed last: 0 the member started; 1 it followed and its leader said nothing for the leader heartbeat timeout; 2 it followed and its image of the leader's log was no longer available; 3 it led and its active members fell below a quorum; 4 its election had closed and a message carried a term above its own; 5 its election before failed (ADR 0077, ADR 0102) |
 | `cluster.commit_position` | a gauge: the commit position the member knows, the bound of its service's reading |
 | `cluster.log_recording_id` | a gauge: the id of the recording the member records the live log into, −1 while it records none; the recording its service replays, or reads below through the member's file of recordings, which the member writes before it stores an id here ("The service", "The log's recordings"; ADR 0103) |
+| `cluster.log_recordings_unwritten` | a duty cycle in which the member had a recording to name and could not write the file of its log's recordings, so that it stored −1 in `cluster.log_recording_id` ("The log's recordings"; ADR 0103) |
 | `cluster.append_position` | a gauge: the member's append position |
 | `cluster.elections` | an election begun, from init |
 | `cluster.terms_led` | a term the member began to lead, on entering leader log replication: `cluster.role` going to leader |

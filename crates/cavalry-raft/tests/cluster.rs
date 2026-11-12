@@ -21,8 +21,8 @@ use cavalry_shm::counters::CountersReader;
 use cavalry_shm::counters::generated::{
     CLUSTER_APPEND_POSITION, CLUSTER_COMMIT_POSITION, CLUSTER_ELECTION_CAUSE,
     CLUSTER_ELECTION_STATE, CLUSTER_ELECTION_STEPS, CLUSTER_ELECTIONS, CLUSTER_ELECTIONS_CLOSED,
-    CLUSTER_LEADER_MEMBER_ID, CLUSTER_LEADERSHIP_TERM_ID, CLUSTER_LOG_RECORDING_ID, CLUSTER_ROLE,
-    CLUSTER_TERMS_LED, SUBSCRIPTION_POSITION,
+    CLUSTER_LEADER_MEMBER_ID, CLUSTER_LEADERSHIP_TERM_ID, CLUSTER_LOG_RECORDING_ID,
+    CLUSTER_LOG_RECORDINGS_UNWRITTEN, CLUSTER_ROLE, CLUSTER_TERMS_LED, SUBSCRIPTION_POSITION,
 };
 
 struct TestDir(PathBuf);
@@ -1735,14 +1735,23 @@ fn a_member_names_no_recording_until_it_has_written_the_file_of_its_logs_recordi
         .iter()
         .position(|m| m.module.role() == Role::Leader)
         .expect("one member leads");
+    let offered_by = Instant::now() + Duration::from_secs(60);
     for index in 0..10u8 {
         loop {
+            assert!(
+                Instant::now() < offered_by,
+                "entry {index} was not taken: {:?}",
+                states(&members)
+            );
             match members[leader].module.offer(&[index]) {
                 Ok(()) => break,
                 Err(RaftError::Offer(Refused::BackPressured)) => {
-                    for member in members.iter_mut() {
-                        // The blocked member's cycle fails and still does its work.
-                        let _ = member.module.do_work();
+                    for (place, member) in members.iter_mut().enumerate() {
+                        // The blocked member's cycle fails and still does its work;
+                        // no other member's may fail.
+                        if let Err(error) = member.module.do_work() {
+                            assert_eq!(place, blocked, "member {place}: {error}");
+                        }
                     }
                 }
                 Err(error) => panic!("{error}"),
@@ -1762,6 +1771,15 @@ fn a_member_names_no_recording_until_it_has_written_the_file_of_its_logs_recordi
     assert!(members[blocked].module.log_recording_id().is_some());
     assert_eq!(counter(&members[blocked], CLUSTER_LOG_RECORDING_ID.0), -1);
     assert!(!file.exists());
+    // Each cycle that could not write the file is counted, on this member alone:
+    // what tells it from a member whose recording never started.
+    let unwritten = counter(&members[blocked], CLUSTER_LOG_RECORDINGS_UNWRITTEN.0);
+    assert!(unwritten > 0, "no failed write was counted");
+    for (index, member) in members.iter().enumerate() {
+        if index != blocked {
+            assert_eq!(counter(member, CLUSTER_LOG_RECORDINGS_UNWRITTEN.0), 0);
+        }
+    }
     let mut client =
         Cavalry::connect_to(&members[blocked].dir).expect("the service's client connects");
     assert!(
@@ -1794,6 +1812,17 @@ fn a_member_names_no_recording_until_it_has_written_the_file_of_its_logs_recordi
     );
     assert_eq!(log_recordings(&members[blocked]), (named, 0, Vec::new()));
     assert!(!tmp.exists(), "the file was renamed from its other name");
+    // The count stands where the last failed cycle left it.
+    let counted = counter(&members[blocked], CLUSTER_LOG_RECORDINGS_UNWRITTEN.0);
+    assert!(counted >= unwritten);
+    for member in members.iter_mut() {
+        member.module.do_work().expect("the member's duty cycle");
+    }
+    assert_eq!(
+        counter(&members[blocked], CLUSTER_LOG_RECORDINGS_UNWRITTEN.0),
+        counted,
+        "a cycle that has nothing to write counts nothing"
+    );
     let mut log = client
         .committed_log(0)
         .expect("the driver answers")

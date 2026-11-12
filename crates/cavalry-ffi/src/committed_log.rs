@@ -73,7 +73,13 @@ fn polling(function: &str) {
 /// Opens the committed log of the cluster member on `client`'s driver at `position`,
 /// as the Rust `Cavalry::committed_log` does: 0 with `*log` the handle; 0 with `*log`
 /// null and no error set while the driver hosts no member that has a recording of its
-/// log; −1 with the error and `*log` null when the driver refuses or the client fails.
+/// log, or while the member is between two recordings, its file of its log's
+/// recordings naming another live recording than its counter does; −1 with the error
+/// and `*log` null when the driver refuses or the client fails. The handle replays
+/// the first recording in the member's file that holds `position`, and the member's
+/// live recording when none does. A file that fails a check, or that cannot be read,
+/// is −1 with `CAVALRY_ERR_IO`, 113, and a message that names the file and the check;
+/// no replay is started for it (`spec/c-abi.md`; ADR 0103).
 ///
 /// # Safety
 ///
@@ -392,7 +398,9 @@ pub unsafe extern "C" fn cavalry_committed_log_failed_at(
 /// begin is written through `position`. The driver keeps a replay's image for the
 /// publication linger, 5 s, after the replay ends, and then withdraws it, read or
 /// not: a service that did not poll for that long after its member closed or left
-/// the log ends so. The entries from that position on were played and not
+/// the log ends so, and so does a handle on a recording below the member's live one
+/// while the member's commit position stays below that recording's stop for that
+/// long (ADR 0103). The entries from that position on were played and not
 /// delivered. A replay that failed is withdrawn so too, and both functions then
 /// return `true`, with this position the lower. Read it once
 /// `cavalry_committed_log_is_ended` returns `true`. A null `position` is refused as
