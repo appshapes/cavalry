@@ -344,7 +344,7 @@ pub const CLUSTER_TERMS_LED: CounterId = CounterId(111);
 /// `cluster.leader_quorum_losses`, a client counter: Times the active members of one cluster leader fell below a quorum, a member being active while its last report is younger than the leader heartbeat timeout, 10 s; the leader holds an election, beginning at init, a failed election when it was in leader log replication or leader ready (spec/cluster.md, The commit position; ADR 0082); key and label as cluster.elections.
 pub const CLUSTER_LEADER_QUORUM_LOSSES: CounterId = CounterId(112);
 
-/// `cluster.appointed_leader_behind`, a client counter: Members an appointed leader found holding a log ahead of its own, in canvass or in leader ready, once for each such member in an election. No member of this version counts it or adds it: a member elects its leader. It stays registered while cavalry doctor reads it, and leaves with that check (ADR 0100); key and label as cluster.elections.
+/// `cluster.appointed_leader_behind`, a client counter: Members an appointed leader found holding a log ahead of its own, in canvass or in leader ready, once for each such member in an election. No member of this version counts it or adds it: a member elects its leader. It stays registered while cavalry doctor reads it, and leaves with that check (ADR 0104); key and label as cluster.elections.
 pub const CLUSTER_APPOINTED_LEADER_BEHIND: CounterId = CounterId(113);
 
 /// `cluster.log_images_lost`, a client counter: Times one cluster follower's image of its leader's log was no longer available, so that it began its election again at init (spec/cluster.md, Roles and the election); key and label as cluster.elections.
@@ -428,7 +428,7 @@ pub const CLUSTER_LEADER_MEMBER_ID: CounterId = CounterId(140);
 /// `cluster.election_cause`, a client gauge: Why one cluster member's last election began, the election it is in or the one that closed last: 0 the member started; 1 it followed and its leader said nothing for the leader heartbeat timeout; 2 it followed and its image of the leader's log was no longer available; 3 it led and its active members fell below a quorum; 4 its election had closed and a message carried a term above its own; 5 its election before failed (spec/cluster.md, Counters; ADR 0077, ADR 0102); key: member id (i32), little-endian; label text: the member id in decimal.
 pub const CLUSTER_ELECTION_CAUSE: CounterId = CounterId(141);
 
-/// `cluster.log_recordings_unwritten`, a client counter: Duty cycles in which one cluster member had a recording of its log to name and could not write the file of its log's recordings, log-recordings-<member id> in its driver directory: the member stored -1 in cluster.log_recording_id, named no recording to a service, and tried again in the next cycle (spec/cluster.md, The log's recordings, and Counters; ADR 0103); key: member id (i32), little-endian; label text: the member id in decimal.
+/// `cluster.log_recordings_unwritten`, a client counter: Duty cycles in which one cluster member had a recording of its log to name and could not write the file of its log's recordings, whose name is log-recordings- and the member's id, in its driver directory: the member stored -1 in cluster.log_recording_id, named no recording to a service, and tried again in the next cycle (spec/cluster.md, The log's recordings, and Counters; ADR 0103); key: member id (i32), little-endian; label text: the member id in decimal.
 pub const CLUSTER_LOG_RECORDINGS_UNWRITTEN: CounterId = CounterId(143);
 
 /// Every entry of `counters.toml`, in the file's order.
@@ -1342,7 +1342,7 @@ pub const COUNTERS: &[CounterDef] = &[
         name: "cluster.appointed_leader_behind",
         kind: Kind::Counter,
         scope: Scope::Client,
-        doc: "Members an appointed leader found holding a log ahead of its own, in canvass or in leader ready, once for each such member in an election. No member of this version counts it or adds it: a member elects its leader. It stays registered while cavalry doctor reads it, and leaves with that check (ADR 0100); key and label as cluster.elections.",
+        doc: "Members an appointed leader found holding a log ahead of its own, in canvass or in leader ready, once for each such member in an election. No member of this version counts it or adds it: a member elects its leader. It stays registered while cavalry doctor reads it, and leaves with that check (ADR 0104); key and label as cluster.elections.",
         doctor: "No member of this version has this counter: it counted a member that an appointed leader found holding more of the log than itself, before a cluster elected its leader. A member that has it is of an earlier version: run every member of a cluster at one version.",
     },
     CounterDef {
@@ -1566,7 +1566,7 @@ pub const COUNTERS: &[CounterDef] = &[
         name: "cluster.log_recordings_unwritten",
         kind: Kind::Counter,
         scope: Scope::Client,
-        doc: "Duty cycles in which one cluster member had a recording of its log to name and could not write the file of its log's recordings, log-recordings-<member id> in its driver directory: the member stored -1 in cluster.log_recording_id, named no recording to a service, and tried again in the next cycle (spec/cluster.md, The log's recordings, and Counters; ADR 0103); key: member id (i32), little-endian; label text: the member id in decimal.",
+        doc: "Duty cycles in which one cluster member had a recording of its log to name and could not write the file of its log's recordings, whose name is log-recordings- and the member's id, in its driver directory: the member stored -1 in cluster.log_recording_id, named no recording to a service, and tried again in the next cycle (spec/cluster.md, The log's recordings, and Counters; ADR 0103); key: member id (i32), little-endian; label text: the member id in decimal.",
         doctor: "A member that counts here cannot write in its driver's directory, and no service beside it reads the log while that lasts. The member's own error names the file and the cause: check that the driver directory is writable by the member's user and that its file system has room. The count stops rising once a cycle has written the file, and cluster.log_recording_id then names the recording. A member started with cavalry run tries a cycle that fails again every 100 ms, so the count rises by about ten a second, and after 10 s of such cycles cavalry run gives the member up and stops it: start it again once its directory can be written.",
     },
 ];

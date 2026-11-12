@@ -89,14 +89,21 @@ pub enum RaftError {
     /// the recording that was to join the member's log is no part of it yet, and the
     /// next cycle writes the record again.
     Recordings(RecordingsError),
-    /// The member's log directory holds a log and a record of terms that holds no
-    /// term (`spec/cluster.md`, "A member's start"; ADR 0108): the `terms` file was
-    /// removed or replaced, and with it went the terms of the log and the votes the
-    /// member cast. A member records a term before its record of the log's
-    /// recordings names a recording of that term, and a truncation that deletes
-    /// every term has cut the log to nothing first, so no stop leaves this.
+    /// The member's log directory holds a log and no record of its terms
+    /// (`spec/cluster.md`, "A member's start"; ADR 0104, ADR 0108): the `terms` file
+    /// was removed or replaced, and with it went the terms of the log and the votes
+    /// the member cast. Either the file is not there and the catalog holds a
+    /// recording of the log's stream, or the file holds no term and the member's
+    /// record of its recordings names a log. A member records a term before it
+    /// records an entry, and a truncation that deletes every term has cut the log to
+    /// nothing first, so no stop leaves either.
     TermsLost {
-        /// Where the log the directory holds ends.
+        /// A recording of the log that the directory holds: the first of the log's
+        /// stream in the catalog where no `terms` file is there, else the first the
+        /// member's record of its recordings names, −1 where it names none.
+        recording_id: i64,
+        /// Where the log the member's record of its recordings names ends; −1 where
+        /// no `terms` file is there, and that record is not read.
         log_end: i64,
     },
     /// The catalog in the member's log directory does not hold the member's log as
@@ -215,19 +222,40 @@ impl core::fmt::Display for RaftError {
             }
             RaftError::Member(error) => write!(f, "member refused ({reason}): {error}"),
             RaftError::Recordings(error) => write!(f, "member stopped ({reason}): {error}"),
-            RaftError::TermsLost { log_end } => write!(
-                f,
-                "member refused ({reason}): the member's log directory holds its log to \
-                 position {log_end}, and its record of terms, the `terms` file, holds no \
-                 term: that file was removed or replaced. The terms of the log and the \
-                 votes the member cast were in it, and the member does not start without \
-                 them. Start it with the log directory it had, whole, as its driver left \
-                 it. If the file is lost, leave the member stopped: the cluster goes on \
-                 while a quorum of the others runs, and a cluster is brought back to its \
-                 full count by starting it again as a new cluster, every member on a new \
-                 log directory. Do not start this member alone on a new log directory; \
-                 see {DOC}"
-            ),
+            RaftError::TermsLost {
+                recording_id,
+                log_end,
+            } => {
+                write!(
+                    f,
+                    "member refused ({reason}): the member's log directory holds "
+                )?;
+                if *log_end >= 0 {
+                    write!(
+                        f,
+                        "its log to position {log_end}, and its record of terms, the \
+                         `terms` file, holds no term: that file was removed or replaced"
+                    )?;
+                } else {
+                    write!(
+                        f,
+                        "recording {recording_id} of a cluster's log and no `terms` file: \
+                         that file was removed"
+                    )?;
+                }
+                write!(
+                    f,
+                    ". The terms of the log and the votes the member cast were in it, and \
+                     the member does not start without them. Start it with the log \
+                     directory it had, whole, as its driver left it. If the file is lost, \
+                     leave the member stopped: the cluster goes on while a quorum of the \
+                     others runs, and a cluster is brought back to its full count by \
+                     starting it again as a new cluster, every member on a new log \
+                     directory. Do not start this member alone on a new log directory, \
+                     and do not put an older copy of the file in its place: either way \
+                     the member would vote with no record of the votes it cast; see {DOC}"
+                )
+            }
             RaftError::ListedRecording {
                 recording_id,
                 listed_start,
@@ -618,6 +646,23 @@ fn stop_recording(client: &mut Cavalry, recording: &Recording) -> Result<i64, Ra
         }
         std::thread::sleep(Duration::from_micros(50));
     }
+}
+
+/// The first recording of the cluster's log stream that `catalog` holds, `None` when
+/// it holds none. A member records its log, and the replays it replicates and catches
+/// up by, on that stream alone, and records a term before it records an entry: so a
+/// log directory whose catalog holds such a recording has been a member's. Read once,
+/// at the member's start.
+fn log_recording_in(catalog: &CatalogReader) -> Result<Option<i64>, RaftError> {
+    let slots = i64::try_from(catalog.slots()?).unwrap_or(i64::MAX);
+    for recording_id in 0..slots {
+        if let Some(descriptor) = catalog.get(recording_id)?
+            && descriptor.stream_id() == LOG_STREAM_ID
+        {
+            return Ok(Some(recording_id));
+        }
+    }
+    Ok(None)
 }
 
 /// Takes the recording the driver has started for an armed `start recording`, and
@@ -1994,6 +2039,19 @@ impl ConsensusModule {
         // the `terms` file, which is created when it is not there, so that a
         // directory the module refuses is left as it was.
         let catalog = CatalogReader::open(log_dir.as_ref())?;
+        // A `terms` file that is not there is created, for a member on a new log
+        // directory. A directory that holds a recording of the log is not new: its
+        // member recorded a term before it recorded an entry, so its `terms` file was
+        // removed, and with it the votes the member cast. It is refused before the
+        // file is created, so that the directory is left as it was (ADR 0104).
+        if !TermsFile::path_in(log_dir.as_ref()).exists()
+            && let Some(recording_id) = log_recording_in(&catalog)?
+        {
+            return Err(RaftError::TermsLost {
+                recording_id,
+                log_end: -1,
+            });
+        }
         let mut terms = TermsFile::open(log_dir.as_ref())?;
         // A member whose record holds a term holds a log, and is given no new record
         // of its recordings: an empty one would say that it holds none, and the
@@ -2025,6 +2083,7 @@ impl ConsensusModule {
         // recorded beside, and the member's votes went with it.
         if stopped_at > 0 && terms.log_leadership_term_id() == -1 {
             return Err(RaftError::TermsLost {
+                recording_id: kept.front().map_or(-1, |first| first.recording_id),
                 log_end: stopped_at,
             });
         }

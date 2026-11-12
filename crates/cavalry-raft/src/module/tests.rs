@@ -3090,10 +3090,29 @@ fn a_member_whose_log_has_lost_its_record_of_terms_is_refused() {
     member.close().expect("the member closes");
     std::fs::remove_file(TermsFile::path_in(&member_log_dir)).expect("the terms file is removed");
 
+    // No `terms` file, and the catalog holds the member's recording of the log: the
+    // start is refused before a file is made, so the directory is left as it was.
+    let missing = ConsensusModule::start(&member_driver_dir, &member_log_dir, &members, 1)
+        .expect_err("a log and no terms file");
+    assert!(
+        matches!(&missing, RaftError::TermsLost { recording_id, log_end: -1 } if *recording_id >= 0),
+        "{missing}"
+    );
+    assert_eq!(missing.reason(), "terms-lost");
+    let text = missing.to_string();
+    assert!(text.contains("and no `terms` file"), "{text}");
+    assert!(
+        !TermsFile::path_in(&member_log_dir).exists(),
+        "the refusal made no terms file"
+    );
+
+    // A `terms` file that holds no term, as one put in the place of the member's: the
+    // member's record of its recordings still names its log, to where it ends.
+    drop(TermsFile::open(&member_log_dir).expect("an empty terms file is made"));
     let refused = ConsensusModule::start(&member_driver_dir, &member_log_dir, &members, 1)
         .expect_err("a log and no term");
     assert!(
-        matches!(&refused, RaftError::TermsLost { log_end } if *log_end == one),
+        matches!(&refused, RaftError::TermsLost { log_end, .. } if *log_end == one),
         "{refused}"
     );
     assert_eq!(refused.reason(), "terms-lost");
@@ -3107,7 +3126,7 @@ fn a_member_whose_log_has_lost_its_record_of_terms_is_refused() {
         text.contains("docs/reference/cluster.md#roles-and-the-election"),
         "{text}"
     );
-    // Asked again, it is refused again: the file the first start made holds no term.
+    // Asked again, it is refused again: the file still holds no term.
     let again = ConsensusModule::start(&member_driver_dir, &member_log_dir, &members, 1)
         .expect_err("a log and no term");
     assert_eq!(again.reason(), "terms-lost");

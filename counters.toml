@@ -1204,7 +1204,7 @@ id = 113
 name = "cluster.appointed_leader_behind"
 kind = "counter"
 scope = "client"
-doc = "Members an appointed leader found holding a log ahead of its own, in canvass or in leader ready, once for each such member in an election. No member of this version counts it or adds it: a member elects its leader. It stays registered while cavalry doctor reads it, and leaves with that check (ADR 0100); key and label as cluster.elections."
+doc = "Members an appointed leader found holding a log ahead of its own, in canvass or in leader ready, once for each such member in an election. No member of this version counts it or adds it: a member elects its leader. It stays registered while cavalry doctor reads it, and leaves with that check (ADR 0104); key and label as cluster.elections."
 doctor = "No member of this version has this counter: it counted a member that an appointed leader found holding more of the log than itself, before a cluster elected its leader. A member that has it is of an earlier version: run every member of a cluster at one version."
 
 [[counter]]
@@ -1434,7 +1434,7 @@ id = 143
 name = "cluster.log_recordings_unwritten"
 kind = "counter"
 scope = "client"
-doc = "Duty cycles in which one cluster member had a recording of its log to name and could not write the file of its log's recordings, log-recordings-<member id> in its driver directory: the member stored -1 in cluster.log_recording_id, named no recording to a service, and tried again in the next cycle (spec/cluster.md, The log's recordings, and Counters; ADR 0103); key: member id (i32), little-endian; label text: the member id in decimal."
+doc = "Duty cycles in which one cluster member had a recording of its log to name and could not write the file of its log's recordings, whose name is log-recordings- and the member's id, in its driver directory: the member stored -1 in cluster.log_recording_id, named no recording to a service, and tried again in the next cycle (spec/cluster.md, The log's recordings, and Counters; ADR 0103); key: member id (i32), little-endian; label text: the member id in decimal."
 doctor = "A member that counts here cannot write in its driver's directory, and no service beside it reads the log while that lasts. The member's own error names the file and the cause: check that the driver directory is writable by the member's user and that its file system has room. The count stops rising once a cycle has written the file, and cluster.log_recording_id then names the recording. A member started with cavalry run tries a cycle that fails again every 100 ms, so the count rises by about ten a second, and after 10 s of such cycles cavalry run gives the member up and stops it: start it again once its directory can be written."
 
 # A cluster member's role (spec/cluster.md, "Roles and the election"; ADR 0052, feature

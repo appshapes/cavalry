@@ -28,6 +28,18 @@ committed once a quorum, two of three, has it on disk.
 - A log directory for each member. A new cluster starts on log directories that hold
   no cluster yet. A member that was stopped starts again on the log directory it had,
   and on no other (step 7).
+- Each member's log directory on storage that outlives the member's host or
+  container: a volume, not the container's own file system. The directory holds the
+  member's votes and its log. A member that comes back on an empty one, beside the
+  others, votes with no record of them, and with a member whose log is behind it can
+  elect a leader that lacks an entry the cluster committed. `cavalry run` cannot tell
+  an empty directory from a new cluster's, so nothing stops it: never start one
+  member alone on a new log directory.
+- Every member on this version of Cavalry. A member of a version in which the member
+  with the lowest id was the leader casts no vote, so the two are not one cluster,
+  and a log directory that version wrote is refused here. To move a cluster from
+  that version, stop every member and start the cluster again as a new one, every
+  member on a new log directory.
 
 ## Steps
 
@@ -81,8 +93,8 @@ committed once a quorum, two of three, has it on disk.
    election closed`, with the same two positions once their recorders have synced,
    which each member asks its recorder for as soon as an entry is written, and name
    the leader: `; it follows member 2; its last election began because the member
-   started`. The term is 1 where two members asked for votes at the same moment and
-   a second ballot was taken.
+   started`. The term is 1 or more where two members asked for votes at the same
+   moment and another ballot was taken.
 
 5. Stop a follower with Ctrl-C or SIGTERM. It prints `cavalry run: stopping` and
    `cavalry run: closed`. The other two are a quorum and go on.
@@ -150,7 +162,8 @@ committed once a quorum, two of three, has it on disk.
   term's first entry, which the leader appended when its election closed. Every
   member's recording gives the same line. `just replay-check` is that check as a gate:
   three members replicate and commit 100,000 entries whose payloads carry a hash
-  chain, each member's recording is replayed through a driver of its own, and the gate
+  chain, each member's log is replayed through a driver of its own, across its
+  recordings where it holds two, and the gate
   fails unless the three members' lines hash the same and their payloads are the ones
   the leader was offered, in order (`scripts/replay-check.sh`).
 - A program beside a member reads the entries as the cluster commits them:
@@ -184,10 +197,11 @@ committed once a quorum, two of three, has it on disk.
   its own log directory. If the file is damaged, do as for a directory with no
   file, above.
 - `cavalry run: member refused (terms-lost)`: the member's log directory holds its
-  log and a `terms` file that holds no term. The file was removed or replaced, and
-  the member's votes and the terms of its log were in it. Start the member with the
-  log directory it had, whole. If the file is lost, do as for a directory with no
-  `log-recordings` file, above.
+  log and no record of its terms. Either there is no `terms` file, or the file holds
+  no term: it was removed or replaced, and the member's votes and the terms of its
+  log were in it. Start the member with the log directory it had, whole. If the file
+  is lost, do as for a directory with no `log-recordings` file, above. Do not put an
+  older copy of the file back.
 - `cavalry run: member refused (listed-recording)`: the `catalog` in the member's
   log directory does not hold the recordings that its `log-recordings` file names.
   The message names the recording and what the catalog holds in its place. The
@@ -230,9 +244,9 @@ committed once a quorum, two of three, has it on disk.
   9022 and 9023 for member 2 in step 1, and the member's host must reach the
   leader's `consensus` endpoint.
 - `WARN cluster-quorum-lost`: the leader heard from fewer than two of three members
-  within 10 s, and nothing was committed while that lasted. A leader that elects
-  stopped leading each time and held an election, and the finding is on a member that
-  leads again. Check that two members run and that each reaches the leader's consensus
+  within 10 s, and nothing was committed while that lasted. The leader stopped
+  leading each time and held an election, and the finding is on a member that leads
+  again. Check that two members run and that each reaches the leader's consensus
   endpoint.
 - `WARN cluster.messages_rejected`: the member rejected consensus messages it cannot
   read, and acted on none of them. Another member sends them from another version of
