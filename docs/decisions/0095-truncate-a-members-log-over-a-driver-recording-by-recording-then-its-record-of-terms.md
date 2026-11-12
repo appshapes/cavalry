@@ -61,7 +61,8 @@ core holds no member in canvass for a truncation.
 is a command the driver answers with success, and the table already says so, so
 it is not sent. A purge whose answer was never read is answered the second time
 with "unknown recording", which the module takes as done. A fault part way
-returns with the table cut as far as the commands went.
+returns with the table cut as far as the commands went; Consequences say what the
+member reports until it is asked again.
 
 **Recordings first, the record after.** A member over a driver does not start on a
 log it kept yet. When it does, what it reads back is the record of terms and the
@@ -121,9 +122,10 @@ order would leave bytes above the record's last term that nothing names.
   of pull request 241 noted the mark; a truncation is what makes the position
   repeat. With the reset taken out the test fails: the mark reads 192.
 - `cargo test -p cavalry-raft`: 166 passed.
-- Not shown: a command that faults part way, which is read from the code; and a
-  stop between the two steps, which Consequences leaves to the change that starts a
-  member on a kept log.
+- Not shown: a command that faults part way, which is read from the code and which
+  Consequences leave to the fault-injection tests of ADR 0077; and a stop between
+  the two steps, which Consequences leave to the change that starts a member on a
+  kept log.
 
 ## Consequences
 
@@ -131,6 +133,23 @@ order would leave bytes above the record's last term that nothing names.
   a member started with `cavalry run` and the election is card 267's fix and the
   change that moves the module to `Consensus::with_election`, with the
   fault-injection tests of ADR 0077.
+- A truncation that faults part way leaves a window. Suppose a purge or a cut
+  succeeds and a later command faults: a response timeout, or a refusal of the
+  driver's. The call returns with the recordings and the table cut as far as the
+  commands went, and with where the log ends (`stopped_at`) and the record of terms
+  as they were. Until the leader's next new leadership term asks again and the
+  truncation completes, the member reports an append position and a log term that
+  its recordings may no longer hold. Under ADR 0083 it canvasses with them, votes
+  with them and may nominate itself on them. A replay it serves of a position
+  between where its table now ends and the end it reports finds no recording and
+  starts nothing, so it sends no byte that was cut.
+- That window is closed by the change that moves the module to
+  `Consensus::with_election`, change 5 of ADR 0100, with the fault-injection tests
+  of ADR 0077, change 7 of ADR 0100. It cannot open while the module's core is
+  appointed, because that core never asks for a truncation. Change 5 is the first
+  in which a member over a driver truncates. Change 7 is where a truncation that
+  faults part way is tested, with what the member reports until the leader asks
+  again.
 - A recording the table has forgotten, when a member stopped more than 1,024 in
   one process, is not cut: it stays in the catalog above the position. Nothing
   reads it until a member starts on a kept log; the change that fills the table
@@ -142,6 +161,9 @@ order would leave bytes above the record's last term that nothing names.
   truncates is what no quorum recorded since it last followed a leader.
 - Revisit when a member over a driver starts on a kept log: the order of the two
   steps is then what a start relies on, and needs a test that stops between them.
+- Revisit if the fault-injection tests of ADR 0077 show a member elected on an end
+  that its recordings no longer hold: the core then holds a member in canvass while
+  a truncation is pending, the other choice ADR 0083 left.
 
 ## References
 
@@ -155,3 +177,7 @@ order would leave bytes above the record's last term that nothing names.
   [ADR 0094](0094-record-a-members-replays-over-a-driver-and-count-the-live-recording-once-the-log-reaches-it.md),
   the two that overlap.
 - [ADR 0031](0031-truncate-purge-and-delete-a-stopped-recording.md), the two commands.
+- [ADR 0100](0100-move-the-module-to-the-election-in-ordered-changes-around-one-that-takes-the-appointed-path-out.md),
+  change 5, the move, and change 7, the fault-injection tests of
+  [ADR 0077](0077-elect-the-leader-by-vote-and-close-a-ballot-on-the-members-heard.md),
+  where a truncation that faults part way is tested.

@@ -200,6 +200,9 @@ election does more, it does this instead, until the step that builds it (ADR 008
   log up and replay it (ADR 0091), record the replays a member asks for and catch
   up (ADR 0094), and truncate (ADR 0095). The module's own member is still
   appointed and asks for none of it, until the change that moves it (ADR 0081).
+  A truncation whose command faults after an earlier one succeeded leaves the
+  member reporting the end and the log term it had until the leader asks again;
+  ADR 0095's Consequences say where that is tested.
 - A leader answers a member for the term the member reports, and does not check that
   its own record of terms holds that term. A member that recorded a term which fewer
   than a quorum recorded keeps it in its record under a leader whose record has none.
