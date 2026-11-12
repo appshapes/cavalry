@@ -37,9 +37,19 @@ nothing depends on it.
   monotonic clock through `quanta` ([ADR 0028](../docs/decisions/0028-stamp-bench-samples-with-the-time-stamp-counter.md)):
   the OS clock through the vDSO was the harness's own tail, 280 ns at p99.99 on the
   bench host and 1.4 µs on the second, once per millisecond when the timekeeper's tick
-  rewrites what it reads. Records each sample in an HdrHistogram with fixed bounds,
-  so recording never allocates, and reports p50, p99, p99.99 and max, never a mean. A
-  `timer` row reports the harness's own overhead.
+  rewrites what it reads. The publisher records each claim's time in an HdrHistogram
+  with fixed bounds, so recording never allocates. The subscriber of a message row
+  keeps its samples outside any histogram while its loop runs: one under 256 ns is
+  counted in a kilobyte of counts, one a nanosecond, and a later one is written after
+  the last into a buffer made and written through at setup. The one-way histogram is
+  made of both after the loop, so that taking a delivery's sample never allocates and
+  never touches memory that is cold for a late one: a record in the histogram inside the
+  subscriber's handler was a cache miss for each late delivery, which made the next
+  one later, and on `grip` that was most of the one-way rows' tail and every run that
+  read two or three times its row's
+  ([ADR 0090](../docs/decisions/0090-keep-a-subscribers-samples-out-of-the-histogram-until-its-loop-is-over.md)).
+  Reports p50, p99, p99.99 and max, never a mean. A `timer` row reports the harness's
+  own overhead.
 - Measures the publisher's claim and commit, the one-way latency from the publisher's
   timestamp to the subscriber's handler, for the exclusive and the concurrent log type,
   and a slot-padding microbench that times a load of a word and a store to a word 0, 64
