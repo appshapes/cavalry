@@ -152,3 +152,4 @@ under `docs/` is listed here; `just lint-docs` fails on one that is not.
 - [0109. Measure every interval on a nano clock, and keep the epoch clock for what another process reads](decisions/0109-measure-every-interval-on-a-nano-clock-and-keep-the-epoch-clock-for-what-another-process-reads.md)
 - [0112. Count unsent bytes above the sent position, and refuse a recording position the sender cannot follow](decisions/0112-count-unsent-bytes-above-the-sent-position-and-refuse-a-recording-position-the-sender-cannot-follow.md)
 - [0102. Publish who a member follows, and why its last election began, as two gauges on both paths](decisions/0102-publish-who-a-member-follows-and-why-its-last-election-began-as-two-gauges-on-both-paths.md)
+- [0099. Let a cavalry:udp publication's channel name its term length](decisions/0099-let-a-cavalry-udp-publications-channel-name-its-term-length.md)
