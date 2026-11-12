@@ -859,12 +859,20 @@ shared runner is
      ```
 
      The loop prints `same:` and a file's name for each file that is byte for byte
-     the same in the two trees, and `cmp`'s own line for one that differs. Every
+     the same in the two trees, and `cmp`'s own line for one that differs. For a
+     row of an `-unchecked` profile, run `export RUSTFLAGS="--cfg cavalry_unchecked"`
+     before the block and give `OUT` another directory: that profile is another
+     build of the same crates, the one `just bench-unchecked` makes. Every
      file the same: no instruction the row runs changed, and the row moved by
-     placement. Pull request 249's five files were the same, while the same
-     comparison of the two crates it changed, `cavalry-proto` and `cavalry-driver`,
-     found six functions that differed. A file that differs is not yet a change
-     on the row's path: it may differ in a function the row never calls. Read the
+     placement. Pull request 249's five files were the same in both builds, while
+     the same comparison of the two crates it changed, `cavalry-proto` and
+     `cavalry-driver`, found six functions that differed. A file that differs is not
+     yet a change on the row's path: it may differ in data alone, or in a function
+     the row never calls. `diff` of the two files shows which. A difference in data
+     is lines that begin `.ascii`, `.asciz` or `.size` and no instruction. Pull
+     request 251's `cavalry_shm` file differed so in both builds: the text of two
+     counters' descriptions, 558 bytes longer, and nothing else in the five files.
+     Otherwise read the
      functions the row runs through in both files, each between its
      `.type <name>,@function` line and its `.size <name>` line; the C ABI's keep
      their names, `cavalry_publication_try_claim` and `cavalry_buffer_claim_commit`
@@ -879,8 +887,16 @@ shared runner is
      gives a job's log.
   The same code and a reading inside that range: record the red where step 4 says
   and re-run the job once, as for any first red; no entry changes for a layout, since
-  the next landing in a linked crate draws another. Code on the row's path that
-  differs, or a reading above every binary's: it is the change's to explain.
+  the next landing in a linked crate draws another. The re-run also tells the binary
+  from the process. Pull request 251's first process on `bench` read the unchecked
+  `claim_commit_32_concurrent` row at p50 90, p99 150 and p99.99 200 ns, at 7.85
+  million claims a second, against an entry whose slowest run was 170. The re-run,
+  the same tree built again, read 79, 149 and 169 at 8.67 million. That red was the
+  process, not placement: the row's p50 and its rate had moved with its p99.99,
+  which is the bullet above on such a row, and that bullet comes first. Read the
+  row's p50 and its rate before the assembly. Code on the row's path that
+  differs, or a reading above every binary's that the re-run repeats: it is the
+  change's to explain.
 - A fault in `faults.txt` whose address lies in a Cavalry mapping, or a mapping whose
   `Rss` is below its `Size`: a mapping was not pre-touched, which is a bug in
   `cavalry-shm`, where every `create` and `open` pre-touches before it hands the
