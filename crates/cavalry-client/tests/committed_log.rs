@@ -12,7 +12,8 @@ use std::time::{Duration, Instant};
 use cavalry_client::{Cavalry, ClientError, CommittedLog, Counter, Publication, Recording};
 use cavalry_driver::Driver;
 use cavalry_proto::cluster::{
-    LOG_RECORDINGS_FILE_PREFIX, LogRecording, MAX_LOG_RECORDINGS_LENGTH, write_log_recordings,
+    LOG_RECORDINGS_FILE_PREFIX, LogRecording, MAX_LOG_RECORDINGS, MAX_LOG_RECORDINGS_LENGTH,
+    write_log_recordings,
 };
 use cavalry_shm::counters::generated::{
     CLUSTER_COMMIT_POSITION, CLUSTER_LOG_RECORDING_ID, REPLAY_STARTED,
@@ -527,14 +528,49 @@ fn the_members_file_is_read_as_missing_as_anothers_and_as_damaged() {
         text.contains(&format!("{LOG_RECORDINGS_FILE_PREFIX}{MEMBER}")),
         "{text}"
     );
-    // A file longer than the longest is refused by its length, read no further.
+    // A long file of zeros fails the first check it fails, its magic.
     std::fs::write(member.file(), vec![0u8; 4 * MAX_LOG_RECORDINGS_LENGTH])
         .expect("the file is stored");
+    let zeros = service.committed_log(0).expect_err("a file of zeros");
+    assert!(zeros.to_string().contains("recordings-magic"), "{zeros}");
+    // A file longer than the longest is read to one byte past the longest and no
+    // further, and refused by its length: the most entries a file holds, every
+    // other check passing, with bytes after them. The message says how many bytes
+    // were read, so it fails if the read's bound goes.
+    let most: Vec<(i64, i64, i64)> = (0..i64::try_from(MAX_LOG_RECORDINGS).expect("a count"))
+        .map(|index| (1_000 + index, index * 32, (index + 1) * 32))
+        .collect();
+    let end = i64::try_from(MAX_LOG_RECORDINGS).expect("a count") * 32;
+    member.write_file(live_id, end, &most);
+    let mut bytes = std::fs::read(member.file()).expect("the file is read");
+    assert_eq!(bytes.len(), MAX_LOG_RECORDINGS_LENGTH, "the longest file");
+    bytes.resize(4 * MAX_LOG_RECORDINGS_LENGTH, 0);
+    std::fs::write(member.file(), &bytes).expect("the file is stored");
     let too_long = service.committed_log(0).expect_err("a file too long");
+    let text = too_long.to_string();
     assert!(
-        too_long.to_string().contains("recordings-magic"),
-        "{too_long}"
+        text.contains("recordings-length")
+            && text.contains(&format!("in {} bytes", MAX_LOG_RECORDINGS_LENGTH + 1)),
+        "{text}"
     );
+    // A file the operating system will not let the service read: a directory in
+    // its place. The error names the file and says what to do.
+    std::fs::remove_file(member.file()).expect("the file is removed");
+    std::fs::create_dir(member.file()).expect("a directory in the file's place");
+    let unreadable = service
+        .committed_log(0)
+        .expect_err("a file that cannot be read");
+    assert!(
+        matches!(&unreadable, ClientError::Io { path, .. } if *path == member.file()),
+        "{unreadable}"
+    );
+    let text = unreadable.to_string();
+    assert!(
+        text.contains("Give the service's user the right to read")
+            && text.contains("docs/how-to/read-the-committed-log.md#when-it-does-not-work"),
+        "{text}"
+    );
+    std::fs::remove_dir(member.file()).expect("the directory is removed");
     assert_eq!(
         replays_started(&service),
         replays_before,
