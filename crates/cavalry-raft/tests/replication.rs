@@ -316,8 +316,10 @@ fn the_leader_canvasses_for_a_missing_member_then_leads_with_a_quorum_and_it_sta
     assert!(cluster.log(2).is_empty());
 }
 
-/// Leader ready waits for the members the canvass heard, not for the first quorum of
-/// them. Of five members four are there: the leader leads with them at the startup
+/// The appointed leader's leader ready waits for the members the canvass heard, not
+/// for the first quorum of them, since its members have no catch-up; a leader that
+/// elects closes on a quorum (`election.rs`). Of five members four are there: the
+/// leader leads with them at the startup
 /// canvass timeout and appends the term's first entry only once all four have joined
 /// its log, so that none of the four misses it. And a member that canvassed and then
 /// stopped before it joined is waited for no longer than the leader heartbeat timeout,
