@@ -10,13 +10,7 @@ commit path runs per message.
   The leader records its term, announces it, appends the term's first entry and commits
   what a quorum has recorded; a follower canvasses, joins the leader's log at its
   append position and reports that position as it rises.
-- Leads by appointment, until the election is built: the member with the lowest id is
-  the one member that may lead, and every other member follows it (`spec/cluster.md`,
-  "The appointed leader"; ADR 0063). It canvasses first and leads only when no member
-  reports a log ahead of its own, so a leader that lost its log directory never leads
-  a second time. A member that could join only with a catch-up or a truncation, one
-  that starts late, is left out and counted, never joined wrong.
-- Elects, on a path of its own that is being built:
+- Elects its leader, in memory and over a driver (ADR 0104):
   `Consensus::with_election(member_ids, member_id, seed)` is a member that canvasses,
   nominates itself after a delay drawn from its seed, asks for the other members' votes
   and leads the term a quorum votes for, at once when every member it has heard has
@@ -27,7 +21,7 @@ commit path runs per message.
   log is of an older term which term its own record of terms holds next, with that
   term's base and its end, read through `Io::terms_after`: the member truncates what it
   holds above that base, so the leader names the next term and never a later one, over
-  which the member would keep bytes of its own. A leader on this path gives up the lead:
+  which the member would keep bytes of its own. A leader gives up the lead:
   it holds an election when its active members fall below a quorum, and when a canvass
   position, a request vote or a commit position carries a term above its own, and it is
   a follower from that call on, its log publication given up in init. A follower holds
@@ -64,20 +58,20 @@ commit path runs per message.
   once it is on the live log, its append position at or past where its live image
   joined, and not before: the replay reads no further than the leader has synced, and
   one stopped sooner would leave a hole below the live image. It joins when the leader
-  sends stop catch-up (ADR 0088). A leader on this path closes its election in leader
+  sends stop catch-up (ADR 0088). A leader closes its election in leader
   ready when a quorum of members, itself among them, has joined its log at its log
   position, and waits for no other member: one that joins after the term's first entry
-  catches up with it (`spec/cluster.md`, row 8). A member on this path starts on the
-  log directory it kept: its first init reads the candidate term it stored and the
+  catches up with it (`spec/cluster.md`, row 8). The core starts on the
+  log directory a member kept: its first init reads the candidate term it stored and the
   highest term of its record, through `Io::candidate_term` and
   `Io::log_leadership_term_id`, so that it votes once in a term across a restart and
   canvasses with the log it holds. The term it followed, its leader and the commit
   position it knew are not kept: a leader tells it. Its canvass waits the startup
   canvass timeout, 60 s, for a member it has not heard, as at any start, and a new
   leadership term says in `is startup` whether its leader leads it from its first
-  election since it started (ADR 0089). The consensus module does not use this path yet: a member
-  over a driver is appointed until the election can do what the next section lists, and
-  then the module moves to it in one change (ADR 0081).
+  election since it started (ADR 0089). The consensus module builds its core so, with a
+  seed from the operating system mixed with the member id, and still refuses a log
+  directory that holds a term, as the next section says (ADR 0104).
 - Counts every move of the election. `ElectionState` is the state machine
   `cluster_election` of `counters.toml`, and each of its transitions adds one to a
   count of `Counts`, the counter registered for it; `Counts::by_counter` pairs each
@@ -107,10 +101,7 @@ commit path runs per message.
   none, `cluster.election_cause`, why its last election began (ADR 0102),
   `cluster.append_position`, `cluster.commit_position`, `cluster.messages_rejected`,
   `cluster.log_recording_id`, the recording that holds its log, which its service
-  replays, and the twenty-three counts of `Counts::by_counter`, of which the four of the
-  ballot, the two of an election held on a higher term, the two of a truncation, the one
-  of dropped terms, the two of a replication and the one of a catch-up stay 0 while the
-  leader is appointed. The
+  replays, and the twenty-two counts of `Counts::by_counter`. The
   counters of sessions and of the service's version in `spec/cluster.md`, "Counters",
   come with those features. One thread calls `do_work()`; the leader's process appends
   with `offer(payload)`, up to 1,344 bytes an entry. A follower that leaves the log
@@ -129,9 +120,8 @@ commit path runs per message.
   the live recording of the term the member leads. A replay still running to the
   member is stopped first. `stop_replay` stops it, and `replay_stopped` says once
   where it ended and whether it ended by itself. A position that no recording kept
-  holds starts nothing. The module's own core is appointed and asks for none of this
-  yet; the tests drive the module's I/O over a driver, with the other member played
-  by the test.
+  holds starts nothing. The crate's unit tests drive the module's I/O over a driver,
+  with the other member played by the test.
 - Records the replays a member asks for, and catches up, over a driver, for a core
   that elects (ADR 0094). `add_catchup` subscribes to stream 100 on the member's own
   `catchup` endpoint and arms a recording there, before the catch-up position leaves:
@@ -193,16 +183,16 @@ commit path runs per message.
   what the example below and most of the crate's tests run. Every member holds a log of
   its own, the entries that reached it, so `log(member)` is that member's bytes and a
   test can find two members that hold different bytes at one position.
-  `memory::Cluster::with_election(member_ids, seed)` is the same cluster with members
-  that elect: which member leads depends on the seed, `leader()` says which, `offer`
-  goes to it, and `log_to(member, position)` is a member's log up to a position, so that
+  `memory::Cluster::with_election(member_ids, seed)` makes it: which member leads
+  depends on the seed, `leader()` says which, `offer` goes to it, and `log_to(member, position)` is a member's log up to a position, so that
   a test can hold what one leader committed against the log of the next. It is a test
   double and allocates; its consensus stream holds at most 4,096 messages in flight and
   loses, and counts, one sent while it is full, and a leader's log publication and each
   member's log hold every entry appended or received for the cluster's life.
 - To come, each with its card: the C ABI's calls for a service, so that a service is
-  a program in any of the five client languages (card 227), the election and mixed
-  versions in a rolling upgrade (card 228), the cluster client (card 229), snapshots
+  a program in any of the five client languages (card 227), a member's start on the
+  log directory it kept and mixed versions in a rolling upgrade (card 228), the
+  cluster client (card 229), snapshots
   and catch-up (card 230), and standby members, which follow the log without voting,
   in the open core.
 
@@ -211,21 +201,15 @@ In Aeron, this is Cluster, with Cluster Standby as a paid component
 
 ### What the election does not do yet
 
-A member made with `Consensus::with_election` has nominate, the two ballots, the
-elections a leader holds, the truncation, the replication of a term a member missed
-and the catch-up within a leader's term of `spec/cluster.md`. Where the page's
-election does more, it does this instead, until the step that builds it (ADR 0081):
+A member made with `Consensus::with_election` has every state of `spec/cluster.md`'s
+election, and the consensus module runs it over a driver. One thing the page's
+election does, the module does not yet:
 
-- Over a driver the module's `Io` can do all an electing core asks: give a leader's
-  log up and replay it (ADR 0091), record the replays a member asks for and catch
-  up (ADR 0094), and truncate (ADR 0095). The module's own member is still
-  appointed and asks for none of it, until the change that moves it (ADR 0081).
 - Over a driver a member does not start on a log directory that holds a term or a
   stored candidate term: the module refuses, and says to start the cluster again
-  as a new one. The core starts on such a directory (ADR 0089); the module does
-  when it moves to this path, with the replay of the log it kept into its own
-  state, the open sessions, which the core's leader replay and follower replay
-  leave to it.
+  as a new one. The core starts on such a directory (ADR 0089). The module does once
+  it reads back which recordings hold the log it kept, the sixth change of ADR 0100.
+  Until then a cluster that lost a member goes on with the members that remain.
 
 ## What it must never do
 
@@ -240,7 +224,7 @@ election does more, it does this instead, until the step that builds it (ADR 008
 
 ## Example
 
-Three members in one process, with no driver: the leader is appointed, the others join
+Three members in one process, with no driver: they elect a leader, the others join
 its log, and an entry is committed once a quorum has recorded it.
 
 ```rust
@@ -280,9 +264,10 @@ for member in [0, 1, 2] {
   slice's eight features in order, of which this crate's are the third to the seventh.
 - [ADR 0063](../../docs/decisions/0063-run-the-consensus-module-as-a-client-and-lead-by-appointment.md),
   how this crate's first feature is built: the consensus module is a client of its
-  driver, in two layers, a core that does no I/O and the module that acts for it, and
-  its leader is appointed, on the path `spec/cluster.md`, "The appointed leader",
-  gives through the election's states.
+  driver, in two layers, a core that does no I/O and the module that acts for it. Its
+  leader was appointed until the election was built, and
+  [ADR 0104](../../docs/decisions/0104-have-the-consensus-module-elect-its-leader-and-take-the-appointed-leader-out.md)
+  took that path out.
 - [ADR 0067](../../docs/decisions/0067-register-the-elections-state-machine-with-its-core-and-count-each-step.md),
   why the election's machine is registered with the core and what its two step
   counters count.

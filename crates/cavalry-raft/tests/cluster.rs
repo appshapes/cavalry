@@ -1,6 +1,6 @@
 //! Three members over three drivers on the loopback: each a [`ConsensusModule`], a
 //! client of its own driver, with its log recorded into its own log directory (ADR
-//! 0060; ADR 0063). The appointed leader leads, the followers arm their recordings
+//! 0060; ADR 0063). The members elect a leader, the followers arm their recordings
 //! before its first frame, a hundred thousand entries are committed at a quorum of synced
 //! positions, and the three recordings hold the same bytes. A member is lost, a follower
 //! or the leader, and a follower leaves the log and joins it again: what a member that
@@ -110,8 +110,7 @@ fn run_until(members: &mut [Member], what: &str, mut done: impl FnMut(&[Member])
 
 /// Runs the members until every election has closed, then puts the member that leads
 /// first: from here `members[0]` is the leader and `members[1..]` are its followers,
-/// whichever member the cluster has for a leader (ADR 0100, change 3). Where the
-/// leader is appointed it is the member with the lowest id, which is first already.
+/// whichever member the cluster elected (ADR 0100, change 3; ADR 0104).
 /// Returns the place the leader was in: a test that holds a vector beside `members`,
 /// one item for each member, swaps that place with the first there too.
 fn run_until_led(members: &mut [Member]) -> usize {
@@ -164,8 +163,7 @@ fn three_members_replicate_a_hundred_thousand_entries_and_their_recordings_are_e
         assert_eq!(counter(member, CLUSTER_LEADERSHIP_TERM_ID.0), -1);
         assert_eq!(counter(member, CLUSTER_LOG_RECORDING_ID.0), -1);
         assert_eq!(counter(member, CLUSTER_COMMIT_POSITION.0), 0);
-        // It names no leader, the appointed leader among them, and the cause of its
-        // election is its start (ADR 0102).
+        // It names no leader, and the cause of its election is its start (ADR 0102).
         assert_eq!(counter(member, CLUSTER_LEADER_MEMBER_ID.0), -1);
         assert_eq!(counter(member, CLUSTER_ELECTION_CAUSE.0), 0);
     }
@@ -327,8 +325,8 @@ fn three_members_replicate_a_hundred_thousand_entries_and_their_recordings_are_e
         }
     }
 
-    // A member over a driver, whose leader is appointed, does not start again on the
-    // log it has: the refusal says why and what to do.
+    // A member over a driver does not start again on the log it has: the refusal
+    // says why and what to do.
     let Member {
         driver,
         module,
@@ -476,7 +474,7 @@ fn a_follower_lost_leaves_a_quorum_that_goes_on_committing() {
 /// The leader's host is lost once entries are committed: its module and its driver
 /// stop at once. Each follower finds its image of the log gone, or its leader silent
 /// for the leader heartbeat timeout, begins its election again at init and leaves the
-/// log, and canvasses with no appointed leader to answer it. The recording it held is
+/// log, and canvasses. The recording it held is
 /// stopped, by its own stop or by the driver's at the image's end, whichever came
 /// first, at the committed end: that is the append position it reports, and it names
 /// no recording in `cluster.log_recording_id`, since none records the live log

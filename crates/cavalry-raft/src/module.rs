@@ -80,7 +80,7 @@ pub enum RaftError {
     /// The member id is not one of the string's.
     Member(MembersRefused),
     /// The member's log directory holds a term or a vote: a member of this version
-    /// does not start again on its log (`spec/cluster.md`, "The appointed leader").
+    /// does not start again on its log (`spec/cluster.md`, "A member's start").
     Restart {
         /// The highest term in the record, −1 for none.
         log_leadership_term_id: i64,
@@ -167,10 +167,13 @@ impl core::fmt::Display for RaftError {
                 f,
                 "member refused ({reason}): the log directory holds term \
                  {log_leadership_term_id} and candidate term {candidate_term}, and a member \
-                 of this version does not start again on its log: that needs the election \
-                 and the catch-up, which are not built yet. Start the cluster again as a new \
-                 cluster, every member on a new log directory; a new log directory on one \
-                 member alone joins nothing; see {DOC}"
+                 of this version does not start again on its log: the consensus module does \
+                 not yet read back which recordings hold it. The cluster goes on without \
+                 this member while a quorum of the others runs. To have every member again, \
+                 start the cluster again as a new cluster, every member on a new log \
+                 directory. Do not start this member alone on a new log directory: it would \
+                 join with no record of its votes or its log, and can then help elect a \
+                 leader that lacks a committed entry; see {DOC}"
             ),
             RaftError::Terms(error) => write!(f, "member stopped ({reason}): {error}"),
             RaftError::Catalog(error) => write!(

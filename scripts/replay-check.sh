@@ -11,7 +11,7 @@
 #
 # Then the same for a cluster (ADR 0052, feature 3; ADR 0063): three members on the
 # loopback, each a driver with its consensus module, replicate 100,000 hash-chained
-# entries from the leader, appointed by the lowest member id, and commit them at a
+# entries from the leader they elect, and commit them at a
 # quorum; a driver started again on each member's directories replays that member's
 # recording of the log; the three members' lines must hash the same, positions and
 # bodies, and the payloads in them must be the payloads the leader was offered, in
