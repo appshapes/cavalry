@@ -21,7 +21,8 @@ use crate::committed_log::CommittedLog;
 use crate::conductor::{
     COMMAND_SCRATCH, Conductor, DRIVER_TIMEOUT, MAX_REPLAYS, MAX_SUBSCRIPTIONS, NO_PENDING,
     RECORDING_QUEUE, RECORDING_REGISTRY, REGISTRATION_QUEUE, REPLAY_QUEUE, RESPONSE_QUEUE,
-    RESPONSE_TIMEOUT, RecordingRegistration, ReplayRegistration, Shared, nanos, now_nanos,
+    RESPONSE_TIMEOUT, RecordingRegistration, ReplayRegistration, Shared, epoch_time, nano_time,
+    nanos,
 };
 use crate::counter::Counter;
 use crate::error::{ClientError, Closed};
@@ -130,7 +131,7 @@ impl Attached {
                 reason: Closed::DriverClosed,
             }));
         }
-        if now_nanos().saturating_sub(heartbeat) > nanos(DRIVER_TIMEOUT) {
+        if epoch_time().saturating_sub(heartbeat) > nanos(DRIVER_TIMEOUT) {
             return Err(Unattached::Refused(ClientError::DriverGone {
                 dir: dir.to_path_buf(),
                 reason: Closed::DriverTimeout,
@@ -286,10 +287,10 @@ impl Cavalry {
         producer.write(
             keepalive.command_type() as i32,
             &scratch[..length],
-            now_nanos(),
+            epoch_time(),
         )?;
 
-        let shared = Arc::new(Shared::new(now_nanos()));
+        let shared = Arc::new(Shared::new(nano_time()));
         let (response_producer, responses) = spsc::queue::<Response>(RESPONSE_QUEUE);
         let (registrations, registration_consumer) =
             spsc::queue::<Registration>(REGISTRATION_QUEUE);
@@ -1243,10 +1244,12 @@ impl Cavalry {
     /// Encodes and writes `command` on the ring, and notes the time for the keepalive.
     fn send(&mut self, command: &Command<'_>) -> Result<(), ClientError> {
         let length = command.write(&mut self.scratch)?;
-        let now = now_nanos();
-        self.producer
-            .write(command.command_type() as i32, &self.scratch[..length], now)?;
-        self.shared.sent(now);
+        self.producer.write(
+            command.command_type() as i32,
+            &self.scratch[..length],
+            epoch_time(),
+        )?;
+        self.shared.sent(nano_time());
         Ok(())
     }
 
@@ -1448,7 +1451,7 @@ impl Cavalry {
                 let _ = self.producer.write(
                     command.command_type() as i32,
                     &self.scratch[..length],
-                    now_nanos(),
+                    epoch_time(),
                 );
             }
         }
