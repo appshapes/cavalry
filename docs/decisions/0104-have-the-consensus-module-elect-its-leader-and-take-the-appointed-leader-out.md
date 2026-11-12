@@ -130,7 +130,50 @@ cluster to have every member again, until ADR 0100's sixth change.
 
 ## Evidence
 
-@@EVIDENCE@@
+- `crates/cavalry-raft/tests/cluster.rs`, three members over three drivers on the
+  loopback, thirteen tests, run thirty times in a row on this change's branch on a
+  laptop, macOS: thirty passed. Among them:
+  - `a_lost_leader_is_replaced_by_the_two_that_remain_and_they_commit`: the leader
+    and its driver stop with a hundred entries committed; the two that remain
+    elect one; an entry offered to it is committed by both; and the first term's
+    log is the same on both from the later of their recordings' starts.
+  - The first test reads the term the cluster elected in, and takes the count of
+    election steps as exact only in term 0: four on the leader, four or five on a
+    follower.
+  - The services' tests read each member's log from position 0, across its
+    recordings where it has more than one (ADR 0103).
+- Three `cavalry run` processes on the laptop, each a driver and a member. Member 2
+  was elected within about a second: `cavalry doctor` said `the leader in term 0,
+  election closed: append position 96, commit position 96; its last election
+  began because the member started` on it, and `a follower in term 0 ...; it
+  follows member 2` on the others. Member 2 was stopped. Thirteen seconds later
+  `doctor` said `the leader in term 1, election closed: append position 192,
+  commit position 192; its last election began because its leader said nothing
+  for the leader heartbeat timeout` on member 0, and `a follower in term 1 ...; it
+  follows member 0` on member 1. `docs/how-to/run-a-cluster.md` is written from
+  that output.
+- `crates/cavalry/tests/cli.rs`: three `cavalry run` members elect; exactly one
+  has the role of leader and two follow, in term 0 or 1; `doctor` on a follower
+  names it so; a member does not start again on its log directory, and the
+  refusal says what to do.
+- `just conformance`, the five clients' rounds beside a member of three that
+  elect, and `just replay-check`, "three equal hashes of one recording, six equal
+  hashes of three members and their services", both exit 0 on this branch.
+- What left, counted on this branch against the change before it: 3,162 lines
+  removed, 547 of them generated vectors. `tests/replication.rs`, eighteen tests on
+  appointed clusters, and `tests/core.rs`, five, are gone. Three of their rules had
+  no test on the election's path and were ported to
+  `tests/elected_replication.rs`: a cluster's first entry is its leader's new
+  leadership term event; two of three wait the startup canvass timeout and the
+  member that starts late catches up; and a leader that lost its log directory
+  leads no term and replicates what it lost. Five checks of leader ready went
+  into `tests/step_down.rs`. Eight tests that said what an appointed member does
+  not do are gone with it. `cargo test -p cavalry-proto -p cavalry-raft`: 212
+  passed.
+- `tests/transitions.rs` makes every registered row of `cluster_election` and
+  `cluster_role` on the one path, and fails on a row no path makes: the rows
+  canvass to leader log replication and follower replay to init left the
+  registry with the appointed leader.
 
 ## Consequences
 
