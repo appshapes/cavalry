@@ -1039,13 +1039,15 @@ impl Consensus {
 
     /// One message of the consensus stream, read at `clock`. A member in init reads
     /// nothing. A member whose leader is appointed ignores request vote and vote, which
-    /// no such member sends, and catch-up position, and every member ignores stop
-    /// catch-up, which this version's members do not send (`spec/cluster.md`, "The
-    /// appointed leader"). A leader that elects answers a catch-up position at or below
-    /// its log position with a replay of its own recordings, stops the replay it runs
-    /// to a member that canvasses again, and stops a catch-up, with stop catch-up,
-    /// when the member it serves reports with the catch-up flag, on the live log
-    /// ("Messages outside an election"; ADR 0085, ADR 0087). A member that elects and reads a new leadership term
+    /// no such member sends, catch-up position and stop catch-up (`spec/cluster.md`,
+    /// "The appointed leader"). A leader that elects answers a catch-up position at or
+    /// below its log position with a replay of its own recordings, stops the replay it
+    /// runs to a member that canvasses again, and stops a catch-up, with stop
+    /// catch-up, when the member it serves reports with the catch-up flag, on the live
+    /// log ("Messages outside an election"; ADR 0085, ADR 0087, ADR 0088). A member
+    /// that elects, in follower catch-up, takes its leader's stop catch-up once it has
+    /// reported with that flag, and removes its catch-up subscription (ADR 0088). A
+    /// member that elects and reads a new leadership term
     /// which leaves it below its leader's term base goes to follower log replication
     /// (ADR 0086). A member that elects notes the sender of whatever it reads
     /// as heard, for its ballot (ADR 0077). Once its election has closed it holds an
