@@ -5,7 +5,7 @@
 #![allow(dead_code)]
 
 use cavalry_proto::cluster::{Message, Template};
-use cavalry_raft::consensus::{base_above, terms_above};
+use cavalry_raft::consensus::{base_above, term_at_or_below, terms_above};
 use cavalry_raft::{Clock, Consensus, ElectionState, Io, Log, ReplayStopped, Role};
 
 /// One call the core made, in the order it made it.
@@ -22,6 +22,8 @@ pub enum Call {
     LeaveLog,
     RemoveLog,
     TruncateLog(i64),
+    /// The terms above this one dropped from the record.
+    DropTermsAbove(i64),
     Append(Template),
     /// A replay started: the member it is to, its position and its end, none for a
     /// catch-up's.
@@ -304,6 +306,27 @@ impl Io for Stub {
 
     fn term_base_above(&mut self, position: i64) -> Option<i64> {
         base_above(self.terms.iter().flatten().copied(), position)
+    }
+
+    fn term_at_or_below(&mut self, term: i64) -> i64 {
+        term_at_or_below(self.terms.iter().flatten().copied(), term)
+    }
+
+    fn drop_terms_above(&mut self, term: i64) -> Result<i64, Self::Fault> {
+        self.call(Call::DropTermsAbove(term));
+        for slot in &mut self.terms {
+            if slot.is_some_and(|(recorded, _)| recorded > term) {
+                *slot = None;
+            }
+        }
+        self.log_term = self
+            .terms
+            .iter()
+            .flatten()
+            .map(|&(recorded, _)| recorded)
+            .max()
+            .unwrap_or(-1);
+        Ok(self.log_term)
     }
 
     fn start_replay(

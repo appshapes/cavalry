@@ -8,10 +8,10 @@
 
 use cavalry_proto::cluster::{
     CLOSED_STATE, CanvassTerms, EMPTY_MEMBER, LogReport, MAX_MEMBERS, MemberPosition, Message,
-    Stream, TermFields, TermSpan, Vote, VoteRequest, appointed_canvass, appointed_leader, ballot,
-    candidate, canvass_position_action, commit_position, entry_position, leader_ready,
-    log_at_least, new_leadership_term_action, next_fields, parse_members, quorum, replay_end,
-    replication_record, replication_stop, request_vote,
+    Stream, TermFields, TermSpan, Vote, VoteRequest, answered_term, appointed_canvass,
+    appointed_leader, ballot, candidate, canvass_position_action, commit_position, entry_position,
+    leader_ready, log_at_least, new_leadership_term_action, next_fields, parse_members, quorum,
+    replay_end, replication_record, replication_stop, request_vote,
 };
 
 /// Deterministic, so a failure reproduces: xorshift64.
@@ -333,8 +333,14 @@ fn no_extreme_input_panics_the_election_arithmetic() {
             term_base_log_position: r.extreme(),
         };
         let in_canvass = r.next().is_multiple_of(2);
-        let _ =
-            new_leadership_term_action(r.extreme(), r.extreme(), r.extreme(), in_canvass, fields);
+        let _ = new_leadership_term_action(
+            r.extreme(),
+            r.extreme(),
+            r.extreme(),
+            in_canvass,
+            r.extreme(),
+            fields,
+        );
         let spans: Vec<TermSpan> = (0..r.below(5))
             .map(|_| TermSpan {
                 term: r.extreme(),
@@ -343,6 +349,9 @@ fn no_extreme_input_panics_the_election_arithmetic() {
             })
             .collect();
         let _ = next_fields(&spans, r.extreme(), r.extreme(), r.extreme());
+        let reported = r.extreme();
+        let answered = answered_term(&spans, reported);
+        assert!(answered == -1 || answered <= reported);
         let _ = replay_end(&spans, r.extreme());
         let _ = replication_record(
             r.extreme(),

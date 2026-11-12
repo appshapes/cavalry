@@ -50,8 +50,9 @@ Wire types, zero-copy frames and version negotiation. Data plane.
   functions (ADR 0058): `quorum` and `commit_position`; `log_at_least`, the order of
   two logs; `candidate`, a canvassing member's nomination; `request_vote`, a reader's
   vote; `ballot`, a candidate's outcome from the votes and the members it has heard
-  (ADR 0077); `canvass_position_action`, what a leader does with a canvass position; `new_leadership_term_action` and `next_fields`, what a
-  reader does with new leadership term and what a leader writes into it;
+  (ADR 0077); `canvass_position_action`, what a leader does with a canvass position; `new_leadership_term_action`, what a
+  reader does with new leadership term; `answered_term` and `next_fields`, the term
+  a leader answers a member for and the next term it names (ADR 0096);
   `replication_stop` and `replication_record`, where a follower's log replication
   stops and the terms it records there; `replay_end`, where a leader's replay begins
   and ends; `entry_position`, the position after an entry; and, until the election is

@@ -1723,9 +1723,14 @@ fn a_replay_whose_sender_vanished_is_said_gone_at_the_image_liveness_timeout() {
         _dir,
         ..
     } = pair;
+    // The driver goes first, and the leader's client after it. A client that closes
+    // while its driver runs has its replay ended by that driver, which sends an end
+    // of stream: the member's image would then go within a heartbeat or two, and not
+    // at the liveness timeout, whenever the driver ran a duty cycle between the two
+    // drops, as it did once in three runs on a loaded runner.
+    drop(_drivers.remove(0));
     let vanished = Instant::now();
     drop(leader);
-    drop(_drivers.remove(0));
     let deadline = vanished + cavalry_proto::udp::IMAGE_LIVENESS_TIMEOUT + Duration::from_secs(5);
     let gone = loop {
         member
@@ -2193,4 +2198,54 @@ fn a_recording_taken_in_hand_starts_with_no_sync_asked() {
         (io.append_position() == two).then_some(())
     });
     assert_eq!(pair.member.io.sync_asked_at, two);
+}
+
+/// A member drops a term its leader's record lacks from its record, over a driver
+/// (ADR 0096). It holds term 0 to 192 and has recorded term 1 at 192, where its log
+/// ends, with no byte of it. A truncation to 192 leaves term 1, whose base is not
+/// above the position. `drop_terms_above(0)` deletes it from the `terms` file, by
+/// term, and returns term 0; asked again it changes nothing. The file read again
+/// from the member's log directory holds term 0 and a term recorded after the drop
+/// at the same base.
+#[test]
+fn a_member_drops_a_term_from_its_record_by_term_where_a_truncation_leaves_it() {
+    let mut pair = pair("drop-terms");
+    let (two, _) = pair.follow_and_leave(0, 0, &[b"one", b"two"]);
+    pair.member
+        .io
+        .record_term(0, 0)
+        .expect("term 0 is recorded");
+    pair.member
+        .io
+        .record_term(1, two)
+        .expect("term 1 is recorded");
+    assert_eq!(pair.member.io.term_at_or_below(1), 1);
+    assert_eq!(pair.member.io.term_at_or_below(-1), -1);
+    assert_eq!(
+        pair.member.io.truncate_log(two).expect("truncated"),
+        Some(1),
+        "a term based at the position stays in the record"
+    );
+
+    assert_eq!(pair.member.io.drop_terms_above(0).expect("dropped"), 0);
+    assert_eq!(pair.member.io.log_leadership_term_id(), 0);
+    assert_eq!(pair.member.io.term_at_or_below(1), 0);
+    assert_eq!(pair.member.io.terms_after(0), [None, None]);
+    assert_eq!(pair.member.io.append_position(), two);
+    assert_eq!(
+        pair.member.io.drop_terms_above(0).expect("nothing to drop"),
+        0
+    );
+
+    pair.member
+        .io
+        .record_term(3, two)
+        .expect("a term after the dropped one is recorded");
+    let file = TermsFile::open(&pair.member_log_dir).expect("the terms file opens");
+    assert_eq!(
+        file.terms()
+            .map(|entry| (entry.leadership_term_id, entry.term_base_log_position))
+            .collect::<Vec<_>>(),
+        vec![(0, 0), (3, two)]
+    );
 }
