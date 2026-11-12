@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Write spec/vectors/udp.json: the test vectors for spec/udp.md, version 3.
+"""Write spec/vectors/udp.json: the test vectors for spec/udp.md, version 4.
 The reference encoder, standard library only. Run from the repository root:
 
     python3 spec/vectors/udp.py
@@ -147,28 +147,34 @@ def datagram(name, frames, term_length=TERM_LENGTH, error=None):
 
 def channel(name, string, endpoint_host, endpoint_port, interface_host=None, interface_port=None,
             control_host=None, control_port=None, control_mode=None, fc="max",
-            initial_term_id=None, term_id=None, term_offset=None, ssc=False):
+            initial_term_id=None, term_id=None, term_offset=None, ssc=False,
+            term_length=UDP_TERM_LENGTH):
     """A channel and its fields: an endpoint or a control address (version 1), `fc`, `max`
     when the string names none, the position keys (version 2) with the position they
-    make under the UDP term length, null when the string names none, and `ssc` (version
-    3), false when the string names none."""
+    make under the channel's term length, null when the string names none, `ssc`
+    (version 3), false when the string names none, and `term_length` (version 4), the
+    UDP term length when the string names none."""
+    assert term_length & (term_length - 1) == 0 and 65536 <= term_length <= 67108864, name
     position = None
     if initial_term_id is not None:
         count = i32(term_id - initial_term_id)
         assert count >= 0, name
-        position = count * UDP_TERM_LENGTH + term_offset
+        assert 0 <= term_offset < term_length and term_offset % 32 == 0, name
+        position = count * term_length + term_offset
     return {"name": name, "kind": "channel", "string": string,
             "fields": {"endpoint_host": endpoint_host, "endpoint_port": endpoint_port,
                        "interface_host": interface_host, "interface_port": interface_port,
                        "control_host": control_host, "control_port": control_port,
                        "control_mode": control_mode, "fc": fc, "ssc": ssc,
+                       "term_length": term_length,
                        "initial_term_id": initial_term_id, "term_id": term_id,
                        "term_offset": term_offset, "position": position}}
 
 
-def control_channel(name, string, control_host, control_port, fc="max", ssc=False):
+def control_channel(name, string, control_host, control_port, fc="max", ssc=False,
+                    term_length=UDP_TERM_LENGTH):
     return channel(name, string, None, None, control_host=control_host, control_port=control_port,
-                   control_mode="manual", fc=fc, ssc=ssc)
+                   control_mode="manual", fc=fc, ssc=ssc, term_length=term_length)
 
 
 def bad_channel(name, string, error, code=1):
@@ -417,7 +423,7 @@ VECTORS = [
                 "cavalry:udp?endpoint=10.0.0.2:40123|init-term-id=7|term-id=7|term-offset=100", "position"),
     bad_channel("channel-position-offset-at-term-length",
                 "cavalry:udp?endpoint=10.0.0.2:40123|init-term-id=7|term-id=7|term-offset=16777216", "position"),
-    bad_channel("channel-key-before-position", "cavalry:udp?endpoint=10.0.0.2:40123|init-term-id=7|term-length=65536",
+    bad_channel("channel-key-before-position", "cavalry:udp?endpoint=10.0.0.2:40123|init-term-id=7|ttl=4",
                 "key"),
     bad_channel("channel-fc-before-position", "cavalry:udp?endpoint=10.0.0.2:40123|fc=tagged|init-term-id=7", "fc"),
     bad_channel("channel-position-before-multicast",
@@ -443,6 +449,59 @@ VECTORS = [
     bad_channel("channel-ssc-before-position", "cavalry:udp?endpoint=10.0.0.2:40123|init-term-id=7|ssc=yes",
                 "ssc"),
     bad_channel("channel-ssc-before-multicast", "cavalry:udp?endpoint=224.0.1.1:40123|ssc=yes", "ssc"),
+    # Version 4: `term-length`, a publication's term length, a power of two from 65536 to
+    # 67108864 with an optional k, m or g, its check after `ssc` and before `position`,
+    # and the position keys counted in it (ADR 0099).
+    channel("channel-term-length-least", "cavalry:udp?endpoint=10.0.0.2:40123|term-length=65536",
+            "10.0.0.2", 40123, term_length=65536),
+    channel("channel-term-length-k", "cavalry:udp?endpoint=10.0.0.2:40123|term-length=64k",
+            "10.0.0.2", 40123, term_length=65536),
+    channel("channel-term-length-m", "cavalry:udp?endpoint=10.0.0.2:40123|term-length=1m",
+            "10.0.0.2", 40123, term_length=1048576),
+    channel("channel-term-length-upper-case", "cavalry:udp?endpoint=10.0.0.2:40123|term-length=4M",
+            "10.0.0.2", 40123, term_length=4194304),
+    channel("channel-term-length-default-named", "cavalry:udp?endpoint=10.0.0.2:40123|term-length=16777216",
+            "10.0.0.2", 40123, term_length=16777216),
+    channel("channel-term-length-most", "cavalry:udp?endpoint=10.0.0.2:40123|term-length=64m",
+            "10.0.0.2", 40123, term_length=67108864),
+    control_channel("channel-control-term-length-ssc-fc-in-any-order",
+                    "cavalry:udp?term-length=1m|ssc=true|fc=min|control-mode=manual|control=10.0.0.1:1",
+                    "10.0.0.1", 1, fc="min", ssc=True, term_length=1048576),
+    channel("channel-term-length-with-position-keys",
+            "cavalry:udp?endpoint=10.0.0.2:40123|term-length=1m|init-term-id=7|term-id=9|term-offset=4096",
+            "10.0.0.2", 40123, initial_term_id=7, term_id=9, term_offset=4096, term_length=1048576),
+    channel("channel-term-length-offset-at-last-frame",
+            "cavalry:udp?endpoint=10.0.0.2:40123|term-length=65536|init-term-id=7|term-id=7|term-offset=65504",
+            "10.0.0.2", 40123, initial_term_id=7, term_id=7, term_offset=65504, term_length=65536),
+    bad_channel("channel-term-length-alone", "cavalry:udp?term-length=1m", "endpoint"),
+    bad_channel("channel-term-length-not-a-power-of-two", "cavalry:udp?endpoint=10.0.0.2:40123|term-length=65535",
+                "term-length"),
+    bad_channel("channel-term-length-below-least", "cavalry:udp?endpoint=10.0.0.2:40123|term-length=32768",
+                "term-length"),
+    bad_channel("channel-term-length-above-most", "cavalry:udp?endpoint=10.0.0.2:40123|term-length=134217728",
+                "term-length"),
+    bad_channel("channel-term-length-g", "cavalry:udp?endpoint=10.0.0.2:40123|term-length=1g", "term-length"),
+    bad_channel("channel-term-length-zero", "cavalry:udp?endpoint=10.0.0.2:40123|term-length=0", "term-length"),
+    bad_channel("channel-term-length-not-a-number", "cavalry:udp?endpoint=10.0.0.2:40123|term-length=long",
+                "term-length"),
+    bad_channel("channel-term-length-two-suffixes", "cavalry:udp?endpoint=10.0.0.2:40123|term-length=1mb",
+                "term-length"),
+    bad_channel("channel-term-length-suffix-alone", "cavalry:udp?endpoint=10.0.0.2:40123|term-length=m",
+                "term-length"),
+    bad_channel("channel-term-length-signed", "cavalry:udp?endpoint=10.0.0.2:40123|term-length=+65536",
+                "term-length"),
+    bad_channel("channel-term-length-fraction", "cavalry:udp?endpoint=10.0.0.2:40123|term-length=1.5m",
+                "term-length"),
+    bad_channel("channel-term-length-past-u64", "cavalry:udp?endpoint=10.0.0.2:40123|term-length=99999999999999999999m",
+                "term-length"),
+    bad_channel("channel-position-offset-at-the-named-term-length",
+                "cavalry:udp?endpoint=10.0.0.2:40123|term-length=65536|init-term-id=7|term-id=7|term-offset=65536",
+                "position"),
+    bad_channel("channel-ssc-before-term-length", "cavalry:udp?endpoint=10.0.0.2:40123|term-length=3|ssc=yes", "ssc"),
+    bad_channel("channel-term-length-before-position", "cavalry:udp?endpoint=10.0.0.2:40123|init-term-id=7|term-length=3",
+                "term-length"),
+    bad_channel("channel-term-length-before-multicast", "cavalry:udp?endpoint=224.0.1.1:40123|term-length=3",
+                "term-length"),
     # Arithmetic: the rules of "The sender" and "The receiver" on given inputs.
     sender_limit("sender-limit-first-status-message", 0, 0, INITIAL_TERM_ID, 0, 131072),
     sender_limit("sender-limit-rises", 8192, 131072, INITIAL_TERM_ID, 8192, 131072),
@@ -474,7 +533,7 @@ def main():
     assert len(names) == len(set(names)), "vector names must be unique"
     doc = {
         "spec": "spec/udp.md",
-        "version": 3,
+        "version": 4,
         "generated_by": "spec/vectors/udp.py; do not edit by hand",
         "vectors": VECTORS,
     }

@@ -76,10 +76,11 @@ committed once a quorum, two of three, has it on disk.
    commit position 96`. For members 1 and 2, with their own id and directories in the
    command, the line says `a follower in term 0, election closed`, with the same two
    positions once their recorders have synced, which each member asks its recorder
-   for as soon as an entry is written. The line ends with who the member follows and
-   why its last election began: on members 1 and 2, `; it follows member 0; its last
-   election began because the member started`. On member 0, which follows no member,
-   it ends `; its last election began because the member started`.
+   for as soon as an entry is written. After the two positions the line says who the
+   member follows and why its last election began: on members 1 and 2, `; it follows
+   member 0; its last election began because the member started`. On member 0, which
+   follows no member, it says `; its last election began because the member started`.
+   The line ends with `; see` and the page that explains it, as every finding does.
 
 5. Stop a member with Ctrl-C or SIGTERM. It prints `cavalry run: stopping` and
    `cavalry run: closed`. The other two are a quorum and go on.
@@ -230,8 +231,13 @@ committed once a quorum, two of three, has it on disk.
   between the two hosts. With a leader taken, the message names that member, from
   `cluster.leader_member_id`, and what the state waits for: an image of the leader's
   log on the member's `log` endpoint, the leader's replay on its `catchup` endpoint,
-  the fifth field of its entry, or both during a catch-up. The check at the end of the
-  message names the endpoints of that state. A member that elects begins again after
+  the fifth field of its entry, or both in `follower catch-up`. The two states of a
+  catch-up before it wait on the `catchup` endpoint alone: the member subscribes to
+  the live log only when the replay has brought its log near the leader's position.
+  The check at the end of the
+  message names the endpoints of that state. In `follower ready` the image has
+  arrived, and the message names the append position alone and the leader's
+  `consensus` endpoint as the one to check. A member that elects begins again after
   an election that fails, so neither message says to start the cluster again. Both
   end with how many elections have failed. Three counters each count one rule that
   fails an election: `cluster.join_position_mismatches`,
