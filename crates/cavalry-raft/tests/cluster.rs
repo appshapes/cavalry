@@ -1433,9 +1433,10 @@ fn a_service_reads_across_the_recordings_of_a_member_that_joined_the_log_again()
     client.close().expect("the service's client closes");
 
     // A member that closes takes its file with it.
-    let file = members[1]
-        .dir
-        .join(format!("{LOG_RECORDINGS_FILE_PREFIX}1"));
+    let file = members[1].dir.join(format!(
+        "{LOG_RECORDINGS_FILE_PREFIX}{}",
+        members[1].module.member_id()
+    ));
     assert!(file.exists());
 
     for member in members {
