@@ -349,13 +349,26 @@ sender reads, and holds a status message's offset, and a NAK's offset and range,
 against the publication's own term itself, since a replay's publication keeps its
 recording's (ADR 0043). The publication is
 connected from the
-first such status message until the connection timeout passes without one. The conductor keeps `publication.limit` at the sender position plus the publication
+first such status message until the connection timeout passes without one. The conductor keeps `publication.limit` at the consumer position plus the publication
 window while the publication is connected and at the sender position otherwise, so that
 the publisher reads `not connected` (`spec/log-buffer.md`, "Claim, commit and abort"),
 keeps `is connected` to match, unblocks the log as "The driver" there says with the
 sender position as the consumer position, and cleans it only up to a term length behind
 the sender position, Aeron's rule, so that the resend window below the sender position
-is never cleaned (ADR 0041). After the publication is closed
+is never cleaned (ADR 0041). The consumer position the limit is kept from is the sender
+position, which stands over `cavalry:udp` where the slowest subscriber's position
+stands over `cavalry:ipc`. For a recorded publication (`spec/client-protocol.md`,
+"Commands", start recording), a replay's publication that is itself recorded among
+them, the recorder is one more reader, as it is over `cavalry:ipc`: the consumer
+position is the lesser of the sender position and the recording's position,
+`recording.position`, which stands at the recording's start position until the
+recorder has attached the counter, and the log is cleaned no further than the
+recording's position, so that a recorder that falls behind back-pressures the
+publisher and no recorded byte is cleaned before the recorder has written it
+(`spec/log-buffer.md`, "The driver"; ADR 0025, ADR 0097). The recorder moves neither
+where the limit rests while the publication is not connected nor where the log is
+unblocked: both stay the sender position.
+After the publication is closed
 it lingers for the linger timeout, sending heartbeats with EOS and answering NAKs; then
 its log is removed. On a channel with an endpoint a status message with the
 end-of-stream flag ends the linger when it arrives, since the one receiver it comes

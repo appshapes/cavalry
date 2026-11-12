@@ -226,7 +226,11 @@ publication (`spec/client-protocol.md`, "Commands") has one more reader, the dri
 recorder, whose position is `recording.position` (`counters.toml`); below, the *consumer
 position* is the minimum subscriber position, or, for a recorded publication, the lesser
 of that and the recording's position, which is the recording's position alone when there
-is no subscriber.
+is no subscriber. Over `cavalry:udp` the sender position stands where the subscribers'
+positions stand here, the publication is connected, unblocked and cleaned by the
+sender's rules, and a recording's position is counted with the sender position for the
+limit and the cleaning in the same way (`spec/udp.md`, "The sender"; ADR 0041, ADR
+0097).
 
 - **Positions.** It stores the producer position in `publication.position`, and the
   publisher limit, the consumer position + the publication window length, in
