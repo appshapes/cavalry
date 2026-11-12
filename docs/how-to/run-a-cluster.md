@@ -93,8 +93,11 @@ committed once a quorum, two of three, has it on disk.
    last election began because its leader said nothing for the leader heartbeat
    timeout`, and on the other `a follower in term 1`, which `follows` the new leader.
    Both also print `WARN cluster.leader_heartbeat_timeouts`, once, for the leader
-   they lost. The member that was stopped does not start again on its log directory
-   in this version: "When it does not work" says what to do.
+   they lost. A member can notice the loss the other way first: it then says `its
+   last election began because its image of the leader's log was no longer
+   available`, and prints `WARN cluster.log_images_lost` in place of that line. Both
+   mean that the leader is gone. The member that was stopped does not start again
+   on its log directory in this version: "When it does not work" says what to do.
 
 ## How to verify it worked
 
