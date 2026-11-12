@@ -38,14 +38,14 @@ TRUNCATE_RECORDING, PURGE_SEGMENTS, PURGE_RECORDING = 0x0105, 0x0106, 0x0107
 # Version 6: no new encoding; start recording arms a recording on a subscription, and a
 # publication's channel may name the position keys of spec/udp.md, version 2 (ADR 0059).
 ADD_DESTINATION, REMOVE_DESTINATION = 7, 8
+# Version 9: no new encoding; a publication's channel may name ssc of spec/udp.md,
+# version 3 (ADR 0098).
 # Version 7: a client's counter, under Aeron's ids (ADR 0062).
 ADD_COUNTER, REMOVE_COUNTER = 9, 10
 ON_COUNTER_READY, ON_UNAVAILABLE_COUNTER = 0x0F08, 0x0F09
 MAX_COUNTER_KEY, MAX_COUNTER_LABEL = 112, 124
 # Version 8: a sync of a recording on command, the next of Cavalry's own ids (ADR 0069).
 SYNC_RECORDING = 0x0108
-# Version 9: no new encoding; a publication's channel may name ssc of spec/udp.md,
-# version 3 (ADR 0098).
 # The replay's conventions, Aeron's: NULL_POSITION, NULL_LENGTH and Long.MAX_VALUE.
 NULL_POSITION, NULL_LENGTH, FOLLOW_LENGTH = -1, -1, 2**63 - 1
 
