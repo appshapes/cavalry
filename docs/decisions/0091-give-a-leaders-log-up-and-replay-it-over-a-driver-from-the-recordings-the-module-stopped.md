@@ -183,6 +183,9 @@ it tries again each cycle still shows its role, its state and its counts.
   times in one process.
 - Revisit when a member over a driver starts on a log it kept: the table is then
   filled from the catalog, and its bound is the catalog's to give.
+- Revisit when the module moves to the election (ADR 0081): if a recording can still
+  be forgotten then, that change adds the counter for a recording the table forgets
+  and its `doctor` text (Alternatives considered).
 
 ## References
 
