@@ -71,11 +71,12 @@ struct Member {
     log_dir: PathBuf,
 }
 
-/// Starts the three members, in an order that does not put the member with the
-/// lowest id first: a test that needs the leader finds it (`run_until_led`), and
-/// none may take a member's place in the vector for its id.
+/// Starts the three members in the order 1, 2, 0, so that no member's place in the
+/// vector is its id, before the leader is put first and after: a test that needs the
+/// leader finds it (`run_until_led`), and none may take a member's place for its id.
+/// The members elect, so the leader is whichever of them won its ballot.
 fn start(dir: &Path, members: &str) -> Vec<Member> {
-    [1, 0, 2]
+    [1, 2, 0]
         .into_iter()
         .map(|id| {
             let driver_dir = dir.join(format!("member-{id}"));
@@ -110,7 +111,8 @@ fn run_until(members: &mut [Member], what: &str, mut done: impl FnMut(&[Member])
 
 /// Runs the members until every election has closed, then puts the member that leads
 /// first: from here `members[0]` is the leader and `members[1..]` are its followers,
-/// whichever member the cluster elected (ADR 0100, change 3; ADR 0104).
+/// whichever member the cluster elected (ADR 0100, change 3; ADR 0104). `start`
+/// starts the members in the order 1, 2, 0, so that no member's place is its id.
 /// Returns the place the leader was in: a test that holds a vector beside `members`,
 /// one item for each member, swaps that place with the first there too.
 fn run_until_led(members: &mut [Member]) -> usize {
@@ -241,8 +243,14 @@ fn three_members_replicate_a_hundred_thousand_entries_and_their_recordings_are_e
             bytes[..usize::try_from(end).expect("a position")].to_vec()
         })
         .collect();
-    assert_eq!(recordings[1], recordings[0], "member 1's recording");
-    assert_eq!(recordings[2], recordings[0], "member 2's recording");
+    assert_eq!(
+        recordings[1], recordings[0],
+        "the first follower's recording"
+    );
+    assert_eq!(
+        recordings[2], recordings[0],
+        "the second follower's recording"
+    );
     // The first entry is the term's event and the last is the hundred thousandth offer.
     let first = Message::parse(Stream::Log, &recordings[0][32..32 + 56]).expect("an entry");
     assert!(matches!(

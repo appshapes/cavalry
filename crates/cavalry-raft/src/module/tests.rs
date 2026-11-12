@@ -1722,9 +1722,14 @@ fn a_replay_whose_sender_vanished_is_said_gone_at_the_image_liveness_timeout() {
         _dir,
         ..
     } = pair;
+    // The driver goes first, and the leader's client after it. A client that closes
+    // while its driver runs has its replay ended by that driver, which sends an end
+    // of stream: the member's image would then go within a heartbeat or two, and not
+    // at the liveness timeout, whenever the driver ran a duty cycle between the two
+    // drops, as it did once in three runs on a loaded runner.
+    drop(_drivers.remove(0));
     let vanished = Instant::now();
     drop(leader);
-    drop(_drivers.remove(0));
     let deadline = vanished + cavalry_proto::udp::IMAGE_LIVENESS_TIMEOUT + Duration::from_secs(5);
     let gone = loop {
         member
@@ -1995,6 +2000,48 @@ fn a_truncation_below_a_recording_purges_it() {
         Some(0)
     );
     assert_eq!(pair.member.io.kept.len(), 1);
+}
+
+/// A purge whose answer was never read is done (ADR 0095). The member's client purges
+/// the second of its two recordings, as a truncation before this one would have, and
+/// the table still names it. A truncation below it is answered "unknown recording"
+/// for that purge, takes it as done, forgets the recording and cuts the first.
+#[test]
+fn a_truncation_takes_a_recording_already_purged_as_purged() {
+    let mut pair = pair("truncate-purged");
+    let (two, first) = pair.follow_and_leave(0, 0, &[b"one", b"two"]);
+    let (_four, second) = pair.follow_and_leave(1, two, &[b"three", b"four"]);
+    let one = two / 2;
+    pair.member
+        .io
+        .record_term(0, 0)
+        .expect("term 0 is recorded");
+    pair.member
+        .io
+        .record_term(1, two)
+        .expect("term 1 is recorded");
+    pair.member
+        .io
+        .client
+        .purge_recording(second)
+        .expect("the driver purges the recording");
+    assert_eq!(pair.stop_of(second), None, "purged");
+    assert_eq!(pair.member.io.kept.len(), 2, "the table still names it");
+
+    assert_eq!(
+        pair.member.io.truncate_log(one).expect("truncated"),
+        Some(0)
+    );
+    assert_eq!(pair.member.io.append_position(), one);
+    assert_eq!(pair.stop_of(first), Some(one));
+    assert_eq!(
+        pair.member.io.kept.iter().copied().collect::<Vec<_>>(),
+        vec![Kept {
+            recording_id: first,
+            start: 0,
+            stop: one,
+        }]
+    );
 }
 
 /// A member that still holds a recording is not out of the log, and a truncation
