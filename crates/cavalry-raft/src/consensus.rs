@@ -487,12 +487,12 @@ pub struct Counts {
     /// `cluster.leadership_terms_ignored`: a new leadership term ignored for its term.
     pub leadership_terms_ignored: u64,
     /// `cluster.join_position_mismatches`: an image of the live log that joined at a
-    /// position other than the member's append position, in follower log await; or,
-    /// in follower log replication, a replay's image that joined at a position other
-    /// than the one the member asked from (ADR 0086, ADR 0092); or, in follower
-    /// catch-up await, the
-    /// image of a catch-up's replay that joined at a position other than the one the
-    /// member asked from (ADR 0088).
+    /// position other than the member's append position, in follower log await,
+    /// which over a driver is a recording of it that begins elsewhere (ADR 0093);
+    /// or, in follower log replication, a replay's image that joined at a position
+    /// other than the one the member asked from (ADR 0086, ADR 0092); or, in
+    /// follower catch-up await, the image of a catch-up's replay that joined at a
+    /// position other than the one the member asked from (ADR 0088).
     pub join_position_mismatches: u64,
     /// `cluster.log_images_lost`: a follower whose image of the leader's log was no
     /// longer available, so that it began again at init.
