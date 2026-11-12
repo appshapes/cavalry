@@ -208,12 +208,18 @@ pub trait Io {
 
     /// A follower's subscription to the log on its `log` endpoint, with a recording
     /// armed on it, so that the recording holds the leader's image from its join
-    /// position.
+    /// position when the image arrives after the recording is armed. An image that
+    /// arrived first is recorded from what it had received by then, and
+    /// [`Io::log_image`] says from where (ADR 0093).
     fn join_log(&mut self) -> Result<(), Self::Fault>;
 
-    /// The join position of the image of the log with `session_id` on the follower's
-    /// subscription: `None` before the image has arrived, and again once it is no
-    /// longer available.
+    /// The join position of the image of the log with `session_id` as the member
+    /// holds it: where the member's recording of that image begins, which is the
+    /// image's join position when the recording was armed first and past it when
+    /// the image arrived first (ADR 0093). `None` before the image has arrived and
+    /// its recording has started, and again once the image is no longer available.
+    /// A recording counts in [`Io::append_position`] no sooner than this has
+    /// reported its image, and one of another session's image never does.
     fn log_image(&mut self, session_id: i32) -> Result<Option<i64>, Self::Fault>;
 
     /// Leaves the log: removes the follower's subscription and stops the recording its
