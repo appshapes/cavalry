@@ -49,11 +49,14 @@ is the driver's.
 
 A status message that would join a publication alone with its recording and names a
 position more than a term behind is counted in `sender.joins_refused`, a counter of the
-publication's own, id 142, beside `sender.status_messages_rejected`. The refusal of a
+publication's own, id 142, beside `sender.status_messages_rejected`. It counts a
+receiver that answered a setup frame too late, and one that left and came back after
+more than a term went by; only the first is a term too short, and it is the one on a
+publication that no receiver has joined. The refusal of a
 message that is too long names the key. `cavalry doctor` reads both from counters, in
 the change to `cavalry-control` that follows the driver's: it warns with
-`udp-publication-join-refused` while that counter is above 0 and the publication is
-still alone, naming `term-length`, and `recording-stalled` says when the room it reads
+`udp-publication-join-refused` while that counter is above 0 on a publication that no
+receiver has joined, naming `term-length`, and `recording-stalled` says when the room it reads
 is a short window.
 
 The rule for choosing a term: it holds what the publisher writes in 16 milliseconds at

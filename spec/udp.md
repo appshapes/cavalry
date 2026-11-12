@@ -453,9 +453,10 @@ term behind the sender position is never cleaned, and nothing in it was sent. A 
 message whose position is further behind, or ahead of the sender position, is rejected
 and counted in `sender.status_messages_rejected`, since the frames it would need are
 no longer in the log; one that is further behind is counted in the publication's own
-`sender.joins_refused` as well, from version 4, since it says that the publisher wrote
-more than a term between a setup frame and its answer, which a longer `term-length`
-ends ("The channel URI"; ADR 0099). Every heartbeat that receiver is then sent is an over-run, which
+`sender.joins_refused` as well, from version 4. On a publication no receiver has
+joined, it says that the publisher wrote more than a term between a setup frame and
+its answer, which a longer `term-length` ends; on one whose receiver had left, that
+more than a term went by while the receiver was away ("The channel URI"; ADR 0099). Every heartbeat that receiver is then sent is an over-run, which
 is no activity ("The receiver", steps 2 and 5): its image times out, its subscribers
 are told with `unavailable image`, and after the cool-down a new image joins at the
 sender position. So no image is left waiting for frames that will not come, nothing is

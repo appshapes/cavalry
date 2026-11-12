@@ -869,8 +869,9 @@ pub(crate) struct Conductor {
     replays: Vec<ReplayEntry>,
     /// The retention commands in progress (`spec/client-protocol.md`, "Sizes").
     commands: Vec<CommandEntry>,
-    /// The term length of every log this conductor creates: the spec's, and the
-    /// smallest in a test at a registry's capacity (ADR 0027).
+    /// The term length of every `cavalry:ipc` log this conductor creates: the spec's,
+    /// and the smallest in a test at a registry's capacity (ADR 0027). A `cavalry:udp`
+    /// publication's is its channel's (ADR 0099).
     term_length: u32,
     recorder: RecorderLink,
     replayer: ReplayerLink,
@@ -1925,18 +1926,14 @@ impl Conductor {
         };
         let flow_control = channel.flow_control();
         let ssc = channel.spies_simulate_connection();
-        // The term length the channel names (`spec/udp.md`, version 4; ADR 0099), or,
-        // when it names none, the spec's UDP term or the smaller one a test at a
-        // registry's capacity sets, since every log is made resident when it is
-        // created (ADR 0027). Nothing depends on the log's term matching what the
-        // sender parses a frame against: the sender holds a status message's and a
-        // NAK's offsets against the publication's own term, as it must for a replay's
-        // publication, whose log keeps its recording's term (ADR 0043).
-        let term_length = if channel.names_term_length() {
-            channel.term_length()
-        } else {
-            self.term_length.min(spec::UDP_TERM_LENGTH)
-        };
+        // The term length the channel names, the spec's UDP term when it names none
+        // (`spec/udp.md`, version 4; ADR 0099): the one source of a publication's
+        // term, in which the parser has already held its position keys. Nothing
+        // depends on the log's term matching what the sender parses a frame against:
+        // the sender holds a status message's and a NAK's offsets against the
+        // publication's own term, as it must for a replay's publication, whose log
+        // keeps its recording's term (ADR 0043).
+        let term_length = channel.term_length();
         let registration = Registration {
             client_id,
             correlation_id,
@@ -2099,13 +2096,11 @@ impl Conductor {
         let reuse = now.saturating_add(spec::nanos(spec::COUNTER_REUSE_TIMEOUT));
         // Version 2's position keys create the log at a position with their initial
         // term id, as a replay's log is created (`spec/udp.md`, "The channel URI"; ADR
-        // 0059), the position counted in the log's own term, the spec's unless a test
-        // shrank it, so that the term ids on the wire are the keys'.
+        // 0059), the position counted in the log's own term, so that the term ids on
+        // the wire are the keys'.
         let keys = channel.position_keys();
         let initial_term_id = keys.map_or(initial_term_id, |keys| keys.initial_term_id);
-        let start_position = keys.map_or(0, |keys| {
-            i64::from(keys.term_count()) * i64::from(term_length) + i64::from(keys.term_offset)
-        });
+        let start_position = channel.position().unwrap_or(0);
         let fields = HeaderFields::new(
             log_type,
             correlation_id,
@@ -2123,7 +2118,20 @@ impl Conductor {
             Err(error) => {
                 self.statics.log_create_failed.increment();
                 self.abandon_send_endpoint(endpoint_index, socket.is_some(), reuse);
-                self.send_error(correlation_id, ErrorCode::StorageSpace, &format!("{error}"));
+                // What the operator can change is the term: the log is three of them,
+                // resident from its creation (ADR 0027, ADR 0099).
+                self.send_error(
+                    correlation_id,
+                    ErrorCode::StorageSpace,
+                    &format!(
+                        "{error}; this publication's log is 3 × its term length + 4096 \
+                         bytes, {} in all, resident in the driver directory from its \
+                         creation: if the directory has no room for it, name a shorter \
+                         term-length on the channel, 65536 at the least, close publications \
+                         that are not used, or give the directory room",
+                        3 * u64::from(term_length) + 4096
+                    ),
+                );
                 return;
             }
         };
@@ -9103,12 +9111,14 @@ mod recording {
     #[test]
     fn the_send_endpoints_registry_fills_at_its_capacity() {
         let mut h = Harness::new("udp-endpoints-capacity");
-        // Every log is made resident at creation: the smallest term for 64 of them.
-        h.conductor.term_length = cavalry_shm::log::layout::MIN_TERM_LENGTH;
         let now = h.now;
         for i in 0..spec::MAX_SEND_ENDPOINTS {
             let correlation_id = 10 + i as i64;
-            let channel = format!("cavalry:udp?endpoint=127.0.0.1:{}", 40_100 + i);
+            // Every log is made resident at creation: the smallest term for 64 of them.
+            let channel = format!(
+                "cavalry:udp?endpoint=127.0.0.1:{}|term-length=64k",
+                40_100 + i
+            );
             h.conductor
                 .add_publication(1, correlation_id, 7, channel.as_bytes(), false, now);
             assert_eq!(h.last_error(correlation_id), None, "endpoint {i}");
@@ -9251,13 +9261,16 @@ mod recording {
     fn the_senders_deferred_requests_are_bounded_by_a_close_per_publication_and_a_remove_per_endpoint()
      {
         let mut h = Harness::new("udp-sender-deferred-capacity");
-        // Every log is made resident at creation: the smallest term for 1024 of them.
-        h.conductor.term_length = cavalry_shm::log::layout::MIN_TERM_LENGTH;
         let now = h.now;
         let per_endpoint = spec::MAX_PUBLICATIONS / spec::MAX_SEND_ENDPOINTS;
         let mut ids: Vec<i64> = Vec::with_capacity(spec::MAX_PUBLICATIONS);
         for endpoint in 0..spec::MAX_SEND_ENDPOINTS {
-            let channel = format!("cavalry:udp?endpoint=127.0.0.1:{}", 40_300 + endpoint);
+            // Every log is made resident at creation: the smallest term for 1024 of
+            // them.
+            let channel = format!(
+                "cavalry:udp?endpoint=127.0.0.1:{}|term-length=64k",
+                40_300 + endpoint
+            );
             for stream in 0..per_endpoint {
                 let correlation_id = 10 + ids.len() as i64;
                 h.conductor.add_publication(
@@ -10564,6 +10577,42 @@ mod recording {
         }
         assert_eq!((read, refold), (late, fold));
         assert_eq!(h.counter(LOG_BUFFER_REJECTED_FRAME), 0);
+    }
+
+    /// A log the driver directory refuses (invariant 3): `add publication` on a
+    /// `cavalry:udp` channel is code 12, and the message says how long the log is and
+    /// that a shorter `term-length` is one way out; nothing of the publication is
+    /// left, and `driver.log_create_failed` counts it (ADR 0099).
+    #[test]
+    fn a_udp_log_the_directory_refuses_is_code_12_and_names_term_length() {
+        use std::os::unix::fs::PermissionsExt;
+        let mut h = Harness::new("udp-log-refused");
+        let receiver = TestReceiver::bind();
+        let channel = format!(
+            "{}|term-length=64k",
+            String::from_utf8(receiver.channel()).expect("utf-8")
+        );
+        let publications = h.dir.path().join("publications");
+        std::fs::create_dir_all(&publications).expect("the directory");
+        let writable = std::fs::metadata(&publications)
+            .expect("stat")
+            .permissions();
+        std::fs::set_permissions(&publications, std::fs::Permissions::from_mode(0o555))
+            .expect("read-only");
+        let now = h.now;
+        h.conductor
+            .add_publication(1, 2, 7, channel.as_bytes(), false, now);
+        std::fs::set_permissions(&publications, writable).expect("writable again");
+        let (code, message) = h.last_error(2).expect("an error");
+        assert_eq!(code, 12, "{message}");
+        assert!(
+            message.contains("3 × its term length + 4096 bytes, 200704 in all"),
+            "{message}"
+        );
+        assert!(message.contains("name a shorter term-length"), "{message}");
+        assert!(h.conductor.publications.is_empty());
+        assert!(h.conductor.send_endpoints.is_empty());
+        assert_eq!(h.counter(DRIVER_LOG_CREATE_FAILED), 1);
     }
 
     /// The bounds of `term-length` at the conductor: the longest term this version
