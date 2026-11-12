@@ -206,7 +206,10 @@ term that fewer than a quorum recorded stays in a member's record there.
 - A member that recorded a term no quorum recorded joins the next leader with one
   more step and no failed election, where it could strand another member later.
 - `cluster.terms_dropped` says when a member's log term went down. Its `doctor`
-  text says that nothing was lost, and what to read when a refusal rises with it.
+  text says that nothing was lost. It also says that a member whose cut would go
+  below the commit position it knows drops nothing: `cluster.truncations_refused`
+  and `cluster.elections_failed` rise on it at each election while
+  `cluster.terms_dropped` stays where it was, and the text names what to read then.
 - A member's log term can fall. Every rule that compares log terms reads it at the
   time: a member that dropped a term reports the lower one from then on, and votes
   as a member of no term it no longer holds, as after a truncation.
