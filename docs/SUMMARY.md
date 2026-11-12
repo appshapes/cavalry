@@ -150,3 +150,4 @@ under `docs/` is listed here; `just lint-docs` fails on one that is not.
 - [0104. Have the consensus module elect its leader, and take the appointed leader out](decisions/0104-have-the-consensus-module-elect-its-leader-and-take-the-appointed-leader-out.md)
 - [0105. Lose a ballot at its first vote against](decisions/0105-lose-a-ballot-at-its-first-vote-against.md)
 - [0106. Canvass with no reports after a replication](decisions/0106-canvass-with-no-reports-after-a-replication.md)
+- [0107. Take the appointed leader out of cavalry doctor, and retire its counter](decisions/0107-take-the-appointed-leader-out-of-cavalry-doctor-and-retire-its-counter.md)

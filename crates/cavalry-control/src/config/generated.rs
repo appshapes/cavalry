@@ -65,7 +65,7 @@ pub const CLUSTER_MEMBERS: KeyDef = KeyDef {
     anchor: "docs/reference/config.md#clustermembers",
 };
 
-/// `cluster.member.id`, integer: This driver's member id in cluster.members: which of the string's members `cavalry run` starts on this host, a whole number from 0 to 2147483647. -1, the default, is no member, the same as the key unset, so that a unit file may write the default out; any other value is refused before anything starts. The member with the lowest id is the cluster's appointed leader (spec/cluster.md, The appointed leader).
+/// `cluster.member.id`, integer: This driver's member id in cluster.members: which of the string's members `cavalry run` starts on this host, a whole number from 0 to 2147483647. -1, the default, is no member, the same as the key unset, so that a unit file may write the default out; any other value is refused before anything starts.
 pub const CLUSTER_MEMBER_ID: KeyDef = KeyDef {
     name: "cluster.member.id",
     env: "CAVALRY_CLUSTER_MEMBER_ID",
@@ -74,7 +74,7 @@ pub const CLUSTER_MEMBER_ID: KeyDef = KeyDef {
     values: &[],
     default: "-1, which is no member",
     term: "member",
-    doc: "This driver's member id in cluster.members: which of the string's members `cavalry run` starts on this host, a whole number from 0 to 2147483647. -1, the default, is no member, the same as the key unset, so that a unit file may write the default out; any other value is refused before anything starts. The member with the lowest id is the cluster's appointed leader (spec/cluster.md, The appointed leader).",
+    doc: "This driver's member id in cluster.members: which of the string's members `cavalry run` starts on this host, a whole number from 0 to 2147483647. -1, the default, is no member, the same as the key unset, so that a unit file may write the default out; any other value is refused before anything starts.",
     why_not_default: "Every member of a cluster holds the same members string, so the id alone says which member a host is; no default is right on more than one of them.",
     doctor: "cluster-member-id",
     anchor: "docs/reference/config.md#clustermemberid",

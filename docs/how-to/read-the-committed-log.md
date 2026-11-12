@@ -146,8 +146,8 @@ its services read what it appends in the same way.
 - `cluster-service: waiting for a cluster member with a log on this driver`, and
   nothing more: the driver in `--dir` runs no cluster member, or the member has no log
   yet. Run `doctor` on that directory with the member's two variables set. A member
-  whose line says `election closed` has a log. `WARN cluster-no-leader` and `WARN
-  cluster-joined-late` are explained in
+  whose line says `election closed` has a log. `WARN cluster-no-leader` and `note
+  cluster-joining` are explained in
   [Run a cluster of three members](run-a-cluster.md#when-it-does-not-work).
 - `error 23 (position out of range)`: `--from` is past what this member has recorded,
   or below every recording of its log that the member keeps. The message gives the
