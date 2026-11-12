@@ -141,4 +141,6 @@ under `docs/` is listed here; `just lint-docs` fails on one that is not.
 - [0090. Keep a subscriber's samples out of the histogram until its loop is over](decisions/0090-keep-a-subscribers-samples-out-of-the-histogram-until-its-loop-is-over.md)
 - [0093. Take where a member's recording of the log begins from the catalog, and count it once its image is checked](decisions/0093-take-where-a-members-recording-of-the-log-begins-from-the-catalog-and-count-it-once-its-image-is-checked.md)
 - [0097. Count the recorder among a cavalry:udp publication's readers](decisions/0097-count-the-recorder-among-a-cavalry-udp-publications-readers.md)
+- [0100. Move the module to the election in ordered changes, around one that takes the appointed path out](decisions/0100-move-the-module-to-the-election-in-ordered-changes-around-one-that-takes-the-appointed-path-out.md)
+- [0094. Record a member's replays over a driver, and count the live recording once the log reaches it](decisions/0094-record-a-members-replays-over-a-driver-and-count-the-live-recording-once-the-log-reaches-it.md)
 - [0101. Read a publisher held by its recorder from its limit, in doctor](decisions/0101-read-a-publisher-held-by-its-recorder-from-its-limit-in-doctor.md)
