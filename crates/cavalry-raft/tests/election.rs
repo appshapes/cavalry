@@ -772,6 +772,73 @@ fn a_term_fewer_than_a_quorum_recorded_strands_no_member() {
     assert_eq!(cluster.commit_position(m), Some(after));
 }
 
+/// Late consensus messages cut nothing that was committed. Since ADR 0096 a member
+/// that reads a new leadership term naming a term below its own log term may drop
+/// terms, so an old message must change nothing: an answer to a report the member
+/// made before it recorded more, or a copy from a leader it has since joined. Three
+/// members, at eight seeds, every consensus message up to two seconds late and out
+/// of order. Three times over, the leader appends an entry, is stopped, another
+/// member leads, and the first runs again. The check after every step holds
+/// throughout: no committed entry is lost or replaced, and no member holds, below
+/// the commit position it knows, bytes that were not committed. No member refuses a
+/// truncation, and once the messages arrive in order again the three settle on one
+/// leader and one log. At these seeds no member drops a term or truncates: the
+/// test is the net under the rule, and `dropped_terms.rs` has the rule's own cases.
+#[test]
+fn late_new_leadership_terms_cut_nothing_that_was_committed() {
+    for seed in 1..=8 {
+        let ids = [0, 1, 2];
+        let mut safety = Safety::new(&ids);
+        let mut cluster = Cluster::with_election(&ids, seed).expect("three members");
+        assert_eq!(cluster.set_delivery(0, 2_000), 2_000);
+        for round in 0..3u8 {
+            // An entry, once a leader's election has closed and takes it.
+            let mut offered = None;
+            for _ in 0..120_000 {
+                if let Ok(position) = cluster.offer(&[b'a' + round; 40]) {
+                    offered = Some(position);
+                    break;
+                }
+                cluster.step();
+                safety.check(&cluster);
+            }
+            assert!(
+                offered.is_some(),
+                "seed {seed}, round {round}: no leader took an entry"
+            );
+            safety.run(&mut cluster, 3_000);
+            // Whoever leads by now: with messages this late the member that took
+            // the entry may have held an election since.
+            safety.run_until(&mut cluster, 120_000, "a member leads", |cluster| {
+                cluster.leader().is_some()
+            });
+            let leader = cluster.leader().expect("a leader");
+            cluster.halt(leader);
+            safety.run_until(&mut cluster, 120_000, "another member leads", |cluster| {
+                cluster.leader().is_some_and(|id| id != leader)
+            });
+            cluster.resume(leader);
+            safety.run(&mut cluster, 15_000);
+        }
+        assert_eq!(cluster.set_delivery(0, 0), 0);
+        safety.run_until(&mut cluster, 120_000, "the three settle", |cluster| {
+            settled(cluster, &ids)
+        });
+        safety.run(&mut cluster, 1_000);
+        let leader = cluster.leader().expect("a leader");
+        let commit = cluster.commit_position(leader).expect("the leader");
+        for id in ids {
+            let counts = cluster.counts(id).expect("a member");
+            assert_eq!(counts.truncations_refused, 0, "seed {seed}: {counts:?}");
+            assert_eq!(
+                cluster.log_to(id, commit),
+                cluster.log_to(leader, commit),
+                "seed {seed}: member {id}'s log is the leader's"
+            );
+        }
+    }
+}
+
 /// A payload whose session message takes a frame of `frame` bytes in the log.
 fn payload_of_frame(frame: i64) -> Vec<u8> {
     use cavalry_proto::cluster::{Message, entry_position};
