@@ -106,7 +106,15 @@ order would leave bytes above the record's last term that nothing names.
 - Each rule taken out fails a test: with only the first recording cut, the test of
   the two that overlap; with the record of terms left as it was, the first two;
   with a recording that begins above the position cut and not purged, the second.
-- `cargo test -p cavalry-raft`: 161 passed.
+- A fifth test, of the sync a member asks for. The mark of the last sync asked is
+  one recording's. A member follows term 0 to 192, where its last request was made,
+  truncates to 96 and follows term 1 from there: the new recording writes 192 with
+  its first entry. Taken in hand, that recording has no mark, so its sync is asked;
+  with the mark left at 192 the request was skipped and the entry counted toward a
+  commit only at the recorder's own sync, up to a second later. The second review
+  of pull request 241 noted the mark; a truncation is what makes the position
+  repeat. With the reset taken out the test fails: the mark reads 192.
+- `cargo test -p cavalry-raft`: 165 passed.
 - Not shown: a command that faults part way, which is read from the code; and a
   stop between the two steps, which Consequences leaves to the change that starts a
   member on a kept log.

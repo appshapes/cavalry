@@ -385,7 +385,9 @@ struct ClientIo {
     /// The end of the contiguous span the recordings this member has stopped hold.
     stopped_at: i64,
     /// The position its recording of the log had written when this member last asked
-    /// the recorder to sync it ([`ask_sync`]).
+    /// the recorder to sync it ([`ask_sync`]), `NO_SYNC_ASKED` from the moment the
+    /// member takes a recording in hand: the mark is one recording's, and the next
+    /// may write a position the one before it was asked at.
     sync_asked_at: i64,
     /// The same for its recording of a replay.
     catchup_sync_asked_at: i64,
@@ -560,6 +562,9 @@ impl ClientIo {
             floor,
         )? {
             self.catchup_held = Some(held);
+            // The mark is of the recording before this one: a position this one
+            // writes may equal it, and its sync must still be asked.
+            self.catchup_sync_asked_at = NO_SYNC_ASKED;
         }
         Ok(())
     }
@@ -648,6 +653,9 @@ impl ClientIo {
             self.log_floor,
         )? {
             self.held = Some(held);
+            // The mark is of the recording before this one: a position this one
+            // writes may equal it, and its sync must still be asked.
+            self.sync_asked_at = NO_SYNC_ASKED;
         }
         Ok(())
     }
@@ -730,6 +738,7 @@ impl Io for ClientIo {
                 self.client
                     .start_recording(&self.log_control_channel, LOG_STREAM_ID)?,
             );
+            self.sync_asked_at = NO_SYNC_ASKED;
         }
         Ok(self.log_recording.as_ref().map(|recording| Log {
             session_id: publication.session_id(),
