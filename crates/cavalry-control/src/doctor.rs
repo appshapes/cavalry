@@ -299,7 +299,7 @@ pub fn examine(dir: &Path) -> Report {
 /// named (`recording-invalid`), every recording's two positions from the counters file,
 /// with a recorder that holds its publisher, or is about to (`recording-stalled`), and
 /// failed
-/// writes (`recording-write-failed`) as findings (ADR 0025, ADR 0100), and a recording over half
+/// writes (`recording-write-failed`) as findings (ADR 0025, ADR 0101), and a recording over half
 /// its filesystem, live by its gauge or stopped by its descriptor
 /// (`recording-over-half`, ADR 0031).
 pub fn examine_with(dir: &Path, log_dir: Option<&Path>) -> Report {
@@ -2262,7 +2262,7 @@ struct RecordingCounters {
 /// invalid, named from the catalog when the log directory is known
 /// (`recording-invalid`) (`spec/client-protocol.md`, "Commands"; ADR 0025).
 ///
-/// `recording-stalled` reads no window of its own (ADR 0100). The driver keeps a
+/// `recording-stalled` reads no window of its own (ADR 0101). The driver keeps a
 /// recorded publication's limit one publication window past its slowest reader, so
 /// when the recorder is that reader, `publication.limit` less `recording.position` is
 /// the room the recorder gives the publisher, whatever the log's term: it is the
@@ -3908,7 +3908,7 @@ mod tests {
     }
 
     /// `recording-stalled` reads the room from the publication's own limit, so it
-    /// needs no window (ADR 0100). A `cavalry:udp` publication held by its recorder
+    /// needs no window (ADR 0101). A `cavalry:udp` publication held by its recorder
     /// stands as the driver leaves it: the limit an eighth of its 8 MiB window short
     /// of the recorder's position plus the window, the publisher a frame short of the
     /// limit, the sender ahead of the recorder. A log of another term reads the same
@@ -3991,7 +3991,7 @@ mod tests {
     /// A recording's label names a session id and a stream id and not what it reads, so
     /// `recording-stalled` judges none it cannot place: two publications on this driver
     /// with them, or an image with them, which a driver that receives its own stream
-    /// has (ADR 0100).
+    /// has (ADR 0101).
     #[test]
     fn a_recording_that_cannot_be_placed_is_not_judged() {
         let dir = TestDir::new("recordings-unplaced");

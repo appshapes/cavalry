@@ -7,5 +7,5 @@
   over `cavalry:ipc` either. The message gives both numbers. A recording `doctor`
   cannot place, of a stream the driver also receives or of one of two publications
   with the same session id and stream id, is listed and not judged
-  ([ADR 0100](docs/decisions/0100-read-a-publisher-held-by-its-recorder-from-its-limit-in-doctor.md);
+  ([ADR 0101](docs/decisions/0101-read-a-publisher-held-by-its-recorder-from-its-limit-in-doctor.md);
   card 270).

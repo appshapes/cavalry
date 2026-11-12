@@ -1,4 +1,4 @@
-# 0100. Read a publisher held by its recorder from its limit, in doctor
+# 0101. Read a publisher held by its recorder from its limit, in doctor
 
 - **Status:** Accepted
 - **Date:** 2026-11-12
