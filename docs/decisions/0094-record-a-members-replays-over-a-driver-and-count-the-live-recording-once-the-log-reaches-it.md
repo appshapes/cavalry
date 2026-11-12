@@ -115,7 +115,7 @@ member's recordings is not in this version (`spec/cluster.md`, "The service").
 
 ## Evidence
 
-- `crates/cavalry-raft/src/module/tests.rs`, six tests. In five, the leader and
+- `crates/cavalry-raft/src/module/tests.rs`, seven tests. In six, the leader and
   the member are each a module on a driver of its own, and the test drives the `Io`
   of both.
   - A term in two of the leader's recordings, 0 to 192 and 192 to 288. For each,
@@ -145,14 +145,19 @@ member's recordings is not in this version (`spec/cluster.md`, "The service").
     bytes and leaves; a log of another term begins at 0; the election is told 0;
     the recording syncs past 96; the append position stays 96, no recording is
     named and nothing more is kept.
+  - A replay whose sender vanished: the leader's module and its driver are
+    stopped while a replay runs. The image is said to have gone 9.996 s later in
+    one run, the image liveness timeout; the test holds it to 9 s at least. What
+    the replay had brought is the member's log, and the recording is kept.
   - A catch-up position with a host name of 240 characters does not fit 128 bytes
     and fits 1,408.
 - Each rule taken out fails the test written for it: the floor; a live recording
   held to begin exactly where the stopped ones end; an image said to be gone as
   soon as its recording stopped, told or not; `leave_log` without stopping the
   replay's recording first.
-- The eighteen in-crate tests ran fifteen times in a row on a macOS laptop with no
-  failure, 5.5 s a run. `cargo test -p cavalry-raft`: 155 passed. The tests over
+- The eighteen in-crate tests before the last was added ran fifteen times in a row
+  on a macOS laptop with no failure, 5.5 s a run; with it a run takes about 11 s,
+  the image liveness timeout. `cargo test -p cavalry-raft`: 156 passed. The tests over
   three drivers, `cluster`, pass unchanged.
 - Not shown: a member's whole election over drivers, which comes when the module
   moves (ADR 0081); and a stale sender on either endpoint, which Consequences
@@ -171,6 +176,15 @@ member's recordings is not in this version (`spec/cluster.md`, "The service").
   fault-injection tests of ADR 0077: if a stale sender can hold a member out for
   more than one timeout, the member needs to tell the driver which session to
   record.
+- A replay's image is said to have gone when the member's recording of it has
+  stopped, which needs the end of stream to reach the member or the image
+  liveness timeout to pass. That timeout and the leader heartbeat timeout are both
+  10 s. So when no end of stream arrives, the member's progress timer fires no
+  later than the image goes, and the member fails its election, counted, and does
+  not ask again. That is right when the leader is gone, which is the case a test
+  here makes. A leader that lives and whose replay's end of stream is lost costs
+  the member one election. Revisit if the fault-injection tests of ADR 0077 meet
+  it.
 - The kept table can hold recordings that overlap. `truncate_log` must cut or
   forget each one that holds bytes above the position, as its doc comment says.
 

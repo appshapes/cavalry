@@ -1519,3 +1519,68 @@ fn a_catch_up_position_with_a_long_host_name_does_not_fit_128_bytes() {
         .expect("the scratch holds it");
     assert!(length > 128, "{length}");
 }
+
+/// A replay whose sender vanishes, here the leader's driver stopped, sends no end of
+/// stream. The member's image of it goes at the image liveness timeout, 10 s, and
+/// only then is the image said to have gone: the driver stops the member's recording
+/// when it retires the image. What the replay had brought is the member's log. The
+/// leader heartbeat timeout is 10 s too, so a member's election fails for want of
+/// progress no later than this, and it does not ask again (ADR 0094).
+#[test]
+fn a_replay_whose_sender_vanished_is_said_gone_at_the_image_liveness_timeout() {
+    let mut pair = pair("sender-vanishes");
+    let _receiver = pair.receive_log();
+    pair.leader
+        .io
+        .add_log(0, 0)
+        .expect("the driver takes the commands")
+        .expect("the log has its recording");
+    let one = pair.append(b"one", 0);
+    pair.member.io.add_catchup().expect("subscribed and armed");
+    assert!(
+        pair.leader
+            .io
+            .start_replay(1, 0, None)
+            .expect("the replay starts")
+    );
+    pair.observe_both("the replay's image is told", |io| {
+        io.catchup_image().expect("the image is read")
+    });
+    pair.observe_both("the append position reaches the leader's", |io| {
+        (io.append_position() == one).then_some(())
+    });
+
+    let Pair {
+        leader,
+        mut member,
+        mut _drivers,
+        _dir,
+        ..
+    } = pair;
+    let vanished = Instant::now();
+    drop(leader);
+    drop(_drivers.remove(0));
+    let deadline = vanished + cavalry_proto::udp::IMAGE_LIVENESS_TIMEOUT + Duration::from_secs(5);
+    let gone = loop {
+        member
+            .io
+            .observe_catchup()
+            .expect("the catch-up is observed");
+        if member.io.catchup_image().expect("read").is_none() {
+            break vanished.elapsed();
+        }
+        assert!(Instant::now() < deadline, "the image never went");
+        std::thread::sleep(Duration::from_millis(5));
+    };
+    assert!(
+        gone >= cavalry_proto::udp::IMAGE_LIVENESS_TIMEOUT - Duration::from_secs(1),
+        "{gone:?}"
+    );
+    assert_eq!(member.io.append_position(), one);
+    member
+        .io
+        .remove_catchup()
+        .expect("the subscription is removed");
+    assert_eq!(member.io.append_position(), one);
+    assert_eq!(member.io.kept.len(), 1);
+}
