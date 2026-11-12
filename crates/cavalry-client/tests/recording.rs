@@ -114,6 +114,17 @@ fn a_recording_follows_the_publisher_and_stops_on_request() {
     drop(catalog);
     client.stop_recording(0).expect("stops");
     let catalog = CatalogReader::open(&log_dir).expect("the catalog opens");
+    // What the catalog is stamped with is the epoch clock, which a later run reads; the
+    // recorder measures its intervals on its nano clock, whose readings are no time of
+    // day (ADR 0109).
+    let slot = catalog.get(0).expect("reads").expect("the slot");
+    let wall = cavalry_shm::clock::epoch_time();
+    for stamp in [slot.start_timestamp(), slot.stop_timestamp()] {
+        assert!(
+            (wall - stamp).abs() < 60_000_000_000,
+            "{stamp} is not within a minute of the host's clock, {wall}"
+        );
+    }
     assert_eq!(
         catalog
             .get(0)

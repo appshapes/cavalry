@@ -133,7 +133,8 @@ so for a few milliseconds a client that has found the command ring can find one 
 three unfinished: missing; empty, created and not yet sized, which its page calls
 `too-short`; or `not-ready`. Such a file is a driver creating it now, and the client
 reads the directory again from the command ring, every 10 ms, for up to the driver
-timeout from its first read, a time it measures on a clock that never goes back. A
+timeout from its first read, a time it measures on its nano clock ("Liveness and
+timeouts"), which never goes back. A
 command ring still unfinished then is a dead driver's, as it is to a starting driver,
 and the client refuses with `driver-timeout`. So is a finished ring whose heartbeat
 has not been stored again since the client first read it: a driver that runs stores
@@ -902,10 +903,10 @@ values and keeps 100 and above for its own (`spec/c-abi.md`, "Error codes").
 
 | Timeout | Value | Measured by | Meaning |
 | --- | --- | --- | --- |
-| heartbeat interval | 1 s | the driver | how often it stores its clock in the consumer heartbeat |
+| heartbeat interval | 1 s | the driver | how often it stores its epoch clock in the consumer heartbeat; it stores it at once after a step of the host's clock as well (below) |
 | driver timeout | 10 s | a client | a consumer heartbeat older than this is `driver-timeout`; the client closes |
 | keepalive interval | 500 ms | a client | how often it sends `client keepalive` when it has sent nothing else |
-| client liveness timeout | 10 s | the driver | a client whose last command is older than this is timed out |
+| client liveness timeout | 10 s | the driver | a client whose last command is older than this, on both of the driver's clocks (below), is timed out |
 | response timeout | 10 s | a client | an add or remove command unanswered for this long is reported to the caller as lost; the command may have been `unblocked` (`spec/command-ring.md`) or rejected before it was decoded |
 | command ring unblock timeout | 10 s | the driver | the client liveness timeout, as `spec/command-ring.md` says |
 | publication unblock timeout | 15 s | the driver | `spec/log-buffer.md`, "Unblocking" |
@@ -916,8 +917,61 @@ values and keeps 100 and above for its own (`spec/c-abi.md`, "Error codes").
 | closing endpoint wait | 5 s | the driver | an `add subscription` that has waited this long for its channel's previous receive endpoint to close, measured from the moment the driver read it, is answered with code 4 and registers nothing ("Commands"); half the response timeout, so that the answer reaches the client before the client reports the add lost |
 
 These are Aeron's values, and they are the driver's in this version. The closing
-endpoint wait is Cavalry's own (ADR 0049). Each timeout is measured on the clock the
-driver stores in the consumer heartbeat, nanoseconds since the Unix epoch.
+endpoint wait is Cavalry's own (ADR 0049).
+
+A process reads two clocks (ADR 0109). Its **epoch clock** is the host's wall clock,
+nanoseconds since the Unix epoch: the clock the driver stores in the consumer
+heartbeat, and the clock of every timestamp another process or a later run reads, the
+files' start timestamps and the timestamps of `spec/durable-log.md`. Its **nano clock**
+counts nanoseconds from the process's first reading of it, never goes back, and is not
+moved when the host's clock is set; a reading of it means nothing to another process.
+
+Every timeout of the table is measured between two readings of the measuring
+process's nano clock, with two exceptions, each because another process's clock is in
+it:
+
+- The driver timeout compares the readings of two processes, so it is measured on the
+  epoch clock: a client, `cavalry doctor` and a starting driver that finds no `pid`
+  ("The driver directory") each take their own epoch clock less the consumer
+  heartbeat.
+- The client liveness timeout is measured on both of the driver's clocks. The driver
+  notes both when it reads a client's command, and times the client out when its last
+  command is older than the timeout on the nano clock and on the epoch clock. The nano
+  clock is in it so that a clock set forward times out nobody. The epoch clock is in
+  it for a client of an earlier release, which measured its keepalive interval on its
+  epoch clock and so sends nothing for the length of a step back.
+
+The driver stores its epoch clock in the consumer heartbeat once per heartbeat
+interval of its nano clock, and again on the first duty cycle that finds its epoch
+clock a heartbeat interval or more from the value it last stored, forward or back. It
+reads its epoch clock for this on every duty cycle.
+
+So a step of the host's clock, forward or back, by a time service or by hand, moves
+no interval: it times out no client, withdraws no image, ends no linger early, delays
+no recording's sync and allocates no freed counter's record early. A step back makes
+one thing later, as it always has: a client that stopped sending is timed out the
+length of the step later.
+
+What a step does to the driver timeout lasts until the driver's next duty cycle, which
+stores the heartbeat again. In that time, after a step forward of F the heartbeat
+reads F older than it is. A client that loads it then, with F above the driver timeout
+less the heartbeat's age, reports `driver-timeout` and closes, and `cavalry doctor`
+reports a driver that stopped. A driver that starts then is not misled, since it goes
+by the lock ("The driver directory"), except about a driver of an earlier version,
+which holds none. After a step back of B the heartbeat reads B newer than it is, so a
+driver that stopped before it stored the stepped clock is found B later than the
+driver timeout. Once the driver has stored the stepped clock, a reader that took its
+own epoch clock before the step and loads the heartbeat after that store reads the
+heartbeat as B older than it is, and with B above the driver timeout it reports
+`driver-timeout`. That window is the time between the reader's clock read and its
+load of the heartbeat: nanoseconds, or as long as the reader is held between the two.
+
+A host that is suspended is such a step forward, by the time it slept, where the nano
+clock does not count that time, as on Linux and macOS: every interval then has as long
+to run when the host wakes as it had when the host slept. Where the operating system's
+clock counts the suspension, every interval runs on through it.
+
+What a step does to a recording's timestamps is in `spec/durable-log.md`, "Time index".
 
 ## Sizes
 
