@@ -345,6 +345,34 @@ fn a_catch_up_that_does_not_move_for_the_heartbeat_timeout_fails() {
     assert_eq!(io.count(|call| *call == Call::RemoveCatchup), 1);
 }
 
+/// Follower catch-up has the whole leader heartbeat timeout for its first byte,
+/// however long the replay's image took to come: its time runs from the image's
+/// joining, and not from the catch-up position's leaving. Here the image joins 9.9 s
+/// after the member asked. The first review of pull request 231 noted that the time
+/// ran from the asking, which left such a replay 0.1 s.
+#[test]
+fn a_catch_up_has_its_whole_timeout_from_when_the_image_joins() {
+    let mut io = Stub::new();
+    let (mut member, ms) = behind(&mut io, 160, 64);
+    work(&mut member, &mut io, ms);
+    assert_eq!(member.election_state(), ElectionState::FollowerCatchupAwait);
+    io.catchup_image = Some(64);
+    let joined = ms + 9_900;
+    work(&mut member, &mut io, joined);
+    assert_eq!(member.election_state(), ElectionState::FollowerCatchup);
+    work(&mut member, &mut io, ms + TIMEOUT_MS);
+    assert_eq!(
+        member.election_state(),
+        ElectionState::FollowerCatchup,
+        "the timeout after it asked"
+    );
+    work(&mut member, &mut io, joined + TIMEOUT_MS - 1);
+    assert_eq!(member.election_state(), ElectionState::FollowerCatchup);
+    work(&mut member, &mut io, joined + TIMEOUT_MS);
+    assert_eq!(member.election_state(), ElectionState::Init);
+    assert_eq!(member.counts().elections_failed, 1);
+}
+
 /// A member whose leader is appointed has no catch-up: behind its leader's log, it
 /// fails in follower replay, as before.
 #[test]
