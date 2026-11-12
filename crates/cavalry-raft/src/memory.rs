@@ -331,6 +331,21 @@ impl Io for MemberIo<'_> {
         Ok(())
     }
 
+    fn candidate_term(&mut self) -> i64 {
+        self.world
+            .disks
+            .get(self.own)
+            .map_or(-1, |disk| disk.candidate_term)
+    }
+
+    fn log_leadership_term_id(&mut self) -> i64 {
+        self.world
+            .disks
+            .get(self.own)
+            .and_then(|disk| disk.terms.iter().map(|&(term, _)| term).max())
+            .unwrap_or(-1)
+    }
+
     fn add_log(&mut self, term: i64, base: i64) -> Result<Option<Log>, Self::Fault> {
         let session_id = 1_000 + i32::try_from(term).unwrap_or(0);
         self.world.publications.push(Publication {
@@ -1123,9 +1138,10 @@ impl Cluster {
     /// Starts the member again on an empty log directory, as a container whose volume
     /// was not kept does: its core is new and its terms, its vote and its recordings
     /// are gone. When it led, its log publication is gone with it, and every
-    /// follower's image of it. A member of this version does not start again on the
-    /// log it had (`spec/cluster.md`, "The appointed leader"); this is the start it
-    /// can make, and what the cluster does about it is the test.
+    /// follower's image of it. A member whose leader is appointed does not start
+    /// again on the log it had (`spec/cluster.md`, "The appointed leader"); this is
+    /// the start it can make, and what the cluster does about it is the test. A
+    /// member that elects starts on the log it kept with [`Cluster::restart`].
     pub fn wipe(&mut self, member: i32) {
         let Some(index) = self.index(member) else {
             return;
@@ -1146,6 +1162,63 @@ impl Cluster {
         }
         // Its replays are gone with its recordings, and the ones to it with its
         // subscription.
+        self.world
+            .replays
+            .retain(|replay| replay.from != index && replay.to != index);
+        if led {
+            for publication in &mut self.world.publications {
+                if publication.leader == index {
+                    publication.closed = true;
+                }
+            }
+            for disk in &mut self.world.disks {
+                disk.image_lost = disk.image.is_some();
+            }
+        }
+    }
+
+    /// Starts the member again on the log directory it kept, as a host that lost power
+    /// and came back does: its core is new, and its log directory holds the candidate
+    /// term it stored, its record of terms and its recordings up to the position they
+    /// had synced. What had reached it and was not synced is gone, and so are its
+    /// subscriptions, its image of the log and every replay it ran or received. When
+    /// it led, its log publication is gone with it, and every follower's image of it.
+    /// A member that was halted or stalled runs again, and its counts begin at 0.
+    ///
+    /// In a cluster made with [`Cluster::new`] this does nothing: a member whose
+    /// leader is appointed does not start again on the log it had (`spec/cluster.md`,
+    /// "The appointed leader"), and [`Cluster::wipe`] is the start it can make.
+    pub fn restart(&mut self, member: i32) {
+        if self.election.is_none() {
+            return;
+        }
+        let Some(index) = self.index(member) else {
+            return;
+        };
+        let ids: Vec<i32> = self.world.disks.iter().map(|disk| disk.id).collect();
+        let led = self
+            .cores
+            .get(index)
+            .is_some_and(|core| core.role() == Role::Leader);
+        if let (Some(core), Ok(new)) = (
+            self.cores.get_mut(index),
+            Self::core(&ids, index, self.election),
+        ) {
+            *core = new;
+        }
+        if let Some(disk) = self.world.disks.get_mut(index) {
+            let synced = disk.synced;
+            disk.log.retain(|entry| entry.position_after <= synced);
+            disk.received = synced;
+            disk.joined = false;
+            disk.image = None;
+            disk.image_lost = false;
+            disk.sync_paused = false;
+            disk.halted = false;
+            disk.stalled = false;
+            disk.catchup = false;
+            disk.catchup_image = None;
+        }
         self.world
             .replays
             .retain(|replay| replay.from != index && replay.to != index);

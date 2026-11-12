@@ -58,7 +58,15 @@ commit path runs per message.
   sends stop catch-up (ADR 0088). A leader on this path closes its election in leader
   ready when a quorum of members, itself among them, has joined its log at its log
   position, and waits for no other member: one that joins after the term's first entry
-  catches up with it (`spec/cluster.md`, row 8). The consensus module does not use this path yet: a member
+  catches up with it (`spec/cluster.md`, row 8). A member on this path starts on the
+  log directory it kept: its first init reads the candidate term it stored and the
+  highest term of its record, through `Io::candidate_term` and
+  `Io::log_leadership_term_id`, so that it votes once in a term across a restart and
+  canvasses with the log it holds. The term it followed, its leader and the commit
+  position it knew are not kept: a leader tells it. Its canvass waits the startup
+  canvass timeout, 60 s, for a member it has not heard, as at any start, and a new
+  leadership term says in `is startup` whether its leader leads it from its first
+  election since it started (ADR 0089). The consensus module does not use this path yet: a member
   over a driver is appointed until the election can do what the next section lists, and
   then the module moves to it in one change (ADR 0081).
 - Counts every move of the election. `ElectionState` is the state machine
@@ -109,8 +117,9 @@ commit path runs per message.
   on a clock the caller steps, with loss, delay, a member cut from every other, two
   members parted from each other (`cut_between`) or one that the other stops hearing
   (`cut_one_way`), a member that stops (`halt`) or whose module stands still while its
-  driver receives (`stall`), paused syncs and a member started again on an empty log
-  directory to set, and a leader's replay of its own log to a member that asked for it:
+  driver receives (`stall`), paused syncs, a member started again on an empty log
+  directory (`wipe`) and one that elects started again on the log it kept (`restart`)
+  to set, and a leader's replay of its own log to a member that asked for it:
   what the example below and most of the crate's tests run. Every member holds a log of
   its own, the entries that reached it, so `log(member)` is that member's bytes and a
   test can find two members that hold different bytes at one position.
@@ -149,8 +158,12 @@ election does more, it does this instead, until the step that builds it (ADR 008
   When that member leads, it can ask another for a truncation below a commit position
   that member knows, which is refused at every election: the member does not join
   (card 267, with a test that makes the history).
-- A member starts with no term: its record of terms and its candidate term are not
-  read back.
+- Over a driver a member does not start on a log directory that holds a term or a
+  stored candidate term: the module refuses, and says to start the cluster again
+  as a new one. The core starts on such a directory (ADR 0089); the module does
+  when it moves to this path, with the replay of the log it kept into its own
+  state, the open sessions, which the core's leader replay and follower replay
+  leave to it.
 
 ## What it must never do
 

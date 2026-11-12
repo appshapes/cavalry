@@ -78,6 +78,18 @@ pub struct Stub {
     pub last_append: Option<(i32, i64, i64)>,
     /// The flags of that append position.
     pub last_append_flags: u8,
+    /// The candidate term the log directory holds: what a test gave it, as a
+    /// directory kept from an earlier start, or what the member stored since.
+    pub candidate_term: i64,
+    /// The highest term of the record the log directory holds, likewise.
+    pub log_term: i64,
+    /// How many times the member read each of the two.
+    pub reads: [usize; 2],
+    /// The last canvass position sent: its log leadership term id, its log position
+    /// and its leadership term id, the sender's candidate term.
+    pub last_canvass: Option<(i64, i64, i64)>,
+    /// The `is startup` of the last new leadership term sent.
+    pub last_startup: Option<bool>,
 }
 
 impl Stub {
@@ -106,6 +118,11 @@ impl Stub {
             catchup_image: None,
             last_append: None,
             last_append_flags: 0,
+            candidate_term: -1,
+            log_term: -1,
+            reads: [0; 2],
+            last_canvass: None,
+            last_startup: None,
         }
     }
 
@@ -146,6 +163,18 @@ impl Io for Stub {
             to: member,
             template: message.template(),
         });
+        if let Message::CanvassPosition {
+            log_leadership_term_id,
+            log_position,
+            leadership_term_id,
+            ..
+        } = *message
+        {
+            self.last_canvass = Some((log_leadership_term_id, log_position, leadership_term_id));
+        }
+        if let Message::NewLeadershipTerm { is_startup, .. } = *message {
+            self.last_startup = Some(is_startup);
+        }
         if let Message::NewLeadershipTerm {
             log_leadership_term_id,
             next_leadership_term_id,
@@ -180,7 +209,18 @@ impl Io for Stub {
 
     fn store_candidate_term(&mut self, term: i64) -> Result<(), Self::Fault> {
         self.call(Call::StoreCandidateTerm(term));
+        self.candidate_term = term;
         Ok(())
+    }
+
+    fn candidate_term(&mut self) -> i64 {
+        self.reads[0] += 1;
+        self.candidate_term
+    }
+
+    fn log_leadership_term_id(&mut self) -> i64 {
+        self.reads[1] += 1;
+        self.log_term
     }
 
     fn record_term(&mut self, term: i64, base: i64) -> Result<(), Self::Fault> {
@@ -191,6 +231,7 @@ impl Io for Stub {
         if let Some(slot) = self.terms.iter_mut().find(|slot| slot.is_none()) {
             *slot = Some((term, base));
         }
+        self.log_term = self.log_term.max(term);
         Ok(())
     }
 
