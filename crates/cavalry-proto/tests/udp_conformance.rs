@@ -452,7 +452,7 @@ fn every_vector_in_spec_vectors_udp_json() {
     let doc: Value = serde_json::from_str(VECTORS).expect("udp.json parses");
     assert_eq!(doc["version"], 4, "the vectors are for version 4");
     let vectors = doc["vectors"].as_array().expect("vectors is an array");
-    assert!(vectors.len() >= 96, "udp.py writes at least 96 vectors");
+    assert!(vectors.len() >= 161, "udp.py writes at least 161 vectors");
     for vector in vectors {
         let name = vector["name"].as_str().expect("name");
         match vector["kind"].as_str().expect("kind") {

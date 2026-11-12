@@ -511,7 +511,9 @@ What the driver does with each, after the checks of "What the driver rejects":
   `ssc`, at the same point, since a replay moves only while a receiver answers and a
   recording of the replay's publication must not move it (ADR 0098), and one that names
   `term-length` is error code 1 with the reason `term-length`, since a replay's
-  publication keeps its recording's term length (ADR 0099). A replay channel that is neither `cavalry:ipc` nor a `cavalry:udp`
+  publication keeps its recording's term length (ADR 0099); a channel that names more
+  than one of the three is refused for the first of them in this order, a position
+  key, `ssc`, `term-length`, the order in which this protocol came to read them. A replay channel that is neither `cavalry:ipc` nor a `cavalry:udp`
   channel this version accepts is error code 1; a `cavalry:udp` replay channel's host is
   resolved once as the command is handled, as every command's is (`spec/udp.md`, "The
   channel URI"; ADR 0043), code 9 when it does not resolve; a length below
