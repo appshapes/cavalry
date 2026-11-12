@@ -773,7 +773,10 @@ fn every_transition_of_the_election_and_the_role_adds_one_to_a_counter_registere
     io.catchup_image = Some(0);
     watch.work(&mut behind, &mut io, 5);
     assert_eq!(behind.election_state(), ElectionState::FollowerCatchup);
+    // The state's time runs from the image's joining, at 5 ms.
     watch.work(&mut behind, &mut io, 4 + 10_000);
+    assert_eq!(behind.election_state(), ElectionState::FollowerCatchup);
+    watch.work(&mut behind, &mut io, 5 + 10_000);
     assert_eq!(behind.election_state(), ElectionState::Init);
 
     // A leader that elects, its election closed, holds an election on a term above its

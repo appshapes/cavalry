@@ -2633,7 +2633,17 @@ impl Consensus {
             .catching
             .map_or(self.append_position, |catching| catching.asked);
         match io.catchup_image()? {
-            Some(join) if join == asked => Ok(self.step(ElectionState::FollowerCatchup, clock)),
+            Some(join) if join == asked => {
+                // Follower catch-up's time begins here, with its replay: what the
+                // image took to come is this state's, and is not counted against an
+                // append position that has had no replay to move it.
+                if let Some(mut catching) = self.catching {
+                    catching.position = self.append_position;
+                    catching.moved_ns = clock.now_ns;
+                    self.catching = Some(catching);
+                }
+                Ok(self.step(ElectionState::FollowerCatchup, clock))
+            }
             Some(_) => {
                 count(&mut self.counts.join_position_mismatches);
                 self.fail(clock);
@@ -2660,7 +2670,8 @@ impl Consensus {
     /// image that nothing fills (ADR 0088). When the leader has sent stop catch-up,
     /// and its append position has reached the commit position it was told, it goes
     /// on to follower log init, already subscribed. A catch-up whose append position
-    /// has not moved for the leader heartbeat timeout fails the election.
+    /// has not moved for the leader heartbeat timeout, counted from the replay's image
+    /// joining, fails the election.
     fn follower_catchup<I: Io>(&mut self, clock: Clock, io: &mut I) -> Result<usize, I::Fault> {
         let Some(mut catching) = self.catching else {
             // The state is entered with a catch-up and left without one.
