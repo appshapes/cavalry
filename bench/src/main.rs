@@ -139,6 +139,11 @@ fn first_allocation() -> Option<&'static str> {
 }
 
 const SCHEMA: u32 = 0;
+/// The directory under `--out` that holds the interrupts files, one beside each result
+/// of a run under `--pin` ([`interrupts_file`]).
+const INTERRUPTS_DIR: &str = "interrupts";
+/// The interrupts file's own schema, which the result's does not move.
+const INTERRUPTS_SCHEMA: u32 = 0;
 /// Spins of the conductor's loop between two reads of the clock, which decide when the
 /// producer position is loaded: once every two milliseconds, the driver's cadence (ADR
 /// 0022, ADR 0032;
@@ -634,24 +639,27 @@ impl Pins {
 
     /// The CPUs as `--pin` spells them, `8,10,12,14`.
     fn list(self) -> String {
-        let mut text = format!("{},{},{}", self.publisher, self.subscriber, self.conductor);
-        if let Some(receiver) = self.receiver {
-            let _ = write!(text, ",{receiver}");
-        }
-        text
+        self.joined(",")
+    }
+
+    /// The CPUs in `--pin`'s order: the publisher's, the subscriber's, the third and,
+    /// when there is one, the fourth.
+    fn cpus(self) -> Vec<usize> {
+        [self.publisher, self.subscriber, self.conductor]
+            .into_iter()
+            .chain(self.receiver)
+            .collect()
     }
 
     /// The CPUs as the result writes them, `[8, 10, 12, 14]`.
     fn json(self) -> String {
-        let mut text = format!(
-            "[{}, {}, {}",
-            self.publisher, self.subscriber, self.conductor
-        );
-        if let Some(receiver) = self.receiver {
-            let _ = write!(text, ", {receiver}");
-        }
-        text.push(']');
-        text
+        format!("[{}]", self.joined(", "))
+    }
+
+    /// The CPUs in `--pin`'s order with `separator` between them.
+    fn joined(self, separator: &str) -> String {
+        let cpus: Vec<String> = self.cpus().iter().map(usize::to_string).collect();
+        cpus.join(separator)
     }
 }
 
@@ -1015,6 +1023,419 @@ struct LogRun {
     producer_position_loads: Option<u64>,
     /// The purge that ran through the loop, under `--purging` (card 177).
     purged: Option<Purged>,
+    /// What the kernel counted on the pinned CPUs around the loop, under `--pin` (card
+    /// 198).
+    interrupted: Option<KernelCounts>,
+}
+
+/// The kernel's interrupt and softirq counts on the pinned CPUs, read from
+/// `/proc/interrupts` and `/proc/softirqs`: one reading, or the difference between two
+/// (card 198). On `grip` about one run in two hundred of a one-way row reads a p99.99
+/// of 1.3 to 2.3 times its row's, with its p50 unmoved, and the likely cause is one
+/// interrupt of a few microseconds on the subscriber's CPU; the counts around a whole
+/// process could not show one interrupt more, since the process's start and end are
+/// in them, so each measured loop takes its own, through a [`KernelWindow`].
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+struct KernelCounts {
+    /// `/proc/interrupts` by its rows' labels, `LOC`, `CAL`, `27`: the count on each
+    /// pinned CPU, in `--pin`'s order.
+    interrupts: BTreeMap<String, Vec<u64>>,
+    /// `/proc/softirqs` the same way, `TIMER`, `RCU`, `SCHED`.
+    softirqs: BTreeMap<String, Vec<u64>>,
+}
+
+impl KernelCounts {
+    /// The counts now on `pin`'s CPUs, or the file that could not be read and why.
+    fn read(pin: Pins) -> Result<Self, String> {
+        let cpus = pin.cpus();
+        let file = |path: &str| {
+            std::fs::read_to_string(path)
+                .map(|text| per_cpu_counts(&text, &cpus))
+                .map_err(|e| format!("{path} could not be read: {e}"))
+        };
+        Ok(Self {
+            interrupts: file("/proc/interrupts")?,
+            softirqs: file("/proc/softirqs")?,
+        })
+    }
+
+    /// What was counted between `before` and this reading: the rows that moved on a
+    /// pinned CPU, and no others. A row `before` does not have is an interrupt line
+    /// that was set up between the two, so its whole count is the difference.
+    fn since(&self, before: &Self) -> Self {
+        let moved = |now: &BTreeMap<String, Vec<u64>>, then: &BTreeMap<String, Vec<u64>>| {
+            now.iter()
+                .map(|(label, counts)| {
+                    let then = then.get(label);
+                    let moved: Vec<u64> = counts
+                        .iter()
+                        .enumerate()
+                        .map(|(cpu, count)| {
+                            let was = then.and_then(|then| then.get(cpu)).copied();
+                            counted_between(was.unwrap_or(0), *count)
+                        })
+                        .collect();
+                    (label.clone(), moved)
+                })
+                .filter(|(_, moved)| moved.iter().any(|count| *count > 0))
+                .collect()
+        };
+        Self {
+            interrupts: moved(&self.interrupts, &before.interrupts),
+            softirqs: moved(&self.softirqs, &before.softirqs),
+        }
+    }
+}
+
+/// What a kernel counter that read `was` and then `now` counted between the two. The
+/// kernel keeps these counts in 32 bits and prints them so, and a local timer's at a
+/// thousand a second passes 2^32 in fifty days, so a count that went down has wrapped
+/// once: the difference is taken around 2^32, where a plain one would read the run in
+/// which it wrapped as uninterrupted. A count that went down from above 32 bits is no
+/// counter this knows, and reads 0.
+fn counted_between(was: u64, now: u64) -> u64 {
+    const WRAP: u64 = 1 << 32;
+    if now >= was {
+        now - was
+    } else if was < WRAP {
+        now + (WRAP - was)
+    } else {
+        0
+    }
+}
+
+/// The first reason a loop of a pinned run was not counted, once per process, for the
+/// line under the table: a count that is missing says why.
+static NOT_COUNTED: OnceLock<String> = OnceLock::new();
+
+/// Keeps `reason` as why a loop was not counted, when it is the process's first.
+fn not_counted(reason: String) {
+    let _ = NOT_COUNTED.set(reason);
+}
+
+/// How long the two threads of a counted loop wait for each other at its end
+/// ([`LoopEnd`]) before the loop goes uncounted: the stall bound of the loops.
+const LOOP_END_LIMIT: Duration = Duration::from_secs(10);
+/// The spins between two reads of the clock while they wait.
+const LOOP_END_CHECK: u64 = 4096;
+
+/// What the publisher and the subscriber of a counted loop pass each other at its end,
+/// so that the second reading of the kernel's counts ([`KernelWindow`]) is made while
+/// both threads still spin on their CPUs. The subscriber says when it has had the last
+/// message and then holds, in user space, until the publisher has read; only then does
+/// its thread return. Without the hold the reading raced the thread's way out: an
+/// unmap there sent a TLB shootdown to the publisher's and the conductor's CPUs, which
+/// the counts of every run of the log rows then held as one `CAL` and one `TLB` on
+/// each, and a CPU that goes idle runs softirqs of its own. Both waits are bounded
+/// ([`LOOP_END_LIMIT`]): past the bound the loop is not counted and the run goes on
+/// as it would have.
+struct LoopEnd {
+    pin: Pins,
+    /// The message at which the publisher makes the first reading: the middle of the
+    /// warm-up.
+    from: u64,
+    /// Set by the subscriber once it has had the loop's last message.
+    delivered: AtomicBool,
+    /// Set by the publisher once it has made the second reading, or will make none.
+    read: AtomicBool,
+}
+
+impl LoopEnd {
+    /// The end of a loop that warms up for `warmup` messages under `pin`, or `None`
+    /// for a loop that is not counted: unpinned, no CPU's counts are the run's, and a
+    /// warm-up of under two messages has no half to put behind the first reading.
+    fn of(pin: Option<Pins>, warmup: u64) -> Option<Arc<Self>> {
+        let pin = pin?;
+        if warmup < 2 {
+            not_counted(
+                "the warm-up is under two messages, where the first reading would come \
+                 straight before a sample"
+                    .to_string(),
+            );
+            return None;
+        }
+        Some(Arc::new(Self {
+            pin,
+            from: warmup / 2,
+            delivered: AtomicBool::new(false),
+            read: AtomicBool::new(false),
+        }))
+    }
+
+    /// The subscriber's side, called once it has had the loop's last message: it says
+    /// so and spins until the publisher has read, or the bound passes. It allocates
+    /// nothing, since the publisher's counting window can still be open.
+    fn hold(end: Option<&Self>) {
+        let Some(end) = end else {
+            return;
+        };
+        end.delivered.store(true, Ordering::Release);
+        let waited = Instant::now();
+        let mut spins: u64 = 0;
+        while !end.read.load(Ordering::Acquire) {
+            spins += 1;
+            if spins.is_multiple_of(LOOP_END_CHECK) && waited.elapsed() > LOOP_END_LIMIT {
+                return;
+            }
+            std::hint::spin_loop();
+        }
+    }
+}
+
+/// A measured loop's two readings of the kernel's counts ([`KernelCounts`]), both made
+/// by the publisher's thread, and their difference, which is what the loop is said to
+/// have been interrupted by.
+///
+/// The first reading is in the middle of the warm-up and not at its end: a reading is
+/// two files formatted by the kernel on the publisher's CPU, a tenth of a millisecond
+/// or so, and the rest of the warm-up puts the publisher's caches back before the first
+/// sample, so a reading is never the last thing before one. The second reading is
+/// after the loop, once the counting window has closed, since a reading allocates, and
+/// once the subscriber has had the last message and holds ([`LoopEnd`]): the publisher
+/// ends ahead of the subscriber, and an interrupt that met the last deliveries belongs
+/// to the run. So the difference covers half the warm-up and the whole measured loop
+/// to its last delivery, and nothing of the benchmark's start or end.
+///
+/// A loop uses it in this order, and the order is the protocol: make the [`LoopEnd`]
+/// before the subscriber is spawned and give the subscriber its clone to hold with;
+/// `open` at message `from`, which the loop compares its index with as a local, so that
+/// a measured loop gains one comparison of two registers; `close` after
+/// `Counting::close` and before the subscriber is joined.
+struct KernelWindow {
+    end: Option<Arc<LoopEnd>>,
+    /// The message at which the loop makes the first reading, or `u64::MAX`, a message
+    /// no loop reaches, when the loop is not counted.
+    from: u64,
+    before: Option<KernelCounts>,
+}
+
+impl KernelWindow {
+    /// The window of the loop whose end is `end`.
+    fn new(end: Option<Arc<LoopEnd>>) -> Self {
+        let from = end.as_ref().map_or(u64::MAX, |end| end.from);
+        Self {
+            end,
+            from,
+            before: None,
+        }
+    }
+
+    /// The first reading, which the loop makes at message `from`.
+    fn open(&mut self) {
+        if let Some(end) = &self.end {
+            self.before = KernelCounts::read(end.pin).map_err(not_counted).ok();
+        }
+    }
+
+    /// The second reading, and what the kernel counted since the first, or `None` when
+    /// the loop is not counted; then the subscriber is let go. It waits for the
+    /// subscriber to have had the last message for no longer than [`LOOP_END_LIMIT`],
+    /// and not at all for a subscriber that has returned, which is one that failed.
+    fn close<T>(&mut self, subscriber: &JoinHandle<T>) -> Option<KernelCounts> {
+        let end = self.end.take()?;
+        let counted = self.before.take().and_then(|before| {
+            let waited = Instant::now();
+            let mut spins: u64 = 0;
+            while !end.delivered.load(Ordering::Acquire) {
+                if subscriber.is_finished() && !end.delivered.load(Ordering::Acquire) {
+                    not_counted(
+                        "the subscriber returned before it had the loop's last message".to_string(),
+                    );
+                    return None;
+                }
+                spins += 1;
+                if spins.is_multiple_of(LOOP_END_CHECK) && waited.elapsed() > LOOP_END_LIMIT {
+                    not_counted(format!(
+                        "the subscriber had not had the loop's last message {} s after the \
+                         publisher's last claim",
+                        LOOP_END_LIMIT.as_secs()
+                    ));
+                    return None;
+                }
+                std::hint::spin_loop();
+            }
+            let now = KernelCounts::read(end.pin).map_err(not_counted).ok()?;
+            Some(now.since(&before))
+        });
+        end.read.store(true, Ordering::Release);
+        counted
+    }
+}
+
+/// A window that is dropped before it is closed, on a loop's early return, lets its
+/// subscriber go all the same.
+impl Drop for KernelWindow {
+    fn drop(&mut self) {
+        if let Some(end) = &self.end {
+            end.read.store(true, Ordering::Release);
+        }
+    }
+}
+
+/// The rows of `/proc/interrupts` or `/proc/softirqs` by label, each with its count on
+/// the CPUs of `cpus`, in their order. The first line names the columns, `CPU0 CPU1
+/// CPU4`, and a CPU that is offline has none, so a CPU is found by its name and not by
+/// its number; one the file does not name reads 0. A row's counts are its leading
+/// numbers, and what follows them describes it. A row with fewer counts than columns
+/// is the host's and not a CPU's, `ERR` and `MIS`, and is left out; a host of one CPU
+/// could not tell them apart so, and `--pin` needs three.
+fn per_cpu_counts(text: &str, cpus: &[usize]) -> BTreeMap<String, Vec<u64>> {
+    let mut lines = text.lines();
+    let columns: Vec<Option<usize>> = lines.next().map_or_else(Vec::new, |header| {
+        header
+            .split_whitespace()
+            .map(|name| name.strip_prefix("CPU").and_then(|id| id.parse().ok()))
+            .collect()
+    });
+    let places: Vec<Option<usize>> = cpus
+        .iter()
+        .map(|cpu| columns.iter().position(|column| *column == Some(*cpu)))
+        .collect();
+    let mut rows = BTreeMap::new();
+    for line in lines {
+        let Some((label, rest)) = line.split_once(':') else {
+            continue;
+        };
+        let counts: Vec<u64> = rest
+            .split_whitespace()
+            .map_while(|word| word.parse().ok())
+            .collect();
+        if columns.is_empty() || counts.len() < columns.len() {
+            continue;
+        }
+        let picked = places
+            .iter()
+            .map(|place| place.map_or(0, |place| counts[place]))
+            .collect();
+        rows.insert(label.trim().to_string(), picked);
+    }
+    rows
+}
+
+/// What the kernel counted around each loop of each message benchmark, by the name the
+/// benchmark's retries are kept under, in the order the runs ran; `None` for a loop
+/// that was not counted, which keeps its place so that a count's place is its run's.
+type CountsByBenchmark = BTreeMap<String, Vec<Option<KernelCounts>>>;
+
+/// Keeps `run`'s counts as the next run of `name`.
+fn keep_counts(by_benchmark: &mut CountsByBenchmark, name: &str, run: Option<KernelCounts>) {
+    by_benchmark.entry(name.to_string()).or_default().push(run);
+}
+
+/// The member of the interrupts file for one of its two kinds of count: by benchmark,
+/// by pinned CPU, by the row's label, the count of each run in the order the runs ran,
+/// which is the order of the result's `p99_99_ns_runs`. A label that counted nothing on
+/// a CPU in any run is left out, and so is a CPU with no label left, so on an isolated
+/// CPU the member is a few lines; a run in which a label that is listed counted nothing
+/// reads 0, and a run that was not counted reads `null`.
+fn json_counts(
+    by_benchmark: &CountsByBenchmark,
+    cpus: &[usize],
+    kind: fn(&KernelCounts) -> &BTreeMap<String, Vec<u64>>,
+) -> String {
+    let mut benchmarks = Vec::new();
+    for (name, runs) in by_benchmark {
+        let mut by_cpu = Vec::new();
+        for (place, cpu) in cpus.iter().enumerate() {
+            // The labels that counted on this CPU in some run, each with every run's
+            // count: 0 until a run sets it, and nothing for a run that was not counted.
+            let mut series: BTreeMap<&str, Vec<Option<u64>>> = BTreeMap::new();
+            for (at, run) in runs.iter().enumerate() {
+                let Some(run) = run else { continue };
+                for (label, counts) in kind(run) {
+                    let count = counts.get(place).copied().unwrap_or(0);
+                    if count > 0 {
+                        series.entry(label).or_insert_with(|| {
+                            runs.iter().map(|run| run.as_ref().map(|_| 0)).collect()
+                        })[at] = Some(count);
+                    }
+                }
+            }
+            if series.is_empty() {
+                continue;
+            }
+            let labels: Vec<String> = series
+                .iter()
+                .map(|(label, every)| {
+                    let every: Vec<String> = every
+                        .iter()
+                        .map(|count| count.map_or_else(|| "null".to_string(), |n| n.to_string()))
+                        .collect();
+                    format!("\"{label}\": [{}]", every.join(", "))
+                })
+                .collect();
+            by_cpu.push(format!("\"{cpu}\": {{{}}}", labels.join(", ")));
+        }
+        benchmarks.push(format!("    \"{name}\": {{{}}}", by_cpu.join(", ")));
+    }
+    if benchmarks.is_empty() {
+        "{}".to_string()
+    } else {
+        format!("{{\n{}\n  }}", benchmarks.join(",\n"))
+    }
+}
+
+/// The interrupts file's `not_counted`: by benchmark, the places, from 0, of the runs
+/// whose loops were not counted, and no benchmark whose every run was. Without it a
+/// benchmark that counted nothing on any CPU and one that was never read would both
+/// be an empty member.
+fn json_not_counted(by_benchmark: &CountsByBenchmark) -> String {
+    let benchmarks: Vec<String> = by_benchmark
+        .iter()
+        .filter_map(|(name, runs)| {
+            let places: Vec<String> = runs
+                .iter()
+                .enumerate()
+                .filter(|(_, run)| run.is_none())
+                .map(|(place, _)| place.to_string())
+                .collect();
+            (!places.is_empty()).then(|| format!("\"{name}\": [{}]", places.join(", ")))
+        })
+        .collect();
+    format!("{{{}}}", benchmarks.join(", "))
+}
+
+/// The interrupts file of a run under `--pin`, `<profile>-<unix time>.json` in the
+/// `interrupts` directory beside the result of the same name (card 198): what the
+/// kernel counted on each pinned CPU around each run's measured loop, by benchmark
+/// under the name its retries are kept under. Its head is the result's profile, commit
+/// and time, which join the two; the result has the run's messages and repeats. It is
+/// a file of its own and not a member of the result because the result is what a red
+/// bench job's record carries whole in one comment (`docs/how-to/run-the-bench.md`,
+/// step 4), and `bench-compare` reads the directory's own `.json` files alone, so
+/// this one is never taken for a result.
+fn interrupts_file(
+    profile: &str,
+    pin: Pins,
+    sha: &str,
+    date_unix: u64,
+    by_benchmark: &CountsByBenchmark,
+) -> String {
+    let cpus = pin.cpus();
+    let mut out = String::new();
+    let _ = writeln!(out, "{{");
+    let _ = writeln!(out, "  \"schema\": {INTERRUPTS_SCHEMA},");
+    let _ = writeln!(out, "  \"profile\": \"{profile}\",");
+    let _ = writeln!(out, "  \"git\": \"{sha}\",");
+    let _ = writeln!(out, "  \"date_unix\": {date_unix},");
+    let _ = writeln!(out, "  \"pinned\": {},", pin.json());
+    let _ = writeln!(
+        out,
+        "  \"not_counted\": {},",
+        json_not_counted(by_benchmark)
+    );
+    let _ = writeln!(
+        out,
+        "  \"interrupts\": {},",
+        json_counts(by_benchmark, &cpus, |run| &run.interrupts)
+    );
+    let _ = writeln!(
+        out,
+        "  \"softirqs\": {}",
+        json_counts(by_benchmark, &cpus, |run| &run.softirqs)
+    );
+    let _ = writeln!(out, "}}");
+    out
 }
 
 /// What a purge running through a measured loop did (card 177), for one run or, after
@@ -1110,11 +1531,13 @@ fn run_log(options: &Options, log_type: LogType, dir: &std::path::Path) -> Resul
     let epoch = tick();
     let done = Arc::new(AtomicBool::new(false));
 
+    let end = LoopEnd::of(options.pin, warmup);
     // The subscriber: a read-only mapping of its own, as a client has.
     let subscriber = {
         let dir = dir.to_path_buf();
         let position = subscriber_position.clone();
         let cpu = options.pin.map(|pin| pin.subscriber);
+        let end = end.clone();
         thread::Builder::new()
             .name("subscriber".into())
             .spawn(move || -> Result<Histogram<u64>, String> {
@@ -1139,6 +1562,7 @@ fn run_log(options: &Options, log_type: LogType, dir: &std::path::Path) -> Resul
                         std::hint::spin_loop();
                     }
                 }
+                LoopEnd::hold(end.as_deref());
                 Ok(hist)
             })
             .map_err(|e| e.to_string())?
@@ -1211,8 +1635,13 @@ fn run_log(options: &Options, log_type: LogType, dir: &std::path::Path) -> Resul
     let mut hist = histogram();
     let mut retries: u64 = 0;
     let mut counting: Option<Counting> = None;
+    let mut window = KernelWindow::new(end);
+    let counted_from = window.from;
     let mut start = Instant::now();
     for i in 0..total {
+        if i == counted_from {
+            window.open();
+        }
         if i == warmup {
             counting = Some(Counting::open());
             start = Instant::now();
@@ -1239,6 +1668,7 @@ fn run_log(options: &Options, log_type: LogType, dir: &std::path::Path) -> Resul
     }
     let elapsed = start.elapsed();
     let allocations = counting.as_ref().map_or(0, Counting::close);
+    let interrupted = window.close(&subscriber);
     let one_way = subscriber
         .join()
         .map_err(|_| "the subscriber thread panicked".to_string())??;
@@ -1253,6 +1683,7 @@ fn run_log(options: &Options, log_type: LogType, dir: &std::path::Path) -> Resul
         allocations,
         producer_position_loads: Some(producer_position_loads),
         purged: None,
+        interrupted,
     })
 }
 
@@ -1615,8 +2046,10 @@ fn run_client(
     let total = warmup + options.messages;
     let epoch = tick();
 
+    let end = LoopEnd::of(options.pin, warmup);
     let subscriber = {
         let cpu = options.pin.map(|pin| pin.subscriber);
+        let end = end.clone();
         thread::Builder::new()
             .name("client-subscriber".into())
             // The subscription comes back with the histogram and is closed by the
@@ -1648,6 +2081,7 @@ fn run_client(
                         std::hint::spin_loop();
                     }
                 }
+                LoopEnd::hold(end.as_deref());
                 Ok((subscription, hist))
             })
             .map_err(|e| e.to_string())?
@@ -1662,8 +2096,13 @@ fn run_client(
     const STALL_CHECK: u64 = 4096;
     const STALL_LIMIT: Duration = Duration::from_secs(10);
     let mut counting: Option<Counting> = None;
+    let mut window = KernelWindow::new(end);
+    let counted_from = window.from;
     let mut start = Instant::now();
     for i in 0..total {
+        if i == counted_from {
+            window.open();
+        }
         if i == warmup {
             purged_before = purged_at(&counters)? as u64;
             counting = Some(Counting::open());
@@ -1710,6 +2149,7 @@ fn run_client(
     // the loop, exactly, where the reply's arrival would say so a duty cycle or two late.
     let purged_after = purged_at(&counters)? as u64;
     let allocations = counting.as_ref().map_or(0, Counting::close);
+    let interrupted = window.close(&subscriber);
     let (subscription, one_way) = match subscriber.join() {
         Ok(Ok(returned)) => returned,
         failed => return Err(subscriber_failure(failed)),
@@ -1761,6 +2201,7 @@ fn run_client(
         allocations,
         producer_position_loads: None,
         purged,
+        interrupted,
     })
 }
 
@@ -1816,8 +2257,10 @@ fn run_ffi(options: &Options, dir: &std::path::Path) -> Result<LogRun, String> {
     let total = warmup + options.messages;
     let epoch = tick();
 
+    let end = LoopEnd::of(options.pin, warmup);
     let subscriber = {
         let cpu = options.pin.map(|pin| pin.subscriber);
+        let end = end.clone();
         thread::Builder::new()
             .name("ffi-subscriber".into())
             .spawn(
@@ -1841,6 +2284,7 @@ fn run_ffi(options: &Options, dir: &std::path::Path) -> Result<LogRun, String> {
                             std::hint::spin_loop();
                         }
                     }
+                    LoopEnd::hold(end.as_deref());
                     Ok((subscription, hist))
                 },
             )
@@ -1853,8 +2297,13 @@ fn run_ffi(options: &Options, dir: &std::path::Path) -> Result<LogRun, String> {
     const STALL_CHECK: u64 = 4096;
     const STALL_LIMIT: Duration = Duration::from_secs(10);
     let mut counting: Option<Counting> = None;
+    let mut window = KernelWindow::new(end);
+    let counted_from = window.from;
     let mut start = Instant::now();
     for i in 0..total {
+        if i == counted_from {
+            window.open();
+        }
         if i == warmup {
             counting = Some(Counting::open());
             start = Instant::now();
@@ -1897,6 +2346,7 @@ fn run_ffi(options: &Options, dir: &std::path::Path) -> Result<LogRun, String> {
     }
     let elapsed = start.elapsed();
     let allocations = counting.as_ref().map_or(0, Counting::close);
+    let interrupted = window.close(&subscriber);
     let (subscription, one_way) = match subscriber.join() {
         Ok(Ok(returned)) => returned,
         failed => return Err(subscriber_failure(failed)),
@@ -1917,6 +2367,7 @@ fn run_ffi(options: &Options, dir: &std::path::Path) -> Result<LogRun, String> {
         allocations,
         producer_position_loads: None,
         purged: None,
+        interrupted,
     })
 }
 
@@ -2521,12 +2972,15 @@ struct Published {
     elapsed: Duration,
     retries: u64,
     allocations: usize,
+    /// What the kernel counted on the pinned CPUs around the loop, under `--pin` (card
+    /// 198).
+    interrupted: Option<KernelCounts>,
 }
 
 /// One run of a stream with one message in flight: its warm-up and its length, the
 /// body, the clock reading its stamps count from, whether it crosses the link, and what
 /// a message that does not reach the subscriber means on its path, for the stall's error.
-#[derive(Clone, Copy)]
+#[derive(Clone)]
 struct Run {
     warmup: u64,
     total: u64,
@@ -2534,6 +2988,9 @@ struct Run {
     epoch: u64,
     link: bool,
     stall: &'static str,
+    /// The loop's end, which its two threads share when the loop is counted
+    /// ([`LoopEnd`]).
+    end: Option<Arc<LoopEnd>>,
 }
 
 /// One run with one message in flight: this thread, the publisher, claims message i
@@ -2556,14 +3013,20 @@ fn publish_one_in_flight<T>(
         epoch,
         link,
         stall,
+        end,
     } = run;
     const STALL_CHECK: u64 = 4096;
     const STALL_LIMIT: Duration = Duration::from_secs(10);
     let mut hist = histogram();
     let mut retries: u64 = 0;
     let mut counting: Option<Counting> = None;
+    let mut window = KernelWindow::new(end);
+    let counted_from = window.from;
     let mut start = Instant::now();
     for i in 0..total {
+        if i == counted_from {
+            window.open();
+        }
         if i == warmup {
             counting = Some(Counting::open());
             start = Instant::now();
@@ -2627,11 +3090,13 @@ fn publish_one_in_flight<T>(
     }
     let elapsed = start.elapsed();
     let allocations = counting.as_ref().map_or(0, Counting::close);
+    let interrupted = window.close(subscriber);
     Ok(Published {
         claim_commit: hist,
         elapsed,
         retries,
         allocations,
+        interrupted,
     })
 }
 
@@ -2661,6 +3126,7 @@ fn spawn_subscriber(
         total,
         epoch,
         link,
+        end,
         ..
     } = run;
     thread::Builder::new()
@@ -2704,6 +3170,7 @@ fn spawn_subscriber(
                     std::hint::spin_loop();
                 }
             }
+            LoopEnd::hold(end.as_deref());
             Ok((subscription, first, second, below_zero))
         })
         .map_err(|e| e.to_string())
@@ -2906,6 +3373,7 @@ fn mdc_rows(
         epoch: tick(),
         link: false,
         stall: second.stall(),
+        end: LoopEnd::of(options.pin, warmup),
     };
     let received = Arc::new(AtomicU64::new(0));
     let subscriber = spawn_subscriber(
@@ -2913,7 +3381,7 @@ fn mdc_rows(
         options.pin.map(|pin| pin.subscriber),
         subscription,
         Arc::clone(&received),
-        run,
+        run.clone(),
     )?;
     let stop = Arc::new(AtomicBool::new(false));
     let drain = drained
@@ -2948,6 +3416,7 @@ fn mdc_rows(
         allocations: published.allocations,
         producer_position_loads: None,
         purged: None,
+        interrupted: published.interrupted,
     })
 }
 
@@ -3023,6 +3492,7 @@ fn run_udp(options: &Options, dir: &std::path::Path) -> Result<LogRun, String> {
         epoch: tick(),
         link: false,
         stall: "the stream stopped on the loopback",
+        end: LoopEnd::of(options.pin, warmup),
     };
     let received = Arc::new(AtomicU64::new(0));
     let subscriber = spawn_subscriber(
@@ -3030,7 +3500,7 @@ fn run_udp(options: &Options, dir: &std::path::Path) -> Result<LogRun, String> {
         options.pin.map(|pin| pin.subscriber),
         subscription,
         Arc::clone(&received),
-        run,
+        run.clone(),
     )?;
     let published = publish_one_in_flight(&mut publication, &received, &subscriber, run)?;
     let (subscription, one_way, _, _) = match subscriber.join() {
@@ -3045,6 +3515,7 @@ fn run_udp(options: &Options, dir: &std::path::Path) -> Result<LogRun, String> {
         allocations: published.allocations,
         producer_position_loads: None,
         purged: None,
+        interrupted: published.interrupted,
     })
 }
 
@@ -3055,6 +3526,9 @@ struct LinkRun {
     retries: u64,
     allocations: usize,
     below_zero: u64,
+    /// What the kernel counted on the pinned CPUs around the loop, under `--pin` (card
+    /// 198).
+    interrupted: Option<KernelCounts>,
 }
 
 /// The link rows, `udp_round_trip_<body>` and `udp_one_way_<body>`: the UDP rows' path
@@ -3100,6 +3574,7 @@ fn run_link(
             link: true,
             stall: "the peer stopped echoing, or the link lost a datagram the sender no longer \
                     holds",
+            end: LoopEnd::of(options.pin, warmup),
         };
         let received = Arc::new(AtomicU64::new(0));
         let held = subscription
@@ -3110,7 +3585,7 @@ fn run_link(
             options.pin.map(|pin| pin.subscriber),
             held,
             Arc::clone(&received),
-            run,
+            run.clone(),
         )?;
         let published = publish_one_in_flight(&mut publication, &received, &subscriber, run)?;
         let (returned, round_trip, one_way, below_zero) = match subscriber.join() {
@@ -3127,6 +3602,7 @@ fn run_link(
             retries: published.retries,
             allocations: published.allocations,
             below_zero,
+            interrupted: published.interrupted,
         });
     }
     // The multi-destination cast rows over the cable and this host at once (ADR 0052,
@@ -3608,6 +4084,10 @@ struct Pass {
     messages_measured: u64,
     /// What the purge running through a benchmark's loop did, under its name (card 177).
     purged: BTreeMap<String, Purged>,
+    /// What the kernel counted on the pinned CPUs around a message benchmark's loop,
+    /// under its name; `None` for a loop that was not counted, as every loop of an
+    /// unpinned run is (card 198).
+    interrupted: BTreeMap<String, Option<KernelCounts>>,
 }
 
 impl Pass {
@@ -3644,6 +4124,7 @@ impl Pass {
         if let Some(purged) = run.purged {
             self.purged.insert(name.into(), purged);
         }
+        self.interrupted.insert(name.into(), run.interrupted);
         self.messages_measured += messages;
     }
 }
@@ -3819,6 +4300,9 @@ fn main() -> ExitCode {
     // The purge's figures over the runs: the fewest files removed during a loop, of
     // that run's pile, and whether it outlasted every loop (card 177; `merge_purged`).
     let mut purged_by_benchmark: BTreeMap<String, Purged> = BTreeMap::new();
+    // What the kernel counted on the pinned CPUs around each benchmark's loop, run by
+    // run in the order the runs ran, for the interrupts file (card 198).
+    let mut interrupted_by_benchmark = CountsByBenchmark::new();
     let mut messages_measured: u64 = 0;
     let mut below_zero: u64 = 0;
     if let Some(link) = &options.link {
@@ -3841,6 +4325,7 @@ fn main() -> ExitCode {
         *allocations_by_benchmark
             .entry("udp_mdc".to_string())
             .or_insert(0) += mdc.allocations;
+        keep_counts(&mut interrupted_by_benchmark, "udp_mdc", mdc.interrupted);
         messages_measured += options.udp_messages();
         let round_trip = format!("udp_round_trip_{}", options.body);
         let one_way = format!("udp_one_way_{}", options.body);
@@ -3855,6 +4340,7 @@ fn main() -> ExitCode {
             *allocations_by_benchmark
                 .entry("link".to_string())
                 .or_insert(0) += run.allocations;
+            keep_counts(&mut interrupted_by_benchmark, "link", run.interrupted);
             messages_measured += options.messages;
             below_zero = below_zero.max(run.below_zero);
         }
@@ -3887,6 +4373,9 @@ fn main() -> ExitCode {
             *allocations_by_benchmark.entry(name).or_insert(0) += count;
         }
         merge_purged(&mut purged_by_benchmark, pass.purged);
+        for (name, interrupted) in pass.interrupted {
+            keep_counts(&mut interrupted_by_benchmark, &name, interrupted);
+        }
         messages_measured += pass.messages_measured;
     }
     let mut benchmarks: BTreeMap<String, Summary> = BTreeMap::new();
@@ -3965,6 +4454,24 @@ fn main() -> ExitCode {
             } else {
                 "did not outlast"
             }
+        );
+    }
+    // The loops of a pinned run that were not counted, of all its message loops: the
+    // line under the table says so, and the interrupts file keeps their places.
+    let loops: usize = interrupted_by_benchmark.values().map(Vec::len).sum();
+    let not_counted = interrupted_by_benchmark
+        .values()
+        .flatten()
+        .filter(|run| run.is_none())
+        .count();
+    if options.pin.is_some() && not_counted > 0 {
+        println!(
+            "  interrupts on the pinned CPUs: {not_counted} of {loops} loops not counted; the first \
+             because {}; the rows above are whole \
+             (docs/how-to/run-the-bench.md#when-it-does-not-work)",
+            NOT_COUNTED
+                .get()
+                .map_or("of a reason that was not kept", String::as_str)
         );
     }
 
@@ -4071,6 +4578,34 @@ fn main() -> ExitCode {
             return ExitCode::FAILURE;
         }
         println!("  written to {}", path.display());
+        // The interrupts file goes beside the result, under the same name in a
+        // directory of its own, when a loop of a run under `--pin` was counted (card
+        // 198). It is a diagnostic and the gate reads the result alone, so a file that
+        // cannot be written is said and fails nothing: the result is written, and the
+        // allocations are still judged below.
+        if let Some(pin) = options.pin.filter(|_| not_counted < loops) {
+            let dir = dir.join(INTERRUPTS_DIR);
+            let path = dir.join(format!("{}-{date_unix}.json", options.profile));
+            let file = interrupts_file(
+                &options.profile,
+                pin,
+                &sha,
+                date_unix,
+                &interrupted_by_benchmark,
+            );
+            match std::fs::create_dir_all(&dir).and_then(|()| std::fs::write(&path, file)) {
+                Ok(()) => println!(
+                    "  interrupts and softirqs on the pinned CPUs around each run's loop written to {}",
+                    path.display()
+                ),
+                Err(e) => eprintln!(
+                    "cavalry-bench: the interrupts file {} was not written: {e}; the result \
+                     above is whole and the gate reads it alone, so the run is judged as \
+                     always (docs/how-to/run-the-bench.md#when-it-does-not-work)",
+                    path.display()
+                ),
+            }
+        }
     }
 
     if let Some(message) = allocation_failure(&allocations_by_benchmark, first_allocation()) {
@@ -4402,6 +4937,7 @@ mod tests {
                 allocations,
                 producer_position_loads: None,
                 purged: None,
+                interrupted: None,
             }
         };
         let mut pass = Pass::default();
@@ -5105,6 +5641,7 @@ mod tests {
             allocations: 0,
             producer_position_loads: None,
             purged,
+            interrupted: None,
         };
         let purged = Purged {
             during: 3107,
@@ -5186,5 +5723,257 @@ mod tests {
                 ("b".to_string(), purged(1, 30, true)),
             ])
         );
+    }
+
+    /// `/proc/interrupts` as a host with CPUs 2 and 3 offline prints it: the header
+    /// names the columns, so CPU 4 is the third column and not the fifth.
+    const PROC_INTERRUPTS: &str = "\
+            CPU0       CPU1       CPU4       CPU5       \n\
+   0:         42          0          0          0   IO-APIC    2-edge      timer\n\
+  27:          0          7          0          3   PCI-MSI 1048576-edge      nvme0q0\n\
+ NMI:          0          0          0          0   Non-maskable interrupts\n\
+ LOC:     100000     200000        659        717   Local timer interrupts\n\
+ CAL:       5000       6000        148        129   Function call interrupts\n\
+ ERR:          0\n\
+ MIS:          0\n";
+
+    /// A reading keeps every row that has a count for each column, under its label,
+    /// with the pinned CPUs' counts in `--pin`'s order: a CPU is found by the name in
+    /// the header, one the header does not name reads 0, a row's description is not a
+    /// count, and the host's own rows, `ERR` and `MIS`, are left out.
+    #[test]
+    fn a_reading_takes_each_rows_counts_on_the_pinned_cpus_by_the_headers_names() {
+        let rows = per_cpu_counts(PROC_INTERRUPTS, &[5, 4, 9]);
+        assert_eq!(
+            rows,
+            BTreeMap::from([
+                ("0".to_string(), vec![0, 0, 0]),
+                ("27".to_string(), vec![3, 0, 0]),
+                ("NMI".to_string(), vec![0, 0, 0]),
+                ("LOC".to_string(), vec![717, 659, 0]),
+                ("CAL".to_string(), vec![129, 148, 0]),
+            ])
+        );
+        // `/proc/softirqs` has the same shape, with no description after the counts.
+        let softirqs = "                    CPU0       CPU1\n          HI:          1          2\n       TIMER:        300        400\n";
+        assert_eq!(
+            per_cpu_counts(softirqs, &[1]),
+            BTreeMap::from([
+                ("HI".to_string(), vec![2]),
+                ("TIMER".to_string(), vec![400]),
+            ])
+        );
+        // No header, no columns: nothing is read, where a count would be a guess.
+        assert!(per_cpu_counts("", &[0]).is_empty());
+        assert!(per_cpu_counts(" LOC: 1 2\n", &[0]).is_empty());
+    }
+
+    fn counts_of(interrupts: &[(&str, &[u64])], softirqs: &[(&str, &[u64])]) -> KernelCounts {
+        let rows = |rows: &[(&str, &[u64])]| {
+            rows.iter()
+                .map(|(label, counts)| (label.to_string(), counts.to_vec()))
+                .collect()
+        };
+        KernelCounts {
+            interrupts: rows(interrupts),
+            softirqs: rows(softirqs),
+        }
+    }
+
+    /// The difference between two readings holds the rows that moved on a pinned CPU
+    /// and no others; a row the first reading does not have counts whole; and a count
+    /// that went down has passed 2^32, the width the kernel keeps it in, so the
+    /// difference is taken around it and the run it wrapped in is not read as quiet.
+    #[test]
+    fn the_difference_of_two_readings_keeps_the_rows_that_moved() {
+        let before = counts_of(
+            &[
+                ("LOC", &[100, 4_294_967_290]),
+                ("CAL", &[5, 5]),
+                ("NMI", &[9, 0]),
+            ],
+            &[("TIMER", &[10, 10]), ("RCU", &[7, 7])],
+        );
+        let after = counts_of(
+            &[
+                ("LOC", &[106, 4]),
+                ("CAL", &[5, 5]),
+                ("NMI", &[9, 0]),
+                ("31", &[0, 1]),
+            ],
+            &[("TIMER", &[10, 11]), ("RCU", &[7, 7])],
+        );
+        assert_eq!(
+            after.since(&before),
+            counts_of(&[("LOC", &[6, 10]), ("31", &[0, 1])], &[("TIMER", &[0, 1])])
+        );
+        assert_eq!(after.since(&after), KernelCounts::default());
+        assert_eq!(counted_between(5, 9), 4);
+        assert_eq!(counted_between(9, 9), 0);
+        assert_eq!(counted_between(u64::from(u32::MAX), 0), 1);
+        assert_eq!(counted_between(u64::from(u32::MAX) - 1, 3), 5);
+        // Above 32 bits a count that went down is no counter the harness knows.
+        assert_eq!(counted_between(1 << 33, 5), 0);
+    }
+
+    /// A loop makes its first reading in the middle of its warm-up, and none when the
+    /// run is unpinned, where no CPU's counts are the run's, or when the warm-up is
+    /// under two messages, where the reading would be the last thing before a sample.
+    /// A loop that is not counted has no end to share: its subscriber holds for
+    /// nothing, and its window closes with nothing and waits for nobody.
+    #[test]
+    fn a_loop_is_counted_from_the_middle_of_its_warm_up_or_not_at_all() {
+        let pin = parse_pin("0,1,2").expect("three parse");
+        let from = |pin, warmup| LoopEnd::of(pin, warmup).map(|end| end.from);
+        assert_eq!(from(Some(pin), 786_432), Some(393_216));
+        assert_eq!(from(Some(pin), 2), Some(1));
+        assert_eq!(from(Some(pin), 1), None);
+        assert_eq!(from(Some(pin), 0), None);
+        assert_eq!(from(None, 786_432), None);
+        assert_eq!(
+            KernelWindow::new(LoopEnd::of(Some(pin), 786_432)).from,
+            393_216
+        );
+        assert_eq!(KernelWindow::new(None).from, u64::MAX);
+        LoopEnd::hold(None);
+        // The close returns at once although this subscriber never returns by itself.
+        let release = Arc::new(AtomicBool::new(false));
+        let subscriber = {
+            let release = Arc::clone(&release);
+            thread::spawn(move || {
+                while !release.load(Ordering::Acquire) {
+                    thread::yield_now();
+                }
+            })
+        };
+        let mut uncounted = KernelWindow::new(None);
+        uncounted.open();
+        assert_eq!(uncounted.close(&subscriber), None);
+        release.store(true, Ordering::Release);
+        subscriber.join().expect("the subscriber returns");
+    }
+
+    /// A counted loop's second reading is made once the subscriber has had the last
+    /// message and while it holds, and the close lets it go: the difference is there
+    /// exactly when the kernel has the two files, on Linux, and the subscriber is let
+    /// go either way.
+    #[test]
+    fn a_counted_loops_close_waits_for_the_last_delivery_and_lets_the_subscriber_go() {
+        let pin = parse_pin("0,1,2").expect("three parse");
+        let readable = std::fs::read_to_string("/proc/interrupts").is_ok()
+            && std::fs::read_to_string("/proc/softirqs").is_ok();
+        let end = LoopEnd::of(Some(pin), 4).expect("a pinned loop with a warm-up is counted");
+        let held = Arc::new(AtomicBool::new(true));
+        let subscriber = {
+            let end = Arc::clone(&end);
+            let held = Arc::clone(&held);
+            thread::spawn(move || {
+                thread::sleep(Duration::from_millis(20));
+                LoopEnd::hold(Some(&end));
+                held.store(false, Ordering::Release);
+            })
+        };
+        let mut window = KernelWindow::new(Some(Arc::clone(&end)));
+        window.open();
+        assert_eq!(window.before.is_some(), readable);
+        let counted = window.close(&subscriber);
+        assert_eq!(counted.is_some(), readable);
+        if readable {
+            assert!(
+                end.delivered.load(Ordering::Acquire),
+                "the second reading was made before the subscriber had the last message"
+            );
+        }
+        assert!(end.read.load(Ordering::Acquire));
+        subscriber.join().expect("the subscriber is let go");
+        assert!(!held.load(Ordering::Acquire));
+    }
+
+    /// A subscriber that returned without the last message is one that failed: the
+    /// close does not wait for it, the loop is not counted, and the reason is kept. A
+    /// window dropped before its close, on a loop's early return, lets the subscriber
+    /// go as well.
+    #[test]
+    fn a_loop_whose_subscriber_failed_is_not_counted_and_nothing_waits() {
+        let pin = parse_pin("0,1,2").expect("three parse");
+        let end = LoopEnd::of(Some(pin), 4).expect("counted");
+        let failed = thread::spawn(|| ());
+        while !failed.is_finished() {
+            thread::yield_now();
+        }
+        let mut window = KernelWindow::new(Some(Arc::clone(&end)));
+        window.open();
+        assert_eq!(window.close(&failed), None);
+        assert!(end.read.load(Ordering::Acquire));
+        failed.join().expect("the subscriber returned");
+
+        let end = LoopEnd::of(Some(pin), 4).expect("counted");
+        drop(KernelWindow::new(Some(Arc::clone(&end))));
+        assert!(end.read.load(Ordering::Acquire));
+        // Let go, the subscriber's hold returns at once.
+        LoopEnd::hold(Some(&end));
+        assert!(end.delivered.load(Ordering::Acquire));
+        // An uncounted loop under `--pin` keeps why, for the line under the table.
+        assert_eq!(LoopEnd::of(Some(pin), 1).map(|end| end.from), None);
+        assert!(NOT_COUNTED.get().is_some());
+    }
+
+    /// The interrupts file lists, by benchmark, by pinned CPU and by label, each run's
+    /// count in the order the runs ran: a run in which a listed label counted nothing
+    /// reads 0, a run that was not counted reads `null` and is named in `not_counted`,
+    /// and a label or a CPU that counted nothing in any run is left out. Its head is
+    /// the result's profile, commit and time, so the two files are joined by them.
+    #[test]
+    fn the_interrupts_file_lists_each_runs_counts_by_benchmark_cpu_and_label() {
+        let pin = parse_pin("4,5,6").expect("three parse");
+        let cpus = pin.cpus();
+        assert_eq!(cpus, vec![4, 5, 6]);
+        let four = parse_pin("4,5,6,7").expect("four parse");
+        assert_eq!(four.cpus(), vec![4, 5, 6, 7]);
+        assert_eq!(four.list(), "4,5,6,7");
+        assert_eq!(four.json(), "[4, 5, 6, 7]");
+        let mut runs = CountsByBenchmark::new();
+        keep_counts(
+            &mut runs,
+            "client",
+            Some(counts_of(
+                &[("LOC", &[6, 5, 0]), ("CAL", &[2, 0, 0])],
+                &[("TIMER", &[1, 0, 0])],
+            )),
+        );
+        keep_counts(&mut runs, "client", None);
+        keep_counts(
+            &mut runs,
+            "client",
+            Some(counts_of(&[("LOC", &[7, 6, 0])], &[])),
+        );
+        keep_counts(&mut runs, "udp", Some(KernelCounts::default()));
+        keep_counts(&mut runs, "recorded", None);
+        assert_eq!(
+            json_counts(&runs, &cpus, |run| &run.interrupts),
+            "{\n    \"client\": {\"4\": {\"CAL\": [2, null, 0], \"LOC\": [6, null, 7]}, \"5\": {\"LOC\": [5, null, 6]}},\n    \"recorded\": {},\n    \"udp\": {}\n  }"
+        );
+        assert_eq!(
+            json_counts(&runs, &cpus, |run| &run.softirqs),
+            "{\n    \"client\": {\"4\": {\"TIMER\": [1, null, 0]}},\n    \"recorded\": {},\n    \"udp\": {}\n  }"
+        );
+        assert_eq!(
+            json_counts(&CountsByBenchmark::new(), &cpus, |run| &run.interrupts),
+            "{}"
+        );
+        assert_eq!(
+            json_not_counted(&runs),
+            "{\"client\": [1], \"recorded\": [0]}"
+        );
+        assert_eq!(json_not_counted(&CountsByBenchmark::new()), "{}");
+        let file = interrupts_file("grip-linux", pin, "abc1234", 1_794_427_849, &runs);
+        assert!(
+            file.starts_with(
+                "{\n  \"schema\": 0,\n  \"profile\": \"grip-linux\",\n  \"git\": \"abc1234\",\n  \"date_unix\": 1794427849,\n  \"pinned\": [4, 5, 6],\n  \"not_counted\": {\"client\": [1], \"recorded\": [0]},\n  \"interrupts\": {\n    \"client\""
+            ),
+            "{file}"
+        );
+        assert!(file.contains("  \"softirqs\": {\n    \"client\""), "{file}");
+        assert!(file.ends_with("  }\n}\n"), "{file}");
     }
 }

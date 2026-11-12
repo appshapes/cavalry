@@ -138,6 +138,43 @@ shared runner is
    a rotation on the log rows, and on the UDP rows a `not connected` before the first
    message as well.
 
+   Under `--pin` the harness writes a second file, the interrupts file,
+   `bench/results/interrupts/<profile>-<unix time>.json`, under the result's own name,
+   and the last line under the table names it (card 198). It holds what the kernel
+   counted on each pinned CPU around each run's measured loop: the rows of
+   `/proc/interrupts` under `interrupts` and the rows of `/proc/softirqs` under
+   `softirqs`. A softirq is work the kernel defers out of an interrupt and runs on the
+   same CPU straight after it. Each member lists the message benchmarks by the name the
+   retries use, then the pinned CPUs by number, then the kernel's label of the row,
+   such as `LOC` for the local timer, `CAL` for a function call sent by another CPU,
+   `TLB` for a TLB shootdown, `NMI` for a non-maskable interrupt and a number for a
+   device's line. Each label has one count per run, in the order the runs ran, which is
+   the order of the result's `p99_99_ns_runs`. A label that counted nothing on a CPU
+   in any run is left out, and so is a CPU with no label left. The file's head is the
+   result's `profile`, `git` and `date_unix`, which join the two files; the messages
+   and the runs are in the result. Its `pinned` is
+   `--pin`'s CPUs in its order: the publisher's, the subscriber's, the third, which is
+   the conductor's in the shared-memory rows and the sender's in the UDP rows, and the
+   receiver's. A run of five with `--pin 16,17,18,19` on `kip`, which is not an
+   isolated host, wrote for the client row, under `interrupts` and then under
+   `softirqs`:
+
+   ```text
+   "client": {"16": {"LOC": [150, 150, 151, 153, 155], "NMI": [0, 0, 0, 0, 1], "PMI": [0, 0, 0, 0, 1]}, "17": {"LOC": [150, 150, 151, 153, 155]}, "18": {"LOC": [158, 160, 160, 161, 162]}, "19": {"LOC": [0, 0, 0, 2, 1]}}
+   "client": {"16": {"RCU": [0, 13, 0, 0, 0], "SCHED": [2, 0, 0, 0, 0]}, "17": {"RCU": [0, 20, 0, 0, 0], "SCHED": [2, 0, 1, 1, 1], "TIMER": [1, 0, 0, 0, 0]}, "18": {"RCU": [0, 18, 0, 0, 0], "SCHED": [4, 2, 1, 2, 2], "TIMER": [1, 1, 1, 2, 1]}}
+   ```
+
+   A count covers the second half of the loop's warm-up and the whole measured loop,
+   to the subscriber's last delivery, and nothing of the benchmark's start or end. The
+   publisher's thread reads the two files in the middle of the warm-up, and again
+   after the loop, when the subscriber has had the last message and still spins on
+   its CPU. A loop that could not be counted keeps its place: its counts read `null`,
+   and `not_counted` lists, by benchmark, the places of such runs, counted from 0.
+   With `--warmup 0` or `--warmup 1` no loop is counted. The timer, slot and record
+   rows have no counts, and an unpinned run writes no file. `just bench-compare` never
+   reads the file, and a red's record (step 4) does not carry it. CI keeps it in the
+   job's artifact, beside the result.
+
 3. Compare with the baseline:
 
    ```sh
@@ -583,7 +620,8 @@ shared runner is
 ## How to verify it worked
 
 - `ls bench/results/` shows a new `.json` file whose `profile` field is the one you
-  expected.
+  expected. After a run under `--pin`, `ls bench/results/interrupts/` shows a file of
+  the same name.
 - The table's last line reads `allocations per message: 0`.
 - `just bench-compare` ends with `bench-compare: ok`.
 - On a Linux host, every Cavalry mapping is resident and no measured thread took a
@@ -626,6 +664,40 @@ shared runner is
 
 ## When it does not work
 
+- One run of a row reads a p99.99 far above the row's other runs, with `--repeat` and
+  `--pin`: find the run's place in the row's last column, then open the interrupts
+  file (step 2) and read the counts at the same place for the row's benchmark, on the
+  subscriber's CPU for a `one_way` row and the publisher's for a `claim_commit` row. A
+  label that counted in that run and in no other names what ran on the CPU during the
+  loop. In the run on `kip` that step 2 shows, the five runs' `one_way_32_client` read
+  10,263, 2,081, 2,003, 3,225 and 2,109 ns, and the first run alone has a `TIMER`
+  softirq on CPU 17, the subscriber's: a timer of the kernel's ran there during that
+  loop. A label is a lead and not a proof. In the same file the exclusive row's second
+  run has the same softirq on the same CPU and read 2,045 ns, beside 2,181, 2,033,
+  1,626 and 1,618. The counts say which interrupts ran and how many, not how long each
+  took, and a thread of another process that took the CPU is not an interrupt, so a
+  run can read
+  high with nothing counted. On a bench host, compare the label with what
+  [Set up a bench host](set-up-a-bench-host.md) moved off the isolated CPUs, and run
+  `bench/host/check.sh`.
+- `interrupts on the pinned CPUs: 3 of 147 loops not counted; the first because ...`
+  under the table: the harness could not make its two readings around that many
+  measured loops, and the line gives the first one's reason. The rows are whole and
+  are judged as always. The interrupts file names the runs under `not_counted`, and is
+  not written when no loop was counted. The reasons:
+  - `the warm-up is under two messages`: with `--warmup 0` or `--warmup 1` every loop
+    is left uncounted, so that no reading comes straight before a sample. Use a longer
+    warm-up to have the counts.
+  - `/proc/interrupts could not be read` or `/proc/softirqs could not be read`, with
+    the system's error: the host does not show the file to the harness's user, as in
+    a container. `cat /proc/interrupts` as that user gives the same error.
+  - `the subscriber had not had the loop's last message 10 s after the publisher's
+    last claim`, or `the subscriber returned before it had the loop's last message`:
+    the run's own failure follows and says what stopped the subscriber.
+- `the interrupts file ... was not written` on standard error: the directory
+  `bench/results/interrupts`, or the one under `--out`, could not be made or written,
+  and the line gives the system's error. The result is written and the run is judged
+  as always; mend the directory's owner or mode for the next run's counts.
 - `allocations per message` is not 0: a measured loop allocated. The gate has done its
   job; the `allocations by benchmark` line above it names the benchmark whose run
   allocated, with its count summed over the runs, and the failure line repeats it,
@@ -656,6 +728,12 @@ shared runner is
   still open. Do not change the driver; fix the harness. Hand the handle back to the
   publisher's thread and close it there after `Counting::close`, as `run_client` and
   `spawn_subscriber` do (card 176).
+- The frames under the failure line include `make_handler` and `thread_start`, on a
+  run with `--warmup` of a message or two: the
+  counting window opened while the subscriber's thread was still starting, and the
+  thread's start allocates. On `kip`, `--warmup 1 --only claim_commit_32_client` under
+  `--pin` counted 4 allocations in each of three processes at 058eaad. No message's
+  path allocated; run with the default warm-up, or one of a few thousand messages.
 - Frames under the failure line, after `the first allocation a measured loop saw`:
   the backtrace of the first allocation any measured loop counted, captured once per
   process inside the allocator's hook. It has the function names the release build

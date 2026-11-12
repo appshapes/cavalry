@@ -96,6 +96,13 @@ nothing depends on it.
   allocate, a reallocation included, naming the benchmark whose loops did and
   printing the backtrace of the first allocation it saw (ADR 0047): the
   zero-allocations-per-message assertion of the gate.
+- Under `--pin`, counts the kernel's interrupts and softirqs on each pinned CPU around
+  each message row's measured loop, from the middle of its warm-up to its last
+  delivery, and writes them run by run to
+  `bench/results/interrupts/<profile>-<unix time>.json`, so that a run whose p99.99
+  reads far above its row's other runs can be read beside what ran on its CPUs (card
+  198; [Run the bench](../docs/how-to/run-the-bench.md), step 2). The gate reads the
+  result alone.
 - Writes `bench/results/<profile>-<unix time>.json`, the clock's step included;
   `scripts/bench-compare.py` fails a p99.99 regression over 5 percent and over one clock
   step, the smaller of the result's and the baseline's, against `bench/baseline.json`
