@@ -757,6 +757,10 @@ struct Catchup {
     flagged: bool,
     /// Whether the leader's stop catch-up was read.
     stopped: bool,
+    /// The commit position the member had been told when it read stop catch-up,
+    /// which its append position must reach before it leaves the state. It is fixed
+    /// then: a leader that goes on committing does not move it.
+    commit_target: i64,
     /// The append position at the last cycle, and when it last moved.
     position: i64,
     moved_ns: u64,
@@ -1412,6 +1416,7 @@ impl Consensus {
                         self.catchup = false;
                     }
                     catching.stopped = true;
+                    catching.commit_target = self.commit_position;
                     self.catching = Some(catching);
                 }
                 Ok(())
@@ -2616,6 +2621,7 @@ impl Consensus {
                 asked: self.append_position,
                 flagged: false,
                 stopped: false,
+                commit_target: 0,
                 position: self.append_position,
                 moved_ns: clock.now_ns,
             });
@@ -2678,8 +2684,10 @@ impl Consensus {
     /// reached where the live image joined: the flag tells the leader that it may
     /// stop the replay, and a replay stopped sooner would leave a hole below the live
     /// image that nothing fills (ADR 0088). When the leader has sent stop catch-up,
-    /// and its append position has reached the commit position it was told, it goes
-    /// on to follower log init, already subscribed. A catch-up whose append position
+    /// and its append position has reached the commit position it had been told when
+    /// it read that message, it goes on to follower log init, already subscribed: the
+    /// commit positions a leader sends after do not hold it, or a steady load would
+    /// for as long as it lasted. A catch-up whose append position
     /// has not moved for the leader heartbeat timeout, counted from the replay's image
     /// joining, fails the election.
     fn follower_catchup<I: Io>(&mut self, clock: Clock, io: &mut I) -> Result<usize, I::Fault> {
@@ -2727,7 +2735,7 @@ impl Consensus {
             work = 1;
         }
         self.catching = Some(catching);
-        if catching.stopped && on_live && self.append_position >= self.commit_position {
+        if catching.stopped && on_live && self.append_position >= catching.commit_target {
             self.catching = None;
             return Ok(self.step(ElectionState::FollowerLogInit, clock));
         }

@@ -272,7 +272,10 @@ fn a_report_carries_the_catch_up_flag_only_once_the_member_is_on_the_live_log() 
 /// What holds a member in the catch-up after it has the leader's log: a stop
 /// catch-up read before it has reported with the flag, one that is not for its term
 /// or not for it; the live image not yet there; an append position below where the
-/// live image joined; an append position below the commit position it was told.
+/// live image joined; an append position below the commit position it had been told
+/// when it read stop catch-up. A commit position told after that does not hold it:
+/// under a steady load the leader's commits would keep it in the state for as long
+/// as the load lasted, which the second review of pull request 231 noted.
 #[test]
 fn a_member_leaves_the_catch_up_only_stopped_on_the_live_log_and_committed() {
     let mut io = Stub::new();
@@ -294,7 +297,13 @@ fn a_member_leaves_the_catch_up_only_stopped_on_the_live_log_and_committed() {
     read(&mut member, &mut io, ms + 2, &stop_catchup(1, 1));
     assert_eq!(io.count(|call| *call == Call::RemoveCatchup), 0);
 
-    // Stopped, with no live image yet.
+    // Told a commit position of 192, then to stop, with no live image yet.
+    let commit = |log_position| Message::CommitPosition {
+        leadership_term_id: 1,
+        log_position,
+        leader_member_id: 2,
+    };
+    read(&mut member, &mut io, ms + 3, &commit(192));
     io.image = None;
     read(&mut member, &mut io, ms + 3, &stop_catchup(1, 0));
     read(&mut member, &mut io, ms + 3, &stop_catchup(1, 0));
@@ -307,20 +316,19 @@ fn a_member_leaves_the_catch_up_only_stopped_on_the_live_log_and_committed() {
     work(&mut member, &mut io, ms + 5);
     assert_eq!(member.election_state(), ElectionState::FollowerCatchup);
 
-    // On the live log, below the commit position it was told.
+    // On the live log, below the commit position it had been told when it read
+    // stop catch-up.
     io.image = Some(128);
-    let told_commit = Message::CommitPosition {
-        leadership_term_id: 1,
-        log_position: 192,
-        leader_member_id: 2,
-    };
-    read(&mut member, &mut io, ms + 6, &told_commit);
-    work(&mut member, &mut io, ms + 7);
+    work(&mut member, &mut io, ms + 6);
     assert_eq!(member.election_state(), ElectionState::FollowerCatchup);
 
+    // A commit position the leader sends after that does not move what it must
+    // reach: at 192 it leaves, though it has been told 256 since.
+    read(&mut member, &mut io, ms + 7, &commit(256));
     io.append_position = 192;
     work(&mut member, &mut io, ms + 8);
     assert_eq!(member.election_state(), ElectionState::FollowerLogInit);
+    assert_eq!(member.commit_position(), 256);
 }
 
 /// A catch-up whose append position has not moved for the leader heartbeat timeout
