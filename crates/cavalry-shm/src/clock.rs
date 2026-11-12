@@ -30,6 +30,11 @@ use std::time::{Instant, SystemTime, UNIX_EPOCH};
 /// timestamp in `spec/`; 0 before the epoch. A step of the host's clock moves it, so it
 /// is read for a value another process compares with its own reading, and never for an
 /// interval.
+///
+/// Inlined into its caller, as the clock read it replaces was: a driver thread reads a
+/// clock once per duty cycle, and without link-time optimisation a function of another
+/// crate is a call unless it is marked so.
+#[inline]
 pub fn epoch_time() -> i64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -48,12 +53,16 @@ pub fn epoch_time() -> i64 {
 /// `CLOCK_UPTIME_RAW` on macOS, neither of which counts the time a host is suspended.
 /// After the first call a reading is one load of the origin and one read of that clock,
 /// with no lock and no system call where the operating system serves the clock from
-/// user space, as Linux and macOS do.
+/// user space, as Linux and macOS do. It is inlined into its caller, as
+/// [`epoch_time`] is; the origin is one static of this crate wherever it is inlined.
+#[inline]
 pub fn nano_time() -> i64 {
-    static ORIGIN: OnceLock<Instant> = OnceLock::new();
     let origin = *ORIGIN.get_or_init(Instant::now);
     i64::try_from(origin.elapsed().as_nanos()).unwrap_or(i64::MAX)
 }
+
+/// The nano clock's origin: the process's first reading of it.
+static ORIGIN: OnceLock<Instant> = OnceLock::new();
 
 #[cfg(test)]
 mod tests {

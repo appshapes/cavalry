@@ -95,7 +95,10 @@ impl EpochClock {
             .read_at
             .is_none_or(|read_at| !(0..interval).contains(&now.saturating_sub(read_at)))
         {
-            self.difference = clock::epoch_time().saturating_sub(clock::nano_time());
+            // One read of the host's clock: `now` is the nano clock's reading on this
+            // duty cycle, taken a moment before, and whatever it is, `now` plus this
+            // difference is the epoch clock as just read.
+            self.difference = clock::epoch_time().saturating_sub(now);
             self.read_at = Some(now);
         }
         now.saturating_add(self.difference)
