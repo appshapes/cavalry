@@ -1879,7 +1879,10 @@ fn udp_checks(reader: &CountersReader, running: bool, findings: &mut Vec<Finding
                      recording; a receiver that joins is sent the stream from where its own \
                      image begins and replays recording {recording} for what came before; if a \
                      receiver was expected, check that a subscription on stream {stream_id} \
-                     exists on its host and that its driver receives on that port"
+                     exists on its host and that its driver receives on that port; if a \
+                     stop of recording {recording} has been asked, the publication is not \
+                     connected from that moment, though the recording's counters stay \
+                     until the stop is done, which the counters do not tell apart"
                 ),
                 doc: DOC_UDP_SENDER,
             });
@@ -3261,6 +3264,15 @@ mod tests {
                  by recording 3 alone: no receiver has answered on the control channel \
                  cavalry:udp?control=10.0.0.1:40456|control-mode=manual, 2 destination(s), \
                  its sender has passed 64000 bytes without sending them"
+            ),
+            "{}",
+            note.message
+        );
+        // The recording connects it until its stop is asked, which no counter marks:
+        // the note says so and claims no more (`spec/udp.md`, "The sender").
+        assert!(
+            note.message.contains(
+                "if a stop of recording 3 has been asked, the publication is not connected"
             ),
             "{}",
             note.message
