@@ -297,8 +297,9 @@ pub fn examine(dir: &Path) -> Report {
 /// the `log.dir` key's check), under a tenth of its filesystem free with the purge that
 /// frees the most (`log-directory-space`), the catalog slots recovery set to invalid,
 /// named (`recording-invalid`), every recording's two positions from the counters file,
-/// with a recorder a full window behind its publisher (`recording-stalled`) and failed
-/// writes (`recording-write-failed`) as findings (ADR 0025), and a recording over half
+/// with a recorder half its publication's window behind its publisher
+/// (`recording-stalled`) and failed
+/// writes (`recording-write-failed`) as findings (ADR 0025, ADR 0097), and a recording over half
 /// its filesystem, live by its gauge or stopped by its descriptor
 /// (`recording-over-half`, ADR 0031).
 pub fn examine_with(dir: &Path, log_dir: Option<&Path>) -> Report {
@@ -2256,10 +2257,21 @@ struct RecordingCounters {
 }
 
 /// The recordings: every `recording.position` counter with its `recording.synced_position`,
-/// listed; a recorder a full publication window behind its publisher
+/// listed; a recorder at least half its publication's window behind its publisher
 /// (`recording-stalled`); writes that failed (`recording-write-failed`); and the catalog
 /// slots recovery set to invalid, named from the catalog when the log directory is
 /// known (`recording-invalid`) (`spec/client-protocol.md`, "Commands"; ADR 0025).
+///
+/// The window is the publication's own, half its term: the `cavalry:ipc` window, or the
+/// `cavalry:udp` one for a publication the sender sends, which is one with a
+/// `sender.limit` counter under its key (`spec/udp.md`, "The sender"; ADR 0097). Half of
+/// it is the threshold because a publisher held by its recorder is rarely a whole
+/// window ahead: the driver raises the limit in steps of an eighth of the window, so
+/// the limit stands up to an eighth short of the recorder's position plus the window,
+/// and the publisher stops up to a message short of the limit, a message being at most
+/// a quarter of the window (`spec/log-buffer.md`, "The driver", "Claim, commit and
+/// abort"). A held publisher is therefore at least five eighths of the window ahead,
+/// and a recorder that keeps up is within the bytes of 50 µs (ADR 0084).
 fn recording_checks(
     reader: &CountersReader,
     log_dir: Option<&Path>,
@@ -2273,6 +2285,8 @@ fn recording_checks(
     let mut recordings: Vec<RecordingCounters> = Vec::new();
     let mut synced: Vec<([u8; 8], i64)> = Vec::new();
     let mut publications: Vec<(i32, i32, i64)> = Vec::new();
+    // The publications the sender sends, `cavalry:udp`, by session id and stream id.
+    let mut sent: Vec<(i32, i32)> = Vec::new();
     let mut live_bytes: Vec<(i64, i64)> = Vec::new();
     for id in 0..capacity {
         let Some(fields) = record(id) else { continue };
@@ -2310,6 +2324,10 @@ fn recording_checks(
             let session = i32::from_le_bytes([key[8], key[9], key[10], key[11]]);
             let stream = i32::from_le_bytes([key[12], key[13], key[14], key[15]]);
             publications.push((session, stream, value));
+        } else if fields.type_id() == SENDER_LIMIT.0 {
+            let session = i32::from_le_bytes([key[8], key[9], key[10], key[11]]);
+            let stream = i32::from_le_bytes([key[12], key[13], key[14], key[15]]);
+            sent.push((session, stream));
         } else if fields.type_id() == RECORDING_BYTES.0 {
             // The gauge's label is the position's: the name, then the recording id.
             if let Some(rid) = fields.label().split_whitespace().nth(1)
@@ -2323,7 +2341,6 @@ fn recording_checks(
         let rid = recording.recording_id.to_le_bytes();
         recording.synced = synced.iter().find(|(key, _)| *key == rid).map(|(_, v)| *v);
     }
-    let window = i64::from(spec::IPC_PUBLICATION_WINDOW);
     for recording in &recordings {
         checks += 1;
         let synced = recording
@@ -2348,17 +2365,26 @@ fn recording_checks(
                 *session == recording.session_id && *stream == recording.stream_id
             })
             .map(|(_, _, position)| *position);
+        let window = if sent.iter().any(|(session, stream)| {
+            *session == recording.session_id && *stream == recording.stream_id
+        }) {
+            i64::from(spec::UDP_PUBLICATION_WINDOW)
+        } else {
+            i64::from(spec::IPC_PUBLICATION_WINDOW)
+        };
         if let Some(publisher) = publisher
-            && publisher.saturating_sub(recording.position) >= window
+            && publisher.saturating_sub(recording.position) >= window / 2
         {
             findings.push(Finding {
                 check: "recording-stalled",
                 level: Level::Warn,
                 message: format!(
-                    "recording {} is {} bytes behind its publisher, a full publication window: \
-                     the recorder's disk is slow or failing, and the publisher is \
-                     back-pressured until it catches up; check recording.write_failed and the \
-                     log directory's disk, and `recording stopped` if it gives up",
+                    "recording {} is {} bytes behind its publisher, at least half its \
+                     publication window of {window} bytes: the recorder's disk is slow or \
+                     failing, and the publisher is back-pressured once it is a window ahead \
+                     of the recorder, until the recorder catches up; check \
+                     recording.write_failed and the log directory's disk, and `recording \
+                     stopped` if it gives up",
                     recording.recording_id,
                     publisher - recording.position
                 ),
@@ -3754,8 +3780,8 @@ mod tests {
         );
     }
 
-    /// Every recording is listed with its two positions, and a recorder a full
-    /// publication window behind its publisher is `recording-stalled`.
+    /// Every recording is listed with its two positions, and a recorder at least half
+    /// a publication window behind its publisher is `recording-stalled`.
     #[test]
     fn recordings_are_listed_and_a_recorder_a_window_behind_warns() {
         let dir = TestDir::new("recordings");
@@ -3809,6 +3835,106 @@ mod tests {
                 .iter()
                 .any(|f| f.check == "recording-stalled"),
             "caught up: {report}"
+        );
+    }
+
+    /// The window `recording-stalled` holds a recorder against is its publication's
+    /// own, and half of it is the threshold (ADR 0097). A `cavalry:udp` publication,
+    /// one with a `sender.limit` under its key, held by its recorder stands where the
+    /// driver leaves it: the limit up to an eighth of the 8 MiB window short of the
+    /// recorder's position plus the window, and the publisher a message short of the
+    /// limit. The same lag on a `cavalry:ipc` publication, whose window is 32 MiB, is
+    /// a recorder that keeps up; and a lag just under half the window warns on neither.
+    #[test]
+    fn a_recorder_is_held_against_its_publications_own_window() {
+        let dir = TestDir::new("recordings-udp-window");
+        let mut counters = CountersFile::create(&dir.0, 128).expect("counters");
+        let ring = CommandRing::create(&dir.0, 4096).expect("ring");
+        let _consumer = ring.consumer(Duration::from_secs(10)).expect("consumer");
+        let key = |correlation: i64, session: i32, stream: i32| {
+            let mut key = [0u8; 16];
+            key[..8].copy_from_slice(&correlation.to_le_bytes());
+            key[8..12].copy_from_slice(&session.to_le_bytes());
+            key[12..].copy_from_slice(&stream.to_le_bytes());
+            key
+        };
+        // The cavalry:udp publication, session -5 on stream 1001, and its recording 3.
+        let udp = counters
+            .allocate(
+                PUBLICATION_POSITION,
+                &key(7, -5, 1001),
+                "publication.position 7 -5 1001",
+            )
+            .expect("the cavalry:udp publication's position");
+        counters
+            .allocate(SENDER_LIMIT, &key(7, -5, 1001), "sender.limit 7 -5 1001 9")
+            .expect("its sender limit");
+        let udp_recorder = counters
+            .allocate(
+                RECORDING_POSITION,
+                &3i64.to_le_bytes(),
+                "recording.position 3 -5 1001",
+            )
+            .expect("its recording's position");
+        // The cavalry:ipc publication, session -6 on stream 1002, and its recording 4.
+        let ipc = counters
+            .allocate(
+                PUBLICATION_POSITION,
+                &key(8, -6, 1002),
+                "publication.position 8 -6 1002",
+            )
+            .expect("the cavalry:ipc publication's position");
+        let ipc_recorder = counters
+            .allocate(
+                RECORDING_POSITION,
+                &4i64.to_le_bytes(),
+                "recording.position 4 -6 1002",
+            )
+            .expect("its recording's position");
+        let stalled = |report: &Report| -> Vec<String> {
+            report
+                .findings
+                .iter()
+                .filter(|finding| finding.check == "recording-stalled")
+                .map(|finding| finding.message.clone())
+                .collect()
+        };
+
+        // Both recorders at 1 MiB. The cavalry:udp publisher is held: its limit was last
+        // raised 1 MiB short of the recorder's position plus the 8 MiB window, and it
+        // stopped a 64-byte frame short of that. The cavalry:ipc publisher is as far
+        // ahead, which under its 32 MiB window is a recorder that keeps up.
+        let mib = 1024 * 1024;
+        udp_recorder.store_release(mib);
+        ipc_recorder.store_release(mib);
+        udp.store_release(mib + 7 * mib - 64);
+        ipc.store_release(mib + 7 * mib - 64);
+        let found = stalled(&examine(&dir.0));
+        assert_eq!(found.len(), 1, "{found:?}");
+        assert!(
+            found[0].starts_with(
+                "recording 3 is 7339968 bytes behind its publisher, at least half its \
+                 publication window of 8388608 bytes"
+            ),
+            "{}",
+            found[0]
+        );
+
+        // Just under half of each window: neither warns. At half: each does, and each
+        // names its own window.
+        udp.store_release(mib + 4 * mib - 32);
+        ipc.store_release(mib + 16 * mib - 32);
+        let found = stalled(&examine(&dir.0));
+        assert!(found.is_empty(), "{found:?}");
+        udp.store_release(mib + 4 * mib);
+        ipc.store_release(mib + 16 * mib);
+        let found = stalled(&examine(&dir.0));
+        assert_eq!(found.len(), 2, "{found:?}");
+        assert!(found[0].contains("window of 8388608 bytes"), "{}", found[0]);
+        assert!(
+            found[1].contains("window of 33554432 bytes"),
+            "{}",
+            found[1]
         );
     }
 
