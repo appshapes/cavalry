@@ -941,16 +941,21 @@ impl Consensus {
     }
 
     /// A member with id `member_id` among the members with `member_ids` that elects its
-    /// leader (`spec/cluster.md`, "Roles and the election"; ADR 0077), in init, with no
-    /// term and no vote. `seed` is where its nomination delays come from: two members
-    /// with different seeds draw different delays, and one seed draws the same delays
-    /// at every run. Refused as [`Consensus::new`] refuses.
+    /// leader (`spec/cluster.md`, "Roles and the election"; ADR 0077), in init. Its
+    /// first duty cycle reads what its log directory holds, through
+    /// [`Io::candidate_term`] and [`Io::log_leadership_term_id`]: none on a new
+    /// directory, and on one the member kept the term it canvasses with and the term
+    /// it will not vote in a second time (ADR 0089). `seed` is where its nomination
+    /// delays come from: two members with different seeds draw different delays, and
+    /// one seed draws the same delays at every run. Refused as [`Consensus::new`]
+    /// refuses.
     ///
     /// This path has nominate, the two ballots, the elections a leader holds, on the
     /// loss of its quorum and on a higher term (ADR 0082), the truncation (ADR 0083),
     /// the replication of a term a member missed (ADR 0085, ADR 0086) and the catch-up
     /// within a leader's term (ADR 0087, ADR 0088), the leader's side of each and the
-    /// member's. The consensus module does not use it yet: see the crate's README for
+    /// member's, and a member's start on the log it kept (ADR 0089). The consensus
+    /// module does not use it yet: see the crate's README for
     /// what a member on it does where the election would do more, and for what the
     /// module's `Io` refuses.
     pub fn with_election(

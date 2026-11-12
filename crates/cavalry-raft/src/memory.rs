@@ -1138,9 +1138,10 @@ impl Cluster {
     /// Starts the member again on an empty log directory, as a container whose volume
     /// was not kept does: its core is new and its terms, its vote and its recordings
     /// are gone. When it led, its log publication is gone with it, and every
-    /// follower's image of it. A member of this version does not start again on the
-    /// log it had (`spec/cluster.md`, "The appointed leader"); this is the start it
-    /// can make, and what the cluster does about it is the test.
+    /// follower's image of it. A member whose leader is appointed does not start
+    /// again on the log it had (`spec/cluster.md`, "The appointed leader"); this is
+    /// the start it can make, and what the cluster does about it is the test. A
+    /// member that elects starts on the log it kept with [`Cluster::restart`].
     pub fn wipe(&mut self, member: i32) {
         let Some(index) = self.index(member) else {
             return;
