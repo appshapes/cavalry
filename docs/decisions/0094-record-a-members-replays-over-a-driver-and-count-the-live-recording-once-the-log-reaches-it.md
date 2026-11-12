@@ -151,9 +151,9 @@ member's recordings is not in this version (`spec/cluster.md`, "The service").
   held to begin exactly where the stopped ones end; an image said to be gone as
   soon as its recording stopped, told or not; `leave_log` without stopping the
   replay's recording first.
-- The eighteen in-crate tests ran fifteen times in a row with the first sixteen,
-  on a macOS laptop, with no failure, 5.5 s a run. `cargo test -p cavalry-raft`: 155
-  passed. The tests over three drivers, `cluster`, pass unchanged.
+- The eighteen in-crate tests ran fifteen times in a row on a macOS laptop with no
+  failure, 5.5 s a run. `cargo test -p cavalry-raft`: 155 passed. The tests over
+  three drivers, `cluster`, pass unchanged.
 - Not shown: a member's whole election over drivers, which comes when the module
   moves (ADR 0081); and a stale sender on either endpoint, which Consequences
   leaves to the fault-injection tests.

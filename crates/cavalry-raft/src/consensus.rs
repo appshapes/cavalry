@@ -225,8 +225,10 @@ pub trait Io {
     /// Leaves the log: removes the follower's subscription and stops the recording its
     /// image started. A follower leaves in init, so that the image it joins next is a
     /// new one, checked against its append position where it joins. A recording whose
-    /// image joined past the member's append position is not part of its contiguous
-    /// log, and [`Io::append_position`] never counts it.
+    /// image joined past the member's append position is part of its contiguous log
+    /// only once that log has reached where the recording begins, which a catch-up's
+    /// replay brings about (ADR 0094): until then, and for ever when nothing brings
+    /// it there, [`Io::append_position`] does not count it.
     fn leave_log(&mut self) -> Result<(), Self::Fault>;
 
     /// Gives the leader's log up: closes the log publication [`Io::add_log`] made and
