@@ -29,9 +29,10 @@ request vote for a term above its own and holds an election.
 
 **Seen in memory.** Three members elect a leader and commit ten entries. The
 leader starts again on an empty log directory. The two that kept their logs elect
-one of them, in term 1; the third replicates what it lost. Over twenty seeds, the
+one of them, in term 1 or, where they split their first vote, in term 2; the third
+replicates what it lost. Over twenty seeds, the
 member that replicated was a candidate in eight, the leader the two had elected
-gave up the lead in each of those, and the three settled on term 3. No committed
+gave up the lead in each of those, and the three settled on a later term. No committed
 entry was lost in any. The cluster had a leader, and lost it to a member that had
 caught up with it.
 
@@ -96,12 +97,13 @@ names what would change that.
   `a_member_that_replicated_canvasses_with_no_reports_and_unseats_no_leader`, the
   case above at seeds 1 to 20, with the check that no committed entry is lost
   after every step. At every seed the leader the two elected still leads five
-  seconds after the third holds the log, every member follows term 1, the leader
+  seconds after the third holds the log, every member follows the term the two
+  elected in, the leader
   counts no `cluster.leader_step_downs`, the member that replicated counts no
   `cluster.candidacies`, and its log is the leader's byte for byte.
 - With the rule taken out, a probe of the same twenty seeds: the member that
   replicated counts one candidacy and the leader one step down at eight seeds, and
-  the three end on term 3 there.
+  the three end on a later term there.
 - Aeron's `Election.state`, read on 2026-11-12: entering `CANVASS` calls
   `resetMembers()`, which forgets every member's log position and vote.
 

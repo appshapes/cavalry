@@ -653,6 +653,8 @@ fn a_member_that_replicated_canvasses_with_no_reports_and_unseats_no_leader() {
             .member(second)
             .expect("a member")
             .leadership_term_id();
+        // Term 1, or a later one where the two split their first vote (seed 12).
+        assert!(term >= 1, "seed {seed}: the two elected in term {term}");
 
         // Long enough for a member that nominated itself to have unseated the leader
         // and for the three to have settled again.
