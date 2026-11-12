@@ -25,7 +25,7 @@ use std::fs::{File, TryLockError};
 use std::net::{SocketAddr, ToSocketAddrs};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::time::Duration;
 
 use cavalry_log::dir::Recovery;
 
@@ -38,6 +38,7 @@ use cavalry_proto::frame::FRAME_ALIGNMENT;
 use cavalry_proto::udp::{MAX_DESTINATIONS, MAX_FLOW_CONTROL_RECEIVERS};
 use cavalry_proto::udp::{SetupFrame, image_start};
 use cavalry_shm::broadcast::{BroadcastBuffer, Transmitter};
+use cavalry_shm::clock;
 use cavalry_shm::command_ring::{
     CommandRing, CommandRingError, Consumer, Producer as RingProducer,
     UnblockOutcome as RingUnblock,
@@ -66,6 +67,7 @@ use cavalry_shm::log::layout as log_layout;
 use cavalry_shm::log::{HeaderFields, LogBuffers, LogType, UnblockOutcome as LogUnblock};
 use cavalry_shm::spsc;
 
+use crate::clock::EpochClock;
 use crate::error::DriverError;
 use crate::idle::{IdleStrategy, Idler};
 use crate::receiver::{self, ImageState, ReaderKey};
@@ -117,15 +119,15 @@ const FRAME_ALIGN: i64 = FRAME_ALIGNMENT as i64;
 /// file as a dead driver's, polling at this interval.
 const NOT_READY_POLL: Duration = Duration::from_millis(10);
 
-/// The driver's clock: nanoseconds since the Unix epoch, the clock the consumer
-/// heartbeat stores and every timeout is measured on; the recorder reads the same clock
-/// once per duty cycle.
+/// The driver's nano clock, which every thread reads once per duty cycle and every
+/// timeout is measured on: nanoseconds that never go back and that a step of the host's
+/// clock does not move (`spec/client-protocol.md`, "Liveness and timeouts"; ADR 0109).
+/// It is one clock for the whole process, so a reading one thread hands another compares
+/// with the other's own. It is no time of day: what another process or a later run
+/// reads, the consumer heartbeat and a recording's timestamps, takes the epoch clock
+/// ([`EpochClock`]).
 pub(crate) fn now_nanos() -> i64 {
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map_or(0, |since| {
-            i64::try_from(since.as_nanos()).unwrap_or(i64::MAX)
-        })
+    clock::nano_time()
 }
 
 /// The name of the file in which a driver writes its pid, for the starter it refuses.
@@ -184,8 +186,10 @@ pub(crate) fn prepare_dir(dir: &Path) -> Result<DirLock, DriverError> {
             match CommandRing::open(dir, false) {
                 Ok(ring) => {
                     let heartbeat = ring.consumer_heartbeat();
+                    // Another process stored the heartbeat: its age is on the epoch
+                    // clock, as a client's check is.
                     let fresh = heartbeat != cavalry_shm::command_ring::layout::DRIVER_CLOSED
-                        && now_nanos().saturating_sub(heartbeat)
+                        && clock::epoch_time().saturating_sub(heartbeat)
                             < spec::nanos(spec::DRIVER_TIMEOUT);
                     if fresh {
                         return Err(DriverError::Active {
@@ -238,10 +242,16 @@ fn holder_pid(pid_path: &Path) -> i64 {
         .unwrap_or(0)
 }
 
-/// One client the driver knows: its id and when it last sent a command.
+/// One client the driver knows: its id and when it last sent a command, on both of the
+/// driver's clocks. The liveness timeout is measured on the nano clock, so that a step
+/// of the host's clock times out nobody. The epoch stamp is beside it for a client of
+/// an earlier release, which measured its keepalive interval on its epoch clock and so
+/// sends nothing for the length of a step back: a client is timed out only when its
+/// last command is older than the timeout on both clocks (ADR 0109).
 struct Client {
     id: i64,
     last_seen: i64,
+    last_seen_epoch: i64,
 }
 
 /// One counter a client added with `add counter` (`spec/client-protocol.md`,
@@ -932,7 +942,13 @@ pub(crate) struct Conductor {
     /// The session id the next publication takes: random at the start
     /// ([`first_session_id`]), one more for each publication.
     next_session_id: i32,
+    /// The nano clock when the heartbeat was last stored, and the value stored: the
+    /// epoch clock then.
     last_heartbeat: i64,
+    heartbeat_stored: i64,
+    /// The epoch clock, for the heartbeat, a client's second stamp and a recording's
+    /// start timestamp.
+    epoch: EpochClock,
     ring_corrupt: bool,
     pending: Vec<Pending>,
     /// How many of `pending` the last read filled.
@@ -969,6 +985,8 @@ impl Conductor {
         let broadcast = BroadcastBuffer::create(dir, spec::BROADCAST_CAPACITY)?;
         let transmitter = broadcast.transmitter()?;
         let now = now_nanos();
+        let mut epoch = EpochClock::every_duty_cycle();
+        let heartbeat_stored = epoch.at(now);
         let scratch_length = transmitter
             .max_message_length()
             .min(8 + 2 * (4 + MAX_STRING_LENGTH) + 64);
@@ -1013,6 +1031,8 @@ impl Conductor {
             registration_count: 0,
             next_session_id: first_session_id(now),
             last_heartbeat: now,
+            heartbeat_stored,
+            epoch,
             ring_corrupt: false,
             pending: (0..COMMANDS_PER_CYCLE).map(|_| Pending::new()).collect(),
             pending_count: 0,
@@ -1109,9 +1129,19 @@ impl Conductor {
     /// One duty cycle; returns how much work it found, 0 when the conductor may idle.
     fn duty_cycle(&mut self, now: i64) -> usize {
         let mut work = 0;
-        if now.saturating_sub(self.last_heartbeat) >= spec::nanos(spec::HEARTBEAT_INTERVAL) {
-            self.consumer.store_heartbeat(now);
+        // The heartbeat is the epoch clock, which clients compare with their own. It is
+        // stored once per heartbeat interval of the nano clock, and at once when the
+        // epoch clock, read on this duty cycle, is found that far from the value last
+        // stored, forward or back: a step of the host's clock, after which the stored
+        // value is that much wrong in a client's eyes until the next store (ADR 0109).
+        let interval = spec::nanos(spec::HEARTBEAT_INTERVAL);
+        let epoch_now = self.epoch.at(now);
+        if now.saturating_sub(self.last_heartbeat) >= interval
+            || epoch_now.abs_diff(self.heartbeat_stored) >= interval.unsigned_abs()
+        {
+            self.consumer.store_heartbeat(epoch_now);
             self.last_heartbeat = now;
+            self.heartbeat_stored = epoch_now;
         }
         work += self.read_commands(now);
         work += self.unblock_ring(now);
@@ -1695,14 +1725,17 @@ impl Conductor {
             .find(|client| client.id == client_id)
         {
             client.last_seen = now;
+            client.last_seen_epoch = self.epoch.at(now);
             return true;
         }
         if self.clients.len() >= spec::MAX_CLIENTS {
             return false;
         }
+        let last_seen_epoch = self.epoch.at(now);
         self.clients.push(Client {
             id: client_id,
             last_seen: now,
+            last_seen_epoch,
         });
         true
     }
@@ -4201,13 +4234,18 @@ impl Conductor {
         }
     }
 
-    /// Times out every client whose last command is older than the liveness timeout.
+    /// Times out every client whose last command is older than the liveness timeout, on
+    /// the nano clock and on the epoch clock both ([`Client`]).
     fn time_out_clients(&mut self, now: i64) -> usize {
         let timeout = spec::nanos(spec::CLIENT_LIVENESS_TIMEOUT);
+        let epoch_now = self.epoch.at(now);
         let stale: Vec<i64> = self
             .clients
             .iter()
-            .filter(|client| now.saturating_sub(client.last_seen) > timeout)
+            .filter(|client| {
+                now.saturating_sub(client.last_seen) > timeout
+                    && epoch_now.saturating_sub(client.last_seen_epoch) > timeout
+            })
             .map(|client| client.id)
             .collect();
         for client_id in &stale {
@@ -4753,7 +4791,7 @@ impl Conductor {
         let start = Start {
             publication_id,
             correlation_id,
-            start_timestamp: now,
+            start_timestamp: self.epoch.at(now),
             start_position,
             initial_term_id: header.initial_term_id(),
             term_length: i32::try_from(header.term_length()).unwrap_or(i32::MAX),
@@ -4995,7 +5033,7 @@ impl Conductor {
         let start = Start {
             publication_id: registration_id,
             correlation_id,
-            start_timestamp: now,
+            start_timestamp: self.epoch.at(now),
             start_position,
             initial_term_id: header.initial_term_id(),
             term_length: i32::try_from(header.term_length()).unwrap_or(i32::MAX),
@@ -5085,7 +5123,7 @@ impl Conductor {
         let start = Start {
             publication_id: registration_id,
             correlation_id,
-            start_timestamp: now,
+            start_timestamp: self.epoch.at(now),
             start_position,
             initial_term_id: header.initial_term_id(),
             term_length: i32::try_from(header.term_length()).unwrap_or(i32::MAX),
@@ -10311,6 +10349,280 @@ mod recording {
             h.sender.positions_of(2).map(|(position, _)| position),
             Some(alone)
         );
+    }
+
+    /// A receiver that was sent the stream, went quiet for the connection timeout and
+    /// comes back with a status message below what it was sent, its subscriber having
+    /// read less than its image took: the sender goes back to it, and
+    /// `sender.bytes_unsent` takes off only the bytes the sender position passed while
+    /// the publication was alone, never what went to the receiver before, so the gauge
+    /// reads 0 and never less (`spec/udp.md`, version 3, "The sender"; ADR 0112).
+    #[test]
+    fn a_receiver_that_comes_back_below_what_it_was_sent_takes_off_only_what_was_passed() {
+        use cavalry_shm::counters::generated::{
+            SENDER_BYTES_SENT, SENDER_NAKS_RECEIVED, SENDER_STATUS_MESSAGES_RECEIVED,
+            SENDER_STATUS_MESSAGES_REJECTED,
+        };
+        let mut h = Harness::new("udp-ssc-back-again");
+        let mut receiver = TestReceiver::bind();
+        receiver.set_read_timeout(Duration::from_millis(20));
+        let channel = format!(
+            "{}|ssc=true",
+            String::from_utf8(receiver.channel()).expect("utf-8")
+        );
+        let now = h.now;
+        h.conductor
+            .add_publication(1, 2, 7, channel.as_bytes(), false, now);
+        assert_eq!(h.last_error(2), None);
+        h.conductor.start_recording(3, 7, &receiver.channel(), now);
+        assert_eq!(h.last_error(3), None);
+        // The recording goes live and the sender follows it.
+        let deadline = Instant::now() + Duration::from_secs(60);
+        while !matches!(
+            h.conductor.publications[0]
+                .udp
+                .as_ref()
+                .expect("udp")
+                .followed,
+            Followed::Recording(_)
+        ) {
+            let now = now_nanos();
+            h.recorder.duty_cycle(now);
+            h.sender.duty_cycle(now);
+            h.conductor.duty_cycle(now);
+            assert!(Instant::now() < deadline, "the recording went live");
+        }
+        // The receiver answers a setup frame, at position 0, before anything is
+        // offered: connected by a receiver.
+        let setup = loop {
+            match receiver.next_control() {
+                Some(ControlFrame::Setup(setup)) => break setup,
+                Some(_) => {}
+                None => {
+                    h.sender.duty_cycle(now_nanos());
+                }
+            }
+            assert!(Instant::now() < deadline, "a setup frame");
+        };
+        let positions =
+            cavalry_shm::log::Positions::new(setup.initial_term_id, spec::UDP_TERM_LENGTH);
+        let at = |position: i64| StatusMessage {
+            flags: 0,
+            session_id: setup.session_id,
+            stream_id: 7,
+            consumption_term_id: positions.term_id_of(position),
+            consumption_term_offset: positions.term_offset_of(position) as i32,
+            receiver_window_length: 131072,
+            receiver_id: 9,
+            group_tag: None,
+        };
+        receiver.send_status_message(&at(0));
+        assert!(wait_for(&mut h, |h| {
+            h.conductor.publications[0]
+                .udp
+                .as_ref()
+                .is_some_and(|udp| udp.connected)
+        }));
+        h.conductor.duty_cycle(now_nanos());
+
+        // 1. Connected: 100 messages go to the receiver, and none is counted unsent.
+        let mut appender = h.conductor.publications[0]
+            .log
+            .appender()
+            .expect("an appender");
+        let limit = h.conductor.publications[0].limit.get();
+        for n in 0..100u64 {
+            appender.offer(&n.to_le_bytes(), limit, 0).expect("offered");
+        }
+        let sent = 100 * 64;
+        let mut next = 0i64;
+        while next < sent {
+            let now = now_nanos();
+            h.recorder.duty_cycle(now);
+            h.sender.duty_cycle(now);
+            h.conductor.duty_cycle(now);
+            if let Some(frames) = next_frames(&mut receiver) {
+                for (header, body) in &frames {
+                    assert_eq!(
+                        positions.position(header.term_id(), header.term_offset() as u32),
+                        next
+                    );
+                    assert_eq!(body.as_slice(), ((next / 64) as u64).to_le_bytes());
+                    next += 64;
+                }
+            }
+            assert!(
+                Instant::now() < deadline,
+                "the receiver got to {next} of {sent}"
+            );
+        }
+        assert_eq!(h.counter(SENDER_BYTES_SENT), sent);
+        assert_eq!(unsent(&h), 0, "sent to a receiver, so not unsent");
+
+        // 2. Its subscriber has read 60 of the 100, and its status message says so:
+        //    the sender takes it while the receiver answers.
+        let read = 60 * 64;
+        receiver.send_status_message(&at(read));
+        assert!(wait_for(&mut h, |h| {
+            h.counter(SENDER_STATUS_MESSAGES_RECEIVED) == 2
+        }));
+
+        // 3. The receiver goes quiet for the connection timeout: the publication is
+        //    alone with its recording. The recorder has what was sent, so the sender
+        //    stays; then 5 messages are offered, and the sender position passes them.
+        let later = now_nanos() + spec::nanos(CONNECTION_TIMEOUT) * 2;
+        h.sender.duty_cycle(later);
+        h.conductor.duty_cycle(now_nanos());
+        assert_eq!(h.counter(PUBLICATION_DISCONNECTED), 1);
+        assert!(
+            h.conductor.publications[0].log.is_connected(),
+            "the recording connects it"
+        );
+        assert_eq!(unsent(&h), 0, "nothing passed yet");
+        let limit = h.conductor.publications[0].limit.get();
+        for n in 100..105u64 {
+            appender.offer(&n.to_le_bytes(), limit, 0).expect("offered");
+        }
+        let end = sent + 5 * 64;
+        while h.sender.positions_of(2).map(|(position, _)| position) != Some(end) {
+            h.recorder.duty_cycle(later);
+            h.sender.duty_cycle(later);
+            h.conductor.duty_cycle(now_nanos());
+            assert!(
+                Instant::now() < deadline,
+                "the sender followed the recorder"
+            );
+        }
+        assert_eq!(
+            unsent(&h),
+            5 * 64,
+            "what was passed alone, and nothing sent"
+        );
+        assert_eq!(h.counter(SENDER_BYTES_SENT), sent);
+
+        // 4. The receiver comes back, its status message at what its subscriber read,
+        //    within a term behind the sender position: the sender goes back to it. Of
+        //    the bytes gone back over, only the 5 messages passed while alone come off
+        //    the gauge; the 40 messages sent before are not taken off a second time.
+        receiver.send_status_message(&at(read));
+        assert!(wait_at(&mut h, later, |h| {
+            h.conductor.publications[0]
+                .udp
+                .as_ref()
+                .is_some_and(|udp| udp.connected)
+        }));
+        assert_eq!(h.counter(SENDER_STATUS_MESSAGES_REJECTED), 0);
+        assert_eq!(h.counter(PUBLICATION_CONNECTED), 2);
+        assert_eq!(unsent(&h), 0, "the gauge never goes below zero");
+
+        // 5. The receiver is sent every frame from its own position on, in order, the
+        //    ones passed while alone among them, with nothing to NAK. What is sent again
+        //    is counted as sent, as any data frame is.
+        let mut next = read;
+        while next < end {
+            h.recorder.duty_cycle(later);
+            h.sender.duty_cycle(later);
+            h.conductor.duty_cycle(now_nanos());
+            if let Some(frames) = next_frames(&mut receiver) {
+                for (header, body) in &frames {
+                    assert_eq!(
+                        positions.position(header.term_id(), header.term_offset() as u32),
+                        next,
+                        "every frame from its own position, in order"
+                    );
+                    assert_eq!(body.as_slice(), ((next / 64) as u64).to_le_bytes());
+                    next += 64;
+                }
+            }
+            assert!(
+                Instant::now() < deadline,
+                "the receiver got to {next} of {end}"
+            );
+        }
+        assert_eq!(h.counter(SENDER_BYTES_SENT), sent + (end - read));
+        assert_eq!(unsent(&h), 0);
+        assert_eq!(h.counter(SENDER_NAKS_RECEIVED), 0);
+        assert_eq!(
+            h.sender.positions_of(2).map(|(position, _)| position),
+            Some(end)
+        );
+    }
+
+    /// A recording position the sender cannot follow, one that is not a frame boundary
+    /// or that lies more than two terms past the sender position, is refused: the
+    /// sender stays where it is, counts each such position once in
+    /// `log_buffer.rejected_position`, evicts no client, and follows the recording
+    /// again once its position is one it can follow (`spec/udp.md`, "The sender"; ADR
+    /// 0112).
+    #[test]
+    fn the_sender_refuses_a_recording_position_it_cannot_follow_and_evicts_no_client() {
+        use cavalry_shm::counters::generated::LOG_BUFFER_REJECTED_POSITION;
+        let mut h = Harness::new("udp-ssc-refused");
+        let receiver = TestReceiver::bind();
+        let channel = format!(
+            "{}|ssc=true",
+            String::from_utf8(receiver.channel()).expect("utf-8")
+        );
+        let now = h.now;
+        h.conductor
+            .add_publication(1, 2, 7, channel.as_bytes(), false, now);
+        assert_eq!(h.last_error(2), None);
+        h.conductor.start_recording(3, 7, &receiver.channel(), now);
+        assert_eq!(h.last_error(3), None);
+        let deadline = Instant::now() + Duration::from_secs(30);
+        while !matches!(
+            h.conductor.publications[0]
+                .udp
+                .as_ref()
+                .expect("udp")
+                .followed,
+            Followed::Recording(_)
+        ) {
+            let now = now_nanos();
+            h.recorder.duty_cycle(now);
+            h.sender.duty_cycle(now);
+            h.conductor.duty_cycle(now);
+            assert!(Instant::now() < deadline, "the recording went live");
+        }
+        let clients = h.conductor.clients.len();
+        // The recorder is held from here on, so the test alone moves its counter.
+        let set = |h: &Harness, position: i64| {
+            h.conductor.recordings[0]
+                .position
+                .as_ref()
+                .expect("attached")
+                .store_release(position);
+        };
+        let cycle = |h: &mut Harness| {
+            for _ in 0..10 {
+                let now = now_nanos();
+                h.sender.duty_cycle(now);
+                h.conductor.duty_cycle(now);
+            }
+            h.sender
+                .positions_of(2)
+                .map(|(position, _)| position)
+                .expect("the sender holds it")
+        };
+        let term = i64::from(spec::UDP_TERM_LENGTH);
+        // Not a frame boundary: refused, and counted once over ten duty cycles.
+        set(&h, 100);
+        assert_eq!(cycle(&mut h), 0, "the sender stays");
+        assert_eq!(h.counter(LOG_BUFFER_REJECTED_POSITION), 1);
+        // A frame boundary more than two terms past the sender position: refused, and
+        // counted once, as another position.
+        set(&h, 2 * term + 64);
+        assert_eq!(cycle(&mut h), 0, "the sender stays");
+        assert_eq!(h.counter(LOG_BUFFER_REJECTED_POSITION), 2);
+        // No client was evicted, and the publication is still there.
+        assert_eq!(h.conductor.clients.len(), clients);
+        assert_eq!(h.conductor.publications.len(), 1);
+        assert_eq!(unsent(&h), 0, "nothing passed");
+        // A position it can follow: the sender moves to it and counts it unsent.
+        set(&h, 640);
+        assert_eq!(cycle(&mut h), 640, "the sender follows again");
+        assert_eq!(h.counter(LOG_BUFFER_REJECTED_POSITION), 2);
+        assert_eq!(unsent(&h), 640);
     }
 
     /// A publication whose channel names `term-length` has a log of that term: its
@@ -17899,5 +18211,246 @@ mod receiving {
         assert_eq!(conductor.subscriptions.len(), 1, "nothing registered");
         assert_eq!(conductor.receive_endpoints.len(), 1);
         drop(conductor);
+    }
+}
+
+#[cfg(test)]
+mod clocks {
+    //! ADR 0109, card 266: a conductor driven duty cycle by duty cycle on a nano clock
+    //! the test advances, while the test steps the epoch clock the conductor reads, as a
+    //! time service, a person or a suspended host steps the host's. No interval moves
+    //! with the step; the heartbeat, which clients compare with their own epoch clock,
+    //! is stored again at once.
+
+    use super::tests::TestDir;
+    use super::*;
+
+    const SECOND: i64 = 1_000_000_000;
+    const HOUR: i64 = 3_600 * SECOND;
+
+    /// A conductor alone in a directory of its own, with the far ends of its four
+    /// queues kept so that nothing it offers is refused for a dropped peer.
+    struct Alone {
+        conductor: Conductor,
+        _recorder: (spsc::Consumer<Request>, spsc::Producer<Reply>),
+        _replayer: (
+            spsc::Consumer<replayer::Request>,
+            spsc::Producer<replayer::Reply>,
+        ),
+        _sender: (
+            spsc::Consumer<sender::Request>,
+            spsc::Producer<sender::Reply>,
+        ),
+        _receiver: (
+            spsc::Consumer<receiver::Request>,
+            spsc::Producer<receiver::Reply>,
+        ),
+        // Dropped last: the conductor unmaps its files before the directory goes.
+        _dir: TestDir,
+    }
+
+    fn alone(test: &str) -> Alone {
+        let dir = TestDir::new(test);
+        prepare_dir(dir.path()).expect("the directory is prepared");
+        let (requests, recorder_requests) = spsc::queue::<Request>(4);
+        let (recorder_replies, replies) = spsc::queue::<Reply>(4);
+        let link = RecorderLink {
+            requests,
+            replies,
+            next_recording_id: 0,
+        };
+        let (requests, replayer_requests) = spsc::queue::<replayer::Request>(4);
+        let (replayer_replies, replies) = spsc::queue::<replayer::Reply>(4);
+        let replayer_link = ReplayerLink { requests, replies };
+        let (requests, sender_requests) = spsc::queue::<sender::Request>(4);
+        let (sender_replies, replies) = spsc::queue::<sender::Reply>(4);
+        let sender_link = SenderLink { requests, replies };
+        let (requests, receiver_requests) = spsc::queue::<receiver::Request>(4);
+        let (receiver_replies, replies) = spsc::queue::<receiver::Reply>(4);
+        let receiver_link = ReceiverLink { requests, replies };
+        let conductor = Conductor::create(
+            dir.path(),
+            IdleStrategy::Backoff,
+            link,
+            replayer_link,
+            sender_link,
+            receiver_link,
+        )
+        .expect("the conductor is created");
+        Alone {
+            conductor,
+            _recorder: (recorder_requests, recorder_replies),
+            _replayer: (replayer_requests, replayer_replies),
+            _sender: (sender_requests, sender_replies),
+            _receiver: (receiver_requests, receiver_replies),
+            _dir: dir,
+        }
+    }
+
+    /// The linger is five seconds of the nano clock, whatever the epoch clock does in
+    /// them. Measured on the epoch clock, as every timeout was, an hour's step forward
+    /// ended it at once.
+    #[test]
+    fn a_step_forward_of_an_hour_ends_no_linger_early() {
+        let mut alone = alone("clock-linger");
+        let conductor = &mut alone.conductor;
+        let t0 = now_nanos();
+        let linger = spec::nanos(spec::PUBLICATION_LINGER);
+
+        // A subscriber that reads nothing, a publication with one message, then the
+        // publication removed: it lingers for the subscriber.
+        conductor.add_subscription(1, 1, 7, IPC_CHANNEL, t0);
+        conductor.add_publication(1, 2, 7, IPC_CHANNEL, false, t0);
+        conductor.duty_cycle(t0);
+        {
+            let publication = &conductor.publications[0];
+            let mut appender = publication.log.appender().expect("an appender");
+            appender
+                .offer(b"unread", publication.limit.get(), 0)
+                .expect("the message is offered");
+        }
+        conductor.remove_publication(1, 3, 2, t0);
+        conductor.duty_cycle(t0);
+        assert!(conductor.publications[0].closing.is_some(), "it is closing");
+
+        conductor.epoch.step(HOUR);
+        conductor.duty_cycle(t0 + linger - 1);
+        assert!(
+            !conductor.publications[0].withdrawn,
+            "the linger has a nanosecond to run, an hour's step forward or not"
+        );
+        conductor.duty_cycle(t0 + linger);
+        assert!(
+            conductor
+                .publications
+                .first()
+                .is_none_or(|publication| publication.withdrawn),
+            "the linger ended when five seconds of the nano clock had passed"
+        );
+    }
+
+    /// The heartbeat is the epoch clock. It is stored once a second of the nano clock,
+    /// and at once when the epoch clock is found a heartbeat interval or more from the
+    /// value last stored, forward or back, so that a client's reading of its age is
+    /// wrong by the step for one duty cycle and not for the rest of a second.
+    #[test]
+    fn the_heartbeat_is_stored_at_once_after_a_step_either_way() {
+        let mut alone = alone("clock-heartbeat");
+        let conductor = &mut alone.conductor;
+        let t0 = now_nanos();
+        let interval = spec::nanos(spec::HEARTBEAT_INTERVAL);
+
+        conductor.duty_cycle(t0 + interval);
+        assert_eq!(conductor._ring.consumer_heartbeat(), t0 + interval);
+        conductor.duty_cycle(t0 + 2 * interval - 1);
+        assert_eq!(
+            conductor._ring.consumer_heartbeat(),
+            t0 + interval,
+            "no step and no second passed: nothing is stored"
+        );
+
+        // Forward by an hour, a millisecond of the nano clock after the last store.
+        conductor.epoch.step(HOUR);
+        let after = t0 + interval + 1_000_000;
+        conductor.duty_cycle(after);
+        assert_eq!(
+            conductor._ring.consumer_heartbeat(),
+            after + HOUR,
+            "the stepped clock is stored on the next duty cycle"
+        );
+
+        // Back by two hours: the heartbeat goes back with the clock, at once.
+        conductor.epoch.step(-2 * HOUR);
+        conductor.duty_cycle(after + 1_000_000);
+        assert_eq!(
+            conductor._ring.consumer_heartbeat(),
+            after + 1_000_000 - HOUR
+        );
+
+        // A step of half the interval is not stored at once: the value stored is still
+        // within an interval of the epoch clock. It is stored when the epoch clock has
+        // moved an interval from it, half a second of the nano clock later.
+        conductor.epoch.step(interval / 2);
+        conductor.duty_cycle(after + 2_000_000);
+        assert_eq!(
+            conductor._ring.consumer_heartbeat(),
+            after + 1_000_000 - HOUR
+        );
+        let due = after + 1_000_000 + interval / 2;
+        conductor.duty_cycle(due - 1);
+        assert_eq!(
+            conductor._ring.consumer_heartbeat(),
+            after + 1_000_000 - HOUR
+        );
+        conductor.duty_cycle(due);
+        assert_eq!(
+            conductor._ring.consumer_heartbeat(),
+            due - HOUR + interval / 2
+        );
+    }
+
+    /// A client is timed out after ten seconds of the nano clock without a command.
+    /// Measured on the epoch clock, a step forward of ten seconds timed out every
+    /// client whose next keepalive the conductor had not read yet.
+    #[test]
+    fn a_step_forward_times_out_no_client() {
+        let mut alone = alone("clock-liveness-forward");
+        let conductor = &mut alone.conductor;
+        let t0 = now_nanos();
+        let timeout = spec::nanos(spec::CLIENT_LIVENESS_TIMEOUT);
+
+        assert!(conductor.touch_client(9, t0));
+        conductor.epoch.step(HOUR);
+        conductor.duty_cycle(t0 + 1_000_000);
+        assert_eq!(
+            conductor.clients.len(),
+            1,
+            "an hour's step is no silence: the client sent a millisecond ago"
+        );
+        conductor.duty_cycle(t0 + timeout);
+        assert_eq!(conductor.clients.len(), 1, "ten seconds, and not yet more");
+        conductor.duty_cycle(t0 + timeout + 1);
+        assert_eq!(
+            conductor.clients.len(),
+            0,
+            "silent for more than the timeout: timed out, as with no step"
+        );
+        assert_eq!(conductor.statics.client_timed_out.get(), 1);
+    }
+
+    /// A client of an earlier release measured its keepalive interval on its epoch
+    /// clock, so after a step back it sends nothing for the length of the step. The
+    /// conductor times a client out only when its last command is older than the
+    /// timeout on both clocks, so such a client is not timed out for a step back, and
+    /// a client that did stop is found the length of the step later, as before.
+    #[test]
+    fn a_step_back_times_out_no_client_that_is_silent_for_the_step() {
+        let mut alone = alone("clock-liveness-back");
+        let conductor = &mut alone.conductor;
+        let t0 = now_nanos();
+        let timeout = spec::nanos(spec::CLIENT_LIVENESS_TIMEOUT);
+        let step = 15 * SECOND;
+
+        assert!(conductor.touch_client(9, t0));
+        conductor.epoch.step(-step);
+        // Silent for the fifteen seconds its epoch clock takes to pass its last send.
+        conductor.duty_cycle(t0 + step);
+        assert_eq!(
+            conductor.clients.len(),
+            1,
+            "fifteen seconds of silence on the nano clock, none on the epoch clock"
+        );
+        // Its keepalives are back: it lives on from there.
+        assert!(conductor.touch_client(9, t0 + step + SECOND / 2));
+        conductor.duty_cycle(t0 + step + timeout);
+        assert_eq!(conductor.clients.len(), 1);
+
+        // A client that stopped at the step is found the step later.
+        conductor.epoch.step(-step);
+        let stopped = t0 + step + SECOND / 2;
+        conductor.duty_cycle(stopped + timeout + step);
+        assert_eq!(conductor.clients.len(), 1, "not yet on the epoch clock");
+        conductor.duty_cycle(stopped + timeout + step + 1);
+        assert_eq!(conductor.clients.len(), 0);
     }
 }

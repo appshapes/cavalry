@@ -69,8 +69,8 @@ id = 6
 name = "log_buffer.rejected_position"
 kind = "counter"
 scope = "static"
-doc = "Subscriber positions the driver found outside the spec's bounds and refused to use; the client that wrote one is evicted (ADR 0010)."
-doctor = "A client wrote an impossible position: a buggy binding or a hostile process. The driver's log names the client; rebuild or remove it."
+doc = "Positions the driver found outside the spec's bounds and refused to use: a subscriber's position, whose client is evicted (ADR 0010); or the position of the live recording that the sender follows for a cavalry:udp publication whose channel names ssc=true while no receiver answers, when it is not a frame boundary or lies more than two terms past the sender position, which the sender does not move to and counts once for each such position, evicting no client (spec/udp.md, The sender; ADR 0112)."
+doctor = "If the driver evicted a client, that client wrote an impossible subscriber position: a buggy binding or a hostile process. The driver's log and the client timeout event name it; rebuild or remove it. If no client was evicted, the sender refused a recording's position for a publication whose channel names ssc=true: that publication's sender.position stays while its recording.position moves, and its publisher is held a window past the sender position. The recorder alone writes recording.position, so the value is a driver bug or a client writing where it should not: stop the recording, after which the publication is connected by a receiver alone, as any is, and report both counters' values."
 
 [[counter]]
 id = 7
@@ -1413,7 +1413,7 @@ id = 139
 name = "sender.bytes_unsent"
 kind = "gauge"
 scope = "instance"
-doc = "Bytes of one cavalry:udp publication that went to its recording and to no receiver: what its sender position passed while the publication was alone with its recording, its channel naming ssc=true, a recording of it live and no receiver answering, less what the sender position went back over when a receiver joined. Allocated for a publication whose channel names ssc=true and no other; key and label as sender.position (spec/udp.md, The sender; ADR 0098)."
+doc = "Bytes of one cavalry:udp publication that went to its recording and to no receiver: what its sender position passed while the publication was alone with its recording, its channel naming ssc=true, a recording of it live and no receiver answering, above its sent position, the highest position the sender had sent to, less what the sender position went back over above the sent position when a receiver joined. Never below zero: a byte a receiver was sent before is neither counted nor taken off, and a byte counted that a receiver whose image began below the sent position is sent later stays counted. Allocated for a publication whose channel names ssc=true and no other; key and label as sender.position (spec/udp.md, The sender; ADR 0098, ADR 0112)."
 doctor = "A publication on a channel that names ssc=true took messages while no receiver answered: they are in its recording, and a receiver that joins later is sent the stream from its own position, at most a term back, and replays the recording for what came before. Nothing was lost. If receivers were expected, check that a subscription on the stream exists on each destination's host and that its driver receives on that port."
 
 [[counter]]

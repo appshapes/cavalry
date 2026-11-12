@@ -9,7 +9,7 @@ use cavalry_proto::client_protocol::Command;
 use cavalry_shm::command_ring::Producer;
 use cavalry_shm::counters::Counter as Cell;
 
-use crate::conductor::{Shared, now_nanos};
+use crate::conductor::{Shared, epoch_time};
 use crate::error::ClientError;
 
 /// A counter this client added with [`Cavalry::add_counter`](crate::Cavalry::add_counter):
@@ -146,7 +146,7 @@ impl Counter {
             let _ = self.producer.write(
                 command.command_type() as i32,
                 &self.scratch[..length],
-                now_nanos(),
+                epoch_time(),
             );
         }
     }
