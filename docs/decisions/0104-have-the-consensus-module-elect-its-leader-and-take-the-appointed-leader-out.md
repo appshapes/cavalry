@@ -144,6 +144,14 @@ appointed leader it led at once when the appointed member was one of the two. A
 member still does not start on the log directory it kept, so a member that stops
 is replaced by starting the cluster again, as before.
 
+A truncation is now something a member over a driver does. One that faults part
+way, a purge that succeeded and a later `truncate recording` that did not, leaves
+the member's record of where its log ends, and its record of terms, as they were:
+until the leader's next new leadership term asks again and the rest is cut, the
+member reports an end its recordings no longer hold (ADR 0083, ADR 0095; the review
+of pull request 246 named it). The fault-injection tests of ADR 0100's seventh
+change are where it is shown or closed.
+
 To maintain. The tests over drivers must not assume which member leads, which
 term is first, or how many ballots an election takes. `cavalry doctor` still has
 texts for an appointed leader until the change that follows.
