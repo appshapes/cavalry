@@ -3,7 +3,11 @@
 `cavalry.Client.committed_log` and `cavalry.CommittedLog` beside a cluster member that
 `conformance/python/run.sh` started with `cavalry run`, one of three on the loopback.
 
-    committed_log.py <the member's driver directory> <the member's id>
+    committed_log.py <the member's driver directory> <the member's id> <its recording's id>
+
+The member is one whose log is one recording that begins at 0, and the recording is that
+one: `conformance/log-member.sh` reads both from the member's file of its log's
+recordings (ADR 0103).
 
 A cluster started with `cavalry run` holds one entry, the first of its leader's term, 56
 bytes in a frame of 88 at position 0, so the log's next position is 96. The round reads
@@ -68,14 +72,15 @@ def poll_until(log, handler, done, what):
 
 
 def main():
-    if len(sys.argv) != 3:
-        fail("usage: committed_log.py <the member's driver directory> <the member's id>")
-    member_dir, member_id = sys.argv[1], int(sys.argv[2])
+    if len(sys.argv) != 4:
+        fail("usage: committed_log.py <the member's driver directory> <the member's id> <its recording's id>")
+    member_dir, member_id, recording_id = sys.argv[1], int(sys.argv[2]), int(sys.argv[3])
     abi = cavalry.library()
     client = cavalry.Client(member_dir)
     log = open_log(client, 0)
-    if (log.member_id, log.recording_id) != (member_id, 0):
-        fail(f"the log is member {log.member_id}'s recording {log.recording_id}, not member {member_id}'s recording 0")
+    if (log.member_id, log.recording_id) != (member_id, recording_id):
+        fail(f"the log is member {log.member_id}'s recording {log.recording_id}, not member {member_id}'s "
+             f"recording {recording_id}")
     if (log.position(), log.commit_position()) != (0, 0):
         fail(f"a log opened at 0 began at {log.position()} with bound {log.commit_position()}")
 
