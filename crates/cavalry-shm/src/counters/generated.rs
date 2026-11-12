@@ -23,7 +23,7 @@ pub const SUBSCRIPTION_POSITION: CounterId = CounterId(4);
 /// `publication.unblocked`, a static counter: Stale claims the driver turned into padding frames because a publisher claimed and did not commit within the unblock timeout (spec/log-buffer.md, The driver).
 pub const PUBLICATION_UNBLOCKED: CounterId = CounterId(5);
 
-/// `log_buffer.rejected_position`, a static counter: Subscriber positions the driver found outside the spec's bounds and refused to use; the client that wrote one is evicted (ADR 0010).
+/// `log_buffer.rejected_position`, a static counter: Positions the driver found outside the spec's bounds and refused to use: a subscriber's position, whose client is evicted (ADR 0010); or the position of the live recording that the sender follows for a cavalry:udp publication whose channel names ssc=true while no receiver answers, when it is not a frame boundary or lies more than two terms past the sender position, which the sender does not move to and counts once for each such position, evicting no client (spec/udp.md, The sender; ADR 0111).
 pub const LOG_BUFFER_REJECTED_POSITION: CounterId = CounterId(6);
 
 /// `log_buffer.rejected_tail`, a static counter: Tail counters the driver found inconsistent with the active term count and refused to use; the publication is closed (ADR 0010).
@@ -480,8 +480,8 @@ pub const COUNTERS: &[CounterDef] = &[
         name: "log_buffer.rejected_position",
         kind: Kind::Counter,
         scope: Scope::Static,
-        doc: "Subscriber positions the driver found outside the spec's bounds and refused to use; the client that wrote one is evicted (ADR 0010).",
-        doctor: "A client wrote an impossible position: a buggy binding or a hostile process. The driver's log names the client; rebuild or remove it.",
+        doc: "Positions the driver found outside the spec's bounds and refused to use: a subscriber's position, whose client is evicted (ADR 0010); or the position of the live recording that the sender follows for a cavalry:udp publication whose channel names ssc=true while no receiver answers, when it is not a frame boundary or lies more than two terms past the sender position, which the sender does not move to and counts once for each such position, evicting no client (spec/udp.md, The sender; ADR 0111).",
+        doctor: "If the driver evicted a client, that client wrote an impossible subscriber position: a buggy binding or a hostile process. The driver's log and the client timeout event name it; rebuild or remove it. If no client was evicted, the sender refused a recording's position for a publication whose channel names ssc=true: that publication's sender.position stays while its recording.position moves, and its publisher is held a window past the sender position. The recorder alone writes recording.position, so the value is a driver bug or a client writing where it should not: stop the recording, after which the publication is connected by a receiver alone, as any is, and report both counters' values.",
     },
     CounterDef {
         id: LOG_BUFFER_REJECTED_TAIL,

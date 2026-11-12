@@ -131,7 +131,9 @@ The daemon: conductor, sender, receiver and idle strategies. Data plane.
   recording of it as well, from the recorder's first write until its stop is asked:
   while no receiver answers, the conductor tells the sender which recording to follow,
   the sender sends no data and moves its position with the recorder's, counting in
-  `sender.bytes_unsent` what it passed above the highest position it had sent to; a
+  `sender.bytes_unsent` what it passed above the highest position it had sent to, and
+  refusing a recording position that is not a frame boundary or lies more than two
+  terms ahead, counted once in `log_buffer.rejected_position` with no client evicted; a
   receiver whose first status message names a position at most a term behind is
   joined there, the sender going back to send from it and taking off the gauge only
   what it had passed above that highest position, so that the gauge is never below

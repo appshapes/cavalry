@@ -10418,6 +10418,83 @@ mod recording {
         );
     }
 
+    /// A recording position the sender cannot follow, one that is not a frame boundary
+    /// or that lies more than two terms past the sender position, is refused: the
+    /// sender stays where it is, counts each such position once in
+    /// `log_buffer.rejected_position`, evicts no client, and follows the recording
+    /// again once its position is one it can follow (`spec/udp.md`, "The sender"; ADR
+    /// 0111).
+    #[test]
+    fn the_sender_refuses_a_recording_position_it_cannot_follow_and_evicts_no_client() {
+        use cavalry_shm::counters::generated::LOG_BUFFER_REJECTED_POSITION;
+        let mut h = Harness::new("udp-ssc-refused");
+        let receiver = TestReceiver::bind();
+        let channel = format!(
+            "{}|ssc=true",
+            String::from_utf8(receiver.channel()).expect("utf-8")
+        );
+        let now = h.now;
+        h.conductor
+            .add_publication(1, 2, 7, channel.as_bytes(), false, now);
+        assert_eq!(h.last_error(2), None);
+        h.conductor.start_recording(3, 7, &receiver.channel(), now);
+        assert_eq!(h.last_error(3), None);
+        let deadline = Instant::now() + Duration::from_secs(30);
+        while !matches!(
+            h.conductor.publications[0]
+                .udp
+                .as_ref()
+                .expect("udp")
+                .followed,
+            Followed::Recording(_)
+        ) {
+            let now = now_nanos();
+            h.recorder.duty_cycle(now);
+            h.sender.duty_cycle(now);
+            h.conductor.duty_cycle(now);
+            assert!(Instant::now() < deadline, "the recording went live");
+        }
+        let clients = h.conductor.clients.len();
+        // The recorder is held from here on, so the test alone moves its counter.
+        let set = |h: &Harness, position: i64| {
+            h.conductor.recordings[0]
+                .position
+                .as_ref()
+                .expect("attached")
+                .store_release(position);
+        };
+        let cycle = |h: &mut Harness| {
+            for _ in 0..10 {
+                let now = now_nanos();
+                h.sender.duty_cycle(now);
+                h.conductor.duty_cycle(now);
+            }
+            h.sender
+                .positions_of(2)
+                .map(|(position, _)| position)
+                .expect("the sender holds it")
+        };
+        let term = i64::from(spec::UDP_TERM_LENGTH);
+        // Not a frame boundary: refused, and counted once over ten duty cycles.
+        set(&h, 100);
+        assert_eq!(cycle(&mut h), 0, "the sender stays");
+        assert_eq!(h.counter(LOG_BUFFER_REJECTED_POSITION), 1);
+        // A frame boundary more than two terms past the sender position: refused, and
+        // counted once, as another position.
+        set(&h, 2 * term + 64);
+        assert_eq!(cycle(&mut h), 0, "the sender stays");
+        assert_eq!(h.counter(LOG_BUFFER_REJECTED_POSITION), 2);
+        // No client was evicted, and the publication is still there.
+        assert_eq!(h.conductor.clients.len(), clients);
+        assert_eq!(h.conductor.publications.len(), 1);
+        assert_eq!(unsent(&h), 0, "nothing passed");
+        // A position it can follow: the sender moves to it and counts it unsent.
+        set(&h, 640);
+        assert_eq!(cycle(&mut h), 640, "the sender follows again");
+        assert_eq!(h.counter(LOG_BUFFER_REJECTED_POSITION), 2);
+        assert_eq!(unsent(&h), 640);
+    }
+
     /// A recording does not connect a `cavalry:udp` publication whose channel names no
     /// `ssc`: with no receiver it is not connected, and the sender is told of no
     /// recording to follow (`spec/udp.md`, "The sender"; ADR 0041, ADR 0098).
