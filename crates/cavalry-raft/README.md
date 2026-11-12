@@ -103,6 +103,8 @@ commit path runs per message.
   0093). It keeps the record of terms in the
   `terms` file of `log_dir`, and stores what it counts in the driver's counters file:
   `cluster.role`, `cluster.election_state`, `cluster.leadership_term_id`,
+  `cluster.leader_member_id`, the member it leads as or follows and −1 while it has
+  none, `cluster.election_cause`, why its last election began (ADR 0102),
   `cluster.append_position`, `cluster.commit_position`, `cluster.messages_rejected`,
   `cluster.log_recording_id`, the recording that holds its log, which its service
   replays, and the twenty-three counts of `Counts::by_counter`, of which the four of the

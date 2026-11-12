@@ -16,10 +16,10 @@ use cavalry_proto::cluster::{Message, SERVICE_LOG_STREAM_ID, Stream};
 use cavalry_raft::{ConsensusModule, ElectionState, NO_SESSION, RaftError, Refused, Role};
 use cavalry_shm::counters::CountersReader;
 use cavalry_shm::counters::generated::{
-    CLUSTER_APPEND_POSITION, CLUSTER_COMMIT_POSITION, CLUSTER_ELECTION_STATE,
-    CLUSTER_ELECTION_STEPS, CLUSTER_ELECTIONS, CLUSTER_ELECTIONS_CLOSED,
-    CLUSTER_LEADERSHIP_TERM_ID, CLUSTER_LOG_RECORDING_ID, CLUSTER_ROLE, CLUSTER_TERMS_LED,
-    SUBSCRIPTION_POSITION,
+    CLUSTER_APPEND_POSITION, CLUSTER_COMMIT_POSITION, CLUSTER_ELECTION_CAUSE,
+    CLUSTER_ELECTION_STATE, CLUSTER_ELECTION_STEPS, CLUSTER_ELECTIONS, CLUSTER_ELECTIONS_CLOSED,
+    CLUSTER_LEADER_MEMBER_ID, CLUSTER_LEADERSHIP_TERM_ID, CLUSTER_LOG_RECORDING_ID, CLUSTER_ROLE,
+    CLUSTER_TERMS_LED, SUBSCRIPTION_POSITION,
 };
 
 struct TestDir(PathBuf);
@@ -137,6 +137,10 @@ fn three_members_replicate_a_hundred_thousand_entries_and_their_recordings_are_e
         assert_eq!(counter(member, CLUSTER_LEADERSHIP_TERM_ID.0), -1);
         assert_eq!(counter(member, CLUSTER_LOG_RECORDING_ID.0), -1);
         assert_eq!(counter(member, CLUSTER_COMMIT_POSITION.0), 0);
+        // It names no leader, the appointed leader among them, and the cause of its
+        // election is its start (ADR 0102).
+        assert_eq!(counter(member, CLUSTER_LEADER_MEMBER_ID.0), -1);
+        assert_eq!(counter(member, CLUSTER_ELECTION_CAUSE.0), 0);
     }
 
     run_until(&mut members, "every election closed", |members| {
@@ -251,6 +255,10 @@ fn three_members_replicate_a_hundred_thousand_entries_and_their_recordings_are_e
         assert_eq!(counter(member, CLUSTER_LEADERSHIP_TERM_ID.0), 0);
         assert_eq!(counter(member, CLUSTER_ELECTION_STATE.0), 17);
         assert_eq!(counter(member, CLUSTER_ELECTIONS.0), 1);
+        // Every member names the leader, the leader itself among them, and none has
+        // held an election since it started (ADR 0102).
+        assert_eq!(counter(member, CLUSTER_LEADER_MEMBER_ID.0), 0);
+        assert_eq!(counter(member, CLUSTER_ELECTION_CAUSE.0), 0);
         assert_eq!(
             counter(member, CLUSTER_ROLE.0),
             if index == 0 { 2 } else { 0 }
@@ -480,6 +488,15 @@ fn a_leader_lost_leaves_each_follower_at_the_end_its_recording_stopped() {
         assert_eq!(member.module.counts().elections, 2);
         assert_eq!(member.module.counts().elections_failed, 0);
         assert_eq!(counter(member, CLUSTER_ELECTIONS.0), 2);
+        // It names no leader, and the cause of its election is what it lost: the
+        // image of the leader's log, 2, or the leader's word for the heartbeat
+        // timeout, 1, whichever its duty cycle met first (ADR 0102).
+        assert_eq!(counter(member, CLUSTER_LEADER_MEMBER_ID.0), -1);
+        let counts = member.module.counts();
+        assert_eq!(
+            counter(member, CLUSTER_ELECTION_CAUSE.0),
+            if counts.log_images_lost == 1 { 2 } else { 1 }
+        );
         // Its log ends where its recording stopped, and its commit position stands.
         assert_eq!(member.module.append_position(), end);
         assert_eq!(counter(member, CLUSTER_APPEND_POSITION.0), end);

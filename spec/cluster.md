@@ -943,6 +943,8 @@ that a reader of a counters file knows which transition it saw.
 | `cluster.role` | a gauge: 0 follower, 1 candidate, 2 leader |
 | `cluster.election_state` | a gauge: the election state's code of "Roles and the election", 17 when no election runs |
 | `cluster.leadership_term_id` | a gauge: the member's leadership term id, −1 before the first |
+| `cluster.leader_member_id` | a gauge: the id of the member this member leads as or follows, −1 while it has none: from init until it leads a term, on entering leader log replication, or takes a leader's new leadership term, on leaving canvass, nominate or a ballot for a follower's state (ADR 0077, ADR 0102) |
+| `cluster.election_cause` | a gauge: why the member's last election began, the election it is in or the one that closed last: 0 the member started; 1 it followed and its leader said nothing for the leader heartbeat timeout; 2 it followed and its image of the leader's log was no longer available; 3 it led and its active members fell below a quorum; 4 its election had closed and a message carried a term above its own; 5 its election before failed (ADR 0077, ADR 0102) |
 | `cluster.commit_position` | a gauge: the commit position the member knows, the bound of its service's reading |
 | `cluster.log_recording_id` | a gauge: the id of the recording the member records the live log into, −1 while it records none; the recording its service replays ("The service") |
 | `cluster.append_position` | a gauge: the member's append position |

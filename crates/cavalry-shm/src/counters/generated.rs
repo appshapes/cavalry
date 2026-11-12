@@ -422,6 +422,12 @@ pub const CLUSTER_CATCHUPS: CounterId = CounterId(137);
 /// `cluster.terms_dropped`, a client counter: Times one cluster member dropped from its record of terms the terms its leader's record lacks: a new leadership term named, as the term it answers, a term below the member's own log term, with a next term above it, so the leader's record holds none of the member's terms above the one named, and the member took them out of its record, cutting first what it held above the base of the lowest of them, which is counted in cluster.log_truncations too (spec/cluster.md, Messages during an election, and Counters; ADR 0096); key: member id (i32), little-endian; label text: the member id in decimal.
 pub const CLUSTER_TERMS_DROPPED: CounterId = CounterId(138);
 
+/// `cluster.leader_member_id`, a client gauge: The id of the member one cluster member leads as or follows, -1 while it has none: from init until it leads a term or takes a leader's new leadership term, so through canvass, nominate and the two ballots (spec/cluster.md, Counters; ADR 0077, ADR 0102); key: member id (i32), little-endian; label text: the member id in decimal.
+pub const CLUSTER_LEADER_MEMBER_ID: CounterId = CounterId(140);
+
+/// `cluster.election_cause`, a client gauge: Why one cluster member's last election began, the election it is in or the one that closed last: 0 the member started; 1 it followed and its leader said nothing for the leader heartbeat timeout; 2 it followed and its image of the leader's log was no longer available; 3 it led and its active members fell below a quorum; 4 its election had closed and a message carried a term above its own; 5 its election before failed (spec/cluster.md, Counters; ADR 0077, ADR 0102); key: member id (i32), little-endian; label text: the member id in decimal.
+pub const CLUSTER_ELECTION_CAUSE: CounterId = CounterId(141);
+
 /// Every entry of `counters.toml`, in the file's order.
 pub const COUNTERS: &[CounterDef] = &[
     CounterDef {
@@ -1535,5 +1541,21 @@ pub const COUNTERS: &[CounterDef] = &[
         scope: Scope::Client,
         doc: "Times one cluster member dropped from its record of terms the terms its leader's record lacks: a new leadership term named, as the term it answers, a term below the member's own log term, with a next term above it, so the leader's record holds none of the member's terms above the one named, and the member took them out of its record, cutting first what it held above the base of the lowest of them, which is counted in cluster.log_truncations too (spec/cluster.md, Messages during an election, and Counters; ADR 0096); key: member id (i32), little-endian; label text: the member id in decimal.",
         doctor: "The member had recorded a term that fewer than a quorum recorded: it joined a leader that never had a quorum, or led such a term itself. No entry was ever appended in that term, so nothing is lost; the member's record is its leader's again and it joins. It is how such a member returns, and nothing to act on. If cluster.truncations_refused rises with it on the same member, the member holds entries above a term it recorded so and knows a commit position among them: read cluster.leadership_term_id and cluster.commit_position on that member and on its leader.",
+    },
+    CounterDef {
+        id: CLUSTER_LEADER_MEMBER_ID,
+        name: "cluster.leader_member_id",
+        kind: Kind::Gauge,
+        scope: Scope::Client,
+        doc: "The id of the member one cluster member leads as or follows, -1 while it has none: from init until it leads a term or takes a leader's new leadership term, so through canvass, nominate and the two ballots (spec/cluster.md, Counters; ADR 0077, ADR 0102); key: member id (i32), little-endian; label text: the member id in decimal.",
+        doctor: "A member that reads -1 has no leader: read its cluster.election_state for where its election stands and its cluster.election_cause for why it began. Two members that read different ids while both elections are closed are on two sides of a partition, or one has not yet heard of a later term: the member whose cluster.leadership_term_id is lower is the one behind.",
+    },
+    CounterDef {
+        id: CLUSTER_ELECTION_CAUSE,
+        name: "cluster.election_cause",
+        kind: Kind::Gauge,
+        scope: Scope::Client,
+        doc: "Why one cluster member's last election began, the election it is in or the one that closed last: 0 the member started; 1 it followed and its leader said nothing for the leader heartbeat timeout; 2 it followed and its image of the leader's log was no longer available; 3 it led and its active members fell below a quorum; 4 its election had closed and a message carried a term above its own; 5 its election before failed (spec/cluster.md, Counters; ADR 0077, ADR 0102); key: member id (i32), little-endian; label text: the member id in decimal.",
+        doctor: "0 is a start and nothing to act on. 1 and 2 on a follower say its leader stopped or could not be reached: look at the leader's process and at the path between the two members' consensus and log endpoints. 3 on a member that led says it could no longer hear a quorum: it is the member that was cut off. 4 says another member held a later term, which is what a member sees when it comes back from a partition. 5 says the election before this one did not close: read cluster.elections_failed and the counters beside it, cluster.join_position_mismatches, cluster.truncations_refused and cluster.log_replications_unavailable, for which rule failed it.",
     },
 ];

@@ -12,7 +12,7 @@
 mod common;
 
 use cavalry_proto::cluster::{Message, Template};
-use cavalry_raft::{Consensus, ElectionState, Role};
+use cavalry_raft::{Consensus, ElectionCause, ElectionState, Role};
 use common::{Call, Stub, append_position, at, canvass_position, new_leadership_term};
 
 /// Member 0 of `[0, 1, 2]`, electing.
@@ -181,6 +181,11 @@ fn a_leader_steps_down_on_a_canvass_position_with_a_term_above_its_own() {
         assert_eq!(counts.elections_failed, before.elections_failed);
         assert_eq!(counts.higher_terms_seen, 0);
         assert_eq!(io.made, 0, "nothing is sent: {:?}", io.calls);
+        // The cause of the election it holds is the term above its own, code 4, and
+        // it names no leader from the same call (ADR 0102).
+        assert_eq!(leader.election_cause(), ElectionCause::HigherTerm);
+        assert_eq!(leader.election_cause().code(), 4);
+        assert_eq!(leader.leader_gauge(), -1);
         // Init gives the log up, and the member canvasses with no leader.
         work(&mut leader, &mut io, ms + 1);
         assert_eq!(io.count(|call| *call == Call::RemoveLog), 1);
@@ -260,6 +265,8 @@ fn a_follower_holds_an_election_on_a_higher_term_and_counts_it() {
         assert_eq!(counts.leader_step_downs, 0);
         assert_eq!(counts.leader_heartbeat_timeouts, 0);
         assert_eq!(io.made, 0, "{:?}", io.calls);
+        assert_eq!(follower.election_cause(), ElectionCause::HigherTerm);
+        assert_eq!(follower.leader_gauge(), -1);
         work(&mut follower, &mut io, ms + 2);
         assert_eq!(io.count(|call| *call == Call::LeaveLog), 1);
         assert_eq!(io.count(|call| *call == Call::RemoveLog), 0);
@@ -288,6 +295,10 @@ fn a_member_whose_leader_is_appointed_holds_no_election_on_a_higher_term() {
     let counts = follower.counts();
     assert_eq!(counts.higher_terms_seen, 0);
     assert_eq!(counts.leader_step_downs, 0);
+    // So cause 4 is never this path's: the cause is still the member's start, and
+    // the member still names its appointed leader (ADR 0102).
+    assert_eq!(follower.election_cause(), ElectionCause::Started);
+    assert_eq!(follower.leader_gauge(), 0);
 }
 
 /// A leader that elects closes its election in leader ready when a quorum counts for
@@ -353,6 +364,10 @@ fn a_leader_fails_its_election_on_a_canvass_position_with_a_higher_term() {
     assert_eq!(leader.role(), Role::Follower);
     assert_eq!(leader.counts().elections_failed, 1);
     assert_eq!(leader.counts().leader_step_downs, 0);
+    // The election it begins has the failed one as its cause, code 5 (ADR 0102).
+    assert_eq!(leader.election_cause(), ElectionCause::ElectionFailed);
+    assert_eq!(leader.election_cause().code(), 5);
+    assert_eq!(leader.leader_gauge(), -1);
     work(&mut leader, &mut io, ms + 1);
     assert_eq!(io.count(|call| *call == Call::RemoveLog), 1);
     assert_eq!(leader.election_state(), ElectionState::Canvass);
@@ -405,6 +420,10 @@ fn a_leader_that_loses_its_quorum_holds_an_election() {
     assert_eq!(counts.leader_quorum_losses, 1);
     assert_eq!(counts.leader_step_downs, 0);
     assert_eq!(counts.elections_failed, 0);
+    // The cause of the election it holds is the quorum it lost, code 3 (ADR 0102).
+    assert_eq!(leader.election_cause(), ElectionCause::QuorumLost);
+    assert_eq!(leader.election_cause().code(), 3);
+    assert_eq!(leader.leader_gauge(), -1);
     work(&mut leader, &mut io, ms + 10_000);
     assert_eq!(io.count(|call| *call == Call::RemoveLog), 1);
     assert_eq!(leader.election_state(), ElectionState::Canvass);
@@ -419,6 +438,8 @@ fn a_leader_that_loses_its_quorum_holds_an_election() {
     let counts = leader.counts();
     assert_eq!(counts.leader_quorum_losses, 1);
     assert_eq!(counts.elections_failed, 1);
+    // A quorum lost before its election closed fails that election: code 5, not 3.
+    assert_eq!(leader.election_cause(), ElectionCause::ElectionFailed);
 
     // Leader ready: member 1 reported last when it canvassed again.
     let mut io = Stub::new();
@@ -450,6 +471,10 @@ fn a_leader_that_loses_its_quorum_holds_an_election() {
     assert_eq!(appointed.role(), Role::Leader);
     assert_eq!(appointed.counts().leader_quorum_losses, 1);
     assert_eq!(io.count(|call| *call == Call::RemoveLog), 0);
+    // So cause 3 is never this path's: the cause is still its start, and it names
+    // itself (ADR 0102).
+    assert_eq!(appointed.election_cause(), ElectionCause::Started);
+    assert_eq!(appointed.leader_gauge(), 0);
 }
 
 /// A leader that begins again gives its log up in init before anything else, once. A
