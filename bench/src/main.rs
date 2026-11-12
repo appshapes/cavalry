@@ -857,9 +857,10 @@ impl Samples {
     /// [`histogram`]. Every sample of a UDP row is [`NEAR_NS`] or more, and the harness
     /// cannot know a row's samples before it has run, so the room is for all `count`.
     /// `--messages` is bounded ([`MAX_MESSAGES`]), so this is. The publisher's thread
-    /// makes both threads' room before the subscriber is started: writing 40 MB
-    /// through takes milliseconds, and a subscriber that made its own would start that
-    /// much of the stream behind.
+    /// makes the subscriber's room before it starts the subscriber, and then its own,
+    /// before its first message: writing 40 MB through takes milliseconds, and a
+    /// subscriber that made its own would start that much of the stream behind. The
+    /// subscriber, started first, has nothing to read until the publisher has its room.
     fn with_capacity(count: u64) -> Self {
         let count = usize::try_from(count).unwrap_or(usize::MAX);
         let mut far = vec![u64::MAX; count];

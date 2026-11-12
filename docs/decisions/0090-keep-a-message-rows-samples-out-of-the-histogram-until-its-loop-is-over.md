@@ -44,9 +44,9 @@ whatever the sample's value. The histogram is made of the counts and the buffer 
 the loop, with the bounds and the precision the rows have always had, so a row reads
 to the nanosecond as before. This holds for every message row: the log rows, the
 client, recorded and purging rows, the ffi rows, the UDP rows and the link rows.
-The publisher's thread makes both threads' buffers before the subscriber is started,
-so that neither starts the stream behind the other, and the histograms are made once
-both threads are joined. `--messages` is bounded at 100,000,000, since a row has room
+The publisher's thread makes the subscriber's buffer before it starts the subscriber,
+so that the subscriber does not start the stream behind, and then makes its own,
+before its first message; the histograms are made once both threads are joined. `--messages` is bounded at 100,000,000, since a row has room
 for 16 bytes a message until its loop is over, and the link rows, whose subscriber
 takes two samples a message, for 24.
 
@@ -157,9 +157,9 @@ one process to the next on unchanged code on this host. An earlier run of the fi
 form alone, nine processes each way, read the same as its column here.
 
 **The decided form as it landed.** Its review moved three things outside the loops:
-the publisher's thread makes both threads' buffers before the subscriber starts, the
-histograms are made after the threads are joined, and a late sample is stored by
-index. That build against the harness before, two or three processes of each for a
+the publisher's thread makes the subscriber's buffer before it starts the subscriber,
+and its own after that, before its first message; the histograms are made after the
+threads are joined; and a late sample is stored by index. That build against the harness before, two or three processes of each for a
 row before a CI job took the host: `one_way_32_client` 459 against 480.5 with one
 loop of the old harness at 1,398, `one_way_32_recorded` 485.5 against 500.5,
 `one_way_32_exclusive` 382 against 396, and no claim row of the three above the old
