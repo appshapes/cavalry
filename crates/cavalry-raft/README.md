@@ -76,8 +76,20 @@ commit path runs per message.
   canvass timeout, 60 s, for a member it has not heard, as at any start, and a new
   leadership term says in `is startup` whether its leader leads it from its first
   election since it started (ADR 0089). The consensus module builds its core so, with a
-  seed from the operating system mixed with the member id, and still refuses a log
-  directory that holds a term, as the next section says (ADR 0104).
+  seed from the operating system mixed with the member id (ADR 0104).
+- Starts a member on the log directory it kept (ADR 0108). The module lists the
+  recordings that hold the member's log in the file `log-recordings` in its log
+  directory, each write synced, and counts a recording toward the append position
+  only once a list names it. At a start it reads the list back against the driver's
+  catalog: the log is the recordings the list names, each to where it stopped. A
+  truncation that the member's stop cut short is finished: the log ends where the
+  recordings that are left end, and a term based above that leaves the record of
+  terms. Nothing else shortens the log. A directory of another member's, a record
+  of terms that holds a term beside no list, and a catalog that holds anything
+  else in place of a listed recording refuse the start, with what to do: a member
+  that started with a shorter log than it reported could vote for a candidate that
+  lacks a committed entry. `tests/restart.rs` stops a follower, the leader and all
+  three members over three drivers and starts them again.
 - Counts every move of the election. `ElectionState` is the state machine
   `cluster_election` of `counters.toml`, and each of its transitions adds one to a
   count of `Counts`, the counter registered for it; `Counts::by_counter` pairs each
@@ -196,26 +208,14 @@ commit path runs per message.
   loses, and counts, one sent while it is full, and a leader's log publication and each
   member's log hold every entry appended or received for the cluster's life.
 - To come, each with its card: the C ABI's calls for a service, so that a service is
-  a program in any of the five client languages (card 227), a member's start on the
-  log directory it kept and mixed versions in a rolling upgrade (card 228), the
+  a program in any of the five client languages (card 227), mixed versions in a
+  rolling upgrade (card 228), the
   cluster client (card 229), snapshots
   and catch-up (card 230), and standby members, which follow the log without voting,
   in the open core.
 
 In Aeron, this is Cluster, with Cluster Standby as a paid component
 ([glossary](../../docs/glossary.md)).
-
-### What the election does not do yet
-
-A member made with `Consensus::with_election` has every state of `spec/cluster.md`'s
-election, and the consensus module runs it over a driver. One thing the page's
-election does, the module does not yet:
-
-- Over a driver a member does not start on a log directory that holds a term or a
-  stored candidate term: the module refuses, and says to start the cluster again
-  as a new one. The core starts on such a directory (ADR 0089). The module does once
-  it reads back which recordings hold the log it kept, the sixth change of ADR 0100.
-  Until then a cluster that lost a member goes on with the members that remain.
 
 ## What it must never do
 

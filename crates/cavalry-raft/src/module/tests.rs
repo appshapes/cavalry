@@ -2879,7 +2879,23 @@ fn a_member_starts_again_on_the_log_it_kept_and_takes_no_recording_it_never_coun
 /// its log is gone: term 1, based at the end, stays, as a truncation leaves it.
 #[test]
 fn a_member_that_stopped_inside_a_truncation_starts_where_its_recordings_end() {
-    let mut pair = pair("start-cut-short");
+    stopped_inside_a_truncation("start-cut-short", false);
+}
+
+/// The same member, stopped one step later: the truncation had written the record
+/// of the log's recordings, without the recording it purged, and had not yet
+/// deleted a term. The start finds the record as the catalog holds the log, writes
+/// it no second time, and deletes the term based above the end of the log.
+#[test]
+fn a_member_that_stopped_before_a_truncation_deleted_its_terms_deletes_them() {
+    stopped_inside_a_truncation("start-terms-left", true);
+}
+
+/// The two tests above: a truncation of the second of two recordings that the
+/// member's stop cut short, after its `purge recording` when `record_written` is
+/// not set, and after its write of the record of the log's recordings when it is.
+fn stopped_inside_a_truncation(test: &str, record_written: bool) {
+    let mut pair = pair(test);
     let (two, first) = pair.follow_and_leave(0, 0, &[b"one", b"two"]);
     let (four, second) = pair.follow_and_leave(1, two, &[b"three", b"four"]);
     for (term, base) in [(0, 0), (1, two), (2, four)] {
@@ -2903,12 +2919,19 @@ fn a_member_that_stopped_inside_a_truncation_starts_where_its_recordings_end() {
         ..
     } = pair;
     member.close().expect("the member closes");
-    // The truncation's first command, and then the member stopped.
+    // The truncation's first command, and then the member stopped; or its write of
+    // the record as well, and then the member stopped.
     let mut client = Cavalry::connect_to(&member_driver_dir).expect("a client");
     client
         .purge_recording(second)
         .expect("the recording is purged");
     client.close().expect("the client closes");
+    if record_written {
+        RecordingsFile::open_kept(&member_log_dir, 1)
+            .expect("the record opens")
+            .write(0, [listed(first, 0)])
+            .expect("the record is written");
+    }
 
     let mut member = ConsensusModule::start(&member_driver_dir, &member_log_dir, &members, 1)
         .expect("the member starts on the log it kept");

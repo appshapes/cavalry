@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """Write spec/vectors/durable-log.json: the test vectors for spec/durable-log.md,
-version 0. The reference encoder, standard library only. Run from the repository root:
+version 3. The reference encoder, standard library only. Run from the repository root:
 
     python3 spec/vectors/durable-log.py
 
@@ -8,7 +8,9 @@ Catalog header vectors carry the 128-byte header and the file length the reader 
 descriptor vectors carry one 1024-byte slot and its index; index vectors carry the
 128-byte index header and the file length, or one 16-byte entry and the entry before it;
 position vectors are arithmetic: from a descriptor's fields and a position, the segment
-file, the offset in it and the frame header fields a reader checks. See spec/README.md,
+file, the offset in it and the frame header fields a reader checks. Log recordings
+vectors carry the file's 64-byte header and the file length; one slot's fields and
+entries; or both slots of a file, for the choice between them. See spec/README.md,
 "Conventions".
 """
 
@@ -143,6 +145,40 @@ def terms_entry(leadership_term_id, term_base_log_position, recording_id=-1, sta
 def encode_terms_entry(e):
     return TERMS_ENTRY.pack(e["state"], e["checksum"], e["leadership_term_id"], e["term_base_log_position"],
                             e["recording_id"])
+
+
+RECORDINGS_MAGIC = b"CVLYLOGR"
+RECORDINGS_HEADER = struct.Struct("<8siii44s")  # magic, version, slot length, member id, reserved
+RECORDINGS_HEADER_LENGTH, RECORDINGS_MAX_ENTRIES = 64, 1026
+RECORDINGS_SLOT_LENGTH = 24 + RECORDINGS_MAX_ENTRIES * 16
+RECORDINGS_FILE_LENGTH = RECORDINGS_HEADER_LENGTH + 2 * RECORDINGS_SLOT_LENGTH
+assert RECORDINGS_HEADER.size == RECORDINGS_HEADER_LENGTH
+assert (RECORDINGS_SLOT_LENGTH, RECORDINGS_FILE_LENGTH) == (16440, 32944)
+
+
+def recordings_header(member_id=1, version=0, slot_length=RECORDINGS_SLOT_LENGTH, magic=RECORDINGS_MAGIC):
+    return {"magic": magic.hex(), "version": version, "slot_length": slot_length, "member_id": member_id}
+
+
+def encode_recordings_header(h):
+    return RECORDINGS_HEADER.pack(bytes.fromhex(h["magic"]), h["version"], h["slot_length"], h["member_id"], b"")
+
+
+def recordings_slot(sequence, floor_position, entries, count=None, checksum=None):
+    """One slot of the log recordings file, its fields and its entries and no byte after
+    them: `entries` is (recording id, start position) pairs. The entry count is the
+    number of entries and the checksum the zlib CRC32 of everything after it, unless
+    given."""
+    body = struct.pack("<iqq", len(entries) if count is None else count, sequence, floor_position)
+    body += b"".join(struct.pack("<qq", recording_id, start) for recording_id, start in entries)
+    if checksum is None:
+        checksum = zlib.crc32(body) & 0xFFFFFFFF
+    return struct.pack("<I", checksum) + body
+
+
+def recordings_fields(sequence, floor_position, entries, **extra):
+    return {"sequence": sequence, "floor_position": floor_position,
+            "entries": [list(entry) for entry in entries], **extra}
 
 
 def index_header(recording_id=0, version=0, magic=INDEX_MAGIC):
@@ -369,7 +405,106 @@ def main():
                            encode_terms_entry(terms_entry(3, 4096, -2)), index=1, previous=first))
     vectors.append(invalid("terms-entry-order-state-before-term", "terms-entry", "state",
                            encode_terms_entry(terms_entry(-1, 0, 0, state=2)), index=0, previous=None))
-    doc = {"spec": "durable-log", "version": 2, "generated_by": "spec/vectors/durable-log.py", "vectors": vectors}
+    # Log recordings file (version 3): the header with the file length, then one slot,
+    # then both slots of a file and which of them holds the list.
+    whole = RECORDINGS_FILE_LENGTH
+    rh = recordings_header()
+
+    def invalid_recordings_header(name, error, h=rh, file_length=whole):
+        vectors.append(invalid(name, "recordings-header", error, encode_recordings_header(h), file_length=file_length))
+
+    vectors.append(valid("recordings-header", "recordings-header", encode_recordings_header(rh), rh, file_length=whole))
+    first_member = recordings_header(member_id=0)
+    vectors.append(valid("recordings-header-member-0", "recordings-header", encode_recordings_header(first_member),
+                         first_member, file_length=whole))
+    invalid_recordings_header("recordings-too-short", "too-short", file_length=whole - 1)
+    invalid_recordings_header("recordings-length", "length", file_length=whole + 1)
+    invalid_recordings_header("recordings-not-ready", "not-ready", recordings_header(magic=bytes(8)))
+    invalid_recordings_header("recordings-magic", "magic", recordings_header(magic=TERMS_MAGIC))
+    invalid_recordings_header("recordings-version", "version", recordings_header(version=1))
+    invalid_recordings_header("recordings-slot-length", "slot-length", recordings_header(slot_length=16432))
+    invalid_recordings_header("recordings-member", "member", recordings_header(member_id=-1))
+    invalid_recordings_header("recordings-order-length-before-magic", "length",
+                              recordings_header(magic=TERMS_MAGIC), file_length=whole + 16)
+    invalid_recordings_header("recordings-order-not-ready-before-version", "not-ready",
+                              recordings_header(magic=bytes(8), version=1))
+    invalid_recordings_header("recordings-order-version-before-slot-length", "version",
+                              recordings_header(version=1, slot_length=16432))
+    invalid_recordings_header("recordings-order-slot-length-before-member", "slot-length",
+                              recordings_header(slot_length=16432, member_id=-1))
+
+    def valid_slot(name, sequence, floor_position, entries):
+        vectors.append(valid(name, "recordings-slot", recordings_slot(sequence, floor_position, entries),
+                             recordings_fields(sequence, floor_position, entries)))
+
+    def invalid_slot(name, error, raw):
+        vectors.append(invalid(name, "recordings-slot", error, raw))
+
+    # The list a creation writes; a member's first recording; a catch-up, whose replay's
+    # recording and live recording overlap; a list whose table forgot the recordings
+    # below 320, with two recordings that begin at one position; and a list that a
+    # truncation left with no recording, whose floor says where the log ends.
+    catchup = [(0, 0), (2, 96), (3, 192)]
+    forgot = [(7, 320), (8, 320), (9, 416)]
+    valid_slot("recordings-slot-created", 0, 0, [])
+    valid_slot("recordings-slot-one-recording", 1, 0, [(0, 0)])
+    valid_slot("recordings-slot-a-catch-up", 5, 0, catchup)
+    valid_slot("recordings-slot-floor-above-0", 12, 320, forgot)
+    valid_slot("recordings-slot-no-recording-over-a-floor", 13, 256, [])
+    valid_slot("recordings-slot-full", 2000, 0, [(i, i * 32) for i in range(RECORDINGS_MAX_ENTRIES)])
+    invalid_slot("recordings-slot-checksum", "checksum", recordings_slot(5, 0, catchup, checksum=0xDEADBEEF))
+    # A slot no write has reached is zeros, and the CRC32 of twenty zero bytes is not 0.
+    invalid_slot("recordings-slot-never-written", "checksum", bytes(24))
+    invalid_slot("recordings-slot-count-negative", "checksum", recordings_slot(5, 0, [], count=-1))
+    invalid_slot("recordings-slot-count-over-the-bound", "checksum",
+                 recordings_slot(5, 0, [(i, i * 32) for i in range(RECORDINGS_MAX_ENTRIES + 1)]))
+    # A write a crash tore after its count: the entries the count names are not there.
+    invalid_slot("recordings-slot-shorter-than-its-count", "checksum", recordings_slot(5, 0, [(0, 0)], count=2))
+    invalid_slot("recordings-slot-sequence", "sequence", recordings_slot(-1, 0, catchup))
+    invalid_slot("recordings-slot-floor-negative", "position", recordings_slot(5, -32, []))
+    invalid_slot("recordings-slot-floor-not-aligned", "position", recordings_slot(5, 48, []))
+    invalid_slot("recordings-slot-recording", "recording", recordings_slot(5, 0, [(0, 0), (-1, 96)]))
+    invalid_slot("recordings-slot-start-not-aligned", "position", recordings_slot(5, 0, [(0, 0), (2, 100)]))
+    invalid_slot("recordings-slot-start-below-the-one-before", "position", recordings_slot(5, 0, [(0, 0), (2, 96), (3, 64)]))
+    invalid_slot("recordings-slot-first-above-the-floor", "position", recordings_slot(5, 0, [(0, 96)]))
+    invalid_slot("recordings-slot-first-below-the-floor", "position", recordings_slot(5, 320, [(7, 288)]))
+    invalid_slot("recordings-slot-order-checksum-before-sequence", "checksum",
+                 recordings_slot(-1, 0, catchup, checksum=0xDEADBEEF))
+    invalid_slot("recordings-slot-order-sequence-before-floor", "sequence", recordings_slot(-1, 48, []))
+    invalid_slot("recordings-slot-order-floor-before-recording", "position", recordings_slot(5, 48, [(-1, 48)]))
+    invalid_slot("recordings-slot-order-recording-before-position", "recording", recordings_slot(5, 0, [(-1, 100)]))
+    invalid_slot("recordings-slot-order-an-entry-before-the-next", "position",
+                 recordings_slot(5, 0, [(0, 0), (2, 100), (-1, 192)]))
+
+    def file_vector(name, slots, chosen=None, error=None):
+        vector = {"name": name, "region": "recordings-file", "slots": [slot.hex() for slot in slots]}
+        if error is None:
+            slot, sequence, floor_position, entries = chosen
+            vector["fields"] = recordings_fields(sequence, floor_position, entries, slot=slot)
+        else:
+            vector["error"] = error
+        vectors.append(vector)
+
+    created = recordings_slot(0, 0, [])
+    one = recordings_slot(1, 0, [(0, 0)])
+    two = recordings_slot(2, 0, [(0, 0), (1, 96)])
+    torn = recordings_slot(3, 0, [(0, 0), (1, 96), (2, 96)], checksum=0)
+    file_vector("recordings-file-created", [created, bytes(24)], chosen=(0, 0, 0, []))
+    file_vector("recordings-file-first-write", [created, one], chosen=(1, 1, 0, [(0, 0)]))
+    file_vector("recordings-file-second-write", [two, one], chosen=(0, 2, 0, [(0, 0), (1, 96)]))
+    # A write a crash tore: the list is the one before it, in the other slot.
+    file_vector("recordings-file-slot-1-torn", [two, torn], chosen=(0, 2, 0, [(0, 0), (1, 96)]))
+    file_vector("recordings-file-slot-0-torn", [torn, one], chosen=(1, 1, 0, [(0, 0)]))
+    file_vector("recordings-file-neither-slot", [torn, bytes(24)], error="slots")
+    file_vector("recordings-file-one-sequence-twice", [one, recordings_slot(1, 0, [(4, 0)])], error="sequence")
+    # A slot whose checksum matches and whose fields fail a check refuses the file,
+    # beside a whole slot, beside a torn one, and slot 0's check first when both fail.
+    bad_start = recordings_slot(3, 0, [(0, 0), (2, 100)])
+    bad_sequence = recordings_slot(-1, 0, [(0, 0)])
+    file_vector("recordings-file-a-slot-that-fails-a-check", [two, bad_start], error="position")
+    file_vector("recordings-file-a-torn-slot-and-one-that-fails-a-check", [torn, bad_sequence], error="sequence")
+    file_vector("recordings-file-order-slot-0-before-slot-1", [bad_start, bad_sequence], error="position")
+    doc = {"spec": "durable-log", "version": 3, "generated_by": "spec/vectors/durable-log.py", "vectors": vectors}
     out = Path(__file__).resolve().parent / "durable-log.json"
     out.write_text(json.dumps(doc, indent=2) + "\n")
     print(f"durable-log.py: wrote {len(vectors)} vectors to {out}")

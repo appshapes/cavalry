@@ -513,8 +513,8 @@ pub fn parse_slot(
 /// Which slot holds the list, from what [`parse_slot`] made of each: the one whose
 /// checksum matches, and of two the one with the higher sequence. A slot whose
 /// checksum fails is not read. Neither matching is `slots`; a slot whose checksum
-/// matches and whose fields fail a check is that check's refusal; two slots of one
-/// sequence are `sequence`.
+/// matches and whose fields fail a check is that check's refusal, whatever the other
+/// slot holds, and slot 0's when both do; two slots of one sequence are `sequence`.
 pub fn choose(
     slot_0: Result<SlotFields, RecordingsError>,
     slot_1: Result<SlotFields, RecordingsError>,
@@ -525,7 +525,9 @@ pub fn choose(
         }
         (Ok(_), Err(RecordingsError::Checksum)) => Ok(0),
         (Err(RecordingsError::Checksum), Ok(_)) => Ok(1),
-        (Err(error), _) | (_, Err(error)) => Err(error),
+        (Err(RecordingsError::Checksum), Err(error)) | (Err(error), _) | (_, Err(error)) => {
+            Err(error)
+        }
         (Ok(first), Ok(second)) if first.sequence == second.sequence => {
             Err(RecordingsError::Sequence {
                 found: first.sequence,
