@@ -165,10 +165,16 @@ All on this change's branch, on a laptop, macOS.
 
 Easier. `doctor` has one path for a cluster member, and every text on it is true
 of a member started with `cavalry run`. Outside the decisions, the changelog and
-the glossary's row, three places still say "appointed", each as history: the
-comment in `counters.toml` where the entry stood, a sentence of
-`crates/cavalry-raft/README.md` on ADR 0063, and the assertions of two tests that
-no text of `doctor` says the word.
+the glossary's row, these places still say "appointed" or name the member with the
+lowest id as a leader, each as history or as an assertion that the word is gone:
+the comment in `counters.toml` where the entry stood; a sentence of
+`crates/cavalry-raft/README.md` on ADR 0063; a comment in
+`crates/cavalry-raft/tests/cluster.rs` above the test that no counter of type 113
+exists; in `doctor.rs`, the assertions of two tests that no text of `doctor` says
+the word, and the doc and the message of the test of a record of type 113; the
+title of ADR 0104 where `docs/how-to/run-a-cluster.md` links it; and the sentence
+of `spec/cluster.md`, "A member's start", and of that how-to's prerequisites on a
+member of a version before ADR 0104.
 
 **A counters file that holds a record of type 113.** A doctor of this version
 reads a member's counters by the type ids `counters.toml` holds. A record of type
@@ -177,7 +183,14 @@ the one the file gives without the record. The record counts toward the fill of
 the counters file, as every allocated record does. The member that wrote it is of
 a build before ADR 0104, and `doctor` reads it as a member that elects, so
 `cluster-no-leader` says of it that the members elect their leader, which that
-build does not do. No such build was released.
+build does not do. Two more texts are wrong of a member built after ADR 0102 and
+before ADR 0104, which has both gauges: `cluster-quorum-lost` says that it stopped
+leading and held an election, where an appointed leader led on and committed
+nothing; and `cluster-joining` in states 10 and 14 to 16 speaks of a catch-up that
+build did not have. A leader such a build found ahead of it, the case of
+`cluster-leader-behind`, has no finding. No such build was released, and the
+members of a cluster are all of one version (`spec/cluster.md`, "A member's
+start").
 
 **A driver of this version refuses `add counter` for type 113**, with error code
 11, as it refuses every type `counters.toml` does not give the scope `client`. A
