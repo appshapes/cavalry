@@ -208,14 +208,33 @@ In Aeron, this is Cluster, with Cluster Standby as a paid component
 ### What the election does not do yet
 
 A member made with `Consensus::with_election` has every state of `spec/cluster.md`'s
-election, and the consensus module runs it over a driver. One thing the page's
-election does, the module does not yet:
+election, and the consensus module runs it over a driver. The pages say more of a
+member's log directory than the module does yet. ADR 0108 decided how a member
+starts on the log directory it kept, and its sentences are on `spec/cluster.md` and
+`spec/durable-log.md`, with the file's reader and writer in `cavalry-log`
+(`recordings::RecordingsFile`). The module's use of the file is the change after
+that one (ADR 0108, "Two pull requests"). Until it lands, of what the two pages
+state:
 
-- Over a driver a member does not start on a log directory that holds a term or a
-  stored candidate term: the module refuses, and says to start the cluster again
-  as a new one. The core starts on such a directory (ADR 0089). The module does once
-  it reads back which recordings hold the log it kept, the sixth change of ADR 0100.
-  Until then a cluster that lost a member goes on with the members that remain.
+- The module writes no log recordings file. It reports a position a recording holds
+  with no list that names the recording (`spec/cluster.md`, "The log";
+  `spec/durable-log.md`, "The driver"), and a truncation writes no list between its
+  last cut and its first deleted term ("Messages during an election").
+- A member does not start on the log directory it kept ("A member's start"). Over a
+  driver the module refuses a log directory that holds a term or a stored candidate
+  term, and says why and what to do. The core starts on such a directory (ADR
+  0089). The module reads no list back against the driver's catalog, stops no
+  recording that is still being made, and finishes no truncation that its stop cut
+  short.
+- The module gives none of that paragraph's other refusals: a record of terms
+  beside no list, a log beside no record of terms, a file that fails a check or
+  names another member, and a catalog that holds something else in place of a
+  recording the file names.
+- A member's append position is what its recordings hold since it started on an
+  empty log directory, and not where the recordings that a file names end.
+
+Until then a member that stopped stays out, and a cluster that lost a member goes on
+with the members that remain while they are a quorum.
 
 ## What it must never do
 

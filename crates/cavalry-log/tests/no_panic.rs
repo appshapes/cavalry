@@ -8,6 +8,10 @@ use cavalry_log::layout::{
     CatalogHeader, DESCRIPTOR_LENGTH, Descriptor, ENTRY_LENGTH, HEADER_LENGTH, IndexEntry,
     IndexHeader, Recording, crc32, locate,
 };
+use cavalry_log::recordings::{
+    self, FILE_LENGTH as RECORDINGS_FILE_LENGTH, HEADER_LENGTH as RECORDINGS_HEADER_LENGTH,
+    RecordingsHeader, SLOT_HEADER_LENGTH, SLOT_LENGTH,
+};
 use cavalry_log::terms::{
     self, ENTRY_LENGTH as TERMS_ENTRY_LENGTH, HEADER_LENGTH as TERMS_HEADER_LENGTH, MAX_ENTRIES,
     TermsEntry, TermsHeader,
@@ -30,7 +34,7 @@ impl XorShift {
     }
 }
 
-const REASONS: [&str; 24] = [
+const REASONS: [&str; 28] = [
     "too-short",
     "not-ready",
     "magic",
@@ -55,6 +59,10 @@ const REASONS: [&str; 24] = [
     "term",
     "recording",
     "terms-full",
+    "slot-length",
+    "member",
+    "sequence",
+    "slots",
 ];
 
 fn named(reason: &str) {
@@ -275,4 +283,122 @@ fn terms_headers_and_entries_never_panic() {
             Err(error) => named(error.reason()),
         }
     }
+}
+
+/// A slot of the log recordings file for [`recordings_headers_and_slots_never_panic`]:
+/// random bytes, or fields a reader takes with now and then one that it does not,
+/// under a checksum that matches two times in three.
+fn recordings_slot(random: &mut XorShift, round: u64) -> Vec<u8> {
+    let count = (random.next() % 6) as usize;
+    let whole = SLOT_HEADER_LENGTH + count * 16;
+    let length = if round.is_multiple_of(7) {
+        (random.next() % 200) as usize
+    } else {
+        whole
+    };
+    let mut slot = random.bytes(length);
+    if round.is_multiple_of(2) && slot.len() >= 8 {
+        slot[4..8].copy_from_slice(&(count as i32).to_le_bytes());
+    }
+    if !round.is_multiple_of(4) && slot.len() >= whole {
+        slot[4..8].copy_from_slice(&(count as i32).to_le_bytes());
+        let sequence = (random.next() % 1_000) as i64;
+        let mut position = ((random.next() % 16) as i64) * 32;
+        slot[8..16].copy_from_slice(&sequence.to_le_bytes());
+        slot[16..24].copy_from_slice(&position.to_le_bytes());
+        for entry in 0..count {
+            let at = SLOT_HEADER_LENGTH + entry * 16;
+            let recording_id = (random.next() % 1_000) as i64;
+            slot[at..at + 8].copy_from_slice(&recording_id.to_le_bytes());
+            slot[at + 8..at + 16].copy_from_slice(&position.to_le_bytes());
+            position += ((random.next() % 4) as i64) * 32;
+        }
+        // One field in five rounds is whatever the generator gives: a sequence, a
+        // floor, a recording id or a start position a reader may refuse.
+        if round.is_multiple_of(5) {
+            let fields = 2 + 2 * count;
+            let at = 8 + 8 * (random.next() as usize % fields);
+            slot[at..at + 8].copy_from_slice(&(random.next() as i64 >> 40).to_le_bytes());
+        }
+    }
+    if !round.is_multiple_of(3) && slot.len() >= whole && slot.len() >= SLOT_HEADER_LENGTH {
+        let count = i32::from_le_bytes([slot[4], slot[5], slot[6], slot[7]]);
+        if let Ok(count) = usize::try_from(count)
+            && slot.len() >= SLOT_HEADER_LENGTH + count * 16
+        {
+            let crc = crc32(&slot[4..SLOT_HEADER_LENGTH + count * 16]);
+            slot[..4].copy_from_slice(&crc.to_le_bytes());
+        }
+    }
+    slot
+}
+
+#[test]
+fn recordings_headers_and_slots_never_panic() {
+    let mut random = XorShift(0x94D0_49BB_1331_11EB);
+    let mut taken = 0;
+    for round in 0..20_000 {
+        let length = if round % 4 == 0 {
+            (random.next() % 100) as usize
+        } else {
+            RECORDINGS_HEADER_LENGTH
+        };
+        let mut bytes = random.bytes(length);
+        if round % 3 == 0 && bytes.len() >= 16 {
+            bytes[..8].copy_from_slice(b"CVLYLOGR");
+            bytes[8..12].copy_from_slice(&0i32.to_le_bytes());
+            bytes[12..16].copy_from_slice(&(SLOT_LENGTH as i32).to_le_bytes());
+        }
+        if round % 2 == 0 && bytes.len() >= 20 {
+            let member_id = (random.next() % 8) as i32 - 1;
+            bytes[16..20].copy_from_slice(&member_id.to_le_bytes());
+        }
+        // Lengths around the file's own as well as its own.
+        let file_length = if round % 5 == 0 {
+            RECORDINGS_FILE_LENGTH as u64 - 2 + random.next() % 5
+        } else {
+            RECORDINGS_FILE_LENGTH as u64
+        };
+        match RecordingsHeader::parse(&bytes, file_length) {
+            Ok(header) => {
+                let again = RecordingsHeader::parse(&header.encode(), file_length)
+                    .expect("encoded bytes parse");
+                assert_eq!(again, header);
+            }
+            Err(error) => named(error.reason()),
+        }
+
+        let slots = [
+            recordings_slot(&mut random, round),
+            recordings_slot(&mut random, round / 2),
+        ];
+        let mut lists = [Vec::new(), Vec::new()];
+        let [list_0, list_1] = &mut lists;
+        let read = [
+            recordings::parse_slot(&slots[0], list_0),
+            recordings::parse_slot(&slots[1], list_1),
+        ];
+        for ((slot, list), bytes) in read.iter().zip(&lists).zip(&slots) {
+            match slot {
+                Ok(fields) => {
+                    // A slot a reader takes is one a writer writes, byte for byte.
+                    let mut out = Box::new([0u8; SLOT_LENGTH]);
+                    let length = recordings::encode_slot(*fields, list.iter().copied(), &mut out)
+                        .expect("the fields and entries a reader took encode");
+                    assert_eq!(&out[..length], &bytes[..length]);
+                    taken += 1;
+                }
+                Err(error) => named(error.reason()),
+            }
+        }
+        let [slot_0, slot_1] = read;
+        match recordings::choose(slot_0, slot_1) {
+            Ok(slot) => assert!(slot < 2),
+            Err(error) => named(error.reason()),
+        }
+    }
+    assert!(
+        taken > 5_000,
+        "{taken} slots were taken: the generator is off"
+    );
 }
