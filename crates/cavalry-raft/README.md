@@ -121,6 +121,20 @@ commit path runs per message.
   holds starts nothing. The module's own core is appointed and asks for none of this
   yet; the tests drive the module's I/O over a driver, with the other member played
   by the test.
+- Records the replays a member asks for, and catches up, over a driver, for a core
+  that elects (ADR 0094). `add_catchup` subscribes to stream 100 on the member's own
+  `catchup` endpoint and arms a recording there, before the catch-up position leaves:
+  one recording for one replay's image (ADR 0092). The catch-up position carries the
+  member's id and that endpoint. `catchup_image` says where the member's recording of
+  the image begins, from the catalog (ADR 0093), once at least, and nothing once that
+  recording has stopped, which is when the image has gone. `remove_catchup` stops the
+  recording, whose stop is where the member's log ends, and removes the subscription.
+  The member's append position is the end of what it holds in order: the recordings
+  it stopped, its recording of a replay, and its recording of the live log once the
+  log has reached where that one begins, so that a member in follower catch-up that
+  has added the live log follows either. A member that leaves the log in a catch-up
+  keeps both recordings. The tests drive the `Io` of two modules, each on a driver
+  of its own.
 - Asks for the sync a commit waits for: a member's append position is its
   recording's synced position, and the driver's recorder syncs a recording by itself
   once a second. So the module asks its driver to sync its recording of the log,
@@ -173,11 +187,10 @@ elections a leader holds, the truncation, the replication of a term a member mis
 and the catch-up within a leader's term of `spec/cluster.md`. Where the page's
 election does more, it does this instead, until the step that builds it (ADR 0081):
 
-- Over a driver a member cannot truncate, replicate or catch up: the module's `Io`
-  refuses `truncate_log`, `add_catchup`, `catchup_image` and `remove_catchup` as
-  `unsupported`, and sends no catch-up position. A leader over a driver can give its
-  log up and replay it (ADR 0091), and the module's member is appointed and never asks
-  (ADR 0083, ADR 0086, ADR 0088).
+- Over a driver a member cannot truncate: the module's `Io` refuses `truncate_log`
+  as `unsupported`. A leader over a driver can give its log up and replay it (ADR
+  0091), a member can record the replays it asks for and catch up (ADR 0094), and
+  the module's member is appointed and never asks for any of it (ADR 0083).
 - A leader answers a member for the term the member reports, and does not check that
   its own record of terms holds that term. A member that recorded a term which fewer
   than a quorum recorded keeps it in its record under a leader whose record has none.

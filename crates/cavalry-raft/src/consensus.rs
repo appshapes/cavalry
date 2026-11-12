@@ -325,9 +325,11 @@ pub trait Io {
     /// The join position of the image the member records on the catch-up
     /// subscription, the one that took the recording [`Io::add_catchup`] armed:
     /// `None` before that image has arrived, and again once it has gone, its replay
-    /// ended or stopped. What an image carries counts in [`Io::append_position`] no
-    /// sooner than this reports the image, so that the core checks where an image
-    /// joined before it reports a position the image gave it.
+    /// ended or stopped, though never before it was reported once, so that a replay
+    /// short enough to come and go between two duty cycles is still checked (ADR
+    /// 0094). What an image carries counts in [`Io::append_position`] no sooner than
+    /// this reports the image, so that the core checks where an image joined before
+    /// it reports a position the image gave it.
     fn catchup_image(&mut self) -> Result<Option<i64>, Self::Fault>;
 
     /// Removes the catch-up subscription and stops the recording its image started,
