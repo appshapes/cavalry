@@ -173,8 +173,11 @@ fn three_members_replicate_a_hundred_thousand_entries_and_their_recordings_are_e
     run_until_led(&mut members);
     assert_eq!(members[0].module.role(), Role::Leader);
     let leader_id = members[0].module.member_id();
+    // The term is 0 when the first ballot elects, and the one after for each ballot
+    // that two candidates split: it is whatever the leader leads.
+    let term = members[0].module.leadership_term_id();
     for member in &members {
-        assert_eq!(member.module.leadership_term_id(), 0);
+        assert_eq!(member.module.leadership_term_id(), term);
         assert_eq!(member.module.counts().elections, 1);
         assert_eq!(member.module.counts().elections_failed, 0);
         assert_eq!(member.module.counts().join_position_mismatches, 0);
@@ -247,11 +250,11 @@ fn three_members_replicate_a_hundred_thousand_entries_and_their_recordings_are_e
     assert!(matches!(
         first,
         Message::NewLeadershipTermEvent {
-            leadership_term_id: 0,
+            leadership_term_id,
             log_position: 0,
             leader_member_id,
             ..
-        } if leader_member_id == leader_id
+        } if leader_member_id == leader_id && leadership_term_id == term
     ));
     let last_frame = &recordings[0][recordings[0].len() - 96..];
     let last = Message::parse(Stream::Log, &last_frame[32..32 + 40]).expect("an entry");
@@ -259,11 +262,11 @@ fn three_members_replicate_a_hundred_thousand_entries_and_their_recordings_are_e
     assert!(matches!(
         last,
         Message::SessionMessage {
-            leadership_term_id: 0,
+            leadership_term_id,
             cluster_session_id: NO_SESSION,
             payload,
             ..
-        } if payload == expected
+        } if payload == expected && leadership_term_id == term
     ));
 
     // What each member counted is in its driver's counters file, where `cavalry doctor`
@@ -276,7 +279,7 @@ fn three_members_replicate_a_hundred_thousand_entries_and_their_recordings_are_e
             Some(counter(member, CLUSTER_LOG_RECORDING_ID.0)),
             member.module.log_recording_id()
         );
-        assert_eq!(counter(member, CLUSTER_LEADERSHIP_TERM_ID.0), 0);
+        assert_eq!(counter(member, CLUSTER_LEADERSHIP_TERM_ID.0), term);
         assert_eq!(counter(member, CLUSTER_ELECTION_STATE.0), 17);
         assert_eq!(counter(member, CLUSTER_ELECTIONS.0), 1);
         // Every member names the leader, the leader itself among them, and none has
@@ -292,13 +295,36 @@ fn three_members_replicate_a_hundred_thousand_entries_and_their_recordings_are_e
         );
         assert_eq!(counter(member, CLUSTER_TERMS_LED.0), i64::from(index == 0));
         // The two counts of ADR 0067 reach the file as the others do, through
-        // `Counts::by_counter`: one election closed, in three steps on the leader
-        // and four on a follower.
+        // `Counts::by_counter`: one election closed, in four steps on the leader,
+        // which nominated itself and won its ballot, and in four on a follower that
+        // took the leader's term from canvass or five on one that voted for it first.
         assert_eq!(counter(member, CLUSTER_ELECTIONS_CLOSED.0), 1);
-        assert_eq!(
-            counter(member, CLUSTER_ELECTION_STEPS.0),
-            if index == 0 { 3 } else { 4 }
-        );
+        let counts = member.module.counts();
+        // Where the first ballot elected, the leader took four steps: to nominate,
+        // and three from leader log replication to leader ready. A follower took
+        // four from its ballot or from canvass to follower ready, and one more when
+        // it was in nominate itself when the leader's request for its vote came. A
+        // ballot that two candidates split sends both back to canvass, with steps of
+        // its own.
+        let steps = counter(member, CLUSTER_ELECTION_STEPS.0);
+        if term == 0 {
+            assert_eq!(counts.candidacies, u64::from(index == 0));
+            assert!(
+                if index == 0 {
+                    steps == 4
+                } else {
+                    steps == 4 || steps == 5
+                },
+                "member {}: {steps} steps, {counts:?}",
+                member.module.member_id()
+            );
+        } else {
+            assert!(
+                steps >= 4,
+                "member {}: {steps} steps, {counts:?}",
+                member.module.member_id()
+            );
+        }
     }
 
     // A member over a driver, whose leader is appointed, does not start again on the
@@ -313,13 +339,18 @@ fn three_members_replicate_a_hundred_thousand_entries_and_their_recordings_are_e
     module.close().expect("the member closes");
     let again = ConsensusModule::start(&driver_dir, &log_dir, &members_string, member_id)
         .expect_err("a log directory that holds a term");
-    assert!(matches!(
-        again,
-        RaftError::Restart {
-            log_leadership_term_id: 0,
-            candidate_term: -1,
-        }
-    ));
+    // Its directory holds the term, and the candidate term it stored when it voted
+    // in a ballot, or none when it took the term from canvass.
+    assert!(
+        matches!(
+            again,
+            RaftError::Restart {
+                log_leadership_term_id,
+                candidate_term,
+            } if log_leadership_term_id == term && (-1..=term).contains(&candidate_term)
+        ),
+        "{again}"
+    );
     let text = again.to_string();
     assert!(
         text.contains("every member on a new log directory"),
@@ -555,6 +586,192 @@ fn a_stop_timeout_says_what_to_do_next() {
         text.contains("docs/reference/cluster.md#roles-and-the-election"),
         "{text}"
     );
+}
+
+/// A leader lost is replaced (`spec/cluster.md`, "Roles and the election"; ADR 0077).
+/// The first leader and its driver stop with a hundred entries committed on all
+/// three. Each member that remains loses the leader's word or its image of the log,
+/// leaves the log where its recording stopped, and canvasses; the two elect one of
+/// themselves, which leads a later term from where the log ends, and the other follows
+/// it.
+/// An entry offered to the new leader is committed by the two, a quorum of three,
+/// within five seconds of the leader heartbeat timeout. Nothing that was committed
+/// is lost: the two hold the first hundred entries byte for byte, and what follows
+/// them is the new term's first entry and the one offered. The election's time is
+/// reported and not asserted, since a split vote takes a second longer by design.
+#[test]
+fn a_lost_leader_is_replaced_by_the_two_that_remain_and_they_commit() {
+    let dir = TestDir::new("leader-replaced");
+    let members_string = members_string();
+    let mut members = start(dir.path(), &members_string);
+    run_until_led(&mut members);
+    const ENTRIES: i64 = 100;
+    offer_entries(&mut members, ENTRIES);
+    let end = 96 + ENTRIES * 96;
+    run_until(
+        &mut members,
+        "every member committed every entry",
+        |members| {
+            members
+                .iter()
+                .all(|m| m.module.commit_position() == end && m.module.append_position() == end)
+        },
+    );
+    let first_leader = members[0].module.member_id();
+    // The term the first leader leads is 0 unless its election took more than one
+    // ballot, which a vote split between two candidates does.
+    let first_term = members[0].module.leadership_term_id();
+    let first_recordings: Vec<i64> = members[1..]
+        .iter()
+        .map(|m| m.module.log_recording_id().expect("a follower's recording"))
+        .collect();
+
+    let leader = members.remove(0);
+    drop(leader.module);
+    leader.driver.close().expect("the driver closes");
+    let lost = Instant::now();
+
+    run_until(
+        &mut members,
+        "the two that remain have a leader",
+        |members| {
+            members.iter().all(|m| {
+                m.module.election_state() == ElectionState::Closed
+                    && m.module.leadership_term_id() > first_term
+            }) && members
+                .iter()
+                .filter(|m| m.module.role() == Role::Leader)
+                .count()
+                == 1
+        },
+    );
+    let elected = lost.elapsed();
+    let at = members
+        .iter()
+        .position(|m| m.module.role() == Role::Leader)
+        .expect("one member leads");
+    let first_recordings = if at == 0 {
+        first_recordings
+    } else {
+        first_recordings.into_iter().rev().collect()
+    };
+    members.swap(0, at);
+    let new_leader = members[0].module.member_id();
+    assert_ne!(new_leader, first_leader);
+    let term = members[0].module.leadership_term_id();
+    for member in &members {
+        assert_eq!(member.module.leadership_term_id(), term);
+        // Each names the new leader, and the cause of its election is what it lost.
+        assert_eq!(
+            counter(member, CLUSTER_LEADER_MEMBER_ID.0),
+            i64::from(new_leader)
+        );
+        let counts = member.module.counts();
+        assert_eq!(counts.log_images_lost + counts.leader_heartbeat_timeouts, 1);
+        assert!(
+            [1, 2, 5].contains(&counter(member, CLUSTER_ELECTION_CAUSE.0)),
+            "member {}: {counts:?}",
+            member.module.member_id()
+        );
+    }
+
+    // The new term's first entry lies where the log ended, and one offered entry
+    // after it: both are committed by the two that remain.
+    offer_entries(&mut members, 1);
+    let committed_end = end + 2 * 96;
+    run_until(
+        &mut members,
+        "the two commit an entry of the new term",
+        |members| {
+            members.iter().all(|m| {
+                m.module.commit_position() == committed_end
+                    && m.module.append_position() == committed_end
+            })
+        },
+    );
+    let committed = lost.elapsed();
+    println!(
+        "cluster: a lost leader was replaced by member {new_leader} in term {term} after \
+         {elected:?}, and the two that remain committed an entry after {committed:?}"
+    );
+    // What each member's ballots were, for a run whose election took more than one.
+    for member in &members {
+        let counts = member.module.counts();
+        println!(
+            "cluster: member {}: first term {first_term}, candidacies {}, ballots lost {}, \
+             votes for {}, votes against {}, higher terms seen {}, elections {}, \
+             heartbeat timeouts {}, images lost {}",
+            member.module.member_id(),
+            counts.candidacies,
+            counts.ballots_lost,
+            counts.votes_for,
+            counts.votes_against,
+            counts.higher_terms_seen,
+            counts.elections,
+            counts.leader_heartbeat_timeouts,
+            counts.log_images_lost
+        );
+    }
+    assert!(
+        committed < Duration::from_secs(10 + 5),
+        "an entry was committed {committed:?} after the leader was lost, more than five \
+         seconds past the leader heartbeat timeout"
+    );
+
+    // Nothing committed was lost. Each member's recording of the first leader's
+    // image holds the same bytes from where the later of the two begins to the end
+    // of that term. A follower that was slow at the start joined after the term's
+    // first entry: its recording begins past 0, and what lies below is in the
+    // recording of the replay it caught up by, which its append position counts.
+    let begins: Vec<i64> = members
+        .iter()
+        .zip(&first_recordings)
+        .map(|(member, id)| {
+            CatalogReader::open(&member.log_dir)
+                .expect("the catalog opens")
+                .get(*id)
+                .expect("the slot is read")
+                .expect("the recording's descriptor")
+                .start_position()
+        })
+        .collect();
+    let from = usize::try_from(begins[0].max(begins[1])).expect("a position");
+    let held: Vec<Vec<u8>> = members
+        .iter()
+        .zip(&first_recordings)
+        .map(|(member, id)| {
+            let file = member.log_dir.join(format!("{id}-0.rec"));
+            let bytes = std::fs::read(&file).expect("the segment file is read");
+            bytes[from..usize::try_from(end).expect("a position")].to_vec()
+        })
+        .collect();
+    assert_eq!(
+        held[0], held[1],
+        "the two logs of the first term from {from}"
+    );
+    // The last of the hundred entries is the last frame of both.
+    let last_frame = &held[0][held[0].len() - 96..];
+    let last = Message::parse(Stream::Log, &last_frame[32..32 + 40]).expect("an entry");
+    assert!(
+        matches!(
+            last,
+            Message::SessionMessage {
+                leadership_term_id,
+                cluster_session_id: NO_SESSION,
+                ..
+            } if leadership_term_id == first_term
+        ),
+        "{last:?}, first leader {first_leader}"
+    );
+    for member in &members {
+        assert_eq!(member.module.counts().elections_failed, 0);
+        assert_eq!(member.module.counts().truncations_refused, 0);
+    }
+
+    for member in members {
+        member.module.close().expect("the member closes");
+        member.driver.close().expect("the driver closes");
+    }
 }
 
 /// Offers `count` entries on the leader, `members[0]`, each made again once every
@@ -802,7 +1019,6 @@ fn a_service_reads_the_committed_log_on_every_member_and_nothing_past_the_commit
             assert!(matches!(
                 message,
                 Message::NewLeadershipTermEvent {
-                    leadership_term_id: 0,
                     log_position: 0,
                     leader_member_id,
                     ..

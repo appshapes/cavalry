@@ -1545,7 +1545,16 @@ impl ConsensusModule {
         for (slot, member) in ids.iter_mut().zip(parsed) {
             *slot = member.id;
         }
-        let core = Consensus::new(ids.get(..count).unwrap_or(&[]), member_id)
+        // The seed of the member's nomination delays: the operating system's, through
+        // the standard library's `RandomState`, mixed with the member id, so that two
+        // members never draw one sequence (ADR 0077).
+        let seed = {
+            use std::hash::{BuildHasher, Hasher};
+            let mut hasher = std::collections::hash_map::RandomState::new().build_hasher();
+            hasher.write_i32(member_id);
+            hasher.finish()
+        };
+        let core = Consensus::with_election(ids.get(..count).unwrap_or(&[]), member_id, seed)
             .map_err(RaftError::Member)?;
         let Some(own) = parsed.iter().find(|member| member.id == member_id) else {
             return Err(RaftError::Member(MembersRefused::NotAMember {
