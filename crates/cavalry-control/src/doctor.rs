@@ -1267,9 +1267,10 @@ fn cluster_checks(
 struct LogPath {
     /// This member's log endpoint, followed by a comma.
     own_log: String,
-    /// The leader, as a phrase: by its id when the member's gauge names it, and as
-    /// `its leader` when the gauge names none.
-    leader: String,
+    /// The leader the member has taken, as the words after "has taken": `its leader,
+    /// member N,` when the member's gauge names it, and `its leader` when the gauge
+    /// names none, so that the sentence names no leader twice.
+    taken: String,
     /// The leader's host, as a phrase.
     leader_host: String,
     /// The leader's consensus endpoint, as a phrase.
@@ -1294,7 +1295,7 @@ impl LogPath {
             let consensus = known.and_then(|cluster| cluster.endpoints(leader));
             return LogPath {
                 own_log,
-                leader: format!("member {leader}"),
+                taken: format!("its leader, member {leader},"),
                 leader_host: format!("member {leader}'s host"),
                 leader_consensus: match consensus {
                     Some((consensus, _)) => {
@@ -1311,7 +1312,7 @@ impl LogPath {
         // endpoint by its field.
         LogPath {
             own_log,
-            leader: "its leader".to_string(),
+            taken: "its leader".to_string(),
             leader_host: "its leader's host".to_string(),
             leader_consensus: format!(
                 "its leader's consensus endpoint, the third field of that member's entry in \
@@ -1424,11 +1425,11 @@ fn joining_message(member: &MemberCounters, state: i64, cluster: Option<&Cluster
         ),
     };
     format!(
-        "member {id} has taken its leader, {}, and joins its log: its election is in {}. \
+        "member {id} has taken {} and joins its log: its election is in {}. \
          {step}. Each wait is bounded by the leader heartbeat timeout, {timeout} s; when \
          one is not met the election fails, counted in cluster.elections_failed, and the \
          member begins again. If it does not close, check {}.{}",
-        path.leader,
+        path.taken,
         election_state_name(state),
         path.check(),
         failed_elections_text(member)
@@ -5032,6 +5033,32 @@ mod tests {
                 message.contains("Each wait is bounded by the leader heartbeat timeout, 10 s;"),
                 "{message}"
             );
+
+            // A member read before it has added its gauges, or whose gauge names no
+            // leader yet: the sentence says that it has taken a leader, once.
+            for gauge in [None, Some(-1)] {
+                let mut counters = vec![
+                    (CLUSTER_ROLE, 0),
+                    (CLUSTER_ELECTION_STATE, state),
+                    (CLUSTER_LEADERSHIP_TERM_ID, 0),
+                ];
+                counters.extend(gauge.map(|leader| (CLUSTER_LEADER_MEMBER_ID, leader)));
+                let (_, findings) = cluster_findings(
+                    &format!("cluster-joining-unnamed-{state}-{}", gauge.is_some()),
+                    2,
+                    &counters,
+                );
+                let message = &findings[1].message;
+                assert_eq!(findings[1].check, "cluster-joining", "state {state}");
+                assert!(
+                    message.starts_with(&format!(
+                        "member 2 has taken its leader and joins its log: its election is \
+                         in {}.",
+                        election_state_name(state)
+                    )),
+                    "{message}"
+                );
+            }
         }
     }
 

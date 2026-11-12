@@ -136,7 +136,9 @@ All on this change's branch, on a laptop, macOS.
     the same record made the member `FAIL cluster-leader-behind`. The test also
     fails when an entry of `counters.toml` has id 113.
   - `a_member_in_every_state_of_the_join_is_joining`, new: each of the states 9 to
-    16 gives `cluster-joining` with the leader's id from the gauge.
+    16 gives `cluster-joining` with the leader's id from the gauge. With no gauge,
+    or a gauge that names no leader, the message begins "has taken its leader and
+    joins its log", where before this change it said "its leader" twice.
   - `the_members_string_names_a_quorum_and_a_path_for_a_member_it_holds`, new: the
     checks of the members string's ids and endpoints that two removed tests held,
     and a member the string does not hold.
