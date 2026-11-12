@@ -92,11 +92,15 @@ table that is full forgets its oldest recording and leaves it as it is in the
 catalog. So a file whose live recording is the id the counter holds lists
 recordings that hold the member's log as it is now. A file that cannot be written
 is the duty cycle's error, with what to do, and the member stores −1 until a later
-cycle has written it: it records and replicates, and names no recording to a
-service. Each cycle in which the write fails is counted in
-`cluster.log_recordings_unwritten`, so that `cavalry doctor` tells a member that
-names no recording because it cannot write its file from one whose recording
-never started.
+cycle has written it: in each such cycle it records and replicates, and names no
+recording to a service. Each cycle in which the write fails is counted in
+`cluster.log_recordings_unwritten`, so that an operator who reads the counters
+tells a member that names no recording because it cannot write its file from one
+whose recording never started. What runs the module decides how long that may
+last: `cavalry run` treats it as it treats every error of a duty cycle, tries the
+cycle again every 100 ms, and gives the member up after 10 s of cycles that fail,
+the leader heartbeat timeout. The cluster then goes on with the members that
+remain, and the member's last error says which file and why.
 
 **A service takes each position from the first recording in the file that holds
 it, and from the live recording when none does**, which is the rule the page
