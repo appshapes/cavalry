@@ -744,8 +744,9 @@ Aeron's, and the driver's in this version; a configuration key for one needs its
 | destinations per send endpoint | 64; a 65th is error code 10 |
 | receivers per `min` publication | 64; a 65th's status messages are accepted and not tracked, counted in `sender.flow_control_receivers_full` |
 
-Timeouts are measured on the clock the driver stores in the consumer heartbeat
-(`spec/client-protocol.md`, "Liveness and timeouts").
+Timeouts are measured on the nano clock of the driver that measures them, which a
+step of the host's clock does not move (`spec/client-protocol.md`, "Liveness and
+timeouts"; ADR 0109).
 
 ## What a reader rejects
 
