@@ -230,7 +230,10 @@ committed once a quorum, two of three, has it on disk.
   between the two hosts. With a leader taken, the message names that member, from
   `cluster.leader_member_id`, and what the state waits for: an image of the leader's
   log on the member's `log` endpoint, the leader's replay on its `catchup` endpoint,
-  the fifth field of its entry, or both during a catch-up. The check at the end of the
+  the fifth field of its entry, or both in `follower catch-up`. The two states of a
+  catch-up before it wait on the `catchup` endpoint alone: the member subscribes to
+  the live log only when the replay has brought its log near the leader's position.
+  The check at the end of the
   message names the endpoints of that state. In `follower ready` the image has
   arrived, and the message names the append position alone and the leader's
   `consensus` endpoint as the one to check. A member that elects begins again after
