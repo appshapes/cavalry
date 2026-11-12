@@ -347,7 +347,7 @@ of its append position and at least every leader heartbeat interval.
 | 8 | 8 | leadership term id | i64 | the sender's log leadership term id, the highest term in its record, as canvass position's |
 | 16 | 8 | log position | i64 | the follower's append position |
 | 24 | 4 | follower member id | i32 | the follower's |
-| 28 | 1 | flags | u8 | bit 0 (`0x01`) catch-up: the position was appended from the leader's catch-up replay; the other bits reserved, written 0, ignored |
+| 28 | 1 | flags | u8 | bit 0 (`0x01`) catch-up: the follower is in follower catch-up (state 13) and on the live log, its append position at or past the position its live image joined at, so that the leader may stop its catch-up replay (ADR 0088); the other bits reserved, written 0, ignored |
 
 ### Commit position, template 55
 
@@ -378,7 +378,7 @@ member was started with one string (ADR 0085).
 ### Stop catch-up, template 57
 
 Block length 12, no variable fields. The leader's word to one follower that its
-catch-up replay has reached the leader's position and stops.
+catch-up replay stops: the answer to an append position with the catch-up flag.
 
 | Offset | Size | Field | Type | Meaning |
 | --- | --- | --- | --- | --- |
@@ -534,7 +534,7 @@ counter ("Counters").
 | 10 | follower replay | replays its own log, its recordings in position order, from its log position to the lesser of its append position and the commit position it was told, into the consensus module's own state as state 6 does and into no service ("The service"), recording each term whose new leadership term event it replays, the leader's term already recorded at the base by the new leadership term that sent it here ("The log"), then goes to follower catch-up init when its append position is behind the leader's log position, else to follower log init; a replay that ends short of its append position goes back to canvass |
 | 11 | follower catch-up init | subscribes to the log stream on its `catchup` endpoint and sends catch-up position with that endpoint, tried each duty cycle until its publication to the leader takes it and counted in `cluster.catchups` when it has left (ADR 0088); goes to follower catch-up await once sent, and fails the election when it cannot send within the leader heartbeat timeout |
 | 12 | follower catch-up await | waits for the image of the leader's catch-up replay, the one image of stream 100 on its `catchup` endpoint, whatever its session id, since a replay's publication has a session id of its own (`spec/client-protocol.md`, "Commands", start replay), checks that the image's join position ("The log") is its append position, and goes to follower catch-up when it has joined it; an image that joins elsewhere, a stale replay's among them, fails the election, counted in `cluster.join_position_mismatches`, and so does no image within the leader heartbeat timeout |
-| 13 | follower catch-up | records the catch-up replay, recording each term whose new leadership term event it reads, reporting its append position, the contiguous end, with the catch-up flag, and adds its `log` endpoint's live subscription once its append position is within the live-add window of the leader's position, the greater of the log position and the commit position its leader told it, since the commit position is the one a leader goes on sending (ADR 0088), the window being the lesser of term length ÷ 4 and 1,048,576 bytes; the live image's recording begins at the live recording's start, the position the follower joined the live log at, which lies at or past its append position, so that the two recordings overlap from there and the append position follows the replay until it reaches the live recording's start and the live recording from then; goes to follower log init once its append position has reached the live recording's start and the commit position it was told, and the leader has sent stop catch-up, which it sends when the follower's append position reaches its log position, and on which the follower removes its catch-up subscription; fails the election when the catch-up makes no progress, its append position not having moved, for the leader heartbeat timeout |
+| 13 | follower catch-up | records the catch-up replay, recording each term whose new leadership term event it reads, reporting its append position, the contiguous end, and adds its `log` endpoint's live subscription once its append position is within the live-add window of the leader's position, the greater of the log position and the commit position its leader told it, since the commit position is the one a leader goes on sending (ADR 0088), the window being the lesser of term length ÷ 4 and 1,048,576 bytes; the live image's recording begins at the live recording's start, the position the follower joined the live log at, which lies at or past its append position, so that the two recordings overlap from there and the append position follows the replay until it reaches the live recording's start and the live recording from then; its reports carry the catch-up flag from the one that first reports a position at or past the live recording's start, sent in that duty cycle, and none before, since the replay reads no further than the leader's recording has synced (`spec/client-protocol.md`, "Commands", start replay) and a replay stopped sooner would leave the positions below the live recording's start unfilled (ADR 0088); goes to follower log init once its append position has reached the live recording's start and the commit position it was told, and the leader has sent stop catch-up, which it sends for each report with the flag, and on which the follower removes its catch-up subscription; fails the election when the catch-up makes no progress, its append position not having moved, for the leader heartbeat timeout |
 | 14 | follower log init | subscribes to the log stream on its `log` endpoint when it has not, and goes to follower log await; one already subscribed goes to follower ready |
 | 15 | follower log await | waits for the live image by the log session id, checks that its join position is its append position, joins it there, records the leader's term at the leader's term base log position when its record lacks the term, which no path of this version into this state leaves lacking ("The log"), and goes to follower ready; an image that joins elsewhere, the leader having appended past the follower's position while it subscribed, fails the election, counted in `cluster.join_position_mismatches`, so that the member canvasses again and catches up, and so does no image within the leader heartbeat timeout |
 | 16 | follower ready | sends append position to the leader and closes the election; fails it when it cannot send within the leader heartbeat timeout |
@@ -659,10 +659,11 @@ do not hold, purged by retention (`spec/client-protocol.md`, "Commands", purge
 segments), is answered by nothing, and the follower's timeout counts it. Each replay's
 publication has a session id of its own in this version, so the follower's image of
 it is on its `catchup` endpoint alone; and sends stop catch-up, stopping the replay with `stop replay`, when a
-follower whose position was appended from the replay reports, for the leader's term, an append position at or
-past the leader's log position, which is the leader's own append position: the replay is
+follower reports an append position with the catch-up flag for the leader's term, whatever the position: the
+follower sets the flag once it is on the live log (state 13), and holds every position
+below where its live image joined. The replay is
 asked to stop once, and stop catch-up is sent for each such report, so that one that is
-lost is sent again on the follower's next (ADR 0087). A leader, its election closed or in states 5 to 8, that
+lost is sent again on the follower's next (ADR 0087, ADR 0088). A leader, its election closed or in states 5 to 8, that
 reads canvass position first stops any replay it has running to that follower with
 `stop replay` and drops any next replay it was waiting to start for it, as a new
 catch-up position from the follower does too, so that a follower that failed and
@@ -678,8 +679,9 @@ init, on one with either term above its own, Raft's step-down, counted in
 position's log leadership term id alone (ADR 0058), so that a member whose candidate
 term passed the leader's term, one that voted in a ballot the leader never saw,
 rejoins through the election it brings instead of canvassing for as long as the
-leader leads; the `canvass-position` vectors pin both. A follower that reads stop catch-up for its term
-removes its catch-up subscription. Any member whose election has closed that reads
+leader leads; the `canvass-position` vectors pin both. A follower in follower catch-up that reads stop catch-up for its term
+and its own id, after it has reported with the catch-up flag, removes its catch-up subscription; one read
+before that answers an earlier catch-up and is ignored (ADR 0088). Any member whose election has closed that reads
 request vote whose candidate term id, or commit position whose leadership term id, is
 above its own leadership term id holds an election, beginning at init, counted in
 `cluster.leader_step_downs` when it was the leader and in `cluster.higher_terms_seen`

@@ -14,9 +14,9 @@
 //! member holds the bytes that reached it and no others, so two members can hold
 //! different bytes at one position, which a test of the cluster's safety must be able
 //! to find. A leader's replay of its own log reaches a member that subscribed on its
-//! catch-up endpoint, an entry after another from the position asked, and ends by
-//! itself at its end, when it is stopped, or when it has had no subscriber for the
-//! replay connect timeout.
+//! catch-up endpoint, an entry after another from the position asked and no further
+//! than the leader's recording has synced, and ends by itself at its end, when it is
+//! stopped, or when it has had no subscriber for the replay connect timeout.
 //!
 //! Its bounds, and what it does at each:
 //!
@@ -817,9 +817,13 @@ impl Cluster {
 
     /// One step of every replay: a replay asked to stop stops; one whose member is
     /// subscribed on its catch-up endpoint and hears the replaying member brings it
-    /// every entry from where it stands to its end, and ends by itself on the step
-    /// after; a catch-up's, with no end, goes on bringing what the replaying member
-    /// appends, for as long as that member holds its log publication; one with no
+    /// every entry the replaying member's recording has synced, from where it stands
+    /// to its end, and ends by itself on the step after; a catch-up's, with no end,
+    /// goes on bringing what the replaying member appends and syncs, for as long as
+    /// that member holds its log publication: a replay of a live recording reads to
+    /// the synced position and waits for it to move (`spec/client-protocol.md`,
+    /// "Commands"), so what a leader has appended and not yet synced reaches a
+    /// member by the live log alone; one with no
     /// such subscriber for the replay connect timeout ends where it stands. A replay
     /// from a halted member stands still, as its host does.
     fn replay(&mut self) {
@@ -865,6 +869,7 @@ impl Cluster {
                             .iter()
                             .filter(|entry| {
                                 entry.position >= replay.position
+                                    && entry.position_after <= disk.synced
                                     && replay.end.is_none_or(|end| entry.position_after <= end)
                             })
                             .cloned()

@@ -1,15 +1,20 @@
 # 0088. Catch up within a leader's term, and join the live log from the replay
 
 - **Status:** Accepted
-- **Date:** 2026-11-11
+- **Date:** 2026-11-12
 - **Invariants affected:** 1, 3, 4, 6
-- **Supersedes:** none. Changes rows 11 and 13 of `spec/cluster.md`, "Roles and the
-  election": row 11 counts the catch-up position in `cluster.catchups` when it has
-  left; row 13 names the leader's position the live-add window is measured from, and
-  says that "no progress" is an append position that has not moved. Adds the steps
-  of the catch-up to the row of `cluster.election_steps` in "Counters". The page's
-  version stays 0: no message changes, and no member over a driver takes a vote yet
-  (ADR 0081).
+- **Supersedes:** ADR 0087, as its Revisit asks, in one decision: when a leader
+  stops a catch-up. "What stands of ADR 0087", below, lists the rest, which is
+  unchanged. Changes rows 11 and 13 of `spec/cluster.md`, "Roles and the election":
+  row 11 counts the catch-up position in `cluster.catchups` when it has left; row 13
+  names the leader's position the live-add window is measured from, says that "no
+  progress" is an append position that has not moved, and says when a report
+  carries the catch-up flag. Changes what the catch-up flag of append position
+  means, and in "Messages outside an election" when a leader sends stop catch-up
+  and when a follower takes it. Adds the steps of the catch-up to the row of
+  `cluster.election_steps` in "Counters". The page's version stays 0: no message's
+  layout changes, no member before this change sent the flag, and no member over a
+  driver takes a vote yet (ADR 0081).
 
 ## Context
 
@@ -42,6 +47,22 @@ log, and waits for stop catch-up, receives nothing.
 **The registry has none of the three states**, nor the step from follower log init
 to follower ready that a member already subscribed makes (ADR 0067).
 
+**When the leader may stop the replay.** ADR 0087 had the leader stop a catch-up
+when the member reported, with the catch-up flag, an append position at or past the
+leader's own, and row 13 had the member set the flag on every report of the state.
+The first review of pull request 229 found what that costs, and ADR 0087 states it:
+a replay of a live recording reads no further than the recording has synced
+(`spec/client-protocol.md`, "Commands", start replay), while the member's live image
+joins at the leader's publication's position, which under load is ahead of what the
+leader has synced. A member that reports the leader's synced position before the
+leader has synced past where the member's live image joined is told to stop there.
+The positions between never arrive: its append position stays below its live
+recording's start, its election fails after the leader heartbeat timeout, and it
+begins again, into the same race. ADR 0087's Revisit asks for a test that meets the
+condition. `a_catch_up_is_not_stopped_while_the_leader_holds_what_it_has_not_synced`
+in `tests/election.rs` meets it in memory, and with the member as row 13 had it the
+member does not join.
+
 ## Decision
 
 A member that elects catches up as rows 10 to 14 say, through the operations of
@@ -62,8 +83,8 @@ position the member asked from. One that joins elsewhere fails the election,
 counted in `cluster.join_position_mismatches`; so does none within the leader
 heartbeat timeout.
 
-**Follower catch-up.** The member reports its append position with the catch-up
-flag, when it moves and every leader heartbeat interval. It adds the live log once
+**Follower catch-up.** The member reports its append position, when it moves and
+every leader heartbeat interval. It adds the live log once
 its append position is within the live-add window of the greater of the log
 position and the commit position its leader told it: the commit position is the
 one the leader goes on sending, and it never passes the leader's log. When it reads
@@ -72,6 +93,42 @@ It goes on to follower log init when three things hold: stop catch-up was read; 
 append position has reached the position the live image joined at; and its append
 position has reached the commit position it was told. An append position that has
 not moved for the leader heartbeat timeout fails the election.
+
+**The member says when the replay may stop.** A member in follower catch-up sets
+the catch-up flag in a report only once it is on the live log: its live image has
+joined, and its append position is at or past the position the image joined at.
+Before that it reports without the flag. The report that first carries the flag is
+sent in the duty cycle the member is first on the live log, whether or not its
+position moved or an interval passed, so that the stop does not wait for one. The
+member is the one that knows where its live image joined; the leader knows only
+positions of its own, and none of them is that one.
+
+**The leader stops on that word.** A leader that reads an append position with the
+catch-up flag, for its term, asks the replay it runs to that member to stop, once,
+and sends stop catch-up, at whatever position the member reports. This replaces
+ADR 0087's comparison with the leader's own append position. With the member's
+word the comparison guards nothing: the member holds every position below where
+its live image joined, and the live log brings it the rest. It only delayed the
+stop until the member's synced position was at or past the leader's, which on a
+member whose sync is slower than its leader's, under a steady load, might never
+be. Follower catch-up had no bound then. Now the replay brings the member to its
+live recording's start at the speed of the leader's sync and the member's, and the
+stop follows the first report after that.
+
+**A stop catch-up before the flag is not an answer.** A member takes stop catch-up
+only after it has reported with the flag in this catch-up. The leader sends it for
+such a report alone, so one read sooner answers an earlier catch-up of the same
+term; taking it would remove the subscription the replay arrives on.
+
+**What stands of ADR 0087.** Everything but the comparison: a catch-up is served
+from the leader's core as a replication is, one replay a member, stopped by a
+canvass position, by a new request and in init; a catch-up position from the
+leader's term base to its own append position starts a replay with no end, one
+above it or below 0 ends what the leader held and starts nothing; every member is
+served in every duty cycle and the first fault is returned after all have had
+their turn; stop catch-up is sent for every report with the flag and the replay is
+asked to stop once; `cluster.catchups` rises by one for each replay a leader
+starts for a catch-up.
 
 **Follower log init, for a member already subscribed.** It goes to follower ready
 with no second subscription, and its report there, without the catch-up flag,
@@ -92,8 +149,11 @@ failure, follower catch-up await's with `cluster.join_position_mismatches` besid
 `cluster.elections_failed`.
 
 **In memory.** A leader's replay with no end brings a member that subscribed every
-entry the leader's log holds from the position asked, each step, as the log grows,
-for as long as the leader holds its log publication. A live image that a member
+entry the leader's recording has synced from the position asked, each step, as the
+leader appends and syncs, for as long as the leader holds its log publication. A
+replay of either kind reads no further than the replaying member has synced, as a
+replay over a driver does; before this change the in-memory replay read all the
+leader had appended, and could not show the case above. A live image that a member
 adds while it is behind joins above the member's log and brings it nothing until
 the replay has brought the log to where it joined.
 
@@ -115,23 +175,48 @@ the replay has brought the log to where it joined.
 - **Keep the catch-up subscription until the member leaves follower catch-up.**
   Lost. The page has stop catch-up remove it, and the leader has stopped the replay
   by then.
+- **End the catch-up at the leader's publication's position, as Aeron does.** Lost.
+  It is the other way ADR 0087's Revisit names, and it is safe: the publication's
+  position is never below where the member's live image joined. But a member's
+  append position is a synced position, which under a steady load trails the
+  leader's publication by the member's own sync, so the member stays in the
+  catch-up, its replay running and its recordings written twice, until the leader's
+  appends pause. It also needs an operation of `Io` that reads a position no other
+  rule of the core uses. The member's word needs neither.
+- **Keep ADR 0087's comparison beside the member's word.** Lost. It would be a
+  second condition that makes nothing safer and leaves follower catch-up with no
+  bound under load, as "The leader stops on that word" says.
+- **Ask again when a catch-up is stopped short.** Lost. The member would have to
+  tell a replay stopped short from one that is slow, and ask from a position the
+  leader may by then have passed with a new term. Not being stopped short needs no
+  second request.
+- **Mark every report of follower catch-up with the flag, as Aeron does, and add a
+  second bit for "on the live log".** Lost. The leader has no use for the first
+  meaning: it counts a member's append position toward a commit by its term and its
+  position, with or without the flag. One bit with one meaning is less to get wrong.
 
 ## Evidence
 
-- `crates/cavalry-raft/tests/follower_catchup.rs`, seven tests on one core through
+- `crates/cavalry-raft/tests/follower_catchup.rs`, eight tests on one core through
   an `Io` that remembers what it was asked.
   - A member at its leader's term base, told the leader's log is 96 bytes on,
     subscribes, then asks from its append position, counted. The image joins there.
-    It reports with the catch-up flag and the leader's term, adds the live log,
-    reads stop catch-up, removes the catch-up subscription once, and goes through
+    It reports with the leader's term and no flag, adds the live log, and reports
+    with the flag once the replay has brought it past where the live image joined.
+    It reads stop catch-up, removes the catch-up subscription once, and goes through
     follower log init to follower ready with one live subscription in all. Its last
     report carries no flag and closes its election: four steps.
+  - A member at 160 whose live image joined at 192 reports without the flag, and
+    does not take a stop catch-up; at 192 it reports with the flag in that cycle. A
+    member already at the join position when the image comes reports with the flag
+    at once, with no move of its position and no interval passed.
   - A member 2 MiB behind adds the live log when it is 1,048,576 bytes from the
     leader's position, and not 32 bytes sooner.
   - A catch-up position that does not leave for the leader heartbeat timeout fails
     the election and counts no catch-up.
   - An image that joins elsewhere fails, counted; none within the timeout fails.
-  - A stop catch-up for another term or another member is not read. A member that
+  - A stop catch-up for another term or another member is not read, nor one that
+    comes before the member has reported with the flag. A member that
     was told to stop stays while the live image is not there, while its append
     position is below where the live image joined, and while it is below the commit
     position it was told.
@@ -145,6 +230,18 @@ the replay has brought the log to where it joined.
   history of pull request 218; the leader that was cut off; the leader that stood
   still; the leader that three of five could not hear; and the leader whose module
   stood still.
+- `a_catch_up_is_not_stopped_while_the_leader_holds_what_it_has_not_synced`, in the
+  same file, at three seeds. The leader's sync is paused with one entry appended
+  and not synced. A member that was cut off comes back, asks, and is brought what
+  the leader has synced; its live image joins past that. For a second it stays in
+  follower catch-up at the leader's append position, one catch-up counted and no
+  election failed, the replay still running. When the leader syncs, it joins within
+  the test's bound of a second, 6 ms at each seed, and all three commit the next
+  entry. With the member setting the flag on every report, the test fails: "the
+  member behind joins: not within 1000 ms".
+- `crates/cavalry-raft/tests/catchups.rs`, the leader on one core: a report with
+  the flag at 128, below the leader's own 160, stops the replay and is answered
+  with stop catch-up; reports without the flag at 128 and at 160 stop nothing.
 - `crates/cavalry-raft/tests/transitions.rs` makes each of the nine new rows.
 - Every other test of the crate passes unchanged.
 
@@ -162,9 +259,20 @@ the replay has brought the log to where it joined.
   live one overlap from where the live image joined, and `Io::append_position` is
   the end of what the two hold together, which is the module's to keep when its I/O
   for the election is built.
-- Revisit: with ADR 0087, whether a leader can end a catch-up before the member
-  holds the log to where its live image joined; a member in that state fails after
-  the leader heartbeat timeout and begins again.
+- The catch-up flag means less than Aeron's and more: not "this position was
+  appended in a catch-up" but "this follower, in a catch-up, is on the live log".
+  In Aeron, this is `APPEND_POSITION_FLAG_CATCHUP`, set on every append position a
+  follower sends while it catches up, and the leader ends the catch-up when the
+  follower's position reaches its log publication's. A capture of the two
+  protocols differs in which reports carry the bit.
+- Follower catch-up is bounded under load: by the replay reaching the member's live
+  recording's start, then one report and its answer, then the commit position the
+  member was told.
+- Revisit with the module's I/O for the election, over drivers: a member's
+  `Io::log_image` must give the join position of the live image while the catch-up
+  subscription is still there, and `Io::append_position` the end of what the two
+  recordings hold together. If either cannot be had from the driver, the member
+  cannot know that it is on the live log, and this decision is taken again.
 
 ## References
 
@@ -178,6 +286,14 @@ the replay has brought the log to where it joined.
   the electing path and its steps.
 - [ADR 0067](0067-register-the-elections-state-machine-with-its-core-and-count-each-step.md),
   the registry of the election's machine.
+- `spec/client-protocol.md`, "Commands", start replay: a replay of a live recording
+  reads up to the synced position and waits for it to move.
+- The first review of pull request 229, which found the case:
+  <https://github.com/appshapes/cavalry/pull/229>
+- Aeron's `ConsensusModuleAgent.trackCatchupCompletion`, which stops a follower's
+  catch-up replay when the follower's log position is at or past
+  `logPublisher.position()`, read on 2026-11-12:
+  <https://github.com/aeron-io/aeron/blob/master/aeron-cluster/src/main/java/io/aeron/cluster/ConsensusModuleAgent.java>
 - Aeron's `Election.followerCatchup`, which adds the live destination when the
   member is near the greater of the catch-up join position and the notified commit
   position, read on 2026-11-11:
