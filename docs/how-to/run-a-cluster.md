@@ -308,19 +308,33 @@ committed once a quorum, two of three, has it on disk.
 - `WARN cluster.log_images_lost`: the follower lost its image of the leader's log
   stream and began its election again. Check the network path from the leader's log
   endpoint to this host, and the image counters of stream 100 on this member's driver.
-- `WARN cluster.log_recordings_unsynced`: the member could not write or sync
-  `log-recordings` in its log directory, the count says how many times, and while
-  that lasted the recording it was making was no part of its log. Check that the
-  log directory is writable by the member's user and that its file system has
-  room. A count that no longer rises is a fault that has passed.
 - `WARN cluster.log_recordings_unwritten`: the member could not write the file of
   its log's recordings in its driver directory, and no service beside it read the
-  log while that lasted. Check that the driver directory is writable and has room.
+  log while that lasted. The member's own message begins `member stopped
+  (log-recordings)` and names the file and the cause. Check that the driver
+  directory is writable by the member's user and that its file system has room. The
+  member tries again every 100 ms, so the count rises by about ten a second. After
+  10 s of cycles that fail, `cavalry run` stops the member: start it again once the
+  directory can be written. A count that no longer rises is a fault that has passed.
+- `WARN cluster.log_recordings_unsynced`: the member could not write or sync
+  `log-recordings` in its log directory, and the count says how many times. While
+  that lasted it reported no position from the recording it was making, so it could
+  not follow or lead. Check that the log directory is writable by the member's user,
+  that its file system has room and that its device reports no error. After 10 s of
+  cycles that fail, `cavalry run` stops the member with `member stopped
+  (recordings)` and a message that begins `could not`, above: start it again on the
+  same log directory once the directory can be written. A count that no longer
+  rises is a fault that has passed.
 - `WARN cluster.log_recordings_forgotten`: the member's log is in more than 1,024
   recordings, and it has forgotten the oldest. It runs on, and there is nothing to
-  do while it runs. It will not start again on this log directory: once it stops,
-  `cavalry run` refuses it with `member refused (log-forgotten)`, above, and the
-  cluster goes on with the other two. Keep this member running where you can.
+  do while it runs. Two requests fail meanwhile. A member that asks it for the log
+  below the oldest recording it kept receives none, and counts
+  `cluster.log_replications_unavailable` when its wait ends. A service that asks
+  for that part of the log is refused by start replay with code 23. The member will
+  not start again on this log directory: once it stops, `cavalry run` refuses it
+  with `member refused (log-forgotten)`, above, and the cluster goes on with the
+  other two. To have three members again, do as that entry says, and never start
+  this member alone on a new log directory.
 - `note cluster-commit-waits`: the leader has appended more than a quorum has
   recorded. Each member asks its recorder to sync an entry as soon as it is written,
   so what waits at any moment is what was appended since the syncs now running began.

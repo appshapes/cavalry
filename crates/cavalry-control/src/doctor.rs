@@ -5889,7 +5889,11 @@ mod tests {
     /// The member's counts with a doctor sentence of their own are reported by their
     /// name and that sentence when above 0: a peer of another version, whose consensus
     /// messages the member rejects, beside the `cluster-no-leader` it causes; a follower
-    /// that lost its leader's heartbeat and its log image, its election closed again.
+    /// that lost its leader's heartbeat and its log image, its election closed again;
+    /// and a member that could not write the two files of its log's recordings, or
+    /// forgot a recording, the three reported in `MEMBER_COUNTS`' order, each with its
+    /// level, its page, its sentence's first words and its instruction, and none of
+    /// them reported at 0.
     #[test]
     fn a_member_count_with_a_doctor_sentence_is_reported_with_it() {
         let (_, findings) = cluster_findings(
@@ -6021,7 +6025,8 @@ mod tests {
                 (CLUSTER_LOG_RECORDINGS_FORGOTTEN, 0),
             ],
         );
-        assert_eq!(findings.len(), 1, "{findings:?}");
+        let found: Vec<&str> = findings.iter().map(|finding| finding.check).collect();
+        assert_eq!(found, ["cluster-member"], "{findings:?}");
     }
 
     #[test]
