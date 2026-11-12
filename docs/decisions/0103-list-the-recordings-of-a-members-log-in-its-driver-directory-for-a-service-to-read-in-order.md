@@ -79,13 +79,14 @@ whole under another name and renames it over the last one, so a reader reads one
 file or the other and never a part.
 
 **A third rule of order.** A member writes the file before it stores a recording's
-id in `cluster.log_recording_id`, each time it names a recording. The member's
-table does not lose a position while the member names a recording: it cuts its
-table only in a truncation, and it truncates only with every recording stopped
+id in `cluster.log_recording_id`, each time it names a recording. No recording
+the file lists is cut while the member names a recording. A member cuts a
+recording only in a truncation, and it truncates only with every recording stopped
 (ADR 0095) and −1 stored in the counter, a condition this decision adds to the
-truncation so that the rule does not rest on the order of two steps elsewhere. So
-a file whose live recording is the id the counter holds is the member's log as it
-is now. A file that cannot be written
+truncation so that the rule does not rest on the order of two steps elsewhere. A
+table that is full forgets its oldest recording and leaves it as it is in the
+catalog. So a file whose live recording is the id the counter holds lists
+recordings that hold the member's log as it is now. A file that cannot be written
 is the duty cycle's error, with what to do, and the member stores −1 until a later
 cycle has written it: it records and replicates, and names no recording to a
 service.
