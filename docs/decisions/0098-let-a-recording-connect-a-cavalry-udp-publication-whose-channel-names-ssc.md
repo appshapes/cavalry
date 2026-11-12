@@ -122,10 +122,7 @@ to version 9; no frame changes.
   behind the sender position and no further, from a position the sender itself
   stored, so the term behind the sender position is whole. A publisher is at most a
   window, half a term, ahead of where the sender stood, so the log holds at most a
-  term and a half after the position gone back to, within its three terms. Test:
-  `the_sender_goes_back_for_a_receiver_that_joins_within_a_term`, 1,000 messages
-  passed alone, then every one of them sent in order from position 0, with no NAK and
-  `sender.bytes_unsent` back at 0.
+  term and a half after the position gone back to, within its three terms.
 - **The recorder's position is a safe place to stand.** The recorder takes whole
   committed frames, so `recording.position` is a frame boundary at most the producer
   position. A setup frame there names the start of a frame.
