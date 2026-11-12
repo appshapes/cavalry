@@ -110,7 +110,37 @@ it tries again each cycle still shows its role, its state and its counts.
 
 ## Evidence
 
-@@EVIDENCE@@
+- `crates/cavalry-raft/src/module/tests.rs`, five tests that drive the module's
+  `Io` over a driver, with the other member played by the test: a subscription on
+  its `log` endpoint and one on its `catchup` endpoint.
+  - A leader appends two entries and gives its log up. Its publication, its
+    recording and its term are gone; its append position is the recording's stop;
+    the table holds that recording from 0 to the stop. A second call does nothing.
+    The member then leads term 1 from that position, on a publication created
+    there and a recording of its own, which the module refused before; given up,
+    the table holds both recordings in order.
+  - With the two recordings kept: a replay from 0 to the end of the second joins
+    the member's subscription at 0, brings the first recording's two entries and
+    ends by itself at the first recording's stop. One from there to the same end
+    brings the third entry and ends at the end asked. One from the middle of the
+    first recording to its stop brings one entry. Each end is handed over once.
+    The log's end, a position past it, and a member the cluster does not have
+    start nothing.
+  - A replay with no end joins at 0 on the live recording, brings the entry
+    appended before it and the one appended after, and ends when the leader stops
+    it, at the second entry's end and not by itself. A stop for a member with no
+    replay does nothing.
+  - A replay that no subscription takes ends after the replay connect timeout,
+    5 s, at the position it began at, and not by itself.
+  - The table holds 1,024 recordings without growing: one more forgets the oldest,
+    whose position then finds no recording, and the others are found in order.
+- The five ran fifteen times in a row on a macOS laptop with no failure, 5.3 s a
+  run, most of it the replay connect timeout.
+- `cargo test -p cavalry-raft`: 143 passed. The tests over three drivers, `cluster`,
+  pass unchanged: the module's core is appointed and calls none of the four.
+- `do_work` storing the counters before it returns the core's fault is read from
+  the code and not shown by a test: no fault of an appointed core is one the
+  module's tests can make after a duty cycle has changed a count.
 
 ## Consequences
 

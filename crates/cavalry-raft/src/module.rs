@@ -10,17 +10,20 @@
 //!
 //! One thread drives a module: [`ConsensusModule::do_work`] once per duty cycle. A
 //! cycle reads the clock once, allocates nothing and sends no command; the commands, a
-//! round trip each, come at the member's start and where its election adds or leaves
-//! the log.
+//! round trip each, come at the member's start, where its election adds, leaves or
+//! gives up the log, and where a leader starts or stops a replay for a member that is
+//! behind (ADR 0091).
 
+use std::collections::VecDeque;
 use std::path::Path;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use cavalry_client::{
     ArmedRecording, Cavalry, ClientError, Counter, Fault, Flags, Offer, Publication, Recording,
-    Subscription,
+    Replay, Subscription,
 };
 use cavalry_log::terms::{NO_RECORDING, TermsError, TermsFile};
+use cavalry_proto::client_protocol::{FOLLOW_LENGTH, ReplayStopReason};
 use cavalry_proto::cluster::{
     CONSENSUS_STREAM_ID, EMPTY_MEMBER, Endpoint, LOG_STREAM_ID, MAX_MEMBERS, MembersError, Message,
     Stream, parse_members,
@@ -52,8 +55,16 @@ const LOG_POLL_LIMIT: usize = 64;
 
 /// How long a member leaving the log waits for its recording's stop position.
 const STOP_TIMEOUT: Duration = Duration::from_secs(1);
+/// How many of the recordings of the log it has stopped a member keeps for replays:
+/// the last this many, the oldest forgotten when one more stops (ADR 0091).
+const KEPT_RECORDINGS: usize = 1024;
 /// No sync asked for yet: no position a recording has written.
 const NO_SYNC_ASKED: i64 = -1;
+
+/// `start replay`'s error codes for a recording the catalog does not hold and for a
+/// position the recording does not hold (`spec/client-protocol.md`, "Commands").
+const RECORDING_NOT_HELD: i32 = 21;
+const POSITION_OUT_OF_RANGE: i32 = 23;
 
 const DOC: &str = "docs/reference/cluster.md#roles-and-the-election";
 const DOC_MEMBERS: &str = "docs/reference/cluster.md#members-and-streams";
@@ -228,6 +239,18 @@ struct Peer {
     consensus: Publication,
     /// The peer's `log` endpoint as a destination of the leader's log.
     log_destination: String,
+    /// The peer's `catchup` endpoint as the channel of a replay to it.
+    catchup_channel: String,
+}
+
+/// A recording of the log this member made and stopped, by where it lies in the log.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct Kept {
+    recording_id: i64,
+    /// The position its first frame is at.
+    start: i64,
+    /// The position it stopped at.
+    stop: i64,
 }
 
 /// A recording of the log this member made, with the position its image joined at.
@@ -271,6 +294,14 @@ struct ClientIo {
     log_term: Option<i64>,
     destinations_added: usize,
     log_recording: Option<Recording>,
+    /// The base `log_publication` was created at, where `log_recording` begins.
+    log_base: i64,
+    /// The recordings of the log this member stopped, in position order: the last
+    /// [`KEPT_RECORDINGS`], allocated at the member's start.
+    kept: VecDeque<Kept>,
+    /// The replay this member started for each peer and has not yet said the end of,
+    /// by the peer's place in `peers`.
+    replays: Vec<Option<Replay>>,
     // A follower's log.
     log_subscription: Option<Subscription>,
     armed: Option<ArmedRecording>,
@@ -305,7 +336,56 @@ fn ask_sync(client: &mut Cavalry, recording: &Recording, asked_at: &mut i64) {
     }
 }
 
+/// Stops `recording` and waits for its stop position, within [`STOP_TIMEOUT`]: where
+/// this member's log ends when the recording began where the log ended before it. A
+/// stop already read, the driver's at the stream's end or this member's own on a cycle
+/// before, needs no command.
+fn stop_recording(client: &mut Cavalry, recording: &Recording) -> Result<i64, RaftError> {
+    if recording.stop_position().is_none() {
+        client.stop_recording(recording.recording_id())?;
+    }
+    let deadline = Instant::now() + STOP_TIMEOUT;
+    loop {
+        if let Some(stop) = recording.stop_position() {
+            return Ok(stop);
+        }
+        if Instant::now() >= deadline {
+            return Err(RaftError::StopTimeout {
+                recording_id: recording.recording_id(),
+            });
+        }
+        std::thread::sleep(Duration::from_micros(50));
+    }
+}
+
 impl ClientIo {
+    /// Keeps a recording this member stopped, for the replays a leader serves. A full
+    /// table forgets its oldest: that recording stays in the driver's catalog, and
+    /// this member no longer replays it (ADR 0091).
+    fn keep(&mut self, kept: Kept) {
+        if self.kept.len() >= KEPT_RECORDINGS {
+            self.kept.pop_front();
+        }
+        self.kept.push_back(kept);
+    }
+
+    /// The recording that holds `position`, and where it stopped, `None` for the
+    /// leader's live one: the recording kept that begins at or below the position and
+    /// stopped above it, else the live recording of the log this member leads, when
+    /// the position is at or above the base its publication was created at.
+    fn recording_at(&self, position: i64) -> Option<(i64, Option<i64>)> {
+        self.kept
+            .iter()
+            .find(|kept| kept.start <= position && position < kept.stop)
+            .map(|kept| (kept.recording_id, Some(kept.stop)))
+            .or_else(|| {
+                self.log_recording
+                    .as_ref()
+                    .filter(|_| position >= self.log_base)
+                    .map(|recording| (recording.recording_id(), None))
+            })
+    }
+
     /// Takes the images the driver announced or withdrew on the log subscription, notes
     /// a new image's join position before a frame of it is read, hands over an armed
     /// recording the driver has started, and reads past what has arrived of the image
@@ -416,7 +496,7 @@ impl Io for ClientIo {
         // another term would append that term's entries where the earlier term's
         // publication stands. A member that led an earlier term in this process gives
         // its publication and its recording up before it leads again, in init, by
-        // `remove_log` (ADR 0082), which this module does not have yet.
+        // `remove_log` (ADR 0082, ADR 0091).
         if self.log_term.is_some_and(|held| held != term) {
             return Err(RaftError::Unsupported {
                 what: "a term led by a member that still holds the log publication of an \
@@ -437,6 +517,7 @@ impl Io for ClientIo {
                     .add_exclusive_publication(&channel, LOG_STREAM_ID)?,
             );
             self.log_term = Some(term);
+            self.log_base = base;
         }
         let Some(publication) = self.log_publication.as_ref() else {
             return Ok(None);
@@ -495,28 +576,18 @@ impl Io for ClientIo {
     /// it never takes a synced position short of the stop.
     fn leave_log(&mut self) -> Result<(), Self::Fault> {
         if let Some(held) = self.held.as_ref() {
-            // A stop already read, the driver's at the image's end or this member's own
-            // on a cycle before, needs no command.
-            if held.recording.stop_position().is_none() {
-                self.client.stop_recording(held.recording.recording_id())?;
-            }
-            let deadline = Instant::now() + STOP_TIMEOUT;
-            let stop = loop {
-                if let Some(stop) = held.recording.stop_position() {
-                    break stop;
-                }
-                if Instant::now() >= deadline {
-                    return Err(RaftError::StopTimeout {
-                        recording_id: held.recording.recording_id(),
-                    });
-                }
-                std::thread::sleep(Duration::from_micros(50));
+            let stop = stop_recording(&mut self.client, &held.recording)?;
+            let kept = Kept {
+                recording_id: held.recording.recording_id(),
+                start: held.start,
+                stop,
             };
             // The recording's stop is where this member's log ends when the recording
             // began where the log ended before it; one that began past it is no part of
-            // the member's contiguous log.
-            if held.start == self.stopped_at {
+            // the member's contiguous log, and is not kept for a replay.
+            if kept.start == self.stopped_at {
                 self.stopped_at = stop;
+                self.keep(kept);
             }
             self.held = None;
         }
@@ -527,14 +598,37 @@ impl Io for ClientIo {
         Ok(())
     }
 
-    /// Refused: the module's member is appointed (ADR 0081), and an appointed leader
-    /// holds no election, so its core never asks this. Closing the publication,
-    /// stopping the leader's recording and taking its stop as the log's end come when
-    /// the module's I/O is built for the election, before the module moves to it.
+    /// Gives up the log of the term this member led (ADR 0082, ADR 0091): stops its
+    /// recording and takes the stop as the log's end, as a follower that leaves the
+    /// log does, then closes the publication and forgets the term it was for, so that
+    /// the next term the member leads has a publication of its own at that term's
+    /// base. What the leader appended and its recorder had not written is not in its
+    /// log: it never reported it. The recording stays held until its stop has been
+    /// read, so a stop the driver refused or did not answer in time returns with
+    /// nothing else changed, and init calls again on the next cycle. The module's own
+    /// core is appointed and never asks (ADR 0081).
     fn remove_log(&mut self) -> Result<(), Self::Fault> {
-        Err(RaftError::Unsupported {
-            what: "a leader that gives up its log publication to hold an election",
-        })
+        if let Some(recording) = self.log_recording.as_ref() {
+            let stop = stop_recording(&mut self.client, recording)?;
+            let kept = Kept {
+                recording_id: recording.recording_id(),
+                start: self.log_base,
+                stop,
+            };
+            self.log_recording = None;
+            // A leader's recording begins at its term's base, which was its append
+            // position, the end of its log, when it began to lead.
+            if kept.start == self.stopped_at {
+                self.stopped_at = stop;
+                self.keep(kept);
+            }
+        }
+        if let Some(publication) = self.log_publication.take() {
+            publication.close()?;
+        }
+        self.log_term = None;
+        self.destinations_added = 0;
+        Ok(())
     }
 
     /// Refused, as [`Io::remove_log`] is here: only a member that elects truncates,
@@ -582,33 +676,97 @@ impl Io for ClientIo {
         )
     }
 
-    /// Refused, as [`Io::remove_log`] is here: only a leader that elects serves a
-    /// replication, and the module's member is appointed (ADR 0081, ADR 0085). The
-    /// module's own, `start replay` of the recording that holds the position to the
-    /// member's `catchup` endpoint, comes with the rest of its I/O for the election.
+    /// Replays the recording that holds `position` to `member`, on stream 100 at the
+    /// member's `catchup` endpoint as this member's members string names it (ADR 0085,
+    /// ADR 0091): to `end` or to the recording's stop, whichever comes first, and with
+    /// no end the live recording for as long as it grows. `false`, with nothing
+    /// started, when no recording this member keeps holds the position, or the driver
+    /// no longer holds the recording or the position. A replay still held for the
+    /// member is stopped first. The command waits for the driver's answer, as the
+    /// commands of [`Io::add_log`] do. The module's own core is appointed and never
+    /// asks (ADR 0081).
     fn start_replay(
         &mut self,
-        _member: i32,
-        _position: i64,
-        _end: Option<i64>,
+        member: i32,
+        position: i64,
+        end: Option<i64>,
     ) -> Result<bool, Self::Fault> {
-        Err(RaftError::Unsupported {
-            what: "a leader that replays its recordings to a member that is behind",
-        })
+        let Some(index) = self.peers.iter().position(|peer| peer.id == member) else {
+            return Ok(false);
+        };
+        let Some((recording_id, stop)) = self.recording_at(position) else {
+            return Ok(false);
+        };
+        let length = match (end, stop) {
+            (Some(end), Some(stop)) => end.min(stop).saturating_sub(position),
+            (Some(end), None) => end.saturating_sub(position),
+            (None, Some(stop)) => stop.saturating_sub(position),
+            (None, None) => FOLLOW_LENGTH,
+        };
+        if length <= 0 {
+            return Ok(false);
+        }
+        self.stop_replay(member)?;
+        let (Some(peer), Some(slot)) = (self.peers.get(index), self.replays.get_mut(index)) else {
+            return Ok(false);
+        };
+        match self.client.start_replay(
+            recording_id,
+            position,
+            length,
+            LOG_STREAM_ID,
+            &peer.catchup_channel,
+        ) {
+            Ok(replay) => {
+                *slot = Some(replay);
+                Ok(true)
+            }
+            // The catalog no longer holds the recording, or the recording no longer
+            // holds the position, purged by retention: nothing to replay, as for a
+            // recording this member has forgotten.
+            Err(ClientError::Refused { raw_code, .. })
+                if raw_code == RECORDING_NOT_HELD || raw_code == POSITION_OUT_OF_RANGE =>
+            {
+                Ok(false)
+            }
+            Err(error) => Err(error.into()),
+        }
     }
 
-    /// Refused, as [`Io::start_replay`] is here.
-    fn stop_replay(&mut self, _member: i32) -> Result<(), Self::Fault> {
-        Err(RaftError::Unsupported {
-            what: "a leader that stops a replay to a member that replicates",
-        })
+    /// Stops the replay held for `member`, when it has not ended: `stop replay`, which
+    /// waits for the driver's answer. Nothing for a member with no replay.
+    fn stop_replay(&mut self, member: i32) -> Result<(), Self::Fault> {
+        let Some(index) = self.peers.iter().position(|peer| peer.id == member) else {
+            return Ok(());
+        };
+        if let Some(Some(replay)) = self.replays.get(index)
+            && replay.ended().is_none()
+        {
+            replay.stop(&mut self.client)?;
+        }
+        Ok(())
     }
 
-    /// Refused, as [`Io::start_replay`] is here.
-    fn replay_stopped(&mut self, _member: i32) -> Result<Option<ReplayStopped>, Self::Fault> {
-        Err(RaftError::Unsupported {
-            what: "a leader that follows a replay to a member that replicates",
-        })
+    /// How the replay held for `member` ended, once the driver has said so, handed
+    /// over once: the position it reached, and whether it ended by itself at its end.
+    /// One that had no subscriber for the replay connect timeout, or failed, did not.
+    fn replay_stopped(&mut self, member: i32) -> Result<Option<ReplayStopped>, Self::Fault> {
+        let Some(slot) = self
+            .peers
+            .iter()
+            .position(|peer| peer.id == member)
+            .and_then(|index| self.replays.get_mut(index))
+        else {
+            return Ok(None);
+        };
+        let Some((position, reason)) = slot.as_ref().and_then(Replay::ended) else {
+            return Ok(None);
+        };
+        *slot = None;
+        Ok(Some(ReplayStopped {
+            position,
+            ended: reason == Some(ReplayStopReason::Ended),
+        }))
     }
 
     /// Refused, as [`Io::remove_log`] is here: only a member that elects replicates,
@@ -891,8 +1049,10 @@ impl ConsensusModule {
                     CONSENSUS_STREAM_ID,
                 )?,
                 log_destination: endpoint_channel(&member.log),
+                catchup_channel: endpoint_channel(&member.catchup),
             });
         }
+        let replays = peers.iter().map(|_| None).collect();
         // Each counter holds the core's value from its add: −1 for the term and the
         // recording, before a duty cycle has run.
         let counters = Counters::add(&mut client, member_id, &core)?;
@@ -914,6 +1074,9 @@ impl ConsensusModule {
                 log_term: None,
                 destinations_added: 0,
                 log_recording: None,
+                log_base: 0,
+                kept: VecDeque::with_capacity(KEPT_RECORDINGS),
+                replays,
                 log_subscription: None,
                 armed: None,
                 image: LogImage::Awaited,
@@ -932,7 +1095,8 @@ impl ConsensusModule {
     /// follower's log subscription holds, the core's own cycle, and the counters that
     /// moved. Returns how much it did, 0 for nothing, for the caller's idle strategy.
     /// An error is a step the member cannot go on without; the member stays in the
-    /// state it was in, and a later call tries the step again.
+    /// state it was in, and a later call tries the step again. An error of the core's
+    /// own cycle is returned after the counters are stored (ADR 0091).
     pub fn do_work(&mut self) -> Result<usize, RaftError> {
         self.clock = read_clock(self.started);
         let clock = self.clock;
@@ -969,11 +1133,14 @@ impl ConsensusModule {
             return Err(error);
         }
         io.observe_log()?;
-        let work = core.do_work(clock, io)?;
+        // The core's fault is returned after the counters are stored: a member that
+        // faults at a step it tries again each cycle, a replay it cannot start, still
+        // shows its role, its state and its counts (ADR 0091).
+        let stepped = core.do_work(clock, io);
         let log_recording_id = self.log_recording_id().unwrap_or(NO_RECORDING);
         self.counters
             .store(&self.core, self.messages_rejected, log_recording_id);
-        Ok(read + work)
+        Ok(read + stepped?)
     }
 
     /// Appends `payload` to the cluster's log as a session message of no session, for
