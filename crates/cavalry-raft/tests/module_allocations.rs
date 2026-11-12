@@ -10,7 +10,7 @@ use std::time::{Duration, Instant};
 
 use cavalry_client::{Cavalry, CommittedLog};
 use cavalry_driver::Driver;
-use cavalry_raft::{ConsensusModule, ElectionState, RaftError, Refused};
+use cavalry_raft::{ConsensusModule, ElectionState, RaftError, Refused, Role};
 use stats_alloc::{INSTRUMENTED_SYSTEM, Region, StatsAlloc};
 
 #[global_allocator]
@@ -37,7 +37,10 @@ fn three_members_run_their_duty_cycles_without_an_allocation() {
         })
         .collect::<Vec<_>>()
         .join("|");
-    let mut cluster: Vec<(Driver, ConsensusModule)> = (0..3)
+    // Started in an order that does not put the member with the lowest id first: the
+    // leader is found below, never taken for the first.
+    let mut cluster: Vec<(Driver, ConsensusModule)> = [1, 0, 2]
+        .into_iter()
         .map(|id| {
             let driver_dir = dir.join(format!("member-{id}"));
             let log_dir = dir.join(format!("member-{id}-log"));
@@ -58,6 +61,13 @@ fn three_members_run_their_duty_cycles_without_an_allocation() {
             module.do_work().expect("the member's duty cycle");
         }
     }
+    // The member that leads, first: every offer below goes through `cluster[0]`,
+    // whichever member the cluster has for a leader (ADR 0100, change 3).
+    let leader = cluster
+        .iter()
+        .position(|(_, module)| module.role() == Role::Leader)
+        .expect("one member leads");
+    cluster.swap(0, leader);
     // The first entries and their commit, so that every path has run once: the
     // segment files are there, the counters have moved, the heartbeats are under way.
     // A commit waits for one sync on a quorum, which each member asks its recorder for.

@@ -263,7 +263,8 @@ fn run(messages: u64, dir: &Path) -> Result<(), Box<dyn std::error::Error>> {
             .collect()
     };
 
-    // The leader is appointed and every member's election closes.
+    // Every member's election closes, and one member leads: the offers below go
+    // through it, whichever member it is (ADR 0100, change 3).
     let deadline = Instant::now() + Duration::from_secs(60);
     while !modules(&members)
         .iter()
@@ -274,9 +275,12 @@ fn run(messages: u64, dir: &Path) -> Result<(), Box<dyn std::error::Error>> {
         }
         cycle(&mut members)?;
     }
-    if modules(&members).first().map(|(role, ..)| *role) != Some(Role::Leader) {
-        return Err("member 0, the lowest id, is not the leader".into());
-    }
+    let Some(leader) = modules(&members)
+        .iter()
+        .position(|(role, ..)| *role == Role::Leader)
+    else {
+        return Err(format!("no member leads: {:?}", modules(&members)).into());
+    };
 
     // The leader's own process appends: each payload its number and the hash of every
     // payload before it. A back-pressured offer is made again once the members ran.
@@ -293,7 +297,7 @@ fn run(messages: u64, dir: &Path) -> Result<(), Box<dyn std::error::Error>> {
         }
         writeln!(offered)?;
         loop {
-            let offered = match members.first_mut().and_then(|m| m.module.as_mut()) {
+            let offered = match members.get_mut(leader).and_then(|m| m.module.as_mut()) {
                 Some(leader) => leader.offer(&payload),
                 None => return Err("the leader's module is gone".into()),
             };
