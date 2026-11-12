@@ -113,7 +113,11 @@ what they return and decides nothing.
   every election closed: 0, the leader's id, on all three, the leader among them,
   and cause 0. With the leader lost: each follower reads −1, and cause 2 or 1 by
   which loss its duty cycle met first, the one its counters counted.
-- `cargo test -p cavalry-raft`: @@RAFT@@ passed.
+- Each rule taken out fails a test. With the gauge holding the core's leader id in
+  every state, four of the six tests on one core fail, the member that started
+  among them. With the store of cause 3, 4 or 5 taken out, the four tests of
+  `step_down.rs` that make those elections fail.
+- `cargo test -p cavalry-raft`: 180 passed.
 - Not shown: `cavalry doctor` reading them, which is the next change.
 
 ## Consequences
