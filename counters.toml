@@ -1216,7 +1216,7 @@ name = "cluster.elections_failed"
 kind = "counter"
 scope = "client"
 doc = "Elections one cluster member failed in a state and began again at init: a log it cannot join without a truncation, a replication or a catch-up, an image of the log that joined at another position, or a step that made no progress for the leader heartbeat timeout, 10 s; and, for a leader that elects, in leader log replication or leader ready, a canvass position with a term above its own or active members that fell below a quorum (spec/cluster.md, Roles and the election; ADR 0082); key and label as cluster.elections."
-doctor = "A member whose elections keep failing cannot join its leader's log as it stands: read cluster.join_position_mismatches on it; a member that started after the leader's first entry, or on a log of its own, needs the catch-up, which this version does not have, so start it on an empty log directory before the leader's first entry."
+doctor = "A member whose elections keep failing cannot join its leader's log as it stands: read cluster.join_position_mismatches on it; a member that started after the leader's first entry, or on a log of its own, needs the catch-up, which this version does not have, so start it on an empty log directory before the leader's first entry. A member that elects and asked its leader for a term it missed, whose cluster.log_replications rose, fails in follower log replication: read cluster.log_replications_unavailable on it, which rises when the replay it asked for stopped arriving, and see that counter's text."
 
 [[counter]]
 id = 116
@@ -1239,15 +1239,15 @@ id = 118
 name = "cluster.join_position_mismatches"
 kind = "counter"
 scope = "client"
-doc = "Images of the log that joined one cluster follower at a position other than its append position, so that it failed its election and left the image (spec/cluster.md, Roles and the election, state 15); key and label as cluster.elections."
-doctor = "The member subscribed to the log after the leader had appended past its append position, and joining there would leave a hole in its log: start it on an empty log directory before the leader's first entry; this version has no catch-up."
+doc = "Images of the log that joined one cluster member somewhere other than where its log ends, so that it failed its election and left the image: in follower log await, state 15, an image of the live log that joined at a position other than its append position; in follower log replication, state 9, an image of a replay that joined at a position other than the one the member asked from, for the first image, or the append position it last sent its leader, for each image after (spec/cluster.md, Roles and the election, states 9 and 15; ADR 0086); key and label as cluster.elections."
+doctor = "In follower log await, state 15: the member subscribed to the log after the leader had appended past its append position, and joining there would leave a hole in its log: start it on an empty log directory before the leader's first entry; this version has no catch-up. In follower log replication, state 9, on a member whose cluster.log_replications rose because it asked its leader for a term it missed: a replay reached this member's catchup endpoint at a position other than the one it asked from or last sent its leader, so it was a replay this member did not ask for. Do not empty this member's log directory for it. Check, on every host, that no two members share a catchup endpoint in the members string: a leader replays to the endpoint its own members string names, so a replay that another member asked for can arrive here. Then read cluster.log_replications on the leader and on the other members to find which member asked. This member asks again at its next election."
 
 [[counter]]
 id = 119
 name = "cluster.election_steps"
 kind = "counter"
 scope = "client"
-doc = "Steps of one cluster member's election from one state to the next that neither begin it, fail it, close it nor make the member a leader: canvass to follower replay, follower replay to follower log init, follower log init to follower log await, follower log await to follower ready, leader log replication to leader replay, leader replay to leader init and leader init to leader ready (ADR 0067); and, for a member that elects, canvass to nominate, and nominate, candidate ballot and follower ballot to follower replay, a candidate's step to follower replay also moving cluster.role from candidate to follower (ADR 0081) (spec/cluster.md, Counters). With no ballot lost, an election that closes makes three on its leader and four on a follower where the leader is appointed, and four on its leader and four or five on a follower where it is elected, five when the follower went through nominate; a member that nominates itself again after a ballot lost counts canvass to nominate again; key and label as cluster.elections."
+doc = "Steps of one cluster member's election from one state to the next that neither begin it, fail it, close it nor make the member a leader: canvass to follower replay, follower replay to follower log init, follower log init to follower log await, follower log await to follower ready, leader log replication to leader replay, leader replay to leader init and leader init to leader ready (ADR 0067); and, for a member that elects, canvass to nominate, and nominate, candidate ballot and follower ballot to follower replay, a candidate's step to follower replay also moving cluster.role from candidate to follower (ADR 0081); and canvass, nominate, candidate ballot and follower ballot to follower log replication, a candidate's step there moving cluster.role as its step to follower replay does, and follower log replication to canvass (ADR 0086) (spec/cluster.md, Counters). With no ballot lost and no term replicated, an election that closes makes three on its leader and four on a follower where the leader is appointed, and four on its leader and four or five on a follower where it is elected, five when the follower went through nominate; a member that nominates itself again after a ballot lost counts canvass to nominate again. A member that replicates a term it missed counts, for each such term, the step into follower log replication, canvass to nominate before it when it went through nominate, and the step back to canvass; then it counts the steps of the path it closes its election on from canvass, as above. So a follower that replicates one term and then joins counts at least six; key and label as cluster.elections."
 doctor = ""
 
 [[counter]]
@@ -1381,8 +1381,16 @@ id = 135
 name = "cluster.log_replications"
 kind = "counter"
 scope = "client"
-doc = "Times one cluster member replicated, or served, a span of the log below the leader's term base log position, a term the member missed: on a follower, a catch-up position it sent from follower log replication; on the leader, a replay of its own recordings that it started for such a member, once for each replay where the span lies in several recordings (spec/cluster.md, follower log replication, Messages outside an election, and Counters; ADR 0085). A member of this version counts the leader's replays alone; key: member id (i32), little-endian; label text: the member id in decimal."
-doctor = "A member that was down or cut off while the cluster elected a leader replicates the terms it missed from the new leader's recordings, and this rises on both by one for each span. It is how such a member returns, and nothing to act on. If it rises on a leader again and again for one member while that member's cluster.append_position does not move, the member cannot receive the replay: check that its catchup endpoint in the members string is the one its host listens on and that the leader's host can reach it."
+doc = "Times one cluster member replicated, or served, a span of the log below the leader's term base log position, a term the member missed: on a follower, a catch-up position it sent from follower log replication; on the leader, a replay of its own recordings that it started for such a member, once for each replay where the span lies in several recordings (spec/cluster.md, follower log replication, Messages outside an election, and Counters; ADR 0085, ADR 0086); key: member id (i32), little-endian; label text: the member id in decimal."
+doctor = "A member that was down or cut off while the cluster elected a leader replicates the terms it missed from the new leader's recordings. This rises by one on the member for each term it asks for, and by one on the leader for each replay it starts, which is one for each recording the term lies in. It is how such a member returns, and nothing to act on. If it rises on a leader again and again for one member while that member's cluster.append_position does not move, the member cannot receive the replay: check that its catchup endpoint in the members string is the one its host listens on and that the leader's host can reach it."
+
+[[counter]]
+id = 136
+name = "cluster.log_replications_unavailable"
+kind = "counter"
+scope = "client"
+doc = "Times one cluster member failed its election in follower log replication because its append position stayed below its stop position without moving for the leader heartbeat timeout: the leader's recordings do not hold the span, purged by retention, a replay stopped for a fault, or the replay never reached the member's catchup endpoint. Counted in cluster.elections_failed too (spec/cluster.md, follower log replication, and Counters; ADR 0086); key: member id (i32), little-endian; label text: the member id in decimal."
+doctor = "This member asked its leader for a term it missed and nothing more arrived for 10 s. Check, on the leader's host, that its recordings still hold the log from this member's cluster.append_position: where a retention purged it, this member cannot rejoin from the log at all, and this version has no snapshot to bring it back with, so the leader's log must be kept until every member has it. Check that this member's catchup endpoint in the members string is the same on both hosts and that the leader's host can reach it: a leader replays to the endpoint its own members string names. If cluster.log_replications rises on the leader for this member each time, the replays start and do not arrive."
 
 # A cluster member's role (spec/cluster.md, "Roles and the election"; ADR 0052, feature
 # 3). A member whose leader is appointed becomes the leader from follower, and no
@@ -1464,14 +1472,16 @@ counter = "cluster.elections_failed"
 # The election as one member's core holds it, `cavalry_raft::ElectionState`: the states
 # of the appointed leader's path (spec/cluster.md, "Roles and the election" and "The
 # appointed leader"; ADR 0063, ADR 0067) and, for a member that elects, nominate and
-# the two ballots (ADR 0077, ADR 0081), and the elections a leader holds (ADR 0082).
+# the two ballots (ADR 0077, ADR 0081), the elections a leader holds (ADR 0082), and
+# follower log replication, which a member enters from the four states that read a
+# new leadership term and leaves for canvass at its stop (ADR 0086).
 # Each transition the core makes is listed with every counter it adds one to; a
 # transition with more than one cause, closed to init with five, is listed with the
 # counter of each cause. A leader that elects and loses its quorum in leader log
 # replication or leader ready adds one to both counters of its row.
 [[state_machine]]
 name = "cluster_election"
-states = ["init", "canvass", "nominate", "candidate_ballot", "follower_ballot", "leader_log_replication", "leader_replay", "leader_init", "leader_ready", "follower_replay", "follower_log_init", "follower_log_await", "follower_ready", "closed"]
+states = ["init", "canvass", "nominate", "candidate_ballot", "follower_ballot", "leader_log_replication", "leader_replay", "leader_init", "leader_ready", "follower_log_replication", "follower_replay", "follower_log_init", "follower_log_await", "follower_ready", "closed"]
 
 [[transition]]
 machine = "cluster_election"
@@ -1720,3 +1730,51 @@ machine = "cluster_election"
 from = "leader_ready"
 to = "init"
 counter = "cluster.leader_quorum_losses"
+
+[[transition]]
+machine = "cluster_election"
+from = "canvass"
+to = "follower_log_replication"
+counter = "cluster.election_steps"
+
+[[transition]]
+machine = "cluster_election"
+from = "nominate"
+to = "follower_log_replication"
+counter = "cluster.election_steps"
+
+[[transition]]
+machine = "cluster_election"
+from = "candidate_ballot"
+to = "follower_log_replication"
+counter = "cluster.election_steps"
+
+[[transition]]
+machine = "cluster_election"
+from = "follower_ballot"
+to = "follower_log_replication"
+counter = "cluster.election_steps"
+
+[[transition]]
+machine = "cluster_election"
+from = "follower_log_replication"
+to = "canvass"
+counter = "cluster.election_steps"
+
+[[transition]]
+machine = "cluster_election"
+from = "follower_log_replication"
+to = "init"
+counter = "cluster.elections_failed"
+
+[[transition]]
+machine = "cluster_election"
+from = "follower_log_replication"
+to = "init"
+counter = "cluster.join_position_mismatches"
+
+[[transition]]
+machine = "cluster_election"
+from = "follower_log_replication"
+to = "init"
+counter = "cluster.log_replications_unavailable"

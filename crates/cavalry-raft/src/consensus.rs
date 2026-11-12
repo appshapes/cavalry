@@ -4,7 +4,8 @@
 //! made with [`Consensus::with_election`] canvasses, nominates itself, wins or loses a
 //! ballot, and as the leader holds an election when it loses its quorum or reads a
 //! higher term and serves a member that replicates a term it missed with replays of its
-//! own recordings (ADR 0077, ADR 0081, ADR 0082, ADR 0085); the rest of the election is
+//! own recordings, and as a member below its leader's term base replicates such a term
+//! (ADR 0077, ADR 0081, ADR 0082, ADR 0085, ADR 0086); the rest of the election is
 //! built on that path first, in memory, and the module moves to it when its I/O can
 //! follow. The core does no I/O of its own. It is given the time and the consensus
 //! messages, and reaches everything else through [`Io`]: the module gives it those
@@ -30,8 +31,9 @@ use cavalry_shm::counters::generated::{
     CLUSTER_ELECTION_STEPS, CLUSTER_ELECTIONS, CLUSTER_ELECTIONS_CLOSED, CLUSTER_ELECTIONS_FAILED,
     CLUSTER_HIGHER_TERMS_SEEN, CLUSTER_JOIN_POSITION_MISMATCHES, CLUSTER_LEADER_HEARTBEAT_TIMEOUTS,
     CLUSTER_LEADER_QUORUM_LOSSES, CLUSTER_LEADER_STEP_DOWNS, CLUSTER_LEADERSHIP_TERMS_IGNORED,
-    CLUSTER_LOG_IMAGES_LOST, CLUSTER_LOG_REPLICATIONS, CLUSTER_LOG_TRUNCATIONS, CLUSTER_TERMS_LED,
-    CLUSTER_TRUNCATIONS_REFUSED, CLUSTER_VOTES_AGAINST, CLUSTER_VOTES_FOR,
+    CLUSTER_LOG_IMAGES_LOST, CLUSTER_LOG_REPLICATIONS, CLUSTER_LOG_REPLICATIONS_UNAVAILABLE,
+    CLUSTER_LOG_TRUNCATIONS, CLUSTER_TERMS_LED, CLUSTER_TRUNCATIONS_REFUSED, CLUSTER_VOTES_AGAINST,
+    CLUSTER_VOTES_FOR,
 };
 
 /// The cluster session id of a session message of no session: one the leader's own
@@ -59,7 +61,8 @@ pub enum Role {
 /// `spec/cluster.md` gives it, the value of the `cluster.election_state` gauge. Every
 /// move from one to another adds one to a count of [`Counts`], the counter
 /// `counters.toml` registers for it as the machine `cluster_election` (ADR 0067). A
-/// member whose leader is appointed never enters nominate or a ballot.
+/// member whose leader is appointed never enters nominate, a ballot or follower log
+/// replication.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 #[repr(u8)]
 pub enum ElectionState {
@@ -92,6 +95,9 @@ pub enum ElectionState {
     /// once the leader heartbeat timeout has passed in this state, then appends the
     /// term's first entry.
     LeaderReady = 8,
+    /// A member below its leader's term base replicates one term it lacks from the
+    /// leader's recordings, to that term's end, and canvasses again (ADR 0086).
+    FollowerLogReplication = 9,
     /// A follower replays its own log; nothing in a log with no term before this one.
     FollowerReplay = 10,
     /// A follower subscribes to the log and arms its recording.
@@ -262,6 +268,31 @@ pub trait Io {
     /// How the replay last started to `member` ended: `None` while it runs, and how
     /// it ended once, on the first call after it stopped.
     fn replay_stopped(&mut self, member: i32) -> Result<Option<ReplayStopped>, Self::Fault>;
+
+    /// A member's subscription to stream 100 on its own `catchup` endpoint, with a
+    /// recording armed on it, so that the recording of each replay's image holds it
+    /// from its join position (`spec/cluster.md`, state 9). The core calls it once
+    /// for a replication, before it asks the leader for anything.
+    fn add_catchup(&mut self) -> Result<(), Self::Fault>;
+
+    /// Sends catch-up position to the member with id `leader`, for its term `term`,
+    /// asking for the log from `position`, with this member's own `catchup`
+    /// endpoint, which the core does not hold. `false` when it was not sent, as
+    /// [`Io::send`] says; the core sends it once, and again on a later cycle while it
+    /// has not left.
+    fn send_catchup_position(&mut self, leader: i32, term: i64, position: i64) -> bool;
+
+    /// The join position of the image now on the catch-up subscription: `None`
+    /// before the first replay's image has arrived and between one replay's image
+    /// and the next. What an image carries counts in [`Io::append_position`] no
+    /// sooner than this reports the image, so that the core checks where an image
+    /// joined before it reports a position the image gave it.
+    fn catchup_image(&mut self) -> Result<Option<i64>, Self::Fault>;
+
+    /// Removes the catch-up subscription and stops the recording its image started,
+    /// whose stop is where the member's log ends. The core calls it when a
+    /// replication has reached its stop, and in init for one that failed.
+    fn remove_catchup(&mut self) -> Result<(), Self::Fault>;
 }
 
 /// Why [`Consensus::new`] refused its members. The members are checked in the order of
@@ -413,8 +444,11 @@ pub struct Counts {
     pub leader_heartbeat_timeouts: u64,
     /// `cluster.leadership_terms_ignored`: a new leadership term ignored for its term.
     pub leadership_terms_ignored: u64,
-    /// `cluster.join_position_mismatches`: an image of the log that joined at a
-    /// position other than the member's append position.
+    /// `cluster.join_position_mismatches`: an image of the live log that joined at a
+    /// position other than the member's append position, in follower log await; or,
+    /// in follower log replication, a replay's image that joined at a position other
+    /// than the one the member asked from, for the first image, or last sent its
+    /// leader, for each image after (ADR 0086).
     pub join_position_mismatches: u64,
     /// `cluster.log_images_lost`: a follower whose image of the leader's log was no
     /// longer available, so that it began again at init.
@@ -450,15 +484,20 @@ pub struct Counts {
     /// position it knows, which it did not do: it failed its election and kept its
     /// log (ADR 0083). No leader that holds what was committed asks it.
     pub truncations_refused: u64,
-    /// `cluster.log_replications`: on the leader, a replay started for a member that
-    /// replicates a term it missed, one for each replay where the span lies in
-    /// several recordings (ADR 0085).
+    /// `cluster.log_replications`: on a member, a catch-up position it sent from
+    /// follower log replication (ADR 0086); on the leader, a replay started for such
+    /// a member, one for each replay where the span lies in several recordings (ADR
+    /// 0085).
     pub log_replications: u64,
+    /// `cluster.log_replications_unavailable`: a member in follower log replication
+    /// whose append position stayed below its stop position without moving for the
+    /// leader heartbeat timeout, so that its election failed (ADR 0086).
+    pub log_replications_unavailable: u64,
 }
 
 impl Counts {
     /// How many counts a member keeps: one counter of `counters.toml` each.
-    pub const LEN: usize = 20;
+    pub const LEN: usize = 21;
 
     /// Each count with the id of its counter in `counters.toml`, the constant
     /// `cavalry-shm` generates from it: what the consensus module stores, each as a
@@ -510,6 +549,10 @@ impl Counts {
             (CLUSTER_LOG_TRUNCATIONS, self.log_truncations),
             (CLUSTER_TRUNCATIONS_REFUSED, self.truncations_refused),
             (CLUSTER_LOG_REPLICATIONS, self.log_replications),
+            (
+                CLUSTER_LOG_REPLICATIONS_UNAVAILABLE,
+                self.log_replications_unavailable,
+            ),
         ]
     }
 }
@@ -648,6 +691,32 @@ enum Serving {
     Next { position: i64, end: i64 },
 }
 
+/// A member's replication of one term (state 9): from the new leadership term that
+/// began it until the member canvasses again or its election fails.
+#[derive(Clone, Copy, Debug)]
+struct Replication {
+    /// Where it stops: the end of the term replicated, the base of the term after it
+    /// in the leader's record.
+    stop: i64,
+    /// The term the member begins at its base, with that base, until the member has
+    /// recorded it: a term it holds none of yet. `None` where the term replicated is
+    /// the member's own log term, which its record holds already.
+    begins: Option<(i64, i64)>,
+    /// Whether the member's catch-up position has left.
+    asked: bool,
+    /// Where the next image of a replay must join: the position the member asked
+    /// from, then the append position it last sent the leader, which is what the
+    /// leader starts the next recording's replay on.
+    expect: i64,
+    /// The join position of the image last checked.
+    image: Option<i64>,
+    /// The append position at the last cycle, and when it last moved.
+    position: i64,
+    moved_ns: u64,
+    /// When the append position was first seen at the stop.
+    reached_ns: Option<u64>,
+}
+
 /// One cluster member's consensus state: its role, its election, its terms and the
 /// positions it knows. See the module's page for how it is driven.
 #[derive(Debug)]
@@ -705,6 +774,10 @@ pub struct Consensus {
     last_canvass_ns: Option<u64>,
     last_append_sent_ns: Option<u64>,
     last_append_sent: i64,
+    /// The replication this member is in, in follower log replication.
+    replication: Option<Replication>,
+    /// Whether this member holds its catch-up subscription.
+    catchup: bool,
 }
 
 impl Consensus {
@@ -781,6 +854,8 @@ impl Consensus {
             last_canvass_ns: None,
             last_append_sent_ns: None,
             last_append_sent: -1,
+            replication: None,
+            catchup: false,
         })
     }
 
@@ -792,9 +867,10 @@ impl Consensus {
     ///
     /// This path has nominate, the two ballots, the elections a leader holds, on the
     /// loss of its quorum and on a higher term (ADR 0082), the truncation (ADR 0083)
-    /// and the leader's side of a replication (ADR 0085). No member on it replicates
-    /// or catches up yet, so the consensus module does not use it: see the crate's
-    /// README for what a member on it does where the election would do more.
+    /// and the replication of a term a member missed, the leader's side and the
+    /// member's (ADR 0085, ADR 0086). No member on it catches up within its leader's
+    /// term yet, so the consensus module does not use it: see the crate's README for
+    /// what a member on it does where the election would do more.
     pub fn with_election(
         member_ids: &[i32],
         member_id: i32,
@@ -856,7 +932,10 @@ impl Consensus {
     }
 
     /// One duty cycle: what the member's state asks of it at `clock`. Returns how much
-    /// it did, 0 for nothing, so that the caller's idle strategy can back off.
+    /// it did, 0 for nothing, so that the caller's idle strategy can back off. A
+    /// leader that elects looks after the replays it serves after its state's own
+    /// work, so a fault of the state's work is returned before one of a replay, and
+    /// a replay's fault is returned once the state's work has run.
     pub fn do_work<I: Io>(&mut self, clock: Clock, io: &mut I) -> Result<usize, I::Fault> {
         self.append_position = self.append_position.max(io.append_position());
         let stepped = match self.state {
@@ -869,6 +948,7 @@ impl Consensus {
             ElectionState::LeaderReplay => Ok(self.step(ElectionState::LeaderInit, clock)),
             ElectionState::LeaderInit => Ok(self.step(ElectionState::LeaderReady, clock)),
             ElectionState::LeaderReady => self.leader_ready(clock, io),
+            ElectionState::FollowerLogReplication => self.follower_log_replication(clock, io),
             ElectionState::FollowerReplay => self.follower_replay(clock),
             ElectionState::FollowerLogInit => self.follower_log_init(clock, io),
             ElectionState::FollowerLogAwait => self.follower_log_await(clock, io),
@@ -899,7 +979,9 @@ impl Consensus {
     /// appointed leader"). A leader that elects answers a catch-up position below its
     /// term base log position with a replay of its own recordings, and stops the
     /// replay it runs to a member that canvasses again ("Messages outside an
-    /// election"; ADR 0085). A member that elects notes the sender of whatever it reads
+    /// election"; ADR 0085). A member that elects and reads a new leadership term
+    /// which leaves it below its leader's term base goes to follower log replication
+    /// (ADR 0086). A member that elects notes the sender of whatever it reads
     /// as heard, for its ballot (ADR 0077). Once its election has closed it holds an
     /// election, beginning at init, on a request vote or a commit position of a term
     /// above its own from another member, and its leader on a canvass position with
@@ -1132,9 +1214,49 @@ impl Consensus {
                         self.step(ElectionState::FollowerReplay, clock);
                         Ok(())
                     }
-                    // A replication, a wait or a log the leader's does not reach, and
-                    // where the leader is appointed a truncation: nothing this version
-                    // can join with.
+                    // Below the leader's term base, with a stop position: the member
+                    // replicates one term from the leader's recordings (state 9). With
+                    // its append position below the next term's base that term is its
+                    // own log term, which its record holds. With its append position at
+                    // that base it begins the next term, of which it holds nothing, and
+                    // state 9 records that term at that base before it asks for
+                    // anything (ADR 0086). The sender is its leader from here, as in
+                    // the step to follower replay.
+                    TermAction::Replicate if self.election.is_some() => {
+                        let begins = (self.append_position == next_term_base_log_position)
+                            .then_some((next_leadership_term_id, next_term_base_log_position));
+                        self.candidate_term = self.candidate_term.max(leadership_term_id);
+                        self.term = leadership_term_id;
+                        self.term_base = term_base_log_position;
+                        self.leader_id = leader_member_id;
+                        self.role = Role::Follower;
+                        self.log_session_id = log_session_id;
+                        self.leader_log_position = log_position;
+                        self.leader_word(clock, log_position, commit_position);
+                        self.replication = Some(Replication {
+                            stop: action.stop_position,
+                            begins,
+                            asked: false,
+                            expect: self.append_position,
+                            image: None,
+                            position: self.append_position,
+                            moved_ns: clock.now_ns,
+                            reached_ns: None,
+                        });
+                        // Its first cycle in the state reports its position.
+                        self.last_append_sent = -1;
+                        self.last_append_sent_ns = None;
+                        self.step(ElectionState::FollowerLogReplication, clock);
+                        Ok(())
+                    }
+                    // At the next term's base with no end carried: the member waits
+                    // for a later new leadership term, where it is. No leader of this
+                    // version sends it: a next term that is not the leader's own ends
+                    // at a base the leader's record holds.
+                    TermAction::Wait if self.election.is_some() => Ok(()),
+                    // A log the leader's does not reach, and where the leader is
+                    // appointed a truncation, a replication or a wait: nothing the
+                    // member can join with.
                     TermAction::Replay
                     | TermAction::Replicate
                     | TermAction::Wait
@@ -1278,11 +1400,13 @@ impl Consensus {
         self.enter(ElectionState::Closed, clock)
     }
 
-    /// Whether this member has taken a leader: in a follower's states after canvass.
+    /// Whether this member has taken a leader: in follower log replication, and in a
+    /// follower's states after canvass.
     fn follows(&self) -> bool {
         matches!(
             self.state,
-            ElectionState::FollowerReplay
+            ElectionState::FollowerLogReplication
+                | ElectionState::FollowerReplay
                 | ElectionState::FollowerLogInit
                 | ElectionState::FollowerLogAwait
                 | ElectionState::FollowerReady
@@ -1298,7 +1422,8 @@ impl Consensus {
 
     /// An election that failed in its state: counted, and begun again at init. A
     /// candidate's fails when it reads the new leadership term of its candidate term
-    /// and could join it only with a truncation, a replication or a wait. A leader's,
+    /// from a leader whose log does not reach its position. A member's fails in
+    /// follower log replication, as that state says. A leader's,
     /// where it elects, fails in leader log replication or leader ready, on a canvass
     /// position with a term above its own or when its active members fall below a
     /// quorum; init gives its log up. Either is a follower from here, the moves
@@ -1596,6 +1721,13 @@ impl Consensus {
             io.leave_log()?;
             self.joined = false;
         }
+        // And out of a replication that failed: its subscription goes, and with it
+        // the image of any replay still on it.
+        if self.catchup {
+            io.remove_catchup()?;
+            self.catchup = false;
+        }
+        self.replication = None;
         // A leader that began again holds the log publication of the term it led. It
         // gives it up, so that no follower's image of it goes on and the term it leads
         // next has a publication of its own, at that term's base (ADR 0082).
@@ -2133,6 +2265,140 @@ impl Consensus {
             return 1;
         }
         0
+    }
+
+    /// State 9. The member replicates one term from its leader's recordings, from its
+    /// append position to the stop position its new leadership term gave, the end of
+    /// that term (`spec/cluster.md`, follower log replication; ADR 0086).
+    ///
+    /// A term it holds none of is recorded at its base first, and only while its
+    /// append position is still that base. Then it subscribes on
+    /// its `catchup` endpoint and sends catch-up position once. Each replay's image
+    /// must join where the member's log ends: the position it asked from, then the
+    /// append position it last sent, on which the leader starts the next recording's
+    /// replay. It reports its append position as it moves and every leader heartbeat
+    /// interval. Below the stop, an append position that has not moved for the leader
+    /// heartbeat timeout fails the election.
+    ///
+    /// At the stop it records the leader's term there when the stop is the leader's
+    /// term base log position, reports, and then waits for the commit position it was
+    /// told to reach its append position, for the leader heartbeat timeout after the
+    /// later of the stop and the leader's last word. A stop below the base has no such
+    /// wait. Then the subscription goes and the member canvasses again: the next new
+    /// leadership term carries it on to the next term, or it joins.
+    fn follower_log_replication<I: Io>(
+        &mut self,
+        clock: Clock,
+        io: &mut I,
+    ) -> Result<usize, I::Fault> {
+        let Some(mut replication) = self.replication else {
+            // The state is entered with a replication and left without one.
+            self.fail(clock);
+            return Ok(1);
+        };
+        if let Some((term, base)) = replication.begins {
+            // The term is begun at its base and nowhere else. The message that began
+            // this was read with the append position of the cycle before; one that
+            // has risen since is of bytes above the base that are of no term this
+            // member may record there, so it records nothing and begins again.
+            if self.append_position != base {
+                self.fail(clock);
+                return Ok(1);
+            }
+            io.record_term(term, base)?;
+            self.log_term = term;
+            replication.begins = None;
+            self.replication = Some(replication);
+        }
+        if self.append_position != replication.position {
+            replication.position = self.append_position;
+            replication.moved_ns = clock.now_ns;
+        }
+        // Past the stop is past the end of the term: a replay the member did not ask
+        // for. Nothing it holds above the stop is of a term in its record.
+        if self.append_position > replication.stop {
+            self.fail(clock);
+            return Ok(1);
+        }
+        let mut work = 0;
+        if self.append_position < replication.stop {
+            if !self.catchup {
+                io.add_catchup()?;
+                self.catchup = true;
+            }
+            if !replication.asked
+                && io.send_catchup_position(self.leader_id, self.term, self.append_position)
+            {
+                replication.asked = true;
+                replication.expect = self.append_position;
+                count(&mut self.counts.log_replications);
+                work = 1;
+                // Kept at once: a fault below must not ask a second time.
+                self.replication = Some(replication);
+            }
+            // A new image, checked before this cycle reports what it brought.
+            if let Some(join) = io.catchup_image()?
+                && replication.image != Some(join)
+            {
+                if join != replication.expect {
+                    count(&mut self.counts.join_position_mismatches);
+                    self.fail(clock);
+                    return Ok(1);
+                }
+                replication.image = Some(join);
+            }
+            if clock.now_ns.saturating_sub(replication.moved_ns) >= LEADER_HEARTBEAT_TIMEOUT_NS {
+                count(&mut self.counts.log_replications_unavailable);
+                self.fail(clock);
+                return Ok(1);
+            }
+            if self.report_replicated(clock, io) {
+                replication.expect = self.append_position;
+                work = 1;
+            }
+            self.replication = Some(replication);
+            return Ok(work);
+        }
+        // At the stop. The leader's term is recorded at its base before the stop is
+        // reported, so that the member counts toward the leader's commits with the
+        // log it holds to the base, as one that joined at the base does.
+        let at_leaders_base = replication.stop == self.term_base;
+        if at_leaders_base && self.term > self.log_term {
+            io.record_term(self.term, self.term_base)?;
+            self.log_term = self.term;
+        }
+        if self.report_replicated(clock, io) {
+            work = 1;
+        }
+        if at_leaders_base && self.commit_position < self.append_position {
+            let reached = *replication.reached_ns.get_or_insert(clock.now_ns);
+            self.replication = Some(replication);
+            let since = reached.max(self.last_leader_word_ns);
+            if clock.now_ns.saturating_sub(since) >= LEADER_HEARTBEAT_TIMEOUT_NS {
+                self.fail(clock);
+                return Ok(1);
+            }
+            return Ok(work);
+        }
+        if self.catchup {
+            io.remove_catchup()?;
+            self.catchup = false;
+        }
+        self.replication = None;
+        Ok(self.step(ElectionState::Canvass, clock))
+    }
+
+    /// The member's append position to its leader while it replicates: when it has
+    /// moved since the last sent, and every leader heartbeat interval. Returns
+    /// whether one left.
+    fn report_replicated<I: Io>(&mut self, clock: Clock, io: &mut I) -> bool {
+        (self.append_position != self.last_append_sent
+            || Self::due(
+                self.last_append_sent_ns,
+                LEADER_HEARTBEAT_INTERVAL_NS,
+                clock,
+            ))
+            && self.send_append_position(clock, io)
     }
 
     /// State 10. Nothing to replay in a log with no term before the leader's. A member

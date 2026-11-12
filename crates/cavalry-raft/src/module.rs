@@ -600,6 +600,36 @@ impl Io for ClientIo {
         })
     }
 
+    /// Refused, as [`Io::remove_log`] is here: only a member that elects replicates,
+    /// and the module's member is appointed (ADR 0081, ADR 0086). The module's own,
+    /// a subscription on its `catchup` endpoint with a recording armed on it, comes
+    /// with the rest of its I/O for the election.
+    fn add_catchup(&mut self) -> Result<(), Self::Fault> {
+        Err(RaftError::Unsupported {
+            what: "a member that subscribes on its catchup endpoint to replicate",
+        })
+    }
+
+    /// Not sent, as a publication that is not connected sends nothing: the module's
+    /// core never asks, since [`Io::add_catchup`] is refused before it.
+    fn send_catchup_position(&mut self, _leader: i32, _term: i64, _position: i64) -> bool {
+        false
+    }
+
+    /// Refused, as [`Io::add_catchup`] is here.
+    fn catchup_image(&mut self) -> Result<Option<i64>, Self::Fault> {
+        Err(RaftError::Unsupported {
+            what: "a member that reads the image of a replay it replicates from",
+        })
+    }
+
+    /// Refused, as [`Io::add_catchup`] is here.
+    fn remove_catchup(&mut self) -> Result<(), Self::Fault> {
+        Err(RaftError::Unsupported {
+            what: "a member that removes its catchup subscription",
+        })
+    }
+
     fn append(&mut self, entry: &Message<'_>) -> Result<bool, Self::Fault> {
         let Some(publication) = self.log_publication.as_mut() else {
             return Ok(false);

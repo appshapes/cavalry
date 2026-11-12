@@ -26,6 +26,10 @@ pub enum Call {
     /// A replay started: the member it is to, its position and its end.
     StartReplay(i32, i64, i64),
     StopReplay(i32),
+    AddCatchup,
+    RemoveCatchup,
+    /// A catch-up position sent: the leader it is to, the term and the position.
+    CatchupPosition(i32, i64, i64),
 }
 
 /// The world of one core, as the test sets it.
@@ -63,6 +67,12 @@ pub struct Stub {
     /// How the replay to each member ended, by the member's id, once the test has
     /// said so: `replay_stopped` hands it over once.
     pub stopped: [Option<ReplayStopped>; Stub::MEMBERS],
+    /// The join position of the image on the catch-up subscription, once the test
+    /// has given it one.
+    pub catchup_image: Option<i64>,
+    /// The last append position sent: who it was for, the term it carried and the
+    /// position.
+    pub last_append: Option<(i32, i64, i64)>,
 }
 
 impl Stub {
@@ -87,6 +97,8 @@ impl Stub {
             fail_start: false,
             fail_stop: false,
             stopped: [None; Stub::MEMBERS],
+            catchup_image: None,
+            last_append: None,
         }
     }
 
@@ -144,6 +156,15 @@ impl Io for Stub {
                     next_log_position,
                 ],
             ));
+        }
+        if let Message::AppendPosition {
+            leadership_term_id,
+            log_position,
+            ..
+        } = *message
+            && !self.refuse_send
+        {
+            self.last_append = Some((member, leadership_term_id, log_position));
         }
         !self.refuse_send
     }
@@ -256,6 +277,25 @@ impl Io for Stub {
             .ok()
             .and_then(|index| self.stopped.get_mut(index));
         Ok(slot.and_then(Option::take))
+    }
+
+    fn add_catchup(&mut self) -> Result<(), Self::Fault> {
+        self.call(Call::AddCatchup);
+        Ok(())
+    }
+
+    fn send_catchup_position(&mut self, leader: i32, term: i64, position: i64) -> bool {
+        self.call(Call::CatchupPosition(leader, term, position));
+        !self.refuse_send
+    }
+
+    fn catchup_image(&mut self) -> Result<Option<i64>, Self::Fault> {
+        Ok(self.catchup_image)
+    }
+
+    fn remove_catchup(&mut self) -> Result<(), Self::Fault> {
+        self.call(Call::RemoveCatchup);
+        Ok(())
     }
 }
 
