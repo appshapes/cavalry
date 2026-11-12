@@ -550,9 +550,10 @@ pub struct Counts {
     /// `cluster.candidacies`: a ballot the member began as a candidate (ADR 0081).
     pub candidacies: u64,
     /// `cluster.ballots_lost`: a ballot that ended with no leader for the member, which
-    /// canvasses again: a candidate at the election timeout short of a quorum or with
-    /// a vote against, a member in follower ballot whose candidate's new leadership
-    /// term did not come within the election timeout, or either that reads a new
+    /// canvasses again: a candidate on a vote against its candidate term or once it
+    /// holds no vote of its own for that term, at once (ADR 0105), or at the election
+    /// timeout short of a quorum, a member in follower ballot whose candidate's new
+    /// leadership term did not come within the election timeout, or either that reads a new
     /// leadership term for a log term that is not its own and that drops none of its
     /// terms (ADR 0096). A candidate that follows another member's new leadership term
     /// for its own candidate term has a leader and counts none (ADR 0081).
