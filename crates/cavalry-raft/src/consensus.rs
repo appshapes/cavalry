@@ -923,11 +923,12 @@ impl Consensus {
     /// at every run. Refused as [`Consensus::new`] refuses.
     ///
     /// This path has nominate, the two ballots, the elections a leader holds, on the
-    /// loss of its quorum and on a higher term (ADR 0082), the truncation (ADR 0083)
-    /// and the replication of a term a member missed, the leader's side and the
-    /// member's (ADR 0085, ADR 0086). No member on it catches up within its leader's
-    /// term yet, so the consensus module does not use it: see the crate's README for
-    /// what a member on it does where the election would do more.
+    /// loss of its quorum and on a higher term (ADR 0082), the truncation (ADR 0083),
+    /// the replication of a term a member missed (ADR 0085, ADR 0086) and the catch-up
+    /// within a leader's term (ADR 0087, ADR 0088), the leader's side of each and the
+    /// member's. The consensus module does not use it yet: see the crate's README for
+    /// what a member on it does where the election would do more, and for what the
+    /// module's `Io` refuses.
     pub fn with_election(
         member_ids: &[i32],
         member_id: i32,
