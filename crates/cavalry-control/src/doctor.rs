@@ -1680,7 +1680,7 @@ fn electing_no_leader_message(
          their leader: each canvasses, one that no member which reported is ahead of \
          nominates itself after a delay of up to half a second, and it leads once {of} has \
          voted for it. At its start a member waits in canvass up to {startup} s for every \
-         member to report, and nominates at once when all have. If this member stays \
+         member to report, and moves to nominate at once when all have. If this member stays \
          without a leader, fewer than a quorum of the members run or reach each other: run \
          doctor on each member's host, and check that each reaches the consensus endpoint \
          of every other, the third field of its entry in {members}.{replicated}{}",
@@ -1692,6 +1692,10 @@ fn electing_no_leader_message(
 /// What `cluster-joining` says of a member that elects, its election in `state`: the
 /// leader it has taken, what the state does, what bounds it, and the path it needs
 /// (`spec/cluster.md`, "Roles and the election", states 9 to 16; ADR 0085, ADR 0088).
+/// States 9 to 15 wait on endpoints of this member that the leader's host sends to.
+/// In follower ready the image has arrived, and what is left is this member's append
+/// position: the one direction to check is this host's toward the leader's consensus
+/// endpoint, as `joining_message` says of a member whose leader is appointed.
 fn electing_joining_message(
     member: &MemberCounters,
     state: i64,
@@ -1726,16 +1730,42 @@ fn electing_joining_message(
             "Each wait after the replay",
             path.check_toward("this member's log endpoint and its catchup endpoint"),
         ),
-        11..=13 => (
+        // In follower catch-up init and follower catch-up await the member has
+        // subscribed on its catchup endpoint alone: it sends catch-up position and
+        // waits for the replay's image there. Its log endpoint's subscription comes in
+        // follower catch-up (`spec/cluster.md`, states 11 to 13; ADR 0088).
+        11 | 12 => (
+            format!(
+                "It catches up within its leader's term: it asks the leader to replay \
+                 what it lacks, and it does not subscribe to the live log until the \
+                 replay has brought its log near the leader's position. {replays}"
+            ),
+            "Each wait",
+            path.check_toward("this member's catchup endpoint"),
+        ),
+        13 => (
             format!(
                 "It catches up within its leader's term: the leader replays what this \
-                 member lacks while this member also records the live log, and the \
-                 catch-up ends when its log reaches where that recording begins. \
-                 {replays}, and an image of the leader's log on {}",
+                 member lacks, this member also records the live log once the replay has \
+                 brought its log near the leader's position, and the catch-up ends when \
+                 its log reaches where that recording begins. {replays}, and an image of \
+                 the leader's log on {}",
                 path.own_log.trim_end_matches(',')
             ),
             "Each wait",
             path.check_toward("this member's catchup endpoint and its log endpoint"),
+        ),
+        // The image arrived in follower log await; what is left is the append
+        // position, sent to the leader (`spec/cluster.md`, follower ready), so the one
+        // direction to check is this host's toward the leader's consensus endpoint.
+        16 => (
+            format!(
+                "The image of the leader's log has arrived on {} and what is left is this \
+                 member's append position, which must reach the leader",
+                path.own_log
+            ),
+            "Sending it",
+            format!("that this host reaches {}", path.leader_consensus),
         ),
         _ => (
             format!(
@@ -1750,7 +1780,7 @@ fn electing_joining_message(
     format!(
         "member {id} has taken its leader, {}, and joins its log: its election is in {}. \
          {step}. {waits} is bounded by the leader heartbeat timeout, {timeout} s; when \
-         one is not met the election fails, counted in cluster.elections_failed, and the \
+         it runs out, the election fails, counted in cluster.elections_failed, and the \
          member begins again. If it does not close, check {check}.{}",
         path.leader,
         election_state_name(state),
@@ -5459,7 +5489,10 @@ mod tests {
             "{message}"
         );
         assert!(
-            message.contains("waits in canvass up to 60 s for every member to report"),
+            message.contains(
+                "waits in canvass up to 60 s for every member to report, and moves to \
+                 nominate at once when all have"
+            ),
             "{message}"
         );
         let replicated = "the third field of its entry in CAVALRY_CLUSTER_MEMBERS. A member \
@@ -5691,7 +5724,8 @@ mod tests {
     /// A member that elects and has taken a leader names the member its gauge holds,
     /// which need not be the one with the lowest id, and is told what its state does:
     /// the live log's image, a replication, its own replay, or a catch-up, each with
-    /// the endpoint it needs and the endpoints to check (ADR 0102).
+    /// the endpoint it needs and the endpoints to check, and in follower ready the
+    /// append position alone and the leader's consensus endpoint (ADR 0102).
     #[test]
     fn a_member_that_elects_and_joins_names_the_leader_its_gauge_holds() {
         let cluster = Cluster::of(Some(THREE_MEMBERS)).expect("the members string parses");
@@ -5795,36 +5829,64 @@ mod tests {
             "{message}"
         );
 
-        // A catch-up, in each of its three states, needs the replay and the live log.
+        // A catch-up's first two states wait on the catchup endpoint alone: the member
+        // subscribes on its log endpoint only in follower catch-up (`spec/cluster.md`,
+        // states 11 to 13).
         for (state, name) in [
             (11, "follower catch-up init"),
             (12, "follower catch-up await"),
-            (13, "follower catch-up"),
         ] {
             let message = joining(&format!("elects-catch-up-{state}"), state, Some(&cluster));
             assert!(
                 message.contains(&format!(
-                    "its election is in {name}. It catches up within its leader's term:"
+                    "its election is in {name}. It catches up within its leader's term: it \
+                     asks the leader to replay what it lacks, and it does not subscribe to \
+                     the live log until the replay has brought its log near the leader's \
+                     position. The leader's replay must arrive, over UDP, on this member's \
+                     catchup endpoint in CAVALRY_CLUSTER_MEMBERS, 127.0.0.1:9023. Each wait \
+                     is bounded"
                 )),
                 "{message}"
             );
             assert!(
-                message.contains(
-                    "The leader's replay must arrive, over UDP, on this member's catchup \
-                     endpoint in CAVALRY_CLUSTER_MEMBERS, 127.0.0.1:9023, and an image of \
-                     the leader's log on this member's log endpoint in \
-                     CAVALRY_CLUSTER_MEMBERS, 127.0.0.1:9022. Each wait is bounded"
+                message.ends_with(
+                    "If it does not close, check that member 1's host reaches this \
+                     member's catchup endpoint over UDP, and that this host reaches member \
+                     1's consensus endpoint, 127.0.0.1:9011."
                 ),
                 "{message}"
             );
-            assert!(
-                message.contains(
-                    "check that member 1's host reaches this member's catchup endpoint and \
-                     its log endpoint over UDP, and that this host reaches"
-                ),
-                "{message}"
-            );
+            assert!(!message.contains("log endpoint"), "{message}");
         }
+
+        // Follower catch-up needs the replay and, once the replay has brought its log
+        // near the leader's position, the live log as well.
+        let message = joining("elects-catch-up-13", 13, Some(&cluster));
+        assert!(
+            message.contains(
+                "its election is in follower catch-up. It catches up within its leader's \
+                 term: the leader replays what this member lacks, this member also records \
+                 the live log once the replay has brought its log near the leader's \
+                 position,"
+            ),
+            "{message}"
+        );
+        assert!(
+            message.contains(
+                "The leader's replay must arrive, over UDP, on this member's catchup \
+                 endpoint in CAVALRY_CLUSTER_MEMBERS, 127.0.0.1:9023, and an image of \
+                 the leader's log on this member's log endpoint in \
+                 CAVALRY_CLUSTER_MEMBERS, 127.0.0.1:9022. Each wait is bounded"
+            ),
+            "{message}"
+        );
+        assert!(
+            message.contains(
+                "check that member 1's host reaches this member's catchup endpoint and \
+                 its log endpoint over UDP, and that this host reaches"
+            ),
+            "{message}"
+        );
 
         // Follower log init waits for what follower log await does.
         let message = joining("elects-log-init", 14, Some(&cluster));
@@ -5837,16 +5899,59 @@ mod tests {
             "{message}"
         );
 
+        // In follower ready the image has arrived: what is left is the append position,
+        // and the one direction to check is this host's toward the leader's consensus
+        // endpoint (`spec/cluster.md`, follower ready).
+        let message = joining("elects-ready", 16, Some(&cluster));
+        assert!(
+            message.contains(
+                "its election is in follower ready. The image of the leader's log has \
+                 arrived on this member's log endpoint in CAVALRY_CLUSTER_MEMBERS, \
+                 127.0.0.1:9022, and what is left is this member's append position, which \
+                 must reach the leader. Sending it is bounded by the leader heartbeat \
+                 timeout, 10 s;"
+            ),
+            "{message}"
+        );
+        assert!(
+            message.ends_with(
+                "If it does not close, check that this host reaches member 1's consensus \
+                 endpoint, 127.0.0.1:9011."
+            ),
+            "{message}"
+        );
+        for absent in [
+            "must arrive",
+            "reaches this member's log endpoint",
+            "catchup",
+        ] {
+            assert!(!message.contains(absent), "{absent}: {message}");
+        }
+
         // Without the members string the leader is still named, its endpoint by its
         // field.
         let message = joining("elects-no-string", 16, None);
         assert!(
             message.contains(
-                "that this host reaches member 1's consensus endpoint, the third field of \
-                 its entry in CAVALRY_CLUSTER_MEMBERS."
+                "has arrived on this member's log endpoint, the fourth field of its entry in \
+                 CAVALRY_CLUSTER_MEMBERS, and what is left is this member's append position"
             ),
             "{message}"
         );
+        assert!(
+            message.ends_with(
+                "If it does not close, check that this host reaches member 1's consensus \
+                 endpoint, the third field of its entry in CAVALRY_CLUSTER_MEMBERS."
+            ),
+            "{message}"
+        );
+        for absent in [
+            "must arrive",
+            "reaches this member's log endpoint",
+            "catchup",
+        ] {
+            assert!(!message.contains(absent), "{absent}: {message}");
+        }
     }
 
     /// A member whose leader is appointed keeps the texts of that path, with the two
