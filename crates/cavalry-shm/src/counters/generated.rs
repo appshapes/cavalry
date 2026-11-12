@@ -23,7 +23,7 @@ pub const SUBSCRIPTION_POSITION: CounterId = CounterId(4);
 /// `publication.unblocked`, a static counter: Stale claims the driver turned into padding frames because a publisher claimed and did not commit within the unblock timeout (spec/log-buffer.md, The driver).
 pub const PUBLICATION_UNBLOCKED: CounterId = CounterId(5);
 
-/// `log_buffer.rejected_position`, a static counter: Subscriber positions the driver found outside the spec's bounds and refused to use; the client that wrote one is evicted (ADR 0010).
+/// `log_buffer.rejected_position`, a static counter: Positions the driver found outside the spec's bounds and refused to use: a subscriber's position, whose client is evicted (ADR 0010); or the position of the live recording that the sender follows for a cavalry:udp publication whose channel names ssc=true while no receiver answers, when it is not a frame boundary or lies more than two terms past the sender position, which the sender does not move to and counts once for each such position, evicting no client (spec/udp.md, The sender; ADR 0112).
 pub const LOG_BUFFER_REJECTED_POSITION: CounterId = CounterId(6);
 
 /// `log_buffer.rejected_tail`, a static counter: Tail counters the driver found inconsistent with the active term count and refused to use; the publication is closed (ADR 0010).
@@ -188,7 +188,7 @@ pub const SENDER_RTT_REPLIES_SENT: CounterId = CounterId(59);
 /// `sender.position`, a instance gauge: The sender position of one cavalry:udp publication: the next byte the sender puts on the wire, stored by the sender with a release store after each burst; key as publication.position; label text: publication.position's three and the endpoint's registration id in decimal, space-separated, so that doctor names the endpoint.
 pub const SENDER_POSITION: CounterId = CounterId(60);
 
-/// `sender.limit`, a instance gauge: The sender limit of one cavalry:udp publication: the consumption position of the last accepted status message plus its receiver window length, never lowered; key and label as sender.position.
+/// `sender.limit`, a instance gauge: The sender limit of one cavalry:udp publication: the consumption position of the last accepted status message plus its receiver window length, never lowered but for one case: a receiver that joins a publication alone with its recording, under ssc=true, has the limit set anew from its own position, which is behind the sender position the publication had moved to (spec/udp.md, The sender; ADR 0098); key and label as sender.position.
 pub const SENDER_LIMIT: CounterId = CounterId(61);
 
 /// `publication.connected`, a static counter: cavalry:udp publications whose first status message without the send-setup flag arrived: the publication's limit rises to the consumer position plus the publication window from here, the consumer position being the sender position, or the recorder's when the publication is recorded and its recorder is behind (spec/udp.md, The sender).
@@ -422,6 +422,9 @@ pub const CLUSTER_CATCHUPS: CounterId = CounterId(137);
 /// `cluster.terms_dropped`, a client counter: Times one cluster member dropped from its record of terms the terms its leader's record lacks: a new leadership term named, as the term it answers, a term below the member's own log term, with a next term above it, so the leader's record holds none of the member's terms above the one named, and the member took them out of its record, cutting first what it held above the base of the lowest of them, which is counted in cluster.log_truncations too (spec/cluster.md, Messages during an election, and Counters; ADR 0096); key: member id (i32), little-endian; label text: the member id in decimal.
 pub const CLUSTER_TERMS_DROPPED: CounterId = CounterId(138);
 
+/// `sender.bytes_unsent`, a instance gauge: Bytes of one cavalry:udp publication that went to its recording and to no receiver: what its sender position passed while the publication was alone with its recording, its channel naming ssc=true, a recording of it live and no receiver answering, above its sent position, the highest position the sender had sent to, less what the sender position went back over above the sent position when a receiver joined. Never below zero: a byte a receiver was sent before is neither counted nor taken off, and a byte counted that a receiver whose image began below the sent position is sent later stays counted. Allocated for a publication whose channel names ssc=true and no other; key and label as sender.position (spec/udp.md, The sender; ADR 0098, ADR 0112).
+pub const SENDER_BYTES_UNSENT: CounterId = CounterId(139);
+
 /// `cluster.leader_member_id`, a client gauge: The id of the member one cluster member leads as or follows, -1 while it has none, which is in init, canvass, nominate and the two ballots: from the init of an election until it leads a term or takes a leader's new leadership term, and again in the canvass it goes back to when a follower log replication has ended, which begins no election and leaves cluster.election_cause as it is (spec/cluster.md, Counters; ADR 0077, ADR 0102); key: member id (i32), little-endian; label text: the member id in decimal.
 pub const CLUSTER_LEADER_MEMBER_ID: CounterId = CounterId(140);
 
@@ -483,8 +486,8 @@ pub const COUNTERS: &[CounterDef] = &[
         name: "log_buffer.rejected_position",
         kind: Kind::Counter,
         scope: Scope::Static,
-        doc: "Subscriber positions the driver found outside the spec's bounds and refused to use; the client that wrote one is evicted (ADR 0010).",
-        doctor: "A client wrote an impossible position: a buggy binding or a hostile process. The driver's log names the client; rebuild or remove it.",
+        doc: "Positions the driver found outside the spec's bounds and refused to use: a subscriber's position, whose client is evicted (ADR 0010); or the position of the live recording that the sender follows for a cavalry:udp publication whose channel names ssc=true while no receiver answers, when it is not a frame boundary or lies more than two terms past the sender position, which the sender does not move to and counts once for each such position, evicting no client (spec/udp.md, The sender; ADR 0112).",
+        doctor: "If the driver evicted a client, that client wrote an impossible subscriber position: a buggy binding or a hostile process. The driver's log and the client timeout event name it; rebuild or remove it. If no client was evicted, the sender refused a recording's position for a publication whose channel names ssc=true: that publication's sender.position stays while its recording.position moves, and its publisher is held a window past the sender position. The recorder alone writes recording.position, so the value is a driver bug or a client writing where it should not: stop the recording, after which the publication is connected by a receiver alone, as any is, and report both counters' values.",
     },
     CounterDef {
         id: LOG_BUFFER_REJECTED_TAIL,
@@ -923,7 +926,7 @@ pub const COUNTERS: &[CounterDef] = &[
         name: "sender.limit",
         kind: Kind::Gauge,
         scope: Scope::Instance,
-        doc: "The sender limit of one cavalry:udp publication: the consumption position of the last accepted status message plus its receiver window length, never lowered; key and label as sender.position.",
+        doc: "The sender limit of one cavalry:udp publication: the consumption position of the last accepted status message plus its receiver window length, never lowered but for one case: a receiver that joins a publication alone with its recording, under ssc=true, has the limit set anew from its own position, which is behind the sender position the publication had moved to (spec/udp.md, The sender; ADR 0098); key and label as sender.position.",
         doctor: "A sender.limit that stays at 0 is a publication no receiver has answered: see sender.setups_sent; one that stops rising while sender.position reaches it is a receiver whose subscriber is slow.",
     },
     CounterDef {
@@ -1541,6 +1544,14 @@ pub const COUNTERS: &[CounterDef] = &[
         scope: Scope::Client,
         doc: "Times one cluster member dropped from its record of terms the terms its leader's record lacks: a new leadership term named, as the term it answers, a term below the member's own log term, with a next term above it, so the leader's record holds none of the member's terms above the one named, and the member took them out of its record, cutting first what it held above the base of the lowest of them, which is counted in cluster.log_truncations too (spec/cluster.md, Messages during an election, and Counters; ADR 0096); key: member id (i32), little-endian; label text: the member id in decimal.",
         doctor: "The member had recorded a term that fewer than a quorum recorded: it joined a leader that never had a quorum, or led such a term itself. No entry of that term was committed, so nothing committed is lost: what the member cut first, when cluster.log_truncations rose with this count, was uncommitted. The member's record then holds no term its leader's lacks, and it joins. It is how such a member returns, and nothing to act on. A member whose cut would go below the commit position it knows drops nothing and does not count here: cluster.truncations_refused and cluster.elections_failed rise on it at each election while this count stays where it was. Read cluster.leadership_term_id and cluster.commit_position on that member and on its leader.",
+    },
+    CounterDef {
+        id: SENDER_BYTES_UNSENT,
+        name: "sender.bytes_unsent",
+        kind: Kind::Gauge,
+        scope: Scope::Instance,
+        doc: "Bytes of one cavalry:udp publication that went to its recording and to no receiver: what its sender position passed while the publication was alone with its recording, its channel naming ssc=true, a recording of it live and no receiver answering, above its sent position, the highest position the sender had sent to, less what the sender position went back over above the sent position when a receiver joined. Never below zero: a byte a receiver was sent before is neither counted nor taken off, and a byte counted that a receiver whose image began below the sent position is sent later stays counted. Allocated for a publication whose channel names ssc=true and no other; key and label as sender.position (spec/udp.md, The sender; ADR 0098, ADR 0112).",
+        doctor: "A publication on a channel that names ssc=true took messages while no receiver answered: they are in its recording, and a receiver that joins later is sent the stream from its own position, at most a term back, and replays the recording for what came before. Nothing was lost. If receivers were expected, check that a subscription on the stream exists on each destination's host and that its driver receives on that port.",
     },
     CounterDef {
         id: CLUSTER_LEADER_MEMBER_ID,
