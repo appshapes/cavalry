@@ -1394,7 +1394,7 @@ impl Consensus {
                 follower_member_id,
             } => {
                 // The leader's word that the catch-up is over: the member reported
-                // with the catch-up flag, at or past the leader's own position. The
+                // with the catch-up flag, which says it is on the live log. The
                 // catch-up subscription goes, and follower catch-up leaves once the
                 // member is on the live log. One read before the member has reported
                 // with the flag answers an earlier catch-up, and is ignored: taking
@@ -2756,7 +2756,7 @@ impl Consensus {
     }
 
     /// The member's append position to its leader, with `flags`: the catch-up flag
-    /// for a position appended from the leader's catch-up replay.
+    /// for a member in follower catch-up that is on the live log, and none otherwise.
     fn send_append_position_flagged<I: Io>(&mut self, clock: Clock, flags: u8, io: &mut I) -> bool {
         let sent = io.send(
             self.leader_id,
