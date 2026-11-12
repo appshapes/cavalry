@@ -13410,10 +13410,18 @@ mod replay {
         assert_eq!(h.counter(CHANNEL_OPENED), 0);
         assert_eq!(h.counter(REPLAY_STARTED), 0);
 
+        // Each publication names the smallest term: a UDP publication's log takes its
+        // term from its channel alone (ADR 0099), so the conductor's own term, which
+        // `recorded` shrinks, no longer reaches it, and 64 logs of the 16 MiB default
+        // would be about 3 GiB in the temporary directory. A replay on the open channel
+        // below still shares the endpoint: only a join on the same stream compares terms.
         let now = h.now;
         for i in 0..spec::MAX_SEND_ENDPOINTS {
             let correlation_id = 10 + i as i64;
-            let channel = format!("cavalry:udp?endpoint=127.0.0.1:{}", 40_200 + i);
+            let channel = format!(
+                "cavalry:udp?endpoint=127.0.0.1:{}|term-length=64k",
+                40_200 + i
+            );
             h.conductor.add_publication(
                 CLIENT,
                 correlation_id,
@@ -13425,6 +13433,12 @@ mod replay {
             assert_eq!(h.last_error(correlation_id), None, "endpoint {i}");
         }
         assert_eq!(h.conductor.send_endpoints.len(), spec::MAX_SEND_ENDPOINTS);
+        assert!(
+            h.conductor.publications.iter().all(|publication| {
+                publication.log.header().term_length() == cavalry_shm::log::layout::MIN_TERM_LENGTH
+            }),
+            "every log has the smallest term"
+        );
         let publications = h.conductor.publications.len();
         let _ = events(&mut h);
         let allocated = h.counter(COUNTERS_ALLOCATED);
