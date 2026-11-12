@@ -143,4 +143,5 @@ under `docs/` is listed here; `just lint-docs` fails on one that is not.
 - [0097. Count the recorder among a cavalry:udp publication's readers](decisions/0097-count-the-recorder-among-a-cavalry-udp-publications-readers.md)
 - [0100. Move the module to the election in ordered changes, around one that takes the appointed path out](decisions/0100-move-the-module-to-the-election-in-ordered-changes-around-one-that-takes-the-appointed-path-out.md)
 - [0094. Record a member's replays over a driver, and count the live recording once the log reaches it](decisions/0094-record-a-members-replays-over-a-driver-and-count-the-live-recording-once-the-log-reaches-it.md)
+- [0101. Read a publisher held by its recorder from its limit, in doctor](decisions/0101-read-a-publisher-held-by-its-recorder-from-its-limit-in-doctor.md)
 - [0098. Let a recording connect a cavalry:udp publication whose channel names ssc](decisions/0098-let-a-recording-connect-a-cavalry-udp-publication-whose-channel-names-ssc.md)
