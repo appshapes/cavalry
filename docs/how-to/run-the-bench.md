@@ -833,14 +833,15 @@ shared runner is
      compare the files:
 
      ```sh
-     # ignore: builds two checkouts for another target, minutes each; needs `rustup target add x86_64-unknown-linux-gnu`
-     # MASTER and CHANGE are two checkouts, one at master and one at the change. The
+     # ignore: needs a second checkout at master, and `rustup target add x86_64-unknown-linux-gnu` once
+     # MASTER and CHANGE are two checkouts, one at master and one at the change; each
+     # builds in about half a minute on a laptop, and nothing is written to either. The
      # stand-in linker lets the assembly of cavalry-ffi and of the bench binary be
      # written on a laptop that has no linker for Linux; it links nothing, and nothing
      # built this way is run.
-     MASTER=../cavalry-master CHANGE=. OUT=/tmp/asm
-     for tree in MASTER CHANGE; do
-       dir=$(eval echo \$$tree)
+     MASTER=../cavalry-master CHANGE=$PWD OUT=/tmp/asm
+     for pair in "MASTER:$MASTER" "CHANGE:$CHANGE"; do
+       tree=${pair%%:*} dir=${pair#*:}
        for crate in cavalry-shm cavalry-log cavalry-client cavalry-ffi; do
          (cd "$dir" && CARGO_TARGET_X86_64_UNKNOWN_LINUX_GNU_LINKER=/usr/bin/true \
            cargo rustc --release -p "$crate" --lib --target x86_64-unknown-linux-gnu \
