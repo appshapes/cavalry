@@ -248,7 +248,8 @@ What the driver does with each, after the checks of "What the driver rejects":
   that would join a live publication under a different `fc` is error code 1 with the
   reason `fc`. A channel that names `ssc=true` (`spec/udp.md`, version 3; ADR 0098)
   has its publication connected by a live recording of it as well as by a receiver,
-  and an add that would join a live publication under another `ssc`, `true` against
+  with a `sender.bytes_unsent` counter of its own beside its `sender.position`, keyed
+  and labelled as that is, and an add that would join a live publication under another `ssc`, `true` against
   `false` or against a channel that names none, is error code 1 with the reason `ssc`.
   A channel that names the position keys of `spec/udp.md`, version 2,
   `init-term-id`, `term-id` and `term-offset`, has its log created at the position they

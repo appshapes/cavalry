@@ -660,7 +660,6 @@ lands: the sender's and the endpoint's rows, the publication's connection and
 | --- | --- |
 | `sender.bytes_sent`, `sender.frames_sent` | a data or padding frame is sent: the bytes put on the wire, 32 for a padding frame, and one frame each; once per destination on a control channel |
 | `sender.setups_sent`, `sender.heartbeats_sent` | a setup frame or a heartbeat is sent; once per destination on a control channel |
-| `sender.bytes_unsent` | the sender position of a publication alone with its recording moves: the bytes it passed, which went to the recording and to no receiver (ADR 0098) |
 | `sender.retransmits_sent`, `sender.retransmitted_bytes` | a NAK is answered; the bytes once per destination on a control channel |
 | `sender.retransmit_overflow` | a NAK for another range arrives while a retransmit is outstanding |
 | `sender.short_sends`, `sender.send_failed` | the socket took part of a datagram, or refused one; once per destination on a control channel |
@@ -671,6 +670,7 @@ lands: the sender's and the endpoint's rows, the publication's connection and
 | `sender.flow_control_receivers_timed_out` | a receiver is dropped from a `min` publication's table for no status message within the flow control receiver timeout; one dropped because its last status message carried end of stream is not counted (ADR 0054) |
 | `sender.flow_control_receivers_full` | a status message from a receiver a `min` publication's full table does not hold: accepted, not tracked |
 | `sender.position`, `sender.limit`, `sender.flow_control_receivers` | keyed as `publication.position` is: the sender position and the sender limit of one publication, and the receivers in its `min` table now, a closed publication's ended receivers among them until the linger ends (ADR 0056), 0 under `max` |
+| `sender.bytes_unsent` | keyed as `publication.position` is, for a publication whose channel names `ssc=true` and no other: the bytes its sender position passed while it was alone with its recording, which went to the recording and to no receiver (ADR 0098) |
 | `receiver.bytes_received`, `receiver.frames_received` | a data or padding frame is accepted: the bytes as they came off the wire, 32 for a padding frame, and one frame each |
 | `receiver.setups_received`, `receiver.setups_unwanted`, `receiver.setups_elicited` | a setup frame arrives; one names a stream nobody wants; a status message asked a sender for one |
 | `receiver.heartbeats_received` | a heartbeat is accepted |
