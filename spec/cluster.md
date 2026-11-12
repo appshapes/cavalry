@@ -623,8 +623,9 @@ leader and the term its term, its candidate term too when the term is higher, in
 memory alone ("The log"), and a
 reader whose append position is above a next
 term base log position the message carries, one not −1, truncates its log to that
-position first, the uncommitted tail of an older term, `truncate recording` on the
-recording that begins at or below the position and ends above it and `purge
+position first, the uncommitted tail of an older term, `truncate recording` on each
+recording that begins at or below the position and ends above it, which are two that
+overlap after a catch-up (state 13; ADR 0095), and `purge
 recording` on every recording that begins above it, every recorded term whose base is
 above the position leaving its record of terms with them, so that it votes as a
 member of no term it no longer holds, and a message whose next term base log

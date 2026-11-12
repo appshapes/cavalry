@@ -8,7 +8,11 @@
   reader's rule in "Messages during an election", and the answer of a leader whose
   election is closed; and two rows of "Counters", a new one for
   `cluster.terms_dropped` and what `cluster.ballots_lost` counts for a message that
-  is not for the reader's log term. Changes one sentence of `spec/durable-log.md`,
+  is not for the reader's log term; and, in the same paragraph of "Messages during
+  an election", one clause of ADR 0095's truncation, which the review of pull
+  request 246 noted: `truncate recording` is sent for each recording that begins at
+  or below the position and ends above it, two that overlap after a catch-up, where
+  the page said "the recording". Changes one sentence of `spec/durable-log.md`,
   "The driver": what the module writes state 3 over. No message's layout changes and
   no file's format changes; both pages stay at their versions, since no member over
   a driver elects yet (ADR 0081). Adds the `answered-term` vectors and five
