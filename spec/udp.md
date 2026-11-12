@@ -25,8 +25,8 @@ no receiver answers (ADR 0098); every frame of version 2 is unchanged and its ve
 byte stays 0, so a receiver of version 2 reads a sender of version 3, which it joins at
 the position the setup frame carries as it joins any sender, and a channel of version
 3 is refused by a reader of version 2 as a key it does not name. Version 4 adds
-`term-length`, by which a publication's channel names the term length of its log (ADR
-0099); every frame of version 3 is unchanged and its version byte stays 0, so a
+`term-length`, by which a publication's channel names the term length of its log, and
+the counter `sender.joins_refused` (ADR 0099); every frame of version 3 is unchanged and its version byte stays 0, so a
 receiver of any version reads a sender of version 4, whose setup frame carries its
 term length as every setup frame does, and a channel of version 4 is refused by a
 reader of version 3 as a key it does not name.
@@ -452,7 +452,10 @@ receiver is sent every frame from its own position on and has nothing to NAK: th
 term behind the sender position is never cleaned, and nothing in it was sent. A status
 message whose position is further behind, or ahead of the sender position, is rejected
 and counted in `sender.status_messages_rejected`, since the frames it would need are
-no longer in the log. Every heartbeat that receiver is then sent is an over-run, which
+no longer in the log; one that is further behind is counted in the publication's own
+`sender.joins_refused` as well, from version 4, since it says that the publisher wrote
+more than a term between a setup frame and its answer, which a longer `term-length`
+ends ("The channel URI"; ADR 0099). Every heartbeat that receiver is then sent is an over-run, which
 is no activity ("The receiver", steps 2 and 5): its image times out, its subscribers
 are told with `unavailable image`, and after the cool-down a new image joins at the
 sender position. So no image is left waiting for frames that will not come, nothing is
@@ -711,6 +714,7 @@ lands: the sender's and the endpoint's rows, the publication's connection and
 | `sender.flow_control_receivers_full` | a status message from a receiver a `min` publication's full table does not hold: accepted, not tracked |
 | `sender.position`, `sender.limit`, `sender.flow_control_receivers` | keyed as `publication.position` is: the sender position and the sender limit of one publication, and the receivers in its `min` table now, a closed publication's ended receivers among them until the linger ends (ADR 0056), 0 under `max` |
 | `sender.bytes_unsent` | keyed as `publication.position` is, for a publication whose channel names `ssc=true` and no other, a gauge: the bytes that went to its recording and to no receiver, what its sender position passed while it was alone with its recording less what it went back over for a receiver that joined (ADR 0098) |
+| `sender.joins_refused` | keyed as `publication.position` is, for a publication whose channel names `ssc=true` and no other: the status messages of a receiver that would have joined it while it was alone with its recording and named a position more than a term behind the sender position, each counted in `sender.status_messages_rejected` too (ADR 0099) |
 | `receiver.bytes_received`, `receiver.frames_received` | a data or padding frame is accepted: the bytes as they came off the wire, 32 for a padding frame, and one frame each |
 | `receiver.setups_received`, `receiver.setups_unwanted`, `receiver.setups_elicited` | a setup frame arrives; one names a stream nobody wants; a status message asked a sender for one |
 | `receiver.heartbeats_received` | a heartbeat is accepted |

@@ -57,8 +57,8 @@ use cavalry_shm::counters::generated::{
     RECORDING_RETENTION_FAILED, RECORDING_SLOT_DROPPED, RECORDING_START_FAILED, RECORDING_STARTED,
     RECORDING_STOPPED, RECORDING_SYNCED_POSITION, RECORDING_TRUNCATED, REPLAY_ENDED, REPLAY_FAILED,
     REPLAY_NOT_CONNECTED, REPLAY_POSITION, REPLAY_START_FAILED, REPLAY_STARTED, REPLAY_STOPPED,
-    SENDER_BYTES_UNSENT, SENDER_FLOW_CONTROL_RECEIVERS, SENDER_LIMIT, SENDER_POSITION,
-    SUBSCRIPTION_ADD_DEFERRED, SUBSCRIPTION_ADD_DEFERRED_TIMED_OUT,
+    SENDER_BYTES_UNSENT, SENDER_FLOW_CONTROL_RECEIVERS, SENDER_JOINS_REFUSED, SENDER_LIMIT,
+    SENDER_POSITION, SUBSCRIPTION_ADD_DEFERRED, SUBSCRIPTION_ADD_DEFERRED_TIMED_OUT,
     SUBSCRIPTION_ADD_DEFERRED_WAITING, SUBSCRIPTION_POSITION,
 };
 use cavalry_shm::counters::{Counter, CounterId, CountersError, CountersFile, Scope};
@@ -363,6 +363,9 @@ struct UdpPublication {
     /// The id of the sender's `sender.bytes_unsent` counter, which a publication under
     /// `ssc=true` has and no other; freed with the others.
     unsent_id: Option<u32>,
+    /// The id of the sender's `sender.joins_refused` counter, which a publication under
+    /// `ssc=true` has and no other; freed with the others (ADR 0099).
+    joins_refused_id: Option<u32>,
     /// The recording the sender has been told to follow, for `ssc`.
     followed: Followed,
 }
@@ -2139,9 +2142,10 @@ impl Conductor {
             }
             label
         };
-        // A publication on a channel that names `ssc=true` has a sixth counter, what
-        // its sender position passed while it was alone with its recording (ADR 0098).
-        let mut allocated: Vec<Counter> = Vec::with_capacity(6);
+        // A publication on a channel that names `ssc=true` has two counters more: what
+        // its sender position passed while it was alone with its recording (ADR 0098),
+        // and the receivers it could not join there (ADR 0099).
+        let mut allocated: Vec<Counter> = Vec::with_capacity(7);
         for (id, name, endpoint) in [
             (PUBLICATION_POSITION, "publication.position", false),
             (PUBLICATION_LIMIT, "publication.limit", false),
@@ -2153,9 +2157,10 @@ impl Conductor {
                 true,
             ),
             (SENDER_BYTES_UNSENT, "sender.bytes_unsent", true),
+            (SENDER_JOINS_REFUSED, "sender.joins_refused", true),
         ]
         .into_iter()
-        .take(if ssc { 6 } else { 5 })
+        .take(if ssc { 7 } else { 5 })
         {
             match self.counters.allocate(id, &key, &label(name, endpoint)) {
                 Ok(counter) => allocated.push(counter),
@@ -2189,6 +2194,7 @@ impl Conductor {
             return;
         };
         let unsent = counters.next();
+        let joins_refused = counters.next();
         let reader = match log.reader(start_position) {
             Ok(reader) => reader,
             Err(error) => {
@@ -2199,6 +2205,7 @@ impl Conductor {
                     Some(&sender_limit),
                     Some(&receivers),
                     unsent.as_ref(),
+                    joins_refused.as_ref(),
                 ]
                 .into_iter()
                 .flatten()
@@ -2252,6 +2259,7 @@ impl Conductor {
                 position: keys,
                 ssc,
                 unsent_id: unsent.as_ref().map(Counter::id),
+                joins_refused_id: joins_refused.as_ref().map(Counter::id),
                 followed: Followed::Nothing,
             }),
         };
@@ -2270,6 +2278,7 @@ impl Conductor {
             receivers,
             receiver_table: receiver_table(flow_control),
             unsent,
+            joins_refused,
         };
         self.hand_to_sender(endpoint_index, socket, add);
         let status_id = counter_id(&self.send_endpoints[endpoint_index].status);
@@ -4542,8 +4551,8 @@ impl Conductor {
             let _ = self.counters.free(udp.sender_position.id(), reuse);
             let _ = self.counters.free(udp.sender_limit_id, reuse);
             let _ = self.counters.free(udp.receivers_id, reuse);
-            if let Some(unsent_id) = udp.unsent_id {
-                let _ = self.counters.free(unsent_id, reuse);
+            for id in [udp.unsent_id, udp.joins_refused_id].into_iter().flatten() {
+                let _ = self.counters.free(id, reuse);
             }
             // A stopped recording's counter that still waited for the sender: the
             // sender's close let it go (ADR 0098).
@@ -6274,6 +6283,7 @@ impl Conductor {
                 // A replay's channel names no `ssc`: it is refused there (ADR 0098).
                 ssc: false,
                 unsent_id: None,
+                joins_refused_id: None,
                 followed: Followed::Nothing,
             });
             let add = sender::AddPublication {
@@ -6291,6 +6301,7 @@ impl Conductor {
                 receivers,
                 receiver_table: receiver_table(flow_control),
                 unsent: None,
+                joins_refused: None,
             };
             self.hand_to_sender(endpoint_index, socket, add);
         }
@@ -9890,6 +9901,11 @@ mod recording {
                 .connected
         );
         assert!(h.sender.positions_of(2).expect("held").0 >= position);
+        assert_eq!(
+            joins_refused(&h),
+            1,
+            "the publication's own counter says a receiver could not join (ADR 0099)"
+        );
         assert_eq!(h.counter(PUBLICATION_CONNECTED), 0);
 
         // The publisher stops, the recorder writes what is left, and the recording is
@@ -10241,6 +10257,7 @@ mod recording {
         }
         assert_eq!(h.counter(SENDER_BYTES_SENT), alone);
         assert_eq!(unsent(&h), 0, "what was passed is sent after all");
+        assert_eq!(joins_refused(&h), 0);
         assert_eq!(
             h.counter(cavalry_shm::counters::generated::SENDER_NAKS_RECEIVED),
             0
@@ -10478,6 +10495,7 @@ mod recording {
             position_after(alone),
             "what was gone back over is sent"
         );
+        assert_eq!(joins_refused(&h), 0);
         assert_eq!(
             h.counter(cavalry_shm::counters::generated::SENDER_NAKS_RECEIVED),
             0
@@ -10496,7 +10514,123 @@ mod recording {
         assert_eq!(stop, position_after(late));
         assert_eq!(recorded, fold);
         assert_eq!(h.counter(RECORDING_WRITE_FAILED), 0);
+        // A replay of it has a log of the recording's term length, and a subscriber
+        // that reads it gets the nine terms' messages back, in order.
+        h.conductor
+            .add_subscription(1, 60, 2001, b"cavalry:ipc", h.now);
+        h.conductor.start_replay(
+            61,
+            0,
+            cavalry_proto::client_protocol::NULL_POSITION,
+            NULL_LENGTH,
+            2001,
+            b"cavalry:ipc",
+        );
+        let deadline = Instant::now() + Duration::from_secs(30);
+        let replayed = loop {
+            let now = now_nanos();
+            h.conductor.duty_cycle(now);
+            h.replayer.duty_cycle(now);
+            if let Ok(log) = LogBuffers::open(h.dir.path(), 61, false) {
+                break log;
+            }
+            assert_eq!(h.last_error(61), None);
+            assert!(Instant::now() < deadline, "the replay's log");
+        };
+        assert_eq!(replayed.header().term_length(), 65536);
+        let mut reader = replayed.reader(0).expect("a reader");
+        let mut read = 0i64;
+        let mut refold = 0u64;
+        while reader.position() < position_after(late) {
+            let poll = reader
+                .poll(64, |body, _| {
+                    assert_eq!(body, message(read).as_slice());
+                    refold = fold_bytes(refold, body);
+                    read += 1;
+                })
+                .expect("the poll reads");
+            if let Some(image) = h.conductor.images.last() {
+                image.position.store_release(poll.position);
+            }
+            let now = now_nanos();
+            h.conductor.duty_cycle(now);
+            h.replayer.duty_cycle(now);
+            assert!(
+                Instant::now() < deadline,
+                "the replay reached {} of {}",
+                reader.position(),
+                position_after(late)
+            );
+        }
+        assert_eq!((read, refold), (late, fold));
         assert_eq!(h.counter(LOG_BUFFER_REJECTED_FRAME), 0);
+    }
+
+    /// The bounds of `term-length` at the conductor: the longest term this version
+    /// creates makes a log of three of them, with the 16 MiB cap on a message not yet
+    /// reached, and a length outside the bounds, one that is not a power of two and a
+    /// suffix this version does not read are refused with the reason `term-length`,
+    /// before anything is made (ADR 0099; invariant 3).
+    #[test]
+    fn a_udp_publications_term_length_is_held_to_its_bounds() {
+        let mut h = Harness::new("udp-term-length-bounds");
+        let receiver = TestReceiver::bind();
+        let unicast = String::from_utf8(receiver.channel()).expect("utf-8");
+        let now = h.now;
+        for (correlation_id, value) in [
+            (2, "32768"),
+            (3, "32k"),
+            (4, "128m"),
+            (5, "1g"),
+            (6, "100000"),
+            (7, "0"),
+            (8, "64kb"),
+            (9, "-65536"),
+        ] {
+            let channel = format!("{unicast}|term-length={value}");
+            h.conductor
+                .add_publication(1, correlation_id, 7, channel.as_bytes(), false, now);
+            let (code, message) = h.last_error(correlation_id).expect("an error");
+            assert_eq!(code, 1, "{value}: {message}");
+            assert!(message.contains("(term-length)"), "{value}: {message}");
+            assert!(message.contains("65536"), "{value}: {message}");
+            assert!(message.contains("67108864"), "{value}: {message}");
+        }
+        assert!(h.conductor.publications.is_empty());
+        assert!(h.conductor.send_endpoints.is_empty());
+        let longest = format!("{unicast}|term-length=64M");
+        h.conductor
+            .add_publication(1, 20, 7, longest.as_bytes(), false, now);
+        assert_eq!(h.last_error(20), None);
+        let header = h.conductor.publications[0].log.header();
+        assert_eq!(header.term_length(), 67_108_864);
+        assert_eq!(header.publication_window_length(), 33_554_432);
+        assert_eq!(header.max_message_length(), 8_388_608);
+        assert!(
+            h.dir
+                .path()
+                .join("publications/20.logbuffer")
+                .metadata()
+                .is_ok_and(|file| file.len() == 3 * 67_108_864 + 4096),
+            "the log is three terms and its metadata page"
+        );
+        // The position keys count in it: the last frame boundary of its third term.
+        let keyed =
+            format!("{unicast}|term-length=64m|init-term-id=0|term-id=2|term-offset=67108832");
+        h.conductor
+            .add_publication(1, 21, 8, keyed.as_bytes(), false, now);
+        assert_eq!(h.last_error(21), None);
+        assert_eq!(
+            h.conductor.publications[1].limit.get(),
+            2 * 67_108_864 + 67_108_832
+        );
+        let over =
+            format!("{unicast}|term-length=64m|init-term-id=0|term-id=2|term-offset=67108864");
+        h.conductor
+            .add_publication(1, 22, 9, over.as_bytes(), false, now);
+        let (code, message) = h.last_error(22).expect("an error");
+        assert_eq!(code, 1, "{message}");
+        assert!(message.contains("(position)"), "{message}");
     }
 
     /// A recording does not connect a `cavalry:udp` publication whose channel names no
@@ -10543,10 +10677,20 @@ mod recording {
 
     /// The `sender.bytes_unsent` of the first publication, which names `ssc=true`.
     fn unsent(h: &Harness) -> i64 {
+        ssc_counter(h, |udp| udp.unsent_id)
+    }
+
+    /// The `sender.joins_refused` of the first publication, which names `ssc=true`.
+    fn joins_refused(h: &Harness) -> i64 {
+        ssc_counter(h, |udp| udp.joins_refused_id)
+    }
+
+    /// One of the two counters a publication under `ssc=true` has and no other.
+    fn ssc_counter(h: &Harness, id: impl Fn(&UdpPublication) -> Option<u32>) -> i64 {
         let id = h.conductor.publications[0]
             .udp
             .as_ref()
-            .and_then(|udp| udp.unsent_id)
+            .and_then(id)
             .expect("a publication under ssc=true has the counter");
         cavalry_shm::counters::CountersReader::open(h.dir.path())
             .expect("the counters file opens")

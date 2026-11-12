@@ -110,6 +110,9 @@ pub(crate) struct AddPublication {
     /// Its `sender.bytes_unsent` counter, which a publication on a channel that names
     /// `ssc=true` has and no other (`spec/udp.md`, "The sender"; ADR 0098).
     pub unsent: Option<Counter>,
+    /// Its `sender.joins_refused` counter, which a publication on a channel that names
+    /// `ssc=true` has and no other (`spec/udp.md`, "The sender"; ADR 0099).
+    pub joins_refused: Option<Counter>,
 }
 
 /// One receiver in a `min` publication's table, by its receiver id: the position plus
@@ -364,6 +367,10 @@ struct Live {
     /// Its `sender.bytes_unsent`: what the sender position passed while following, less
     /// what it went back for when a receiver joined.
     unsent: Option<Counter>,
+    /// Its `sender.joins_refused`: the status messages of a receiver that would have
+    /// joined it while it was alone with its recording, and named a position more than
+    /// a term behind.
+    joins_refused: Option<Counter>,
     /// The last recording position the sender could not follow, counted once.
     refused_position: i64,
 }
@@ -918,6 +925,7 @@ impl Sender {
                     receivers_gauge: add.receivers,
                     recording: None,
                     unsent: add.unsent,
+                    joins_refused: add.joins_refused,
                     refused_position: -1,
                 });
             }
@@ -1059,8 +1067,11 @@ impl Sender {
         // of an earlier connection, left it: at most a term behind, the sender goes
         // back to it and sends from there, so the receiver has nothing to NAK; the
         // term behind the sender position is never cleaned, and nothing in it was sent.
-        // Further behind, what it would need is no longer in the log: rejected, and its
-        // image times out and joins again. The limit is set anew from this receiver.
+        // Further behind, what it would need is no longer in the log: rejected and
+        // counted in the publication's own `sender.joins_refused`, since a publisher
+        // that writes more than a term between a setup frame and its answer is one
+        // whose term is too short for it (ADR 0099), and its image times out and joins
+        // again. The limit is set anew from this receiver.
         if live.alone(now) {
             let position = cavalry_proto::udp::position(
                 message.consumption_term_id,
@@ -1071,6 +1082,11 @@ impl Sender {
             let behind = live.sender_position.wrapping_sub(position);
             if behind < 0 || behind > i64::from(live.positions.term_length()) {
                 self.statics.status_messages_rejected.increment();
+                if behind > 0
+                    && let Some(joins_refused) = &live.joins_refused
+                {
+                    joins_refused.add(1);
+                }
                 return;
             }
             if let Some(unsent) = &live.unsent {
