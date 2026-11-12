@@ -52,7 +52,10 @@ commit path runs per message.
   append position (ADR 0087). A member that has joined its leader's term behind the
   leader's log asks for it from its append position, records the leader's replay, adds
   the live log when it is near the leader's position, and joins when the leader sends
-  stop catch-up (ADR 0088). The consensus module does not use this path yet: a member
+  stop catch-up (ADR 0088). A leader on this path closes its election in leader ready
+  when a quorum of members, itself among them, has joined its log at its log position,
+  and waits for no other member: one that joins after the term's first entry catches up
+  with it (`spec/cluster.md`, row 8). The consensus module does not use this path yet: a member
   over a driver is appointed until the election can do what the next section lists, and
   then the module moves to it in one change (ADR 0081).
 - Counts every move of the election. `ElectionState` is the state machine
@@ -143,11 +146,6 @@ election does more, it does this instead, until the step that builds it (ADR 008
   When that member leads, it can ask another for a truncation below a commit position
   that member knows, which is refused at every election: the member does not join
   (card 267, with a test that makes the history).
-- Leader ready waits for every member the leader has heard to count, as the appointed
-  leader's does, and for a quorum alone only once the leader heartbeat timeout has
-  passed in that state, where the page closes it on a quorum at once. The wait was for
-  a follower that missed a term's first entry and could not catch up with it; it can
-  now, and the wait goes in the next change (ADR 0088).
 - A member starts with no term: its record of terms and its candidate term are not
   read back.
 

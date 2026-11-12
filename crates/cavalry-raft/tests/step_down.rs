@@ -1,10 +1,11 @@
 //! The elections a member that elects holds once it leads or follows, one core at a
 //! time, driven by hand through an [`Io`] that remembers what it was asked
 //! (`spec/cluster.md`, "The commit position", states 5 and 8, "Messages during an
-//! election" and "Messages outside an election"; ADR 0082): a leader steps down on a
-//! term above its own, fails its election on one before it has closed, holds an
-//! election when its active members fall below a quorum, and gives its log up in
-//! init; a follower holds an election on a term above its own too.
+//! election" and "Messages outside an election"; ADR 0082): a leader closes its
+//! election on a quorum, steps down on a term above its own, fails its election on
+//! one before it has closed, holds an election when its active members fall below a
+//! quorum, and gives its log up in init; a follower holds an election on a term above
+//! its own too.
 //!
 //! [`Io`]: cavalry_raft::Io
 
@@ -64,13 +65,17 @@ fn to_leader_log_replication(member: &mut Consensus, io: &mut Stub) -> u64 {
     507
 }
 
-/// Takes the leader on to leader ready and holds it there: member 1 has joined its log
-/// and member 2, heard in canvass, has not, so the leader waits for it. Returns the
-/// next millisecond.
+/// Takes the leader on to leader ready and holds it there: member 1 joined its log,
+/// which took the leader past leader log replication, and then canvassed again, as a
+/// member whose election failed does, so no member but the leader counts for the term.
+/// Returns the next millisecond.
 fn to_leader_ready(member: &mut Consensus, io: &mut Stub) -> u64 {
     let ms = to_leader_log_replication(member, io);
     read(member, io, ms, &append_position(1, 0));
-    for step in 0..4 {
+    work(member, io, ms);
+    assert_eq!(member.election_state(), ElectionState::LeaderReplay);
+    read(member, io, ms, &canvass_position(1, -1, 0));
+    for step in 1..4 {
         work(member, io, ms + step);
     }
     assert_eq!(member.election_state(), ElectionState::LeaderReady);
@@ -285,6 +290,54 @@ fn a_member_whose_leader_is_appointed_holds_no_election_on_a_higher_term() {
     assert_eq!(counts.leader_step_downs, 0);
 }
 
+/// A leader that elects closes its election in leader ready when a quorum counts for
+/// its term at its log position, itself among them, and waits for no other member:
+/// member 2, heard in canvass, has not joined its log. The term's first entry is
+/// appended once, in the cycle that closes. The appointed leader waits for the member
+/// it heard (`core.rs`, `leader_ready_waits_for_a_member_it_heard_whoever_else_has_joined`).
+/// A leader held in leader ready with no member counted stays there, an append
+/// position at another position than its own counts for nothing, and it closes in the
+/// cycle after a member reports its own.
+#[test]
+fn a_leader_closes_its_election_on_a_quorum_and_waits_for_no_other_member() {
+    let first_entries =
+        |io: &Stub| io.count(|call| *call == Call::Append(Template::NewLeadershipTermEvent));
+    let mut io = Stub::new();
+    let mut leader = elector(4);
+    let ms = to_leader_log_replication(&mut leader, &mut io);
+    read(&mut leader, &mut io, ms, &append_position(1, 0));
+    for step in 0..3 {
+        work(&mut leader, &mut io, ms + step);
+    }
+    assert_eq!(leader.election_state(), ElectionState::LeaderReady);
+    assert_eq!(first_entries(&io), 0);
+    work(&mut leader, &mut io, ms + 3);
+    assert_eq!(leader.election_state(), ElectionState::Closed);
+    assert_eq!(leader.role(), Role::Leader);
+    assert_eq!(first_entries(&io), 1);
+    let counts = leader.counts();
+    assert_eq!(counts.elections_closed, 1);
+    assert_eq!(counts.elections_failed, 0);
+    assert_eq!(counts.appointed_leader_behind, 0);
+
+    // Held in leader ready: the leader alone counts, one of three.
+    let mut io = Stub::new();
+    let mut leader = elector(4);
+    let ms = to_leader_ready(&mut leader, &mut io);
+    work(&mut leader, &mut io, ms);
+    assert_eq!(leader.election_state(), ElectionState::LeaderReady);
+    // A position past the leader's own is of entries its log does not hold.
+    read(&mut leader, &mut io, ms + 1, &append_position(2, 32));
+    work(&mut leader, &mut io, ms + 1);
+    assert_eq!(leader.election_state(), ElectionState::LeaderReady);
+    assert_eq!(first_entries(&io), 0);
+    assert_eq!(leader.counts().appointed_leader_behind, 0);
+    read(&mut leader, &mut io, ms + 2, &append_position(2, 0));
+    work(&mut leader, &mut io, ms + 2);
+    assert_eq!(leader.election_state(), ElectionState::Closed);
+    assert_eq!(first_entries(&io), 1);
+}
+
 /// A leader whose election has not closed fails it on a canvass position with a term
 /// above its own, in leader log replication and in leader ready, and is a follower in
 /// init from the same call. In leader replay and leader init the message updates its
@@ -367,7 +420,7 @@ fn a_leader_that_loses_its_quorum_holds_an_election() {
     assert_eq!(counts.leader_quorum_losses, 1);
     assert_eq!(counts.elections_failed, 1);
 
-    // Leader ready: member 1 reported last when it joined the log.
+    // Leader ready: member 1 reported last when it canvassed again.
     let mut io = Stub::new();
     let mut leader = elector(5);
     let ms = to_leader_ready(&mut leader, &mut io);

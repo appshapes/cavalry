@@ -92,9 +92,9 @@ pub enum ElectionState {
     LeaderReplay = 6,
     /// The leader joins its log for the term.
     LeaderInit = 7,
-    /// The leader announces its term until every member counts for it, or a quorum
-    /// once the leader heartbeat timeout has passed in this state, then appends the
-    /// term's first entry.
+    /// The leader announces its term until a quorum counts for it, then appends the
+    /// term's first entry. The appointed leader waits for every member it has heard,
+    /// or for a quorum once the leader heartbeat timeout has passed in this state.
     LeaderReady = 8,
     /// A member below its leader's term base replicates one term it lacks from the
     /// leader's recordings, to that term's end, and canvasses again (ADR 0086).
@@ -2342,14 +2342,17 @@ impl Consensus {
         Ok(work)
     }
 
-    /// State 8. The heartbeat until every member the leader has heard counts for the
-    /// term at the leader's log position, or a quorum once the leader heartbeat timeout
-    /// has passed in this state, and no member's last report holds a log ahead of the
-    /// leader's; then the term's first entry, the new leadership term event. A member
-    /// is heard once it has reported since the canvass began, in a canvass position or
-    /// an append position; it counts by an append position alone, which it sends once
-    /// it has joined the log. A leader that elects fails its election when its active
-    /// members fall below a quorum, as in state 5.
+    /// State 8. The heartbeat until enough members count for the term at the leader's
+    /// log position; then the term's first entry, the new leadership term event. A
+    /// member counts by an append position alone, which it sends once it has joined the
+    /// log. A leader that elects closes on a quorum at once: a member that joins after
+    /// the term's first entry catches up with it, states 11 to 13. It fails its
+    /// election when its active members fall below a quorum, as in state 5. The
+    /// appointed leader's members have no catch-up, so it waits for every member it has
+    /// heard, or for a quorum once the leader heartbeat timeout has passed in this
+    /// state, and never while a member's last report holds a log ahead of its own. A
+    /// member is heard once it has reported since the canvass began, in a canvass
+    /// position or an append position.
     fn leader_ready<I: Io>(&mut self, clock: Clock, io: &mut I) -> Result<usize, I::Fault> {
         if self.report_own(clock) {
             self.fail(clock);
@@ -2357,7 +2360,6 @@ impl Consensus {
         }
         let work = self.announce(clock, io);
         let members = || self.peers.iter().take(self.count);
-        let heard = members().filter(|peer| peer.reported).count();
         let counted = members()
             .filter(|peer| {
                 // At the leader's log position and no other: a position past it is of
@@ -2369,13 +2371,21 @@ impl Consensus {
                     && clock.now_ns.saturating_sub(peer.at_ns) < LEADER_HEARTBEAT_TIMEOUT_NS
             })
             .count();
-        let deadline_passed =
-            clock.now_ns.saturating_sub(self.state_since_ns) >= LEADER_HEARTBEAT_TIMEOUT_NS;
-        let ahead = self.count_ahead(LogReport {
-            term: self.term,
-            position: self.append_position,
-        });
-        if !leader_ready(self.count, heard, counted, ahead, deadline_passed) {
+        let ready = if self.election.is_some() {
+            // Row 8 of the page. No member's log is ahead of an elected leader's: a
+            // report of a term above its own has already failed this election.
+            counted >= quorum(self.count)
+        } else {
+            let heard = members().filter(|peer| peer.reported).count();
+            let deadline_passed =
+                clock.now_ns.saturating_sub(self.state_since_ns) >= LEADER_HEARTBEAT_TIMEOUT_NS;
+            let ahead = self.count_ahead(LogReport {
+                term: self.term,
+                position: self.append_position,
+            });
+            leader_ready(self.count, heard, counted, ahead, deadline_passed)
+        };
+        if !ready {
             return Ok(work);
         }
         let Some(log) = self.log else {

@@ -1403,7 +1403,7 @@ pub const COUNTERS: &[CounterDef] = &[
         kind: Kind::Gauge,
         scope: Scope::Client,
         doc: "The state of one cluster member's election, the code spec/cluster.md, Roles and the election, gives it, 17 when no election runs; key: member id (i32), little-endian; label text: the member id in decimal.",
-        doctor: "A member that stays at 1, canvass, has found no leader it can follow: the appointed leader is not running, cannot be reached on the consensus endpoints, or holds a log behind this member's. A leader that stays at 8, leader ready, waits for a member that has not joined its log, for at most 10 s.",
+        doctor: "A member that stays at 1, canvass, has found no leader it can follow: the appointed leader is not running, cannot be reached on the consensus endpoints, or holds a log behind this member's. A leader that stays at 8, leader ready, waits for members to join its log: the appointed leader for every member it has heard, for at most 10 s, and a leader that elects for a quorum, itself among them.",
     },
     CounterDef {
         id: CLUSTER_LEADERSHIP_TERM_ID,
