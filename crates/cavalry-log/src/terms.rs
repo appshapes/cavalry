@@ -772,6 +772,25 @@ impl TermsFile {
         Ok(())
     }
 
+    /// Drops every valid term above `term`, from the last backwards, each write synced,
+    /// as a truncation deletes them: a member told by its leader that the leader's
+    /// record holds none of them (`spec/cluster.md`, "Messages during an election";
+    /// ADR 0096). They are named by term and not by base, since the lowest of them is
+    /// based where the member's log is cut, and a term at or below `term` may share
+    /// that base. Returns the highest term left, −1 for none.
+    pub fn drop_above_term(&mut self, term: i64) -> Result<i64, TermsError> {
+        for index in (0..self.entries.len()).rev() {
+            let entry = self.entries[index];
+            if entry.state != VALID || entry.leadership_term_id <= term {
+                continue;
+            }
+            let at = (HEADER_LENGTH + index * ENTRY_LENGTH) as u64;
+            self.write_at(at, &DELETED.to_le_bytes(), "truncate")?;
+            self.entries[index].state = DELETED;
+        }
+        Ok(self.log_leadership_term_id())
+    }
+
     /// Raises the candidate term in one synced write: the term and its checksum, in the
     /// slot the stored candidate term is not read from, so that a crash during the write
     /// leaves the candidate term stored before it. A value below −1 or below the
@@ -887,6 +906,38 @@ mod tests {
         .encode();
         assert_eq!(&bytes[at..at + 4], &DELETED.to_le_bytes());
         assert_eq!(&bytes[at + 4..at + ENTRY_LENGTH], &appended[4..]);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn terms_above_a_term_are_dropped_by_term_whatever_their_base() {
+        let dir = dir("drop-above-term");
+        let mut file = TermsFile::create(&dir).expect("created");
+        file.append(0, 0, 0).expect("appended");
+        // Two terms at one base: the first has no byte, the second began where it did.
+        file.append(1, 4096, 1).expect("appended");
+        file.append(2, 4096, 2).expect("appended");
+        file.append(3, 8192, 3).expect("appended");
+        // By base, a truncation to 4096 would leave terms 1 and 2 where they are.
+        assert_eq!(file.drop_above_term(1).expect("dropped"), 1);
+        assert_eq!(file.log_leadership_term_id(), 1);
+        assert_eq!(file.drop_above_term(1).expect("nothing to drop"), 1);
+        file.append(4, 4096, 4)
+            .expect("a term after the dropped ones");
+        drop(file);
+        let mut file = TermsFile::open(&dir).expect("opened");
+        let terms: Vec<(i64, i64)> = file
+            .terms()
+            .map(|entry| (entry.leadership_term_id, entry.term_base_log_position))
+            .collect();
+        assert_eq!(terms, vec![(0, 0), (1, 4096), (4, 4096)]);
+        assert_eq!(
+            file.entries.len(),
+            5,
+            "the dropped entries keep their places"
+        );
+        assert_eq!(file.drop_above_term(-1).expect("dropped"), -1);
+        assert_eq!(file.terms().count(), 0);
         let _ = std::fs::remove_dir_all(&dir);
     }
 
