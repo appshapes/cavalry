@@ -38,6 +38,8 @@ TRUNCATE_RECORDING, PURGE_SEGMENTS, PURGE_RECORDING = 0x0105, 0x0106, 0x0107
 # Version 6: no new encoding; start recording arms a recording on a subscription, and a
 # publication's channel may name the position keys of spec/udp.md, version 2 (ADR 0059).
 ADD_DESTINATION, REMOVE_DESTINATION = 7, 8
+# Version 9: no new encoding; a publication's channel may name ssc of spec/udp.md,
+# version 3 (ADR 0098).
 # Version 7: a client's counter, under Aeron's ids (ADR 0062).
 ADD_COUNTER, REMOVE_COUNTER = 9, 10
 ON_COUNTER_READY, ON_UNAVAILABLE_COUNTER = 0x0F08, 0x0F09
@@ -517,7 +519,7 @@ def main():
     out = Path(__file__).with_suffix(".json")
     names = [v["name"] for v in VECTORS]
     assert len(names) == len(set(names)), "vector names must be unique"
-    out.write_text(json.dumps({"spec": "spec/client-protocol.md", "version": 8,
+    out.write_text(json.dumps({"spec": "spec/client-protocol.md", "version": 9,
                                "generated_by": "spec/vectors/client-protocol.py",
                                "vectors": VECTORS}, indent=1) + "\n")
     print(f"wrote {out} ({len(VECTORS)} vectors)")

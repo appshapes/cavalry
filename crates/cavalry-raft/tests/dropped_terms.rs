@@ -9,7 +9,7 @@
 mod common;
 
 use cavalry_proto::cluster::Message;
-use cavalry_raft::{Consensus, ElectionState};
+use cavalry_raft::{Consensus, ElectionState, Role};
 use common::{
     Call, Stub, at, canvass_position, follow_term, leader_of_term_two, leadership_term,
     lose_the_leader, new_leadership_term,
@@ -98,6 +98,105 @@ fn a_member_cuts_what_it_holds_above_a_dropped_terms_base_before_it_drops_the_te
         member.election_state(),
         ElectionState::FollowerLogReplication
     );
+}
+
+/// Member 0 of three, electing, in canvass, with a record of (0, 0), (2, 64) and a
+/// log of term 2 that ends at 64: it followed term 0, led by member 1 from 0, and
+/// then term 2, led by member 2 from 64, and lost that leader. It never recorded a
+/// term 1. Returns the member and the next millisecond, the calls so far forgotten.
+fn member_of_term_two(io: &mut Stub) -> (Consensus, u64) {
+    let mut member = Consensus::with_election(&[0, 1, 2], 0, 1).expect("a member");
+    member.do_work(at(1), io).expect("no fault");
+    let closed = follow_term(&mut member, io, 2, &new_leadership_term(1, 0), 0);
+    let ms = lose_the_leader(&mut member, io, closed, 64);
+    let term_two = leadership_term(2, 2, 64, 64, 0, [2, 64, -1]);
+    let closed = follow_term(&mut member, io, ms, &term_two, 64);
+    let ms = lose_the_leader(&mut member, io, closed, 64);
+    assert_eq!(record(io), vec![(0, 0), (2, 64)]);
+    io.clear();
+    (member, ms)
+}
+
+/// Member 1's new leadership term for its term 3, which begins at 128, from a record
+/// that holds terms 0, 1 and 3 and no term 2: answered to a member that reported
+/// term 2, it is for term 1, the highest the record holds at or below 2, and names
+/// term 3 at 128 as the next.
+fn term_three_for_a_record_without_term_two() -> Message<'static> {
+    leadership_term(1, 3, 128, 128, 1, [3, 128, -1])
+}
+
+/// The term a leader names can be one the member never recorded: terms 1 and 2 were
+/// each recorded by fewer than a quorum, by different members. The member's record is
+/// (0, 0), (2, 64) and the answer names term 1, with term 3 next. The member drops
+/// term 2, counted once, and its log is then of term 0, below the term named. Read
+/// again, the message is for a log term that is not the member's own and says
+/// nothing more of its terms: the member canvasses on, to report term 0, and reads
+/// the message no third time. Its election has not failed.
+#[test]
+fn a_member_that_never_recorded_the_term_named_drops_its_terms_above_it_and_canvasses() {
+    let mut io = Stub::new();
+    let (mut member, ms) = member_of_term_two(&mut io);
+
+    member
+        .on_message(at(ms), &term_three_for_a_record_without_term_two(), &mut io)
+        .expect("no fault");
+    assert_eq!(io.count(|call| *call == Call::DropTermsAbove(1)), 1);
+    assert_eq!(
+        io.count(|call| matches!(call, Call::DropTermsAbove(_))),
+        1,
+        "read twice, dropped once: {:?}",
+        io.calls
+    );
+    assert_eq!(io.count(|call| matches!(call, Call::TruncateLog(_))), 0);
+    assert_eq!(record(&io), vec![(0, 0)]);
+    assert_eq!(member.counts().terms_dropped, 1);
+    assert_eq!(member.counts().elections_failed, 0);
+    assert_eq!(member.counts().ballots_lost, 0, "it was in no ballot");
+    assert_eq!(member.election_state(), ElectionState::Canvass);
+    assert_eq!(member.leader_member_id(), -1);
+    assert_eq!(member.append_position(), 64);
+}
+
+/// The same member as a candidate. It proposed term 3 while member 1 did, and member
+/// 1 won. In candidate ballot it reads member 1's new leadership term for term 3,
+/// which names term 1: it drops term 2, and the message, read again, is for a log
+/// term that is not its own, so its ballot ends with no leader. Both are counted,
+/// `cluster.terms_dropped` and `cluster.ballots_lost`, and it canvasses as a
+/// follower.
+#[test]
+fn a_candidate_that_drops_a_term_and_holds_none_named_loses_its_ballot() {
+    let mut io = Stub::new();
+    let (mut member, ms) = member_of_term_two(&mut io);
+    // Both others report a log that is not ahead of its own: a candidate at once.
+    for other in [1, 2] {
+        member
+            .on_message(at(ms), &canvass_position(other, 0, 64), &mut io)
+            .expect("no fault");
+    }
+    member.do_work(at(ms + 1), &mut io).expect("no fault");
+    assert_eq!(member.election_state(), ElectionState::Nominate);
+    // The nomination delay is below half the election timeout.
+    member.do_work(at(ms + 501), &mut io).expect("no fault");
+    assert_eq!(member.election_state(), ElectionState::CandidateBallot);
+    assert_eq!(member.role(), Role::Candidate);
+    assert_eq!(io.count(|call| *call == Call::StoreCandidateTerm(3)), 1);
+    let lost = member.counts().ballots_lost;
+
+    member
+        .on_message(
+            at(ms + 502),
+            &term_three_for_a_record_without_term_two(),
+            &mut io,
+        )
+        .expect("no fault");
+    assert_eq!(io.count(|call| *call == Call::DropTermsAbove(1)), 1);
+    assert_eq!(record(&io), vec![(0, 0)]);
+    assert_eq!(member.counts().terms_dropped, 1);
+    assert_eq!(member.counts().ballots_lost, lost + 1);
+    assert_eq!(member.counts().elections_failed, 0);
+    assert_eq!(member.election_state(), ElectionState::Canvass);
+    assert_eq!(member.role(), Role::Follower);
+    assert_eq!(member.leader_member_id(), -1);
 }
 
 /// The guard of a truncation holds for a drop: a member that knows a commit position

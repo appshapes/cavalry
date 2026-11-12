@@ -1,6 +1,7 @@
 #![doc = include_str!("../README.md")]
 #![deny(missing_docs, rustdoc::broken_intra_doc_links)]
 
+mod clock;
 mod conductor;
 mod error;
 mod idle;
@@ -155,7 +156,8 @@ impl Driver {
         let dir = dir.as_ref().to_path_buf();
         let log_dir = log_dir.as_ref().to_path_buf();
         let dir_lock = conductor::prepare_dir(&dir)?;
-        let (log, recovery) = LogDir::open(&log_dir, conductor::now_nanos())?;
+        // What recovery stamps is read by later runs: the epoch clock (ADR 0109).
+        let (log, recovery) = LogDir::open(&log_dir, cavalry_shm::clock::epoch_time())?;
         let (requests, request_consumer) =
             spsc::queue::<recorder::Request>(spec::RECORDER_QUEUE_CAPACITY);
         let (reply_producer, replies) =

@@ -362,6 +362,65 @@ fn a_sync_now_syncs_what_is_unsynced_whatever_the_time_and_the_periodic_sync_wai
     let _ = log.stop(writer, NOW + 3 * SYNC_INTERVAL).expect("stops");
 }
 
+/// ADR 0109: a caller with two clocks stamps with its epoch clock and measures the sync
+/// interval on its nano clock, which it names once with `sync_from`. The interval then
+/// runs on that clock alone, whatever the timestamps are.
+#[test]
+fn the_sync_interval_runs_on_the_clock_sync_from_names_and_not_on_the_timestamps() {
+    let dir = TestDir::new("sync-two-clocks");
+    let (mut log, _) = LogDir::open(dir.path(), NOW).expect("opens");
+    let mut writer = log.start(&recording(1001, 0), NOW).expect("starts");
+    let found = writer.descriptor().clone();
+    // The nano clock: small numbers, decades from the timestamps.
+    let nano = 5_000;
+    writer.sync_from(nano);
+    writer
+        .write(&data_block(&found, 0, 1), 64, NOW)
+        .expect("writes");
+    assert!(
+        !writer.sync(nano + SYNC_INTERVAL - 1).expect("syncs"),
+        "not a second of the nano clock yet"
+    );
+    // The epoch clock set forward by an hour moves the timestamps and not the interval.
+    writer
+        .write(&data_block(&found, 64, 2), 64, NOW + 3_600 * SYNC_INTERVAL)
+        .expect("writes");
+    assert!(!writer.sync(nano + SYNC_INTERVAL - 1).expect("syncs"));
+    assert!(
+        writer.sync(nano + SYNC_INTERVAL).expect("syncs"),
+        "a second of the nano clock passed"
+    );
+    assert_eq!((writer.position(), writer.synced_position()), (128, 128));
+    let _ = log
+        .stop(writer, NOW + 3_600 * SYNC_INTERVAL)
+        .expect("stops");
+}
+
+/// A caller with one clock, the host's, whose clock is set back: the bytes are synced
+/// on the next call, and not left unsynced for the length of the step.
+#[test]
+fn a_clock_set_back_syncs_at_once_and_the_interval_runs_from_there() {
+    let dir = TestDir::new("sync-clock-back");
+    let (mut log, _) = LogDir::open(dir.path(), NOW).expect("opens");
+    let mut writer = log.start(&recording(1001, 0), NOW).expect("starts");
+    let found = writer.descriptor().clone();
+    writer
+        .write(&data_block(&found, 0, 1), 64, NOW)
+        .expect("writes");
+    let back = NOW - 3_600 * SYNC_INTERVAL;
+    assert!(
+        writer.sync(back).expect("syncs"),
+        "a now before the last sync's counts as the second passed"
+    );
+    assert_eq!(writer.synced_position(), 64);
+    writer
+        .write(&data_block(&found, 64, 2), 64, NOW)
+        .expect("writes");
+    assert!(!writer.sync(back + SYNC_INTERVAL - 1).expect("syncs"));
+    assert!(writer.sync(back + SYNC_INTERVAL).expect("syncs"));
+    let _ = log.stop(writer, NOW).expect("stops");
+}
+
 #[test]
 fn a_stop_at_a_segment_boundary_removes_the_empty_next_segment() {
     let dir = TestDir::new("stop-at-boundary");

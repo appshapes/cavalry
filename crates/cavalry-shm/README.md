@@ -71,6 +71,12 @@ the two crates where `unsafe` is permitted.
   load and no check. `CountersWriter` is a client's writable view: the owner's `Counter`
   handle on the `subscription.position` the driver allocated for it, and nothing that
   allocates or frees a record.
+- Reads the two clocks a process has: `clock::epoch_time`, the host's wall clock, for
+  what another process or a later run reads, the consumer heartbeat and every
+  timestamp; and `clock::nano_time`, which never goes back and which a step of the
+  host's clock does not move, for every interval a process measures by itself. A
+  freed counter's reclaim deadline is a reading of the nano clock
+  ([ADR 0109](../../docs/decisions/0109-measure-every-interval-on-a-nano-clock-and-keep-the-epoch-clock-for-what-another-process-reads.md)).
 - Keeps every shared layout `#[repr(C)]` with a version in its header. Atomics use
   `Acquire` for loads that gate reads of other memory and `Release` for stores that
   publish it.

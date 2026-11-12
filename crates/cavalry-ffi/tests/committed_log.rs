@@ -67,8 +67,8 @@ use ports::free_ports;
 /// Three members over three drivers on the loopback, as `cavalry-raft`'s own cluster
 /// test starts them. `members[0]` is the member that leads and `members[1..]` are its
 /// followers, whichever member the cluster has for a leader: `start` finds it, and
-/// starts the members in an order that does not put the lowest id first (ADR 0100,
-/// change 3).
+/// starts the members in the order 1, 2, 0, so that no member's place is its id,
+/// before the leader is put first or after (ADR 0100, change 3).
 struct Cluster {
     members: Vec<(Driver, ConsensusModule, PathBuf)>,
     _dir: TestDir,
@@ -88,7 +88,7 @@ impl Cluster {
             })
             .collect::<Vec<_>>()
             .join("|");
-        let members = [1, 0, 2]
+        let members = [1, 2, 0]
             .into_iter()
             .map(|id| {
                 let driver_dir = dir.path().join(format!("member-{id}"));
@@ -360,7 +360,7 @@ fn a_driver_with_no_member_answers_the_open_with_a_null_handle_and_no_error() {
     driver.close().expect("closes");
 }
 
-/// A service through the ABI beside a follower, member 1: a hundred entries committed
+/// A service through the ABI beside a follower: a hundred entries committed
 /// by a quorum are handed to the C handler in order, each at the position the log
 /// gives it, the term's first entry at 0 and the hundred after it 96 bytes apart; the
 /// handle's position and bound are the end of the last; and nothing arrives while
@@ -387,7 +387,7 @@ fn a_service_reads_the_committed_log_through_the_c_handler_with_each_entrys_posi
             "{}",
             errmsg()
         );
-        assert!(!log.is_null(), "member 1 has a recording of the log");
+        assert!(!log.is_null(), "the follower has a recording of the log");
         let mut constants = std::mem::zeroed::<cavalry_committed_log_constants_t>();
         assert_eq!(cavalry_committed_log_constants(log, &mut constants), 0);
         assert_eq!(
@@ -730,7 +730,7 @@ fn a_log_opened_where_no_entry_begins_fails_there_and_says_so() {
             "{}",
             errmsg()
         );
-        assert!(!log.is_null(), "member 1 has a recording of the log");
+        assert!(!log.is_null(), "the follower has a recording of the log");
         let mut collected = Collected::default();
         let clientd = ptr::addr_of_mut!(collected).cast::<c_void>();
         let deadline = Instant::now() + Duration::from_secs(30);
@@ -810,7 +810,7 @@ fn a_service_whose_image_faulted_reads_the_fault_for_the_life_of_its_handle() {
             "{}",
             errmsg()
         );
-        assert!(!log.is_null(), "member 1 has a recording of the log");
+        assert!(!log.is_null(), "the follower has a recording of the log");
         let replayed: Vec<PathBuf> = publication_logs(&member_dir)
             .into_iter()
             .filter(|path| !before.contains(path))
