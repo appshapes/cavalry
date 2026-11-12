@@ -88,7 +88,10 @@ commit path runs per message.
   position in the cluster's log (ADR 0059), or subscribes to the leader's log and arms
   the recording that holds it from its first frame. Where that recording begins it
   reads from the driver's catalog in `log_dir`, which must be the driver's log
-  directory, and not from the image: an image that arrived between its two commands
+  directory: a directory with no catalog is refused at the member's start with
+  `RaftError::Catalog`, before anything is written there, and a catalog whose slot
+  does not hold the recording the driver started gives no start. It does not read
+  it from the image: an image that arrived between its two commands
   is recorded from what it had received by then, so the module tells its election
   where the recording begins, and counts a recording as the member's log only once
   the election has been told its image and when it begins where the log ended (ADR

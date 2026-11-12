@@ -1070,6 +1070,106 @@ fn a_recording_of_another_sessions_image_is_never_told_and_never_counted() {
     assert!(pair.member.io.kept.is_empty());
 }
 
+/// A member whose log directory is not its driver's is refused at its start, before
+/// anything is written there (ADR 0093). The directory holds no catalog: the error is
+/// `RaftError::Catalog`, its reason `catalog`, its message names the page's "Members
+/// and streams", and the directory is as empty as it was, with no `terms` file.
+#[test]
+fn a_member_started_on_a_directory_with_no_catalog_is_refused_and_writes_nothing_there() {
+    let dir = TestDir::new("no-catalog");
+    let driver_dir = dir.0.join("driver");
+    let other = dir.0.join("not-the-drivers");
+    std::fs::create_dir_all(&other).expect("the other directory");
+    let ports = free_ports(10);
+    let member = |id: usize| {
+        let endpoints: Vec<String> = ports[id * 5..id * 5 + 5]
+            .iter()
+            .map(|port| format!("127.0.0.1:{port}"))
+            .collect();
+        format!("{id},{}", endpoints.join(","))
+    };
+    let members = format!("{}|{}", member(0), member(1));
+    let _driver = Driver::start(&driver_dir, dir.0.join("log")).expect("the driver starts");
+
+    let Err(error) = ConsensusModule::start(&driver_dir, &other, &members, 0) else {
+        panic!("a member started on a directory with no catalog");
+    };
+    assert!(matches!(error, RaftError::Catalog(_)), "{error}");
+    assert_eq!(error.reason(), "catalog");
+    let message = error.to_string();
+    assert!(message.contains(DOC_MEMBERS), "{message}");
+    assert_eq!(
+        std::fs::read_dir(&other)
+            .expect("the other directory is read")
+            .count(),
+        0,
+        "nothing was written into the directory"
+    );
+}
+
+/// A catalog that is not the driver's gives no start position (ADR 0093). The
+/// leader's driver holds a recording of another stream in slot 0 of its catalog.
+/// The member's driver starts the member's recording of the log, recording 0 of its
+/// own catalog. With the leader's catalog in the member's hands, the slot holds a
+/// recording of another session and stream: the hand-over is `RaftError::Catalog`
+/// with `unknown`, on every duty cycle, the election is told nothing and nothing is
+/// counted. With its own driver's catalog the member takes the recording on its next
+/// duty cycle, and tells the election where it begins.
+#[test]
+fn a_catalog_slot_that_holds_another_recording_gives_no_start() {
+    let mut pair = pair("another-catalog");
+    let leader_log_dir = pair._dir.0.join("log-0");
+    let mut stranger = Cavalry::connect_to(&pair.leader_driver_dir).expect("the stranger");
+    let _other = stranger
+        .add_exclusive_publication("cavalry:ipc", 7)
+        .expect("a publication of another stream");
+    let other = stranger
+        .start_recording("cavalry:ipc", 7)
+        .expect("its recording");
+    assert_eq!(other.recording_id(), 0);
+
+    pair.member.io.join_log().expect("subscribed and armed");
+    let log = pair
+        .leader
+        .io
+        .add_log(0, 0)
+        .expect("the driver takes the commands")
+        .expect("the log has its recording");
+    pair.member.io.catalog = CatalogReader::open(&leader_log_dir).expect("the catalog opens");
+    let error = wait_for("the hand-over is refused", || {
+        pair.member.io.observe_log().err()
+    });
+    assert!(
+        matches!(
+            error,
+            RaftError::Catalog(CatalogError::Unknown { recording_id: 0 })
+        ),
+        "{error}"
+    );
+    assert_eq!(error.reason(), "catalog");
+    for _ in 0..3 {
+        assert!(matches!(
+            pair.member.io.observe_log(),
+            Err(RaftError::Catalog(CatalogError::Unknown {
+                recording_id: 0
+            }))
+        ));
+    }
+    assert!(pair.member.io.held.is_none());
+    assert_eq!(
+        pair.member.io.log_image(log.session_id).expect("read"),
+        None
+    );
+    assert_eq!(pair.member.io.append_position(), 0);
+
+    pair.member.io.catalog = CatalogReader::open(&pair.member_log_dir).expect("the catalog opens");
+    let start = pair.observe("the recording's start is told", |io| {
+        io.log_image(log.session_id).expect("the image is read")
+    });
+    assert_eq!(start, 0);
+    assert_eq!(pair.member.log_recording_id(), Some(0));
+}
+
 impl Pair {
     /// A subscriber on member 1's `log` endpoint that is no part of the member: with
     /// it the leader's log publication has a receiver and takes appends while the

@@ -7,5 +7,7 @@
   in `cluster.join_position_mismatches`, and joins again. A recording taken by an
   image of another session is no longer counted either. `ConsensusModule::start`
   needs its `log_dir` to be its driver's log directory, as it has always said, and
-  returns the new `RaftError::Catalog` when the directory holds no catalog
+  returns the new `RaftError::Catalog` when the directory holds no catalog, before
+  it writes anything there, or when the catalog's slot does not hold the recording
+  the driver started
   ([ADR 0093](docs/decisions/0093-take-where-a-members-recording-of-the-log-begins-from-the-catalog-and-count-it-once-its-image-is-checked.md)).
