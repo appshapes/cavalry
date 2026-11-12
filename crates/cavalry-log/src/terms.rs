@@ -208,6 +208,19 @@ impl TermsError {
 impl std::fmt::Display for TermsError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         const DOC: &str = "docs/reference/durable-log.md#terms";
+        // What an operator does with a terms file that cannot be read: the member's
+        // votes and the terms of its log are in it, so the member stays out, and it
+        // is never given a new log directory beside the others (`spec/cluster.md`,
+        // "A member's start"; ADR 0104).
+        const STAY_OUT: &str = "the member's votes and the terms of its log are in this \
+                                file, so the member does not start without it. Leave the \
+                                member stopped: the cluster goes on while a quorum of the \
+                                others runs. To have every member again, start the cluster \
+                                again as a new cluster, every member on a new log \
+                                directory. Do not start this member alone on a new log \
+                                directory, and do not put an older copy of the file in its \
+                                place: either way the member would vote with no record of \
+                                the votes it cast";
         match self {
             TermsError::Io { what, path, source } => {
                 write!(
@@ -227,13 +240,12 @@ impl std::fmt::Display for TermsError {
                 "terms file not ready (not-ready): the magic is zero, so the file's creation \
                  did not finish. A member that is starting writes the file again: read it \
                  again. A member that refused to start with this found a term or a vote under \
-                 the zero magic, so the file is damaged: restore it from the member's last \
-                 good copy, or start a new log directory for this member; see {DOC}"
+                 the zero magic, so the file is damaged: {STAY_OUT}; see {DOC}"
             ),
             TermsError::Magic => write!(
                 f,
                 "terms file rejected (magic): the first eight bytes are not CVLYTERM; the \
-                 file is not a terms file, so move it out of the log directory; see {DOC}"
+                 file is not a terms file, or it is damaged: {STAY_OUT}; see {DOC}"
             ),
             TermsError::Version { found } => write!(
                 f,
@@ -249,65 +261,60 @@ impl std::fmt::Display for TermsError {
                 f,
                 "terms file rejected (candidate): neither candidate term slot's checksum \
                  matches, or a slot holds a candidate term below -1, so the member's stored \
-                 vote cannot be read and the file is damaged: restore it from the member's \
-                 last good copy, or start a new log directory for this member; see {DOC}"
+                 vote cannot be read and the file is damaged: {STAY_OUT}; see {DOC}"
             ),
             TermsError::Length { found } => write!(
                 f,
                 "terms file rejected (length): {found} entries, over the {MAX_ENTRIES} the \
-                 file holds; start a new log directory for this member; see {DOC}"
+                 file holds. A cluster whose member's record of terms is full is started \
+                 again as a new cluster, every member on a new log directory; see {DOC}"
             ),
             TermsError::State { found } => write!(
                 f,
                 "terms entry rejected (state): state {found} is not 0, 1 or 3; the file is \
-                 damaged past this entry, so restore it from the member's last good copy or \
-                 start a new log directory; see {DOC}"
+                 damaged past this entry: {STAY_OUT}; see {DOC}"
             ),
             TermsError::Checksum => write!(
                 f,
                 "terms entry rejected (checksum): the entry's checksum does not match its \
                  fields. The writer syncs the fields before the state, so no crash leaves \
-                 this and the file is damaged: restore it from the member's last good copy, \
-                 or start a new log directory for this member; see {DOC}"
+                 this and the file is damaged: {STAY_OUT}; see {DOC}"
             ),
             TermsError::Damaged { index } => write!(
                 f,
                 "terms file rejected (checksum): entry {index}'s checksum does not match its \
                  fields. The writer syncs the fields before the state, so no crash leaves \
                  this and the file is damaged; it was left as it was and no term was \
-                 dropped: restore it from the member's last good copy, or start a new log \
-                 directory for this member; see {DOC}"
+                 dropped: {STAY_OUT}; see {DOC}"
             ),
             TermsError::EmptyBeforeLast { index } => write!(
                 f,
                 "terms file rejected (state): entry {index} is empty and an entry follows it. \
                  The writer appends an entry only after the one before it is whole, so only \
                  the last entry can be empty and the file is damaged; it was left as it was \
-                 and no term was dropped: restore it from the member's last good copy, or \
-                 start a new log directory for this member; see {DOC}"
+                 and no term was dropped: {STAY_OUT}; see {DOC}"
             ),
             TermsError::Term { found } => write!(
                 f,
                 "terms entry rejected (term): term {found} is below 0 or not above the term \
-                 before it; the file is damaged past this entry, so restore it or start a new \
-                 log directory; see {DOC}"
+                 before it; the file is damaged past this entry: {STAY_OUT}; see {DOC}"
             ),
             TermsError::Position { found } => write!(
                 f,
                 "terms entry rejected (position): term base log position {found} is below 0, \
                  not a multiple of 32 or below the position before it; the file is damaged past \
-                 this entry, so restore it or start a new log directory; see {DOC}"
+                 this entry: {STAY_OUT}; see {DOC}"
             ),
             TermsError::Recording { found } => write!(
                 f,
                 "terms entry rejected (recording): recording id {found} is below -1; the file \
-                 is damaged past this entry, so restore it or start a new log directory; see \
-                 {DOC}"
+                 is damaged past this entry: {STAY_OUT}; see {DOC}"
             ),
             TermsError::Full => write!(
                 f,
-                "terms full: the file holds {MAX_ENTRIES} entries, its bound; start a new log \
-                 directory for this member; see {DOC}"
+                "terms full: the file holds {MAX_ENTRIES} entries, its bound. Start the \
+                 cluster again as a new cluster, every member on a new log directory; see \
+                 {DOC}"
             ),
             TermsError::Refused { check, found, rule } => write!(
                 f,
@@ -785,7 +792,7 @@ impl TermsFile {
                 continue;
             }
             let at = (HEADER_LENGTH + index * ENTRY_LENGTH) as u64;
-            self.write_at(at, &DELETED.to_le_bytes(), "truncate")?;
+            self.write_at(at, &DELETED.to_le_bytes(), "drop a term from")?;
             self.entries[index].state = DELETED;
         }
         Ok(self.log_leadership_term_id())
@@ -1014,7 +1021,11 @@ mod tests {
         assert_eq!(refused.reason(), "candidate");
         let message = refused.to_string();
         assert!(message.contains("damaged"), "{message}");
-        assert!(message.contains("restore it"), "{message}");
+        assert!(message.contains("Leave the member stopped"), "{message}");
+        assert!(
+            message.contains("Do not start this member alone on a new log directory"),
+            "{message}"
+        );
         assert!(!message.contains("nothing to do"), "{message}");
         // A slot whose checksum matches a term below -1: a term no writer stores.
         let mut bytes = whole;
@@ -1154,7 +1165,11 @@ mod tests {
         );
         let message = refused.to_string();
         assert!(message.contains("damaged"), "{message}");
-        assert!(message.contains("restore it"), "{message}");
+        assert!(message.contains("Leave the member stopped"), "{message}");
+        assert!(
+            message.contains("Do not start this member alone on a new log directory"),
+            "{message}"
+        );
         assert_eq!(
             std::fs::read(&path).expect("read"),
             bytes,
@@ -1197,7 +1212,11 @@ mod tests {
         );
         let message = refused.to_string();
         assert!(message.contains("damaged"), "{message}");
-        assert!(message.contains("restore it"), "{message}");
+        assert!(message.contains("Leave the member stopped"), "{message}");
+        assert!(
+            message.contains("Do not start this member alone on a new log directory"),
+            "{message}"
+        );
         assert!(!message.contains("nothing to do"), "{message}");
         assert_eq!(
             std::fs::read(&path).expect("read"),

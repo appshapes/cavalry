@@ -82,6 +82,19 @@ fn recording_at(
     position: i64,
 ) -> Result<Option<i64>, ClientError> {
     const WHAT: &str = "read the file of the cluster member's log's recordings";
+    // An error of the operating system, with what to do about it: the file is the
+    // member's, in the driver's directory, and the service's user must be able to
+    // read it. Made at the open, never in a poll.
+    fn unreadable(source: std::io::Error) -> std::io::Error {
+        std::io::Error::new(
+            source.kind(),
+            format!(
+                "{source}. Give the service's user the right to read the files of the \
+                 driver directory, which the member's user wrote, as \
+                 docs/how-to/read-the-committed-log.md#when-it-does-not-work says"
+            ),
+        )
+    }
     let member_id = i32::from_le_bytes(member);
     let path = dir.join(format!("{LOG_RECORDINGS_FILE_PREFIX}{member_id}"));
     let file = match std::fs::File::open(&path) {
@@ -93,7 +106,7 @@ fn recording_at(
             return Err(ClientError::Io {
                 what: WHAT,
                 path,
-                source,
+                source: unreadable(source),
             });
         }
     };
@@ -104,7 +117,7 @@ fn recording_at(
         return Err(ClientError::Io {
             what: WHAT,
             path,
-            source,
+            source: unreadable(source),
         });
     }
     match LogRecordings::read(&bytes, member_id) {

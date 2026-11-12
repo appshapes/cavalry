@@ -66,8 +66,8 @@ use ports::free_ports;
 
 /// Three cluster members over three drivers on the loopback, their elections closed,
 /// the member that leads first and its followers after it, whichever member the
-/// cluster has for a leader (ADR 0100, change 3). They start in an order that does
-/// not put the lowest id first.
+/// cluster has for a leader (ADR 0100, change 3). They start in the order 1, 2, 0,
+/// so that no member's place is its id, before the leader is put first or after.
 fn cluster(dir: &Path) -> Vec<(Driver, ConsensusModule)> {
     let ports = free_ports(15);
     let members_string = (0..3)
@@ -80,7 +80,7 @@ fn cluster(dir: &Path) -> Vec<(Driver, ConsensusModule)> {
         })
         .collect::<Vec<_>>()
         .join("|");
-    let mut members: Vec<(Driver, ConsensusModule)> = [1, 0, 2]
+    let mut members: Vec<(Driver, ConsensusModule)> = [1, 2, 0]
         .into_iter()
         .map(|id| {
             let driver_dir = dir.join(format!("member-{id}"));
@@ -207,8 +207,8 @@ fn the_message_path_allocates_nothing() {
              .claude/rules/data-plane.md"
         );
 
-        // The committed log's window: a service through the ABI beside member 1, a
-        // follower. The leader appends an entry, the members run, and the C handler
+        // The committed log's window: a service through the ABI beside a follower.
+        // The leader appends an entry, the members run, and the C handler
         // is handed what a quorum committed, with its header's values and its
         // position, two thousand times.
         let mut context = ptr::null_mut();
@@ -220,12 +220,12 @@ fn the_message_path_allocates_nothing() {
         // after its election closes.
         let deadline = Instant::now() + Duration::from_secs(60);
         while members[1].1.log_recording_id().is_none() {
-            assert!(Instant::now() < deadline, "member 1 recorded the log");
+            assert!(Instant::now() < deadline, "the follower recorded the log");
             work(&mut members);
         }
         let mut log = ptr::null_mut();
         assert_eq!(cavalry_committed_log(&mut log, client, 0), 0);
-        assert!(!log.is_null(), "member 1 has a recording of the log");
+        assert!(!log.is_null(), "the follower has a recording of the log");
         let payload = [9u8; 8];
         let mut offered = 0;
         // Warm up: the replay's image joins and the first entries cross.

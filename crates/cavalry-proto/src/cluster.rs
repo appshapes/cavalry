@@ -2247,9 +2247,11 @@ pub struct Ballot {
     /// Whether every member the candidate has heard voted for it and those votes make a
     /// quorum, which decides at once.
     pub unanimous: bool,
-    /// Whether the ballot can no longer be won: a vote against the candidate's term
-    /// has been cast, and no ballot with one makes a leader, at once or at the
-    /// election timeout. The candidate canvasses again at once (ADR 0105).
+    /// Whether a vote against the candidate's term has been cast: no ballot with one
+    /// makes a leader, at once or at the election timeout, and the candidate canvasses
+    /// again at once (ADR 0105). A candidate also loses its ballot once it holds no
+    /// vote of its own for its term. The votes name no candidate, so that is not
+    /// read here: the caller checks it.
     pub lost: bool,
 }
 

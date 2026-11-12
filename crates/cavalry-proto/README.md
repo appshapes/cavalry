@@ -22,10 +22,11 @@ Wire types, zero-copy frames and version negotiation. Data plane.
 - Parses a channel, `cavalry:ipc`, `cavalry:udp?endpoint=<host>:<port>` with its
   `interface` option, or the control channel
   `cavalry:udp?control=<host>:<port>|control-mode=manual` of multi-destination cast,
-  each with `fc=max|min` on a publication's channel (ADR 0053) and the position keys
+  each with `fc=max|min` on a publication's channel (ADR 0053), the position keys
   `init-term-id`, `term-id` and `term-offset` that create one at a position (ADR
-  0059), in `channel`, borrowing from the string, with each refusal named and every
-  refusal error code 1;
+  0059), and `ssc=true|false`, by which a live recording connects one that no receiver
+  answers (ADR 0098), in `channel`, borrowing from the string, with each refusal named
+  and every refusal error code 1;
   resolving the host is the driver's.
 - Is the one place bytes are shuffled by hand. Every other crate uses its types. A
   reader that holds only a frame's header, as the log buffer's does, passes the bytes
@@ -47,8 +48,9 @@ Wire types, zero-copy frames and version negotiation. Data plane.
   functions (ADR 0058): `quorum` and `commit_position`; `log_at_least`, the order of
   two logs; `candidate`, a canvassing member's nomination; `request_vote`, a reader's
   vote; `ballot`, a candidate's outcome from the votes and the members it has heard
-  (ADR 0077); `canvass_position_action`, what a leader does with a canvass position; `new_leadership_term_action` and `next_fields`, what a
-  reader does with new leadership term and what a leader writes into it;
+  (ADR 0077); `canvass_position_action`, what a leader does with a canvass position; `new_leadership_term_action`, what a
+  reader does with new leadership term; `answered_term` and `next_fields`, the term
+  a leader answers a member for and the next term it names (ADR 0096);
   `replication_stop` and `replication_record`, where a follower's log replication
   stops and the terms it records there; `replay_end`, where a leader's replay begins
   and ends; and `entry_position`, the position after an entry. A log leadership term
