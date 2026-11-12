@@ -92,7 +92,9 @@ stop catch-up for its term and its own id, it removes its catch-up subscription.
 It goes on to follower log init when three things hold: stop catch-up was read; its
 append position has reached the position the live image joined at; and its append
 position has reached the commit position it was told. An append position that has
-not moved for the leader heartbeat timeout fails the election.
+not moved for the leader heartbeat timeout fails the election; the time runs from
+when the replay's image joined, so what the image took to come, which is follower
+catch-up await's to bound, is not counted against the replay's first byte.
 
 **The member says when the replay may stop.** A member in follower catch-up sets
 the catch-up flag in a report only once it is on the live log: its live image has
