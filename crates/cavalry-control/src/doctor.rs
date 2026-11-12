@@ -298,7 +298,7 @@ pub fn examine(dir: &Path) -> Report {
 /// the `log.dir` key's check), under a tenth of its filesystem free with the purge that
 /// frees the most (`log-directory-space`), the catalog slots recovery set to invalid,
 /// named (`recording-invalid`), every recording's two positions from the counters file,
-/// with a recorder that holds its publisher, or is about to (`recording-stalled`), and
+/// with a recorder that holds its publisher (`recording-stalled`), and
 /// failed
 /// writes (`recording-write-failed`) as findings (ADR 0025, ADR 0101), and a recording over half
 /// its filesystem, live by its gauge or stopped by its descriptor
@@ -2362,7 +2362,7 @@ struct RecordingCounters {
 }
 
 /// The recordings: every `recording.position` counter with its `recording.synced_position`,
-/// listed; a recorder that holds its publisher, or is about to (`recording-stalled`);
+/// listed; a recorder that holds its publisher (`recording-stalled`);
 /// writes that failed (`recording-write-failed`); and the catalog slots recovery set to
 /// invalid, named from the catalog when the log directory is known
 /// (`recording-invalid`) (`spec/client-protocol.md`, "Commands"; ADR 0025).
@@ -2372,9 +2372,12 @@ struct RecordingCounters {
 /// when the recorder is that reader, `publication.limit` less `recording.position` is
 /// the room the recorder gives the publisher, whatever the log's term: it is the
 /// window, or up to an eighth short of it, since the limit is raised in steps of an
-/// eighth. The publisher is refused when the next message does not fit in that room,
-/// and a message is at most a quarter of the window, so a publisher held by its
-/// recorder has used more than five sevenths of the room. The check warns from there.
+/// eighth. A claim is refused when the publisher's position is not below its limit,
+/// and one that starts below it is reserved whole (`spec/log-buffer.md`, "Claim,
+/// commit and abort", step 1), so a publisher held by its recorder stands at its
+/// limit or up to a message past it. The check warns when `publication.position` has
+/// reached `publication.limit`, the condition the publisher is refused on, and at no
+/// fraction of the room below it, where nobody is held.
 /// It judges a recording only when it can tell which publication it reads: one
 /// publication on this driver with the recording's session id and stream id, and no
 /// image with them, since a recording's label names neither. And it leaves a recording
@@ -2507,7 +2510,9 @@ fn recording_checks(
             .any(|(reader_key, position)| reader_key == key && *position < recording.position);
         let room = limit.saturating_sub(recording.position);
         let behind = publisher.saturating_sub(recording.position);
-        if !slower_reader && room > 0 && behind.saturating_mul(7) >= room.saturating_mul(5) {
+        // Held now: the publisher's position has reached its limit, which is what its
+        // next claim is refused on, and the limit waits for the recorder.
+        if !slower_reader && room > 0 && *publisher >= limit {
             // A window of a quarter of the default term or less is a short term's: a
             // burst fills it on any disk, and the remedy is the term (ADR 0099).
             let short = if room <= i64::from(UDP_TERM_LENGTH / 4) {
@@ -2523,14 +2528,14 @@ fn recording_checks(
                 check: "recording-stalled",
                 level: Level::Warn,
                 message: format!(
-                    "recording {} is {behind} bytes behind its publisher, which has used \
-                     them of the {room} bytes its limit gives it past the recorder: the \
-                     publisher is back-pressured when a message no longer fits in what is \
-                     left, and may be now; a recorder that stays this far behind is on a \
-                     slow or failing disk, so check recording.write_failed and the log \
-                     directory's disk, and `recording stopped` if it gives up, and run \
-                     doctor again, since a recorder that has caught up by then was waiting \
-                     for a sync{short}",
+                    "recording {} holds its publisher: the publisher's position is {behind} \
+                     bytes past the recorder's and its limit {room} bytes past it, and a \
+                     publisher whose position has reached its limit is back-pressured \
+                     until the limit rises, which waits for the recorder; a recorder that \
+                     stays behind is on a slow or failing disk, so check \
+                     recording.write_failed and the log directory's disk, and `recording \
+                     stopped` if it gives up, and run doctor again, since a recorder that \
+                     has caught up by then was waiting for a sync{short}",
                     recording.recording_id
                 ),
                 doc: DOC_RECORDING_COMMANDS,
@@ -4122,8 +4127,10 @@ mod tests {
     }
 
     /// Every recording is listed with its two positions, and a recorder that holds its
-    /// publisher is `recording-stalled`: the publisher has used the room its limit
-    /// gives it past the recorder, here a `cavalry:ipc` window of 32 MiB less a frame.
+    /// publisher is `recording-stalled`: the publisher stands at its limit, here a
+    /// `cavalry:ipc` window of 32 MiB past the recorder, or a message past it, since a
+    /// claim that starts below the limit is reserved whole. A frame short of the limit
+    /// nobody is held, and nothing is said.
     #[test]
     fn recordings_are_listed_and_a_recorder_that_holds_its_publisher_warns() {
         let dir = TestDir::new("recordings");
@@ -4134,7 +4141,7 @@ mod tests {
         let mib = 1024 * 1024;
         publication.recorder.store_release(2 * mib);
         publication.limit.store_release(34 * mib);
-        publication.position.store_release(34 * mib - 64);
+        publication.position.store_release(34 * mib);
         let synced = counters
             .allocate(
                 RECORDING_SYNCED_POSITION,
@@ -4155,14 +4162,33 @@ mod tests {
         assert_eq!(found.level, Level::Warn);
         assert!(
             found.message.starts_with(
-                "recording 3 is 33554368 bytes behind its publisher, which has used them \
-                 of the 33554432 bytes its limit gives it past the recorder"
+                "recording 3 holds its publisher: the publisher's position is 33554432 \
+                 bytes past the recorder's and its limit 33554432 bytes past it"
             ),
             "{}",
             found.message
         );
+        // A message past the limit, which the last claim below it was reserved to.
+        publication.position.store_release(34 * mib + 4096);
+        let past = stalled(&examine(&dir.0));
+        assert_eq!(past.len(), 1, "{past:?}");
+        assert!(
+            past[0].starts_with(
+                "recording 3 holds its publisher: the publisher's position is 33558528 \
+                 bytes past the recorder's and its limit 33554432 bytes past it"
+            ),
+            "{}",
+            past[0]
+        );
+        // A frame short of the limit: the next claim is reserved, so nobody is held.
+        publication.position.store_release(34 * mib - 64);
+        let report = examine(&dir.0);
+        assert!(stalled(&report).is_empty(), "not held: {report}");
 
+        // The recorder catches up and the conductor raises the limit a window past it.
+        publication.position.store_release(34 * mib);
         publication.recorder.store_release(34 * mib - 64);
+        publication.limit.store_release(34 * mib - 64 + 32 * mib);
         let report = examine(&dir.0);
         assert!(stalled(&report).is_empty(), "caught up: {report}");
     }
@@ -4170,11 +4196,11 @@ mod tests {
     /// `recording-stalled` reads the room from the publication's own limit, so it
     /// needs no window (ADR 0101). A `cavalry:udp` publication held by its recorder
     /// stands as the driver leaves it: the limit an eighth of its 8 MiB window short
-    /// of the recorder's position plus the window, the publisher a frame short of the
-    /// limit, the sender ahead of the recorder. A log of another term reads the same
-    /// way. Under five sevenths of the room, nothing; and a reader further behind than
-    /// the recorder, a sender whose receivers are slow or a subscriber, is the one that
-    /// holds the publisher, so the recorder is not named.
+    /// of the recorder's position plus the window, the publisher at the limit, the
+    /// sender ahead of the recorder. A log of another term reads the same way, its
+    /// publisher a message past its limit. A frame short of the limit, nothing; and a
+    /// reader further behind than the recorder, a sender whose receivers are slow or a
+    /// subscriber, is the one that holds the publisher, so the recorder is not named.
     #[test]
     fn a_held_publisher_is_read_from_its_limit_and_its_slowest_reader() {
         let dir = TestDir::new("recordings-held");
@@ -4193,27 +4219,28 @@ mod tests {
             .expect("its sender position");
         udp.recorder.store_release(mib);
         udp.limit.store_release(mib + 7 * mib);
-        udp.position.store_release(mib + 7 * mib - 64);
-        sender.store_release(mib + 7 * mib - 64);
-        // A publication whose log has a 1 MiB term, window 512 KiB, held the same way.
+        udp.position.store_release(mib + 7 * mib);
+        sender.store_release(mib + 7 * mib);
+        // A publication whose log has a 1 MiB term, window 512 KiB, held the same way,
+        // a message past its limit.
         let small = recorded(&mut counters, 8, -6, 1002, 4);
         small.recorder.store_release(mib);
         small.limit.store_release(mib + 512 * 1024);
-        small.position.store_release(mib + 512 * 1024 - 64);
+        small.position.store_release(mib + 512 * 1024 + 4096);
         let found = stalled(&examine(&dir.0));
         assert_eq!(found.len(), 2, "{found:?}");
         assert!(
             found[0].starts_with(
-                "recording 3 is 7339968 bytes behind its publisher, which has \
-                                  used them of the 7340032 bytes"
+                "recording 3 holds its publisher: the publisher's position is 7340032 \
+                 bytes past the recorder's and its limit 7340032 bytes past it"
             ),
             "{}",
             found[0]
         );
         assert!(
             found[1].starts_with(
-                "recording 4 is 524224 bytes behind its publisher, which has \
-                                  used them of the 524288 bytes"
+                "recording 4 holds its publisher: the publisher's position is 528384 \
+                 bytes past the recorder's and its limit 524288 bytes past it"
             ),
             "{}",
             found[1]
@@ -4227,21 +4254,21 @@ mod tests {
         );
         assert!(!found[0].contains("term-length"), "{}", found[0]);
 
-        // Just under five sevenths of the room: nothing. At it: the warning.
-        udp.position.store_release(mib + 5 * mib - 64);
-        small.position.store_release(mib + 64);
+        // A frame short of the limit: the next claim is reserved, nobody is held. At
+        // the limit: the warning.
+        udp.position.store_release(mib + 7 * mib - 64);
+        small.position.store_release(mib + 512 * 1024 - 64);
         assert!(stalled(&examine(&dir.0)).is_empty());
-        udp.position.store_release(mib + 5 * mib);
+        udp.position.store_release(mib + 7 * mib);
         assert_eq!(stalled(&examine(&dir.0)).len(), 1);
 
         // The sender further behind than the recorder: its receivers hold the
         // publisher, and the recorder keeps up.
-        udp.position.store_release(mib + 7 * mib - 64);
         sender.store_release(mib - 64);
         assert!(stalled(&examine(&dir.0)).is_empty());
         // A subscriber further behind than the recorder, over cavalry:ipc, the same.
-        sender.store_release(mib + 7 * mib - 64);
-        small.position.store_release(mib + 512 * 1024 - 64);
+        sender.store_release(mib + 7 * mib);
+        small.position.store_release(mib + 512 * 1024);
         assert_eq!(stalled(&examine(&dir.0)).len(), 2);
         let subscriber = counters
             .allocate(
@@ -4270,7 +4297,7 @@ mod tests {
         let held = recorded(&mut counters, 7, -5, 1001, 3);
         held.recorder.store_release(mib);
         held.limit.store_release(9 * mib);
-        held.position.store_release(9 * mib - 64);
+        held.position.store_release(9 * mib);
         assert_eq!(stalled(&examine(&dir.0)).len(), 1, "placed: judged");
         // An image of the same session and stream: the recording may be the image's.
         let image = counters

@@ -88,23 +88,19 @@ dedicated hosts (ADR 0016, ADR 0034, ADR 0044), and a weekly email of the change
 
 The latency gate's baselines are in `bench/baseline.json`. The rows below are 32-byte
 messages on `grip`, an Intel Core i7-10700 with isolated cores. A sample is the time
-from the publisher's timestamp to the subscriber's handler. Four rows,
-`one_way_32_exclusive`, `one_way_32_client`, `one_way_32_recorded` and
-`one_way_32_udp`, were recorded on 2026-11-04 from 13 processes, and each of their
-numbers is the largest the host measured over those processes. The `one_way_32_ffi`
-row was added by hand on 2026-11-06 from 3 processes at the tree of c208279, in
-commit b409b78: its p50, p99 and max are the largest over those 3 processes, and its
-p99.99 is the slowest of their 63 runs, the number the gate compares a row with when
-the row has no list of runs (ADR 0033). Either way a number is the slow edge of the
-host's band and not a typical run.
+from the publisher's timestamp to the subscriber's handler. The five rows were
+recorded on 2026-11-12 from 8 processes, each of 21 runs, and each of their numbers is
+the largest the host measured over those processes, so a number is the slow edge of
+the host's band and not a typical run. The gate compares a row with the slowest of
+the 168 runs, which the file lists (ADR 0033).
 
 | Row | Path | p50 | p99 | p99.99 | max |
 | --- | --- | --- | --- | --- | --- |
-| `one_way_32_exclusive` | Shared memory, in one process | 93 ns | 141 ns | 405 ns | 637 ns |
-| `one_way_32_client` | Shared memory, through the client API | 106 ns | 185 ns | 493 ns | 1,453 ns |
-| `one_way_32_ffi` | The same, through the C ABI | 123 ns | 224 ns | 537 ns | 1,144 ns |
-| `one_way_32_recorded` | The same, while the driver records the stream | 105 ns | 217 ns | 521 ns | 1,535 ns |
-| `one_way_32_udp` | UDP on the loopback, through the sender and the receiver | 2,479 ns | 2,699 ns | 5,651 ns | 7,359 ns |
+| `one_way_32_exclusive` | Shared memory, in one process | 89 ns | 137 ns | 400 ns | 614 ns |
+| `one_way_32_client` | Shared memory, through the client API | 116 ns | 188 ns | 465 ns | 770 ns |
+| `one_way_32_ffi` | The same, through the C ABI | 127 ns | 223 ns | 466 ns | 1,407 ns |
+| `one_way_32_recorded` | The same, while the driver records the stream | 109 ns | 184 ns | 494 ns | 1,035 ns |
+| `one_way_32_udp` | UDP on the loopback, through the sender and the receiver | 2,499 ns | 2,661 ns | 5,783 ns | 7,247 ns |
 
 Across the cable between the two bench hosts, at 1 Gb/s, the round trip
 `udp_round_trip_32` reads p50 111,679 ns, p99 122,815 ns, p99.99 189,567 ns and max
