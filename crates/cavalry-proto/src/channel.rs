@@ -4,13 +4,14 @@
 //! and `fc=max|min`, the flow control strategy, on a publication's channel, and, from
 //! version 2, the position keys `init-term-id`, `term-id` and `term-offset`, which
 //! create a publication at a position, and, from version 3, `ssc=true|false`, by which
-//! a live recording connects a publication that no receiver answers (`spec/udp.md`,
-//! "The channel URI"; `spec/client-protocol.md`, version 9; ADR 0040, ADR 0053, ADR
-//! 0059, ADR 0098).
+//! a live recording connects a publication that no receiver answers, and, from version
+//! 4, `term-length`, the term length of a publication's log (`spec/udp.md`, "The
+//! channel URI"; `spec/client-protocol.md`, version 10; ADR 0040, ADR 0053, ADR 0059,
+//! ADR 0098, ADR 0099).
 //!
 //! [`Channel::parse`] reads a channel string, borrowing from it, and runs the spec's
 //! checks in the spec's order: `grammar`, `key`, `control`, `endpoint`, `fc`, `ssc`,
-//! `position`, `multicast`. Resolving a host name is the driver's, on its control
+//! `term-length`, `position`, `multicast`. Resolving a host name is the driver's, on its control
 //! plane, and its failure is error code 9; every refusal here is error code 1.
 
 use core::fmt;
@@ -21,6 +22,14 @@ pub const IPC: &str = "cavalry:ipc";
 
 /// What every UDP channel begins with.
 pub const UDP_PREFIX: &str = "cavalry:udp?";
+
+/// The least term length a channel's `term-length` names: the least a log buffer has
+/// (`spec/log-buffer.md`, "What a reader rejects").
+pub const MIN_CHANNEL_TERM_LENGTH: u32 = crate::udp::MIN_TERM_LENGTH;
+
+/// The greatest term length a channel's `term-length` names: the `cavalry:ipc` term,
+/// the longest term this version creates (`spec/udp.md`, version 4; ADR 0099).
+pub const MAX_CHANNEL_TERM_LENGTH: u32 = 64 * 1024 * 1024;
 
 /// The docs anchor every error message names.
 const DOC: &str = "docs/reference/udp.md#the-channel-uri";
@@ -37,7 +46,8 @@ pub enum ChannelError {
         what: &'static str,
     },
     /// A key this version does not name: not `endpoint`, `interface`, `control`,
-    /// `control-mode`, `fc`, `ssc`, `init-term-id`, `term-id` or `term-offset`.
+    /// `control-mode`, `fc`, `ssc`, `term-length`, `init-term-id`, `term-id` or
+    /// `term-offset`.
     Key {
         /// The byte offset of the key within the channel string.
         at: usize,
@@ -70,11 +80,19 @@ pub enum ChannelError {
         /// What was wrong, in words.
         what: &'static str,
     },
+    /// A `term-length` that is not decimal digits with at most one of `k`, `m` or `g`
+    /// after them, or not a power of two from [`MIN_CHANNEL_TERM_LENGTH`] to
+    /// [`MAX_CHANNEL_TERM_LENGTH`] (version 4, ADR 0099).
+    TermLength {
+        /// What was wrong, in words.
+        what: &'static str,
+    },
     /// One or two of the position keys `init-term-id`, `term-id` and `term-offset`
     /// without the rest; a value that is not a 32-bit integer in decimal; a `term-id`
     /// below `init-term-id` by the 32-bit two's complement count; or a `term-offset`
-    /// that is negative, not a multiple of 32 or not below the UDP term length
-    /// (version 2, ADR 0059).
+    /// that is negative, not a multiple of 32 or not below the publication's term
+    /// length, the channel's `term-length` or the UDP term length (version 2, ADR
+    /// 0059; version 4, ADR 0099).
     Position {
         /// What was wrong, in words.
         what: &'static str,
@@ -86,7 +104,7 @@ pub enum ChannelError {
 
 impl ChannelError {
     /// The reason's name in `spec/udp.md`, "What a reader rejects": `grammar`, `key`,
-    /// `control`, `endpoint`, `fc`, `ssc`, `position` or `multicast`.
+    /// `control`, `endpoint`, `fc`, `ssc`, `term-length`, `position` or `multicast`.
     pub const fn reason(self) -> &'static str {
         match self {
             ChannelError::Grammar { .. } => "grammar",
@@ -95,6 +113,7 @@ impl ChannelError {
             ChannelError::Endpoint { .. } => "endpoint",
             ChannelError::FlowControl { .. } => "fc",
             ChannelError::SimulatedConnection { .. } => "ssc",
+            ChannelError::TermLength { .. } => "term-length",
             ChannelError::Position { .. } => "position",
             ChannelError::Multicast => "multicast",
         }
@@ -129,8 +148,8 @@ impl fmt::Display for ChannelError {
                 f,
                 "channel refused (key): the {len}-byte parameter at byte {at} is not one this \
                  version names, endpoint, interface, control, control-mode, fc, ssc, \
-                 init-term-id, term-id or term-offset; remove it, or upgrade the driver to a \
-                 version that names it; see {DOC}"
+                 term-length, init-term-id, term-id or term-offset; remove it, or upgrade \
+                 the driver to a version that names it; see {DOC}"
             ),
             ChannelError::Control { what } => write!(
                 f,
@@ -154,6 +173,13 @@ impl fmt::Display for ChannelError {
                 "channel refused (ssc): {what}; ssc=true lets a live recording connect the \
                  publication while no receiver answers, and ssc=false, or no ssc, leaves that \
                  to a receiver; see {DOC}"
+            ),
+            ChannelError::TermLength { what } => write!(
+                f,
+                "channel refused (term-length): {what}; a publication's term length is a \
+                 power of two from {MIN_CHANNEL_TERM_LENGTH} to {MAX_CHANNEL_TERM_LENGTH} \
+                 bytes, written as digits with an optional k, m or g, such as \
+                 term-length=1m, and 16777216 when the channel names none; see {DOC}"
             ),
             ChannelError::Position { what } => write!(
                 f,
@@ -258,6 +284,7 @@ pub struct UdpChannel<'a> {
     control_mode: Option<ControlMode>,
     flow_control: Option<FlowControl>,
     spies_simulate_connection: Option<bool>,
+    term_length: Option<u32>,
     position: Option<PublicationPosition>,
 }
 
@@ -270,7 +297,7 @@ pub struct PublicationPosition {
     pub initial_term_id: i32,
     /// `term-id`: the term id of the position, `initial_term_id` plus the term count.
     pub term_id: i32,
-    /// `term-offset`: a multiple of 32 below the UDP term length.
+    /// `term-offset`: a multiple of 32 below the publication's term length.
     pub term_offset: i32,
 }
 
@@ -281,10 +308,10 @@ impl PublicationPosition {
         self.term_id.wrapping_sub(self.initial_term_id)
     }
 
-    /// The position the keys name under the UDP term length of `spec/udp.md`, "Values":
-    /// the term count × the term length + the term offset.
-    pub const fn position(self) -> i64 {
-        self.term_count() as i64 * crate::udp::UDP_TERM_LENGTH as i64 + self.term_offset as i64
+    /// The position the keys name under `term_length`, the publication's: the term
+    /// count × the term length + the term offset (`spec/udp.md`, "The channel URI").
+    pub const fn position(self, term_length: u32) -> i64 {
+        self.term_count() as i64 * term_length as i64 + self.term_offset as i64
     }
 }
 
@@ -345,6 +372,31 @@ impl<'a> UdpChannel<'a> {
         self.spies_simulate_connection.is_some()
     }
 
+    /// The term length of the publication's log: what `term-length` names, or the UDP
+    /// term length of `spec/udp.md`, "Values", when the channel names none (version 4;
+    /// ADR 0099).
+    pub const fn term_length(&self) -> u32 {
+        match self.term_length {
+            Some(term_length) => term_length,
+            None => crate::udp::UDP_TERM_LENGTH,
+        }
+    }
+
+    /// Whether the channel names `term-length` at all, which an `add subscription`, a
+    /// destination channel and a `start replay` channel refuse.
+    pub const fn names_term_length(&self) -> bool {
+        self.term_length.is_some()
+    }
+
+    /// The position the position keys name under the channel's term length, when the
+    /// channel names them.
+    pub const fn position(&self) -> Option<i64> {
+        match self.position {
+            Some(keys) => Some(keys.position(self.term_length())),
+            None => None,
+        }
+    }
+
     /// The position keys, when the channel names them: a publication's log is created
     /// at [`PublicationPosition::position`] with their initial term id (version 2).
     pub const fn position_keys(&self) -> Option<PublicationPosition> {
@@ -390,7 +442,7 @@ impl<'a> Channel<'a> {
             });
         };
         // `grammar` over every parameter first, then `key`, `control`, `endpoint`, `fc`,
-        // `ssc`, `position` and `multicast`: the page's order, so that a string wrong in two ways reports
+        // `ssc`, `term-length`, `position` and `multicast`: the page's order, so that a string wrong in two ways reports
         // the earlier check whatever the order of its parameters.
         //
         // `grammar`: the key=value form, the key's characters, a non-empty value, and no
@@ -440,6 +492,7 @@ impl<'a> Channel<'a> {
                     | "control-mode"
                     | "fc"
                     | "ssc"
+                    | "term-length"
                     | "init-term-id"
                     | "term-id"
                     | "term-offset"
@@ -457,6 +510,7 @@ impl<'a> Channel<'a> {
         let mut interface_value = None;
         let mut fc_value = None;
         let mut ssc_value = None;
+        let mut term_length_value = None;
         let mut initial_term_id_value = None;
         let mut term_id_value = None;
         let mut term_offset_value = None;
@@ -469,6 +523,7 @@ impl<'a> Channel<'a> {
                 "interface" => interface_value = Some(value),
                 "fc" => fc_value = Some(value),
                 "ssc" => ssc_value = Some(value),
+                "term-length" => term_length_value = Some(value),
                 "init-term-id" => initial_term_id_value = Some(value),
                 "term-id" => term_id_value = Some(value),
                 "term-offset" => term_offset_value = Some(value),
@@ -550,8 +605,19 @@ impl<'a> Channel<'a> {
                 });
             }
         };
+        // `term-length` (version 4): digits with at most one of k, m or g after them,
+        // a power of two this version creates.
+        let term_length = match term_length_value {
+            None => None,
+            Some(value) => Some(parse_term_length(value)?),
+        };
+        let effective_term_length = match term_length {
+            Some(term_length) => term_length,
+            None => crate::udp::UDP_TERM_LENGTH,
+        };
         // `position` (version 2): the three keys together, each a 32-bit integer, the
-        // term id at or past the initial one and the offset within the UDP term.
+        // term id at or past the initial one and the offset within the publication's
+        // term, the one `term-length` names or the UDP term.
         let position = match (initial_term_id_value, term_id_value, term_offset_value) {
             (None, None, None) => None,
             (Some(initial), Some(term), Some(offset)) => {
@@ -576,11 +642,12 @@ impl<'a> Channel<'a> {
                 }
                 if term_offset < 0
                     || term_offset % 32 != 0
-                    || term_offset >= crate::udp::UDP_TERM_LENGTH as i32
+                    || term_offset as u32 >= effective_term_length
                 {
                     return Err(ChannelError::Position {
-                        what: "term-offset is not a multiple of 32 from 0 to below the UDP term \
-                               length",
+                        what: "term-offset is not a multiple of 32 from 0 to below the \
+                               publication's term length, the channel's term-length or \
+                               16777216",
                     });
                 }
                 Some(keys)
@@ -604,9 +671,47 @@ impl<'a> Channel<'a> {
             control_mode,
             flow_control,
             spies_simulate_connection,
+            term_length,
             position,
         }))
     }
+}
+
+/// A `term-length` value: decimal digits, then at most one of `k`, `m` or `g` in either
+/// case for × 1024, × 1048576 and × 1073741824, naming a power of two from
+/// [`MIN_CHANNEL_TERM_LENGTH`] to [`MAX_CHANNEL_TERM_LENGTH`] (`spec/udp.md`, version
+/// 4, "The channel URI"; ADR 0099).
+fn parse_term_length(value: &str) -> Result<u32, ChannelError> {
+    let refused = |what| ChannelError::TermLength { what };
+    let (digits, unit) = match value.as_bytes().last() {
+        Some(b'k' | b'K') => (&value[..value.len() - 1], 1u64 << 10),
+        Some(b'm' | b'M') => (&value[..value.len() - 1], 1u64 << 20),
+        Some(b'g' | b'G') => (&value[..value.len() - 1], 1u64 << 30),
+        _ => (value, 1),
+    };
+    if digits.is_empty() || !digits.bytes().all(|byte| byte.is_ascii_digit()) {
+        return Err(refused(
+            "the term-length value is not decimal digits with at most one of k, m or g \
+             after them",
+        ));
+    }
+    let length = digits
+        .parse::<u64>()
+        .ok()
+        .and_then(|count| count.checked_mul(unit))
+        .ok_or(refused(
+            "the term-length value is past any length a log can have",
+        ))?;
+    if !length.is_power_of_two()
+        || length < u64::from(MIN_CHANNEL_TERM_LENGTH)
+        || length > u64::from(MAX_CHANNEL_TERM_LENGTH)
+    {
+        return Err(refused(
+            "the term length is not a power of two from 65536 to 67108864",
+        ));
+    }
+    // In range, so it fits.
+    Ok(length as u32)
 }
 
 /// The key of a `key=value` parameter: the whole parameter when it has no `=`, which
@@ -728,8 +833,8 @@ mod tests {
         for (string, key) in [
             ("cavalry:udp?mtu=1408|endpoint=10.0.0.2:1", "mtu"),
             (
-                "cavalry:udp?endpoint=10.0.0.2:0|term-length=65536",
-                "term-length",
+                "cavalry:udp?endpoint=10.0.0.2:0|linger=5000000000",
+                "linger",
             ),
             (
                 "cavalry:udp?control=10.0.0.1:1|control-mode=manual|group=1",
