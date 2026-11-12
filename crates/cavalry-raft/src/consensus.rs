@@ -187,6 +187,18 @@ pub trait Io {
     /// durably, before the member reports an append position for it.
     fn record_term(&mut self, term: i64, base: i64) -> Result<(), Self::Fault>;
 
+    /// The candidate term the member's log directory holds, −1 when none was stored:
+    /// what [`Io::store_candidate_term`] wrote last, before this start or since. A
+    /// member that elects reads it once, in its first init, so that it votes once in a
+    /// term across a restart (`spec/cluster.md`, "The log"; ADR 0089). Read from
+    /// memory: it returns at once and cannot fail.
+    fn candidate_term(&mut self) -> i64;
+
+    /// The highest term in the member's record of terms, its log leadership term id,
+    /// −1 for a record with none: what [`Io::record_term`] wrote, before this start or
+    /// since. Read once with [`Io::candidate_term`], and from memory as it is.
+    fn log_leadership_term_id(&mut self) -> i64;
+
     /// The leader's log for `term`: its publication on stream 100 at position `base`
     /// with every other member's `log` endpoint as a destination, and its recording.
     /// `Ok(None)` while a step is still under way; the core calls again each cycle
@@ -788,6 +800,12 @@ pub struct Consensus {
     /// Whether the member's first election since it started has yet to close: until it
     /// has, the canvass deadline is the startup canvass timeout.
     startup: bool,
+    /// Whether a member that elects has read what its log directory held when it
+    /// started: its candidate term and the highest term of its record (ADR 0089).
+    read_back: bool,
+    /// Whether the term this member leads is the term of its first election since it
+    /// started: what its new leadership term carries as `is startup`.
+    led_from_start: bool,
     /// Whether a consensus message from each member has been read since this member's
     /// election began at init (ADR 0077): the members a candidate waits for.
     heard: [bool; MAX_MEMBERS],
@@ -884,6 +902,8 @@ impl Consensus {
             leader_id: appointed_leader(member_ids),
             election: None,
             startup: true,
+            read_back: false,
+            led_from_start: false,
             heard: [false; MAX_MEMBERS],
             votes: [None; MAX_MEMBERS],
             requested: [false; MAX_MEMBERS],
@@ -1875,6 +1895,16 @@ impl Consensus {
     /// leads at once. A fault at any step leaves it in init, and the next cycle tries
     /// the step again.
     fn init<I: Io>(&mut self, clock: Clock, io: &mut I) -> Result<usize, I::Fault> {
+        // A member that elects starts on what its log directory holds (ADR 0089): the
+        // candidate term it stored, so that it votes once in a term across a restart,
+        // and the highest term of its record, the term it canvasses with. It reads
+        // them here, once, and no message before: a member in init reads none. Its
+        // append position it reads every cycle, as it always has.
+        if self.election.is_some() && !self.read_back {
+            self.candidate_term = self.candidate_term.max(io.candidate_term());
+            self.log_term = self.log_term.max(io.log_leadership_term_id());
+            self.read_back = true;
+        }
         // Out of the live log, so that the image joined next is a new one whose join
         // position follower log await checks.
         if self.joined {
@@ -2125,6 +2155,7 @@ impl Consensus {
         self.term = self.candidate_term;
         self.term_base = self.append_position;
         self.leader_id = self.member_id();
+        self.led_from_start = self.startup;
         // Init gave up the log of any term this member led before, so `log` is `None`
         // and leader log replication adds this term's.
         count(&mut self.counts.terms_led);
@@ -2156,6 +2187,7 @@ impl Consensus {
         self.term = term;
         self.term_base = self.append_position;
         self.leader_id = self.member_id();
+        self.led_from_start = self.startup;
         // No log is held here, as in `lead_elected`: an appointed leader leads once,
         // from canvass or, alone, from init, and has added none before.
         count(&mut self.counts.terms_led);
@@ -2276,7 +2308,10 @@ impl Consensus {
                 leader_member_id: self.member_id(),
                 log_session_id: log.session_id,
                 app_version: 0,
-                is_startup: true,
+                // The appointed leader leads once, from its start. A leader that
+                // elects says whether this term is of its first election since it
+                // started, as Aeron's leader sends its own node startup (ADR 0089).
+                is_startup: self.election.is_none() || self.led_from_start,
                 commit_position: self.commit_position,
             },
         );

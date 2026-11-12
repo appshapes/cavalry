@@ -399,6 +399,17 @@ impl Io for ClientIo {
         Ok(self.terms.append(term, base, NO_RECORDING)?)
     }
 
+    /// The `terms` file's stored candidate term as the module holds it in memory. The
+    /// module's member is appointed and its core never asks (ADR 0081, ADR 0089).
+    fn candidate_term(&mut self) -> i64 {
+        self.terms.candidate_term()
+    }
+
+    /// The highest term of the `terms` file, from memory, as [`Io::candidate_term`].
+    fn log_leadership_term_id(&mut self) -> i64 {
+        self.terms.log_leadership_term_id()
+    }
+
     fn add_log(&mut self, term: i64, base: i64) -> Result<Option<Log>, Self::Fault> {
         // The publication held is the one of the term it was created for, at that
         // term's base: a call for the same term is a step tried again, and one for
