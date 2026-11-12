@@ -23,7 +23,13 @@ commit path runs per message.
   voted for it (ADR 0077). It stores a term before the vote or the request vote that
   raises it, and votes once in a term. A candidate asks for votes in the term it
   nominated itself for and no other: one whose term another candidate's request raised
-  asks for none in the raised term and does not lead it. A leader tells a member whose
+  asks for none in the raised term and does not lead it. A candidate that cannot win
+  its ballot, one that has read a vote against its term or holds no vote of its own
+  for it, canvasses again on its next cycle and does not wait out the election
+  timeout, so a split vote costs a second delay of at most 500 ms and not a second
+  (ADR 0105). A member that replicated a term it lacked canvasses again with no
+  member's report, so that it waits for its leader's answer and does not nominate
+  itself against a leader it has caught up with (ADR 0106). A leader tells a member whose
   log is of an older term which term its own record of terms holds next, with that
   term's base and its end, read through `Io::terms_after`: the member truncates what it
   holds above that base, so the leader names the next term and never a later one, over
@@ -151,7 +157,9 @@ commit path runs per message.
   position, truncates each that stopped above it, which after a catch-up can be two
   that overlap, then takes every term based above the position out of the `terms`
   file. Each command waits for the driver's answer, so it is one step; asked again,
-  it changes nothing.
+  it changes nothing. `drop_terms_above` takes the terms a leader's record lacks out
+  of that file by term, after such a truncation, each write synced
+  (`TermsFile::drop_above_term`; ADR 0096).
 - Asks for the sync a commit waits for: a member's append position is its
   recording's synced position, and the driver's recorder syncs a recording by itself
   once a second. So the module asks its driver to sync its recording of the log,
@@ -226,6 +234,9 @@ election does more, it does this instead, until the step that builds it (ADR 008
   log up and replay it (ADR 0091), record the replays a member asks for and catch
   up (ADR 0094), and truncate (ADR 0095). The module's own member is still
   appointed and asks for none of it, until the change that moves it (ADR 0081).
+  A truncation whose command faults after an earlier one succeeded leaves the
+  member reporting the end and the log term it had until the leader asks again;
+  ADR 0095's Consequences say where that is tested.
 - Over a driver a member does not start on a log directory that holds a term or a
   stored candidate term: the module refuses, and says to start the cluster again
   as a new one. The core starts on such a directory (ADR 0089); the module does

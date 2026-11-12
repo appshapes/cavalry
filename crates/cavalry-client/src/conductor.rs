@@ -12,7 +12,7 @@
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicI32, AtomicI64, Ordering};
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::time::Duration;
 
 use cavalry_proto::client_protocol::{Command, Event};
 use cavalry_shm::broadcast::{BroadcastError, Receiver};
@@ -117,8 +117,7 @@ pub(crate) struct Shared {
     /// Loaded by every claim and offer before the limit, so in a slot of its own,
     /// apart from `last_sent`, which the conductor stores at each keepalive.
     state: StateSlot,
-    /// The driver's clock, nanoseconds since the Unix epoch, when a command was last
-    /// sent by either thread.
+    /// The client's nano clock when a command was last sent by either thread.
     last_sent: AtomicI64,
     /// The correlation id of the command the user's thread waits on, or [`NO_PENDING`].
     /// Stored before the command is written and loaded after its answer is read, so the
@@ -174,15 +173,11 @@ impl Shared {
     }
 }
 
-/// The driver's clock: nanoseconds since the Unix epoch, as the ring page measures
-/// every timeout.
-pub(crate) fn now_nanos() -> i64 {
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map_or(0, |since| {
-            i64::try_from(since.as_nanos()).unwrap_or(i64::MAX)
-        })
-}
+// The client's two clocks (`spec/client-protocol.md`, "Liveness and timeouts"; ADR
+// 0109). The epoch clock is for the consumer heartbeat's age, here and in every claim
+// on the command ring: the driver stored its own epoch clock there. The nano clock is
+// for the keepalive interval, which a step of the host's clock must not move.
+pub(crate) use cavalry_shm::clock::{epoch_time, nano_time};
 
 pub(crate) const fn nanos(duration: Duration) -> i64 {
     let nanos = duration.as_nanos();
@@ -287,12 +282,12 @@ impl Conductor {
     pub(crate) fn run(mut self) {
         let mut backoff = Backoff::new();
         while self.shared.closed().is_none() {
-            let now = now_nanos();
-            if let Some(reason) = self.liveness(now) {
+            let epoch = epoch_time();
+            if let Some(reason) = self.liveness(epoch) {
                 self.shared.close(reason);
                 break;
             }
-            let work = match self.duty_cycle(now) {
+            let work = match self.duty_cycle(epoch, nano_time()) {
                 Ok(work) => work,
                 Err(reason) => {
                     self.shared.close(reason);
@@ -309,8 +304,8 @@ impl Conductor {
 
     /// One cycle's work after the heartbeat: the keepalive, the subscriptions added or
     /// gone since the last cycle, then a batch of events.
-    fn duty_cycle(&mut self, now: i64) -> Result<usize, Closed> {
-        Ok(self.keepalive(now)? + self.registrations() + self.events()?)
+    fn duty_cycle(&mut self, epoch: i64, now: i64) -> Result<usize, Closed> {
+        Ok(self.keepalive(epoch, now)? + self.registrations() + self.events()?)
     }
 
     /// Drops the mappings the subscriptions retired and forgets a registration whose
@@ -342,13 +337,13 @@ impl Conductor {
         work
     }
 
-    /// The consumer heartbeat: −1 is `driver-closed`; older than the driver timeout is
-    /// `driver-timeout`.
-    fn liveness(&self, now: i64) -> Option<Closed> {
+    /// The consumer heartbeat: −1 is `driver-closed`; older than the driver timeout on
+    /// the client's epoch clock, `epoch`, is `driver-timeout`.
+    fn liveness(&self, epoch: i64) -> Option<Closed> {
         let heartbeat = self.ring.consumer_heartbeat();
         if heartbeat == DRIVER_CLOSED {
             Some(Closed::DriverClosed)
-        } else if now.saturating_sub(heartbeat) > nanos(DRIVER_TIMEOUT) {
+        } else if epoch.saturating_sub(heartbeat) > nanos(DRIVER_TIMEOUT) {
             Some(Closed::DriverTimeout)
         } else {
             None
@@ -360,7 +355,10 @@ impl Conductor {
     /// a producer retries: a full ring clears, and an unblocked claim was not delivered.
     /// A driver the write finds closed or stale closes the client as the heartbeat
     /// would; any other refusal is a ring that failed a check of its page, and closes it.
-    fn keepalive(&mut self, now: i64) -> Result<usize, Closed> {
+    /// The interval is measured on the nano clock, `now`, so that a clock set back does
+    /// not silence the client for the length of the step; the claim checks the
+    /// heartbeat's age against the epoch clock, `epoch`.
+    fn keepalive(&mut self, epoch: i64, now: i64) -> Result<usize, Closed> {
         if now.saturating_sub(self.shared.last_sent()) < nanos(KEEPALIVE_INTERVAL) {
             return Ok(0);
         }
@@ -371,10 +369,11 @@ impl Conductor {
         let Ok(length) = command.write(&mut self.scratch) else {
             return Ok(0);
         };
-        match self
-            .producer
-            .write(command.command_type() as i32, &self.scratch[..length], now)
-        {
+        match self.producer.write(
+            command.command_type() as i32,
+            &self.scratch[..length],
+            epoch,
+        ) {
             Ok(()) => {
                 self.shared.sent(now);
                 Ok(1)
