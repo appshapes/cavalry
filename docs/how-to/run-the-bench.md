@@ -764,8 +764,9 @@ shared runner is
   168). On `bench` a row's median moves by up to three 10 ns steps: over the twelve
   processes at the same tree the checked `one_way_32_exclusive` row read 210 to 230
   with its p50 at 140 in every one, and the unchecked `claim_commit_32_exclusive` row
-  read 120 to 150. So a `REGRESSION` on a bench host is one of four things. On a
-  changed tree it is a change. On the baseline's tree, with the row's p50 and its rate
+  read 120 to 150. So a `REGRESSION` on a bench host is one of five things. On a
+  changed tree it is a change, unless the change touches nothing the row runs through,
+  which is the last of the bullets on a `REGRESSION` below. On the baseline's tree, with the row's p50 and its rate
   where the other processes read them, it is a part of the host's band the baseline
   did not hold, and the process joins the baseline with step 4's `--join` on either
   host. A row whose p50 and p99 moved with its p99.99 is the next
@@ -803,6 +804,82 @@ shared runner is
   the host: `nm -C target/release/cavalry-bench | grep 'TermReader>::poll'` prints the
   symbol only when it is out of line, and the publisher's `try_claim` and `commit` are
   out of line in every build.
+- `REGRESSION` on a message row after a change that touches nothing the row runs
+  through: where the linker put code that did not change, not the change. A row's
+  p99.99 moves with the addresses its loop and the functions under it land at, and
+  a change to a crate the bench links moves the address of what is laid out after
+  it. On `grip`, over the 50 processes of 33 of `master`'s binaries from 2026-11-09
+  to 2026-11-12, the median run of `claim_commit_32_ffi` read 127 to 151 ns on the
+  unchecked profile and 130 to 155 on the checked one: 24 and 25 ns across binaries,
+  where the processes of one binary, for the four binaries that ran three or more,
+  differed by 2 to 10 ns and by 2 to 7. How much of that is placement is not known
+  for those binaries; for one change it is. Pull request
+  249 added 150 instructions to the channel parser and to the conductor's command
+  handling and none to anything a claim runs through, and its three processes read
+  that row at 152, 159 and 147 on the unchecked profile, against an entry whose
+  slowest run was 147 (card 198). Three things tell this from a change:
+  1. What the bench links. `cargo tree -p cavalry-bench --edges normal --prefix none |
+     grep -o '^cavalry[a-z-]*' | sort -u` prints `cavalry-bench` and the six crates it
+     links: `cavalry-client`, `cavalry-driver`, `cavalry-ffi`, `cavalry-log`,
+     `cavalry-proto` and `cavalry-shm`. A change to
+     `cavalry-raft` or `cavalry-control` alone runs the bench on `master`'s machine
+     code: its processes are more processes of `master`'s binary, and a red on one
+     is the process or the host, never placement.
+  2. Whether the code on the row's path is the same. The workspace sets no profile,
+     so a release build has no cross-crate link-time optimisation: a function's code
+     is fixed when its own crate is compiled, and an `#[inline]` or generic function
+     is compiled into the crate that calls it. Emit the assembly of each crate the
+     row runs through, and of the bench binary, at `master` and at the change, and
+     compare the files:
+
+     ```sh
+     # ignore: builds two checkouts for another target, minutes each; needs `rustup target add x86_64-unknown-linux-gnu`
+     # MASTER and CHANGE are two checkouts, one at master and one at the change. The
+     # stand-in linker lets the assembly of cavalry-ffi and of the bench binary be
+     # written on a laptop that has no linker for Linux; it links nothing, and nothing
+     # built this way is run.
+     MASTER=../cavalry-master CHANGE=. OUT=/tmp/asm
+     for tree in MASTER CHANGE; do
+       dir=$(eval echo \$$tree)
+       for crate in cavalry-shm cavalry-log cavalry-client cavalry-ffi; do
+         (cd "$dir" && CARGO_TARGET_X86_64_UNKNOWN_LINUX_GNU_LINKER=/usr/bin/true \
+           cargo rustc --release -p "$crate" --lib --target x86_64-unknown-linux-gnu \
+           --target-dir "$OUT/$tree" -- --emit asm -C debuginfo=0)
+       done
+       (cd "$dir" && CARGO_TARGET_X86_64_UNKNOWN_LINUX_GNU_LINKER=/usr/bin/true \
+         cargo rustc --release -p cavalry-bench --bin cavalry-bench \
+         --target x86_64-unknown-linux-gnu --target-dir "$OUT/$tree" \
+         -- --emit asm -C debuginfo=0)
+     done
+     for file in "$OUT"/MASTER/x86_64-unknown-linux-gnu/release/deps/*.s; do
+       cmp "$file" "$OUT/CHANGE/x86_64-unknown-linux-gnu/release/deps/$(basename "$file")" \
+         && echo "same: $(basename "$file")"
+     done
+     ```
+
+     The loop prints `same:` and a file's name for each file that is byte for byte
+     the same in the two trees, and `cmp`'s own line for one that differs. Every
+     file the same: no instruction the row runs changed, and the row moved by
+     placement. Pull request 249's five files were the same, while the same
+     comparison of the two crates it changed, `cavalry-proto` and `cavalry-driver`,
+     found six functions that differed. A file that differs is not yet a change
+     on the row's path: it may differ in a function the row never calls. Read the
+     functions the row runs through in both files, each between its
+     `.type <name>,@function` line and its `.size <name>` line; the C ABI's keep
+     their names, `cavalry_publication_try_claim` and `cavalry_buffer_claim_commit`
+     for the ffi claim row. A function that differs only in offsets from `%rsp`
+     has the same instructions and another stack layout, because a type it holds by
+     value changed its size. The bench's `run_client` holds the driver's start and
+     the client's connect, so a change to either recompiles the function the
+     `_client` rows are measured in, and those rows cannot be cleared this way.
+  3. Whether the reading is inside what `master`'s own binaries have read. The
+     `bench (grip)` and `bench (linux)` jobs of `master`'s runs print the row in
+     `bench-compare`'s table; `gh api repos/<owner>/<repo>/actions/jobs/<job id>/logs`
+     gives a job's log.
+  The same code and a reading inside that range: record the red where step 4 says
+  and re-run the job once, as for any first red; no entry changes for a layout, since
+  the next landing in a linked crate draws another. Code on the row's path that
+  differs, or a reading above every binary's: it is the change's to explain.
 - A fault in `faults.txt` whose address lies in a Cavalry mapping, or a mapping whose
   `Rss` is below its `Size`: a mapping was not pre-touched, which is a bug in
   `cavalry-shm`, where every `create` and `open` pre-touches before it hands the

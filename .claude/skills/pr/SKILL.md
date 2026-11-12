@@ -49,6 +49,13 @@ conflict: a conflict is resolved in place, as step 4 says.
    `just lint` and one that did not build, and each cost a review cycle. A non-zero exit
    stops the sequence; fix, then start this step again.
 
+   A gate run in the background, or with its output cut by a pipe, has the same trap
+   in another place: the job's status, and `$?` after a pipe, are the last command's,
+   an `echo`'s or `tail`'s. Read the line the gate's own `echo "lint exit $?"`
+   printed, and nothing else, as its result. On 2026-11-12 a trial merge piped through
+   `tail` printed `exit 0` under its own `CONFLICT` line, and a background job of two
+   gates read `completed (exit code 0)` whatever either gate had done (card 266).
+
    The laptop's gates compile the laptop's platform alone. A change that adds or
    touches a `cfg(target_os = "linux")` block, or its `not` twin, is type-checked for
    Linux before the push, because the Linux gates and both bench hosts build it:
@@ -109,7 +116,13 @@ conflict: a conflict is resolved in place, as step 4 says.
    `auto-merge` goes on at creation: the reviewer's approval of the current head then
    arms a squash merge that lands when the required checks pass, with no person in the
    path (`auto-merge.yml`). Leave it off only when the user asked to read the pull
-   request first.
+   request first, or when other sessions take turns on the bench hosts and this pull
+   request is to land between two of them. A landing while a pull request that takes
+   the hosts is open leaves that one not holding `master`'s tip when it merges, and
+   `master`'s run for its squash then takes both hosts again (`scripts/bench-needed.py`,
+   ADR 0074), whether or not the landing itself takes a host. Such a pull request
+   lands on the word of the session whose push comes next, as "Approved" in section 2
+   says for one that is approved and unlabelled.
 
 7. **Confirm the review started.** Within a minute, `gh run list --workflow "dispatch
    review" --limit 3` shows a `pull_request_target` run titled with the pull request,
@@ -139,7 +152,14 @@ gh pr checks <number>
 
 - **Changes requested by `claude[bot]`.** A `claude` run (event `pull_request_review`)
   starts within a minute and applies the blockers on the branch. Push nothing while it
-  runs or waits: one writer per cycle. Its runs queue one at a time per pull request
+  runs or waits: one writer per cycle. Whether it has ended is read from the run's
+  jobs, `gh api repos/{owner}/{repo}/actions/runs/<run id>/jobs --jq '.jobs[] | .name
+  + " " + .status'`, and not from the run's one word or from the branch: the run reads
+  `queued` between its jobs, and its last job, `approve-fixer-runs`, runs after the
+  fixer's commits are on the branch. On pull request 250 on 2026-11-12 the branch held
+  both of the fixer's commits and the run read `queued` while that job had still to
+  run. A listing of runs filtered to the pull request that prints nothing shows no run
+  in flight only when the listing reaches back to the pull request's earlier runs. Its runs queue one at a time per pull request
   and GitHub keeps one pending run per queue, so a push of yours now gets its own
   review, and the fix run that review starts cancels the one already waiting; on pull
   request 57 two reviews lost their fix run that way and the run that did work answered
@@ -203,6 +223,14 @@ gh pr checks <number>
   changes on the approved head (`auto-merge.yml`), and an open request from a
   collaborator on the head arms nothing, which the `auto merge` run says; the
   reviewer's approval of the new head arms it again, so disarm nothing by hand.
+  The label counts at the moment the approval is submitted: `auto-merge.yml` runs on
+  a submitted review and on nothing else, so `auto-merge` put on a pull request that
+  is already approved arms nothing (pull requests 248 and 250 on 2026-11-12). To land
+  one, put `auto-merge` on and ask for a review of the unchanged head with `gh pr edit
+  <number> --add-label review`; that review's approval arms the merge, and on pull
+  request 250 it landed nineteen seconds later. To hold one back: before that approval
+  is submitted, take `auto-merge` off again; once the merge is armed the label does
+  nothing (pull request 249), and `gh pr merge <number> --disable-auto` stops it.
   The merge lands when the required checks pass: `gh pr checks <number>
   --required`. A branch that moved after the approval is refused by GitHub, and the
   `auto merge` run says why: a notice, and the run green, when GitHub raised runs for
