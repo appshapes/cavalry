@@ -193,7 +193,11 @@ commit path runs per message.
   the member's live recording. `spec/cluster.md`, "The service" and "The log's
   recordings", say what both do. Until they land a member writes no such file, and a
   service whose position is below the recording its member names is refused with
-  error code 23, as before.
+  error code 23, as before. Three more sentences of the page wait for the member's
+  write: a member does not yet wait for `cluster.log_recording_id` to hold −1
+  before it truncates ("Messages during an election"); it does not store −1 there
+  when the file cannot be written; and `cluster.log_recordings_unwritten`, the
+  count of such a cycle, is not registered yet.
 - To come, each with its card: the C ABI's calls for a service, so that a service is
   a program in any of the five client languages (card 227), the election and mixed
   versions in a rolling upgrade (card 228), the cluster client (card 229), snapshots
