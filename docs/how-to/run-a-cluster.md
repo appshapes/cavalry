@@ -76,7 +76,11 @@ committed once a quorum, two of three, has it on disk.
    commit position 96`. For members 1 and 2, with their own id and directories in the
    command, the line says `a follower in term 0, election closed`, with the same two
    positions once their recorders have synced, which each member asks its recorder
-   for as soon as an entry is written.
+   for as soon as an entry is written. After the two positions the line says who the
+   member follows and why its last election began: on members 1 and 2, `; it follows
+   member 0; its last election began because the member started`. On member 0, which
+   follows no member, it says `; its last election began because the member started`.
+   The line ends with `; see` and the page that explains it, as every finding does.
 
 5. Stop a member with Ctrl-C or SIGTERM. It prints `cavalry run: stopping` and
    `cavalry run: closed`. The other two are a quorum and go on.
@@ -189,8 +193,10 @@ committed once a quorum, two of three, has it on disk.
   restart. Start the cluster again as a new cluster, and keep the old log directories
   for what they hold.
 - `WARN cluster-quorum-lost`: the leader heard from fewer than two of three members
-  within 10 s, and nothing was committed while that lasted. Check that two members run
-  and that each reaches the leader's consensus endpoint.
+  within 10 s, and nothing was committed while that lasted. A leader that elects
+  stopped leading each time and held an election, and the finding is on a member that
+  leads again. Check that two members run and that each reaches the leader's consensus
+  endpoint.
 - `WARN cluster.messages_rejected`: the member rejected consensus messages it cannot
   read, and acted on none of them. Another member sends them from another version of
   Cavalry, as during an upgrade, and the member may canvass with no leader for as long
@@ -211,3 +217,33 @@ committed once a quorum, two of three, has it on disk.
   on that member's driver counts the refusals. If the commit position stays where it
   is while the append position moves, run `doctor` on each member's host: the leader's
   own disk is one of the quorum's.
+- `WARN cluster-no-leader` or `note cluster-joining` whose message names no appointed
+  leader: the member elects its leader. No member started with `cavalry run` does
+  yet; `doctor` knows such a member by its counters, which hold
+  `cluster.leader_member_id` and no `cluster.appointed_leader_behind`. With no leader,
+  the message says which state the election is in and why it began, from
+  `cluster.election_cause`. A leader needs the votes of two of three members, so run
+  `doctor` on each member's host and check that each reaches the `consensus` endpoint
+  of every other. In canvass the message has one more sentence, for a member that has
+  replicated a term it missed: it canvasses again with no leader, in the same
+  election, until the leader it replicated from answers it. A member that stays there
+  waits for that one member and not for votes, so check the `consensus` endpoints
+  between the two hosts. With a leader taken, the message names that member, from
+  `cluster.leader_member_id`, and what the state waits for: an image of the leader's
+  log on the member's `log` endpoint, the leader's replay on its `catchup` endpoint,
+  the fifth field of its entry, or both in `follower catch-up`. The two states of a
+  catch-up before it wait on the `catchup` endpoint alone: the member subscribes to
+  the live log only when the replay has brought its log near the leader's position.
+  The check at the end of the
+  message names the endpoints of that state. In `follower ready` the image has
+  arrived, and the message names the append position alone and the leader's
+  `consensus` endpoint as the one to check. A member that elects begins again after
+  an election that fails, so neither message says to start the cluster again. Both
+  end with how many elections have failed. Three counters each count one rule that
+  fails an election: `cluster.join_position_mismatches`,
+  `cluster.truncations_refused` and `cluster.log_replications_unavailable`. They do
+  not hold every failure. When more elections failed than the three count, the
+  message says how many and what else fails an election: a step that made no progress
+  for 10 s, a log the member cannot join its leader with, or, on a member that led
+  before its election closed, a term above its own or the loss of its quorum, which
+  `cluster.leader_quorum_losses` counts.
