@@ -8,9 +8,11 @@
   that holds what the publisher writes in 16 milliseconds at its fastest. A channel
   that names none has the 16 MiB term, as before. In Aeron, this is the `term-length`
   channel parameter. A publication on `ssc=true` has a new counter,
-  `sender.joins_refused`: the receivers that could not join it while it was alone with
-  its recording because the publisher wrote more than a term before they answered,
-  which a longer term ends. The refusal of a message that is too long names the key.
+  `sender.joins_refused`: the status messages of receivers that could not join it while
+  it was alone with its recording, because the publisher wrote more than a term before
+  they answered, which a longer term ends, or while they were away. The refusal of a
+  message that is too long names the key, and so does the refusal of a publication
+  whose log the driver directory has no room for.
   `spec/udp.md` is at version 4 and `spec/client-protocol.md` at version 10; a
   subscription's, a destination's and a replay's channel refuse the key with code 1,
   and a join under another term length is refused

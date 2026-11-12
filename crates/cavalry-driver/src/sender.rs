@@ -1068,10 +1068,12 @@ impl Sender {
         // back to it and sends from there, so the receiver has nothing to NAK; the
         // term behind the sender position is never cleaned, and nothing in it was sent.
         // Further behind, what it would need is no longer in the log: rejected and
-        // counted in the publication's own `sender.joins_refused`, since a publisher
-        // that writes more than a term between a setup frame and its answer is one
-        // whose term is too short for it (ADR 0099), and its image times out and joins
-        // again. The limit is set anew from this receiver.
+        // counted in the publication's own `sender.joins_refused`, and its image times
+        // out and joins again. On a publication no receiver has joined, that is a
+        // publisher that writes more than a term between a setup frame and its answer,
+        // one whose term is too short for it; on one whose receiver left, more than a
+        // term went by while it was away (ADR 0099). The limit is set anew from this
+        // receiver.
         if live.alone(now) {
             let position = cavalry_proto::udp::position(
                 message.consumption_term_id,

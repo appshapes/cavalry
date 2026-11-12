@@ -869,8 +869,9 @@ pub(crate) struct Conductor {
     replays: Vec<ReplayEntry>,
     /// The retention commands in progress (`spec/client-protocol.md`, "Sizes").
     commands: Vec<CommandEntry>,
-    /// The term length of every log this conductor creates: the spec's, and the
-    /// smallest in a test at a registry's capacity (ADR 0027).
+    /// The term length of every `cavalry:ipc` log this conductor creates: the spec's,
+    /// and the smallest in a test at a registry's capacity (ADR 0027). A `cavalry:udp`
+    /// publication's is its channel's (ADR 0099).
     term_length: u32,
     recorder: RecorderLink,
     replayer: ReplayerLink,
@@ -2117,7 +2118,20 @@ impl Conductor {
             Err(error) => {
                 self.statics.log_create_failed.increment();
                 self.abandon_send_endpoint(endpoint_index, socket.is_some(), reuse);
-                self.send_error(correlation_id, ErrorCode::StorageSpace, &format!("{error}"));
+                // What the operator can change is the term: the log is three of them,
+                // resident from its creation (ADR 0027, ADR 0099).
+                self.send_error(
+                    correlation_id,
+                    ErrorCode::StorageSpace,
+                    &format!(
+                        "{error}; this publication's log is 3 × its term length + 4096 \
+                         bytes, {} in all, resident in the driver directory from its \
+                         creation: if the directory has no room for it, name a shorter \
+                         term-length on the channel, 65536 at the least, close publications \
+                         that are not used, or give the directory room",
+                        3 * u64::from(term_length) + 4096
+                    ),
+                );
                 return;
             }
         };
@@ -10563,6 +10577,42 @@ mod recording {
         }
         assert_eq!((read, refold), (late, fold));
         assert_eq!(h.counter(LOG_BUFFER_REJECTED_FRAME), 0);
+    }
+
+    /// A log the driver directory refuses (invariant 3): `add publication` on a
+    /// `cavalry:udp` channel is code 12, and the message says how long the log is and
+    /// that a shorter `term-length` is one way out; nothing of the publication is
+    /// left, and `driver.log_create_failed` counts it (ADR 0099).
+    #[test]
+    fn a_udp_log_the_directory_refuses_is_code_12_and_names_term_length() {
+        use std::os::unix::fs::PermissionsExt;
+        let mut h = Harness::new("udp-log-refused");
+        let receiver = TestReceiver::bind();
+        let channel = format!(
+            "{}|term-length=64k",
+            String::from_utf8(receiver.channel()).expect("utf-8")
+        );
+        let publications = h.dir.path().join("publications");
+        std::fs::create_dir_all(&publications).expect("the directory");
+        let writable = std::fs::metadata(&publications)
+            .expect("stat")
+            .permissions();
+        std::fs::set_permissions(&publications, std::fs::Permissions::from_mode(0o555))
+            .expect("read-only");
+        let now = h.now;
+        h.conductor
+            .add_publication(1, 2, 7, channel.as_bytes(), false, now);
+        std::fs::set_permissions(&publications, writable).expect("writable again");
+        let (code, message) = h.last_error(2).expect("an error");
+        assert_eq!(code, 12, "{message}");
+        assert!(
+            message.contains("3 × its term length + 4096 bytes, 200704 in all"),
+            "{message}"
+        );
+        assert!(message.contains("name a shorter term-length"), "{message}");
+        assert!(h.conductor.publications.is_empty());
+        assert!(h.conductor.send_endpoints.is_empty());
+        assert_eq!(h.counter(DRIVER_LOG_CREATE_FAILED), 1);
     }
 
     /// The bounds of `term-length` at the conductor: the longest term this version

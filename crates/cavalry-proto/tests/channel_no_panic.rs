@@ -45,6 +45,11 @@ fn check(bytes: &[u8]) {
             );
             assert!(!endpoint.host().is_empty(), "{bytes:02x?}: endpoint host");
             assert!(!endpoint.is_multicast(), "{bytes:02x?}: multicast accepted");
+            let term = udp.term_length();
+            assert!(
+                term.is_power_of_two() && (65_536..=67_108_864).contains(&term),
+                "{bytes:02x?}: term length {term}"
+            );
             if let Some(interface) = udp.interface() {
                 assert!(!interface.host().is_empty(), "{bytes:02x?}: interface host");
                 assert_ne!(interface.port(), Some(0), "{bytes:02x?}: interface port 0");
