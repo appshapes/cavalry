@@ -1,10 +1,11 @@
 //! What a leader does for a member that replicates a term it missed, on one core
 //! driven by hand (`spec/cluster.md`, "Messages outside an election"; ADR 0085). The
 //! leader answers a catch-up position below its term base log position with a replay
-//! of its own recordings, from the position to the first term base above it, one
-//! replay a member at a time. Where the span lies in several recordings it starts
-//! the next once the member has reported the end of the last. It stops the replay of
-//! a member that canvasses or asks again, and every replay when it holds an election.
+//! of the recording of its own that holds the position, to the first term base above
+//! it or to that recording's end, one replay a member at a time. Where the span lies
+//! in several recordings the member asks for each, and the leader starts none by
+//! itself (ADR 0092). It stops the replay of a member that canvasses or asks again,
+//! and every replay when it holds an election.
 //!
 //! The leader of every test here is member 0 of three, leading term 2 from 96 over a
 //! record of terms (0, 0), (1, 64), (2, 96): term 0 is the log from 0 to 64, term 1
@@ -184,12 +185,13 @@ fn a_position_the_recordings_do_not_hold_is_answered_by_nothing() {
 }
 
 /// A term whose bytes lie in two recordings: the first replay ends by itself at its
-/// recording's end, 32, below the term's end. The next begins there, and only once
-/// the member has reported an append position that reached it, so that its image of
-/// the next replay joins at its append position. Each replay is counted. The second
-/// ends at the term's end, and nothing follows it.
+/// recording's end, 32, below the term's end. Nothing of the leader's own follows
+/// it, whatever the member reports: the member asks for the next recording's replay
+/// from where its log ends, once a recording is armed for the image (ADR 0092), and
+/// the leader starts it then, with no replay to stop. Each replay is counted. The
+/// second ends at the term's end, and nothing follows it either.
 #[test]
-fn the_next_recording_is_replayed_once_the_member_has_reported_the_end_of_the_last() {
+fn the_next_recording_is_replayed_when_the_member_asks_for_it() {
     let (mut leader, mut io, ms) = leader();
     read(&mut leader, &mut io, ms, &catchup_position(2, 2, 0));
     assert_eq!(started(&io), vec![(2, 0, 64)]);
@@ -203,30 +205,38 @@ fn the_next_recording_is_replayed_once_the_member_has_reported_the_end_of_the_la
         ended: true,
     });
     work(&mut leader, &mut io, ms + 2);
-    assert_eq!(started(&io).len(), 1, "the member has reported nothing yet");
-    read(&mut leader, &mut io, ms + 3, &replicated_to(2, 0, 16));
+    read(&mut leader, &mut io, ms + 3, &replicated_to(2, 0, 32));
     work(&mut leader, &mut io, ms + 4);
-    assert_eq!(started(&io).len(), 1, "the member is at 16, below 32");
+    assert_eq!(
+        started(&io).len(),
+        1,
+        "the member has reported the end, and the leader starts nothing by itself"
+    );
 
-    read(&mut leader, &mut io, ms + 5, &replicated_to(2, 0, 32));
-    work(&mut leader, &mut io, ms + 6);
+    read(&mut leader, &mut io, ms + 5, &catchup_position(2, 2, 32));
     assert_eq!(started(&io), vec![(2, 0, 64), (2, 32, 64)]);
+    assert_eq!(
+        stops(&io, 2),
+        0,
+        "the first had stopped, and its end was read"
+    );
     assert_eq!(leader.counts().log_replications, 2);
 
     io.stopped[2] = Some(ReplayStopped {
         position: 64,
         ended: true,
     });
-    work(&mut leader, &mut io, ms + 7);
-    read(&mut leader, &mut io, ms + 8, &replicated_to(2, 0, 64));
-    work(&mut leader, &mut io, ms + 9);
+    work(&mut leader, &mut io, ms + 6);
+    read(&mut leader, &mut io, ms + 7, &replicated_to(2, 0, 64));
+    work(&mut leader, &mut io, ms + 8);
     assert_eq!(started(&io).len(), 2, "the term's end was reached");
     assert_eq!(stops(&io, 2), 0);
 }
 
 /// A replay that stopped for any reason but its end, no subscriber or a fault of the
-/// recording, is followed by nothing, whatever the member reports: the member's
-/// progress timer fails its election, and it asks again.
+/// recording, is followed by nothing either, whatever the member reports: the member
+/// asks again when the replay brought it something, and else its progress timer
+/// fails its election.
 #[test]
 fn a_replay_that_did_not_end_by_itself_is_followed_by_nothing() {
     let (mut leader, mut io, ms) = leader();
@@ -283,20 +293,25 @@ fn a_member_that_asks_again_is_served_its_newest_request_once_the_old_replay_sto
 
 /// A member that canvasses is in no replication. The leader first stops the replay
 /// it runs to it, and starts none when that one has stopped. One it was waiting to
-/// start, the next recording's, is dropped: the append position that would have
-/// started it starts nothing.
+/// start, a request whose start faulted, is dropped: the append position that would
+/// have started it starts nothing.
 #[test]
 fn a_canvass_position_stops_the_replay_and_drops_the_one_owed() {
     let (mut leader, mut io, ms) = leader();
-    // To member 2 a replay runs; to member 1 the next recording's is owed.
+    // To member 2 a replay runs; to member 1 one is owed, its start having faulted.
     read(&mut leader, &mut io, ms, &catchup_position(2, 2, 0));
-    read(&mut leader, &mut io, ms, &catchup_position(1, 2, 0));
-    io.stopped[1] = Some(ReplayStopped {
-        position: 32,
-        ended: true,
-    });
+    io.fail_start_to = Some(1);
+    assert_eq!(
+        leader.on_message(at(ms), &catchup_position(1, 2, 0), &mut io),
+        Err("the replay cannot be started")
+    );
+    io.fail_start_to = None;
     work(&mut leader, &mut io, ms + 1);
-    assert_eq!(started(&io).len(), 2);
+    assert_eq!(
+        started(&io).len(),
+        2,
+        "member 1 has reported nothing: its replay stays owed"
+    );
 
     for member in [1, 2] {
         read(
@@ -341,7 +356,11 @@ fn a_canvass_position_stops_the_replay_and_drops_the_one_owed() {
         2,
         "no replay follows a canvass position"
     );
-    assert_eq!(leader.counts().log_replications, 2);
+    assert_eq!(
+        leader.counts().log_replications,
+        1,
+        "the start that faulted is no replay"
+    );
 }
 
 /// A stop the driver refuses is a fault: the message's call returns it, the leader

@@ -455,6 +455,59 @@ fn a_follower_that_is_behind_is_no_candidate_replicates_what_it_lacks_and_joins(
     assert_eq!(cluster.log(behind), cluster.log(ahead));
 }
 
+/// A term that lies in two of the leader's recordings is replicated by two replays,
+/// and the member asks for each (ADR 0092). A follower is cut off while the leader
+/// commits two entries; the member ahead holds the first in one recording and the
+/// second in another. When the leader stops, the member ahead leads, and the member
+/// behind is told the new term, whose base it is below. Its first replay ends at the
+/// end of the recording it began in, between the two entries: its image goes, it
+/// subscribes again and asks from where its log then ends, and the second replay
+/// brings the rest. Both catch-up positions and both replays are counted, no
+/// replication is counted unavailable, no image joined elsewhere, and the member
+/// holds the leader's log to the term's base byte for byte, where it records the
+/// term.
+#[test]
+fn a_term_in_two_of_the_leaders_recordings_is_asked_for_twice() {
+    let ids = [0, 1, 2];
+    let mut safety = Safety::new(&ids);
+    let (mut cluster, first) = elected(5, &mut safety);
+    let others: Vec<i32> = ids.iter().copied().filter(|&id| id != first).collect();
+    let (ahead, behind) = (others[0], others[1]);
+    safety.run(&mut cluster, 10);
+    let held = cluster.append_position(behind).expect("a member");
+
+    cluster.cut(behind);
+    let one = cluster
+        .offer(b"in the first recording")
+        .expect("the leader appends");
+    safety.run(&mut cluster, 100);
+    assert_eq!(cluster.append_position(ahead), Some(one));
+    cluster.end_recording(ahead);
+    let two = cluster
+        .offer(b"in the second recording")
+        .expect("the leader appends");
+    safety.run(&mut cluster, 11_000);
+    assert_eq!(cluster.commit_position(first), Some(two));
+    assert_eq!(cluster.append_position(behind), Some(held));
+
+    cluster.halt(first);
+    cluster.heal(behind);
+    safety.run_until(&mut cluster, 14_000, "the term replicated", |cluster| {
+        cluster.append_position(behind) == Some(two)
+    });
+    safety.run(&mut cluster, 100);
+    assert_eq!(cluster.leader(), Some(ahead));
+    let counts = cluster.counts(behind).expect("a member");
+    assert_eq!(counts.log_replications, 2, "{counts:?}");
+    assert_eq!(counts.log_replications_unavailable, 0, "{counts:?}");
+    assert_eq!(counts.join_position_mismatches, 0, "{counts:?}");
+    assert_eq!(counts.elections_failed, 0, "{counts:?}");
+    assert_eq!(cluster.counts(ahead).expect("a member").log_replications, 2);
+    let (terms, _) = cluster.record_of_terms(behind).expect("a member");
+    assert_eq!(terms, vec![(0, 0), (1, two)]);
+    assert_eq!(cluster.log_to(behind, two), cluster.log_to(ahead, two));
+}
+
 /// A replication whose replay never arrives. A follower that was cut off while the
 /// leader committed an entry comes back as that leader stops, votes for the member
 /// ahead, and is told the new term, whose base it is below: it asks for what it

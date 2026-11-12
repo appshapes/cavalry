@@ -331,24 +331,29 @@ fn a_request_the_leader_cannot_serve_ends_what_it_held_for_the_member() {
     work(&mut leader, &mut io, ms + 2);
     assert_eq!(started(&io), vec![(2, 96, None)]);
 
-    // To member 1 the next recording's replay of a replication is owed.
-    read(&mut leader, &mut io, ms + 3, &catchup_position(1, 2, 0));
-    io.stopped[1] = Some(ReplayStopped {
-        position: 32,
-        ended: true,
-    });
-    work(&mut leader, &mut io, ms + 4);
-    read(&mut leader, &mut io, ms + 5, &catchup_position(1, 2, -1));
-    read(&mut leader, &mut io, ms + 6, &appended(1, 0, 32, false));
-    work(&mut leader, &mut io, ms + 7);
-    assert_eq!(started(&io), vec![(2, 96, None), (1, 0, Some(64))]);
+    // To member 1 a replay is owed: the start of its request faulted, and the request
+    // is kept for the cycle after the member has reported the position.
+    io.fail_start_to = Some(1);
+    assert_eq!(
+        leader.on_message(at(ms + 3), &catchup_position(1, 2, 0), &mut io),
+        Err("the replay cannot be started")
+    );
+    io.fail_start_to = None;
+    read(&mut leader, &mut io, ms + 4, &catchup_position(1, 2, -1));
+    read(&mut leader, &mut io, ms + 5, &appended(1, 0, 0, false));
+    work(&mut leader, &mut io, ms + 6);
+    assert_eq!(
+        started(&io),
+        vec![(2, 96, None), (1, 0, Some(64))],
+        "the start that faulted, and none after"
+    );
     assert_eq!(stops(&io, 1), 0, "nothing ran to member 1");
 }
 
 /// One member's fault does not starve another. A start to member 1 faults in every
-/// cycle. In the same cycles member 2, later in the leader's table, has the next
-/// recording's replay started and its catch-up served: the fault is returned from
-/// each cycle after every member has had its turn.
+/// cycle. In the same cycles member 2, later in the leader's table, has the end of
+/// its replay read, so that the next recording's replay starts at once when it asks:
+/// the fault is returned from each cycle after every member has had its turn.
 #[test]
 fn a_start_that_faults_for_one_member_does_not_starve_the_next() {
     let (mut leader, mut io, ms) = leading();
@@ -369,8 +374,11 @@ fn a_start_that_faults_for_one_member_does_not_starve_the_next() {
         Err("the replay cannot be started")
     );
     read(&mut leader, &mut io, ms + 3, &appended(2, 0, 32, false));
+    // Member 2 asks for the next recording's: the leader holds no replay for it.
+    read(&mut leader, &mut io, ms + 4, &catchup_position(2, 2, 32));
+    assert_eq!(stops(&io, 2), 0, "the end of its first replay was read");
     assert_eq!(
-        leader.do_work(at(ms + 4), &mut io),
+        leader.do_work(at(ms + 5), &mut io),
         Err("the replay cannot be started")
     );
     let to_two: Vec<_> = started(&io)

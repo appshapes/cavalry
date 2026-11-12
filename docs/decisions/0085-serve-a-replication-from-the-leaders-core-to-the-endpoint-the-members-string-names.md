@@ -1,6 +1,6 @@
 # 0085. Serve a replication from the leader's core, one replay a member, to the endpoint the members string names
 
-- **Status:** Accepted
+- **Status:** Superseded by 0092
 - **Date:** 2026-11-11
 - **Invariants affected:** 1, 3, 4, 6
 - **Supersedes:** none. Adds one clause to `spec/cluster.md`, "Catch-up position,

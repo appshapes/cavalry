@@ -137,3 +137,4 @@ under `docs/` is listed here; `just lint-docs` fails on one that is not.
 - [0088. Catch up within a leader's term, and join the live log from the replay](decisions/0088-catch-up-within-a-leaders-term-and-join-the-live-log-from-the-replay.md)
 - [0089. Start a member that elects on the log directory it kept](decisions/0089-start-a-member-that-elects-on-the-log-directory-it-kept.md)
 - [0091. Give a leader's log up, and replay it over a driver, from the recordings the module stopped](decisions/0091-give-a-leaders-log-up-and-replay-it-over-a-driver-from-the-recordings-the-module-stopped.md)
+- [0092. Have the member ask for each replay of a replication, so that a recording is armed for its image](decisions/0092-have-the-member-ask-for-each-replay-of-a-replication-so-that-a-recording-is-armed-for-its-image.md)

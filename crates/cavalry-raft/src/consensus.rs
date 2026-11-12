@@ -302,28 +302,32 @@ pub trait Io {
     fn replay_stopped(&mut self, member: i32) -> Result<Option<ReplayStopped>, Self::Fault>;
 
     /// A member's subscription to stream 100 on its own `catchup` endpoint, with a
-    /// recording armed on it, so that the recording of each replay's image holds it
-    /// from its join position (`spec/cluster.md`, state 9). The core calls it once
-    /// for a replication, before it asks the leader for anything.
+    /// recording armed on it, so that the recording of the replay's image holds it
+    /// from its join position (`spec/cluster.md`, state 9). One recording is armed
+    /// for one image: the core calls this before each catch-up position it sends,
+    /// once for each replay of a replication (ADR 0092) and once for a catch-up,
+    /// with no catch-up subscription held.
     fn add_catchup(&mut self) -> Result<(), Self::Fault>;
 
     /// Sends catch-up position to the member with id `leader`, for its term `term`,
     /// asking for the log from `position`, with this member's own `catchup`
     /// endpoint, which the core does not hold. `false` when it was not sent, as
-    /// [`Io::send`] says; the core sends it once, and again on a later cycle while it
-    /// has not left.
+    /// [`Io::send`] says; the core sends it once from a position, and again on a
+    /// later cycle while it has not left.
     fn send_catchup_position(&mut self, leader: i32, term: i64, position: i64) -> bool;
 
-    /// The join position of the image now on the catch-up subscription: `None`
-    /// before the first replay's image has arrived and between one replay's image
-    /// and the next. What an image carries counts in [`Io::append_position`] no
+    /// The join position of the image the member records on the catch-up
+    /// subscription, the one that took the recording [`Io::add_catchup`] armed:
+    /// `None` before that image has arrived, and again once it has gone, its replay
+    /// ended or stopped. What an image carries counts in [`Io::append_position`] no
     /// sooner than this reports the image, so that the core checks where an image
     /// joined before it reports a position the image gave it.
     fn catchup_image(&mut self) -> Result<Option<i64>, Self::Fault>;
 
     /// Removes the catch-up subscription and stops the recording its image started,
     /// whose stop is where the member's log ends. The core calls it when a
-    /// replication has reached its stop, and in init for one that failed.
+    /// replication has reached its stop, when a replay's image has gone below it
+    /// (ADR 0092), and in init for one that failed.
     fn remove_catchup(&mut self) -> Result<(), Self::Fault>;
 }
 
@@ -479,8 +483,8 @@ pub struct Counts {
     /// `cluster.join_position_mismatches`: an image of the live log that joined at a
     /// position other than the member's append position, in follower log await; or,
     /// in follower log replication, a replay's image that joined at a position other
-    /// than the one the member asked from, for the first image, or last sent its
-    /// leader, for each image after (ADR 0086); or, in follower catch-up await, the
+    /// than the one the member asked from (ADR 0086, ADR 0092); or, in follower
+    /// catch-up await, the
     /// image of a catch-up's replay that joined at a position other than the one the
     /// member asked from (ADR 0088).
     pub join_position_mismatches: u64,
@@ -519,9 +523,9 @@ pub struct Counts {
     /// log (ADR 0083). No leader that holds what was committed asks it.
     pub truncations_refused: u64,
     /// `cluster.log_replications`: on a member, a catch-up position it sent from
-    /// follower log replication (ADR 0086); on the leader, a replay started for such
-    /// a member, one for each replay where the span lies in several recordings (ADR
-    /// 0085).
+    /// follower log replication, one for each replay it asked for (ADR 0086, ADR
+    /// 0092); on the leader, a replay started for such a member, one for each replay
+    /// where the span lies in several recordings (ADR 0085).
     pub log_replications: u64,
     /// `cluster.log_replications_unavailable`: a member in follower log replication
     /// whose append position stayed below its stop position without moving for the
@@ -709,25 +713,27 @@ struct Peer {
 }
 
 /// What a leader holds of one member that is behind: the replays of its own recordings
-/// that it serves the member with, one at a time, for a replication (state 9) or for
-/// a catch-up within its term (state 11) (`spec/cluster.md`, "Messages outside an
-/// election"; ADR 0085, ADR 0087).
+/// that it serves the member with, one at a time and one for each catch-up position
+/// the member sends, for a replication (state 9) or for a catch-up within its term
+/// (state 11) (`spec/cluster.md`, "Messages outside an election"; ADR 0085, ADR 0087,
+/// ADR 0092).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Serving {
     /// No replay runs to the member and none is owed.
     Idle,
-    /// A replay runs to the member. A replication's replays end at `end`, the first
-    /// term base log position above the position the member asked from. A catch-up's
-    /// has no end: it follows the leader's live recording until the leader stops it.
-    Running { end: Option<i64> },
+    /// A replay runs to the member. A replication's ends at the first term base log
+    /// position above the position the member asked from, or at its recording's end
+    /// where that comes first. A catch-up's has no end: it follows the leader's live
+    /// recording until the leader stops it. However it ends, nothing follows it but
+    /// the member's next request (ADR 0092).
+    Running,
     /// The leader asked the replay to stop and waits for it to have stopped. `next`
     /// is the newest request the member has sent since: its position, and its end.
     Stopping { next: Option<(i64, Option<i64>)> },
     /// A replay is owed from `position`, and begins once the member's reported
     /// append position has reached it, so that the member's image of it joins at its
-    /// append position. Either the last replay of a replication ended by itself
-    /// there, at a recording's end below `end`, or the member asked from there and
-    /// the start faulted: the request is kept this way until a start succeeds.
+    /// append position. The member asked from there and the start faulted: the
+    /// request is kept this way until a start succeeds.
     Next { position: i64, end: Option<i64> },
 }
 
@@ -742,13 +748,14 @@ struct Replication {
     /// recorded it: a term it holds none of yet. `None` where the term replicated is
     /// the member's own log term, which its record holds already.
     begins: Option<(i64, i64)>,
-    /// Whether the member's catch-up position has left.
+    /// Whether a catch-up position has left whose replay the member waits for or
+    /// records: from the message leaving until that replay's image has gone.
     asked: bool,
-    /// Where the next image of a replay must join: the position the member asked
-    /// from, then the append position it last sent the leader, which is what the
-    /// leader starts the next recording's replay on.
-    expect: i64,
-    /// The join position of the image last checked.
+    /// The position the member last asked from, `None` before its first catch-up
+    /// position has left: where the image of the replay must join, and a position
+    /// the member does not ask from a second time (ADR 0092).
+    asked_from: Option<i64>,
+    /// The join position of the image last checked, of the replay last asked for.
     image: Option<i64>,
     /// The append position at the last cycle, and when it last moved.
     position: i64,
@@ -1346,7 +1353,7 @@ impl Consensus {
                             stop: action.stop_position,
                             begins,
                             asked: false,
-                            expect: self.append_position,
+                            asked_from: None,
                             image: None,
                             position: self.append_position,
                             moved_ns: clock.now_ns,
@@ -1768,7 +1775,7 @@ impl Consensus {
                 self.serve(index, Serving::Next { position, end });
                 self.start_replay(member, position, end, io)?
             }
-            Serving::Running { .. } => {
+            Serving::Running => {
                 io.stop_replay(member)?;
                 Serving::Stopping {
                     next: Some((position, end)),
@@ -1822,7 +1829,7 @@ impl Consensus {
         } else {
             &mut self.counts.catchups
         });
-        Ok(Serving::Running { end })
+        Ok(Serving::Running)
     }
 
     /// Ends what this leader serves the member at `index`, which canvasses again,
@@ -1831,7 +1838,7 @@ impl Consensus {
     fn end_serving<I: Io>(&mut self, index: usize, io: &mut I) -> Result<(), I::Fault> {
         let serving = match self.serving(index) {
             Serving::Idle | Serving::Next { .. } => Serving::Idle,
-            Serving::Running { .. } => {
+            Serving::Running => {
                 io.stop_replay(self.peer(index).id)?;
                 Serving::Stopping { next: None }
             }
@@ -1841,15 +1848,15 @@ impl Consensus {
         Ok(())
     }
 
-    /// The replays a leader serves, once a duty cycle. A replay that ended by itself
-    /// below its replication's end, at its recording's end, is followed by the next
-    /// recording's from there, once the member has reported an append position that
-    /// reached it. One that ended at the replication's end, or for any other reason,
-    /// is followed by nothing: the member goes on by a new request, or its own timer
-    /// fails its election. A replay the leader stopped is followed, once it has
-    /// stopped, by the request the member sent since. How a replay ended is handed
-    /// over once, so the request is first kept as a replay owed: a start that faults
-    /// is tried again on a later cycle, when the member has reported its position.
+    /// The replays a leader serves, once a duty cycle. A replay that has stopped,
+    /// at its replication's end, at its recording's end below it or for any other
+    /// reason, is followed by nothing of the leader's own: the member goes on by a
+    /// new request, which it sends when its log has moved since it last asked, or
+    /// its own timer fails its election (ADR 0092). A replay the leader stopped is
+    /// followed, once it has stopped, by the request the member sent since. How a
+    /// replay ended is handed over once, so the request is first kept as a replay
+    /// owed: a start that faults is tried again on a later cycle, when the member
+    /// has reported its position.
     fn serve_replays<I: Io>(&mut self, io: &mut I) -> Result<usize, I::Fault> {
         let mut work = 0;
         // Every member is served in every cycle: one member's fault, which may last,
@@ -1875,17 +1882,12 @@ impl Consensus {
         let peer = self.peer(index);
         let serving = match self.serving(index) {
             Serving::Idle => return Ok(0),
-            Serving::Running { end } => match io.replay_stopped(peer.id)? {
+            // A replay that has stopped is followed by nothing of the leader's own,
+            // however it ended: one that ended at its recording's end below the
+            // replication's is carried on by the member's next catch-up position,
+            // which it sends once a recording is armed for the image (ADR 0092).
+            Serving::Running => match io.replay_stopped(peer.id)? {
                 None => return Ok(0),
-                // A replication's replay that ended at its recording's end, below
-                // the replication's: the next recording's is owed. A catch-up's
-                // replay is followed by nothing, however it ended.
-                Some(stopped) if stopped.ended && end.is_some_and(|end| stopped.position < end) => {
-                    Serving::Next {
-                        position: stopped.position,
-                        end,
-                    }
-                }
                 Some(_) => Serving::Idle,
             },
             Serving::Stopping { next } => match (io.replay_stopped(peer.id)?, next) {
@@ -1952,7 +1954,7 @@ impl Consensus {
         // asks no more about one it had stopped already. A fault leaves the rest for
         // the next cycle.
         for index in 0..self.count {
-            if matches!(self.serving(index), Serving::Running { .. }) {
+            if matches!(self.serving(index), Serving::Running) {
                 io.stop_replay(self.peer(index).id)?;
             }
             self.serve(index, Serving::Idle);
@@ -2501,12 +2503,15 @@ impl Consensus {
     ///
     /// A term it holds none of is recorded at its base first, and only while its
     /// append position is still that base. Then it subscribes on
-    /// its `catchup` endpoint and sends catch-up position once. Each replay's image
-    /// must join where the member's log ends: the position it asked from, then the
-    /// append position it last sent, on which the leader starts the next recording's
-    /// replay. It reports its append position as it moves and every leader heartbeat
-    /// interval. Below the stop, an append position that has not moved for the leader
-    /// heartbeat timeout fails the election.
+    /// its `catchup` endpoint and sends catch-up position, for one replay: the
+    /// replay's image must join where the member asked from. When that image has
+    /// gone with the member still below its stop, the member removes its
+    /// subscription and, when its log ends further on than where it asked from,
+    /// subscribes and asks again from there: a recording is armed for each image,
+    /// and a member asks from a position once (ADR 0092). It reports its append
+    /// position as it moves and every leader heartbeat interval. Below the stop, an
+    /// append position that has not moved for the leader heartbeat timeout fails the
+    /// election.
     ///
     /// At the stop it records the leader's term there when the stop is the leader's
     /// term base log position, reports, and then waits for the commit position it was
@@ -2550,30 +2555,53 @@ impl Consensus {
         }
         let mut work = 0;
         if self.append_position < replication.stop {
-            if !self.catchup {
-                io.add_catchup()?;
-                self.catchup = true;
-            }
-            if !replication.asked
-                && io.send_catchup_position(self.leader_id, self.term, self.append_position)
-            {
-                replication.asked = true;
-                replication.expect = self.append_position;
-                count(&mut self.counts.log_replications);
-                work = 1;
-                // Kept at once: a fault below must not ask a second time.
-                self.replication = Some(replication);
-            }
-            // A new image, checked before this cycle reports what it brought.
-            if let Some(join) = io.catchup_image()?
-                && replication.image != Some(join)
-            {
-                if join != replication.expect {
-                    count(&mut self.counts.join_position_mismatches);
-                    self.fail(clock);
-                    return Ok(1);
+            // The member asks for one replay at a time, and from a position once
+            // (ADR 0092): at first, and again when a replay's image has gone and
+            // left its log further on. It subscribes for each, so that a recording
+            // is armed for the image the leader's replay brings: a driver arms one
+            // only on a stream with no image.
+            if !replication.asked && replication.asked_from != Some(self.append_position) {
+                if !self.catchup {
+                    io.add_catchup()?;
+                    self.catchup = true;
                 }
-                replication.image = Some(join);
+                if io.send_catchup_position(self.leader_id, self.term, self.append_position) {
+                    replication.asked = true;
+                    replication.asked_from = Some(self.append_position);
+                    replication.image = None;
+                    count(&mut self.counts.log_replications);
+                    work = 1;
+                    // Kept at once: a fault below must not ask a second time.
+                    self.replication = Some(replication);
+                }
+            }
+            if self.catchup {
+                match io.catchup_image()? {
+                    // A new image, checked before this cycle reports what it
+                    // brought: it must join where the member asked from.
+                    Some(join) if replication.image != Some(join) => {
+                        if replication.asked_from != Some(join) {
+                            count(&mut self.counts.join_position_mismatches);
+                            self.fail(clock);
+                            return Ok(1);
+                        }
+                        replication.image = Some(join);
+                    }
+                    Some(_) => {}
+                    // The image has gone: its replay ended, at its recording's end
+                    // or at a fault, or was stopped. The subscription goes, and the
+                    // stop of the image's recording is where the log ends, which the
+                    // next cycle reads; it asks again there if that is further on.
+                    None if replication.image.is_some() => {
+                        io.remove_catchup()?;
+                        self.catchup = false;
+                        replication.image = None;
+                        replication.asked = false;
+                        work = 1;
+                        self.replication = Some(replication);
+                    }
+                    None => {}
+                }
             }
             if clock.now_ns.saturating_sub(replication.moved_ns) >= LEADER_HEARTBEAT_TIMEOUT_NS {
                 count(&mut self.counts.log_replications_unavailable);
@@ -2581,7 +2609,6 @@ impl Consensus {
                 return Ok(1);
             }
             if self.report_replicated(clock, io) {
-                replication.expect = self.append_position;
                 work = 1;
             }
             self.replication = Some(replication);
