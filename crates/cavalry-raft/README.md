@@ -135,6 +135,12 @@ commit path runs per message.
   has added the live log follows either. A member that leaves the log in a catch-up
   keeps both recordings. The tests drive the `Io` of two modules, each on a driver
   of its own.
+- Truncates a member's log over a driver, for a core that elects (ADR 0095):
+  `truncate_log` purges each recording the member keeps that begins above the
+  position, truncates each that stopped above it, which after a catch-up can be two
+  that overlap, then takes every term based above the position out of the `terms`
+  file. Each command waits for the driver's answer, so it is one step; asked again,
+  it changes nothing.
 - Asks for the sync a commit waits for: a member's append position is its
   recording's synced position, and the driver's recorder syncs a recording by itself
   once a second. So the module asks its driver to sync its recording of the log,
@@ -187,10 +193,10 @@ elections a leader holds, the truncation, the replication of a term a member mis
 and the catch-up within a leader's term of `spec/cluster.md`. Where the page's
 election does more, it does this instead, until the step that builds it (ADR 0081):
 
-- Over a driver a member cannot truncate: the module's `Io` refuses `truncate_log`
-  as `unsupported`. A leader over a driver can give its log up and replay it (ADR
-  0091), a member can record the replays it asks for and catch up (ADR 0094), and
-  the module's member is appointed and never asks for any of it (ADR 0083).
+- Over a driver the module's `Io` can do all an electing core asks: give a leader's
+  log up and replay it (ADR 0091), record the replays a member asks for and catch
+  up (ADR 0094), and truncate (ADR 0095). The module's own member is still
+  appointed and asks for none of it, until the change that moves it (ADR 0081).
 - A leader answers a member for the term the member reports, and does not check that
   its own record of terms holds that term. A member that recorded a term which fewer
   than a quorum recorded keeps it in its record under a leader whose record has none.

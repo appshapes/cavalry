@@ -12,8 +12,9 @@
 //! cycle reads the clock once, allocates nothing and sends no command; the commands, a
 //! round trip each, come at the member's start, where its election adds, leaves or
 //! gives up the log, where a leader starts or stops a replay for a member that is
-//! behind (ADR 0091), and where a member that is behind subscribes on its `catchup`
-//! endpoint for a replay or removes that subscription (ADR 0094).
+//! behind (ADR 0091), where a member that is behind subscribes on its `catchup`
+//! endpoint for a replay or removes that subscription (ADR 0094), and where a member
+//! truncates its log (ADR 0095).
 
 use std::collections::VecDeque;
 use std::path::Path;

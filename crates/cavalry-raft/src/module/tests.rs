@@ -1842,3 +1842,91 @@ fn a_truncation_asked_of_a_member_in_the_log_does_nothing() {
     assert_eq!(pair.member.io.truncate_log(0).expect("asked"), None);
     assert_eq!(pair.member.io.append_position(), one);
 }
+
+/// After a catch-up a member keeps two recordings that overlap, the replay's and the
+/// live one (ADR 0094). A truncation to a position both hold cuts both there, so
+/// that neither brings a replay of this member's own what its log no longer holds.
+#[test]
+fn a_truncation_cuts_both_of_two_recordings_that_overlap() {
+    let mut pair = pair("truncate-overlap");
+    let _receiver = pair.receive_log();
+    let log = pair
+        .leader
+        .io
+        .add_log(0, 0)
+        .expect("the driver takes the commands")
+        .expect("the log has its recording");
+    let one = pair.append(b"one", 0);
+    pair.member.io.add_catchup().expect("subscribed and armed");
+    assert!(
+        pair.leader
+            .io
+            .start_replay(1, 0, None)
+            .expect("the replay starts")
+    );
+    pair.observe_both("the replay's image is told", |io| {
+        io.catchup_image().expect("the image is read")
+    });
+    pair.observe_both("the append position reaches the leader's", |io| {
+        (io.append_position() == one).then_some(())
+    });
+    // The live add, and two more entries that both recordings hold.
+    pair.member.io.join_log().expect("subscribed and armed");
+    let two = pair.append(b"two", one);
+    let three = pair.append(b"three", two);
+    wait_for("the replay brings both entries", || {
+        pair.member
+            .io
+            .observe_catchup()
+            .expect("the catch-up is observed");
+        (pair.member.io.append_position() == three).then_some(())
+    });
+    let live_start = pair.observe_both("the live recording's start is told", |io| {
+        io.log_image(log.session_id).expect("the image is read")
+    });
+    assert!(live_start < two, "{live_start}");
+    pair.observe_both("the live recording holds both entries", |io| {
+        io.held
+            .as_ref()
+            .filter(|held| held.recording.synced_position() >= three)
+            .map(|_| ())
+    });
+    pair.leader
+        .io
+        .stop_replay(1)
+        .expect("the replay is stopped");
+    pair.observe_both("the replay's recording has stopped", |io| {
+        io.catchup_held
+            .as_ref()
+            .and_then(|held| held.recording.stop_position())
+    });
+    pair.member.io.leave_log().expect("the log is left");
+    pair.member
+        .io
+        .remove_catchup()
+        .expect("the catch-up subscription is removed");
+    let kept: Vec<_> = pair.member.io.kept.iter().copied().collect();
+    assert_eq!(kept.len(), 2, "{kept:?}");
+    assert!(kept.iter().all(|kept| kept.stop >= three), "{kept:?}");
+    pair.member
+        .io
+        .record_term(0, 0)
+        .expect("term 0 is recorded");
+
+    assert_eq!(
+        pair.member.io.truncate_log(two).expect("truncated"),
+        Some(0)
+    );
+    assert_eq!(pair.member.io.append_position(), two);
+    let cut: Vec<_> = pair.member.io.kept.iter().copied().collect();
+    assert_eq!(
+        cut.iter()
+            .map(|kept| (kept.start, kept.stop))
+            .collect::<Vec<_>>(),
+        vec![(0, two), (live_start, two)]
+    );
+    for kept in cut {
+        assert_eq!(pair.stop_of(kept.recording_id), Some(two));
+    }
+    assert_eq!(pair.member.io.recording_at(two), None);
+}
