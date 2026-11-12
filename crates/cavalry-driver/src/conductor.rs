@@ -1916,6 +1916,24 @@ impl Conductor {
             self.registry_full(correlation_id, "publications", spec::MAX_PUBLICATIONS);
             return;
         }
+        // Version 3's `ssc=true` has a live recording connect the publication, which
+        // card 271's driver change builds (ADR 0098); until it lands the key is
+        // answered with code 11, as the position keys were before card 227's driver
+        // change (ADR 0059). `ssc=false` is what every publication is.
+        if channel.spies_simulate_connection() {
+            self.send_error(
+                correlation_id,
+                ErrorCode::GenericError,
+                &format!(
+                    "the channel names ssc=true, by which a live recording connects a \
+                     publication that no receiver answers (spec/udp.md, version 3; ADR 0098): \
+                     this driver does not do that yet, card 271's driver change does; remove \
+                     the key until it lands, and until then give the publication a receiver, \
+                     a subscription on this driver among them; see {ERRORS_DOC}"
+                ),
+            );
+            return;
+        }
         let Some(target) = self.resolve_target(correlation_id, &channel) else {
             return;
         };
