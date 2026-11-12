@@ -1,4 +1,4 @@
-# 0111. Count unsent bytes above the sent position, and refuse a recording position the sender cannot follow
+# 0112. Count unsent bytes above the sent position, and refuse a recording position the sender cannot follow
 
 - **Status:** Accepted
 - **Date:** 2026-11-12

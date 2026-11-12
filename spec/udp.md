@@ -21,7 +21,8 @@ version 1 is unchanged and its version byte stays 0, so a receiver of version 1 
 sender of version 2, whose setup frame carries a position every version's receiver
 reads, and a channel of version 2 is refused by a reader of version 1 as a key it does
 not name. Version 3 adds `ssc`, by which a live recording connects a publication that
-no receiver answers (ADR 0098); every frame of version 2 is unchanged and its version
+no receiver answers (ADR 0098, and ADR 0112 for what its sender counts as unsent and
+what it does with a recording position it cannot follow); every frame of version 2 is unchanged and its version
 byte stays 0, so a receiver of version 2 reads a sender of version 3, which it joins at
 the position the setup frame carries as it joins any sender, and a channel of version
 3 is refused by a reader of version 2 as a key it does not name.
@@ -405,10 +406,17 @@ first status message without the send-setup flag and whenever the connection tim
 has passed since the last, it is *alone with its recording*: the sender sends no data
 frame of it, and on every duty cycle moves its sender position up to the recording's
 position, `recording.position`, when that is ahead, as it advances past a burst to no
-destination; `sender.bytes_unsent` counts the bytes passed, and the sender limit
+destination; `sender.bytes_unsent` counts the bytes it passes above its *sent
+position*, the highest position a data burst has taken the sender position to, which
+is the publication's start position until the sender has sent, and the sender limit
 stands where it stood. Its setup frames before the first status message and its
 heartbeats after it go on, at the sender position. The recording's position is a frame
-boundary at most the producer position, so the sender position stays one; and since
+boundary at most the producer position, so the sender position stays one. A value of
+that counter that is not a multiple of the frame alignment, or that lies more than two
+term lengths past the sender position, is not a position this publication's recorder
+writes, and the sender does not follow it: it stays where it is, counts each such
+value once in `log_buffer.rejected_position`, evicts no client, and follows again
+when the counter holds a position it can follow (ADR 0112). And since
 the consumer position is then the sender position, which follows the recorder, a
 publisher alone with its recording is back-pressured one window past its recorder, as
 over `cavalry:ipc`.
@@ -417,11 +425,16 @@ A receiver joins such a publication where its own image begins. A status message
 without the send-setup flag that arrives while the publication is alone names the
 receiver's position: where a setup frame put its image, or where an earlier connection
 left it. When that position is at most a term length behind the sender position, the
-sender sets its sender position back to it, takes the bytes it goes back over off
-`sender.bytes_unsent`, and sets the sender limit anew, to that position plus the
-receiver's window; then the status message connects the publication as any does. The
-receiver is sent every frame from its own position on and has nothing to NAK: the
-term behind the sender position is never cleaned, and nothing in it was sent. A status
+sender sets its sender position back to it, takes off `sender.bytes_unsent` the bytes
+it goes back over above its sent position, and sets the sender limit anew, to that
+position plus the receiver's window; then the status message connects the publication
+as any does. The receiver is sent every frame from its own position on and has nothing
+to NAK: the term behind the sender position is never cleaned. What the sender goes
+back over above its sent position was passed while the publication was alone and is
+sent now for the first time. What it goes back over below it went to a receiver
+before, the one that comes back among them: it was never counted in the gauge, is not
+taken off it, and is sent again, counted in `sender.bytes_sent` and
+`sender.frames_sent` as any data frame is. So the gauge is never below 0 (ADR 0112). A status
 message whose position is further behind is rejected and counted in
 `sender.status_messages_rejected`, since the frames it would need are no longer in the
 log. Every heartbeat that receiver is then sent is an over-run, which is no activity
@@ -688,7 +701,7 @@ lands: the sender's and the endpoint's rows, the publication's connection and
 | `sender.flow_control_receivers_timed_out` | a receiver is dropped from a `min` publication's table for no status message within the flow control receiver timeout; one dropped because its last status message carried end of stream is not counted (ADR 0054) |
 | `sender.flow_control_receivers_full` | a status message from a receiver a `min` publication's full table does not hold: accepted, not tracked |
 | `sender.position`, `sender.limit`, `sender.flow_control_receivers` | keyed as `publication.position` is: the sender position and the sender limit of one publication, and the receivers in its `min` table now, a closed publication's ended receivers among them until the linger ends (ADR 0056), 0 under `max` |
-| `sender.bytes_unsent` | keyed as `publication.position` is, for a publication whose channel names `ssc=true` and no other, a gauge: the bytes that went to its recording and to no receiver, what its sender position passed while it was alone with its recording less what it went back over for a receiver that joined (ADR 0098) |
+| `sender.bytes_unsent` | keyed as `publication.position` is, for a publication whose channel names `ssc=true` and no other, a gauge, never below 0: the bytes that went to its recording and to no receiver, what its sender position passed above its sent position while it was alone with its recording, less what it went back over above its sent position for a receiver that joined (ADR 0098, ADR 0112) |
 | `receiver.bytes_received`, `receiver.frames_received` | a data or padding frame is accepted: the bytes as they came off the wire, 32 for a padding frame, and one frame each |
 | `receiver.setups_received`, `receiver.setups_unwanted`, `receiver.setups_elicited` | a setup frame arrives; one names a stream nobody wants; a status message asked a sender for one |
 | `receiver.heartbeats_received` | a heartbeat is accepted |

@@ -10226,7 +10226,7 @@ mod recording {
     /// read less than its image took: the sender goes back to it, and
     /// `sender.bytes_unsent` takes off only the bytes the sender position passed while
     /// the publication was alone, never what went to the receiver before, so the gauge
-    /// reads 0 and never less (`spec/udp.md`, version 3, "The sender"; ADR 0111).
+    /// reads 0 and never less (`spec/udp.md`, version 3, "The sender"; ADR 0112).
     #[test]
     fn a_receiver_that_comes_back_below_what_it_was_sent_takes_off_only_what_was_passed() {
         use cavalry_shm::counters::generated::{
@@ -10423,7 +10423,7 @@ mod recording {
     /// sender stays where it is, counts each such position once in
     /// `log_buffer.rejected_position`, evicts no client, and follows the recording
     /// again once its position is one it can follow (`spec/udp.md`, "The sender"; ADR
-    /// 0111).
+    /// 0112).
     #[test]
     fn the_sender_refuses_a_recording_position_it_cannot_follow_and_evicts_no_client() {
         use cavalry_shm::counters::generated::LOG_BUFFER_REJECTED_POSITION;

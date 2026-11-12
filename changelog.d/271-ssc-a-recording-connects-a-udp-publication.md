@@ -12,5 +12,5 @@
   a replay's channel refuse the key with code 1, and a join under another `ssc` is
   refused
   ([ADR 0098](docs/decisions/0098-let-a-recording-connect-a-cavalry-udp-publication-whose-channel-names-ssc.md),
-  [ADR 0111](docs/decisions/0111-count-unsent-bytes-above-the-sent-position-and-refuse-a-recording-position-the-sender-cannot-follow.md);
+  [ADR 0112](docs/decisions/0112-count-unsent-bytes-above-the-sent-position-and-refuse-a-recording-position-the-sender-cannot-follow.md);
   card 271).

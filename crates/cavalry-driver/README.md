@@ -139,7 +139,7 @@ The daemon: conductor, sender, receiver and idle strategies. Data plane.
   what it had passed above that highest position, so that the gauge is never below
   zero, and one further behind is rejected; and when the recording stops, the
   conductor frees its position counter only after the sender has answered that it
-  reads it no more (ADR 0098, ADR 0111). On a control channel, `cavalry:udp?control=<host>:<port>|control-mode=manual`,
+  reads it no more (ADR 0098, ADR 0112). On a control channel, `cavalry:udp?control=<host>:<port>|control-mode=manual`,
   the endpoint's socket is bound to the control address and connected to nothing, and
   the sender sends every datagram to each destination a client added with `add
   destination`, at most 64 per endpoint, each resolved when it is added to an address

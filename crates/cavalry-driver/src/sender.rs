@@ -363,12 +363,12 @@ struct Live {
     recording: Option<Counter>,
     /// Its `sender.bytes_unsent`: what the sender position passed while following above
     /// `sent_position`, less what it went back over above `sent_position` when a
-    /// receiver joined (ADR 0111).
+    /// receiver joined (ADR 0112).
     unsent: Option<Counter>,
     /// The highest position a data burst took the sender position to: every byte below
     /// it was sent or was passed while following, and nothing at or above it was sent.
     /// `sender.bytes_unsent` counts no byte below it, so that a byte sent before the
-    /// publication was alone is never counted as unsent nor taken off (ADR 0111).
+    /// publication was alone is never counted as unsent nor taken off (ADR 0112).
     sent_position: i64,
     /// The last recording position the sender could not follow, counted once.
     refused_position: i64,
@@ -392,12 +392,12 @@ impl Live {
     /// Moves the sender position up to the recording's position, for a publication
     /// alone with its recording, and returns whether it moved; `sender.bytes_unsent`
     /// counts the bytes passed above the highest position sent, the others having
-    /// been sent already or counted already (ADR 0111). The recording's position is a
+    /// been sent already or counted already (ADR 0112). The recording's position is a
     /// frame boundary at most the producer position, which the publisher's limit holds
     /// within a term and a half of the sender position; one that is not a multiple of
     /// the frame alignment, or more than two terms ahead, is not this publication's
     /// recording's: it is counted once in `log_buffer.rejected_position` and the
-    /// sender stays (`spec/udp.md`, "The sender"; ADR 0111).
+    /// sender stays (`spec/udp.md`, "The sender"; ADR 0112).
     fn follow_recording(&mut self, statics: &Statics) -> bool {
         let Some(recording) = &self.recording else {
             return false;
@@ -1075,7 +1075,7 @@ impl Sender {
         // over, those above the highest position sent were passed while alone and
         // are now to be sent, and come off `sender.bytes_unsent`; those below it went
         // to a receiver before, the one that comes back among them, and were never
-        // counted (ADR 0111). Further behind, what it would need is no longer in the
+        // counted (ADR 0112). Further behind, what it would need is no longer in the
         // log: rejected, and its image times out and joins again. The limit is set
         // anew from this receiver. A receiver ahead of the sender position, whose image
         // began where an earlier setup frame put it before the sender went back for
