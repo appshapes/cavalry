@@ -314,30 +314,60 @@ more recordings than the table keeps.
   entries, p50 3.09 ms, p99 3.95 ms, max 13.18 ms; 1026 entries, p50 4.88 ms, p99
   6.82 ms, max 9.90 ms. On macOS a sync is `F_FULLFSYNC`. No Linux host has timed
   it: the bench hosts are for the bench.
-- The module was built on a branch on 2026-11-12 and run on that laptop. The
-  tests below are in the change that builds it.
-  - The read at a start, with no driver: the log read back from the recordings the
-    list names and not from one the catalog also holds across the log's end; none,
+- The module's use of the file is the pull request after this one. It was built on
+  the branch `228-start-on-the-kept-log` and run on that laptop on 2026-11-12, at
+  that branch's commit 5f7df6f9. The branch lands as one commit, so what a reader
+  finds afterwards is the tests, here by file and name.
+  - `crates/cavalry-raft/src/module/tests.rs`, the read at a start with no driver.
+    `a_start_reads_the_log_back_from_the_recordings_its_record_names`: the log read
+    back from the recordings the list names and not from one the catalog also
+    holds across the log's end.
+    `a_start_ends_the_log_where_a_truncation_cut_short_left_its_recordings`: none,
     one, two and all three of the list's last recordings missing, and the log
-    ending at 608, 512, 416 and at the floor, 320; five refusals, each naming its
-    recording, with nothing stopped; 1026 listed and the last 1024 kept.
-  - Over two drivers: a recording told to the election and synced, with an append
-    position of 0 until the list is written; a member started again beside a
-    recording it never counted; a member stopped after a truncation's first
-    command, and one stopped after its write of the list, each started on the
-    recordings that were left with the term above them deleted; a directory with a
-    term and no file refused, and left as it was; a directory with a log and no
-    `terms` file refused, twice; a truncation that empties a
-    table of three recordings above 128, and a start that reads 128 back.
-  - Over three drivers, each member's driver closed and started with it, twenty
-    runs of three tests, all passed. A follower lost and started again held the
-    ten entries it lacked 0.224 s to 0.444 s after its start, under the same
-    leader and term. A leader lost and started again followed the next term's
-    leader 0.227 s to 1.069 s after its start. Three members closed and started
-    again had a leader in a later term 0.320 s to 0.832 s after their start. In
-    each, a service beside the member that started again read every committed
-    entry from position 0, the bytes a service beside another member read.
-  - Three `cavalry run` processes, stopped by SIGTERM and started again on their
+    ending at 288, 192, 96 and at the floor, 0; and a last recording that ends
+    inside the one before it, with the log ending at the further end.
+    `a_start_is_refused_when_the_catalog_does_not_hold_the_log_the_record_names`:
+    five refusals, each naming its recording, with nothing stopped.
+    `a_start_is_refused_on_a_log_the_member_forgot_a_recording_of`: a floor above
+    0, over three recordings and over none; 1026 recordings that hold bytes,
+    refused with nothing stopped; a 1025th that holds bytes once it is stopped;
+    and 1026 names of which two hold nothing, which start.
+  - The same file, over two drivers.
+    `the_record_names_a_recording_before_the_member_reports_a_position_it_holds`: a
+    recording told to the election and synced, with an append position of 0 until
+    the list is written, and the four counts: the creation's list, the list that
+    takes the recording in, a list the file refuses, and a recording a full table
+    forgets.
+    `a_member_starts_again_on_the_log_it_kept_and_takes_no_recording_it_never_counted`.
+    `a_member_that_stopped_inside_a_truncation_starts_where_its_recordings_end` and
+    `a_member_that_stopped_before_a_truncation_deleted_its_terms_deletes_them`: a
+    member stopped after a truncation's first command, and one stopped after its
+    write of the list, each started on the recordings that were left with the term
+    above them deleted and one truncation counted as finished.
+    `a_member_whose_record_holds_a_term_and_no_record_of_its_recordings_is_refused`:
+    a directory with a term and no file, refused and left as it was.
+    `a_member_whose_log_has_lost_its_record_of_terms_is_refused`: a directory with
+    a log and no `terms` file, and one with a `terms` file that holds no term.
+    `a_truncation_that_empties_the_table_keeps_where_the_log_ends`: a truncation
+    that empties a table of three recordings above 128, a member that runs on with
+    a log ending at 128, and a start that is refused, naming 128, with no term
+    deleted.
+  - `crates/cavalry-raft/tests/restart.rs`, over three drivers, each member's
+    driver closed and started with it, twenty runs of the three tests in a row
+    with `scripts/test-times.sh`, all passed.
+    `a_follower_that_stopped_starts_again_on_its_log_and_replicates_what_it_lacks`:
+    the follower held the ten entries it lacked 0.225 s to 0.371 s after its start,
+    under the same leader and term, and the four counters read from each member's
+    counters file.
+    `a_leader_that_stopped_starts_again_on_its_log_as_a_follower_of_the_next_term`:
+    it followed the next term's leader 0.127 s to 0.340 s after its start.
+    `all_three_members_start_again_on_their_logs_and_the_log_goes_on`: the three
+    had a leader in a later term 0.304 s to 0.674 s after their start. In each, a service
+    beside the member that started again read every committed entry from position
+    0, the bytes a service beside another member read.
+  - `crates/cavalry/tests/cli.rs`,
+    `run_with_the_cluster_keys_starts_a_member_and_three_of_them_elect_a_leader`:
+    three `cavalry run` processes, stopped by SIGTERM and started again on their
     directories, elected a leader in a term above the one they had held.
 - `remove_client` in `crates/cavalry-driver/src/conductor.rs`, read on
   2026-11-12: it removes a client's counters, registrations and subscriptions, and
@@ -345,7 +375,9 @@ more recordings than the table keeps.
 - Not shown. No test cuts the power: what "What a start does not hold" says rests
   on `spec/durable-log.md`'s account of the recovery scan. No test runs a
   directory of an earlier version: none was released, and the refusal is tested
-  on a directory whose file was removed.
+  on a directory whose file was removed. No test has the operating system fail a
+  write of the list: the test of the count gives the file a list it refuses. No
+  member has run to 1024 recordings: the table is filled by the test.
 
 ## Consequences
 
