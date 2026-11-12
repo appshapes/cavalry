@@ -191,7 +191,7 @@ pub const SENDER_POSITION: CounterId = CounterId(60);
 /// `sender.limit`, a instance gauge: The sender limit of one cavalry:udp publication: the consumption position of the last accepted status message plus its receiver window length, never lowered; key and label as sender.position.
 pub const SENDER_LIMIT: CounterId = CounterId(61);
 
-/// `publication.connected`, a static counter: cavalry:udp publications whose first status message without the send-setup flag arrived: the publication's limit rises to the sender position plus the publication window from here (spec/udp.md, The sender).
+/// `publication.connected`, a static counter: cavalry:udp publications whose first status message without the send-setup flag arrived: the publication's limit rises to the consumer position plus the publication window from here, the consumer position being the sender position, or the recorder's when the publication is recorded and its recorder is behind (spec/udp.md, The sender).
 pub const PUBLICATION_CONNECTED: CounterId = CounterId(62);
 
 /// `publication.disconnected`, a static counter: cavalry:udp publications that passed the connection timeout without a status message: the limit falls to the sender position and the publisher reads not connected until the next one (spec/udp.md, The sender).
@@ -922,7 +922,7 @@ pub const COUNTERS: &[CounterDef] = &[
         name: "publication.connected",
         kind: Kind::Counter,
         scope: Scope::Static,
-        doc: "cavalry:udp publications whose first status message without the send-setup flag arrived: the publication's limit rises to the sender position plus the publication window from here (spec/udp.md, The sender).",
+        doc: "cavalry:udp publications whose first status message without the send-setup flag arrived: the publication's limit rises to the consumer position plus the publication window from here, the consumer position being the sender position, or the recorder's when the publication is recorded and its recorder is behind (spec/udp.md, The sender).",
         doctor: "",
     },
     CounterDef {

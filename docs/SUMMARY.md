@@ -139,3 +139,4 @@ under `docs/` is listed here; `just lint-docs` fails on one that is not.
 - [0091. Give a leader's log up, and replay it over a driver, from the recordings the module stopped](decisions/0091-give-a-leaders-log-up-and-replay-it-over-a-driver-from-the-recordings-the-module-stopped.md)
 - [0092. Have the member ask for each replay of a replication, so that a recording is armed for its image](decisions/0092-have-the-member-ask-for-each-replay-of-a-replication-so-that-a-recording-is-armed-for-its-image.md)
 - [0090. Keep a subscriber's samples out of the histogram until its loop is over](decisions/0090-keep-a-subscribers-samples-out-of-the-histogram-until-its-loop-is-over.md)
+- [0097. Count the recorder among a cavalry:udp publication's readers](decisions/0097-count-the-recorder-among-a-cavalry-udp-publications-readers.md)
