@@ -2,9 +2,12 @@
 //! the slot and the files, a [`RecordingWriter`] writes blocks of committed frames into
 //! segment files, keeps the time index and syncs once per second behind two positions,
 //! and [`LogDir::stop`] writes the stop (`spec/durable-log.md`, "Segment files", "Time
-//! index" and "The driver"; ADR 0024, ADR 0025). The clock is the caller's: every
-//! method takes `now`, nanoseconds since the Unix epoch, as the driver reads it once per
-//! duty cycle, so nothing here reads a clock.
+//! index" and "The driver"; ADR 0024, ADR 0025). The clocks are the caller's, so nothing
+//! here reads one, and they are two (ADR 0109). [`LogDir::start`], `write` and
+//! [`LogDir::stop`] take `now` for the timestamps they write, nanoseconds since the
+//! Unix epoch: the caller's epoch clock. `sync`, `sync_now` and `sync_from` take `now`
+//! for the interval between syncs, which a step of the host's clock must not move: the
+//! caller's nano clock. A caller with one clock hands it to all of them.
 
 use std::fs::{self, File, OpenOptions};
 use std::io;
@@ -429,11 +432,23 @@ impl RecordingWriter {
         Ok(())
     }
 
+    /// Runs the sync interval from `now`, a reading of the clock the caller hands
+    /// [`sync`](Self::sync). [`LogDir::start`] runs it from the start timestamp, which is
+    /// right for a caller with one clock; a caller that stamps with its epoch clock and
+    /// measures with its nano clock calls this once, after the start, with the nano
+    /// clock (ADR 0109).
+    pub fn sync_from(&mut self, now: i64) {
+        self.last_sync_timestamp = now;
+    }
+
     /// Syncs the segment and the index when a second has passed since the last sync and
     /// there are unsynced bytes, and moves the synced position up to the position.
-    /// Returns whether it synced.
+    /// Returns whether it synced. A `now` before the last sync's, which a clock set
+    /// back gives, counts as the second passed: the bytes are never left unsynced for
+    /// the length of a step.
     pub fn sync(&mut self, now: i64) -> Result<bool, RecorderError> {
-        if !self.unsynced || now - self.last_sync_timestamp < SYNC_INTERVAL {
+        let since = now.saturating_sub(self.last_sync_timestamp);
+        if !self.unsynced || (0..SYNC_INTERVAL).contains(&since) {
             return Ok(false);
         }
         self.sync_files()?;

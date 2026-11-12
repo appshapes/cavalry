@@ -78,7 +78,8 @@ committed once a quorum, two of three, has it on disk.
    positions once their recorders have synced, which each member asks its recorder
    for as soon as an entry is written. The line ends with who the member follows and
    why its last election began: on members 1 and 2, `; it follows member 0; its last
-   election began because the member started`.
+   election began because the member started`. On member 0, which follows no member,
+   it ends `; its last election began because the member started`.
 
 5. Stop a member with Ctrl-C or SIGTERM. It prints `cavalry run: stopping` and
    `cavalry run: closed`. The other two are a quorum and go on.
@@ -191,8 +192,10 @@ committed once a quorum, two of three, has it on disk.
   restart. Start the cluster again as a new cluster, and keep the old log directories
   for what they hold.
 - `WARN cluster-quorum-lost`: the leader heard from fewer than two of three members
-  within 10 s, and nothing was committed while that lasted. Check that two members run
-  and that each reaches the leader's consensus endpoint.
+  within 10 s, and nothing was committed while that lasted. A leader that elects
+  stopped leading each time and held an election, and the finding is on a member that
+  leads again. Check that two members run and that each reaches the leader's consensus
+  endpoint.
 - `WARN cluster.messages_rejected`: the member rejected consensus messages it cannot
   read, and acted on none of them. Another member sends them from another version of
   Cavalry, as during an upgrade, and the member may canvass with no leader for as long
@@ -220,11 +223,21 @@ committed once a quorum, two of three, has it on disk.
   the message says which state the election is in and why it began, from
   `cluster.election_cause`. A leader needs the votes of two of three members, so run
   `doctor` on each member's host and check that each reaches the `consensus` endpoint
-  of every other. With a leader taken, the message names that member, from
+  of every other. In canvass the message has one more sentence, for a member that has
+  replicated a term it missed: it canvasses again with no leader, in the same
+  election, until the leader it replicated from answers it. A member that stays there
+  waits for that one member and not for votes, so check the `consensus` endpoints
+  between the two hosts. With a leader taken, the message names that member, from
   `cluster.leader_member_id`, and what the state waits for: an image of the leader's
-  log on the member's `log` endpoint, or the leader's replay on its `catchup`
-  endpoint, the fifth field of its entry. A member that elects begins again after an
-  election that fails, so neither message says to start the cluster again. Both end
-  with how many elections have failed and on which rule, by the names of three
-  counters: `cluster.join_position_mismatches`, `cluster.truncations_refused` and
-  `cluster.log_replications_unavailable`.
+  log on the member's `log` endpoint, the leader's replay on its `catchup` endpoint,
+  the fifth field of its entry, or both during a catch-up. The check at the end of the
+  message names the endpoints of that state. A member that elects begins again after
+  an election that fails, so neither message says to start the cluster again. Both
+  end with how many elections have failed. Three counters each count one rule that
+  fails an election: `cluster.join_position_mismatches`,
+  `cluster.truncations_refused` and `cluster.log_replications_unavailable`. They do
+  not hold every failure. When more elections failed than the three count, the
+  message says how many and what else fails an election: a step that made no progress
+  for 10 s, a log the member cannot join its leader with, or, on a member that led
+  before its election closed, a term above its own or the loss of its quorum, which
+  `cluster.leader_quorum_losses` counts.

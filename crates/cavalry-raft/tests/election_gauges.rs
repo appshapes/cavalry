@@ -1,15 +1,19 @@
 //! What the two gauges of ADR 0077 hold, one core at a time, driven by hand
 //! (`spec/cluster.md`, "Counters"; ADR 0102): `cluster.leader_member_id`, the member
 //! this one leads as or follows and −1 while it has none, and
-//! `cluster.election_cause`, why its last election began. The causes a leader has,
-//! a term above its own, a quorum lost and an election that failed, are asserted
-//! where those elections are made, in `step_down.rs`.
+//! `cluster.election_cause`, why its last election began. The causes of the
+//! elections a leader begins, a term above its own, a quorum lost and an election of
+//! its own that failed, are asserted where those elections are made, in
+//! `step_down.rs`, with a follower's cause 4; a follower's failed election, cause 5,
+//! is here.
 
 mod common;
 
 use cavalry_proto::cluster::Message;
 use cavalry_raft::{Consensus, ElectionCause, ElectionState, Role};
-use common::{Stub, at, canvass_position, follow_term, leadership_term, new_leadership_term};
+use common::{
+    Stub, at, canvass_position, follow_term, leadership_term, lose_the_leader, new_leadership_term,
+};
 
 /// A member that started has no leader and cause 0, on both paths, in init and in
 /// canvass. Where the leader is appointed the core knows its id from the start, and
@@ -51,12 +55,28 @@ fn a_follower_names_its_leader_until_its_next_election_and_the_cause_is_the_hear
             .expect("no fault");
         assert_eq!(member.election_state(), ElectionState::FollowerReplay);
         assert_eq!(member.leader_gauge(), 0, "from the term it takes");
-        member.do_work(at(3), &mut io).expect("no fault");
-        member.do_work(at(4), &mut io).expect("no fault");
-        io.image = Some(0);
-        member.do_work(at(5), &mut io).expect("no fault");
-        member.do_work(at(6), &mut io).expect("no fault");
-        assert_eq!(member.election_state(), ElectionState::Closed);
+        // Through each follower's state it passes on its way to closed.
+        let mut passed = vec![member.election_state()];
+        for ms in 3..=6 {
+            if ms == 5 {
+                io.image = Some(0);
+            }
+            member.do_work(at(ms), &mut io).expect("no fault");
+            assert_eq!(member.leader_gauge(), 0, "in {:?}", member.election_state());
+            if passed.last() != Some(&member.election_state()) {
+                passed.push(member.election_state());
+            }
+        }
+        assert_eq!(
+            passed,
+            [
+                ElectionState::FollowerReplay,
+                ElectionState::FollowerLogInit,
+                ElectionState::FollowerLogAwait,
+                ElectionState::FollowerReady,
+                ElectionState::Closed,
+            ]
+        );
         assert_eq!(member.leader_gauge(), 0);
         assert_eq!(member.election_cause(), ElectionCause::Started);
 
@@ -203,4 +223,71 @@ fn an_election_that_failed_is_the_cause_of_the_next_on_the_appointed_path() {
     assert_eq!(member.election_cause(), ElectionCause::ElectionFailed);
     assert_eq!(member.election_cause().code(), 5);
     assert_eq!(member.leader_gauge(), -1);
+}
+
+/// A member that replicates a term it missed names its leader while it replicates,
+/// in follower log replication, and names none in the canvass it goes back to when
+/// the replication has ended. That canvass begins no election: the cause stays the
+/// one its election began with, and no election is counted. The next new leadership
+/// term names the leader again.
+#[test]
+fn a_member_names_its_leader_while_it_replicates_and_none_in_the_canvass_after() {
+    let mut io = Stub::new();
+    let mut member = Consensus::with_election(&[0, 1, 2], 0, 1).expect("a member");
+    member.do_work(at(1), &mut io).expect("no fault");
+    let closed = follow_term(&mut member, &mut io, 2, &new_leadership_term(1, 0), 0);
+    let ms = lose_the_leader(&mut member, &mut io, closed, 32);
+    assert_eq!(member.leader_gauge(), -1);
+    assert_eq!(
+        member.election_cause(),
+        ElectionCause::LeaderHeartbeatTimeout
+    );
+    let elections = member.counts().elections;
+
+    // Member 2 leads term 1 from 64, and this member lacks 32 bytes of term 0.
+    member
+        .on_message(
+            at(ms),
+            &leadership_term(2, 1, 64, 64, 0, [1, 64, -1]),
+            &mut io,
+        )
+        .expect("no fault");
+    assert_eq!(
+        member.election_state(),
+        ElectionState::FollowerLogReplication
+    );
+    assert_eq!(member.leader_gauge(), 2, "the leader it replicates from");
+    member.do_work(at(ms + 1), &mut io).expect("no fault");
+    io.catchup_image = Some(32);
+    io.append_position = 48;
+    member.do_work(at(ms + 2), &mut io).expect("no fault");
+    assert_eq!(
+        member.election_state(),
+        ElectionState::FollowerLogReplication
+    );
+    assert_eq!(member.leader_gauge(), 2);
+
+    // The replay reaches the stop, the leader's base: the member canvasses again.
+    io.append_position = 64;
+    member.do_work(at(ms + 3), &mut io).expect("no fault");
+    assert_eq!(member.election_state(), ElectionState::Canvass);
+    assert_eq!(member.leader_gauge(), -1, "none in the canvass after it");
+    assert_eq!(
+        member.election_cause(),
+        ElectionCause::LeaderHeartbeatTimeout,
+        "the election it was in"
+    );
+    assert_eq!(member.counts().elections, elections);
+    assert_eq!(member.counts().elections_failed, 0);
+
+    // Level with the leader's base: it takes the term and names the leader again.
+    member
+        .on_message(
+            at(ms + 4),
+            &leadership_term(2, 1, 64, 64, 1, [-1; 3]),
+            &mut io,
+        )
+        .expect("no fault");
+    assert_eq!(member.election_state(), ElectionState::FollowerReplay);
+    assert_eq!(member.leader_gauge(), 2);
 }

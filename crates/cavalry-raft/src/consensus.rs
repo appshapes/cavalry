@@ -80,7 +80,8 @@ pub enum ElectionState {
     Nominate = 2,
     /// A candidate asks every other member for its vote, and leads the term at once
     /// when a quorum has voted for it and every member it has heard is among them, or
-    /// at the election timeout with a quorum and no vote against (ADR 0077).
+    /// at the election timeout with a quorum and no vote against (ADR 0077). It
+    /// canvasses again at once on a vote against, which no ballot survives (ADR 0105).
     CandidateBallot = 3,
     /// A member that voted for a candidate waits for that candidate's new leadership
     /// term, for the election timeout at most.
@@ -549,11 +550,13 @@ pub struct Counts {
     /// `cluster.candidacies`: a ballot the member began as a candidate (ADR 0081).
     pub candidacies: u64,
     /// `cluster.ballots_lost`: a ballot that ended with no leader for the member, which
-    /// canvasses again: a candidate at the election timeout short of a quorum or with
-    /// a vote against, a member in follower ballot whose candidate's new leadership
-    /// term did not come within the election timeout, or either that reads a new
-    /// leadership term for a log term that is not its own and that drops none of its
-    /// terms (ADR 0096). A candidate that follows another member's new leadership term
+    /// canvasses again: a candidate on a vote against its candidate term or once it
+    /// holds no vote of its own for that term, at once (ADR 0105), or at the election
+    /// timeout short of a quorum, a member in follower ballot whose candidate's new
+    /// leadership term did not come within the election timeout, or either that reads
+    /// a new leadership term for a log term that is not its own, once it has dropped
+    /// any terms the message says its leader's record lacks (ADR 0096). A candidate
+    /// that follows another member's new leadership term
     /// for its own candidate term has a leader and counts none (ADR 0081).
     pub ballots_lost: u64,
     /// `cluster.votes_for`: a vote the member sent for a candidate.
@@ -569,9 +572,11 @@ pub struct Counts {
     /// election on a request vote whose candidate term id or a commit position whose
     /// leadership term id was above its own term (ADR 0082).
     pub higher_terms_seen: u64,
-    /// `cluster.log_truncations`: a member that truncated its log to the base of the
-    /// term its leader's record holds next after its own, on a new leadership term:
-    /// the tail of an older term that no quorum recorded (ADR 0083).
+    /// `cluster.log_truncations`: a member that truncated its log on a new leadership
+    /// term, to the base of the term its leader's record holds next after its own, the
+    /// tail of an older term that no quorum recorded (ADR 0083); or, before it dropped
+    /// the terms its leader's record lacks, to the base of the lowest of them, the
+    /// drop counted in `terms_dropped` (ADR 0096).
     pub log_truncations: u64,
     /// `cluster.truncations_refused`: a member told to truncate below the commit
     /// position it knows, which it did not do: it failed its election and kept its
@@ -730,6 +735,10 @@ pub fn terms_above(
 
 /// The highest term of `record` at or below `term`, −1 where the record holds none:
 /// what [`Io::term_at_or_below`] returns, from a record of terms read in any order.
+/// The rule is the page's, and `cavalry_proto::cluster::answered_term` is the copy of
+/// it that the `answered-term` vectors pin (`spec/cluster.md`, "New leadership term,
+/// template 53"; ADR 0096): this is the same rule over a member's record as its
+/// `Io` holds it, and a change to one is a change to both.
 ///
 /// ```
 /// use cavalry_raft::consensus::term_at_or_below;
@@ -1425,7 +1434,12 @@ impl Consensus {
                     // by now, under the guard of a truncation; the terms leave its
                     // record, and it reads the message again with the log it then
                     // holds: once, since its log term is then at or below the term
-                    // named (ADR 0096).
+                    // named (ADR 0096). Below it, when the member never recorded the
+                    // term named: the second read canvasses. A drop that faults
+                    // leaves the log cut and the record holding some of those terms
+                    // or all of them, with `log_term` as it was: the member reports
+                    // it again, the leader answers again, and the drop, which changes
+                    // nothing already dropped, runs again.
                     TermAction::Drop if self.election.is_some() => {
                         self.log_term = io.drop_terms_above(log_leadership_term_id)?;
                         count(&mut self.counts.terms_dropped);
@@ -1721,7 +1735,9 @@ impl Consensus {
 
     /// Truncates this member's log to `position`, the base of the term its leader's
     /// record holds next after this member's own, which a new leadership term named
-    /// (`spec/cluster.md`, "Messages during an election"; ADR 0083). Returns whether
+    /// (`spec/cluster.md`, "Messages during an election"; ADR 0083), or the base of
+    /// the lowest of this member's terms that such a message says the leader's
+    /// record lacks, before they are dropped (ADR 0096). Returns whether
     /// the member goes on with that message. It does not while the truncation is under
     /// way, and it does not when the position is below the commit position it knows:
     /// a committed entry is never truncated, so no leader that holds what was
@@ -1765,10 +1781,12 @@ impl Consensus {
         self.enter(ElectionState::Init, clock);
     }
 
-    /// A ballot that ended with no leader, this member's own or its candidate's, at the
-    /// election timeout or on a new leadership term for a log term that is not its own
-    /// and that drops none of its terms: counted, and the member canvasses again as a
-    /// follower, with the reports and the members heard that it has.
+    /// A ballot that ended with no leader, this member's own or its candidate's: its
+    /// own on a vote against its candidate term or once it holds no vote of its own
+    /// for that term (ADR 0105), either at the election timeout, or on a new leadership
+    /// term for a log term that is not its own, once any terms the message says its
+    /// leader's record lacks are dropped (ADR 0096). Counted, and the member canvasses
+    /// again as a follower, with the reports and the members heard that it has.
     fn lose_ballot(&mut self, clock: Clock) -> usize {
         count(&mut self.counts.ballots_lost);
         self.role = Role::Follower;
@@ -2250,8 +2268,10 @@ impl Consensus {
     /// member not yet sent one, then the ballot: the candidate leads its candidate term
     /// at once when the votes for that term, its own among them, make a quorum and every
     /// member it has heard has cast one of them, or at the election timeout with a
-    /// quorum for and none against (ADR 0077). At the election timeout with no such
-    /// ballot it canvasses again.
+    /// quorum for and none against (ADR 0077). It canvasses again at once when it
+    /// cannot win: a vote against its candidate term has been cast, or it no longer
+    /// holds its own vote for that term (ADR 0105). At the election timeout with no
+    /// leader it canvasses again, short of a quorum.
     fn candidate_ballot<I: Io>(&mut self, clock: Clock, io: &mut I) -> Result<usize, I::Fault> {
         let mut work = 0;
         // A candidate whose term rose during its ballot, by a request vote for a
@@ -2289,7 +2309,10 @@ impl Consensus {
         if outcome.leader && own_vote {
             return self.lead_elected(clock, io);
         }
-        if timeout_passed {
+        // A ballot with a vote against makes no leader, at once or at the election
+        // timeout, and a candidate without its own vote for its term leads nothing:
+        // waiting out the timeout would change neither (ADR 0105).
+        if timeout_passed || outcome.lost || !own_vote {
             return Ok(self.lose_ballot(clock));
         }
         Ok(work)
@@ -2784,6 +2807,15 @@ impl Consensus {
             self.catchup = false;
         }
         self.replication = None;
+        // The reports this member holds were read against the log it had before it
+        // replicated. Against the log it has now, a report that was ahead of it may
+        // no longer be, and canvass would make it a candidate at once, to ask for
+        // votes in a term above its leader's. It canvasses with no report, as a
+        // member does from init, and its leader answers its canvass position (ADR
+        // 0106).
+        for peer in self.peers.iter_mut().take(self.count) {
+            peer.reported = false;
+        }
         Ok(self.step(ElectionState::Canvass, clock))
     }
 
