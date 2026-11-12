@@ -540,9 +540,11 @@ pub struct Counts {
     /// election on a request vote whose candidate term id or a commit position whose
     /// leadership term id was above its own term (ADR 0082).
     pub higher_terms_seen: u64,
-    /// `cluster.log_truncations`: a member that truncated its log to the base of the
-    /// term its leader's record holds next after its own, on a new leadership term:
-    /// the tail of an older term that no quorum recorded (ADR 0083).
+    /// `cluster.log_truncations`: a member that truncated its log on a new leadership
+    /// term, to the base of the term its leader's record holds next after its own, the
+    /// tail of an older term that no quorum recorded (ADR 0083); or, before it dropped
+    /// the terms its leader's record lacks, to the base of the lowest of them, the
+    /// drop counted in `terms_dropped` (ADR 0096).
     pub log_truncations: u64,
     /// `cluster.truncations_refused`: a member told to truncate below the commit
     /// position it knows, which it did not do: it failed its election and kept its
@@ -1671,7 +1673,9 @@ impl Consensus {
 
     /// Truncates this member's log to `position`, the base of the term its leader's
     /// record holds next after this member's own, which a new leadership term named
-    /// (`spec/cluster.md`, "Messages during an election"; ADR 0083). Returns whether
+    /// (`spec/cluster.md`, "Messages during an election"; ADR 0083), or the base of
+    /// the lowest of this member's terms that such a message says the leader's
+    /// record lacks, before they are dropped (ADR 0096). Returns whether
     /// the member goes on with that message. It does not while the truncation is under
     /// way, and it does not when the position is below the commit position it knows:
     /// a committed entry is never truncated, so no leader that holds what was

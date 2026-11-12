@@ -6,10 +6,13 @@
 - **Supersedes:** none. Changes `spec/cluster.md`: the first field of "New leadership
   term, template 53"; in "Roles and the election", the leader's answer and the
   reader's rule in "Messages during an election", and the answer of a leader whose
-  election is closed; and two rows of "Counters", a new one for
-  `cluster.terms_dropped` and what `cluster.ballots_lost` counts for a message that
-  is not for the reader's log term; and, in the same paragraph of "Messages during
-  an election", one clause of ADR 0095's truncation, which the review of pull
+  election is closed; and three rows of "Counters": a new one for
+  `cluster.terms_dropped`; what `cluster.ballots_lost` counts for a message that
+  is not for the reader's log term; and what `cluster.log_truncations` counts,
+  which is also the cut to the base of the lowest term a drop takes out of the
+  record, besides the cut to the next term base log position of ADR 0083; and, in
+  the same paragraph of "Messages during an election", one clause of ADR 0095's
+  truncation, which the review of pull
   request 246 noted: `truncate recording` is sent for each recording that begins at
   or below the position and ends above it, two that overlap after a catch-up, where
   the page said "the recording". Changes one sentence of `spec/durable-log.md`,
@@ -20,7 +23,8 @@
   answered is the term reported, as before. Adds the `answered-term` vectors and
   five `new-leadership-term` vectors. Amends ADR 0081 in one clause: what
   `cluster.ballots_lost` counts on a new leadership term that is not for the
-  reader's log term.
+  reader's log term. Amends ADR 0083 in one clause: what
+  `cluster.log_truncations` counts, which now includes the cut a drop makes first.
 
 ## Context
 
