@@ -246,6 +246,10 @@ A truncation whose command faults after an earlier one succeeded leaves the memb
 reporting the end and the log term it had until the leader asks again; ADR 0095's
 Consequences say where that is tested.
 
+A truncation whose command faults after an earlier one succeeded leaves the member
+reporting the end and the log term it had until the leader asks again; ADR 0095's
+Consequences say where that is tested.
+
 ## What it must never do
 
 - Report an entry as committed before a majority holds it durably, or apply entries in

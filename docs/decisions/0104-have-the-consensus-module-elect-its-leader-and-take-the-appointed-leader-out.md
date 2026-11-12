@@ -54,9 +54,9 @@ on the loopback:
   service was refused below its live recording, which ADR 0103 ends.
 
 **ADR 0077's Revisit fired, and ADR 0105 answered it before this change.** The
-Revisit reads: when an election takes more than the election timeout, 1 s, in
-more than one run in a hundred. With the store in the window the rate was three
-in a hundred. Since ADR 0105 a candidate that reads a vote against its term
+Revisit has this case: "when the loopback tests' reported election times are above
+a second in more than one run in a hundred, for the split vote". With the store in
+the window the rate was three in a hundred. Since ADR 0105 a candidate that reads a vote against its term
 canvasses again at once, so a split vote costs a second delay of at most 500 ms
 and not the second those two elections took.
 
@@ -86,8 +86,9 @@ one that holds either, until ADR 0100's sixth change. And the leader's own
 process may append a session message of no session.
 
 **The ballot is ADR 0105's.** This change does not touch it. The figures above
-were taken before that ADR, on the scratch branch; the figures of the test that
-stops a leader, on this change's own branch, are in Evidence.
+were taken before that ADR, on the scratch branch. The test that stops a leader,
+on this change's own branch, prints its election's time and asserts no bound on
+it; Evidence says how often it passed.
 
 **No test over drivers assumes a term, one ballot or a step count.** Each reads
 the leader's term, and takes a count of steps as exact only where the term says
@@ -114,6 +115,23 @@ and the module's refusal of a kept directory say so, and say what to do: the
 cluster goes on with the members that remain, and is started again as a new
 cluster to have every member again, until ADR 0100's sixth change.
 
+**A log directory that holds the log and no `terms` file is refused.** A member
+records a term before it records an entry, so a directory whose catalog holds a
+recording of the log's stream has been a member's, and one with no `terms` file
+beside it has lost the member's votes. `TermsFile::open` creates a file that is
+not there, which is right for a new directory alone: the module looks in the
+catalog first and refuses with `RaftError::TermsLost`, `terms-lost`, and leaves
+the directory as it was.
+
+**Members of the version before are not members of this cluster.** A member whose
+leader is appointed casts no vote and answers no request for one; when it has the
+lowest id it leads term 0 once every member has reported, with no ballot, and
+never gives the lead up; when it has not, it follows the member with the lowest id
+and no other. No message's layout tells the two apart, so neither refuses the
+other. Since no member starts again on its log, a cluster of that version comes to
+this one as a new cluster, every member on this version and on a new log
+directory: there is no rolling upgrade across this change.
+
 ## Alternatives considered
 
 - **Move the module and take the path out in two changes.** Lost, as ADR 0100
@@ -127,6 +145,18 @@ cluster to have every member again, until ADR 0100's sixth change.
   path no cluster runs is a second set of rules to keep true.
 - **Retire the counter here.** Lost for the plane's rule above, at the cost of
   one registered counter that reads 0 for one change.
+- **Have a member whose record holds no term cast no vote for a candidate that
+  holds a log, until it has joined a log.** This is the guard against a member
+  started alone on an empty log directory. Lost, for this change. It is safe and
+  it is not live: a member that was slow to join a new cluster's first term, and
+  whose leader then stops, would never vote, and a cluster of three would have no
+  leader until it was started again. Nor does it know what it had acknowledged
+  before. The answer that has neither fault changes who the members are, a member
+  whose identity goes with its log directory or a change of membership through
+  the log, and it is a decision of its own: card 274.
+- **Refuse a start on an empty log directory beside members that hold a log.**
+  Lost. That is every member that starts late in a new cluster, which this change
+  makes join.
 
 ## Evidence
 
@@ -180,6 +210,19 @@ cluster to have every member again, until ADR 0100's sixth change.
 Easier. A cluster that loses its leader has another after the leader heartbeat
 timeout and an election, with no person in the path. The core has one path, and
 the page one set of rules.
+
+Against invariant 1, and named so. A member started alone on an empty log
+directory, where it had a log, now joins and votes with no record of the votes it
+cast or of the entries it acknowledged. With a member whose log is behind it is a
+quorum, and the two can elect a leader that lacks an entry the cluster committed.
+Under the appointed leader that member joined nothing. A container whose log
+directory is on no volume does this at every restart. `cavalry run` cannot tell
+that directory from a new cluster's, so nothing refuses it, no counter counts it
+and `cavalry doctor` cannot say it happened. It is left to a rule for the
+operator, in the refusals' texts, in the page and in the how-to's prerequisites.
+Card 274 is the decision that ends it, and a condition of the first release (ADR
+0061); what Aeron does with a node whose cluster directory was lost is read there
+first.
 
 Harder. A cluster of three in which two members start while the third is down
 has no leader for the startup canvass timeout, 60 s (ADR 0089); under an

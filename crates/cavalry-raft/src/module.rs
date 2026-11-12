@@ -88,6 +88,14 @@ pub enum RaftError {
         /// The candidate term stored, −1 for none.
         candidate_term: i64,
     },
+    /// The member's log directory holds a recording of a cluster's log and no `terms`
+    /// file: the record of the member's terms and of the votes it cast is gone, and a
+    /// member that started here would vote with no record of them (`spec/cluster.md`,
+    /// "A member's start"; ADR 0104).
+    TermsLost {
+        /// The first recording of the log's stream that the directory's catalog holds.
+        recording_id: i64,
+    },
     /// The `terms` file could not be read or written.
     Terms(TermsError),
     /// The driver's catalog could not be read in the member's log directory, at the
@@ -135,14 +143,15 @@ pub enum RaftError {
 }
 
 impl RaftError {
-    /// The reason's name: `members`, `member`, `restart`, `terms`, `catalog`, `client`,
-    /// `poll`, `unsupported`, `payload-too-long`, `offer`, `stop-timeout` or
-    /// `log-recordings`.
+    /// The reason's name: `members`, `member`, `restart`, `terms-lost`, `terms`,
+    /// `catalog`, `client`, `poll`, `unsupported`, `payload-too-long`, `offer`,
+    /// `stop-timeout` or `log-recordings`.
     pub const fn reason(&self) -> &'static str {
         match self {
             RaftError::Members(_) => "members",
             RaftError::Member(_) => "member",
             RaftError::Restart { .. } => "restart",
+            RaftError::TermsLost { .. } => "terms-lost",
             RaftError::Terms(_) => "terms",
             RaftError::Catalog(_) => "catalog",
             RaftError::Client(_) => "client",
@@ -177,6 +186,19 @@ impl core::fmt::Display for RaftError {
                  start the cluster again as a new cluster, every member on a new log \
                  directory. Do not start this member alone on a new log directory: it would \
                  join with no record of its votes or its log, and can then help elect a \
+                 leader that lacks a committed entry; see {DOC}"
+            ),
+            RaftError::TermsLost { recording_id } => write!(
+                f,
+                "member refused ({reason}): the log directory holds recording \
+                 {recording_id} of a cluster's log and no `terms` file, so this member's \
+                 record of the terms of its log and of the votes it cast is gone, and the \
+                 member does not start without it. Leave the member stopped: the cluster \
+                 goes on while a quorum of the others runs. To have every member again, \
+                 start the cluster again as a new cluster, every member on a new log \
+                 directory. Do not start this member alone on a new log directory, and do \
+                 not put an older copy of the file in its place: either way the member \
+                 would vote with no record of the votes it cast, and can then help elect a \
                  leader that lacks a committed entry; see {DOC}"
             ),
             RaftError::Terms(error) => write!(f, "member stopped ({reason}): {error}"),
@@ -491,6 +513,23 @@ fn stop_recording(client: &mut Cavalry, recording: &Recording) -> Result<i64, Ra
         }
         std::thread::sleep(Duration::from_micros(50));
     }
+}
+
+/// The first recording of the cluster's log stream that `catalog` holds, `None` when
+/// it holds none. A member records its log, and the replays it replicates and catches
+/// up by, on that stream alone, and records a term before it records an entry: so a
+/// log directory whose catalog holds such a recording has been a member's. Read once,
+/// at the member's start.
+fn log_recording_in(catalog: &CatalogReader) -> Result<Option<i64>, RaftError> {
+    let slots = i64::try_from(catalog.slots()?).unwrap_or(i64::MAX);
+    for recording_id in 0..slots {
+        if let Some(descriptor) = catalog.get(recording_id)?
+            && descriptor.stream_id() == LOG_STREAM_ID
+        {
+            return Ok(Some(recording_id));
+        }
+    }
+    Ok(None)
 }
 
 /// Takes the recording the driver has started for an armed `start recording`, and
@@ -1609,6 +1648,16 @@ impl ConsensusModule {
         // the `terms` file, which is created when it is not there, so that a
         // directory the module refuses is left as it was.
         let catalog = CatalogReader::open(log_dir.as_ref())?;
+        // A `terms` file that is not there is created, for a member on a new log
+        // directory. A directory that holds a recording of the log is not new: its
+        // member recorded a term before it recorded an entry, so its `terms` file was
+        // removed, and with it the votes the member cast. It is refused before the
+        // file is created, so that the directory is left as it was.
+        if !TermsFile::path_in(log_dir.as_ref()).exists()
+            && let Some(recording_id) = log_recording_in(&catalog)?
+        {
+            return Err(RaftError::TermsLost { recording_id });
+        }
         let terms = TermsFile::open(log_dir.as_ref())?;
         if terms.log_leadership_term_id() != -1 || terms.candidate_term() != -1 {
             return Err(RaftError::Restart {
