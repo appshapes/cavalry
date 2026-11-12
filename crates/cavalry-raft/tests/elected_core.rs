@@ -9,26 +9,24 @@
 mod common;
 
 use cavalry_proto::cluster::{Message, Template};
-use cavalry_raft::{Consensus, ElectionState, Role};
-use common::{Call, Stub, at, canvass_position, new_leadership_term};
+use cavalry_raft::{Consensus, ElectionState, Refused, Role};
+use common::{Call, Stub, append_position, at, canvass_position, new_leadership_term};
 
-/// A fault at the record of terms leaves a member that has won its ballot leading
-/// nothing: no term led, no log added, nothing announced. The next cycle records the
-/// same term, not the one after it, and the member leads it. Its candidate term was
-/// stored once, before it asked for a vote.
-#[test]
-fn a_record_that_fails_leaves_the_winner_leading_nothing_and_the_same_term_to_record() {
-    let mut io = Stub::new();
+/// Member 0 of three, which elects, taken by hand to the cycle after it has both
+/// votes of its ballot for term 0: it canvassed, heard both others with logs level
+/// with its own, nominated itself after its delay and asked for votes. Returns the
+/// member and the next millisecond.
+fn winner(io: &mut Stub) -> (Consensus, u64) {
     let mut member = Consensus::with_election(&[0, 1, 2], 0, 1).expect("a member");
-    member.do_work(at(1), &mut io).expect("no fault");
+    member.do_work(at(1), io).expect("no fault");
     for other in [1, 2] {
         member
-            .on_message(at(2), &canvass_position(other, -1, 0), &mut io)
+            .on_message(at(2), &canvass_position(other, -1, 0), io)
             .expect("no fault");
     }
-    member.do_work(at(3), &mut io).expect("no fault");
+    member.do_work(at(3), io).expect("no fault");
     assert_eq!(member.election_state(), ElectionState::Nominate);
-    member.do_work(at(503), &mut io).expect("no fault");
+    member.do_work(at(503), io).expect("no fault");
     assert_eq!(member.election_state(), ElectionState::CandidateBallot);
     for voter in [1, 2] {
         let vote = Message::Vote {
@@ -39,10 +37,107 @@ fn a_record_that_fails_leaves_the_winner_leading_nothing_and_the_same_term_to_re
             follower_member_id: voter,
             vote: true,
         };
-        member
-            .on_message(at(504), &vote, &mut io)
-            .expect("no fault");
+        member.on_message(at(504), &vote, io).expect("no fault");
     }
+    (member, 505)
+}
+
+/// The first call that sends a message of `template`.
+fn first_sent(io: &Stub, template: Template) -> Option<usize> {
+    io.first(|call| matches!(call, Call::Send { template: sent, .. } if *sent == template))
+}
+
+/// A member that wins its ballot stores its candidate term before it asks for a
+/// vote, and records the term and adds its log before it sends a word of it. It
+/// appends the term's first entry only once a quorum has reported for the term, its
+/// own log among them: a report under an id no member has, and one under the
+/// leader's own id, count for nothing. Back pressure on the first entry keeps the
+/// election open, and the entry is appended once.
+#[test]
+fn a_winner_records_its_term_before_it_announces_it_and_appends_its_first_entry_once() {
+    let mut io = Stub::new();
+    let (mut leader, mut ms) = winner(&mut io);
+    while leader.election_state() != ElectionState::LeaderReady {
+        assert!(ms < 600, "leader ready was not reached: {:?}", io.calls);
+        leader.do_work(at(ms), &mut io).expect("no fault");
+        ms += 1;
+    }
+    assert_eq!(leader.role(), Role::Leader);
+    assert_eq!(leader.leadership_term_id(), 0);
+
+    let stored = io
+        .first(|call| *call == Call::StoreCandidateTerm(0))
+        .expect("stored");
+    let asked = first_sent(&io, Template::RequestVote).expect("asked for a vote");
+    let recorded = io
+        .first(|call| *call == Call::RecordTerm(0, 0))
+        .expect("recorded");
+    let log = io
+        .first(|call| *call == Call::AddLog(0, 0))
+        .expect("the log");
+    let announced = first_sent(&io, Template::NewLeadershipTerm).expect("announced");
+    assert!(
+        stored < asked && asked < recorded && recorded < log && log < announced,
+        "{:?}",
+        io.calls
+    );
+    assert_eq!(
+        io.count(|call| matches!(call, Call::Append(_))),
+        0,
+        "no entry before a quorum's reports"
+    );
+
+    // A report under an id no member has, and one under the leader's own id, count
+    // for nothing: the leader's own log is no quorum of three.
+    leader
+        .on_message(at(ms), &append_position(7, 0), &mut io)
+        .expect("no fault");
+    leader
+        .on_message(at(ms), &append_position(0, 0), &mut io)
+        .expect("no fault");
+    leader.do_work(at(ms + 1), &mut io).expect("no fault");
+    assert_eq!(leader.election_state(), ElectionState::LeaderReady);
+    assert_eq!(
+        leader
+            .offer(at(ms + 1), b"early", &mut io)
+            .expect("no fault"),
+        Err(Refused::Election)
+    );
+
+    // One follower's report makes the quorum. Back pressure on the term's first
+    // entry keeps the election open, and the entry is appended once.
+    leader
+        .on_message(at(ms + 2), &append_position(1, 0), &mut io)
+        .expect("no fault");
+    io.back_pressured = true;
+    leader.do_work(at(ms + 3), &mut io).expect("no fault");
+    assert_eq!(leader.election_state(), ElectionState::LeaderReady);
+    io.back_pressured = false;
+    leader.do_work(at(ms + 4), &mut io).expect("no fault");
+    leader.do_work(at(ms + 5), &mut io).expect("no fault");
+    assert_eq!(leader.election_state(), ElectionState::Closed);
+    assert_eq!(
+        io.count(|call| *call == Call::Append(Template::NewLeadershipTermEvent)),
+        1
+    );
+    assert_eq!(
+        leader.offer(at(ms + 6), b"now", &mut io).expect("no fault"),
+        Ok(())
+    );
+    assert_eq!(
+        io.count(|call| *call == Call::Append(Template::SessionMessage)),
+        1
+    );
+}
+
+/// A fault at the record of terms leaves a member that has won its ballot leading
+/// nothing: no term led, no log added, nothing announced. The next cycle records the
+/// same term, not the one after it, and the member leads it. Its candidate term was
+/// stored once, before it asked for a vote.
+#[test]
+fn a_record_that_fails_leaves_the_winner_leading_nothing_and_the_same_term_to_record() {
+    let mut io = Stub::new();
+    let (mut member, _) = winner(&mut io);
 
     io.fail_record = true;
     let mut faults = 0;
@@ -90,6 +185,14 @@ fn a_record_that_fails_leaves_the_winner_leading_nothing_and_the_same_term_to_re
         io.count(|call| matches!(call, Call::StoreCandidateTerm(term) if *term != 0)),
         0
     );
+    let stored = io
+        .first(|call| *call == Call::StoreCandidateTerm(0))
+        .expect("stored");
+    let asked = first_sent(&io, Template::RequestVote).expect("asked for a vote");
+    assert!(stored < asked, "{:?}", io.calls);
+    // Once recorded, the term is announced, and not before.
+    let announced = first_sent(&io, Template::NewLeadershipTerm).expect("announced");
+    assert!(recorded < announced, "{:?}", io.calls);
 }
 
 /// A follower records its leader's term before it reports a position for it, joins

@@ -279,7 +279,14 @@ fn run(messages: u64, dir: &Path) -> Result<(), Box<dyn std::error::Error>> {
         .iter()
         .position(|(role, ..)| *role == Role::Leader)
     else {
-        return Err(format!("no member leads: {:?}", modules(&members)).into());
+        return Err(format!(
+            "every member's election closed and none leads: {:?}. A closed election \
+             has a leader (spec/cluster.md, \"Roles and the election\"), so this is a \
+             fault of the consensus module: run `just replay-check` again, and report \
+             it with these states if it repeats",
+            modules(&members)
+        )
+        .into());
     };
 
     // The leader's own process appends: each payload its number and the hash of every

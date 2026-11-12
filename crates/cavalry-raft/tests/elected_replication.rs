@@ -13,7 +13,7 @@ mod elected_cluster;
 
 use cavalry_proto::cluster::MAX_MEMBERS;
 use cavalry_raft::memory::{Cluster, IN_FLIGHT_CAPACITY, MAX_DELAY_MS};
-use cavalry_raft::{Consensus, ElectionState, MembersRefused, Refused, Role};
+use cavalry_raft::{Consensus, ElectionCause, ElectionState, MembersRefused, Refused, Role};
 use elected_cluster::{Safety, elected, holds, settled};
 
 /// The two members of `ids` that `leader` leads.
@@ -90,6 +90,13 @@ fn an_offer_is_refused_with_no_leader_before_its_election_closes_and_under_back_
     let mut cluster = Cluster::with_election(&ids, 1).expect("three members");
     let refused = cluster.offer(b"too early").expect_err("no member leads");
     assert_eq!(refused, Refused::NotLeader);
+    assert!(
+        refused.to_string().contains("offer to the leader")
+            && refused
+                .to_string()
+                .contains("docs/reference/cluster.md#roles-and-the-election"),
+        "{refused}"
+    );
     let mut safety = Safety::new(&ids);
     // A member leads from the ballot it wins, some steps before its election closes.
     let mut refused_for_its_election = 0;
@@ -142,10 +149,12 @@ fn an_offer_is_refused_with_no_leader_before_its_election_closes_and_under_back_
 }
 
 /// The consensus stream loses one message in three and delivers the rest up to 50 ms
-/// late and out of order, from the first step: the cluster still elects a leader,
-/// replicates and commits, the three logs are one, and the safety check holds at
-/// every step. An election may take more than one ballot on such a stream; none
-/// fails once a leader has closed.
+/// late and out of order, from the first step to the last: the cluster still elects a
+/// leader, and replicates and commits 500 entries under that loss; the three logs are
+/// one, and the safety check holds at every step. An election may take more than one
+/// ballot on such a stream. Once every election has closed none begins again: from
+/// then to the end no member counts an election, a failed election or a leader
+/// heartbeat timeout, no offer is refused, and the same member leads.
 #[test]
 fn lost_and_late_consensus_messages_change_no_outcome() {
     let ids = [0, 1, 2];
@@ -158,31 +167,43 @@ fn lost_and_late_consensus_messages_change_no_outcome() {
         "a leader on a lossy stream",
         |cluster| settled(cluster, &ids),
     );
+    let leader = cluster.leader().expect("a leader");
+    let settled_counts = ids.map(|id| cluster.counts(id).expect("a member"));
     let mut last = 0;
-    let mut offered = 0u32;
-    // An offer is refused while no leader has closed; on this stream that can be
-    // again, so each entry is offered until it is taken.
-    while offered < 500 {
-        match cluster.offer(&offered.to_le_bytes()) {
-            Ok(position) => {
-                last = position;
-                offered += 1;
-            }
-            Err(Refused::Election) => {}
-            Err(other) => panic!("{other}"),
-        }
+    for entry in 0..500u32 {
+        last = cluster
+            .offer(&entry.to_le_bytes())
+            .expect("the leader appends");
         safety.run(&mut cluster, 3);
     }
-    cluster.set_delivery(0, 0);
-    safety.run_until(&mut cluster, 30_000, "every member committed", |cluster| {
-        settled(cluster, &ids)
-            && ids
-                .iter()
+    // The stream stays lossy and late while the last entries commit.
+    safety.run_until(
+        &mut cluster,
+        30_000,
+        "every member committed under the loss",
+        |cluster| {
+            ids.iter()
                 .all(|&id| cluster.commit_position(id) >= Some(last))
-    });
-    let leader = cluster.leader().expect("a leader");
-    for id in ids {
+        },
+    );
+    assert_eq!(cluster.leader(), Some(leader), "the same member leads");
+    for (id, before) in ids.into_iter().zip(settled_counts) {
         assert_eq!(cluster.log(id), cluster.log(leader), "member {id}");
+        assert_eq!(
+            cluster.election_state(id),
+            Some(ElectionState::Closed),
+            "member {id}"
+        );
+        let counts = cluster.counts(id).expect("a member");
+        assert_eq!(counts.elections, before.elections, "member {id}");
+        assert_eq!(
+            counts.elections_failed, before.elections_failed,
+            "member {id}"
+        );
+        assert_eq!(
+            counts.leader_heartbeat_timeouts, before.leader_heartbeat_timeouts,
+            "member {id}"
+        );
     }
 }
 
@@ -414,12 +435,8 @@ fn a_follower_that_loses_its_image_begins_again_and_joins_level_or_behind() {
     let counts = cluster.counts(first).expect("a member");
     assert_eq!((counts.elections, counts.elections_failed), (2, 0));
     assert_eq!(
-        cluster
-            .member(first)
-            .expect("a member")
-            .election_cause()
-            .code(),
-        2
+        cluster.member(first).expect("a member").election_cause(),
+        ElectionCause::LogImageLost
     );
     assert_eq!(
         cluster.leader(),
@@ -451,8 +468,10 @@ fn a_follower_that_loses_its_image_begins_again_and_joins_level_or_behind() {
 /// keeps what a quorum committed while a quorum keeps its logs, and no protocol keeps
 /// it when a quorum loses them: two of three start again on empty log directories
 /// while the third, which kept its own, is cut off. The two elect a leader of term 0
-/// a second time and commit another history, and the check says so at the step that
-/// commits it.
+/// a second time, which commits its term's first entry where the first history holds
+/// another, and the check says so at the step that commits it. That first entry is
+/// the whole of the other history here: nothing is offered after the wipe, and the
+/// test passes on the first panic that carries the check's words.
 #[test]
 #[should_panic(expected = "leads with a log that differs from what was committed")]
 fn a_quorum_that_lost_its_logs_commits_another_history_and_the_check_fails() {
@@ -483,9 +502,11 @@ fn a_quorum_that_lost_its_logs_commits_another_history_and_the_check_fails() {
 /// messages between those two alone. The leader commits with the other follower, and
 /// the parted follower holds what it held. It hears nothing from its leader for the
 /// leader heartbeat timeout and holds an election, which it cannot win: the other
-/// follower's log is ahead of its own. When the partition ends the three end behind
-/// one leader on one log that holds what was committed while they were parted, where
-/// a member whose leader is appointed stayed out (`replication.rs`).
+/// follower's log is ahead of its own, so it leads no term from the cut to the end.
+/// The other follower's election stays closed throughout. When the partition ends
+/// the three end behind the leader they had, on one log that holds what was
+/// committed while they were parted, where a member whose leader is appointed stayed
+/// out (`replication.rs`).
 #[test]
 fn a_partition_between_the_leader_and_a_follower_ends_with_one_log() {
     let ids = [0, 1, 2];
@@ -496,6 +517,7 @@ fn a_partition_between_the_leader_and_a_follower_ends_with_one_log() {
     };
     safety.run(&mut cluster, 500);
     let held = cluster.append_position(parted).expect("a member");
+    let held_log = cluster.log(parted);
 
     cluster.cut_between(leader, parted);
     let entry = cluster
@@ -513,7 +535,19 @@ fn a_partition_between_the_leader_and_a_follower_ends_with_one_log() {
         counts.leader_heartbeat_timeouts + counts.log_images_lost >= 1,
         "{counts:?}"
     );
-    assert_ne!(cluster.leader(), Some(parted), "a log behind leads nothing");
+    assert!(counts.elections >= 2, "it began an election: {counts:?}");
+    assert_eq!(cluster.leader(), Some(leader), "the leader still leads");
+    assert_eq!(
+        cluster.log(parted),
+        held_log,
+        "the parted follower holds what it held"
+    );
+    assert_eq!(
+        cluster.election_state(other),
+        Some(ElectionState::Closed),
+        "the other follower's election stayed closed"
+    );
+    assert_eq!(cluster.counts(other).expect("a member").elections, 1);
 
     cluster.heal_between(parted, leader);
     safety.run_until(&mut cluster, 30_000, "one leader and one log", |cluster| {
@@ -522,9 +556,14 @@ fn a_partition_between_the_leader_and_a_follower_ends_with_one_log() {
                 .iter()
                 .all(|&id| cluster.commit_position(id) >= Some(entry))
     });
-    let leads = cluster.leader().expect("a leader");
+    assert_eq!(cluster.leader(), Some(leader), "the same member leads");
+    assert_eq!(
+        cluster.counts(parted).expect("a member").terms_led,
+        0,
+        "a log behind led nothing, from the cut to the end"
+    );
     for id in ids {
-        assert_eq!(cluster.log(id), cluster.log(leads), "member {id}");
+        assert_eq!(cluster.log(id), cluster.log(leader), "member {id}");
         assert!(
             holds(&cluster.log(id), b"one follower is parted from the leader"),
             "member {id} holds what was committed"
@@ -544,6 +583,10 @@ fn a_cut_leaders_log_reaches_no_follower_until_the_cut_ends() {
     let (mut cluster, leader) = elected(1, &mut safety);
     safety.run(&mut cluster, 500);
     let before = cluster.commit_position(leader).expect("the leader");
+    let held: Vec<(i32, Vec<u8>)> = followers(&ids, leader)
+        .into_iter()
+        .map(|id| (id, cluster.log(id)))
+        .collect();
 
     cluster.cut(leader);
     let entry = cluster
@@ -552,8 +595,9 @@ fn a_cut_leaders_log_reaches_no_follower_until_the_cut_ends() {
     safety.run(&mut cluster, 2_000);
     assert_eq!(cluster.append_position(leader), Some(entry));
     assert_eq!(cluster.commit_position(leader), Some(before));
-    for id in followers(&ids, leader) {
-        assert_eq!(cluster.append_position(id), Some(before), "member {id}");
+    for (id, log) in &held {
+        assert_eq!(cluster.append_position(*id), Some(before), "member {id}");
+        assert_eq!(&cluster.log(*id), log, "member {id}'s log did not move");
     }
 
     cluster.heal(leader);
@@ -562,10 +606,8 @@ fn a_cut_leaders_log_reaches_no_follower_until_the_cut_ends() {
     for id in ids {
         assert_eq!(cluster.commit_position(id), Some(entry), "member {id}");
         assert_eq!(cluster.log(id), cluster.log(leader), "member {id}");
-        assert_eq!(
-            cluster.counts(id).expect("a member").elections,
-            1,
-            "member {id}"
-        );
+        let counts = cluster.counts(id).expect("a member");
+        assert_eq!(counts.elections, 1, "member {id} held no election");
+        assert_eq!(counts.log_images_lost, 0, "member {id} kept its image");
     }
 }
