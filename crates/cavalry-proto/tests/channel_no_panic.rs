@@ -19,7 +19,16 @@ impl XorShift {
     }
 }
 
-const REASONS: [&str; 6] = ["grammar", "key", "control", "endpoint", "fc", "multicast"];
+const REASONS: [&str; 8] = [
+    "grammar",
+    "key",
+    "control",
+    "endpoint",
+    "fc",
+    "ssc",
+    "position",
+    "multicast",
+];
 
 fn check(bytes: &[u8]) {
     match Channel::parse(bytes) {
@@ -51,8 +60,10 @@ fn check(bytes: &[u8]) {
     }
 }
 
-const VALID: [&str; 6] = [
+const VALID: [&str; 8] = [
     "cavalry:ipc",
+    "cavalry:udp?endpoint=10.0.0.2:40123|ssc=true",
+    "cavalry:udp?endpoint=10.0.0.2:1|init-term-id=7|term-id=9|term-offset=4096",
     "cavalry:udp?endpoint=10.0.0.2:40123",
     "cavalry:udp?endpoint=grip-link:40123|interface=10.0.0.1",
     "cavalry:udp?endpoint=[fd00::2]:40123|interface=[fd00::1]:5000",
@@ -60,7 +71,7 @@ const VALID: [&str; 6] = [
     "cavalry:udp?endpoint=a.b-c.d:1",
 ];
 
-const ALPHABET: &[u8] = b"cavlry:iudp?endoint=.-|[]0123456789abcdef:gx \xff";
+const ALPHABET: &[u8] = b"cavlry:iudp?endoint=.-|[]0123456789abcdef:gx \xffstmf";
 
 #[test]
 fn random_strings_never_panic() {
