@@ -24,6 +24,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
 use cavalry_proto::channel::FlowControl;
+use cavalry_proto::frame::FRAME_ALIGNMENT as FRAME_ALIGNMENT_BYTES;
 use cavalry_proto::frame::Flags;
 use cavalry_proto::udp::{
     CONNECTION_TIMEOUT, ControlFrame, DATAGRAMS_PER_BURST, FLOW_CONTROL_RECEIVER_TIMEOUT,
@@ -32,13 +33,13 @@ use cavalry_proto::udp::{
     StatusMessage, parse, retransmit_window, sender_limit,
 };
 use cavalry_shm::counters::generated::{
-    LOG_BUFFER_REJECTED_FRAME, PUBLICATION_CONNECTED, PUBLICATION_DISCONNECTED,
-    RECEIVER_RECEIVE_FAILED, SENDER_BYTES_SENT, SENDER_FLOW_CONTROL_LIMITED,
-    SENDER_FLOW_CONTROL_RECEIVERS_FULL, SENDER_FLOW_CONTROL_RECEIVERS_TIMED_OUT,
-    SENDER_FRAMES_SENT, SENDER_HEARTBEATS_SENT, SENDER_NAKS_IGNORED, SENDER_NAKS_RECEIVED,
-    SENDER_RETRANSMIT_OVERFLOW, SENDER_RETRANSMITS_SENT, SENDER_RETRANSMITTED_BYTES,
-    SENDER_RTT_REPLIES_SENT, SENDER_SEND_FAILED, SENDER_SETUPS_SENT, SENDER_SHORT_SENDS,
-    SENDER_STATUS_MESSAGES_RECEIVED, SENDER_STATUS_MESSAGES_REJECTED,
+    LOG_BUFFER_REJECTED_FRAME, LOG_BUFFER_REJECTED_POSITION, PUBLICATION_CONNECTED,
+    PUBLICATION_DISCONNECTED, RECEIVER_RECEIVE_FAILED, SENDER_BYTES_SENT,
+    SENDER_FLOW_CONTROL_LIMITED, SENDER_FLOW_CONTROL_RECEIVERS_FULL,
+    SENDER_FLOW_CONTROL_RECEIVERS_TIMED_OUT, SENDER_FRAMES_SENT, SENDER_HEARTBEATS_SENT,
+    SENDER_NAKS_IGNORED, SENDER_NAKS_RECEIVED, SENDER_RETRANSMIT_OVERFLOW, SENDER_RETRANSMITS_SENT,
+    SENDER_RETRANSMITTED_BYTES, SENDER_RTT_REPLIES_SENT, SENDER_SEND_FAILED, SENDER_SETUPS_SENT,
+    SENDER_SHORT_SENDS, SENDER_STATUS_MESSAGES_RECEIVED, SENDER_STATUS_MESSAGES_REJECTED,
 };
 use cavalry_shm::counters::{Counter, CounterId, CountersError};
 use cavalry_shm::log::{Positions, TermReader};
@@ -106,6 +107,9 @@ pub(crate) struct AddPublication {
     /// [`cavalry_proto::udp::MAX_FLOW_CONTROL_RECEIVERS`] and empty, or with no room
     /// under `max`; the sender never grows it.
     pub receiver_table: Vec<Receiver>,
+    /// Its `sender.bytes_unsent` counter, which a publication on a channel that names
+    /// `ssc=true` has and no other (`spec/udp.md`, "The sender"; ADR 0098).
+    pub unsent: Option<Counter>,
 }
 
 /// One receiver in a `min` publication's table, by its receiver id: the position plus
@@ -174,6 +178,17 @@ pub(crate) enum Request {
         /// The end of stream position the conductor stored.
         end_of_stream_position: i64,
     },
+    /// The recording a publication on a channel that names `ssc=true` follows while no
+    /// receiver answers, or none once that recording has stopped (`spec/udp.md`, "The
+    /// sender"; ADR 0098). A `None` is answered with [`Reply::Unfollowed`], whether or
+    /// not the sender still holds the publication, so that the conductor frees the
+    /// counter only after the sender has let it go.
+    Follow {
+        /// The publication.
+        registration_id: i64,
+        /// The recording's `recording.position` counter.
+        recording: Option<Counter>,
+    },
 }
 
 /// What the sender answers: the states only it can see.
@@ -197,6 +212,12 @@ pub(crate) enum Reply {
     /// The endpoint's socket is closed.
     EndpointClosed {
         /// The endpoint.
+        registration_id: i64,
+    },
+    /// The sender holds no recording's counter for the publication any more: the answer
+    /// to a [`Request::Follow`] with no recording.
+    Unfollowed {
+        /// The publication.
         registration_id: i64,
     },
 }
@@ -224,6 +245,7 @@ pub(crate) struct Statics {
     publication_disconnected: Counter,
     receive_failed: Counter,
     rejected_frame: Counter,
+    rejected_position: Counter,
 }
 
 impl Statics {
@@ -253,6 +275,7 @@ impl Statics {
             publication_disconnected: counter(PUBLICATION_DISCONNECTED)?,
             receive_failed: counter(RECEIVER_RECEIVE_FAILED)?,
             rejected_frame: counter(LOG_BUFFER_REJECTED_FRAME)?,
+            rejected_position: counter(LOG_BUFFER_REJECTED_POSITION)?,
         })
     }
 
@@ -333,6 +356,76 @@ struct Live {
     receivers: Vec<Receiver>,
     /// Its `sender.flow_control_receivers` gauge.
     receivers_gauge: Counter,
+    /// The `recording.position` of the live recording of a publication whose channel
+    /// names `ssc=true`: while no receiver answers, the sender position follows it and
+    /// no data goes (`spec/udp.md`, "The sender"; ADR 0098). `None` for every other
+    /// publication, and once the recording has stopped.
+    recording: Option<Counter>,
+    /// Its `sender.bytes_unsent`: what the sender position passed while following above
+    /// `sent_position`, less what it went back over above `sent_position` when a
+    /// receiver joined (ADR 0112).
+    unsent: Option<Counter>,
+    /// The highest position a data burst took the sender position to: every byte below
+    /// it was sent or was passed while following, and nothing at or above it was sent.
+    /// `sender.bytes_unsent` counts no byte below it, so that a byte sent before the
+    /// publication was alone is never counted as unsent nor taken off (ADR 0112).
+    sent_position: i64,
+    /// The last recording position the sender could not follow, counted once.
+    refused_position: i64,
+}
+
+impl Live {
+    /// Whether a receiver answers: the first status message without the send-setup
+    /// flag has arrived, and one arrived within the connection timeout. The sender's
+    /// own reading, which waits for no reply to the conductor.
+    fn receiving(&self, now: i64) -> bool {
+        self.answered
+            && now.saturating_sub(self.last_status_message_at) < spec::nanos(CONNECTION_TIMEOUT)
+    }
+
+    /// Whether the publication is alone with its recording: a recording to follow and
+    /// no receiver answering (`spec/udp.md`, "The sender"; ADR 0098).
+    fn alone(&self, now: i64) -> bool {
+        self.recording.is_some() && !self.receiving(now)
+    }
+
+    /// Moves the sender position up to the recording's position, for a publication
+    /// alone with its recording, and returns whether it moved; `sender.bytes_unsent`
+    /// counts the bytes passed above the highest position sent, the others having
+    /// been sent already or counted already (ADR 0112). The recording's position is a
+    /// frame boundary at most the producer position, which the publisher's limit holds
+    /// within a term and a half of the sender position; one that is not a multiple of
+    /// the frame alignment, or more than two terms ahead, is not this publication's
+    /// recording's: it is counted once in `log_buffer.rejected_position` and the
+    /// sender stays (`spec/udp.md`, "The sender"; ADR 0112).
+    fn follow_recording(&mut self, statics: &Statics) -> bool {
+        let Some(recording) = &self.recording else {
+            return false;
+        };
+        let target = recording.load_acquire();
+        if target <= self.sender_position {
+            return false;
+        }
+        let term_length = i64::from(self.positions.term_length());
+        if target % FRAME_ALIGNMENT_BYTES as i64 != 0
+            || target - self.sender_position > 2 * term_length
+        {
+            if self.refused_position != target {
+                self.refused_position = target;
+                statics.rejected_position.increment();
+            }
+            return false;
+        }
+        let passed = target - self.sender_position.max(self.sent_position);
+        if let Some(unsent) = &self.unsent
+            && passed > 0
+        {
+            unsent.add(passed);
+        }
+        self.sender_position = target;
+        self.position.store_release(target);
+        true
+    }
 }
 
 /// One send endpoint: its socket, on this thread from the conductor's add until its
@@ -835,6 +928,10 @@ impl Sender {
                     flow_control: add.flow_control,
                     receivers: add.receiver_table,
                     receivers_gauge: add.receivers,
+                    recording: None,
+                    unsent: add.unsent,
+                    sent_position: sender_position,
+                    refused_position: -1,
                 });
             }
             Request::Close {
@@ -855,6 +952,35 @@ impl Sender {
                     // ended: closed at once, so the conductor's close completes, as a
                     // remove of an endpoint it does not hold is answered.
                     None => self.reply(Reply::Closed { registration_id }),
+                }
+            }
+            Request::Follow {
+                registration_id,
+                recording,
+            } => {
+                let live = self
+                    .live
+                    .iter_mut()
+                    .find(|live| live.registration_id == registration_id);
+                match recording {
+                    // A publication the sender no longer holds follows nothing: the
+                    // handle is dropped here.
+                    Some(recording) => {
+                        if let Some(live) = live {
+                            live.recording = Some(recording);
+                        }
+                    }
+                    // The recording stopped: one last look, so that a publication alone
+                    // with it ends where the recording ended, then the counter goes.
+                    None => {
+                        if let Some(live) = live {
+                            if live.alone(now) {
+                                live.follow_recording(&self.statics);
+                            }
+                            live.recording = None;
+                        }
+                        self.reply(Reply::Unfollowed { registration_id });
+                    }
                 }
             }
         }
@@ -939,6 +1065,49 @@ impl Sender {
                 live.elicited = true;
             }
             return;
+        }
+        // A publication alone with its recording has moved its sender position with
+        // the recorder's and sent nothing (`spec/udp.md`, "The sender"; ADR 0098). The
+        // receiver this status message is from stands where a setup frame, or the end
+        // of an earlier connection, left it: at most a term behind, the sender goes
+        // back to it and sends from there, so the receiver has nothing to NAK; the
+        // term behind the sender position is never cleaned. Of the bytes gone back
+        // over, those above the highest position sent were passed while alone and
+        // are now to be sent, and come off `sender.bytes_unsent`; those below it went
+        // to a receiver before, the one that comes back among them, and were never
+        // counted (ADR 0112). Further behind, what it would need is no longer in the
+        // log: rejected, and its image times out and joins again. The limit is set
+        // anew from this receiver. A receiver ahead of the sender position, whose image
+        // began where an earlier setup frame put it before the sender went back for
+        // another, is no join to go back for: its status message is taken below as any
+        // is, and it drops what the sender sends below its position as under-runs.
+        if live.alone(now) {
+            let position = cavalry_proto::udp::position(
+                message.consumption_term_id,
+                message.consumption_term_offset,
+                live.positions.initial_term_id(),
+                live.positions.term_length(),
+            );
+            let behind = live.sender_position.wrapping_sub(position);
+            if behind > i64::from(live.positions.term_length()) {
+                self.statics.status_messages_rejected.increment();
+                return;
+            }
+            if behind >= 0 {
+                // At most a term: the position is within a term below the sender
+                // position, so neither difference overflows.
+                let to_send = live.sender_position - position.max(live.sent_position);
+                if let Some(unsent) = &live.unsent
+                    && to_send > 0
+                {
+                    unsent.add(-to_send);
+                }
+                live.sender_position = position;
+                live.position.store_release(position);
+                live.sender_limit = position;
+                live.limit.store_release(position);
+                live.limited = false;
+            }
         }
         let limit = sender_limit(
             live.sender_position,
@@ -1238,8 +1407,22 @@ impl Sender {
             work += 1;
         }
 
-        // 3. Data: one burst of whole committed frames up to the sender limit.
-        let room = live.sender_limit.saturating_sub(live.sender_position);
+        // Alone with its recording (`spec/udp.md`, "The sender"; ADR 0098): a recording
+        // followed and no receiver answering. The sender position moves with the
+        // recorder's and no data goes; a setup frame above or a heartbeat below names
+        // the position a receiver joins at.
+        let alone = live.alone(now);
+        if alone && live.follow_recording(statics) {
+            work += 1;
+        }
+
+        // 3. Data: one burst of whole committed frames up to the sender limit; none
+        //    while the publication is alone with its recording.
+        let room = if alone {
+            0
+        } else {
+            live.sender_limit.saturating_sub(live.sender_position)
+        };
         let burst = Burst::gather(
             &live.reader,
             live.positions,
@@ -1262,14 +1445,19 @@ impl Sender {
                 statics.bytes_sent.add(delivery.bytes as i64);
                 statics.frames_sent.add(delivery.frames as i64);
                 live.sender_position += advanced as i64;
-                // A burst ends at its term, so the seek is within the term.
+                live.sent_position = live.sent_position.max(live.sender_position);
+                // A burst ends at its term, so the seek is within the term. The reader's
+                // own position is read by nothing: every read names its position, and a
+                // sender position that followed a recording or went back for a receiver
+                // leaves the reader's behind or ahead, where the seek is refused and
+                // nothing depends on it (ADR 0098).
                 let _ = live.reader.seek(live.sender_position);
                 live.position.store_release(live.sender_position);
                 live.last_sent_at = now;
                 live.limited = false;
             }
             work += 1;
-        } else if room <= 0 && !live.limited {
+        } else if room <= 0 && !live.limited && !alone {
             // No window at all: a committed frame waiting is the limited state.
             limited = live
                 .reader
