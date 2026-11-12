@@ -48,11 +48,14 @@ commit path runs per message.
   and waits for the commit position (ADR 0086). A leader answers a member that is behind
   within the leader's own term too, with a catch-up position from its term base to its
   append position: the replay follows its live recording, with no end, and the leader
-  stops it and sends stop catch-up when the member reports from it the leader's own
-  append position (ADR 0087). A member that has joined its leader's term behind the
-  leader's log asks for it from its append position, records the leader's replay, adds
-  the live log when it is near the leader's position, and joins when the leader sends
-  stop catch-up (ADR 0088). The consensus module does not use this path yet: a member
+  stops it and sends stop catch-up when the member reports with the catch-up flag (ADR
+  0087, ADR 0088). A member that has joined its leader's term behind the leader's log
+  asks for it from its append position, records the leader's replay and adds the live
+  log when it is near the leader's position. It sets the catch-up flag in its reports
+  once it is on the live log, its append position at or past where its live image
+  joined, and not before: the replay reads no further than the leader has synced, and
+  one stopped sooner would leave a hole below the live image. It joins when the leader
+  sends stop catch-up (ADR 0088). The consensus module does not use this path yet: a member
   over a driver is appointed until the election can do what the next section lists, and
   then the module moves to it in one change (ADR 0081).
 - Counts every move of the election. `ElectionState` is the state machine
