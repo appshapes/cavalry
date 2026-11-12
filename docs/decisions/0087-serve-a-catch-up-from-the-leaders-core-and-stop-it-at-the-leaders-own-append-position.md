@@ -1,6 +1,6 @@
 # 0087. Serve a catch-up from the leader's core, and stop it at the leader's own append position
 
-- **Status:** Accepted
+- **Status:** Superseded by 0088
 - **Date:** 2026-11-11
 - **Invariants affected:** 1, 3, 4, 6
 - **Supersedes:** none. Adds three clauses to `spec/cluster.md`, "Messages outside an

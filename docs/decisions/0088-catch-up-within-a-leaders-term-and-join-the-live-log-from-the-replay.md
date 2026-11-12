@@ -115,6 +115,14 @@ be. Follower catch-up had no bound then. Now the replay brings the member to its
 live recording's start at the speed of the leader's sync and the member's, and the
 stop follows the first report after that.
 
+**A member on the live log is owed no replay.** On that report the leader ends
+what it held for the member as it does for one that canvasses: the replay it runs
+is asked to stop, and a request it still owed the member, one whose start faulted
+or one that waited for a replay being stopped, is dropped. The third review of
+pull request 229 noted that such a replay would be started to a member that waits
+for none, find no subscriber, end at the replay connect timeout, 5 s, and count a
+catch-up nobody asked for.
+
 **A stop catch-up before the flag is not an answer.** A member takes stop catch-up
 only after it has reported with the flag in this catch-up. The leader sends it for
 such a report alone, so one read sooner answers an earlier catch-up of the same
@@ -128,7 +136,9 @@ above it or below 0 ends what the leader held and starts nothing; every member i
 served in every duty cycle and the first fault is returned after all have had
 their turn; stop catch-up is sent for every report with the flag and the replay is
 asked to stop once; `cluster.catchups` rises by one for each replay a leader
-starts for a catch-up.
+starts for a catch-up. ADR 0087's Status reads "Superseded by 0088", the one line
+of an Accepted ADR that may change, so that a reader of it is sent here; its text
+is the record of what was decided on 2026-11-11 and why.
 
 **Follower log init, for a member already subscribed.** It goes to follower ready
 with no second subscription, and its report there, without the catch-up flag,
@@ -239,9 +249,12 @@ the replay has brought the log to where it joined.
   the test's bound of a second, 6 ms at each seed, and all three commit the next
   entry. With the member setting the flag on every report, the test fails: "the
   member behind joins: not within 1000 ms".
-- `crates/cavalry-raft/tests/catchups.rs`, the leader on one core: a report with
-  the flag at 128, below the leader's own 160, stops the replay and is answered
-  with stop catch-up; reports without the flag at 128 and at 160 stop nothing.
+- `crates/cavalry-raft/tests/catchups.rs`, the leader on one core, eleven tests: a
+  report with the flag at 128, below the leader's own 160, stops the replay and is
+  answered with stop catch-up; reports without the flag at 128 and at 160 stop
+  nothing. A report with the flag drops a request whose start had faulted, and one
+  that waited for a replay being stopped: no replay is started for either. Before
+  that change the test fails, the start that faulted made a second time.
 - `crates/cavalry-raft/tests/transitions.rs` makes each of the nine new rows.
 - Every other test of the crate passes unchanged.
 
