@@ -1,9 +1,9 @@
 //! What a leader does for a member that catches up within its term, on one core driven
-//! by hand (`spec/cluster.md`, "Messages outside an election"; ADR 0087). A catch-up
-//! position from the leader's term base to its own append position starts a replay of
-//! its live recording, with no end. The leader stops it, and says so with stop
-//! catch-up, when the member reports from the replay an append position at or past
-//! the leader's own.
+//! by hand (`spec/cluster.md`, "Messages outside an election"; ADR 0087, ADR 0088). A
+//! catch-up position from the leader's term base to its own append position starts a
+//! replay of its live recording, with no end. The leader stops it, and says so with
+//! stop catch-up, when the member reports with the catch-up flag, which says that it
+//! is on the live log.
 //!
 //! The leader of every test here is member 0 of three, leading term 2 from 96 over a
 //! record of terms (0, 0), (1, 64), (2, 96), with 64 bytes of its own term in its log:
@@ -32,14 +32,14 @@ fn catchup_position(member: i32, term: i64, position: i64) -> Message<'static> {
     }
 }
 
-/// `member`'s append position for `term`, with the catch-up flag when it was appended
-/// from the leader's catch-up replay.
-fn appended(member: i32, term: i64, position: i64, from_replay: bool) -> Message<'static> {
+/// `member`'s append position for `term`, with the catch-up flag when the member is
+/// in a catch-up and on the live log.
+fn appended(member: i32, term: i64, position: i64, on_live: bool) -> Message<'static> {
     Message::AppendPosition {
         leadership_term_id: term,
         log_position: position,
         follower_member_id: member,
-        flags: if from_replay {
+        flags: if on_live {
             APPEND_POSITION_FLAG_CATCHUP
         } else {
             0
@@ -109,21 +109,23 @@ fn a_position_in_the_leaders_term_starts_a_replay_with_no_end() {
     assert_eq!(leader.counts().log_replications, 1);
 }
 
-/// The member reports, from the replay, the leader's own append position: the leader
-/// stops the replay, once, and sends stop catch-up. Until the member has read it, it
-/// goes on reporting with the flag, and each report is answered with stop catch-up
-/// again and no second stop. A report below the leader's position, or one without the
-/// flag, a follower on the live log, stops nothing.
+/// The member reports with the catch-up flag, which it sets once it is on the live
+/// log: the leader stops the replay, once, and sends stop catch-up, whatever the
+/// position reported, here 128 against the leader's own 160. Until the member has
+/// read it, it goes on reporting with the flag, and each report is answered with stop
+/// catch-up again and no second stop. A report without the flag stops nothing, at the
+/// leader's own position or below it: the member is not on the live log yet, and the
+/// replay still has bytes to bring it.
 #[test]
-fn a_member_that_reports_the_leaders_position_from_the_replay_is_told_to_stop() {
+fn a_member_that_reports_with_the_catch_up_flag_is_told_to_stop() {
     let (mut leader, mut io, ms) = leading();
     read(&mut leader, &mut io, ms, &catchup_position(2, 2, 96));
-    read(&mut leader, &mut io, ms + 1, &appended(2, 2, 128, true));
+    read(&mut leader, &mut io, ms + 1, &appended(2, 2, 128, false));
     read(&mut leader, &mut io, ms + 2, &appended(2, 2, 160, false));
     assert_eq!(stops(&io, 2), 0);
     assert_eq!(stop_catchups(&io, 2), 0);
 
-    read(&mut leader, &mut io, ms + 3, &appended(2, 2, 160, true));
+    read(&mut leader, &mut io, ms + 3, &appended(2, 2, 128, true));
     assert_eq!(stops(&io, 2), 1);
     assert_eq!(stop_catchups(&io, 2), 1);
     let stop = io
@@ -161,7 +163,7 @@ fn a_member_that_reports_the_leaders_position_from_the_replay_is_told_to_stop() 
 /// A report with the flag for another term than the leader's stops nothing: it is of
 /// a log the leader does not count.
 #[test]
-fn a_report_from_a_replay_for_another_term_stops_nothing() {
+fn a_report_with_the_flag_for_another_term_stops_nothing() {
     let (mut leader, mut io, ms) = leading();
     read(&mut leader, &mut io, ms, &catchup_position(2, 2, 96));
     read(&mut leader, &mut io, ms + 1, &appended(2, 1, 160, true));
@@ -180,7 +182,7 @@ fn a_catch_up_replay_that_ended_is_followed_by_nothing() {
         ended: true,
     });
     work(&mut leader, &mut io, ms + 1);
-    read(&mut leader, &mut io, ms + 2, &appended(2, 2, 128, true));
+    read(&mut leader, &mut io, ms + 2, &appended(2, 2, 128, false));
     work(&mut leader, &mut io, ms + 3);
     assert_eq!(started(&io), vec![(2, 96, None)]);
     // The member asks again, and is served at once.
@@ -225,6 +227,48 @@ fn a_catch_up_is_stopped_by_a_canvass_position_and_replaced_by_a_new_request() {
     );
     assert_eq!(leader.counts().catchups, 3);
     assert_eq!(leader.counts().log_replications, 0);
+}
+
+/// A member told to stop is owed no replay. A report with the catch-up flag says the
+/// member is on the live log, so a request of its that the leader still owed it is
+/// dropped, as a canvass position drops it: one whose start faulted, and one that
+/// waited for the replay before it to stop. Started, such a replay would find no
+/// subscriber, end at the replay connect timeout and count a catch-up nobody asked
+/// for, which the third review of pull request 229 noted.
+#[test]
+fn a_report_with_the_flag_drops_the_replay_the_leader_still_owed() {
+    // A request whose start faulted is owed.
+    let (mut leader, mut io, ms) = leading();
+    io.fail_start_to = Some(1);
+    assert_eq!(
+        leader.on_message(at(ms), &catchup_position(1, 2, 96), &mut io),
+        Err("the replay cannot be started")
+    );
+    io.fail_start_to = None;
+    read(&mut leader, &mut io, ms + 1, &appended(1, 2, 160, true));
+    assert_eq!(stop_catchups(&io, 1), 1);
+    assert_eq!(stops(&io, 1), 0, "no replay ran to it");
+    work(&mut leader, &mut io, ms + 2);
+    work(&mut leader, &mut io, ms + 3);
+    assert_eq!(started(&io), vec![(1, 96, None)], "the start that faulted");
+    assert_eq!(leader.counts().catchups, 0);
+
+    // A request made while a replay ran waits for that replay to stop.
+    let (mut leader, mut io, ms) = leading();
+    read(&mut leader, &mut io, ms, &catchup_position(2, 2, 96));
+    read(&mut leader, &mut io, ms + 1, &catchup_position(2, 2, 128));
+    assert_eq!(stops(&io, 2), 1);
+    read(&mut leader, &mut io, ms + 2, &appended(2, 2, 160, true));
+    assert_eq!(stops(&io, 2), 1, "the replay was asked to stop already");
+    assert_eq!(stop_catchups(&io, 2), 1);
+    io.stopped[2] = Some(ReplayStopped {
+        position: 112,
+        ended: false,
+    });
+    work(&mut leader, &mut io, ms + 3);
+    work(&mut leader, &mut io, ms + 4);
+    assert_eq!(started(&io), vec![(2, 96, None)]);
+    assert_eq!(leader.counts().catchups, 1);
 }
 
 /// A leader that holds an election stops a catch-up's replay in init, as it stops a
@@ -313,7 +357,7 @@ fn a_start_that_faults_for_one_member_does_not_starve_the_next() {
         leader.on_message(at(ms), &catchup_position(1, 2, 96), &mut io),
         Err("the replay cannot be started")
     );
-    read(&mut leader, &mut io, ms, &appended(1, 2, 96, true));
+    read(&mut leader, &mut io, ms, &appended(1, 2, 96, false));
     // Member 2 replicates term 0, which lies in two recordings.
     read(&mut leader, &mut io, ms + 1, &catchup_position(2, 2, 0));
     io.stopped[2] = Some(ReplayStopped {

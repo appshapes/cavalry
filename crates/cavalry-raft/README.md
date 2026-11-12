@@ -48,8 +48,14 @@ commit path runs per message.
   and waits for the commit position (ADR 0086). A leader answers a member that is behind
   within the leader's own term too, with a catch-up position from its term base to its
   append position: the replay follows its live recording, with no end, and the leader
-  stops it and sends stop catch-up when the member reports from it the leader's own
-  append position (ADR 0087). The consensus module does not use this path yet: a member
+  stops it and sends stop catch-up when the member reports with the catch-up flag (ADR
+  0087, ADR 0088). A member that has joined its leader's term behind the leader's log
+  asks for it from its append position, records the leader's replay and adds the live
+  log when it is near the leader's position. It sets the catch-up flag in its reports
+  once it is on the live log, its append position at or past where its live image
+  joined, and not before: the replay reads no further than the leader has synced, and
+  one stopped sooner would leave a hole below the live image. It joins when the leader
+  sends stop catch-up (ADR 0088). The consensus module does not use this path yet: a member
   over a driver is appointed until the election can do what the next section lists, and
   then the module moves to it in one change (ADR 0081).
 - Counts every move of the election. `ElectionState` is the state machine
@@ -124,22 +130,10 @@ In Aeron, this is Cluster, with Cluster Standby as a paid component
 ### What the election does not do yet
 
 A member made with `Consensus::with_election` has nominate, the two ballots, the
-elections a leader holds, the truncation and the replication of a term a member missed
-of `spec/cluster.md`. Where the page's election does more, it does this instead, until
-the step that builds it (ADR 0081):
+elections a leader holds, the truncation, the replication of a term a member missed
+and the catch-up within a leader's term of `spec/cluster.md`. Where the page's
+election does more, it does this instead, until the step that builds it (ADR 0081):
 
-- A member catches up with nothing: a leader answers a catch-up within its own term that
-  no member asks for yet, and in the in-memory cluster starts no such replay until the
-  member's side is built. Where a member's append position is behind its leader's log
-  position within the leader's term, it fails its election, counted in
-  `cluster.elections_failed`, and canvasses again, every election status interval, 100
-  ms, until that step. So a leader that gave up the lead does not join the leader
-  elected after it: it truncates an entry no quorum recorded, is then at the new term's
-  base, and is behind the new leader's log by what was appended since. So too a member
-  that replicated to its leader's base while the leader waited for it: the leader counts
-  it, closes its election and appends the term's first entry, and the member is behind
-  by that entry. Where the leader needs that member for its quorum, nothing above the
-  term's base is committed until the member can catch up.
 - Over a driver a leader cannot give its log up, a member cannot truncate, a leader
   cannot replay and a member cannot replicate: the module's `Io` refuses `remove_log`,
   `truncate_log`, `start_replay`, `stop_replay`, `replay_stopped`, `add_catchup`,
@@ -152,8 +146,11 @@ the step that builds it (ADR 0081):
   When that member leads, it can ask another for a truncation below a commit position
   that member knows, which is refused at every election: the member does not join
   (card 267, with a test that makes the history).
-- Leader ready waits for every member the leader has heard, as the appointed leader's
-  does, since a follower that misses a term's first entry cannot catch up with it.
+- Leader ready waits for every member the leader has heard to count, as the appointed
+  leader's does, and for a quorum alone only once the leader heartbeat timeout has
+  passed in that state, where the page closes it on a quorum at once. The wait was for
+  a follower that missed a term's first entry and could not catch up with it; it can
+  now, and the wait goes in the next change (ADR 0088).
 - A member starts with no term: its record of terms and its candidate term are not
   read back.
 

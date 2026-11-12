@@ -19,11 +19,12 @@
 
 use cavalry_proto::cluster::{
     APPEND_POSITION_FLAG_CATCHUP, CanvassAction, CanvassTerms, ELECTION_STATUS_INTERVAL_NS,
-    ELECTION_TIMEOUT_NS, LEADER_HEARTBEAT_INTERVAL_NS, LEADER_HEARTBEAT_TIMEOUT_NS, LogReport,
-    MAX_MEMBERS, MemberPosition, Message, PROTOCOL_VERSION, STARTUP_CANVASS_TIMEOUT_NS, TermAction,
-    TermFields, TermSpan, TimeUnit, Vote, VoteRequest, appointed_canvass, appointed_leader, ballot,
-    candidate, canvass_position_action, commit_position, leader_ready, log_at_least,
-    new_leadership_term_action, next_fields, quorum, request_vote,
+    ELECTION_TIMEOUT_NS, LEADER_HEARTBEAT_INTERVAL_NS, LEADER_HEARTBEAT_TIMEOUT_NS,
+    LIVE_ADD_MAX_WINDOW, LogReport, MAX_MEMBERS, MemberPosition, Message, PROTOCOL_VERSION,
+    STARTUP_CANVASS_TIMEOUT_NS, TermAction, TermFields, TermSpan, TimeUnit, Vote, VoteRequest,
+    appointed_canvass, appointed_leader, ballot, candidate, canvass_position_action,
+    commit_position, leader_ready, log_at_least, new_leadership_term_action, next_fields, quorum,
+    request_vote,
 };
 use cavalry_shm::counters::CounterId;
 use cavalry_shm::counters::generated::{
@@ -100,6 +101,18 @@ pub enum ElectionState {
     FollowerLogReplication = 9,
     /// A follower replays its own log; nothing in a log with no term before this one.
     FollowerReplay = 10,
+    /// A follower behind its leader's log within the leader's term subscribes on its
+    /// catch-up endpoint and asks the leader for the log from its append position
+    /// (ADR 0088).
+    FollowerCatchupInit = 11,
+    /// It waits for the image of the leader's replay, which must join at its append
+    /// position.
+    FollowerCatchupAwait = 12,
+    /// It records the replay, adds the live log once it is near the leader's
+    /// position, and goes on to join when the leader has sent stop catch-up and it
+    /// has reached the live log and the commit position it had been told when it read
+    /// stop catch-up.
+    FollowerCatchup = 13,
     /// A follower subscribes to the log and arms its recording.
     FollowerLogInit = 14,
     /// A follower waits for the leader's image and checks where it joins.
@@ -455,7 +468,9 @@ pub struct Counts {
     /// position other than the member's append position, in follower log await; or,
     /// in follower log replication, a replay's image that joined at a position other
     /// than the one the member asked from, for the first image, or last sent its
-    /// leader, for each image after (ADR 0086).
+    /// leader, for each image after (ADR 0086); or, in follower catch-up await, the
+    /// image of a catch-up's replay that joined at a position other than the one the
+    /// member asked from (ADR 0088).
     pub join_position_mismatches: u64,
     /// `cluster.log_images_lost`: a follower whose image of the leader's log was no
     /// longer available, so that it began again at init.
@@ -730,6 +745,40 @@ struct Replication {
     reached_ns: Option<u64>,
 }
 
+/// A member's catch-up within its leader's term (states 12 and 13): from the catch-up
+/// position that began it until the member joins the live log or its election fails.
+#[derive(Clone, Copy, Debug)]
+struct Catchup {
+    /// The position the member asked the log from, where the replay's image must
+    /// join.
+    asked: i64,
+    /// Whether the member has reported with the catch-up flag: it holds the log to
+    /// where its live image joined, and the leader may stop its replay. Only then is
+    /// a stop catch-up the leader's answer to this catch-up.
+    flagged: bool,
+    /// Whether the leader's stop catch-up was read.
+    stopped: bool,
+    /// The commit position the member had been told when it read stop catch-up,
+    /// which its append position must reach before it leaves the state. It is fixed
+    /// then: a leader that goes on committing does not move it.
+    commit_target: i64,
+    /// The append position at the last cycle, and when it last moved.
+    position: i64,
+    moved_ns: u64,
+}
+
+/// How near the leader's position a member that catches up adds the live log: the
+/// lesser of a quarter of the log's term length and [`LIVE_ADD_MAX_WINDOW`]
+/// (`spec/cluster.md`, "Values").
+const LIVE_ADD_WINDOW: i64 = {
+    let quarter = (cavalry_proto::udp::UDP_TERM_LENGTH / 4) as i64;
+    if quarter < LIVE_ADD_MAX_WINDOW {
+        quarter
+    } else {
+        LIVE_ADD_MAX_WINDOW
+    }
+};
+
 /// One cluster member's consensus state: its role, its election, its terms and the
 /// positions it knows. See the module's page for how it is driven.
 #[derive(Debug)]
@@ -791,6 +840,9 @@ pub struct Consensus {
     replication: Option<Replication>,
     /// Whether this member holds its catch-up subscription.
     catchup: bool,
+    /// The catch-up this member is in, in follower catch-up await and follower
+    /// catch-up.
+    catching: Option<Catchup>,
 }
 
 impl Consensus {
@@ -869,6 +921,7 @@ impl Consensus {
             last_append_sent: -1,
             replication: None,
             catchup: false,
+            catching: None,
         })
     }
 
@@ -879,11 +932,12 @@ impl Consensus {
     /// at every run. Refused as [`Consensus::new`] refuses.
     ///
     /// This path has nominate, the two ballots, the elections a leader holds, on the
-    /// loss of its quorum and on a higher term (ADR 0082), the truncation (ADR 0083)
-    /// and the replication of a term a member missed, the leader's side and the
-    /// member's (ADR 0085, ADR 0086). No member on it catches up within its leader's
-    /// term yet, so the consensus module does not use it: see the crate's README for
-    /// what a member on it does where the election would do more.
+    /// loss of its quorum and on a higher term (ADR 0082), the truncation (ADR 0083),
+    /// the replication of a term a member missed (ADR 0085, ADR 0086) and the catch-up
+    /// within a leader's term (ADR 0087, ADR 0088), the leader's side of each and the
+    /// member's. The consensus module does not use it yet: see the crate's README for
+    /// what a member on it does where the election would do more, and for what the
+    /// module's `Io` refuses.
     pub fn with_election(
         member_ids: &[i32],
         member_id: i32,
@@ -963,6 +1017,9 @@ impl Consensus {
             ElectionState::LeaderReady => self.leader_ready(clock, io),
             ElectionState::FollowerLogReplication => self.follower_log_replication(clock, io),
             ElectionState::FollowerReplay => self.follower_replay(clock),
+            ElectionState::FollowerCatchupInit => self.follower_catchup_init(clock, io),
+            ElectionState::FollowerCatchupAwait => self.follower_catchup_await(clock, io),
+            ElectionState::FollowerCatchup => self.follower_catchup(clock, io),
             ElectionState::FollowerLogInit => self.follower_log_init(clock, io),
             ElectionState::FollowerLogAwait => self.follower_log_await(clock, io),
             ElectionState::FollowerReady => Ok(self.follower_ready(clock, io)),
@@ -987,13 +1044,15 @@ impl Consensus {
 
     /// One message of the consensus stream, read at `clock`. A member in init reads
     /// nothing. A member whose leader is appointed ignores request vote and vote, which
-    /// no such member sends, and catch-up position, and every member ignores stop
-    /// catch-up, which this version's members do not send (`spec/cluster.md`, "The
-    /// appointed leader"). A leader that elects answers a catch-up position at or below
-    /// its log position with a replay of its own recordings, stops the replay it runs
-    /// to a member that canvasses again, and stops a catch-up, with stop catch-up,
-    /// when the member it serves reports the leader's own append position
-    /// ("Messages outside an election"; ADR 0085, ADR 0087). A member that elects and reads a new leadership term
+    /// no such member sends, catch-up position and stop catch-up (`spec/cluster.md`,
+    /// "The appointed leader"). A leader that elects answers a catch-up position at or
+    /// below its log position with a replay of its own recordings, stops the replay it
+    /// runs to a member that canvasses again, and stops a catch-up, with stop
+    /// catch-up, when the member it serves reports with the catch-up flag, on the live
+    /// log ("Messages outside an election"; ADR 0085, ADR 0087, ADR 0088). A member
+    /// that elects, in follower catch-up, takes its leader's stop catch-up once it has
+    /// reported with that flag, and removes its catch-up subscription (ADR 0088). A
+    /// member that elects and reads a new leadership term
     /// which leaves it below its leader's term base goes to follower log replication
     /// (ADR 0086). A member that elects notes the sender of whatever it reads
     /// as heard, for its ballot (ADR 0077). Once its election has closed it holds an
@@ -1111,12 +1170,14 @@ impl Consensus {
                     && let Some(index) = self.other(follower_member_id)
                 {
                     self.report(index, log_position, leadership_term_id, true, clock);
-                    // A position appended from a catch-up replay, for this leader's
-                    // term, that has reached the leader's own: the catch-up is over.
+                    // A report with the catch-up flag, for this leader's term: the
+                    // member is on the live log. It holds every position below where
+                    // its live image joined, so the replay brings it nothing more,
+                    // and the catch-up is over at whatever position it reports (ADR
+                    // 0088).
                     if self.election.is_some()
                         && flags & APPEND_POSITION_FLAG_CATCHUP != 0
                         && leadership_term_id == self.term
-                        && log_position >= self.append_position
                     {
                         self.stop_catchup(index, io)?;
                     }
@@ -1333,6 +1394,34 @@ impl Consensus {
                 }
                 Ok(())
             }
+            Message::StopCatchup {
+                leadership_term_id,
+                follower_member_id,
+            } => {
+                // The leader's word that the catch-up is over: the member reported
+                // with the catch-up flag, which says it is on the live log. The
+                // catch-up subscription goes, and follower catch-up leaves once the
+                // member is on the live log. One read before the member has reported
+                // with the flag answers an earlier catch-up, and is ignored: taking
+                // it would end the replay before the member holds the log to where
+                // its live image joins.
+                if self.state == ElectionState::FollowerCatchup
+                    && follower_member_id == self.member_id()
+                    && leadership_term_id == self.term
+                    && let Some(mut catching) = self.catching
+                    && catching.flagged
+                    && !catching.stopped
+                {
+                    if self.catchup {
+                        io.remove_catchup()?;
+                        self.catchup = false;
+                    }
+                    catching.stopped = true;
+                    catching.commit_target = self.commit_position;
+                    self.catching = Some(catching);
+                }
+                Ok(())
+            }
             _ => Ok(()),
         }
     }
@@ -1430,6 +1519,9 @@ impl Consensus {
             self.state,
             ElectionState::FollowerLogReplication
                 | ElectionState::FollowerReplay
+                | ElectionState::FollowerCatchupInit
+                | ElectionState::FollowerCatchupAwait
+                | ElectionState::FollowerCatchup
                 | ElectionState::FollowerLogInit
                 | ElectionState::FollowerLogAwait
                 | ElectionState::FollowerReady
@@ -1665,18 +1757,17 @@ impl Consensus {
         Ok(())
     }
 
-    /// The member at `index` has caught up: it reported, from a catch-up replay, an
-    /// append position at or past this leader's own. The leader stops the replay it
-    /// runs to it and tells it so with stop catch-up, on which the member removes
-    /// its catch-up subscription. The member reports with the catch-up flag until it
-    /// has read one, so a stop catch-up that did not leave is sent again on its next
-    /// report, and the replay is asked to stop once.
+    /// The member at `index` is on the live log: it reported with the catch-up flag,
+    /// which a member sets once its append position has reached where its live image
+    /// joined. The leader ends what it held for it, as for a member that canvasses:
+    /// the replay it runs is asked to stop, once, and a replay it still owed the
+    /// member is dropped, since the member waits for none. It tells the member so with
+    /// stop catch-up, on which the member removes its catch-up subscription. The
+    /// member reports with the flag until it has read one, so a stop catch-up that
+    /// did not leave is sent again on its next report.
     fn stop_catchup<I: Io>(&mut self, index: usize, io: &mut I) -> Result<(), I::Fault> {
+        self.end_serving(index, io)?;
         let member = self.peer(index).id;
-        if self.serving(index) == (Serving::Running { end: None }) {
-            io.stop_replay(member)?;
-            self.serve(index, Serving::Stopping { next: None });
-        }
         io.send(
             member,
             &Message::StopCatchup {
@@ -1709,9 +1800,9 @@ impl Consensus {
         Ok(Serving::Running { end })
     }
 
-    /// Ends what this leader serves the member at `index`, which canvasses again or
-    /// asks for what the leader cannot replay: the replay it runs is stopped, and the
-    /// next it owed is dropped.
+    /// Ends what this leader serves the member at `index`, which canvasses again,
+    /// asks for what the leader cannot replay, or reports that it is on the live log:
+    /// the replay it runs is stopped, and the next it owed is dropped.
     fn end_serving<I: Io>(&mut self, index: usize, io: &mut I) -> Result<(), I::Fault> {
         let serving = match self.serving(index) {
             Serving::Idle | Serving::Next { .. } => Serving::Idle,
@@ -1808,12 +1899,13 @@ impl Consensus {
             self.joined = false;
         }
         // And out of a replication that failed: its subscription goes, and with it
-        // the image of any replay still on it.
+        // the image of any replay still on it. So too out of a catch-up that failed.
         if self.catchup {
             io.remove_catchup()?;
             self.catchup = false;
         }
         self.replication = None;
+        self.catching = None;
         // A leader that began again holds the log publication of the term it led. It
         // gives it up, so that no follower's image of it goes on and the term it leads
         // next has a publication of its own, at that term's base (ADR 0082).
@@ -2488,18 +2580,170 @@ impl Consensus {
     }
 
     /// State 10. Nothing to replay in a log with no term before the leader's. A member
-    /// behind the leader's log position would catch up, which this version cannot.
+    /// behind the leader's log position catches up, when it elects; one whose leader
+    /// is appointed has no catch-up and fails.
     fn follower_replay<F>(&mut self, clock: Clock) -> Result<usize, F> {
         if self.append_position < self.leader_log_position {
-            self.fail(clock);
-            return Ok(1);
+            if self.election.is_none() {
+                self.fail(clock);
+                return Ok(1);
+            }
+            return Ok(self.step(ElectionState::FollowerCatchupInit, clock));
         }
         Ok(self.step(ElectionState::FollowerLogInit, clock))
     }
 
-    /// State 14. The log subscription and its armed recording. No member of this
-    /// version is already subscribed here: that is the catch-up's live add, state 13.
+    /// State 11. The member subscribes on its `catchup` endpoint and asks its leader
+    /// for the log from its append position, counted in `cluster.catchups` when the
+    /// catch-up position has left. One that does not leave within the leader
+    /// heartbeat timeout fails the election.
+    fn follower_catchup_init<I: Io>(
+        &mut self,
+        clock: Clock,
+        io: &mut I,
+    ) -> Result<usize, I::Fault> {
+        if !self.catchup {
+            io.add_catchup()?;
+            self.catchup = true;
+        }
+        if io.send_catchup_position(self.leader_id, self.term, self.append_position) {
+            count(&mut self.counts.catchups);
+            self.catching = Some(Catchup {
+                asked: self.append_position,
+                flagged: false,
+                stopped: false,
+                commit_target: 0,
+                position: self.append_position,
+                moved_ns: clock.now_ns,
+            });
+            // Its first cycle in follower catch-up reports its position.
+            self.last_append_sent = -1;
+            self.last_append_sent_ns = None;
+            return Ok(self.step(ElectionState::FollowerCatchupAwait, clock));
+        }
+        if clock.now_ns.saturating_sub(self.state_since_ns) >= LEADER_HEARTBEAT_TIMEOUT_NS {
+            self.fail(clock);
+            return Ok(1);
+        }
+        Ok(0)
+    }
+
+    /// State 12. The image of the leader's replay, which must join at the position
+    /// the member asked from. One that joins elsewhere, a stale replay's among them,
+    /// fails the election, counted; so does none within the leader heartbeat timeout.
+    fn follower_catchup_await<I: Io>(
+        &mut self,
+        clock: Clock,
+        io: &mut I,
+    ) -> Result<usize, I::Fault> {
+        let asked = self
+            .catching
+            .map_or(self.append_position, |catching| catching.asked);
+        match io.catchup_image()? {
+            Some(join) if join == asked => {
+                // Follower catch-up's time begins here, with its replay: what the
+                // image took to come is this state's, and is not counted against an
+                // append position that has had no replay to move it.
+                if let Some(mut catching) = self.catching {
+                    catching.position = self.append_position;
+                    catching.moved_ns = clock.now_ns;
+                    self.catching = Some(catching);
+                }
+                Ok(self.step(ElectionState::FollowerCatchup, clock))
+            }
+            Some(_) => {
+                count(&mut self.counts.join_position_mismatches);
+                self.fail(clock);
+                Ok(1)
+            }
+            None => {
+                if clock.now_ns.saturating_sub(self.state_since_ns) >= LEADER_HEARTBEAT_TIMEOUT_NS {
+                    self.fail(clock);
+                    return Ok(1);
+                }
+                Ok(0)
+            }
+        }
+    }
+
+    /// State 13. The member records the replay and reports its append position, when
+    /// it moves and every leader heartbeat interval. Once it is within the live-add
+    /// window of the leader's position, the greater of the log position and the
+    /// commit position its leader told it, it adds the live log: the live image joins
+    /// at or past its append position, and the replay brings it there. Its reports
+    /// carry the catch-up flag only from then on, once its append position has
+    /// reached where the live image joined: the flag tells the leader that it may
+    /// stop the replay, and a replay stopped sooner would leave a hole below the live
+    /// image that nothing fills (ADR 0088). When the leader has sent stop catch-up,
+    /// and its append position has reached the commit position it had been told when
+    /// it read that message, it goes on to follower log init, already subscribed: the
+    /// commit positions a leader sends after do not hold it, or a steady load would
+    /// for as long as it lasted. A catch-up whose append position
+    /// has not moved for the leader heartbeat timeout, counted from the replay's image
+    /// joining, fails the election.
+    fn follower_catchup<I: Io>(&mut self, clock: Clock, io: &mut I) -> Result<usize, I::Fault> {
+        let Some(mut catching) = self.catching else {
+            // The state is entered with a catch-up and left without one.
+            self.fail(clock);
+            return Ok(1);
+        };
+        if self.append_position != catching.position {
+            catching.position = self.append_position;
+            catching.moved_ns = clock.now_ns;
+            self.catching = Some(catching);
+        }
+        let mut work = 0;
+        let near = self.leader_log_position.max(self.commit_position);
+        if !self.joined && self.append_position >= near.saturating_sub(LIVE_ADD_WINDOW) {
+            io.join_log()?;
+            self.joined = true;
+            work = 1;
+        }
+        // On the live log: the member holds every position below where its live
+        // image joined, so the live log brings it all that follows.
+        let on_live = self.joined
+            && io
+                .log_image(self.log_session_id)?
+                .is_some_and(|live_start| self.append_position >= live_start);
+        let flags = if on_live {
+            APPEND_POSITION_FLAG_CATCHUP
+        } else {
+            0
+        };
+        // Sent when the position moved, every leader heartbeat interval, and at once
+        // when the member is first on the live log, so that the leader's stop does
+        // not wait an interval for it.
+        if (self.append_position != self.last_append_sent
+            || (on_live && !catching.flagged)
+            || Self::due(
+                self.last_append_sent_ns,
+                LEADER_HEARTBEAT_INTERVAL_NS,
+                clock,
+            ))
+            && self.send_append_position_flagged(clock, flags, io)
+        {
+            catching.flagged |= on_live;
+            work = 1;
+        }
+        self.catching = Some(catching);
+        if catching.stopped && on_live && self.append_position >= catching.commit_target {
+            self.catching = None;
+            return Ok(self.step(ElectionState::FollowerLogInit, clock));
+        }
+        if clock.now_ns.saturating_sub(catching.moved_ns) >= LEADER_HEARTBEAT_TIMEOUT_NS {
+            self.fail(clock);
+            return Ok(1);
+        }
+        Ok(work)
+    }
+
+    /// State 14. The log subscription and its armed recording. A member that caught
+    /// up is already subscribed, by the live add of state 13, and on the live image:
+    /// it goes to follower ready.
     fn follower_log_init<I: Io>(&mut self, clock: Clock, io: &mut I) -> Result<usize, I::Fault> {
+        if self.joined {
+            return Ok(self.step(ElectionState::FollowerReady, clock));
+        }
         io.join_log()?;
         self.joined = true;
         Ok(self.step(ElectionState::FollowerLogAwait, clock))
@@ -2528,13 +2772,19 @@ impl Consensus {
     }
 
     fn send_append_position<I: Io>(&mut self, clock: Clock, io: &mut I) -> bool {
+        self.send_append_position_flagged(clock, 0, io)
+    }
+
+    /// The member's append position to its leader, with `flags`: the catch-up flag
+    /// for a member in follower catch-up that is on the live log, and none otherwise.
+    fn send_append_position_flagged<I: Io>(&mut self, clock: Clock, flags: u8, io: &mut I) -> bool {
         let sent = io.send(
             self.leader_id,
             &Message::AppendPosition {
                 leadership_term_id: self.log_term,
                 log_position: self.append_position,
                 follower_member_id: self.member_id(),
-                flags: 0,
+                flags,
             },
         );
         if sent {

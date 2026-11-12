@@ -14,9 +14,9 @@
 //! member holds the bytes that reached it and no others, so two members can hold
 //! different bytes at one position, which a test of the cluster's safety must be able
 //! to find. A leader's replay of its own log reaches a member that subscribed on its
-//! catch-up endpoint, an entry after another from the position asked, and ends by
-//! itself at its end, when it is stopped, or when it has had no subscriber for the
-//! replay connect timeout.
+//! catch-up endpoint, an entry after another from the position asked and no further
+//! than the leader's recording has synced, and ends by itself at its end, when it is
+//! stopped, or when it has had no subscriber for the replay connect timeout.
 //!
 //! Its bounds, and what it does at each:
 //!
@@ -121,9 +121,11 @@ struct Replay {
     to: usize,
     /// Where it began, the join position of its image.
     start: i64,
-    /// Where the next entry it sends begins, and where it ends.
+    /// Where the next entry it sends begins, and where it ends: a replication's
+    /// replay at its end, a catch-up's, with none, when it is stopped or the member
+    /// it replays gives its log up.
     position: i64,
-    end: i64,
+    end: Option<i64>,
     /// Since when it has had no subscriber it reaches.
     unheard_since_ns: Option<u64>,
     /// Whether its image has reached the member's subscription.
@@ -455,23 +457,20 @@ impl Io for MemberIo<'_> {
         position: i64,
         end: Option<i64>,
     ) -> Result<bool, Self::Fault> {
-        // A catch-up's replay, with no end, follows a leader's log as it grows. This
-        // cluster does not play one yet: no member in it asks for a catch-up until
-        // the member's side is built (ADR 0087), and a leader answers such a
-        // position as one whose recordings do not hold it.
-        let Some(end) = end else {
-            return Ok(false);
-        };
         let Some(to) = self.world.disks.iter().position(|disk| disk.id == member) else {
             return Ok(false);
         };
-        // The member's log holds the position when an entry of it begins there. A log
-        // that does not is one whose recordings were purged, or one that differs from
-        // the asker's below the position: nothing is started.
+        // The member's log holds the position when an entry of it begins there, and
+        // a replication's replay needs that entry to end at or below its end. A
+        // catch-up's replay, with no end, follows the log as it grows, so it may
+        // begin where the log ends now. A log that holds neither is one whose
+        // recordings were purged, or one that differs from the asker's below the
+        // position: nothing is started.
         let held = self.world.disks.get(self.own).is_some_and(|disk| {
-            disk.log
-                .iter()
-                .any(|entry| entry.position == position && entry.position_after <= end)
+            let begins = disk.log.iter().any(|entry| {
+                entry.position == position && end.is_none_or(|end| entry.position_after <= end)
+            });
+            begins || (end.is_none() && position == disk.received)
         });
         if !held {
             return Ok(false);
@@ -803,15 +802,22 @@ impl Cluster {
 
     /// One step of every replay: a replay asked to stop stops; one whose member is
     /// subscribed on its catch-up endpoint and hears the replaying member brings it
-    /// every entry from where it stands to its end, and ends by itself on the step
-    /// after; one with no such subscriber for the replay connect timeout ends where
-    /// it stands. A replay from a halted member stands still, as its host does.
+    /// every entry the replaying member's recording has synced, from where it stands
+    /// to its end, and ends by itself on the step after; a catch-up's, with no end,
+    /// goes on bringing what the replaying member appends and syncs, for as long as
+    /// that member holds its log publication: a replay of a live recording reads to
+    /// the synced position and waits for it to move (`spec/client-protocol.md`,
+    /// "Commands"), so what a leader has appended and not yet synced reaches a
+    /// member by the live log alone; one with no
+    /// such subscriber for the replay connect timeout ends where it stands. A replay
+    /// from a halted member stands still, as its host does.
     fn replay(&mut self) {
         let now_ns = self.world.clock.now_ns;
         let World {
             disks,
             cuts,
             replays,
+            publications,
             ..
         } = &mut self.world;
         for replay in replays.iter_mut() {
@@ -826,7 +832,7 @@ impl Cluster {
             let mut ended = None;
             if replay.stopping {
                 ended = Some(false);
-            } else if replay.joined && replay.position >= replay.end {
+            } else if replay.joined && replay.end.is_some_and(|end| replay.position >= end) {
                 // At its end, a step after its last entry, so that the member sees
                 // the image it came on; with or without its subscriber by now.
                 ended = Some(true);
@@ -848,15 +854,22 @@ impl Cluster {
                             .iter()
                             .filter(|entry| {
                                 entry.position >= replay.position
-                                    && entry.position_after <= replay.end
+                                    && entry.position_after <= disk.synced
+                                    && replay.end.is_none_or(|end| entry.position_after <= end)
                             })
                             .cloned()
                             .collect()
                     })
                     .unwrap_or_default();
-                if replay.joined && entries.is_empty() {
+                // A catch-up's replay follows the live recording for as long as the
+                // replaying member holds its log publication.
+                let follows = replay.end.is_none()
+                    && publications.iter().any(|publication| {
+                        publication.leader == replay.from && !publication.closed
+                    });
+                if replay.joined && entries.is_empty() && !follows {
                     // The end of what the replaying member holds below the replay's
-                    // end: its recording's end.
+                    // end, or of a live recording that stopped: its recording's end.
                     ended = Some(true);
                 } else if let Some(disk) = disks.get_mut(replay.to) {
                     replay.joined = true;

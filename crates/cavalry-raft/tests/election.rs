@@ -8,10 +8,9 @@
 //! leader committed is in the log of every leader after it, and that no two members
 //! lead one term.
 //!
-//! A member on this path truncates a tail no quorum recorded and replicates a term it
-//! missed, and has no catch-up yet (the crate's README, "What the election does not
-//! do yet"), so the tests stop a leader when its followers are level with it, or say
-//! what the member that is behind its leader's log does instead.
+//! A member on this path truncates a tail no quorum recorded, replicates a term it
+//! missed and catches up within its leader's term (ADR 0083, ADR 0086, ADR 0088), so
+//! a member that comes back behind its leader ends each test on the leader's log.
 
 use cavalry_proto::cluster::quorum;
 use cavalry_raft::memory::Cluster;
@@ -543,9 +542,9 @@ fn payload_of_frame(frame: i64) -> Vec<u8> {
 /// recorded its term: its election closes, where a leader that named its own term as
 /// the next would have counted the follower over bytes of its own.
 ///
-/// The follower is then behind the leader's log by the third term's first entry, and
-/// joins only by catching up, which this step does not have: nothing above the third
-/// term's base is committed until it can.
+/// The follower is then behind the leader's log by the third term's first entry. It
+/// catches up with it from the leader's live recording (states 11 to 13), joins the
+/// live log, and the three commit.
 #[test]
 fn a_member_whose_tail_is_as_long_as_a_term_it_missed_replicates_that_term() {
     let ids = [0, 1, 2, 3, 4];
@@ -657,18 +656,24 @@ fn a_member_whose_tail_is_as_long_as_a_term_it_missed_replicates_that_term() {
             (first_term + 2, third_base)
         ]
     );
-    assert_eq!(cluster.append_position(tailed), Some(third_base));
+    // It was then behind by the third term's first entry, caught up with it from
+    // the leader's live recording, and joined: three of five follow one log again.
+    assert_eq!(counts.catchups, 1, "{counts:?}");
+    assert_eq!(cluster.counts(third).expect("a member").catchups, 1);
+    assert_eq!(member.election_state(), ElectionState::Closed);
+    assert_eq!(member.leader_member_id(), third);
     assert_eq!(
         cluster.log(tailed),
-        cluster.log_to(third, third_base),
+        cluster.log(third),
         "what it holds is the leader's"
     );
-    // Behind by the third term's first entry: the catch-up. Until then the member
-    // fails its elections, and nothing above the base is committed.
-    assert!(cluster.append_position(third).expect("a member") > third_base);
-    assert_ne!(member.election_state(), ElectionState::Closed);
-    assert!(counts.elections_failed > 0, "{counts:?}");
-    assert_eq!(cluster.commit_position(third), Some(third_base));
+    assert!(cluster.commit_position(third).expect("a member") > third_base);
+    let last = cluster
+        .offer(b"committed by the three")
+        .expect("the leader appends");
+    safety.run(&mut cluster, 1_000);
+    assert_eq!(cluster.commit_position(tailed), Some(last));
+    assert_eq!(cluster.log(tailed), cluster.log(third));
 }
 
 /// The leader is cut off from both followers, its duty cycle still running. It leads
@@ -682,9 +687,9 @@ fn a_member_whose_tail_is_as_long_as_a_term_it_missed_replicates_that_term() {
 /// holds an entry the new leader's log does not, above the new term's base, and
 /// truncates it, counted in `cluster.log_truncations`: its log is then the new
 /// leader's up to that base, and it records the new term there. It is behind the new
-/// leader's log from there and joins only by catching up, which this step does not
-/// have: its elections fail, counted. What it appended while cut off was in no other
-/// member's log, was never committed, and is gone.
+/// leader's log from there, catches up with it from the leader's live recording, and
+/// joins: the three commit. What it appended while cut off was in no other member's
+/// log, was never committed, and is gone.
 #[test]
 fn a_leader_cut_off_from_its_followers_gives_up_the_lead_and_the_others_elect() {
     let ids = [0, 1, 2];
@@ -770,27 +775,28 @@ fn a_leader_cut_off_from_its_followers_gives_up_the_lead_and_the_others_elect() 
         // The cut ends. The old leader is told the new term, whose base is below its
         // append position: it truncates the entry no quorum recorded, once, and then
         // holds the log to the new term's base and records the term there. It is
-        // behind the new leader's log by what the two appended, and joins only by
-        // catching up.
+        // behind the new leader's log by what the two appended, catches up with it
+        // from the leader's live recording, and joins.
         cluster.heal(first);
-        let failed = cluster.counts(first).expect("a member").elections_failed;
         safety.run(&mut cluster, 2_000);
         let member = cluster.member(first).expect("a member");
         assert_eq!(member.role(), Role::Follower, "seed {seed}");
-        assert_ne!(
+        assert_eq!(
             member.election_state(),
             ElectionState::Closed,
             "seed {seed}"
         );
-        assert!(member.counts().elections_failed > failed, "seed {seed}");
+        assert_eq!(member.leader_member_id(), second, "seed {seed}");
         assert_eq!(member.counts().terms_led, 1, "seed {seed}");
         assert_eq!(member.counts().log_truncations, 1, "seed {seed}");
+        assert_eq!(member.counts().catchups, 1, "seed {seed}");
         assert_eq!(
             cluster.append_position(first),
-            Some(committed),
+            cluster.append_position(second),
             "seed {seed}"
         );
-        assert_eq!(cluster.log(first), before, "seed {seed}");
+        assert!(cluster.log(first).starts_with(&before), "seed {seed}");
+        assert_eq!(cluster.log(first), cluster.log(second), "seed {seed}");
         assert!(
             !holds(&cluster.log(first), b"appended with no quorum"),
             "seed {seed}"
@@ -810,11 +816,12 @@ fn a_leader_cut_off_from_its_followers_gives_up_the_lead_and_the_others_elect() 
             first_term + 1,
             "seed {seed}"
         );
-        // The two go on committing while it canvasses.
+        // The three go on committing.
         let last = cluster.offer(b"and again").expect("the new leader appends");
         safety.run(&mut cluster, 1_000);
-        for &id in &others {
+        for &id in &ids {
             assert_eq!(cluster.commit_position(id), Some(last), "seed {seed}");
+            assert_eq!(cluster.log(id), cluster.log(second), "seed {seed}");
         }
     }
 }
@@ -830,8 +837,8 @@ fn a_leader_cut_off_from_its_followers_gives_up_the_lead_and_the_others_elect() 
 ///
 /// It then canvasses to the new leader and is told the new term, whose base is its
 /// own append position. It records the term there, and is behind the new leader's log
-/// by the entries appended since: it joins only by catching up, which this step does
-/// not have, so its elections fail, counted, until that step.
+/// by the entries appended since: it catches up with them and joins, and the three
+/// commit.
 #[test]
 fn a_leader_that_stood_still_gives_up_the_lead_when_it_runs_again() {
     let ids = [0, 1, 2];
@@ -891,8 +898,8 @@ fn a_leader_that_stood_still_gives_up_the_lead_when_it_runs_again() {
         let member = cluster.member(first).expect("a member");
         assert_eq!(member.role(), Role::Follower, "seed {seed}");
         assert_eq!(member.counts().terms_led, 1, "seed {seed}");
-        assert!(member.counts().elections_failed > 0, "seed {seed}");
-        // It recorded the new term at its base, the position it holds to.
+        // It recorded the new term at its base, the position it held to, caught up
+        // with what the two appended since, and joined.
         let (terms, _) = cluster.record_of_terms(first).expect("a member");
         assert_eq!(
             terms,
@@ -900,14 +907,21 @@ fn a_leader_that_stood_still_gives_up_the_lead_when_it_runs_again() {
             "seed {seed}"
         );
         assert_eq!(
-            cluster.append_position(first),
-            Some(committed),
+            member.election_state(),
+            ElectionState::Closed,
             "seed {seed}"
         );
-        // The two go on committing.
+        assert_eq!(member.leader_member_id(), second, "seed {seed}");
+        assert_eq!(member.counts().catchups, 1, "seed {seed}");
+        assert_eq!(
+            cluster.append_position(first),
+            cluster.append_position(second),
+            "seed {seed}"
+        );
+        // The three go on committing.
         let last = cluster.offer(b"and again").expect("the new leader appends");
         safety.run(&mut cluster, 1_000);
-        for &id in &others {
+        for &id in &ids {
             assert_eq!(cluster.commit_position(id), Some(last), "seed {seed}");
             assert_eq!(cluster.log(id), cluster.log(second), "seed {seed}");
         }
@@ -927,8 +941,7 @@ fn a_leader_that_stood_still_gives_up_the_lead_when_it_runs_again() {
 /// it heard to the last, counts `cluster.higher_terms_seen`. The follower then
 /// canvasses to the new leader and joins it, level with the new term's base. The old
 /// leader stays in canvass while it is not heard, and when the partition ends it is
-/// told the new term and is behind the new leader's log, which it joins only by
-/// catching up.
+/// told the new term, is behind the new leader's log, catches up with it and joins.
 ///
 /// The UDP transport holds a partition that cuts one way for the connection timeout,
 /// 5 s, at most ([`Cluster::cut_one_way`]). The in-memory cluster holds it for the ten
@@ -1035,20 +1048,23 @@ fn a_leader_that_three_of_five_cannot_hear_steps_down_on_their_request_vote() {
         assert_eq!(member.leader_member_id(), -1, "seed {seed}");
         assert_eq!(member.counts().terms_led, 1, "seed {seed}");
 
-        // The partition ends: it is told the term, and is behind the new leader's log.
+        // The partition ends: it is told the term, is behind the new leader's log,
+        // catches up with it and joins.
         for &id in unhearing {
             cluster.heal_between(first, id);
         }
         safety.run(&mut cluster, 2_000);
         let member = cluster.member(first).expect("a member");
         assert_eq!(member.role(), Role::Follower, "seed {seed}");
-        assert!(member.counts().elections_failed > 0, "seed {seed}");
-        assert_eq!(cluster.leader(), Some(second), "seed {seed}");
         assert_eq!(
-            cluster.append_position(first),
-            Some(committed),
+            member.election_state(),
+            ElectionState::Closed,
             "seed {seed}"
         );
+        assert_eq!(member.leader_member_id(), second, "seed {seed}");
+        assert_eq!(member.counts().catchups, 1, "seed {seed}");
+        assert_eq!(cluster.leader(), Some(second), "seed {seed}");
+        assert_eq!(cluster.log(first), cluster.log(second), "seed {seed}");
     }
 }
 
@@ -1060,7 +1076,8 @@ fn a_leader_that_three_of_five_cannot_hear_steps_down_on_their_request_vote() {
 /// The append positions are read at the time it runs, so by them its followers
 /// report, and it would lose no quorum; the request vote, of a term above its own,
 /// is what makes it give up the lead, counted in `cluster.leader_step_downs`. It
-/// reads nothing after that in init, and canvasses.
+/// reads nothing after that in init, and canvasses; told the new term, it catches up
+/// with the new leader's log and joins.
 #[test]
 fn a_leader_whose_module_stood_still_steps_down_on_the_request_vote_that_waited() {
     let ids = [0, 1, 2];
@@ -1123,12 +1140,18 @@ fn a_leader_whose_module_stood_still_steps_down_on_the_request_vote_that_waited(
         );
         assert_eq!(cluster.leader(), Some(second), "seed {seed}");
 
-        // It is told the new term at the position it holds to, records it, and is
-        // behind the new leader's log until it can catch up.
+        // It is told the new term at the position it holds to, records it, catches
+        // up with the new leader's log and joins.
         safety.run(&mut cluster, 2_000);
         let member = cluster.member(first).expect("a member");
         assert_eq!(member.role(), Role::Follower, "seed {seed}");
-        assert!(member.counts().elections_failed > 0, "seed {seed}");
+        assert_eq!(
+            member.election_state(),
+            ElectionState::Closed,
+            "seed {seed}"
+        );
+        assert_eq!(member.leader_member_id(), second, "seed {seed}");
+        assert_eq!(member.counts().catchups, 1, "seed {seed}");
         let (terms, _) = cluster.record_of_terms(first).expect("a member");
         assert_eq!(
             terms,
@@ -1138,6 +1161,91 @@ fn a_leader_whose_module_stood_still_steps_down_on_the_request_vote_that_waited(
         let last = cluster.offer(b"and again").expect("the new leader appends");
         safety.run(&mut cluster, 1_000);
         for &id in &others {
+            assert_eq!(cluster.commit_position(id), Some(last), "seed {seed}");
+        }
+    }
+}
+
+/// A catch-up is not stopped short of the live log. The leader has appended an entry
+/// that its own recording has not synced: its publication is past its append
+/// position. A member that was cut off comes back in that moment and catches up. The
+/// leader's replay reads no further than the leader has synced, and the member's
+/// live image joins at the publication's position, past it. The member reports the
+/// position the replay brought it to, which is the leader's own append position,
+/// without the catch-up flag, since it is not on the live log yet, and the leader
+/// does not stop the replay. When the leader syncs, the replay brings the rest, the
+/// member is on the live log, reports with the flag, is told to stop and joins: one
+/// catch-up, and no election failed. A member that set the flag from its first
+/// report was told to stop at the leader's append position, held a hole below its
+/// live image that nothing filled, and failed its election after the leader
+/// heartbeat timeout, which the first review of pull request 229 found.
+#[test]
+fn a_catch_up_is_not_stopped_while_the_leader_holds_what_it_has_not_synced() {
+    let ids = [0, 1, 2];
+    for seed in [1, 2, 3] {
+        let mut safety = Safety::new(&ids);
+        let (mut cluster, leader) = elected(seed, &mut safety);
+        let others: Vec<i32> = ids.iter().copied().filter(|&id| id != leader).collect();
+        let (level, behind) = (others[0], others[1]);
+
+        // Cut off for longer than the leader heartbeat timeout, the member behind
+        // holds an election and canvasses alone. The other two commit an entry.
+        cluster.cut(behind);
+        let first = cluster
+            .offer(b"while it is away")
+            .expect("the leader appends");
+        safety.run(&mut cluster, 11_000);
+        assert_eq!(cluster.commit_position(leader), Some(first), "seed {seed}");
+        assert_eq!(cluster.leader(), Some(leader), "seed {seed}");
+        let before = cluster.counts(behind).expect("a member");
+        assert_eq!(before.catchups, 0, "seed {seed}: {before:?}");
+
+        // The leader appends an entry and does not sync it.
+        cluster.pause_sync(leader);
+        let second = cluster
+            .offer(b"appended, not synced")
+            .expect("the leader appends");
+        safety.run(&mut cluster, 50);
+        assert_eq!(cluster.append_position(leader), Some(first), "seed {seed}");
+        assert_eq!(cluster.append_position(level), Some(second), "seed {seed}");
+
+        // The member behind comes back: told the term, it asks, the replay brings
+        // it what the leader has synced, and its live image joins past that.
+        cluster.heal(behind);
+        safety.run(&mut cluster, 1_000);
+        assert_eq!(
+            cluster.election_state(behind),
+            Some(ElectionState::FollowerCatchup),
+            "seed {seed}"
+        );
+        assert_eq!(cluster.append_position(behind), Some(first), "seed {seed}");
+        let counts = cluster.counts(behind).expect("a member");
+        assert_eq!(counts.catchups, 1, "seed {seed}: {counts:?}");
+        assert_eq!(
+            counts.elections_failed, before.elections_failed,
+            "seed {seed}: {counts:?}"
+        );
+
+        // The leader syncs: the replay brings the rest, and the member joins.
+        cluster.resume_sync(leader);
+        safety.run_until(&mut cluster, 1_000, "the member behind joins", |cluster| {
+            settled(cluster, &ids)
+        });
+        let counts = cluster.counts(behind).expect("a member");
+        assert_eq!(counts.catchups, 1, "seed {seed}: {counts:?}");
+        assert_eq!(
+            counts.elections_failed, before.elections_failed,
+            "seed {seed}: {counts:?}"
+        );
+        assert_eq!(
+            counts.join_position_mismatches, before.join_position_mismatches,
+            "seed {seed}: {counts:?}"
+        );
+        assert_eq!(cluster.log(behind), cluster.log(leader), "seed {seed}");
+        assert_eq!(cluster.leader(), Some(leader), "seed {seed}");
+        let last = cluster.offer(b"by all three").expect("the leader appends");
+        safety.run(&mut cluster, 500);
+        for &id in &ids {
             assert_eq!(cluster.commit_position(id), Some(last), "seed {seed}");
         }
     }

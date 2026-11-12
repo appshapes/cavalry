@@ -882,7 +882,7 @@ pub enum Message<'a> {
         log_position: i64,
         /// The follower's member id.
         follower_member_id: i32,
-        /// Bit 0 catch-up; the other bits reserved.
+        /// Bit 0 catch-up, [`APPEND_POSITION_FLAG_CATCHUP`]; the other bits reserved.
         flags: u8,
     },
     /// Template 55.
@@ -931,7 +931,10 @@ pub enum Message<'a> {
     },
 }
 
-/// The catch-up bit of an append position's flags.
+/// The catch-up bit of an append position's flags: the follower is in follower
+/// catch-up and on the live log, its append position at or past the position its live
+/// image joined at, so its leader may stop its catch-up replay (`spec/cluster.md`,
+/// "Append position, template 54").
 pub const APPEND_POSITION_FLAG_CATCHUP: u8 = 0x01;
 
 /// A reader of little-endian fields from a message, every read bounds-checked.
