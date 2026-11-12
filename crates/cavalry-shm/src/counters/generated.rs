@@ -422,6 +422,9 @@ pub const CLUSTER_CATCHUPS: CounterId = CounterId(137);
 /// `sender.bytes_unsent`, a instance gauge: Bytes of one cavalry:udp publication that went to its recording and to no receiver: what its sender position passed while the publication was alone with its recording, its channel naming ssc=true, a recording of it live and no receiver answering, less what the sender position went back over when a receiver joined. Allocated for a publication whose channel names ssc=true and no other; key and label as sender.position (spec/udp.md, The sender; ADR 0098).
 pub const SENDER_BYTES_UNSENT: CounterId = CounterId(139);
 
+/// `sender.joins_refused`, a instance counter: Status messages of a receiver that would have joined one cavalry:udp publication while it was alone with its recording, refused because they named a position more than a term behind the sender position: what the receiver needs is no longer in the log. Each is counted in sender.status_messages_rejected as well. Allocated for a publication whose channel names ssc=true and no other; key and label as sender.position (spec/udp.md, The sender; ADR 0098, ADR 0099).
+pub const SENDER_JOINS_REFUSED: CounterId = CounterId(142);
+
 /// Every entry of `counters.toml`, in the file's order.
 pub const COUNTERS: &[CounterDef] = &[
     CounterDef {
@@ -1535,5 +1538,13 @@ pub const COUNTERS: &[CounterDef] = &[
         scope: Scope::Instance,
         doc: "Bytes of one cavalry:udp publication that went to its recording and to no receiver: what its sender position passed while the publication was alone with its recording, its channel naming ssc=true, a recording of it live and no receiver answering, less what the sender position went back over when a receiver joined. Allocated for a publication whose channel names ssc=true and no other; key and label as sender.position (spec/udp.md, The sender; ADR 0098).",
         doctor: "A publication on a channel that names ssc=true took messages while no receiver answered: they are in its recording, and a receiver that joins later is sent the stream from its own position, at most a term back, and replays the recording for what came before. Nothing was lost. `cavalry doctor` names the publication in `udp-publication-recorded-alone` while no receiver has answered; if receivers were expected, check that a subscription on the stream exists on each destination's host and that its driver receives on that port.",
+    },
+    CounterDef {
+        id: SENDER_JOINS_REFUSED,
+        name: "sender.joins_refused",
+        kind: Kind::Counter,
+        scope: Scope::Instance,
+        doc: "Status messages of a receiver that would have joined one cavalry:udp publication while it was alone with its recording, refused because they named a position more than a term behind the sender position: what the receiver needs is no longer in the log. Each is counted in sender.status_messages_rejected as well. Allocated for a publication whose channel names ssc=true and no other; key and label as sender.position (spec/udp.md, The sender; ADR 0098, ADR 0099).",
+        doctor: "The publisher writes more than a term between a setup frame and a receiver's answer, so no receiver joins while the publication is alone with its recording: the receiver's image receives nothing, times out and tries again. Name a longer term-length on the publication's channel, one that holds what the publisher writes in 16 milliseconds at its fastest, or leave the key out for the 16 MiB default.",
     },
 ];

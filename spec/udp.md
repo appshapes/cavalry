@@ -1,4 +1,4 @@
-# UDP transport, version 3
+# UDP transport, version 4
 
 The UDP transport carries one publication's stream from the driver on one host to the
 driver on another: the sender puts the frames of the publication's log buffer into
@@ -24,7 +24,12 @@ not name. Version 3 adds `ssc`, by which a live recording connects a publication
 no receiver answers (ADR 0098); every frame of version 2 is unchanged and its version
 byte stays 0, so a receiver of version 2 reads a sender of version 3, which it joins at
 the position the setup frame carries as it joins any sender, and a channel of version
-3 is refused by a reader of version 2 as a key it does not name.
+3 is refused by a reader of version 2 as a key it does not name. Version 4 adds
+`term-length`, by which a publication's channel names the term length of its log, and
+the counter `sender.joins_refused` (ADR 0099); every frame of version 3 is unchanged and its version byte stays 0, so a
+receiver of any version reads a sender of version 4, whose setup frame carries its
+term length as every setup frame does, and a channel of version 4 is refused by a
+reader of version 3 as a key it does not name.
 
 ## The datagram
 
@@ -190,7 +195,7 @@ A publication's channel may name `init-term-id`, `term-id` and `term-offset`, al
 or none, each a 32-bit integer in decimal, ASCII digits after an optional `+` or `-`,
 leading zeros allowed, as a port is read: the *position keys*, which create the
 publication's log at a position instead of 0, (`term-id` − `init-term-id`, a 32-bit
-two's complement count of 0 or more) × the UDP term length of "Values" + `term-offset`,
+two's complement count of 0 or more) × the publication's term length + `term-offset`,
 with `init-term-id` as the initial term id, as `spec/log-buffer.md`, "The driver",
 creates a replay's log at a position, so that the first frame the publication sends is
 at that position and its setup frames carry its term id and term offset ("The sender").
@@ -202,8 +207,26 @@ term id, and on a `start recording` channel they take no part, as its `fc` takes
 since the command matches a stream by its resolved channel and a client records the
 publication it created under the channel it holds (`spec/client-protocol.md`,
 "Commands"). In Aeron, these are the `init-term-id`, `term-id`
-and `term-offset` parameters of a publication's channel, without `term-length`, which
-this version's one term length would make a key that does nothing (ADR 0059).
+and `term-offset` parameters of a publication's channel (ADR 0059); `term-length`,
+which they count in, came with version 4, below.
+
+A publication's channel, with an endpoint or a control address, may name
+`term-length=<length>`: the length in bytes of each of the three terms of the
+publication's log, written as decimal digits, optionally followed by one of `k`, `m`
+or `g` in either case for × 1024, × 1048576 and × 1073741824, and a power of two from
+65536 to 67108864, the `cavalry:ipc` term, the longest term this version creates. A
+channel that names none has the UDP term length of "Values". Everything a log takes
+from its term follows (`spec/log-buffer.md`): the log is 3 × the term length + 4096
+bytes, resident from its creation; the longest message is the smaller of the term
+length ÷ 8 and 16777216 bytes; the publication window is half the term; and the
+position keys count in it, with `term-offset` below it. A receiver takes the term
+length from the setup frame, as it does of every sender, and its receiver window is
+the lesser of the receiver window length of "Values" and half the term. `term-length`
+is a publication's, as `fc` is: an `add subscription`, a destination channel or a
+`start replay` channel that names it is refused, since an image takes its sender's
+term length and a replay's publication its recording's, and on a `start recording`
+channel it takes no part. In Aeron, this is the `term-length` parameter of a
+publication's channel (ADR 0099).
 
 Two channels are the same channel when their resolved endpoint and interface are the
 same, or their resolved control addresses are the same: a second `add publication` on
@@ -214,14 +237,18 @@ publication's, read from the command that created it, and not part of the channe
 `add publication` that would join a live publication under a different `fc` is refused.
 `ssc` is the publication's in the same way: an `add publication` that would join a live
 publication under another `ssc` is refused, `true` against `false` or against a channel
-that names none, since a shared log is connected one way.
+that names none, since a shared log is connected one way. The term length is the
+publication's too: an `add publication` that would join a live publication whose term
+length is not its own is refused, a channel that names none having the UDP term length
+of "Values", since a shared log has one.
 The position keys are the publication's too, read from the command that created it: an
 `add publication` that would join a live publication whose position keys differ from
 its own, or that names them where the live one named none or the reverse, is refused,
 since a shared log has one position.
 A channel is refused as "What a reader rejects" says: the grammar, an unknown key, a
 port of 0 or above 65535, a control address without its mode or beside an endpoint, an
-`fc` this version does not name, an `ssc` that is not `true` or `false`, position keys
+`fc` this version does not name, an `ssc` that is not `true` or `false`, a
+`term-length` that is not a length this version creates, position keys
 that are incomplete or out of range,
 and a multicast address are error code 1 with a message naming what; a host that does
 not resolve is code 9.
@@ -230,8 +257,9 @@ not resolve is code 9.
 
 The driver's sender is one dedicated thread per driver with the driver's idle strategy.
 A `cavalry:udp` publication has a log buffer of type 0 or 1 (`spec/log-buffer.md`) with
-the UDP term length and MTU of "Values", or, for a replay's publication, its recording's
-term length and MTU, which its setup frame carries (`spec/client-protocol.md`,
+the term length its channel names, the UDP term length of "Values" when it names none
+("The channel URI"; ADR 0099), and the MTU of "Values", or, for a replay's publication,
+its recording's term length and MTU, which its setup frame carries (`spec/client-protocol.md`,
 "Commands", start replay; ADR 0043); a client's publication is created at position 0
 with an initial term id of the driver's choosing, or at the position its channel's
 position keys name with `init-term-id` as its initial term id ("The channel URI"; ADR
@@ -424,7 +452,10 @@ receiver is sent every frame from its own position on and has nothing to NAK: th
 term behind the sender position is never cleaned, and nothing in it was sent. A status
 message whose position is further behind, or ahead of the sender position, is rejected
 and counted in `sender.status_messages_rejected`, since the frames it would need are
-no longer in the log. Every heartbeat that receiver is then sent is an over-run, which
+no longer in the log; one that is further behind is counted in the publication's own
+`sender.joins_refused` as well, from version 4, since it says that the publisher wrote
+more than a term between a setup frame and its answer, which a longer `term-length`
+ends ("The channel URI"; ADR 0099). Every heartbeat that receiver is then sent is an over-run, which
 is no activity ("The receiver", steps 2 and 5): its image times out, its subscribers
 are told with `unavailable image`, and after the cool-down a new image joins at the
 sender position. So no image is left waiting for frames that will not come, nothing is
@@ -683,6 +714,7 @@ lands: the sender's and the endpoint's rows, the publication's connection and
 | `sender.flow_control_receivers_full` | a status message from a receiver a `min` publication's full table does not hold: accepted, not tracked |
 | `sender.position`, `sender.limit`, `sender.flow_control_receivers` | keyed as `publication.position` is: the sender position and the sender limit of one publication, and the receivers in its `min` table now, a closed publication's ended receivers among them until the linger ends (ADR 0056), 0 under `max` |
 | `sender.bytes_unsent` | keyed as `publication.position` is, for a publication whose channel names `ssc=true` and no other, a gauge: the bytes that went to its recording and to no receiver, what its sender position passed while it was alone with its recording less what it went back over for a receiver that joined (ADR 0098) |
+| `sender.joins_refused` | keyed as `publication.position` is, for a publication whose channel names `ssc=true` and no other: the status messages of a receiver that would have joined it while it was alone with its recording and named a position more than a term behind the sender position, each counted in `sender.status_messages_rejected` too (ADR 0099) |
 | `receiver.bytes_received`, `receiver.frames_received` | a data or padding frame is accepted: the bytes as they came off the wire, 32 for a padding frame, and one frame each |
 | `receiver.setups_received`, `receiver.setups_unwanted`, `receiver.setups_elicited` | a setup frame arrives; one names a stream nobody wants; a status message asked a sender for one |
 | `receiver.heartbeats_received` | a heartbeat is accepted |
@@ -714,7 +746,7 @@ Aeron's, and the driver's in this version; a configuration key for one needs its
 | Value | This version |
 | --- | --- |
 | MTU length | 1408 bytes |
-| UDP term length | 16777216 bytes |
+| UDP term length | 16777216 bytes: the term of a publication whose channel names no `term-length`; one that names it has a power of two from 65536 to 67108864 |
 | publication window | term length ÷ 2 |
 | receiver window length | the lesser of 131072 bytes and term length ÷ 2 |
 | socket receive buffer | 131072 bytes asked; the socket's answer in `channel.socket_rcvbuf` |
@@ -764,27 +796,29 @@ and nothing from a rejected datagram is delivered.
 A channel is checked in this order, each check over the whole string before the next:
 `grammar` (the scheme, the `?`, the `key=value` form of every parameter, a key outside
 `[a-z0-9-]+`, an empty value, a repeated key), `key` (a key this version does not name:
-not `endpoint`, `interface`, `control`, `control-mode`, `fc`, `ssc`, `init-term-id`,
-`term-id` or `term-offset`), `control` (a control
+not `endpoint`, `interface`, `control`, `control-mode`, `fc`, `ssc`, `term-length`,
+`init-term-id`, `term-id` or `term-offset`), `control` (a control
 address without `control-mode` or `control-mode` without a control address; a control
 mode other than `manual`; a control address beside an endpoint or an interface; a
 control address with no port, a port of 0 or above 65535, or malformed), `endpoint`
 (neither an endpoint nor a control address; an endpoint or interface with a port of 0
 or above 65535 or a malformed address), `fc` (a value other than `max` or `min`),
 `ssc` (a value other than `true` or `false`),
+`term-length` (a value that is not decimal digits with at most one of `k`, `m` or `g`
+after them, or that is not a power of two from 65536 to 67108864),
 `position` (one or two of `init-term-id`, `term-id` and `term-offset` without the rest;
 a value that is not a 32-bit integer in decimal, an optional sign and digits; a
 `term-id` below `init-term-id` by
 the 32-bit two's complement count; a `term-offset` that is negative, not a multiple of
-32 or not below the term length), `multicast` (an endpoint or control address that is a
+32 or not below the publication's term length), `multicast` (an endpoint or control address that is a
 multicast address), each error
 code 1 with the reason in the message; then `host` (the name does not resolve), error
 code 9. A string wrong in two ways reports the earlier check, as the vectors pin. The
 socket that cannot be opened, bound or connected is error code 4 with the operating
 system's reason. The driver's own checks on a channel that parses, a control channel,
-`fc`, `ssc` or a position key on an `add subscription`, `ssc` or a position key on a
-`start replay` channel, a join under a different `fc`, another `ssc` or different
-position keys, a destination
+`fc`, `ssc`, `term-length` or a position key on an `add subscription`, `ssc`,
+`term-length` or a position key on a `start replay` channel, a join under a different
+`fc`, another `ssc`, another term length or different position keys, a destination
 channel that is `cavalry:ipc` or a control channel or names more than its endpoint,
 and a destination with no address the control address can send to ("The sender"), are
 error code 1 too
@@ -804,9 +838,11 @@ vector has a `kind`:
   among them is its header alone, as "The datagram" carries it.
 - `channel`: a channel `string` and the `fields` it parses to (endpoint host and port,
   interface host and port, control host and port, control mode, `fc`, `max` when the
-  string names none, `ssc`, false when the string names none, and the position keys `initial_term_id`, `term_id` and
-  `term_offset` with the `position` they make under the UDP term length of "Values"; a
-  field the string does not name is null) or the `error` and its `code`.
+  string names none, `ssc`, false when the string names none, `term_length`, the UDP
+  term length of "Values" when the string names none, and the position keys
+  `initial_term_id`, `term_id` and `term_offset` with the `position` they make under
+  that term length; a field the string does not name is null) or the `error` and its
+  `code`.
 - `arithmetic`: `inputs` and the `fields` that follow: the sender limit from a status
   message against a sender position, the retransmit window, the receiver's under-run and
   over-run bounds, the status message threshold, and an image's start position.
