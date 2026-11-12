@@ -833,29 +833,32 @@ shared runner is
      compare the files:
 
      ```sh
-     # ignore: needs a second checkout at master, and `rustup target add x86_64-unknown-linux-gnu` once
+     # ignore: needs a second checkout at master and, on any host but x86_64 Linux, `rustup target add x86_64-unknown-linux-gnu` once
      # MASTER and CHANGE are two checkouts, one at master and one at the change; each
-     # builds in about half a minute on a laptop, and nothing is written to either. The
-     # stand-in linker lets the assembly of cavalry-ffi and of the bench binary be
-     # written on a laptop that has no linker for Linux; it links nothing, and nothing
-     # built this way is run.
+     # builds in under a minute, and nothing is written to either. On any host but
+     # x86_64 Linux, the stand-in linker lets the assembly be written with no linker
+     # for Linux: cargo links cavalry-ffi's cdylib when it builds the bench, which
+     # depends on it. The stand-in links nothing, and nothing built this way is run.
+     # On x86_64 Linux it stays unset, because there cargo would also use it for the
+     # build scripts, which have to run.
      MASTER=../cavalry-master CHANGE=$PWD OUT=/tmp/asm
+     TARGET=x86_64-unknown-linux-gnu
+     [ "$(rustc -vV | sed -n 's/^host: //p')" = "$TARGET" ] ||
+       export CARGO_TARGET_X86_64_UNKNOWN_LINUX_GNU_LINKER=/usr/bin/true
      for pair in "MASTER:$MASTER" "CHANGE:$CHANGE"; do
        tree=${pair%%:*} dir=${pair#*:}
        for crate in cavalry-shm cavalry-log cavalry-client cavalry-ffi; do
-         (cd "$dir" && CARGO_TARGET_X86_64_UNKNOWN_LINUX_GNU_LINKER=/usr/bin/true \
-           cargo rustc --release -p "$crate" --lib --target x86_64-unknown-linux-gnu \
+         (cd "$dir" && cargo rustc --release -p "$crate" --lib --target "$TARGET" \
            --target-dir "$OUT/$tree" -- --emit asm -C debuginfo=0)
        done
-       (cd "$dir" && CARGO_TARGET_X86_64_UNKNOWN_LINUX_GNU_LINKER=/usr/bin/true \
-         cargo rustc --release -p cavalry-bench --bin cavalry-bench \
-         --target x86_64-unknown-linux-gnu --target-dir "$OUT/$tree" \
-         -- --emit asm -C debuginfo=0)
+       (cd "$dir" && cargo rustc --release -p cavalry-bench --bin cavalry-bench \
+         --target "$TARGET" --target-dir "$OUT/$tree" -- --emit asm -C debuginfo=0)
      done
-     for file in "$OUT"/MASTER/x86_64-unknown-linux-gnu/release/deps/*.s; do
-       cmp "$file" "$OUT/CHANGE/x86_64-unknown-linux-gnu/release/deps/$(basename "$file")" \
-         && echo "same: $(basename "$file")"
-     done
+     # Cargo writes the files under release/deps/ or, in newer versions such as
+     # 1.100, under release/build/<crate>/<hash>/out/; find reads either.
+     (cd "$OUT/MASTER" && find . -name '*.s' | sort | while read -r file; do
+       cmp "$file" "$OUT/CHANGE/$file" && echo "same: $(basename "$file")"
+     done)
      ```
 
      The loop prints `same:` and a file's name for each file that is byte for byte
