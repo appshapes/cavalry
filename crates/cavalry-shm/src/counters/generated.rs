@@ -431,6 +431,18 @@ pub const CLUSTER_ELECTION_CAUSE: CounterId = CounterId(141);
 /// `cluster.log_recordings_unwritten`, a client counter: Duty cycles in which one cluster member had a recording of its log to name and could not write the file of its log's recordings, whose name is log-recordings- and the member's id, in its driver directory: the member stored -1 in cluster.log_recording_id, named no recording to a service, and tried again in the next cycle (spec/cluster.md, The log's recordings, and Counters; ADR 0103); key: member id (i32), little-endian; label text: the member id in decimal.
 pub const CLUSTER_LOG_RECORDINGS_UNWRITTEN: CounterId = CounterId(143);
 
+/// `cluster.log_recordings_listed`, a client counter: Times one cluster member wrote the list of its log's recordings to the log recordings file in its log directory and synced it: the list of no recording that the file's creation writes, and each list after it, when a recording of a replay or of the live log has come to carry the log on, before the member appends to the log of a term it leads, between a truncation's last command and its first deleted term, and at a start that took other recordings than the file named. A recording counts toward the member's append position only once such a list names it (spec/durable-log.md, Log recordings and The driver; spec/cluster.md, The log, and Counters; ADR 0108); key: member id (i32), little-endian; label text: the member id in decimal.
+pub const CLUSTER_LOG_RECORDINGS_LISTED: CounterId = CounterId(144);
+
+/// `cluster.log_recordings_unsynced`, a client counter: Duty cycles in which one cluster member had a list of its log's recordings to write to the log recordings file in its log directory and could not write or sync it: the recording it had to list stayed out of its log, its append position did not count it, and the next cycle wrote the whole list again (spec/durable-log.md, The driver; spec/cluster.md, The log, and Counters; ADR 0108); key: member id (i32), little-endian; label text: the member id in decimal.
+pub const CLUSTER_LOG_RECORDINGS_UNSYNCED: CounterId = CounterId(145);
+
+/// `cluster.log_recordings_forgotten`, a client counter: Recordings of its log that one cluster member forgot: it had stopped a recording while its table already held 1,024 stopped ones, and the oldest left the table and the list in the log recordings file, whose floor position rose to where the oldest one left begins. The recording stays in the driver's catalog. The member replays nothing below that position to another member or to a service from then on, and it does not start again on its log directory, since a start replays the log from position 0 (spec/cluster.md, A member's start, and Counters; ADR 0091, ADR 0108); key: member id (i32), little-endian; label text: the member id in decimal.
+pub const CLUSTER_LOG_RECORDINGS_FORGOTTEN: CounterId = CounterId(146);
+
+/// `cluster.truncations_finished`, a client counter: Times one cluster member finished, at its start, a truncation that its stop had cut short: the last recordings its log recordings file named were gone from the driver's catalog, purged before the member stopped, or its record of terms held a term based above the end of its log, and the start wrote the list of the recordings that were left and deleted those terms, before the member read a message. At most one for a start (spec/cluster.md, A member's start, and Counters; ADR 0108); key: member id (i32), little-endian; label text: the member id in decimal.
+pub const CLUSTER_TRUNCATIONS_FINISHED: CounterId = CounterId(147);
+
 /// Every entry of `counters.toml`, in the file's order.
 pub const COUNTERS: &[CounterDef] = &[
     CounterDef {
@@ -1568,5 +1580,37 @@ pub const COUNTERS: &[CounterDef] = &[
         scope: Scope::Client,
         doc: "Duty cycles in which one cluster member had a recording of its log to name and could not write the file of its log's recordings, whose name is log-recordings- and the member's id, in its driver directory: the member stored -1 in cluster.log_recording_id, named no recording to a service, and tried again in the next cycle (spec/cluster.md, The log's recordings, and Counters; ADR 0103); key: member id (i32), little-endian; label text: the member id in decimal.",
         doctor: "A member that counts here cannot write in its driver's directory, and no service beside it reads the log while that lasts. The member's own error names the file and the cause: check that the driver directory is writable by the member's user and that its file system has room. The count stops rising once a cycle has written the file, and cluster.log_recording_id then names the recording. A member started with cavalry run tries a cycle that fails again every 100 ms, so the count rises by about ten a second, and after 10 s of such cycles cavalry run gives the member up and stops it: start it again once its directory can be written.",
+    },
+    CounterDef {
+        id: CLUSTER_LOG_RECORDINGS_LISTED,
+        name: "cluster.log_recordings_listed",
+        kind: Kind::Counter,
+        scope: Scope::Client,
+        doc: "Times one cluster member wrote the list of its log's recordings to the log recordings file in its log directory and synced it: the list of no recording that the file's creation writes, and each list after it, when a recording of a replay or of the live log has come to carry the log on, before the member appends to the log of a term it leads, between a truncation's last command and its first deleted term, and at a start that took other recordings than the file named. A recording counts toward the member's append position only once such a list names it (spec/durable-log.md, Log recordings and The driver; spec/cluster.md, The log, and Counters; ADR 0108); key: member id (i32), little-endian; label text: the member id in decimal.",
+        doctor: "This rises by one each time the member takes a recording into its log, leads a term or truncates, and it is nothing to act on. Each rise is one synced write on the member's own thread, a few milliseconds, at a join and never for an entry. A member whose cluster.log_recording_id names a recording while this count and cluster.append_position stay where they were has not listed the recording yet: read cluster.log_recordings_unsynced.",
+    },
+    CounterDef {
+        id: CLUSTER_LOG_RECORDINGS_UNSYNCED,
+        name: "cluster.log_recordings_unsynced",
+        kind: Kind::Counter,
+        scope: Scope::Client,
+        doc: "Duty cycles in which one cluster member had a list of its log's recordings to write to the log recordings file in its log directory and could not write or sync it: the recording it had to list stayed out of its log, its append position did not count it, and the next cycle wrote the whole list again (spec/durable-log.md, The driver; spec/cluster.md, The log, and Counters; ADR 0108); key: member id (i32), little-endian; label text: the member id in decimal.",
+        doctor: "A member that counts here cannot write or sync a file in its log directory, and it reports no position from the recording it is making while that lasts, so it cannot follow or lead. The member's own error names the file and the cause: check that the log directory is writable by the member's user, that its file system has room and that its device reports no error. The count stops rising once a cycle has written the list. A member started with cavalry run tries a cycle that fails again every 100 ms, and after 10 s of such cycles cavalry run gives the member up and stops it: start it again on the same log directory once the directory can be written.",
+    },
+    CounterDef {
+        id: CLUSTER_LOG_RECORDINGS_FORGOTTEN,
+        name: "cluster.log_recordings_forgotten",
+        kind: Kind::Counter,
+        scope: Scope::Client,
+        doc: "Recordings of its log that one cluster member forgot: it had stopped a recording while its table already held 1,024 stopped ones, and the oldest left the table and the list in the log recordings file, whose floor position rose to where the oldest one left begins. The recording stays in the driver's catalog. The member replays nothing below that position to another member or to a service from then on, and it does not start again on its log directory, since a start replays the log from position 0 (spec/cluster.md, A member's start, and Counters; ADR 0091, ADR 0108); key: member id (i32), little-endian; label text: the member id in decimal.",
+        doctor: "This member's log is in more recordings than a member keeps, 1,024: it has joined a log, replicated a replay or led a term that many times on this log directory. It runs on. A member that asks it for the log below the oldest recording it kept receives none and counts cluster.log_replications_unavailable when its wait ends, a service that asks is refused by start replay with code 23, and this member will not start again on this log directory: once it stops it stays out, as a member whose log directory was lost does. The cluster goes on while a quorum of the others runs. To have every member again, start the cluster again as a new cluster, every member on a new log directory; never start this member alone on a new one.",
+    },
+    CounterDef {
+        id: CLUSTER_TRUNCATIONS_FINISHED,
+        name: "cluster.truncations_finished",
+        kind: Kind::Counter,
+        scope: Scope::Client,
+        doc: "Times one cluster member finished, at its start, a truncation that its stop had cut short: the last recordings its log recordings file named were gone from the driver's catalog, purged before the member stopped, or its record of terms held a term based above the end of its log, and the start wrote the list of the recordings that were left and deleted those terms, before the member read a message. At most one for a start (spec/cluster.md, A member's start, and Counters; ADR 0108); key: member id (i32), little-endian; label text: the member id in decimal.",
+        doctor: "The member was stopped while it truncated its log on a new leader's word, and its start brought its recordings, its list of them and its record of terms into agreement. What it cut no quorum had recorded, as cluster.log_truncations says of every truncation, so nothing committed was lost, and there is nothing to act on. What that truncation had not yet cut the member's next leader has it cut, counted in cluster.log_truncations.",
     },
 ];

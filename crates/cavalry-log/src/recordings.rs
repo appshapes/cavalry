@@ -128,7 +128,9 @@ pub enum RecordingsError {
     Slots,
     /// A slot whose checksum matches holds a sequence below 0, or both slots hold the
     /// same sequence: damage, since each write's sequence is one above the other
-    /// slot's.
+    /// slot's. [`RecordingsFile::write`] returns it too, and writes nothing, for a
+    /// file whose list holds the highest sequence an i64 has, which no count of
+    /// writes reaches.
     Sequence {
         /// The sequence found.
         found: i64,
@@ -169,7 +171,7 @@ impl RecordingsError {
             RecordingsError::Sequence { .. } => "sequence",
             RecordingsError::Recording { .. } => "recording",
             RecordingsError::Position { .. } => "position",
-            RecordingsError::Full => "recordings-full",
+            RecordingsError::Full => "log-recordings-full",
         }
     }
 }
@@ -264,8 +266,9 @@ impl std::fmt::Display for RecordingsError {
             ),
             RecordingsError::Sequence { found } => write!(
                 f,
-                "a slot of the log recordings file holds the sequence {found}, below 0 \
-                 or the other slot's own: the file is damaged. {stay_out}; see {DOC}"
+                "a slot of the log recordings file holds the sequence {found}, which is \
+                 below 0, the other slot's own, or the highest there is, which no write \
+                 reaches: the file is damaged. {stay_out}; see {DOC}"
             ),
             RecordingsError::Recording { found } => write!(
                 f,
@@ -275,9 +278,9 @@ impl std::fmt::Display for RecordingsError {
             RecordingsError::Position { found } => write!(
                 f,
                 "the log recordings file holds the position {found}, which is below 0, \
-                 not a multiple of 32, below the recording before it, or a first \
-                 recording's that is not the floor position: the file is damaged. \
-                 {stay_out}; see {DOC}"
+                 not a multiple of 32, below the start of the recording before it, or \
+                 the first recording's start and not the floor position: the file is \
+                 damaged. {stay_out}; see {DOC}"
             ),
             RecordingsError::Full => write!(
                 f,
@@ -556,6 +559,8 @@ pub struct RecordingsFile {
     /// One slot's bytes, allocated when the file is opened, so that a write
     /// allocates nothing.
     scratch: Box<[u8; SLOT_LENGTH]>,
+    /// Whether this open wrote the file, new or over a torn creation.
+    created: bool,
 }
 
 impl RecordingsFile {
@@ -627,14 +632,22 @@ impl RecordingsFile {
             ),
         ];
         // A creation a crash tore: creation writes one list, the empty one of
-        // sequence 0 and floor 0, so a zero magic over any other list is not one.
-        let written = |slot: &Result<SlotFields, RecordingsError>, list: &Vec<ListedRecording>| matches!(slot, Ok(fields) if *fields != SlotFields::CREATED || !list.is_empty());
+        // sequence 0 and floor 0, and no other. So under a zero magic a slot is the
+        // creation's when its checksum fails, the slot no write reached, or when it
+        // holds that list; any other slot whose checksum matches, a list a write
+        // made or one that fails a later check, is damage and not a creation.
+        let creations =
+            |slot: &Result<SlotFields, RecordingsError>, list: &[ListedRecording]| match slot {
+                Err(RecordingsError::Checksum) => true,
+                Ok(fields) => *fields == SlotFields::CREATED && list.is_empty(),
+                Err(_) => false,
+            };
         let zero_magic = bytes.get(..8).is_some_and(|magic| magic == [0u8; 8]);
         let torn_creation = file_length < HEADER_LENGTH as u64
-            || (zero_magic && !written(&slots[0], &lists[0]) && !written(&slots[1], &lists[1]));
+            || (zero_magic && creations(&slots[0], &lists[0]) && creations(&slots[1], &lists[1]));
         let mut scratch = Box::new([0u8; SLOT_LENGTH]);
         if torn_creation && create {
-            Self::create(&file, &path, member_id, &mut scratch)?;
+            Self::create(&file, dir, &path, member_id, &mut scratch)?;
             let [mut entries, _] = lists;
             entries.clear();
             return Ok(Self {
@@ -644,6 +657,7 @@ impl RecordingsFile {
                 fields: SlotFields::CREATED,
                 entries,
                 scratch,
+                created: true,
             });
         }
         let header = RecordingsHeader::parse(&bytes, file_length)?;
@@ -668,14 +682,18 @@ impl RecordingsFile {
                 .unwrap_or(SlotFields::CREATED),
             entries: if slot == 0 { list_0 } else { list_1 },
             scratch,
+            created: false,
         })
     }
 
     /// Writes the created file over whatever `file` holds, the way the terms file is
     /// created: the file emptied, the header after its magic, slot 0 as the empty list
-    /// of sequence 0 and the file's full length, synced; then the magic, synced.
+    /// of sequence 0 and the file's full length, synced; then the magic, synced; then
+    /// the directory `dir`, synced, so that a power loss does not take the file's
+    /// name from a directory in which the member has since recorded a term.
     fn create(
         file: &File,
+        dir: &Path,
         path: &Path,
         member_id: i32,
         scratch: &mut [u8; SLOT_LENGTH],
@@ -695,7 +713,18 @@ impl RecordingsFile {
         file.sync_all().map_err(io("sync"))?;
         file.write_all_at(&header[..8], 0)
             .map_err(io("write the magic of"))?;
-        file.sync_all().map_err(io("sync"))
+        file.sync_all().map_err(io("sync"))?;
+        File::open(dir)
+            .and_then(|dir| dir.sync_all())
+            .map_err(io("sync the directory of"))
+    }
+
+    /// Whether this open wrote the file: there was none, or a crash had torn the one
+    /// a start before this one was creating. The list is then the one a creation
+    /// writes, of no recording, which the member counts as it counts each list it
+    /// writes (`cluster.log_recordings_listed`).
+    pub const fn was_created(&self) -> bool {
+        self.created
     }
 
     /// The list: the recordings that hold the member's log, in the order they carry
@@ -720,15 +749,21 @@ impl RecordingsFile {
     /// the slot the list is not read from, with the next sequence, and one sync. A
     /// crash before the sync has ended leaves the list as it was. A list a reader
     /// would refuse, or one of more than [`MAX_ENTRIES`], is refused and nothing is
-    /// written. On an error the list in memory is the one before the call, as the
-    /// file's is.
+    /// written, and so is any list for a file that holds the highest sequence there
+    /// is ([`RecordingsError::Sequence`]). On an error the list in memory is the one
+    /// before the call, as the file's is.
     pub fn write(
         &mut self,
         floor_position: i64,
         entries: impl IntoIterator<Item = ListedRecording> + Clone,
     ) -> Result<(), RecordingsError> {
+        let Some(sequence) = self.fields.sequence.checked_add(1) else {
+            return Err(RecordingsError::Sequence {
+                found: self.fields.sequence,
+            });
+        };
         let fields = SlotFields {
-            sequence: self.fields.sequence + 1,
+            sequence,
             floor_position,
         };
         let length = encode_slot(fields, entries.clone(), &mut self.scratch)?;
@@ -897,8 +932,49 @@ mod tests {
         let path = RecordingsFile::path_in(&dir);
         // A creation the crash took before its magic: the file is created again.
         std::fs::write(&path, vec![0u8; FILE_LENGTH]).expect("a file of zeros");
-        let mut file = RecordingsFile::open(&dir, 1).expect("the file is created again");
+        let file = RecordingsFile::open(&dir, 1).expect("the file is created again");
         assert_eq!(file.entries(), &[]);
+        assert!(file.was_created());
+        drop(file);
+        assert!(!RecordingsFile::open(&dir, 1).expect("whole").was_created());
+        let raw = OpenOptions::new()
+            .write(true)
+            .open(&path)
+            .expect("the file");
+        // A creation the crash took between its two syncs: everything but the
+        // magic, with the list a creation writes in slot 0. Created again.
+        raw.write_all_at(&[0u8; 8], 0).expect("a write");
+        let file = RecordingsFile::open(&dir, 1).expect("the file is created again");
+        assert!(file.was_created());
+        drop(file);
+        // A zero magic over a slot whose checksum matches and which is not that
+        // list is damage, though the slot fails a later check: here a floor
+        // position of 48, which is no multiple of 32. Refused, and left as it was.
+        let mut slot = [0u8; SLOT_HEADER_LENGTH];
+        slot[16..24].copy_from_slice(&48i64.to_le_bytes());
+        let checksum = crc32(&slot[4..]);
+        slot[..4].copy_from_slice(&checksum.to_le_bytes());
+        raw.write_all_at(&[0u8; 8], 0).expect("a write");
+        raw.write_all_at(&slot, slot_offset(0)).expect("a write");
+        let before = std::fs::read(&path).expect("the file");
+        assert_eq!(
+            RecordingsFile::open(&dir, 1)
+                .expect_err("a zero magic over a slot no creation writes")
+                .reason(),
+            "not-ready"
+        );
+        assert_eq!(std::fs::read(&path).expect("the file"), before);
+        // The same slot under a magic is its own check's refusal.
+        raw.write_all_at(&MAGIC, 0).expect("a write");
+        assert_eq!(
+            RecordingsFile::open(&dir, 1)
+                .expect_err("a floor position that is no position")
+                .reason(),
+            "position"
+        );
+        drop(raw);
+        std::fs::remove_file(&path).expect("the file is removed");
+        let mut file = RecordingsFile::open(&dir, 1).expect("the file is created");
         file.write(0, [listed(5, 0)]).expect("the list is written");
         drop(file);
         // A zero magic over a list is damage: creation never writes one.
@@ -1009,6 +1085,74 @@ mod tests {
         std::fs::remove_dir_all(&dir).expect("the directory is removed");
     }
 
+    /// What a write of the list costs, for ADR 0108's Evidence: 500 writes of a list
+    /// of 3 recordings and 500 of a full one, each synced, with the 50th and 99th
+    /// percentile and the longest printed. Ignored, since it measures and asserts
+    /// nothing: `cargo test -p cavalry-log --lib -- --ignored --nocapture
+    /// a_write_of_the_list_timed`.
+    #[test]
+    #[ignore = "a measurement for ADR 0108, run by hand"]
+    fn a_write_of_the_list_timed() {
+        let dir = dir("timed");
+        let mut file = RecordingsFile::open(&dir, 0).expect("the file is created");
+        for count in [3usize, MAX_ENTRIES] {
+            let list: Vec<ListedRecording> = (0..count as i64)
+                .map(|index| listed(index, index * 32))
+                .collect();
+            let mut took = Vec::with_capacity(500);
+            for _ in 0..500 {
+                let from = std::time::Instant::now();
+                file.write(0, list.iter().copied()).expect("a write");
+                took.push(from.elapsed());
+            }
+            took.sort();
+            println!(
+                "{count} entries, 500 writes: p50 {:.2} ms, p99 {:.2} ms, max {:.2} ms",
+                took[249].as_secs_f64() * 1e3,
+                took[494].as_secs_f64() * 1e3,
+                took[499].as_secs_f64() * 1e3
+            );
+        }
+        std::fs::remove_dir_all(&dir).expect("the directory is removed");
+    }
+
+    #[test]
+    fn a_file_at_the_highest_sequence_takes_no_write() {
+        let dir = dir("sequence");
+        let path = RecordingsFile::path_in(&dir);
+        drop(RecordingsFile::open(&dir, 3).expect("the file is created"));
+        // No count of writes reaches this sequence: a file that holds it is damage,
+        // and a write to it is refused where the sum would overflow.
+        let mut slot = Box::new([0u8; SLOT_LENGTH]);
+        let length = encode_slot(
+            SlotFields {
+                sequence: i64::MAX,
+                floor_position: 0,
+            },
+            [listed(4, 0)],
+            &mut slot,
+        )
+        .expect("a slot");
+        let raw = OpenOptions::new()
+            .write(true)
+            .open(&path)
+            .expect("the file");
+        raw.write_all_at(&slot[..length], slot_offset(1))
+            .expect("a write");
+        let before = std::fs::read(&path).expect("the file");
+        let mut file = RecordingsFile::open(&dir, 3).expect("the file opens");
+        assert_eq!(file.sequence(), i64::MAX);
+        assert_eq!(
+            file.write(0, [listed(4, 0), listed(5, 96)])
+                .expect_err("no sequence above the highest")
+                .reason(),
+            "sequence"
+        );
+        assert_eq!(file.entries(), &[listed(4, 0)]);
+        assert_eq!(std::fs::read(&path).expect("the file"), before);
+        std::fs::remove_dir_all(&dir).expect("the directory is removed");
+    }
+
     #[test]
     fn a_list_at_the_bound_is_written_and_one_past_it_is_refused() {
         let dir = dir("bound");
@@ -1023,7 +1167,7 @@ mod tests {
             file.write(0, over.iter().copied())
                 .expect_err("one past the bound")
                 .reason(),
-            "recordings-full"
+            "log-recordings-full"
         );
         drop(file);
         let file = RecordingsFile::open(&dir, 0).expect("the file opens");
