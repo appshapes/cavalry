@@ -988,8 +988,9 @@ impl Consensus {
     /// One message of the consensus stream, read at `clock`. A member in init reads
     /// nothing. A member whose leader is appointed ignores request vote and vote, which
     /// no such member sends, and catch-up position, and every member ignores stop
-    /// catch-up, which this version's members do not send (`spec/cluster.md`, "The
-    /// appointed leader"). A leader that elects answers a catch-up position at or below
+    /// catch-up, which a leader that elects sends and no member acts on until the
+    /// member's side of the catch-up (`spec/cluster.md`, "The appointed leader";
+    /// ADR 0087). A leader that elects answers a catch-up position at or below
     /// its log position with a replay of its own recordings, stops the replay it runs
     /// to a member that canvasses again, and stops a catch-up, with stop catch-up,
     /// when the member it serves reports the leader's own append position
