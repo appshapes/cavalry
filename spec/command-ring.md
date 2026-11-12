@@ -63,7 +63,7 @@ bytes, at most capacity.
 | 640 | 8 | consumer heartbeat | i64 | the consumer, with release stores | producers, `doctor`, with acquire loads | nanoseconds since the Unix epoch, 0 or more, while the driver runs; −1 once it has closed |
 
 To create the ring the driver sizes the file to its full length, writes zero everywhere,
-stores its clock in the consumer heartbeat, fills the header fields after the magic, and
+stores its epoch clock in the consumer heartbeat, fills the header fields after the magic, and
 writes the magic last with a release store. Every position starts at 0.
 
 ## Record
@@ -219,9 +219,12 @@ producer slower than it has already been timed out as a client.
 
 ## Heartbeat and correlation ids
 
-The consumer stores its clock in the consumer heartbeat with a release store at least
-once per heartbeat interval, and stores −1 when it closes. A producer loads it before it
-claims (step 1). The intervals are the driver's to specify. A client that finds
+The consumer stores its epoch clock, the host's wall clock, in the consumer heartbeat
+with a release store at least once per heartbeat interval, and stores −1 when it closes.
+A producer loads it before it claims (step 1) and takes its age from its own epoch
+clock. The intervals are the driver's to specify, with the clock each is measured on
+and what a step of the host's clock does to the heartbeat's age
+(`spec/client-protocol.md`, "Liveness and timeouts"). A client that finds
 `driver-closed` or `driver-timeout` reports it to its caller and closes.
 
 A producer takes a correlation id with a fetch-and-add of 1 on the correlation id counter

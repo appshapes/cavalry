@@ -25,7 +25,7 @@ use std::fs::{File, TryLockError};
 use std::net::{SocketAddr, ToSocketAddrs};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::time::Duration;
 
 use cavalry_log::dir::Recovery;
 
@@ -38,6 +38,7 @@ use cavalry_proto::frame::FRAME_ALIGNMENT;
 use cavalry_proto::udp::{MAX_DESTINATIONS, MAX_FLOW_CONTROL_RECEIVERS};
 use cavalry_proto::udp::{SetupFrame, image_start};
 use cavalry_shm::broadcast::{BroadcastBuffer, Transmitter};
+use cavalry_shm::clock;
 use cavalry_shm::command_ring::{
     CommandRing, CommandRingError, Consumer, Producer as RingProducer,
     UnblockOutcome as RingUnblock,
@@ -57,14 +58,16 @@ use cavalry_shm::counters::generated::{
     RECORDING_RETENTION_FAILED, RECORDING_SLOT_DROPPED, RECORDING_START_FAILED, RECORDING_STARTED,
     RECORDING_STOPPED, RECORDING_SYNCED_POSITION, RECORDING_TRUNCATED, REPLAY_ENDED, REPLAY_FAILED,
     REPLAY_NOT_CONNECTED, REPLAY_POSITION, REPLAY_START_FAILED, REPLAY_STARTED, REPLAY_STOPPED,
-    SENDER_FLOW_CONTROL_RECEIVERS, SENDER_LIMIT, SENDER_POSITION, SUBSCRIPTION_ADD_DEFERRED,
-    SUBSCRIPTION_ADD_DEFERRED_TIMED_OUT, SUBSCRIPTION_ADD_DEFERRED_WAITING, SUBSCRIPTION_POSITION,
+    SENDER_BYTES_UNSENT, SENDER_FLOW_CONTROL_RECEIVERS, SENDER_LIMIT, SENDER_POSITION,
+    SUBSCRIPTION_ADD_DEFERRED, SUBSCRIPTION_ADD_DEFERRED_TIMED_OUT,
+    SUBSCRIPTION_ADD_DEFERRED_WAITING, SUBSCRIPTION_POSITION,
 };
 use cavalry_shm::counters::{Counter, CounterId, CountersError, CountersFile, Scope};
 use cavalry_shm::log::layout as log_layout;
 use cavalry_shm::log::{HeaderFields, LogBuffers, LogType, UnblockOutcome as LogUnblock};
 use cavalry_shm::spsc;
 
+use crate::clock::EpochClock;
 use crate::error::DriverError;
 use crate::idle::{IdleStrategy, Idler};
 use crate::receiver::{self, ImageState, ReaderKey};
@@ -116,15 +119,15 @@ const FRAME_ALIGN: i64 = FRAME_ALIGNMENT as i64;
 /// file as a dead driver's, polling at this interval.
 const NOT_READY_POLL: Duration = Duration::from_millis(10);
 
-/// The driver's clock: nanoseconds since the Unix epoch, the clock the consumer
-/// heartbeat stores and every timeout is measured on; the recorder reads the same clock
-/// once per duty cycle.
+/// The driver's nano clock, which every thread reads once per duty cycle and every
+/// timeout is measured on: nanoseconds that never go back and that a step of the host's
+/// clock does not move (`spec/client-protocol.md`, "Liveness and timeouts"; ADR 0109).
+/// It is one clock for the whole process, so a reading one thread hands another compares
+/// with the other's own. It is no time of day: what another process or a later run
+/// reads, the consumer heartbeat and a recording's timestamps, takes the epoch clock
+/// ([`EpochClock`]).
 pub(crate) fn now_nanos() -> i64 {
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map_or(0, |since| {
-            i64::try_from(since.as_nanos()).unwrap_or(i64::MAX)
-        })
+    clock::nano_time()
 }
 
 /// The name of the file in which a driver writes its pid, for the starter it refuses.
@@ -183,8 +186,10 @@ pub(crate) fn prepare_dir(dir: &Path) -> Result<DirLock, DriverError> {
             match CommandRing::open(dir, false) {
                 Ok(ring) => {
                     let heartbeat = ring.consumer_heartbeat();
+                    // Another process stored the heartbeat: its age is on the epoch
+                    // clock, as a client's check is.
                     let fresh = heartbeat != cavalry_shm::command_ring::layout::DRIVER_CLOSED
-                        && now_nanos().saturating_sub(heartbeat)
+                        && clock::epoch_time().saturating_sub(heartbeat)
                             < spec::nanos(spec::DRIVER_TIMEOUT);
                     if fresh {
                         return Err(DriverError::Active {
@@ -237,10 +242,16 @@ fn holder_pid(pid_path: &Path) -> i64 {
         .unwrap_or(0)
 }
 
-/// One client the driver knows: its id and when it last sent a command.
+/// One client the driver knows: its id and when it last sent a command, on both of the
+/// driver's clocks. The liveness timeout is measured on the nano clock, so that a step
+/// of the host's clock times out nobody. The epoch stamp is beside it for a client of
+/// an earlier release, which measured its keepalive interval on its epoch clock and so
+/// sends nothing for the length of a step back: a client is timed out only when its
+/// last command is older than the timeout on both clocks (ADR 0109).
 struct Client {
     id: i64,
     last_seen: i64,
+    last_seen_epoch: i64,
 }
 
 /// One counter a client added with `add counter` (`spec/client-protocol.md`,
@@ -303,6 +314,26 @@ struct Publication {
     udp: Option<UdpPublication>,
 }
 
+/// The recording whose position the sender follows for a publication on a channel that
+/// names `ssc=true`, as the conductor last told it (`spec/udp.md`, "The sender"; ADR
+/// 0098). The sender reads the recording's `recording.position` on its own thread, so
+/// the conductor frees that counter only once the sender has answered that it holds it
+/// no more, as it frees a publication's own counters only after the sender's close.
+enum Followed {
+    /// No recording: none is live, or the sender has not been told of it yet.
+    Nothing,
+    /// The live recording whose `recording.position` has this counter id.
+    Recording(u32),
+    /// A recording that stopped: its position counter, kept allocated until the sender
+    /// answers, and whether the sender has been asked yet.
+    Ending {
+        /// The stopped recording's `recording.position`.
+        counter: Counter,
+        /// The request to follow nothing has gone to the sender.
+        asked: bool,
+    },
+}
+
 /// A `cavalry:udp` publication as the conductor sees it: the sender puts its log on the
 /// wire, and the conductor keeps its limit from the sender position, the consumer
 /// position over UDP, or from the recorder's position when the publication is recorded
@@ -335,6 +366,15 @@ struct UdpPublication {
     /// The id of the sender's `sender.flow_control_receivers` gauge, freed with the
     /// others.
     receivers_id: u32,
+    /// The channel's `ssc`, read from the command that created the publication: under
+    /// `true` a live recording connects it while no receiver answers, and a join under
+    /// another is refused (`spec/udp.md`, version 3, "The channel URI"; ADR 0098).
+    ssc: bool,
+    /// The id of the sender's `sender.bytes_unsent` counter, which a publication under
+    /// `ssc=true` has and no other; freed with the others.
+    unsent_id: Option<u32>,
+    /// The recording the sender has been told to follow, for `ssc`.
+    followed: Followed,
 }
 
 /// Where a send endpoint's socket sends (`spec/udp.md`, "The channel URI"; ADR 0053):
@@ -898,7 +938,13 @@ pub(crate) struct Conductor {
     /// The session id the next publication takes: random at the start
     /// ([`first_session_id`]), one more for each publication.
     next_session_id: i32,
+    /// The nano clock when the heartbeat was last stored, and the value stored: the
+    /// epoch clock then.
     last_heartbeat: i64,
+    heartbeat_stored: i64,
+    /// The epoch clock, for the heartbeat, a client's second stamp and a recording's
+    /// start timestamp.
+    epoch: EpochClock,
     ring_corrupt: bool,
     pending: Vec<Pending>,
     /// How many of `pending` the last read filled.
@@ -935,6 +981,8 @@ impl Conductor {
         let broadcast = BroadcastBuffer::create(dir, spec::BROADCAST_CAPACITY)?;
         let transmitter = broadcast.transmitter()?;
         let now = now_nanos();
+        let mut epoch = EpochClock::every_duty_cycle();
+        let heartbeat_stored = epoch.at(now);
         let scratch_length = transmitter
             .max_message_length()
             .min(8 + 2 * (4 + MAX_STRING_LENGTH) + 64);
@@ -979,6 +1027,8 @@ impl Conductor {
             registration_count: 0,
             next_session_id: first_session_id(now),
             last_heartbeat: now,
+            heartbeat_stored,
+            epoch,
             ring_corrupt: false,
             pending: (0..COMMANDS_PER_CYCLE).map(|_| Pending::new()).collect(),
             pending_count: 0,
@@ -1075,9 +1125,19 @@ impl Conductor {
     /// One duty cycle; returns how much work it found, 0 when the conductor may idle.
     fn duty_cycle(&mut self, now: i64) -> usize {
         let mut work = 0;
-        if now.saturating_sub(self.last_heartbeat) >= spec::nanos(spec::HEARTBEAT_INTERVAL) {
-            self.consumer.store_heartbeat(now);
+        // The heartbeat is the epoch clock, which clients compare with their own. It is
+        // stored once per heartbeat interval of the nano clock, and at once when the
+        // epoch clock, read on this duty cycle, is found that far from the value last
+        // stored, forward or back: a step of the host's clock, after which the stored
+        // value is that much wrong in a client's eyes until the next store (ADR 0109).
+        let interval = spec::nanos(spec::HEARTBEAT_INTERVAL);
+        let epoch_now = self.epoch.at(now);
+        if now.saturating_sub(self.last_heartbeat) >= interval
+            || epoch_now.abs_diff(self.heartbeat_stored) >= interval.unsigned_abs()
+        {
+            self.consumer.store_heartbeat(epoch_now);
             self.last_heartbeat = now;
+            self.heartbeat_stored = epoch_now;
         }
         work += self.read_commands(now);
         work += self.unblock_ring(now);
@@ -1115,6 +1175,7 @@ impl Conductor {
         work += self.flush_commands();
         work += self.keep_replays(now);
         work += self.keep_publications(now);
+        work += self.keep_followed();
         work
     }
 
@@ -1659,14 +1720,17 @@ impl Conductor {
             .find(|client| client.id == client_id)
         {
             client.last_seen = now;
+            client.last_seen_epoch = self.epoch.at(now);
             return true;
         }
         if self.clients.len() >= spec::MAX_CLIENTS {
             return false;
         }
+        let last_seen_epoch = self.epoch.at(now);
         self.clients.push(Client {
             id: client_id,
             last_seen: now,
+            last_seen_epoch,
         });
         true
     }
@@ -1885,28 +1949,11 @@ impl Conductor {
             self.registry_full(correlation_id, "publications", spec::MAX_PUBLICATIONS);
             return;
         }
-        // Version 3's `ssc=true` has a live recording connect the publication, which
-        // card 271's driver change builds (ADR 0098); until it lands the key is
-        // answered with code 11, as the position keys were before card 227's driver
-        // change (ADR 0059). `ssc=false` is what every publication is.
-        if channel.spies_simulate_connection() {
-            self.send_error(
-                correlation_id,
-                ErrorCode::GenericError,
-                &format!(
-                    "the channel names ssc=true, by which a live recording connects a \
-                     publication that no receiver answers (spec/udp.md, version 3; ADR 0098): \
-                     this driver does not do that yet, card 271's driver change does; remove \
-                     the key until it lands, and until then give the publication a receiver, \
-                     a subscription on this driver among them; see {ERRORS_DOC}"
-                ),
-            );
-            return;
-        }
         let Some(target) = self.resolve_target(correlation_id, &channel) else {
             return;
         };
         let flow_control = channel.flow_control();
+        let ssc = channel.spies_simulate_connection();
         let registration = Registration {
             client_id,
             correlation_id,
@@ -1942,6 +1989,31 @@ impl Conductor {
                              {ERRORS_DOC}",
                             held.name(),
                             held.name()
+                        ),
+                    );
+                    return;
+                }
+                // A shared log is connected one way: a join names the live publication's
+                // `ssc`, `true` or not (`spec/udp.md`, version 3; ADR 0098).
+                let held_ssc = self.publications[index]
+                    .udp
+                    .as_ref()
+                    .is_some_and(|udp| udp.ssc);
+                if held_ssc != ssc {
+                    self.statics.rejected_command.increment();
+                    let (held, to_join) = if held_ssc {
+                        ("ssc=true", "name ssc=true")
+                    } else {
+                        ("no ssc=true", "leave ssc out, or name ssc=false,")
+                    };
+                    self.send_error(
+                        correlation_id,
+                        ErrorCode::InvalidChannel,
+                        &format!(
+                            "the channel: channel refused (ssc): the live publication on \
+                             stream {stream_id} and this channel was created with {held}, and \
+                             a join keeps one; {to_join} to join it, or use another stream; \
+                             see {ERRORS_DOC}"
                         ),
                     );
                     return;
@@ -2073,7 +2145,9 @@ impl Conductor {
             }
             label
         };
-        let mut allocated: Vec<Counter> = Vec::with_capacity(5);
+        // A publication on a channel that names `ssc=true` has a sixth counter, what
+        // its sender position passed while it was alone with its recording (ADR 0098).
+        let mut allocated: Vec<Counter> = Vec::with_capacity(6);
         for (id, name, endpoint) in [
             (PUBLICATION_POSITION, "publication.position", false),
             (PUBLICATION_LIMIT, "publication.limit", false),
@@ -2084,7 +2158,11 @@ impl Conductor {
                 "sender.flow_control_receivers",
                 true,
             ),
-        ] {
+            (SENDER_BYTES_UNSENT, "sender.bytes_unsent", true),
+        ]
+        .into_iter()
+        .take(if ssc { 6 } else { 5 })
+        {
             match self.counters.allocate(id, &key, &label(name, endpoint)) {
                 Ok(counter) => allocated.push(counter),
                 Err(error) => {
@@ -2116,16 +2194,21 @@ impl Conductor {
         else {
             return;
         };
+        let unsent = counters.next();
         let reader = match log.reader(start_position) {
             Ok(reader) => reader,
             Err(error) => {
                 for counter in [
-                    &position,
-                    &limit,
-                    &sender_position,
-                    &sender_limit,
-                    &receivers,
-                ] {
+                    Some(&position),
+                    Some(&limit),
+                    Some(&sender_position),
+                    Some(&sender_limit),
+                    Some(&receivers),
+                    unsent.as_ref(),
+                ]
+                .into_iter()
+                .flatten()
+                {
                     let _ = self.counters.free(counter.id(), reuse);
                 }
                 drop(log);
@@ -2173,6 +2256,9 @@ impl Conductor {
                 flow_control,
                 receivers_id: receivers.id(),
                 position: keys,
+                ssc,
+                unsent_id: unsent.as_ref().map(Counter::id),
+                followed: Followed::Nothing,
             }),
         };
         let add = sender::AddPublication {
@@ -2189,6 +2275,7 @@ impl Conductor {
             flow_control,
             receivers,
             receiver_table: receiver_table(flow_control),
+            unsent,
         };
         self.hand_to_sender(endpoint_index, socket, add);
         let status_id = counter_id(&self.send_endpoints[endpoint_index].status);
@@ -2528,7 +2615,13 @@ impl Conductor {
                         && let Some(udp) = &mut publication.udp
                     {
                         udp.sender_closed = true;
+                        // The sender dropped the publication, and with it any
+                        // recording's counter it followed (ADR 0098).
+                        self.unfollowed(registration_id, now);
                     }
+                }
+                sender::Reply::Unfollowed { registration_id } => {
+                    self.unfollowed(registration_id, now);
                 }
                 sender::Reply::EndpointClosed { registration_id } => {
                     if let Some(index) = self
@@ -2554,6 +2647,93 @@ impl Conductor {
             taken += 1;
         }
         taken
+    }
+
+    /// The sender holds no recording's counter for the publication any more: a stopped
+    /// recording's position counter that waited for this is freed now, after the reuse
+    /// timeout as every counter is (ADR 0098).
+    fn unfollowed(&mut self, registration_id: i64, now: i64) {
+        let Some(udp) = self
+            .publications
+            .iter_mut()
+            .find(|publication| publication.registration_id == registration_id)
+            .and_then(|publication| publication.udp.as_mut())
+        else {
+            return;
+        };
+        if let Followed::Ending { counter, .. } =
+            std::mem::replace(&mut udp.followed, Followed::Nothing)
+        {
+            let reuse = now.saturating_add(spec::nanos(spec::COUNTER_REUSE_TIMEOUT));
+            let _ = self.counters.free(counter.id(), reuse);
+        }
+    }
+
+    /// Tells the sender which recording each publication on a channel that names
+    /// `ssc=true` follows: the live recording's `recording.position` once the recorder
+    /// has attached it, and nothing once that recording has stopped (`spec/udp.md`,
+    /// "The sender"; ADR 0098). One request a publication a cycle at most, offered only
+    /// when the sender's queue has room and nothing waits for it, so that the sender
+    /// sees its requests in order; what does not go now goes on a later cycle, and what
+    /// the sender has not been told it does not follow. Returns how many went.
+    fn keep_followed(&mut self) -> usize {
+        let mut told = 0;
+        for index in 0..self.publications.len() {
+            if !self.sender_deferred.is_empty() {
+                break;
+            }
+            let publication = &self.publications[index];
+            let registration_id = publication.registration_id;
+            let Some(udp) = &publication.udp else {
+                continue;
+            };
+            if !udp.ssc || udp.sender_closed {
+                continue;
+            }
+            // What to tell the sender: a recording to follow, or to follow none.
+            let recording = match &udp.followed {
+                Followed::Nothing => {
+                    let live = self
+                        .recordings
+                        .iter()
+                        .find(|recording| {
+                            recording.publication_id == registration_id
+                                && recording.state == RecordingState::Live
+                        })
+                        .and_then(|recording| recording.position.clone());
+                    match live {
+                        Some(counter) => Some(counter),
+                        None => continue,
+                    }
+                }
+                Followed::Ending { asked: false, .. } => None,
+                Followed::Recording(_) | Followed::Ending { asked: true, .. } => continue,
+            };
+            let followed = recording.as_ref().map(Counter::id);
+            if self
+                .sender
+                .requests
+                .offer(sender::Request::Follow {
+                    registration_id,
+                    recording,
+                })
+                .is_err()
+            {
+                break;
+            }
+            told += 1;
+            if let Some(udp) = &mut self.publications[index].udp {
+                match (followed, &mut udp.followed) {
+                    (Some(id), followed) => *followed = Followed::Recording(id),
+                    (None, Followed::Ending { asked, .. }) => *asked = true,
+                    (None, _) => {}
+                }
+            }
+        }
+        if told > 0 {
+            self.wake_sender();
+        }
+        told
     }
 
     /// What the sender said about a `cavalry:udp` publication's receiver, kept for the
@@ -4007,13 +4187,18 @@ impl Conductor {
         }
     }
 
-    /// Times out every client whose last command is older than the liveness timeout.
+    /// Times out every client whose last command is older than the liveness timeout, on
+    /// the nano clock and on the epoch clock both ([`Client`]).
     fn time_out_clients(&mut self, now: i64) -> usize {
         let timeout = spec::nanos(spec::CLIENT_LIVENESS_TIMEOUT);
+        let epoch_now = self.epoch.at(now);
         let stale: Vec<i64> = self
             .clients
             .iter()
-            .filter(|client| now.saturating_sub(client.last_seen) > timeout)
+            .filter(|client| {
+                now.saturating_sub(client.last_seen) > timeout
+                    && epoch_now.saturating_sub(client.last_seen_epoch) > timeout
+            })
             .map(|client| client.id)
             .collect();
         for client_id in &stale {
@@ -4094,6 +4279,7 @@ impl Conductor {
                     .as_ref()
                     .map_or(recording.start_position, Counter::load_acquire)
             });
+        let recording_connects = self.recording_connects(publication_id);
         let publication = &mut self.publications[index];
         // The producer position at most once every two milliseconds (ADR 0022, ADR 0032):
         // the publisher
@@ -4176,7 +4362,9 @@ impl Conductor {
                 let consumer =
                     lesser(Some(sender_position), recording_floor).unwrap_or(sender_position);
                 (
-                    udp.connected,
+                    // A receiver answers, or the channel names `ssc=true` and a
+                    // recording of the publication is live (ADR 0098).
+                    udp.connected || (udp.ssc && recording_connects),
                     consumer,
                     sender_position
                         .saturating_sub(udp.term_length)
@@ -4362,6 +4550,14 @@ impl Conductor {
             let _ = self.counters.free(udp.sender_position.id(), reuse);
             let _ = self.counters.free(udp.sender_limit_id, reuse);
             let _ = self.counters.free(udp.receivers_id, reuse);
+            if let Some(unsent_id) = udp.unsent_id {
+                let _ = self.counters.free(unsent_id, reuse);
+            }
+            // A stopped recording's counter that still waited for the sender: the
+            // sender's close let it go (ADR 0098).
+            if let Followed::Ending { counter, .. } = udp.followed {
+                let _ = self.counters.free(counter.id(), reuse);
+            }
             self.release_send_endpoint(udp.endpoint_id, reuse);
         }
         true
@@ -4548,7 +4744,7 @@ impl Conductor {
         let start = Start {
             publication_id,
             correlation_id,
-            start_timestamp: now,
+            start_timestamp: self.epoch.at(now),
             start_position,
             initial_term_id: header.initial_term_id(),
             term_length: i32::try_from(header.term_length()).unwrap_or(i32::MAX),
@@ -4790,7 +4986,7 @@ impl Conductor {
         let start = Start {
             publication_id: registration_id,
             correlation_id,
-            start_timestamp: now,
+            start_timestamp: self.epoch.at(now),
             start_position,
             initial_term_id: header.initial_term_id(),
             term_length: i32::try_from(header.term_length()).unwrap_or(i32::MAX),
@@ -4880,7 +5076,7 @@ impl Conductor {
         let start = Start {
             publication_id: registration_id,
             correlation_id,
-            start_timestamp: now,
+            start_timestamp: self.epoch.at(now),
             start_position,
             initial_term_id: header.initial_term_id(),
             term_length: i32::try_from(header.term_length()).unwrap_or(i32::MAX),
@@ -4972,6 +5168,17 @@ impl Conductor {
                     recording_id,
                     correlation_id: Some(correlation_id),
                 });
+                // A recording that is stopping connects nothing: a publication under
+                // `ssc=true` with no receiver is not connected from here, before its
+                // limit is lowered (ADR 0048, ADR 0098).
+                let publication_id = self.recordings[index].publication_id;
+                if let Some(publication) = self
+                    .publications
+                    .iter()
+                    .position(|publication| publication.registration_id == publication_id)
+                {
+                    self.lower_connected(publication);
+                }
             }
             _ => self.send(&Event::OperationSuccess { correlation_id }),
         }
@@ -5323,8 +5530,23 @@ impl Conductor {
         self.drop_recording_reader(publication_id);
     }
 
+    /// Whether a recording connects the publication `publication_id` under `ssc=true`:
+    /// one of it is live, the recorder writing it and its counter attached, and no stop
+    /// has been asked of it (`spec/udp.md`, "The sender"; ADR 0098). A recording that is
+    /// starting may yet fail, and one that is stopping ends at what the recorder has
+    /// written, so a message accepted on the strength of either could be in no
+    /// recording and at no receiver.
+    fn recording_connects(&self, publication_id: i64) -> bool {
+        self.recordings.iter().any(|recording| {
+            recording.publication_id == publication_id
+                && recording.state == RecordingState::Live
+                && !recording.stop_requested
+        })
+    }
+
     /// Stores is connected 0 for the publication at `index` once nothing connects it:
-    /// neither an image nor a recording of it, or over `cavalry:udp` no receiver. The
+    /// neither an image nor a recording of it, or over `cavalry:udp` no receiver and,
+    /// on a channel that names `ssc=true`, no recording either (ADR 0098). The
     /// commands pass calls it where the last of these goes, so that the 0 is stored
     /// before the limit pass lowers the limit, and a publisher at the old limit or the
     /// lowered one is told `not connected`, never `back pressured`. The 1 is the limit
@@ -5338,7 +5560,7 @@ impl Conductor {
         }
         let id = publication.registration_id;
         let connected = match &publication.udp {
-            Some(udp) => udp.connected,
+            Some(udp) => udp.connected || (udp.ssc && self.recording_connects(id)),
             None => {
                 self.images.iter().any(|image| image.publication_id == id)
                     || self
@@ -5394,12 +5616,34 @@ impl Conductor {
             .position(|recording| recording.recording_id == Some(recording_id))
         {
             self.recordings[index].state = RecordingState::Stopped;
-            let entry = self.recordings.swap_remove(index);
+            let mut entry = self.recordings.swap_remove(index);
             let reuse = now.saturating_add(spec::nanos(spec::COUNTER_REUSE_TIMEOUT));
-            for counter in [entry.position, entry.synced, entry.bytes]
-                .into_iter()
-                .flatten()
-            {
+            // The sender reads this recording's position for a publication on a channel
+            // that names `ssc=true`: the counter stays allocated until the sender has
+            // answered that it holds it no more (ADR 0098).
+            if let Some(position) = entry.position.take() {
+                let follower = self
+                    .publications
+                    .iter_mut()
+                    .find(|publication| publication.registration_id == publication_id)
+                    .and_then(|publication| publication.udp.as_mut())
+                    .filter(|udp| {
+                        !udp.sender_closed
+                            && matches!(udp.followed, Followed::Recording(id) if id == position.id())
+                    });
+                match follower {
+                    Some(udp) => {
+                        udp.followed = Followed::Ending {
+                            counter: position,
+                            asked: false,
+                        };
+                    }
+                    None => {
+                        let _ = self.counters.free(position.id(), reuse);
+                    }
+                }
+            }
+            for counter in [entry.synced, entry.bytes].into_iter().flatten() {
                 let _ = self.counters.free(counter.id(), reuse);
             }
         }
@@ -6016,6 +6260,10 @@ impl Conductor {
                 flow_control,
                 receivers_id: receivers.id(),
                 position: None,
+                // A replay's channel names no `ssc`: it is refused there (ADR 0098).
+                ssc: false,
+                unsent_id: None,
+                followed: Followed::Nothing,
             });
             let add = sender::AddPublication {
                 registration_id: replay_session_id,
@@ -6031,6 +6279,7 @@ impl Conductor {
                 flow_control,
                 receivers,
                 receiver_table: receiver_table(flow_control),
+                unsent: None,
             };
             self.hand_to_sender(endpoint_index, socket, add);
         }
@@ -8531,21 +8780,21 @@ mod recording {
         assert_eq!(code, 1, "{message}");
         assert!(message.contains("(ssc)"), "{message}");
         assert!(h.conductor.replays.is_empty());
-        // On a publication's channel `ssc=true` is answered with code 11 until the
-        // driver's change lands (ADR 0098), with nothing registered.
-        let publications = h.conductor.publications.len();
-        h.conductor.add_publication(
-            1,
-            207,
-            9,
-            b"cavalry:udp?endpoint=127.0.0.1:40123|ssc=true",
-            false,
-            now,
-        );
+        // A join keeps the live publication's `ssc`: publication 2 was created with
+        // none, so a join that names `ssc=true` is refused with the reason `ssc`, and
+        // one that names `ssc=false` is the same publication (ADR 0098).
+        let with_ssc = format!("{unicast}|ssc=true");
+        h.conductor
+            .add_publication(1, 207, 7, with_ssc.as_bytes(), false, now);
         let (code, message) = h.last_error(207).expect("an error");
-        assert_eq!(code, 11, "{message}");
-        assert!(message.contains("ssc=true"), "{message}");
-        assert_eq!(h.conductor.publications.len(), publications);
+        assert_eq!(code, 1, "{message}");
+        assert!(message.contains("(ssc)"), "{message}");
+        let without = format!("{unicast}|ssc=false");
+        h.conductor
+            .add_publication(1, 208, 7, without.as_bytes(), false, now);
+        assert_eq!(h.last_error(208), None);
+        h.conductor.remove_publication(1, 209, 208, now);
+        assert_eq!(h.last_error(209), None);
         // A publication that names them is created at their position, and a start
         // recording on a subscription with no image arms the recording: each its own
         // test (ADR 0059).
@@ -8567,10 +8816,10 @@ mod recording {
         );
         assert_eq!(h.conductor.publications.len(), 2);
         // Ten of version 5's refusals, the position keys refused on a subscription, on
-        // a destination and on a replay channel, and `ssc` refused on the same three;
-        // the code 11 answers count nothing, and a recording channel's keys take no
-        // part (ADR 0059, ADR 0098).
-        assert_eq!(h.counter(CLIENT_PROTOCOL_REJECTED_COMMAND), 16);
+        // a destination and on a replay channel, `ssc` refused on the same three, and
+        // a join under another `ssc`; the code 11 answers count nothing, and a
+        // recording channel's keys take no part (ADR 0059, ADR 0098).
+        assert_eq!(h.counter(CLIENT_PROTOCOL_REJECTED_COMMAND), 17);
     }
 
     /// An RTT measurement that reaches a control channel's socket is answered to the
@@ -9422,6 +9671,883 @@ mod recording {
             fold_offered(offered),
             "and holds it as it was offered"
         );
+    }
+
+    /// A `cavalry:udp` publication on a channel that names `ssc=true`, recorded, with
+    /// a destination that never answers (`spec/udp.md`, version 3, "The sender"; ADR
+    /// 0098). The full case first: with the recorder stalled the publisher is back
+    /// pressured one window past it. Then the recorder runs: the publication is
+    /// connected by its recording, the sender position follows the recorder's and
+    /// never passes it, `sender.bytes_unsent` counts what it passed, nothing is counted
+    /// as sent, and the destination is sent setup frames alone. When the recording
+    /// stops, the sender lets its counter go before the conductor frees it, the
+    /// publication is not connected, and the recording holds every message offered.
+    #[test]
+    fn a_recording_connects_a_udp_publication_that_names_ssc() {
+        use cavalry_shm::counters::generated::SENDER_BYTES_SENT;
+        let mut h = Harness::new("udp-ssc-alone");
+        let mut receiver = TestReceiver::bind();
+        receiver.set_read_timeout(Duration::from_millis(20));
+        let channel = format!(
+            "{}|ssc=true",
+            String::from_utf8(receiver.channel()).expect("utf-8")
+        );
+        let now = h.now;
+        h.conductor
+            .add_publication(1, 2, 7, channel.as_bytes(), false, now);
+        assert_eq!(h.last_error(2), None);
+        h.conductor.duty_cycle(now);
+        h.sender.duty_cycle(now);
+        assert!(
+            !h.conductor.publications[0].log.is_connected(),
+            "no recording and no receiver: not connected, whatever the channel names"
+        );
+        // The recording, started under the publication's own channel: its `ssc` takes
+        // no part there. The recorder attaches its counter and is then held.
+        h.conductor.start_recording(3, 7, channel.as_bytes(), now);
+        assert_eq!(h.last_error(3), None);
+        h.conductor.duty_cycle(now);
+        assert!(
+            !h.conductor.publications[0].log.is_connected(),
+            "a recording that is starting connects nothing: it may yet fail"
+        );
+        let deadline = Instant::now() + Duration::from_secs(30);
+        while h.conductor.recordings[0].position.is_none() {
+            let now = now_nanos();
+            h.conductor.duty_cycle(now);
+            h.recorder.duty_cycle(now);
+            assert!(Instant::now() < deadline, "the recorder's counter");
+        }
+        let recorded = |h: &Harness| {
+            h.conductor.recordings[0]
+                .position
+                .as_ref()
+                .expect("attached")
+                .get()
+        };
+        let window = i64::from(
+            h.conductor.publications[0]
+                .log
+                .header()
+                .publication_window_length(),
+        );
+        let term = i64::from(spec::UDP_TERM_LENGTH);
+        let mut appender = h.conductor.publications[0]
+            .log
+            .appender()
+            .expect("an appender");
+        let mut offered = 0i64;
+        let mut round = |h: &mut Harness, offered: &mut i64, run_recorder: bool, offer: bool| {
+            let now = now_nanos();
+            let limit = h.conductor.publications[0].limit.get();
+            if offer {
+                offer_to(&mut appender, limit, offered);
+            }
+            if run_recorder {
+                h.recorder.duty_cycle(now);
+            }
+            h.sender.duty_cycle(now);
+            h.conductor.duty_cycle(now);
+            h.sender
+                .positions_of(2)
+                .map(|(position, _)| position)
+                .expect("the sender holds it")
+        };
+
+        // The recorder held: connected by the recording, and back pressured one window
+        // past it; the sender has nowhere to go.
+        for _ in 0..50 {
+            let position = round(&mut h, &mut offered, false, true);
+            assert_eq!(position, 0, "the sender stands with the recorder");
+        }
+        assert!(h.conductor.publications[0].log.is_connected());
+        assert_eq!(h.conductor.publications[0].limit.get(), window);
+        assert_eq!(offered * 64, window, "the publisher filled its window");
+        assert_eq!(recorded(&h), 0);
+
+        // The recorder runs: the stream passes a term and a half with no receiver.
+        let deadline = Instant::now() + Duration::from_secs(60);
+        loop {
+            let position = round(&mut h, &mut offered, true, true);
+            let recorder = recorded(&h);
+            assert!(
+                position <= recorder,
+                "the sender at {position} passed the recorder at {recorder}"
+            );
+            assert!(h.conductor.publications[0].limit.get() <= recorder + window);
+            if position >= term + term / 2 {
+                break;
+            }
+            assert!(Instant::now() < deadline, "the sender reached {position}");
+        }
+        let position = h.sender.positions_of(2).expect("held").0;
+        assert_eq!(unsent(&h), position, "every byte passed is counted");
+        assert_eq!(h.counter(SENDER_BYTES_SENT), 0, "and none as sent");
+        assert_eq!(h.counter(SENDER_FRAMES_SENT), 0);
+        assert_eq!(h.counter(PUBLICATION_CONNECTED), 0, "no receiver answered");
+        // What reached the destination: setup frames and nothing else.
+        let mut setups = 0;
+        let mut first = None;
+        while let Ok((length, from)) = receiver.socket.recv_from(&mut receiver.buffer) {
+            receiver.peer = Some(from);
+            match parse_udp(&receiver.buffer[..length], spec::UDP_TERM_LENGTH) {
+                Ok(ControlFrame::Setup(setup)) => {
+                    setups += 1;
+                    first.get_or_insert(setup);
+                }
+                other => panic!("a datagram that is not a setup frame: {other:?}"),
+            }
+        }
+        assert!(setups > 0, "setup frames went to the destination");
+        // A receiver that answers the first of them now stands at position 0, more
+        // than a term behind the sender: what it would need is no longer in the log,
+        // so its status message is rejected and the sender stays where it is.
+        let first = first.expect("a setup frame");
+        assert_eq!(
+            (first.active_term_id, first.term_offset),
+            (first.initial_term_id, 0)
+        );
+        receiver.send_status_message(&StatusMessage {
+            flags: 0,
+            session_id: first.session_id,
+            stream_id: 7,
+            consumption_term_id: first.initial_term_id,
+            consumption_term_offset: 0,
+            receiver_window_length: 131072,
+            receiver_id: 9,
+            group_tag: None,
+        });
+        assert!(wait_for(&mut h, |h| {
+            h.counter(cavalry_shm::counters::generated::SENDER_STATUS_MESSAGES_REJECTED) == 1
+        }));
+        assert!(
+            !h.conductor.publications[0]
+                .udp
+                .as_ref()
+                .expect("udp")
+                .connected
+        );
+        assert!(h.sender.positions_of(2).expect("held").0 >= position);
+        assert_eq!(h.counter(PUBLICATION_CONNECTED), 0);
+
+        // The publisher stops, the recorder writes what is left, and the recording is
+        // stopped: the sender is asked to let the counter go, answers, and only then
+        // is the counter freed.
+        let end = offered * 64;
+        let deadline = Instant::now() + Duration::from_secs(30);
+        while recorded(&h) < end || h.sender.positions_of(2).expect("held").0 < end {
+            round(&mut h, &mut offered, true, false);
+            assert!(
+                Instant::now() < deadline,
+                "the recorder reached {}",
+                recorded(&h)
+            );
+        }
+        let position_id = h.conductor.recordings[0]
+            .position
+            .as_ref()
+            .expect("attached")
+            .id();
+        assert!(matches!(
+            h.conductor.publications[0].udp.as_ref().expect("udp").followed,
+            Followed::Recording(id) if id == position_id
+        ));
+        h.conductor.stop_recording(50, 0);
+        assert!(
+            !h.conductor.publications[0].log.is_connected(),
+            "a recording that is stopping connects nothing: it ends at what is written"
+        );
+        while !h.conductor.recordings.is_empty() {
+            let now = now_nanos();
+            h.recorder.duty_cycle(now);
+            // The recorder's reply alone: the sender is not run yet.
+            h.conductor.duty_cycle(now);
+            assert!(Instant::now() < deadline, "the recording did not stop");
+        }
+        assert!(
+            matches!(
+                h.conductor.publications[0]
+                    .udp
+                    .as_ref()
+                    .expect("udp")
+                    .followed,
+                Followed::Ending { .. }
+            ),
+            "the counter waits for the sender"
+        );
+        let label = label_of(&h, position_id);
+        assert!(label.starts_with("recording.position"), "{label}");
+        let now = now_nanos();
+        h.conductor.duty_cycle(now);
+        h.sender.duty_cycle(now);
+        h.conductor.duty_cycle(now);
+        assert!(matches!(
+            h.conductor.publications[0]
+                .udp
+                .as_ref()
+                .expect("udp")
+                .followed,
+            Followed::Nothing
+        ));
+        // Not connected: the flag is down, the limit rests at the sender position,
+        // and an offer says so.
+        assert!(!h.conductor.publications[0].log.is_connected());
+        h.conductor.duty_cycle(now_nanos());
+        assert_eq!(h.conductor.publications[0].limit.get(), end);
+        drop(round);
+        assert!(matches!(
+            appender.offer(b"cavalry!", end, 0),
+            Err(ClaimError::NotConnected)
+        ));
+        let (stop, fold) = fold_recording(&h.log_dir, 0);
+        assert_eq!(stop, end, "the recording stopped at everything published");
+        assert_eq!(
+            fold,
+            fold_offered(offered),
+            "and holds it as it was offered"
+        );
+    }
+
+    /// A receiver that joins a publication alone with its recording joins at the
+    /// sender position, is sent data from there and nothing from before, and when it
+    /// goes quiet the publication stays connected by its recording and the sender
+    /// follows the recorder again (`spec/udp.md`, version 3, "The sender"; ADR 0098).
+    #[test]
+    fn a_receiver_joins_a_publication_alone_with_its_recording_where_the_sender_stands() {
+        use cavalry_shm::counters::generated::SENDER_BYTES_SENT;
+        let mut h = Harness::new("udp-ssc-join");
+        let mut receiver = TestReceiver::bind();
+        let channel = format!(
+            "{}|ssc=true",
+            String::from_utf8(receiver.channel()).expect("utf-8")
+        );
+        let now = h.now;
+        h.conductor
+            .add_publication(1, 2, 7, channel.as_bytes(), false, now);
+        assert_eq!(h.last_error(2), None);
+        h.conductor.start_recording(3, 7, &receiver.channel(), now);
+        assert_eq!(h.last_error(3), None);
+        let mut appender = h.conductor.publications[0]
+            .log
+            .appender()
+            .expect("an appender");
+        // Alone: 1,000 messages go to the recording, and the sender position follows.
+        let alone = 1_000 * 64;
+        let mut sent = 0;
+        let deadline = Instant::now() + Duration::from_secs(30);
+        while h.sender.positions_of(2).map(|(position, _)| position) != Some(alone) {
+            let now = now_nanos();
+            let limit = h.conductor.publications[0].limit.get();
+            while sent < 1_000 && appender.offer(b"cavalry!", limit, 0).is_ok() {
+                sent += 1;
+            }
+            h.recorder.duty_cycle(now);
+            h.sender.duty_cycle(now);
+            h.conductor.duty_cycle(now);
+            assert!(
+                Instant::now() < deadline,
+                "the sender followed the recorder"
+            );
+        }
+        assert_eq!(unsent(&h), alone);
+        assert_eq!(
+            label_of(
+                &h,
+                h.conductor.publications[0]
+                    .udp
+                    .as_ref()
+                    .and_then(|udp| udp.unsent_id)
+                    .expect("its counter")
+            ),
+            format!(
+                "sender.bytes_unsent 2 {} 7 {}",
+                h.conductor.publications[0].session_id,
+                h.conductor.send_endpoints[0].registration_id
+            ),
+            "labelled as sender.position is"
+        );
+        // The setup frame the receiver is given names where the sender stands.
+        let positions = |setup: &SetupFrame| {
+            cavalry_shm::log::Positions::new(setup.initial_term_id, spec::UDP_TERM_LENGTH)
+        };
+        let setup = loop {
+            h.sender
+                .duty_cycle(now_nanos() + spec::nanos(Duration::from_millis(200)));
+            match receiver.next_control() {
+                Some(ControlFrame::Setup(setup))
+                    if positions(&setup)
+                        .position(setup.active_term_id, setup.term_offset as u32)
+                        == alone =>
+                {
+                    break setup;
+                }
+                Some(ControlFrame::Setup(_)) => {}
+                other => panic!("expected a setup frame, got {other:?}"),
+            }
+            assert!(Instant::now() < deadline, "a setup frame at {alone}");
+        };
+        // It answers from there: connected by a receiver now, and what follows is sent.
+        receiver.send_status_message(&StatusMessage {
+            flags: 0,
+            session_id: setup.session_id,
+            stream_id: 7,
+            consumption_term_id: setup.active_term_id,
+            consumption_term_offset: setup.term_offset,
+            receiver_window_length: 131072,
+            receiver_id: 9,
+            group_tag: None,
+        });
+        assert!(wait_for(&mut h, |h| {
+            h.conductor.publications[0]
+                .udp
+                .as_ref()
+                .is_some_and(|udp| udp.connected)
+        }));
+        assert_eq!(h.counter(PUBLICATION_CONNECTED), 1);
+        let limit = h.conductor.publications[0].limit.get();
+        for _ in 0..10 {
+            appender.offer(b"received", limit, 0).expect("offered");
+        }
+        let mut got = 0;
+        while got < 10 {
+            let now = now_nanos();
+            h.recorder.duty_cycle(now);
+            h.sender.duty_cycle(now);
+            h.conductor.duty_cycle(now);
+            if let Some(frames) = next_frames(&mut receiver) {
+                for (header, body) in &frames {
+                    assert_eq!(body, b"received", "nothing from before the join");
+                    assert_eq!(
+                        positions(&setup).position(header.term_id(), header.term_offset() as u32),
+                        alone + got * 64,
+                        "the first frame sent is the one at the join position"
+                    );
+                    got += 1;
+                }
+            }
+            assert!(Instant::now() < deadline, "the receiver got {got} of 10");
+        }
+        assert_eq!(h.counter(SENDER_BYTES_SENT), 640);
+        assert_eq!(unsent(&h), alone, "sent, so not counted unsent");
+
+        // The receiver goes quiet for the connection timeout: the sender says so, the
+        // publication stays connected by its recording, and the sender follows the
+        // recorder again.
+        let later = now_nanos() + spec::nanos(CONNECTION_TIMEOUT) * 2;
+        h.sender.duty_cycle(later);
+        h.conductor.duty_cycle(now_nanos());
+        assert_eq!(h.counter(PUBLICATION_DISCONNECTED), 1);
+        assert!(
+            !h.conductor.publications[0]
+                .udp
+                .as_ref()
+                .expect("udp")
+                .connected
+        );
+        assert!(
+            h.conductor.publications[0].log.is_connected(),
+            "the recording connects it"
+        );
+        let limit = h.conductor.publications[0].limit.get();
+        for _ in 0..5 {
+            appender.offer(b"unheard!", limit, 0).expect("offered");
+        }
+        let end = alone + 15 * 64;
+        while h.sender.positions_of(2).map(|(position, _)| position) != Some(end) {
+            h.recorder.duty_cycle(later);
+            h.sender.duty_cycle(later);
+            h.conductor.duty_cycle(now_nanos());
+            assert!(
+                Instant::now() < deadline,
+                "the sender followed the recorder again"
+            );
+        }
+        assert_eq!(unsent(&h), alone + 5 * 64);
+        assert_eq!(h.counter(SENDER_BYTES_SENT), 640);
+
+        // A status message that names a position ahead of the sender position, while
+        // the publication is alone again, is no join to go back for: it is taken as any
+        // status message is, connects the publication with the sender position where it
+        // stands, and counts no rejection (`spec/udp.md`, "The sender").
+        let rejected = h.counter(cavalry_shm::counters::generated::SENDER_STATUS_MESSAGES_REJECTED);
+        let ahead = positions(&setup);
+        receiver.send_status_message(&StatusMessage {
+            flags: 0,
+            session_id: setup.session_id,
+            stream_id: 7,
+            consumption_term_id: ahead.term_id_of(end + 640),
+            consumption_term_offset: ahead.term_offset_of(end + 640) as i32,
+            receiver_window_length: 131072,
+            receiver_id: 9,
+            group_tag: None,
+        });
+        let deadline = Instant::now() + Duration::from_secs(30);
+        while h.sender.positions_of(2) != Some((end, end + 640 + 131072)) {
+            h.sender.duty_cycle(later);
+            std::thread::sleep(Duration::from_millis(1));
+            assert!(
+                Instant::now() < deadline,
+                "the status message ahead was taken: {:?}",
+                h.sender.positions_of(2)
+            );
+        }
+        assert_eq!(
+            h.counter(cavalry_shm::counters::generated::SENDER_STATUS_MESSAGES_REJECTED),
+            rejected
+        );
+        assert_eq!(unsent(&h), alone + 5 * 64, "nothing gone back over");
+    }
+
+    /// A receiver whose status message names a position the sender has passed while
+    /// the publication was alone with its recording, within a term: the sender goes
+    /// back to it and sends from there, so the receiver is given every frame from its
+    /// own position with nothing to NAK, and `sender.bytes_unsent` gives back what is
+    /// now sent (`spec/udp.md`, version 3, "The sender"; ADR 0098).
+    #[test]
+    fn the_sender_goes_back_for_a_receiver_that_joins_within_a_term() {
+        use cavalry_shm::counters::generated::SENDER_BYTES_SENT;
+        let mut h = Harness::new("udp-ssc-back");
+        let mut receiver = TestReceiver::bind();
+        let channel = format!(
+            "{}|ssc=true",
+            String::from_utf8(receiver.channel()).expect("utf-8")
+        );
+        let now = h.now;
+        h.conductor
+            .add_publication(1, 2, 7, channel.as_bytes(), false, now);
+        assert_eq!(h.last_error(2), None);
+        h.conductor.start_recording(3, 7, &receiver.channel(), now);
+        assert_eq!(h.last_error(3), None);
+        // The first setup frame, at position 0, which the receiver answers late.
+        h.sender.duty_cycle(now);
+        let setup = match receiver.next_control() {
+            Some(ControlFrame::Setup(setup)) => setup,
+            other => panic!("expected a setup frame, got {other:?}"),
+        };
+        assert_eq!(
+            (setup.active_term_id, setup.term_offset),
+            (setup.initial_term_id, 0)
+        );
+        let mut appender = h.conductor.publications[0]
+            .log
+            .appender()
+            .expect("an appender");
+        // Meanwhile 1,000 messages go to the recording, and the sender follows it.
+        let alone = 1_000 * 64;
+        let mut sent = 0;
+        let deadline = Instant::now() + Duration::from_secs(30);
+        while h.sender.positions_of(2).map(|(position, _)| position) != Some(alone) {
+            let now = now_nanos();
+            let limit = h.conductor.publications[0].limit.get();
+            while sent < 1_000
+                && appender
+                    .offer(&(sent as u64).to_le_bytes(), limit, 0)
+                    .is_ok()
+            {
+                sent += 1;
+            }
+            h.recorder.duty_cycle(now);
+            h.sender.duty_cycle(now);
+            h.conductor.duty_cycle(now);
+            assert!(
+                Instant::now() < deadline,
+                "the sender followed the recorder"
+            );
+        }
+        assert_eq!(unsent(&h), alone);
+        // The receiver's image begins where the setup frame said, position 0, and it
+        // says so: the sender goes back there.
+        receiver.send_status_message(&StatusMessage {
+            flags: 0,
+            session_id: setup.session_id,
+            stream_id: 7,
+            consumption_term_id: setup.active_term_id,
+            consumption_term_offset: 0,
+            receiver_window_length: 131072,
+            receiver_id: 9,
+            group_tag: None,
+        });
+        assert!(wait_for(&mut h, |h| {
+            h.conductor.publications[0]
+                .udp
+                .as_ref()
+                .is_some_and(|udp| udp.connected)
+        }));
+        assert_eq!(
+            h.counter(cavalry_shm::counters::generated::SENDER_STATUS_MESSAGES_REJECTED),
+            0
+        );
+        // Every message from the first, in order, with no NAK asked or answered.
+        let positions =
+            cavalry_shm::log::Positions::new(setup.initial_term_id, spec::UDP_TERM_LENGTH);
+        let mut got = 0u64;
+        while got < 1_000 {
+            let now = now_nanos();
+            h.recorder.duty_cycle(now);
+            h.sender.duty_cycle(now);
+            h.conductor.duty_cycle(now);
+            if let Some(frames) = next_frames(&mut receiver) {
+                for (header, body) in &frames {
+                    assert_eq!(body.as_slice(), got.to_le_bytes().as_slice());
+                    assert_eq!(
+                        positions.position(header.term_id(), header.term_offset() as u32),
+                        got as i64 * 64
+                    );
+                    got += 1;
+                }
+                // The receiver has read them: room for more.
+                receiver.send_status_message(&StatusMessage {
+                    flags: 0,
+                    session_id: setup.session_id,
+                    stream_id: 7,
+                    consumption_term_id: setup.active_term_id,
+                    consumption_term_offset: (got * 64) as i32,
+                    receiver_window_length: 131072,
+                    receiver_id: 9,
+                    group_tag: None,
+                });
+            }
+            assert!(Instant::now() < deadline, "the receiver got {got} of 1000");
+        }
+        assert_eq!(h.counter(SENDER_BYTES_SENT), alone);
+        assert_eq!(unsent(&h), 0, "what was passed is sent after all");
+        assert_eq!(
+            h.counter(cavalry_shm::counters::generated::SENDER_NAKS_RECEIVED),
+            0
+        );
+        assert_eq!(
+            h.sender.positions_of(2).map(|(position, _)| position),
+            Some(alone)
+        );
+    }
+
+    /// A receiver that was sent the stream, went quiet for the connection timeout and
+    /// comes back with a status message below what it was sent, its subscriber having
+    /// read less than its image took: the sender goes back to it, and
+    /// `sender.bytes_unsent` takes off only the bytes the sender position passed while
+    /// the publication was alone, never what went to the receiver before, so the gauge
+    /// reads 0 and never less (`spec/udp.md`, version 3, "The sender"; ADR 0112).
+    #[test]
+    fn a_receiver_that_comes_back_below_what_it_was_sent_takes_off_only_what_was_passed() {
+        use cavalry_shm::counters::generated::{
+            SENDER_BYTES_SENT, SENDER_NAKS_RECEIVED, SENDER_STATUS_MESSAGES_RECEIVED,
+            SENDER_STATUS_MESSAGES_REJECTED,
+        };
+        let mut h = Harness::new("udp-ssc-back-again");
+        let mut receiver = TestReceiver::bind();
+        receiver.set_read_timeout(Duration::from_millis(20));
+        let channel = format!(
+            "{}|ssc=true",
+            String::from_utf8(receiver.channel()).expect("utf-8")
+        );
+        let now = h.now;
+        h.conductor
+            .add_publication(1, 2, 7, channel.as_bytes(), false, now);
+        assert_eq!(h.last_error(2), None);
+        h.conductor.start_recording(3, 7, &receiver.channel(), now);
+        assert_eq!(h.last_error(3), None);
+        // The recording goes live and the sender follows it.
+        let deadline = Instant::now() + Duration::from_secs(60);
+        while !matches!(
+            h.conductor.publications[0]
+                .udp
+                .as_ref()
+                .expect("udp")
+                .followed,
+            Followed::Recording(_)
+        ) {
+            let now = now_nanos();
+            h.recorder.duty_cycle(now);
+            h.sender.duty_cycle(now);
+            h.conductor.duty_cycle(now);
+            assert!(Instant::now() < deadline, "the recording went live");
+        }
+        // The receiver answers a setup frame, at position 0, before anything is
+        // offered: connected by a receiver.
+        let setup = loop {
+            match receiver.next_control() {
+                Some(ControlFrame::Setup(setup)) => break setup,
+                Some(_) => {}
+                None => {
+                    h.sender.duty_cycle(now_nanos());
+                }
+            }
+            assert!(Instant::now() < deadline, "a setup frame");
+        };
+        let positions =
+            cavalry_shm::log::Positions::new(setup.initial_term_id, spec::UDP_TERM_LENGTH);
+        let at = |position: i64| StatusMessage {
+            flags: 0,
+            session_id: setup.session_id,
+            stream_id: 7,
+            consumption_term_id: positions.term_id_of(position),
+            consumption_term_offset: positions.term_offset_of(position) as i32,
+            receiver_window_length: 131072,
+            receiver_id: 9,
+            group_tag: None,
+        };
+        receiver.send_status_message(&at(0));
+        assert!(wait_for(&mut h, |h| {
+            h.conductor.publications[0]
+                .udp
+                .as_ref()
+                .is_some_and(|udp| udp.connected)
+        }));
+        h.conductor.duty_cycle(now_nanos());
+
+        // 1. Connected: 100 messages go to the receiver, and none is counted unsent.
+        let mut appender = h.conductor.publications[0]
+            .log
+            .appender()
+            .expect("an appender");
+        let limit = h.conductor.publications[0].limit.get();
+        for n in 0..100u64 {
+            appender.offer(&n.to_le_bytes(), limit, 0).expect("offered");
+        }
+        let sent = 100 * 64;
+        let mut next = 0i64;
+        while next < sent {
+            let now = now_nanos();
+            h.recorder.duty_cycle(now);
+            h.sender.duty_cycle(now);
+            h.conductor.duty_cycle(now);
+            if let Some(frames) = next_frames(&mut receiver) {
+                for (header, body) in &frames {
+                    assert_eq!(
+                        positions.position(header.term_id(), header.term_offset() as u32),
+                        next
+                    );
+                    assert_eq!(body.as_slice(), ((next / 64) as u64).to_le_bytes());
+                    next += 64;
+                }
+            }
+            assert!(
+                Instant::now() < deadline,
+                "the receiver got to {next} of {sent}"
+            );
+        }
+        assert_eq!(h.counter(SENDER_BYTES_SENT), sent);
+        assert_eq!(unsent(&h), 0, "sent to a receiver, so not unsent");
+
+        // 2. Its subscriber has read 60 of the 100, and its status message says so:
+        //    the sender takes it while the receiver answers.
+        let read = 60 * 64;
+        receiver.send_status_message(&at(read));
+        assert!(wait_for(&mut h, |h| {
+            h.counter(SENDER_STATUS_MESSAGES_RECEIVED) == 2
+        }));
+
+        // 3. The receiver goes quiet for the connection timeout: the publication is
+        //    alone with its recording. The recorder has what was sent, so the sender
+        //    stays; then 5 messages are offered, and the sender position passes them.
+        let later = now_nanos() + spec::nanos(CONNECTION_TIMEOUT) * 2;
+        h.sender.duty_cycle(later);
+        h.conductor.duty_cycle(now_nanos());
+        assert_eq!(h.counter(PUBLICATION_DISCONNECTED), 1);
+        assert!(
+            h.conductor.publications[0].log.is_connected(),
+            "the recording connects it"
+        );
+        assert_eq!(unsent(&h), 0, "nothing passed yet");
+        let limit = h.conductor.publications[0].limit.get();
+        for n in 100..105u64 {
+            appender.offer(&n.to_le_bytes(), limit, 0).expect("offered");
+        }
+        let end = sent + 5 * 64;
+        while h.sender.positions_of(2).map(|(position, _)| position) != Some(end) {
+            h.recorder.duty_cycle(later);
+            h.sender.duty_cycle(later);
+            h.conductor.duty_cycle(now_nanos());
+            assert!(
+                Instant::now() < deadline,
+                "the sender followed the recorder"
+            );
+        }
+        assert_eq!(
+            unsent(&h),
+            5 * 64,
+            "what was passed alone, and nothing sent"
+        );
+        assert_eq!(h.counter(SENDER_BYTES_SENT), sent);
+
+        // 4. The receiver comes back, its status message at what its subscriber read,
+        //    within a term behind the sender position: the sender goes back to it. Of
+        //    the bytes gone back over, only the 5 messages passed while alone come off
+        //    the gauge; the 40 messages sent before are not taken off a second time.
+        receiver.send_status_message(&at(read));
+        assert!(wait_at(&mut h, later, |h| {
+            h.conductor.publications[0]
+                .udp
+                .as_ref()
+                .is_some_and(|udp| udp.connected)
+        }));
+        assert_eq!(h.counter(SENDER_STATUS_MESSAGES_REJECTED), 0);
+        assert_eq!(h.counter(PUBLICATION_CONNECTED), 2);
+        assert_eq!(unsent(&h), 0, "the gauge never goes below zero");
+
+        // 5. The receiver is sent every frame from its own position on, in order, the
+        //    ones passed while alone among them, with nothing to NAK. What is sent again
+        //    is counted as sent, as any data frame is.
+        let mut next = read;
+        while next < end {
+            h.recorder.duty_cycle(later);
+            h.sender.duty_cycle(later);
+            h.conductor.duty_cycle(now_nanos());
+            if let Some(frames) = next_frames(&mut receiver) {
+                for (header, body) in &frames {
+                    assert_eq!(
+                        positions.position(header.term_id(), header.term_offset() as u32),
+                        next,
+                        "every frame from its own position, in order"
+                    );
+                    assert_eq!(body.as_slice(), ((next / 64) as u64).to_le_bytes());
+                    next += 64;
+                }
+            }
+            assert!(
+                Instant::now() < deadline,
+                "the receiver got to {next} of {end}"
+            );
+        }
+        assert_eq!(h.counter(SENDER_BYTES_SENT), sent + (end - read));
+        assert_eq!(unsent(&h), 0);
+        assert_eq!(h.counter(SENDER_NAKS_RECEIVED), 0);
+        assert_eq!(
+            h.sender.positions_of(2).map(|(position, _)| position),
+            Some(end)
+        );
+    }
+
+    /// A recording position the sender cannot follow, one that is not a frame boundary
+    /// or that lies more than two terms past the sender position, is refused: the
+    /// sender stays where it is, counts each such position once in
+    /// `log_buffer.rejected_position`, evicts no client, and follows the recording
+    /// again once its position is one it can follow (`spec/udp.md`, "The sender"; ADR
+    /// 0112).
+    #[test]
+    fn the_sender_refuses_a_recording_position_it_cannot_follow_and_evicts_no_client() {
+        use cavalry_shm::counters::generated::LOG_BUFFER_REJECTED_POSITION;
+        let mut h = Harness::new("udp-ssc-refused");
+        let receiver = TestReceiver::bind();
+        let channel = format!(
+            "{}|ssc=true",
+            String::from_utf8(receiver.channel()).expect("utf-8")
+        );
+        let now = h.now;
+        h.conductor
+            .add_publication(1, 2, 7, channel.as_bytes(), false, now);
+        assert_eq!(h.last_error(2), None);
+        h.conductor.start_recording(3, 7, &receiver.channel(), now);
+        assert_eq!(h.last_error(3), None);
+        let deadline = Instant::now() + Duration::from_secs(30);
+        while !matches!(
+            h.conductor.publications[0]
+                .udp
+                .as_ref()
+                .expect("udp")
+                .followed,
+            Followed::Recording(_)
+        ) {
+            let now = now_nanos();
+            h.recorder.duty_cycle(now);
+            h.sender.duty_cycle(now);
+            h.conductor.duty_cycle(now);
+            assert!(Instant::now() < deadline, "the recording went live");
+        }
+        let clients = h.conductor.clients.len();
+        // The recorder is held from here on, so the test alone moves its counter.
+        let set = |h: &Harness, position: i64| {
+            h.conductor.recordings[0]
+                .position
+                .as_ref()
+                .expect("attached")
+                .store_release(position);
+        };
+        let cycle = |h: &mut Harness| {
+            for _ in 0..10 {
+                let now = now_nanos();
+                h.sender.duty_cycle(now);
+                h.conductor.duty_cycle(now);
+            }
+            h.sender
+                .positions_of(2)
+                .map(|(position, _)| position)
+                .expect("the sender holds it")
+        };
+        let term = i64::from(spec::UDP_TERM_LENGTH);
+        // Not a frame boundary: refused, and counted once over ten duty cycles.
+        set(&h, 100);
+        assert_eq!(cycle(&mut h), 0, "the sender stays");
+        assert_eq!(h.counter(LOG_BUFFER_REJECTED_POSITION), 1);
+        // A frame boundary more than two terms past the sender position: refused, and
+        // counted once, as another position.
+        set(&h, 2 * term + 64);
+        assert_eq!(cycle(&mut h), 0, "the sender stays");
+        assert_eq!(h.counter(LOG_BUFFER_REJECTED_POSITION), 2);
+        // No client was evicted, and the publication is still there.
+        assert_eq!(h.conductor.clients.len(), clients);
+        assert_eq!(h.conductor.publications.len(), 1);
+        assert_eq!(unsent(&h), 0, "nothing passed");
+        // A position it can follow: the sender moves to it and counts it unsent.
+        set(&h, 640);
+        assert_eq!(cycle(&mut h), 640, "the sender follows again");
+        assert_eq!(h.counter(LOG_BUFFER_REJECTED_POSITION), 2);
+        assert_eq!(unsent(&h), 640);
+    }
+
+    /// A recording does not connect a `cavalry:udp` publication whose channel names no
+    /// `ssc`: with no receiver it is not connected, and the sender is told of no
+    /// recording to follow (`spec/udp.md`, "The sender"; ADR 0041, ADR 0098).
+    #[test]
+    fn a_recording_does_not_connect_a_udp_publication_that_names_no_ssc() {
+        let mut h = Harness::new("udp-no-ssc-recorded");
+        let receiver = TestReceiver::bind();
+        let now = h.now;
+        h.conductor
+            .add_publication(1, 2, 7, &receiver.channel(), false, now);
+        assert_eq!(h.last_error(2), None);
+        h.conductor.start_recording(3, 7, &receiver.channel(), now);
+        assert_eq!(h.last_error(3), None);
+        let deadline = Instant::now() + Duration::from_secs(30);
+        while h.conductor.recordings[0].position.is_none() {
+            let now = now_nanos();
+            h.conductor.duty_cycle(now);
+            h.recorder.duty_cycle(now);
+            assert!(Instant::now() < deadline, "the recorder's counter");
+        }
+        for _ in 0..10 {
+            let now = now_nanos();
+            h.conductor.duty_cycle(now);
+            h.sender.duty_cycle(now);
+        }
+        let publication = &h.conductor.publications[0];
+        assert!(!publication.log.is_connected());
+        assert_eq!(publication.limit.get(), 0);
+        assert!(matches!(
+            publication.udp.as_ref().expect("udp").followed,
+            Followed::Nothing
+        ));
+        let mut appender = h.conductor.publications[0]
+            .log
+            .appender()
+            .expect("an appender");
+        assert!(matches!(
+            appender.offer(b"cavalry!", 0, 0),
+            Err(ClaimError::NotConnected)
+        ));
+    }
+
+    /// The `sender.bytes_unsent` of the first publication, which names `ssc=true`.
+    fn unsent(h: &Harness) -> i64 {
+        let id = h.conductor.publications[0]
+            .udp
+            .as_ref()
+            .and_then(|udp| udp.unsent_id)
+            .expect("a publication under ssc=true has the counter");
+        cavalry_shm::counters::CountersReader::open(h.dir.path())
+            .expect("the counters file opens")
+            .read(id)
+            .expect("the counter reads")
     }
 
     /// `ssc=false` on a publication's channel is what every publication is: the
@@ -16544,5 +17670,246 @@ mod receiving {
         assert_eq!(conductor.subscriptions.len(), 1, "nothing registered");
         assert_eq!(conductor.receive_endpoints.len(), 1);
         drop(conductor);
+    }
+}
+
+#[cfg(test)]
+mod clocks {
+    //! ADR 0109, card 266: a conductor driven duty cycle by duty cycle on a nano clock
+    //! the test advances, while the test steps the epoch clock the conductor reads, as a
+    //! time service, a person or a suspended host steps the host's. No interval moves
+    //! with the step; the heartbeat, which clients compare with their own epoch clock,
+    //! is stored again at once.
+
+    use super::tests::TestDir;
+    use super::*;
+
+    const SECOND: i64 = 1_000_000_000;
+    const HOUR: i64 = 3_600 * SECOND;
+
+    /// A conductor alone in a directory of its own, with the far ends of its four
+    /// queues kept so that nothing it offers is refused for a dropped peer.
+    struct Alone {
+        conductor: Conductor,
+        _recorder: (spsc::Consumer<Request>, spsc::Producer<Reply>),
+        _replayer: (
+            spsc::Consumer<replayer::Request>,
+            spsc::Producer<replayer::Reply>,
+        ),
+        _sender: (
+            spsc::Consumer<sender::Request>,
+            spsc::Producer<sender::Reply>,
+        ),
+        _receiver: (
+            spsc::Consumer<receiver::Request>,
+            spsc::Producer<receiver::Reply>,
+        ),
+        // Dropped last: the conductor unmaps its files before the directory goes.
+        _dir: TestDir,
+    }
+
+    fn alone(test: &str) -> Alone {
+        let dir = TestDir::new(test);
+        prepare_dir(dir.path()).expect("the directory is prepared");
+        let (requests, recorder_requests) = spsc::queue::<Request>(4);
+        let (recorder_replies, replies) = spsc::queue::<Reply>(4);
+        let link = RecorderLink {
+            requests,
+            replies,
+            next_recording_id: 0,
+        };
+        let (requests, replayer_requests) = spsc::queue::<replayer::Request>(4);
+        let (replayer_replies, replies) = spsc::queue::<replayer::Reply>(4);
+        let replayer_link = ReplayerLink { requests, replies };
+        let (requests, sender_requests) = spsc::queue::<sender::Request>(4);
+        let (sender_replies, replies) = spsc::queue::<sender::Reply>(4);
+        let sender_link = SenderLink { requests, replies };
+        let (requests, receiver_requests) = spsc::queue::<receiver::Request>(4);
+        let (receiver_replies, replies) = spsc::queue::<receiver::Reply>(4);
+        let receiver_link = ReceiverLink { requests, replies };
+        let conductor = Conductor::create(
+            dir.path(),
+            IdleStrategy::Backoff,
+            link,
+            replayer_link,
+            sender_link,
+            receiver_link,
+        )
+        .expect("the conductor is created");
+        Alone {
+            conductor,
+            _recorder: (recorder_requests, recorder_replies),
+            _replayer: (replayer_requests, replayer_replies),
+            _sender: (sender_requests, sender_replies),
+            _receiver: (receiver_requests, receiver_replies),
+            _dir: dir,
+        }
+    }
+
+    /// The linger is five seconds of the nano clock, whatever the epoch clock does in
+    /// them. Measured on the epoch clock, as every timeout was, an hour's step forward
+    /// ended it at once.
+    #[test]
+    fn a_step_forward_of_an_hour_ends_no_linger_early() {
+        let mut alone = alone("clock-linger");
+        let conductor = &mut alone.conductor;
+        let t0 = now_nanos();
+        let linger = spec::nanos(spec::PUBLICATION_LINGER);
+
+        // A subscriber that reads nothing, a publication with one message, then the
+        // publication removed: it lingers for the subscriber.
+        conductor.add_subscription(1, 1, 7, IPC_CHANNEL, t0);
+        conductor.add_publication(1, 2, 7, IPC_CHANNEL, false, t0);
+        conductor.duty_cycle(t0);
+        {
+            let publication = &conductor.publications[0];
+            let mut appender = publication.log.appender().expect("an appender");
+            appender
+                .offer(b"unread", publication.limit.get(), 0)
+                .expect("the message is offered");
+        }
+        conductor.remove_publication(1, 3, 2, t0);
+        conductor.duty_cycle(t0);
+        assert!(conductor.publications[0].closing.is_some(), "it is closing");
+
+        conductor.epoch.step(HOUR);
+        conductor.duty_cycle(t0 + linger - 1);
+        assert!(
+            !conductor.publications[0].withdrawn,
+            "the linger has a nanosecond to run, an hour's step forward or not"
+        );
+        conductor.duty_cycle(t0 + linger);
+        assert!(
+            conductor
+                .publications
+                .first()
+                .is_none_or(|publication| publication.withdrawn),
+            "the linger ended when five seconds of the nano clock had passed"
+        );
+    }
+
+    /// The heartbeat is the epoch clock. It is stored once a second of the nano clock,
+    /// and at once when the epoch clock is found a heartbeat interval or more from the
+    /// value last stored, forward or back, so that a client's reading of its age is
+    /// wrong by the step for one duty cycle and not for the rest of a second.
+    #[test]
+    fn the_heartbeat_is_stored_at_once_after_a_step_either_way() {
+        let mut alone = alone("clock-heartbeat");
+        let conductor = &mut alone.conductor;
+        let t0 = now_nanos();
+        let interval = spec::nanos(spec::HEARTBEAT_INTERVAL);
+
+        conductor.duty_cycle(t0 + interval);
+        assert_eq!(conductor._ring.consumer_heartbeat(), t0 + interval);
+        conductor.duty_cycle(t0 + 2 * interval - 1);
+        assert_eq!(
+            conductor._ring.consumer_heartbeat(),
+            t0 + interval,
+            "no step and no second passed: nothing is stored"
+        );
+
+        // Forward by an hour, a millisecond of the nano clock after the last store.
+        conductor.epoch.step(HOUR);
+        let after = t0 + interval + 1_000_000;
+        conductor.duty_cycle(after);
+        assert_eq!(
+            conductor._ring.consumer_heartbeat(),
+            after + HOUR,
+            "the stepped clock is stored on the next duty cycle"
+        );
+
+        // Back by two hours: the heartbeat goes back with the clock, at once.
+        conductor.epoch.step(-2 * HOUR);
+        conductor.duty_cycle(after + 1_000_000);
+        assert_eq!(
+            conductor._ring.consumer_heartbeat(),
+            after + 1_000_000 - HOUR
+        );
+
+        // A step of half the interval is not stored at once: the value stored is still
+        // within an interval of the epoch clock. It is stored when the epoch clock has
+        // moved an interval from it, half a second of the nano clock later.
+        conductor.epoch.step(interval / 2);
+        conductor.duty_cycle(after + 2_000_000);
+        assert_eq!(
+            conductor._ring.consumer_heartbeat(),
+            after + 1_000_000 - HOUR
+        );
+        let due = after + 1_000_000 + interval / 2;
+        conductor.duty_cycle(due - 1);
+        assert_eq!(
+            conductor._ring.consumer_heartbeat(),
+            after + 1_000_000 - HOUR
+        );
+        conductor.duty_cycle(due);
+        assert_eq!(
+            conductor._ring.consumer_heartbeat(),
+            due - HOUR + interval / 2
+        );
+    }
+
+    /// A client is timed out after ten seconds of the nano clock without a command.
+    /// Measured on the epoch clock, a step forward of ten seconds timed out every
+    /// client whose next keepalive the conductor had not read yet.
+    #[test]
+    fn a_step_forward_times_out_no_client() {
+        let mut alone = alone("clock-liveness-forward");
+        let conductor = &mut alone.conductor;
+        let t0 = now_nanos();
+        let timeout = spec::nanos(spec::CLIENT_LIVENESS_TIMEOUT);
+
+        assert!(conductor.touch_client(9, t0));
+        conductor.epoch.step(HOUR);
+        conductor.duty_cycle(t0 + 1_000_000);
+        assert_eq!(
+            conductor.clients.len(),
+            1,
+            "an hour's step is no silence: the client sent a millisecond ago"
+        );
+        conductor.duty_cycle(t0 + timeout);
+        assert_eq!(conductor.clients.len(), 1, "ten seconds, and not yet more");
+        conductor.duty_cycle(t0 + timeout + 1);
+        assert_eq!(
+            conductor.clients.len(),
+            0,
+            "silent for more than the timeout: timed out, as with no step"
+        );
+        assert_eq!(conductor.statics.client_timed_out.get(), 1);
+    }
+
+    /// A client of an earlier release measured its keepalive interval on its epoch
+    /// clock, so after a step back it sends nothing for the length of the step. The
+    /// conductor times a client out only when its last command is older than the
+    /// timeout on both clocks, so such a client is not timed out for a step back, and
+    /// a client that did stop is found the length of the step later, as before.
+    #[test]
+    fn a_step_back_times_out_no_client_that_is_silent_for_the_step() {
+        let mut alone = alone("clock-liveness-back");
+        let conductor = &mut alone.conductor;
+        let t0 = now_nanos();
+        let timeout = spec::nanos(spec::CLIENT_LIVENESS_TIMEOUT);
+        let step = 15 * SECOND;
+
+        assert!(conductor.touch_client(9, t0));
+        conductor.epoch.step(-step);
+        // Silent for the fifteen seconds its epoch clock takes to pass its last send.
+        conductor.duty_cycle(t0 + step);
+        assert_eq!(
+            conductor.clients.len(),
+            1,
+            "fifteen seconds of silence on the nano clock, none on the epoch clock"
+        );
+        // Its keepalives are back: it lives on from there.
+        assert!(conductor.touch_client(9, t0 + step + SECOND / 2));
+        conductor.duty_cycle(t0 + step + timeout);
+        assert_eq!(conductor.clients.len(), 1);
+
+        // A client that stopped at the step is found the step later.
+        conductor.epoch.step(-step);
+        let stopped = t0 + step + SECOND / 2;
+        conductor.duty_cycle(stopped + timeout + step);
+        assert_eq!(conductor.clients.len(), 1, "not yet on the epoch clock");
+        conductor.duty_cycle(stopped + timeout + step + 1);
+        assert_eq!(conductor.clients.len(), 0);
     }
 }
