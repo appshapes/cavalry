@@ -2792,6 +2792,15 @@ impl Consensus {
             self.catchup = false;
         }
         self.replication = None;
+        // The reports this member holds were read against the log it had before it
+        // replicated. Against the log it has now, a report that was ahead of it may
+        // no longer be, and canvass would make it a candidate at once, to ask for
+        // votes in a term above its leader's. It canvasses with no report, as a
+        // member does from init, and its leader answers its canvass position (ADR
+        // 0106).
+        for peer in self.peers.iter_mut().take(self.count) {
+            peer.reported = false;
+        }
         Ok(self.step(ElectionState::Canvass, clock))
     }
 
