@@ -2112,7 +2112,9 @@ impl Conductor {
             }
             label
         };
-        let mut allocated: Vec<Counter> = Vec::with_capacity(5);
+        // A publication on a channel that names `ssc=true` has a sixth counter, what
+        // its sender position passed while it was alone with its recording (ADR 0098).
+        let mut allocated: Vec<Counter> = Vec::with_capacity(6);
         for (id, name, endpoint) in [
             (PUBLICATION_POSITION, "publication.position", false),
             (PUBLICATION_LIMIT, "publication.limit", false),
@@ -2123,7 +2125,11 @@ impl Conductor {
                 "sender.flow_control_receivers",
                 true,
             ),
-        ] {
+            (SENDER_BYTES_UNSENT, "sender.bytes_unsent", true),
+        ]
+        .into_iter()
+        .take(if ssc { 6 } else { 5 })
+        {
             match self.counters.allocate(id, &key, &label(name, endpoint)) {
                 Ok(counter) => allocated.push(counter),
                 Err(error) => {
@@ -2155,35 +2161,7 @@ impl Conductor {
         else {
             return;
         };
-        // A publication on a channel that names `ssc=true` has one more counter, what
-        // its sender position passed while it was alone with its recording (ADR 0098).
-        let unsent = if ssc {
-            match self.counters.allocate(
-                SENDER_BYTES_UNSENT,
-                &key,
-                &label("sender.bytes_unsent", true),
-            ) {
-                Ok(counter) => Some(counter),
-                Err(error) => {
-                    for counter in [
-                        &position,
-                        &limit,
-                        &sender_position,
-                        &sender_limit,
-                        &receivers,
-                    ] {
-                        let _ = self.counters.free(counter.id(), reuse);
-                    }
-                    drop(log);
-                    remove_log(&self.dir, correlation_id);
-                    self.abandon_send_endpoint(endpoint_index, socket.is_some(), reuse);
-                    self.counters_full(correlation_id, &error);
-                    return;
-                }
-            }
-        } else {
-            None
-        };
+        let unsent = counters.next();
         let reader = match log.reader(start_position) {
             Ok(reader) => reader,
             Err(error) => {
@@ -2679,26 +2657,32 @@ impl Conductor {
             if !udp.ssc || udp.sender_closed {
                 continue;
             }
-            let request = match &udp.followed {
-                Followed::Nothing => self
-                    .recordings
-                    .iter()
-                    .find(|recording| recording.publication_id == registration_id)
-                    .and_then(|recording| recording.position.clone()),
-                Followed::Recording(_) | Followed::Ending { asked: true, .. } => continue,
+            // What to tell the sender: a recording to follow, or to follow none.
+            let recording = match &udp.followed {
+                Followed::Nothing => {
+                    let live = self
+                        .recordings
+                        .iter()
+                        .find(|recording| {
+                            recording.publication_id == registration_id
+                                && recording.state == RecordingState::Live
+                        })
+                        .and_then(|recording| recording.position.clone());
+                    match live {
+                        Some(counter) => Some(counter),
+                        None => continue,
+                    }
+                }
                 Followed::Ending { asked: false, .. } => None,
+                Followed::Recording(_) | Followed::Ending { asked: true, .. } => continue,
             };
-            let followed = match (&udp.followed, &request) {
-                (Followed::Nothing, Some(counter)) => Some(counter.id()),
-                (Followed::Nothing, None) => continue,
-                _ => None,
-            };
+            let followed = recording.as_ref().map(Counter::id);
             if self
                 .sender
                 .requests
                 .offer(sender::Request::Follow {
                     registration_id,
-                    recording: request,
+                    recording,
                 })
                 .is_err()
             {
@@ -2707,7 +2691,7 @@ impl Conductor {
             told += 1;
             if let Some(udp) = &mut self.publications[index].udp {
                 match (followed, &mut udp.followed) {
-                    (Some(id), _) => udp.followed = Followed::Recording(id),
+                    (Some(id), followed) => *followed = Followed::Recording(id),
                     (None, Followed::Ending { asked, .. }) => *asked = true,
                     (None, _) => {}
                 }
@@ -4257,6 +4241,7 @@ impl Conductor {
                     .as_ref()
                     .map_or(recording.start_position, Counter::load_acquire)
             });
+        let recording_connects = self.recording_connects(publication_id);
         let publication = &mut self.publications[index];
         // The producer position at most once every two milliseconds (ADR 0022, ADR 0032):
         // the publisher
@@ -4341,7 +4326,7 @@ impl Conductor {
                 (
                     // A receiver answers, or the channel names `ssc=true` and a
                     // recording of the publication is live (ADR 0098).
-                    udp.connected || (udp.ssc && recording_floor.is_some()),
+                    udp.connected || (udp.ssc && recording_connects),
                     consumer,
                     sender_position
                         .saturating_sub(udp.term_length)
@@ -5145,6 +5130,17 @@ impl Conductor {
                     recording_id,
                     correlation_id: Some(correlation_id),
                 });
+                // A recording that is stopping connects nothing: a publication under
+                // `ssc=true` with no receiver is not connected from here, before its
+                // limit is lowered (ADR 0048, ADR 0098).
+                let publication_id = self.recordings[index].publication_id;
+                if let Some(publication) = self
+                    .publications
+                    .iter()
+                    .position(|publication| publication.registration_id == publication_id)
+                {
+                    self.lower_connected(publication);
+                }
             }
             _ => self.send(&Event::OperationSuccess { correlation_id }),
         }
@@ -5496,6 +5492,20 @@ impl Conductor {
         self.drop_recording_reader(publication_id);
     }
 
+    /// Whether a recording connects the publication `publication_id` under `ssc=true`:
+    /// one of it is live, the recorder writing it and its counter attached, and no stop
+    /// has been asked of it (`spec/udp.md`, "The sender"; ADR 0098). A recording that is
+    /// starting may yet fail, and one that is stopping ends at what the recorder has
+    /// written, so a message accepted on the strength of either could be in no
+    /// recording and at no receiver.
+    fn recording_connects(&self, publication_id: i64) -> bool {
+        self.recordings.iter().any(|recording| {
+            recording.publication_id == publication_id
+                && recording.state == RecordingState::Live
+                && !recording.stop_requested
+        })
+    }
+
     /// Stores is connected 0 for the publication at `index` once nothing connects it:
     /// neither an image nor a recording of it, or over `cavalry:udp` no receiver and,
     /// on a channel that names `ssc=true`, no recording either (ADR 0098). The
@@ -5512,14 +5522,7 @@ impl Conductor {
         }
         let id = publication.registration_id;
         let connected = match &publication.udp {
-            Some(udp) => {
-                udp.connected
-                    || (udp.ssc
-                        && self
-                            .recordings
-                            .iter()
-                            .any(|recording| recording.publication_id == id))
-            }
+            Some(udp) => udp.connected || (udp.ssc && self.recording_connects(id)),
             None => {
                 self.images.iter().any(|image| image.publication_id == id)
                     || self
@@ -9665,6 +9668,11 @@ mod recording {
         // no part there. The recorder attaches its counter and is then held.
         h.conductor.start_recording(3, 7, channel.as_bytes(), now);
         assert_eq!(h.last_error(3), None);
+        h.conductor.duty_cycle(now);
+        assert!(
+            !h.conductor.publications[0].log.is_connected(),
+            "a recording that is starting connects nothing: it may yet fail"
+        );
         let deadline = Instant::now() + Duration::from_secs(30);
         while h.conductor.recordings[0].position.is_none() {
             let now = now_nanos();
@@ -9741,13 +9749,48 @@ mod recording {
         assert_eq!(h.counter(PUBLICATION_CONNECTED), 0, "no receiver answered");
         // What reached the destination: setup frames and nothing else.
         let mut setups = 0;
-        while let Ok((length, _)) = receiver.socket.recv_from(&mut receiver.buffer) {
+        let mut first = None;
+        while let Ok((length, from)) = receiver.socket.recv_from(&mut receiver.buffer) {
+            receiver.peer = Some(from);
             match parse_udp(&receiver.buffer[..length], spec::UDP_TERM_LENGTH) {
-                Ok(ControlFrame::Setup(_)) => setups += 1,
+                Ok(ControlFrame::Setup(setup)) => {
+                    setups += 1;
+                    first.get_or_insert(setup);
+                }
                 other => panic!("a datagram that is not a setup frame: {other:?}"),
             }
         }
         assert!(setups > 0, "setup frames went to the destination");
+        // A receiver that answers the first of them now stands at position 0, more
+        // than a term behind the sender: what it would need is no longer in the log,
+        // so its status message is rejected and the sender stays where it is.
+        let first = first.expect("a setup frame");
+        assert_eq!(
+            (first.active_term_id, first.term_offset),
+            (first.initial_term_id, 0)
+        );
+        receiver.send_status_message(&StatusMessage {
+            flags: 0,
+            session_id: first.session_id,
+            stream_id: 7,
+            consumption_term_id: first.initial_term_id,
+            consumption_term_offset: 0,
+            receiver_window_length: 131072,
+            receiver_id: 9,
+            group_tag: None,
+        });
+        assert!(wait_for(&mut h, |h| {
+            h.counter(cavalry_shm::counters::generated::SENDER_STATUS_MESSAGES_REJECTED) == 1
+        }));
+        assert!(
+            !h.conductor.publications[0]
+                .udp
+                .as_ref()
+                .expect("udp")
+                .connected
+        );
+        assert!(h.sender.positions_of(2).expect("held").0 >= position);
+        assert_eq!(h.counter(PUBLICATION_CONNECTED), 0);
 
         // The publisher stops, the recorder writes what is left, and the recording is
         // stopped: the sender is asked to let the counter go, answers, and only then
@@ -9772,6 +9815,10 @@ mod recording {
             Followed::Recording(id) if id == position_id
         ));
         h.conductor.stop_recording(50, 0);
+        assert!(
+            !h.conductor.publications[0].log.is_connected(),
+            "a recording that is stopping connects nothing: it ends at what is written"
+        );
         while !h.conductor.recordings.is_empty() {
             let now = now_nanos();
             h.recorder.duty_cycle(now);
@@ -9979,6 +10026,129 @@ mod recording {
         }
         assert_eq!(unsent(&h), alone + 5 * 64);
         assert_eq!(h.counter(SENDER_BYTES_SENT), 640);
+    }
+
+    /// A receiver whose status message names a position the sender has passed while
+    /// the publication was alone with its recording, within a term: the sender goes
+    /// back to it and sends from there, so the receiver is given every frame from its
+    /// own position with nothing to NAK, and `sender.bytes_unsent` gives back what is
+    /// now sent (`spec/udp.md`, version 3, "The sender"; ADR 0098).
+    #[test]
+    fn the_sender_goes_back_for_a_receiver_that_joins_within_a_term() {
+        use cavalry_shm::counters::generated::SENDER_BYTES_SENT;
+        let mut h = Harness::new("udp-ssc-back");
+        let mut receiver = TestReceiver::bind();
+        let channel = format!(
+            "{}|ssc=true",
+            String::from_utf8(receiver.channel()).expect("utf-8")
+        );
+        let now = h.now;
+        h.conductor
+            .add_publication(1, 2, 7, channel.as_bytes(), false, now);
+        assert_eq!(h.last_error(2), None);
+        h.conductor.start_recording(3, 7, &receiver.channel(), now);
+        assert_eq!(h.last_error(3), None);
+        // The first setup frame, at position 0, which the receiver answers late.
+        h.sender.duty_cycle(now);
+        let setup = match receiver.next_control() {
+            Some(ControlFrame::Setup(setup)) => setup,
+            other => panic!("expected a setup frame, got {other:?}"),
+        };
+        assert_eq!(
+            (setup.active_term_id, setup.term_offset),
+            (setup.initial_term_id, 0)
+        );
+        let mut appender = h.conductor.publications[0]
+            .log
+            .appender()
+            .expect("an appender");
+        // Meanwhile 1,000 messages go to the recording, and the sender follows it.
+        let alone = 1_000 * 64;
+        let mut sent = 0;
+        let deadline = Instant::now() + Duration::from_secs(30);
+        while h.sender.positions_of(2).map(|(position, _)| position) != Some(alone) {
+            let now = now_nanos();
+            let limit = h.conductor.publications[0].limit.get();
+            while sent < 1_000
+                && appender
+                    .offer(&(sent as u64).to_le_bytes(), limit, 0)
+                    .is_ok()
+            {
+                sent += 1;
+            }
+            h.recorder.duty_cycle(now);
+            h.sender.duty_cycle(now);
+            h.conductor.duty_cycle(now);
+            assert!(
+                Instant::now() < deadline,
+                "the sender followed the recorder"
+            );
+        }
+        assert_eq!(unsent(&h), alone);
+        // The receiver's image begins where the setup frame said, position 0, and it
+        // says so: the sender goes back there.
+        receiver.send_status_message(&StatusMessage {
+            flags: 0,
+            session_id: setup.session_id,
+            stream_id: 7,
+            consumption_term_id: setup.active_term_id,
+            consumption_term_offset: 0,
+            receiver_window_length: 131072,
+            receiver_id: 9,
+            group_tag: None,
+        });
+        assert!(wait_for(&mut h, |h| {
+            h.conductor.publications[0]
+                .udp
+                .as_ref()
+                .is_some_and(|udp| udp.connected)
+        }));
+        assert_eq!(
+            h.counter(cavalry_shm::counters::generated::SENDER_STATUS_MESSAGES_REJECTED),
+            0
+        );
+        // Every message from the first, in order, with no NAK asked or answered.
+        let positions =
+            cavalry_shm::log::Positions::new(setup.initial_term_id, spec::UDP_TERM_LENGTH);
+        let mut got = 0u64;
+        while got < 1_000 {
+            let now = now_nanos();
+            h.recorder.duty_cycle(now);
+            h.sender.duty_cycle(now);
+            h.conductor.duty_cycle(now);
+            if let Some(frames) = next_frames(&mut receiver) {
+                for (header, body) in &frames {
+                    assert_eq!(body.as_slice(), got.to_le_bytes().as_slice());
+                    assert_eq!(
+                        positions.position(header.term_id(), header.term_offset() as u32),
+                        got as i64 * 64
+                    );
+                    got += 1;
+                }
+                // The receiver has read them: room for more.
+                receiver.send_status_message(&StatusMessage {
+                    flags: 0,
+                    session_id: setup.session_id,
+                    stream_id: 7,
+                    consumption_term_id: setup.active_term_id,
+                    consumption_term_offset: (got * 64) as i32,
+                    receiver_window_length: 131072,
+                    receiver_id: 9,
+                    group_tag: None,
+                });
+            }
+            assert!(Instant::now() < deadline, "the receiver got {got} of 1000");
+        }
+        assert_eq!(h.counter(SENDER_BYTES_SENT), alone);
+        assert_eq!(unsent(&h), 0, "what was passed is sent after all");
+        assert_eq!(
+            h.counter(cavalry_shm::counters::generated::SENDER_NAKS_RECEIVED),
+            0
+        );
+        assert_eq!(
+            h.sender.positions_of(2).map(|(position, _)| position),
+            Some(alone)
+        );
     }
 
     /// A recording does not connect a `cavalry:udp` publication whose channel names no

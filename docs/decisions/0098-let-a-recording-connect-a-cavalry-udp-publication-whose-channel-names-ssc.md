@@ -41,14 +41,17 @@ already holds its publisher back.
 
 A `cavalry:udp` publication's channel may name `ssc=true` or `ssc=false`, Aeron's key
 and Aeron's meaning, with the driver's recorder as the one spy. Under `ssc=true` a live
-recording of the publication connects it whether or not a receiver answers. While it
-has a live recording and no receiver answers, the publication is alone with its
-recording: the sender sends no data frame of it, moves its sender position up to the
-recording's position on every duty cycle, and counts the bytes it passed in
-`sender.bytes_unsent`; the publisher's limit is then a window past the recorder, as
-over `cavalry:ipc`. A receiver that joins is given a setup frame at the sender
-position, and what was published before is in the recording, for a replay. `ssc=false`
-is the default and is today's behaviour, byte for byte. The key is a publication's: a
+recording of the publication connects it whether or not a receiver answers; one that
+is starting or whose stop has been asked connects nothing. While it has a live
+recording and no receiver answers, the publication is alone with its recording: the
+sender sends no data frame of it, moves its sender position up to the recording's
+position on every duty cycle, and counts the bytes it passed in `sender.bytes_unsent`;
+the publisher's limit is then a window past the recorder, as over `cavalry:ipc`. A
+receiver joins where its own image begins: when its first status message names a
+position at most a term behind the sender position, the sender goes back to it and
+sends from there, and one further behind is rejected. What a receiver's image begins
+after is in the recording, for a replay. `ssc=false` is the default and is today's
+behaviour, byte for byte. The key is a publication's: a
 subscription's, a destination's and a replay's channel refuse it, a recording's reads
 past it, and a second `add publication` that would join a live publication under
 another `ssc` is refused. `spec/udp.md` goes to version 3 and `spec/client-protocol.md`
@@ -78,6 +81,19 @@ to version 9; no frame changes.
   recording does not hold yet, and the replay it asks for to fill what it missed could
   not reach its join position until the recorder had caught up. At the recorder's
   position, everything before a join is already in the recording.
+- **Leave what a joining receiver missed to its NAKs.** The sender would stay where
+  the recorder is, accept the receiver's status message within half a term, and
+  answer its NAKs from the resend window, as it treats any receiver it has run ahead
+  of. It was built first, and lost in review before it was pushed. A setup frame names
+  a position the sender has left by the time the status message returns, so every
+  join began with a gap to NAK, one NAK at a time, and a publisher that wrote more
+  than half a term in that time was never joined at all. Going back costs nothing:
+  the term behind the sender position is never cleaned, and nothing in it was sent.
+- **Connect on any recording of the publication, starting or stopping included, as
+  `cavalry:ipc` does.** Lost: a recording that is starting may fail, and one that is
+  stopping ends at what the recorder has written. A message accepted on the strength
+  of either could be in no recording and at no receiver, with the publisher told it
+  was taken. Over UDP the publication waits until the recording is live.
 - **A name of Cavalry's own for the key.** Lost: `ssc` is what an Aeron user searches
   for, and the concept matches. The glossary says what a spy is here.
 
@@ -102,6 +118,14 @@ to version 9; no frame changes.
   told. One within half a term is accepted by the sender, since its status message
   lies in the window, and NAKs what it missed, which lies in the resend window: both
   are half a term.
+- **Going back is safe.** The conductor cleans a `cavalry:udp` log up to a term length
+  behind the sender position and no further, from a position the sender itself
+  stored, so the term behind the sender position is whole. A publisher is at most a
+  window, half a term, ahead of where the sender stood, so the log holds at most a
+  term and a half after the position gone back to, within its three terms. Test:
+  `the_sender_goes_back_for_a_receiver_that_joins_within_a_term`, 1,000 messages
+  passed alone, then every one of them sent in order from position 0, with no NAK and
+  `sender.bytes_unsent` back at 0.
 - **The recorder's position is a safe place to stand.** The recorder takes whole
   committed frames, so `recording.position` is a frame boundary at most the producer
   position. A setup frame there names the start of a frame.
@@ -117,9 +141,21 @@ to version 9; no frame changes.
 - A program that records a `cavalry:udp` stream and names `ssc=true` appends with no
   receiver, and needs no subscription to its own stream: one log fewer per driver.
 - A publisher on such a channel no longer learns from `not connected` that nobody
-  receives. `sender.bytes_unsent` and a `cavalry doctor` note say when a publication is
-  alone with its recording; `udp-publication-not-connected` names the key as what to do
-  when a recorded stream should take messages with no receiver.
+  receives. `sender.bytes_unsent`, a gauge of the publication's own, and a `cavalry
+  doctor` note say when a publication is alone with its recording;
+  `udp-publication-not-connected` names the key as what to do when a recorded stream
+  should take messages with no receiver.
+- The connection a publisher reads has two sources and no counter of its own:
+  `publication.connected` and `publication.disconnected` count the receiver's side, as
+  before, and `recording.started` and `recording.stopped` the recording's. A static
+  counter for it would be the first with an id of 128 or more, which the 36 tests and
+  the bench that create a counters file of 128 records do not hold.
+- A receiver cannot join while the publisher writes more than a term between the
+  setup frame and the receiver's status message: it is rejected, its image times out,
+  and it tries again. With the 16 MiB term that takes a publisher that writes 16 MiB
+  to its recording in the time one join takes. A channel that names a short term
+  (card 272) meets it sooner, and that card's decision says what term a stream of a
+  given rate needs.
 - The sender holds one more counter per such publication, the recording's position,
   given and taken away by the conductor. The conductor frees a stopped recording's
   position counter only once the sender has answered that it reads it no more, as it

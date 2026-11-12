@@ -358,7 +358,8 @@ went away holds the stream back for the timeout and no longer; a status message 
 receiver the full table does not hold is accepted for the connection below and not
 tracked, counted in `sender.flow_control_receivers_full`. The entries now are the gauge
 `sender.flow_control_receivers`, keyed as `sender.limit` is. The sender limit never
-falls, under either strategy. A status message outside the window is counted in
+falls, under either strategy, but when a receiver joins a publication that is alone
+with its recording, below. A status message outside the window is counted in
 `sender.status_messages_rejected` and ignored, and so is one whose consumption term
 offset is not below the publication's own term length; a NAK whose term offset is not
 below the publication's term length, or whose range, the offset plus the length, runs
@@ -390,35 +391,46 @@ where the limit rests while the publication is not connected nor where the log i
 unblocked: both stay the sender position.
 
 A publication whose channel names `ssc=true` is connected by its recording as well as
-by a receiver. While a recording of it is live, the conductor keeps the publication
-connected whether or not a receiver answers: `publication.limit` at the consumer
-position above plus the publication window, and `is connected` to match. When the
-recording stops and no receiver answers, the publication is not connected, as any
-publication is. While such a publication has a live recording and no receiver answers,
-from its creation to its first status message without the send-setup flag and from
-each connection timeout to the next such status message, it is *alone with its
-recording*: the sender sends no data frame of it, and on every duty cycle moves its
-sender position up to the recording's position, `recording.position`, when that is
-ahead, as it advances past a burst to no destination, and counts the bytes passed in
-`sender.bytes_unsent`. Its setup frames before the first status message and its
+by a receiver. While a recording of it is live, the recorder writing it and no stop
+asked of it, the conductor keeps the publication connected whether or not a receiver
+answers: `publication.limit` at the consumer position above plus the publication
+window, and `is connected` to match. A recording that is starting, which may yet fail,
+and one whose stop has been asked, which ends at what the recorder has written,
+connect nothing, so that no message is accepted that could be in no recording and at
+no receiver. From the stop's asking, with no receiver answering, the publication is
+not connected, as any publication is.
+
+While such a publication has a live recording and no receiver answers, before its
+first status message without the send-setup flag and whenever the connection timeout
+has passed since the last, it is *alone with its recording*: the sender sends no data
+frame of it, and on every duty cycle moves its sender position up to the recording's
+position, `recording.position`, when that is ahead, as it advances past a burst to no
+destination; `sender.bytes_unsent` counts the bytes passed, and the sender limit
+stands where it stood. Its setup frames before the first status message and its
 heartbeats after it go on, at the sender position. The recording's position is a frame
 boundary at most the producer position, so the sender position stays one; and since
 the consumer position is then the sender position, which follows the recorder, a
 publisher alone with its recording is back-pressured one window past its recorder, as
 over `cavalry:ipc`.
 
-Nothing a publication sends while it is alone with its recording is counted as sent,
-and no receiver is told it was. A receiver that joins is given a setup frame at the
-sender position, as a subscription joins at the producer's position: its image begins
-there, and what was published before is in the recording, for a replay
-(`spec/client-protocol.md`, "Commands", start replay). A receiver whose image is older
-than the publication's time alone is treated as any receiver whose sender has moved
-on. Within half a term of the sender position its status message is accepted, and it
-NAKs what it missed, which the resend window holds. Further behind, its status message
-is rejected and every data frame and heartbeat it is sent is an over-run, which is no
-activity ("The receiver", steps 2 and 5): the image times out, its subscribers are
-told with `unavailable image`, and after the cool-down a new image joins at the sender
-position. No image is left waiting for frames that will not come (ADR 0098).
+A receiver joins such a publication where its own image begins. A status message
+without the send-setup flag that arrives while the publication is alone names the
+receiver's position: where a setup frame put its image, or where an earlier connection
+left it. When that position is at most a term length behind the sender position, the
+sender sets its sender position back to it, takes the bytes it goes back over off
+`sender.bytes_unsent`, and sets the sender limit anew, to that position plus the
+receiver's window; then the status message connects the publication as any does. The
+receiver is sent every frame from its own position on and has nothing to NAK: the
+term behind the sender position is never cleaned, and nothing in it was sent. A status
+message whose position is further behind, or ahead of the sender position, is rejected
+and counted in `sender.status_messages_rejected`, since the frames it would need are
+no longer in the log. Every heartbeat that receiver is then sent is an over-run, which
+is no activity ("The receiver", steps 2 and 5): its image times out, its subscribers
+are told with `unavailable image`, and after the cool-down a new image joins at the
+sender position. So no image is left waiting for frames that will not come, nothing is
+counted as sent that no receiver took, and what a receiver's image begins after is in
+the recording, for a replay (`spec/client-protocol.md`, "Commands", start replay; ADR
+0098).
 After the publication is closed
 it lingers for the linger timeout, sending heartbeats with EOS and answering NAKs; then
 its log is removed. On a channel with an endpoint a status message with the
@@ -670,7 +682,7 @@ lands: the sender's and the endpoint's rows, the publication's connection and
 | `sender.flow_control_receivers_timed_out` | a receiver is dropped from a `min` publication's table for no status message within the flow control receiver timeout; one dropped because its last status message carried end of stream is not counted (ADR 0054) |
 | `sender.flow_control_receivers_full` | a status message from a receiver a `min` publication's full table does not hold: accepted, not tracked |
 | `sender.position`, `sender.limit`, `sender.flow_control_receivers` | keyed as `publication.position` is: the sender position and the sender limit of one publication, and the receivers in its `min` table now, a closed publication's ended receivers among them until the linger ends (ADR 0056), 0 under `max` |
-| `sender.bytes_unsent` | keyed as `publication.position` is, for a publication whose channel names `ssc=true` and no other: the bytes its sender position passed while it was alone with its recording, which went to the recording and to no receiver (ADR 0098) |
+| `sender.bytes_unsent` | keyed as `publication.position` is, for a publication whose channel names `ssc=true` and no other, a gauge: the bytes that went to its recording and to no receiver, what its sender position passed while it was alone with its recording less what it went back over for a receiver that joined (ADR 0098) |
 | `receiver.bytes_received`, `receiver.frames_received` | a data or padding frame is accepted: the bytes as they came off the wire, 32 for a padding frame, and one frame each |
 | `receiver.setups_received`, `receiver.setups_unwanted`, `receiver.setups_elicited` | a setup frame arrives; one names a stream nobody wants; a status message asked a sender for one |
 | `receiver.heartbeats_received` | a heartbeat is accepted |

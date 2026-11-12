@@ -1403,10 +1403,10 @@ doctor = "A member that joined its leader's term behind the leader's log catches
 [[counter]]
 id = 139
 name = "sender.bytes_unsent"
-kind = "counter"
+kind = "gauge"
 scope = "instance"
-doc = "Bytes the sender position of one cavalry:udp publication passed without sending, while the publication was alone with its recording: its channel names ssc=true, a recording of it is live and no receiver answers. They went to the recording and to no receiver. Allocated for a publication whose channel names ssc=true and no other; key and label as sender.position (spec/udp.md, The sender; ADR 0098)."
-doctor = "A publication on a channel that names ssc=true took messages while no receiver answered: they are in its recording, and a receiver that joins later joins at the sender position and replays the recording for what came before. Nothing was lost. If receivers were expected, `udp-publication-recorded-alone` names the publication and its destinations."
+doc = "Bytes of one cavalry:udp publication that went to its recording and to no receiver: what its sender position passed while the publication was alone with its recording, its channel naming ssc=true, a recording of it live and no receiver answering, less what the sender position went back over when a receiver joined. Allocated for a publication whose channel names ssc=true and no other; key and label as sender.position (spec/udp.md, The sender; ADR 0098)."
+doctor = "A publication on a channel that names ssc=true took messages while no receiver answered: they are in its recording, and a receiver that joins later is sent the stream from its own position, at most a term back, and replays the recording for what came before. Nothing was lost. If receivers were expected, check that a subscription on the stream exists on each destination's host and that its driver receives on that port."
 
 # A cluster member's role (spec/cluster.md, "Roles and the election"; ADR 0052, feature
 # 3). A member whose leader is appointed becomes the leader from follower, and no
