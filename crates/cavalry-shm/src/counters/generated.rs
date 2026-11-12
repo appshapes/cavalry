@@ -188,7 +188,7 @@ pub const SENDER_RTT_REPLIES_SENT: CounterId = CounterId(59);
 /// `sender.position`, a instance gauge: The sender position of one cavalry:udp publication: the next byte the sender puts on the wire, stored by the sender with a release store after each burst; key as publication.position; label text: publication.position's three and the endpoint's registration id in decimal, space-separated, so that doctor names the endpoint.
 pub const SENDER_POSITION: CounterId = CounterId(60);
 
-/// `sender.limit`, a instance gauge: The sender limit of one cavalry:udp publication: the consumption position of the last accepted status message plus its receiver window length, never lowered; key and label as sender.position.
+/// `sender.limit`, a instance gauge: The sender limit of one cavalry:udp publication: the consumption position of the last accepted status message plus its receiver window length, never lowered but for one case: a receiver that joins a publication alone with its recording, under ssc=true, has the limit set anew from its own position, which is behind the sender position the publication had moved to (spec/udp.md, The sender; ADR 0098); key and label as sender.position.
 pub const SENDER_LIMIT: CounterId = CounterId(61);
 
 /// `publication.connected`, a static counter: cavalry:udp publications whose first status message without the send-setup flag arrived: the publication's limit rises to the consumer position plus the publication window from here, the consumer position being the sender position, or the recorder's when the publication is recorded and its recorder is behind (spec/udp.md, The sender).
@@ -920,7 +920,7 @@ pub const COUNTERS: &[CounterDef] = &[
         name: "sender.limit",
         kind: Kind::Gauge,
         scope: Scope::Instance,
-        doc: "The sender limit of one cavalry:udp publication: the consumption position of the last accepted status message plus its receiver window length, never lowered; key and label as sender.position.",
+        doc: "The sender limit of one cavalry:udp publication: the consumption position of the last accepted status message plus its receiver window length, never lowered but for one case: a receiver that joins a publication alone with its recording, under ssc=true, has the limit set anew from its own position, which is behind the sender position the publication had moved to (spec/udp.md, The sender; ADR 0098); key and label as sender.position.",
         doctor: "A sender.limit that stays at 0 is a publication no receiver has answered: see sender.setups_sent; one that stops rising while sender.position reaches it is a receiver whose subscriber is slow.",
     },
     CounterDef {
