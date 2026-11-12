@@ -52,8 +52,8 @@ is Archive's `startRecording` ([glossary](../glossary.md)).
    first segment file of 128 MiB (sparse until written), and `0.idx`, the time index.
    The publisher's limit respects the recording's position, so a disk slower than the
    stream back-pressures the publisher and never loses a byte; `doctor` says
-   `recording-stalled` when the recorder is at least half the publication's window
-   behind.
+   `recording-stalled` when the publisher has used most of the room its limit gives it
+   past the recorder, which is when the recorder holds it or is about to.
 
 3. Stop it:
 

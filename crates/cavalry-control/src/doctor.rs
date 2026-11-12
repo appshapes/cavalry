@@ -25,7 +25,7 @@ use std::net::{Ipv4Addr, ToSocketAddrs};
 use std::path::{Path, PathBuf};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
-use cavalry_driver::{IdleStrategy, spec};
+use cavalry_driver::IdleStrategy;
 use cavalry_log::catalog::CatalogReader;
 use cavalry_log::layout::{Descriptor, State as SlotState, locate};
 use cavalry_proto::cluster::{
@@ -40,11 +40,11 @@ use cavalry_shm::counters::generated::{
     CHANNEL_DESTINATIONS, CHANNEL_IMAGES, CHANNEL_PUBLICATIONS, CHANNEL_SOCKET_RCVBUF,
     CHANNEL_SOCKET_SNDBUF, CHANNEL_STATUS, CONDUCTOR_IDLE_STRATEGY as IDLE_STRATEGY_COUNTER,
     COUNTERS, COUNTERS_ALLOCATED, COUNTERS_ALLOCATION_FAILED, IMAGE_CREATED, IMAGE_ENDED,
-    IMAGE_HWM_POSITION, IMAGE_REBUILD_POSITION, PUBLICATION_POSITION, RECORDING_ARMED,
-    RECORDING_ARMED_DROPPED, RECORDING_ARMED_FAILED, RECORDING_ARMED_STARTED, RECORDING_BYTES,
-    RECORDING_INVALIDATED, RECORDING_POSITION, RECORDING_SYNCED_POSITION, RECORDING_WRITE_FAILED,
-    SENDER_FLOW_CONTROL_RECEIVERS, SENDER_FLOW_CONTROL_RECEIVERS_FULL,
-    SENDER_FLOW_CONTROL_RECEIVERS_TIMED_OUT, SENDER_LIMIT,
+    IMAGE_HWM_POSITION, IMAGE_REBUILD_POSITION, PUBLICATION_LIMIT, PUBLICATION_POSITION,
+    RECORDING_ARMED, RECORDING_ARMED_DROPPED, RECORDING_ARMED_FAILED, RECORDING_ARMED_STARTED,
+    RECORDING_BYTES, RECORDING_INVALIDATED, RECORDING_POSITION, RECORDING_SYNCED_POSITION,
+    RECORDING_WRITE_FAILED, SENDER_FLOW_CONTROL_RECEIVERS, SENDER_FLOW_CONTROL_RECEIVERS_FULL,
+    SENDER_FLOW_CONTROL_RECEIVERS_TIMED_OUT, SENDER_LIMIT, SENDER_POSITION, SUBSCRIPTION_POSITION,
 };
 use cavalry_shm::counters::generated::{
     CLUSTER_APPEND_POSITION, CLUSTER_APPOINTED_LEADER_BEHIND, CLUSTER_COMMIT_POSITION,
@@ -297,9 +297,9 @@ pub fn examine(dir: &Path) -> Report {
 /// the `log.dir` key's check), under a tenth of its filesystem free with the purge that
 /// frees the most (`log-directory-space`), the catalog slots recovery set to invalid,
 /// named (`recording-invalid`), every recording's two positions from the counters file,
-/// with a recorder half its publication's window behind its publisher
-/// (`recording-stalled`) and failed
-/// writes (`recording-write-failed`) as findings (ADR 0025, ADR 0097), and a recording over half
+/// with a recorder that holds its publisher, or is about to (`recording-stalled`), and
+/// failed
+/// writes (`recording-write-failed`) as findings (ADR 0025, ADR 0100), and a recording over half
 /// its filesystem, live by its gauge or stopped by its descriptor
 /// (`recording-over-half`, ADR 0031).
 pub fn examine_with(dir: &Path, log_dir: Option<&Path>) -> Report {
@@ -2257,21 +2257,24 @@ struct RecordingCounters {
 }
 
 /// The recordings: every `recording.position` counter with its `recording.synced_position`,
-/// listed; a recorder at least half its publication's window behind its publisher
-/// (`recording-stalled`); writes that failed (`recording-write-failed`); and the catalog
-/// slots recovery set to invalid, named from the catalog when the log directory is
-/// known (`recording-invalid`) (`spec/client-protocol.md`, "Commands"; ADR 0025).
+/// listed; a recorder that holds its publisher, or is about to (`recording-stalled`);
+/// writes that failed (`recording-write-failed`); and the catalog slots recovery set to
+/// invalid, named from the catalog when the log directory is known
+/// (`recording-invalid`) (`spec/client-protocol.md`, "Commands"; ADR 0025).
 ///
-/// The window is the publication's own, half its term: the `cavalry:ipc` window, or the
-/// `cavalry:udp` one for a publication the sender sends, which is one with a
-/// `sender.limit` counter under its key (`spec/udp.md`, "The sender"; ADR 0097). Half of
-/// it is the threshold because a publisher held by its recorder is rarely a whole
-/// window ahead: the driver raises the limit in steps of an eighth of the window, so
-/// the limit stands up to an eighth short of the recorder's position plus the window,
-/// and the publisher stops up to a message short of the limit, a message being at most
-/// a quarter of the window (`spec/log-buffer.md`, "The driver", "Claim, commit and
-/// abort"). A held publisher is therefore at least five eighths of the window ahead,
-/// and a recorder that keeps up is within the bytes of 50 µs (ADR 0084).
+/// `recording-stalled` reads no window of its own (ADR 0100). The driver keeps a
+/// recorded publication's limit one publication window past its slowest reader, so
+/// when the recorder is that reader, `publication.limit` less `recording.position` is
+/// the room the recorder gives the publisher, whatever the log's term: it is the
+/// window, or up to an eighth short of it, since the limit is raised in steps of an
+/// eighth. The publisher is refused when the next message does not fit in that room,
+/// and a message is at most a quarter of the window, so a publisher held by its
+/// recorder has used more than five sevenths of the room. The check warns from there.
+/// It judges a recording only when it can tell which publication it reads: one
+/// publication on this driver with the recording's session id and stream id, and no
+/// image with them, since a recording's label names neither. And it leaves a recording
+/// alone when another reader of the publication, its sender or a subscriber, is
+/// further behind than the recorder: that reader holds the publisher then.
 fn recording_checks(
     reader: &CountersReader,
     log_dir: Option<&Path>,
@@ -2284,9 +2287,15 @@ fn recording_checks(
     // position, keyed by correlation id, session id and stream id.
     let mut recordings: Vec<RecordingCounters> = Vec::new();
     let mut synced: Vec<([u8; 8], i64)> = Vec::new();
-    let mut publications: Vec<(i32, i32, i64)> = Vec::new();
-    // The publications the sender sends, `cavalry:udp`, by session id and stream id.
-    let mut sent: Vec<(i32, i32)> = Vec::new();
+    // By key, 16 bytes: the correlation id, the session id and the stream id. A
+    // publication's position and limit, and its other readers' positions, its sender's
+    // and its subscribers', are under the publication's key; an image's high-water
+    // mark is under the image's, with the stream's session id and stream id.
+    let mut publications: Vec<([u8; 16], i64)> = Vec::new();
+    let mut limits: Vec<([u8; 16], i64)> = Vec::new();
+    let mut readers: Vec<([u8; 16], i64)> = Vec::new();
+    let mut images: Vec<[u8; 8]> = Vec::new();
+    let key_of = |key: &[u8]| -> Option<[u8; 16]> { key.get(..16)?.try_into().ok() };
     let mut live_bytes: Vec<(i64, i64)> = Vec::new();
     for id in 0..capacity {
         let Some(fields) = record(id) else { continue };
@@ -2321,13 +2330,23 @@ fn recording_checks(
             rid.copy_from_slice(&key[..8]);
             synced.push((rid, value));
         } else if fields.type_id() == PUBLICATION_POSITION.0 {
-            let session = i32::from_le_bytes([key[8], key[9], key[10], key[11]]);
-            let stream = i32::from_le_bytes([key[12], key[13], key[14], key[15]]);
-            publications.push((session, stream, value));
-        } else if fields.type_id() == SENDER_LIMIT.0 {
-            let session = i32::from_le_bytes([key[8], key[9], key[10], key[11]]);
-            let stream = i32::from_le_bytes([key[12], key[13], key[14], key[15]]);
-            sent.push((session, stream));
+            if let Some(key) = key_of(key) {
+                publications.push((key, value));
+            }
+        } else if fields.type_id() == PUBLICATION_LIMIT.0 {
+            if let Some(key) = key_of(key) {
+                limits.push((key, value));
+            }
+        } else if fields.type_id() == SENDER_POSITION.0
+            || fields.type_id() == SUBSCRIPTION_POSITION.0
+        {
+            if let Some(key) = key_of(key) {
+                readers.push((key, value));
+            }
+        } else if fields.type_id() == IMAGE_HWM_POSITION.0 {
+            if let Some(stream) = key.get(8..16).and_then(|tail| tail.try_into().ok()) {
+                images.push(stream);
+            }
         } else if fields.type_id() == RECORDING_BYTES.0 {
             // The gauge's label is the position's: the name, then the recording id.
             if let Some(rid) = fields.label().split_whitespace().nth(1)
@@ -2359,34 +2378,44 @@ fn recording_checks(
             ),
             doc: DOC_RECORDING_COMMANDS,
         });
-        let publisher = publications
-            .iter()
-            .find(|(session, stream, _)| {
-                *session == recording.session_id && *stream == recording.stream_id
-            })
-            .map(|(_, _, position)| *position);
-        let window = if sent.iter().any(|(session, stream)| {
-            *session == recording.session_id && *stream == recording.stream_id
-        }) {
-            i64::from(spec::UDP_PUBLICATION_WINDOW)
-        } else {
-            i64::from(spec::IPC_PUBLICATION_WINDOW)
+        // The one publication the recording can be reading, or none that the counters
+        // name: see the function's comment.
+        let mut stream = [0u8; 8];
+        stream[..4].copy_from_slice(&recording.session_id.to_le_bytes());
+        stream[4..].copy_from_slice(&recording.stream_id.to_le_bytes());
+        let mut on_stream = publications.iter().filter(|(key, _)| key[8..] == stream);
+        let (Some((key, publisher)), None) = (on_stream.next(), on_stream.next()) else {
+            continue;
         };
-        if let Some(publisher) = publisher
-            && publisher.saturating_sub(recording.position) >= window / 2
-        {
+        if images.contains(&stream) {
+            continue;
+        }
+        let Some(limit) = limits
+            .iter()
+            .find(|(limit_key, _)| limit_key == key)
+            .map(|(_, limit)| *limit)
+        else {
+            continue;
+        };
+        let slower_reader = readers
+            .iter()
+            .any(|(reader_key, position)| reader_key == key && *position < recording.position);
+        let room = limit.saturating_sub(recording.position);
+        let behind = publisher.saturating_sub(recording.position);
+        if !slower_reader && room > 0 && behind.saturating_mul(7) >= room.saturating_mul(5) {
             findings.push(Finding {
                 check: "recording-stalled",
                 level: Level::Warn,
                 message: format!(
-                    "recording {} is {} bytes behind its publisher, at least half its \
-                     publication window of {window} bytes: the recorder's disk is slow or \
-                     failing, and the publisher is back-pressured once it is a window ahead \
-                     of the recorder, until the recorder catches up; check \
-                     recording.write_failed and the log directory's disk, and `recording \
-                     stopped` if it gives up",
-                    recording.recording_id,
-                    publisher - recording.position
+                    "recording {} is {behind} bytes behind its publisher, which has used \
+                     them of the {room} bytes its limit gives it past the recorder: the \
+                     publisher is back-pressured when a message no longer fits in what is \
+                     left, and may be now; a recorder that stays this far behind is on a \
+                     slow or failing disk, so check recording.write_failed and the log \
+                     directory's disk, and `recording stopped` if it gives up, and run \
+                     doctor again, since a recorder that has caught up by then was waiting \
+                     for a sync",
+                    recording.recording_id
                 ),
                 doc: DOC_RECORDING_COMMANDS,
             });
@@ -3780,35 +3809,80 @@ mod tests {
         );
     }
 
-    /// Every recording is listed with its two positions, and a recorder at least half
-    /// a publication window behind its publisher is `recording-stalled`.
+    /// A counters file with the counters a recorded publication has, for the tests of
+    /// `recording-stalled`: its key is its correlation id, its session id and its
+    /// stream id, and its recording's label names the last two.
+    struct Recorded {
+        position: cavalry_shm::counters::Counter,
+        limit: cavalry_shm::counters::Counter,
+        recorder: cavalry_shm::counters::Counter,
+    }
+
+    fn position_key(correlation: i64, session: i32, stream: i32) -> [u8; 16] {
+        let mut key = [0u8; 16];
+        key[..8].copy_from_slice(&correlation.to_le_bytes());
+        key[8..12].copy_from_slice(&session.to_le_bytes());
+        key[12..].copy_from_slice(&stream.to_le_bytes());
+        key
+    }
+
+    fn recorded(
+        counters: &mut CountersFile,
+        correlation: i64,
+        session: i32,
+        stream: i32,
+        recording: i64,
+    ) -> Recorded {
+        let key = position_key(correlation, session, stream);
+        let label = |name: &str| format!("{name} {correlation} {session} {stream}");
+        Recorded {
+            position: counters
+                .allocate(PUBLICATION_POSITION, &key, &label("publication.position"))
+                .expect("the publication's position"),
+            limit: counters
+                .allocate(PUBLICATION_LIMIT, &key, &label("publication.limit"))
+                .expect("the publication's limit"),
+            recorder: counters
+                .allocate(
+                    RECORDING_POSITION,
+                    &recording.to_le_bytes(),
+                    &format!("recording.position {recording} {session} {stream}"),
+                )
+                .expect("the recording's position"),
+        }
+    }
+
+    fn stalled(report: &Report) -> Vec<String> {
+        report
+            .findings
+            .iter()
+            .filter(|finding| finding.check == "recording-stalled")
+            .map(|finding| finding.message.clone())
+            .collect()
+    }
+
+    /// Every recording is listed with its two positions, and a recorder that holds its
+    /// publisher is `recording-stalled`: the publisher has used the room its limit
+    /// gives it past the recorder, here a `cavalry:ipc` window of 32 MiB less a frame.
     #[test]
-    fn recordings_are_listed_and_a_recorder_a_window_behind_warns() {
+    fn recordings_are_listed_and_a_recorder_that_holds_its_publisher_warns() {
         let dir = TestDir::new("recordings");
         let mut counters = CountersFile::create(&dir.0, 128).expect("counters");
         let ring = CommandRing::create(&dir.0, 4096).expect("ring");
         let _consumer = ring.consumer(Duration::from_secs(10)).expect("consumer");
-        let mut key = [0u8; 16];
-        key[..8].copy_from_slice(&7i64.to_le_bytes());
-        key[8..12].copy_from_slice(&(-5i32).to_le_bytes());
-        key[12..].copy_from_slice(&1001i32.to_le_bytes());
-        let publisher = counters
-            .allocate(PUBLICATION_POSITION, &key, "publication.position 7 -5 1001")
-            .expect("the publication's position");
-        publisher.store_release(40 * 1024 * 1024);
-        let rid = 3i64.to_le_bytes();
-        let position = counters
-            .allocate(RECORDING_POSITION, &rid, "recording.position 3 -5 1001")
-            .expect("the recording's position");
+        let publication = recorded(&mut counters, 7, -5, 1001, 3);
+        let mib = 1024 * 1024;
+        publication.recorder.store_release(2 * mib);
+        publication.limit.store_release(34 * mib);
+        publication.position.store_release(34 * mib - 64);
         let synced = counters
             .allocate(
                 RECORDING_SYNCED_POSITION,
-                &rid,
+                &3i64.to_le_bytes(),
                 "recording.synced_position 3 -5 1001",
             )
             .expect("the recording's synced position");
-        position.store_release(2 * 1024 * 1024);
-        synced.store_release(1024 * 1024);
+        synced.store_release(mib);
 
         let report = examine(&dir.0);
         let listed = finding(&report, "recording");
@@ -3817,125 +3891,139 @@ mod tests {
             listed.message,
             "recording 3 of stream 1001 session -5: position 2097152, synced 1048576"
         );
-        let stalled = finding(&report, "recording-stalled");
-        assert_eq!(stalled.level, Level::Warn);
+        let found = finding(&report, "recording-stalled");
+        assert_eq!(found.level, Level::Warn);
         assert!(
-            stalled
-                .message
-                .starts_with("recording 3 is 39845888 bytes behind"),
+            found.message.starts_with(
+                "recording 3 is 33554368 bytes behind its publisher, which has used them \
+                 of the 33554432 bytes its limit gives it past the recorder"
+            ),
             "{}",
-            stalled.message
+            found.message
         );
 
-        position.store_release(40 * 1024 * 1024);
+        publication.recorder.store_release(34 * mib - 64);
         let report = examine(&dir.0);
-        assert!(
-            !report
-                .findings
-                .iter()
-                .any(|f| f.check == "recording-stalled"),
-            "caught up: {report}"
-        );
+        assert!(stalled(&report).is_empty(), "caught up: {report}");
     }
 
-    /// The window `recording-stalled` holds a recorder against is its publication's
-    /// own, and half of it is the threshold (ADR 0097). A `cavalry:udp` publication,
-    /// one with a `sender.limit` under its key, held by its recorder stands where the
-    /// driver leaves it: the limit up to an eighth of the 8 MiB window short of the
-    /// recorder's position plus the window, and the publisher a message short of the
-    /// limit. The same lag on a `cavalry:ipc` publication, whose window is 32 MiB, is
-    /// a recorder that keeps up; and a lag just under half the window warns on neither.
+    /// `recording-stalled` reads the room from the publication's own limit, so it
+    /// needs no window (ADR 0100). A `cavalry:udp` publication held by its recorder
+    /// stands as the driver leaves it: the limit an eighth of its 8 MiB window short
+    /// of the recorder's position plus the window, the publisher a frame short of the
+    /// limit, the sender ahead of the recorder. A log of another term reads the same
+    /// way. Under five sevenths of the room, nothing; and a reader further behind than
+    /// the recorder, a sender whose receivers are slow or a subscriber, is the one that
+    /// holds the publisher, so the recorder is not named.
     #[test]
-    fn a_recorder_is_held_against_its_publications_own_window() {
-        let dir = TestDir::new("recordings-udp-window");
+    fn a_held_publisher_is_read_from_its_limit_and_its_slowest_reader() {
+        let dir = TestDir::new("recordings-held");
         let mut counters = CountersFile::create(&dir.0, 128).expect("counters");
         let ring = CommandRing::create(&dir.0, 4096).expect("ring");
         let _consumer = ring.consumer(Duration::from_secs(10)).expect("consumer");
-        let key = |correlation: i64, session: i32, stream: i32| {
-            let mut key = [0u8; 16];
-            key[..8].copy_from_slice(&correlation.to_le_bytes());
-            key[8..12].copy_from_slice(&session.to_le_bytes());
-            key[12..].copy_from_slice(&stream.to_le_bytes());
-            key
-        };
-        // The cavalry:udp publication, session -5 on stream 1001, and its recording 3.
-        let udp = counters
-            .allocate(
-                PUBLICATION_POSITION,
-                &key(7, -5, 1001),
-                "publication.position 7 -5 1001",
-            )
-            .expect("the cavalry:udp publication's position");
-        counters
-            .allocate(SENDER_LIMIT, &key(7, -5, 1001), "sender.limit 7 -5 1001 9")
-            .expect("its sender limit");
-        let udp_recorder = counters
-            .allocate(
-                RECORDING_POSITION,
-                &3i64.to_le_bytes(),
-                "recording.position 3 -5 1001",
-            )
-            .expect("its recording's position");
-        // The cavalry:ipc publication, session -6 on stream 1002, and its recording 4.
-        let ipc = counters
-            .allocate(
-                PUBLICATION_POSITION,
-                &key(8, -6, 1002),
-                "publication.position 8 -6 1002",
-            )
-            .expect("the cavalry:ipc publication's position");
-        let ipc_recorder = counters
-            .allocate(
-                RECORDING_POSITION,
-                &4i64.to_le_bytes(),
-                "recording.position 4 -6 1002",
-            )
-            .expect("its recording's position");
-        let stalled = |report: &Report| -> Vec<String> {
-            report
-                .findings
-                .iter()
-                .filter(|finding| finding.check == "recording-stalled")
-                .map(|finding| finding.message.clone())
-                .collect()
-        };
-
-        // Both recorders at 1 MiB. The cavalry:udp publisher is held: its limit was last
-        // raised 1 MiB short of the recorder's position plus the 8 MiB window, and it
-        // stopped a 64-byte frame short of that. The cavalry:ipc publisher is as far
-        // ahead, which under its 32 MiB window is a recorder that keeps up.
         let mib = 1024 * 1024;
-        udp_recorder.store_release(mib);
-        ipc_recorder.store_release(mib);
-        udp.store_release(mib + 7 * mib - 64);
-        ipc.store_release(mib + 7 * mib - 64);
+        // A cavalry:udp publication, window 8 MiB, with its sender's position.
+        let udp = recorded(&mut counters, 7, -5, 1001, 3);
+        let sender = counters
+            .allocate(
+                SENDER_POSITION,
+                &position_key(7, -5, 1001),
+                "sender.position 7 -5 1001 9",
+            )
+            .expect("its sender position");
+        udp.recorder.store_release(mib);
+        udp.limit.store_release(mib + 7 * mib);
+        udp.position.store_release(mib + 7 * mib - 64);
+        sender.store_release(mib + 7 * mib - 64);
+        // A publication whose log has a 1 MiB term, window 512 KiB, held the same way.
+        let small = recorded(&mut counters, 8, -6, 1002, 4);
+        small.recorder.store_release(mib);
+        small.limit.store_release(mib + 512 * 1024);
+        small.position.store_release(mib + 512 * 1024 - 64);
         let found = stalled(&examine(&dir.0));
-        assert_eq!(found.len(), 1, "{found:?}");
+        assert_eq!(found.len(), 2, "{found:?}");
         assert!(
             found[0].starts_with(
-                "recording 3 is 7339968 bytes behind its publisher, at least half its \
-                 publication window of 8388608 bytes"
+                "recording 3 is 7339968 bytes behind its publisher, which has \
+                                  used them of the 7340032 bytes"
             ),
             "{}",
             found[0]
         );
-
-        // Just under half of each window: neither warns. At half: each does, and each
-        // names its own window.
-        udp.store_release(mib + 4 * mib - 32);
-        ipc.store_release(mib + 16 * mib - 32);
-        let found = stalled(&examine(&dir.0));
-        assert!(found.is_empty(), "{found:?}");
-        udp.store_release(mib + 4 * mib);
-        ipc.store_release(mib + 16 * mib);
-        let found = stalled(&examine(&dir.0));
-        assert_eq!(found.len(), 2, "{found:?}");
-        assert!(found[0].contains("window of 8388608 bytes"), "{}", found[0]);
         assert!(
-            found[1].contains("window of 33554432 bytes"),
+            found[1].starts_with(
+                "recording 4 is 524224 bytes behind its publisher, which has \
+                                  used them of the 524288 bytes"
+            ),
             "{}",
             found[1]
         );
+
+        // Just under five sevenths of the room: nothing. At it: the warning.
+        udp.position.store_release(mib + 5 * mib - 64);
+        small.position.store_release(mib + 64);
+        assert!(stalled(&examine(&dir.0)).is_empty());
+        udp.position.store_release(mib + 5 * mib);
+        assert_eq!(stalled(&examine(&dir.0)).len(), 1);
+
+        // The sender further behind than the recorder: its receivers hold the
+        // publisher, and the recorder keeps up.
+        udp.position.store_release(mib + 7 * mib - 64);
+        sender.store_release(mib - 64);
+        assert!(stalled(&examine(&dir.0)).is_empty());
+        // A subscriber further behind than the recorder, over cavalry:ipc, the same.
+        sender.store_release(mib + 7 * mib - 64);
+        small.position.store_release(mib + 512 * 1024 - 64);
+        assert_eq!(stalled(&examine(&dir.0)).len(), 2);
+        let subscriber = counters
+            .allocate(
+                SUBSCRIPTION_POSITION,
+                &position_key(8, -6, 1002),
+                "subscription.position 8 -6 1002",
+            )
+            .expect("a subscriber's position");
+        subscriber.store_release(mib - 64);
+        let found = stalled(&examine(&dir.0));
+        assert_eq!(found.len(), 1, "{found:?}");
+        assert!(found[0].starts_with("recording 3 "), "{}", found[0]);
+    }
+
+    /// A recording's label names a session id and a stream id and not what it reads, so
+    /// `recording-stalled` judges none it cannot place: two publications on this driver
+    /// with them, or an image with them, which a driver that receives its own stream
+    /// has (ADR 0100).
+    #[test]
+    fn a_recording_that_cannot_be_placed_is_not_judged() {
+        let dir = TestDir::new("recordings-unplaced");
+        let mut counters = CountersFile::create(&dir.0, 128).expect("counters");
+        let ring = CommandRing::create(&dir.0, 4096).expect("ring");
+        let _consumer = ring.consumer(Duration::from_secs(10)).expect("consumer");
+        let mib = 1024 * 1024;
+        let held = recorded(&mut counters, 7, -5, 1001, 3);
+        held.recorder.store_release(mib);
+        held.limit.store_release(9 * mib);
+        held.position.store_release(9 * mib - 64);
+        assert_eq!(stalled(&examine(&dir.0)).len(), 1, "placed: judged");
+        // An image of the same session and stream: the recording may be the image's.
+        let image = counters
+            .allocate(
+                IMAGE_HWM_POSITION,
+                &position_key(20, -5, 1001),
+                "image.hwm_position 20 -5 1001",
+            )
+            .expect("an image's high-water mark");
+        assert!(stalled(&examine(&dir.0)).is_empty());
+        counters.free(image.id(), 0).expect("freed");
+        assert_eq!(stalled(&examine(&dir.0)).len(), 1);
+        // A second publication with the session id and the stream id.
+        counters
+            .allocate(
+                PUBLICATION_POSITION,
+                &position_key(9, -5, 1001),
+                "publication.position 9 -5 1001",
+            )
+            .expect("another publication's position");
+        assert!(stalled(&examine(&dir.0)).is_empty());
     }
 
     /// `recording-write-failed` and `recording-invalid`, the latter naming the catalog's
