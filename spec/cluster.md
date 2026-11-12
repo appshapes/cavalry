@@ -164,7 +164,7 @@ that record and written before the vote or the request vote that raises it is se
 Aeron's node state file, so that a member votes once in a term across a restart; a
 raise on following a leader is kept in memory alone, since a member counts toward a
 term only once it has recorded that term, after which init takes the term from its
-record ("Messages during an election"). A member that elects reads both when it
+record ("Messages during an election"). A member reads both when it
 starts, in its first init and before it reads any message: its candidate term is the
 higher of the stored one and the highest term in its record, its log leadership term
 id is that highest term, and its append position is what its recordings hold. It
@@ -748,7 +748,10 @@ allows, as Aeron's clients do.
 
 **A member's start.** A member starts with a record that holds no term and a candidate
 term of −1; one whose record holds either does not start, and says why and what to do.
-A member that elects can take up the log it kept ("The log"; ADR 0089), but over a
+Nor does one whose log directory holds a recording of the log's stream and no record
+of terms: a member records a term before it records an entry, so the record was
+removed, and the votes the member cast with it (ADR 0104).
+A member can take up the log it kept ("The log"; ADR 0089), but over a
 driver its consensus module does not yet read back which recordings hold that log (ADR
 0100). Until it does, a member that stopped stays out, the cluster goes on with the
 members that remain while they are a quorum, and a cluster is brought back to its full
@@ -756,7 +759,12 @@ count by starting it again as a new cluster, every member on a new log directory
 member is never started alone on a new log directory beside the others. It would
 join and replicate the log, with no record of the votes it cast and none of the log it
 held, and with a member whose log is behind it is a quorum that can elect a leader
-without an entry the cluster committed (ADR 0104).
+without an entry the cluster committed (ADR 0104). The members of a cluster are all of
+a version that elects. A member of a version before ADR 0104, whose leader is the
+member with the lowest id, casts no vote and follows no leader a ballot made, and no
+message tells the two apart: since no member starts again on its log, a cluster of
+that version comes to this one as a new cluster, every member on this version and on
+a new log directory.
 
 **The leader's own entries.** Before the sessions of "Sessions" exist, the leader's own
 process appends for itself: once its election has closed it may append a session
@@ -999,7 +1007,7 @@ that a reader of a counters file knows which transition it saw.
 | `cluster.log_images_lost` | a follower whose image of its leader's log was no longer available, so that it held an election |
 | `cluster.elections_failed` | an election that failed in a state and began again at init |
 | `cluster.elections_closed` | an election that closed: leader ready to closed, the term's first entry appended, or follower ready to closed, the append position sent |
-| `cluster.election_steps` | a step of an election from one state to the next that neither begins it, fails it, closes it nor makes the member a leader: canvass to follower replay, follower replay to follower log init, follower log init to follower log await, follower log await to follower ready, leader log replication to leader replay, leader replay to leader init and leader init to leader ready; and, for a member that elects, canvass to nominate, and nominate, candidate ballot and follower ballot to follower replay, a candidate's step to follower replay also moving `cluster.role` from candidate to follower (ADR 0081); and canvass, nominate, candidate ballot and follower ballot to follower log replication, a candidate's step there moving `cluster.role` as its step to follower replay does, and follower log replication to canvass (ADR 0086); and follower replay to follower catch-up init, follower catch-up init to follower catch-up await, follower catch-up await to follower catch-up, follower catch-up to follower log init, and follower log init to follower ready for a member the catch-up left subscribed (ADR 0088) |
+| `cluster.election_steps` | a step of an election from one state to the next that neither begins it, fails it, closes it nor makes the member a leader: canvass to follower replay, follower replay to follower log init, follower log init to follower log await, follower log await to follower ready, leader log replication to leader replay, leader replay to leader init and leader init to leader ready; and canvass to nominate, and nominate, candidate ballot and follower ballot to follower replay, a candidate's step to follower replay also moving `cluster.role` from candidate to follower (ADR 0081); and canvass, nominate, candidate ballot and follower ballot to follower log replication, a candidate's step there moving `cluster.role` as its step to follower replay does, and follower log replication to canvass (ADR 0086); and follower replay to follower catch-up init, follower catch-up init to follower catch-up await, follower catch-up await to follower catch-up, follower catch-up to follower log init, and follower log init to follower ready for a member the catch-up left subscribed (ADR 0088) |
 | `cluster.leader_heartbeat_timeouts` | a follower that held an election for want of a leader's heartbeat |
 | `cluster.leader_step_downs` | a leader whose election had closed that held an election on a canvass position with either term, a request vote whose candidate term id or a commit position whose leadership term id above its own term |
 | `cluster.higher_terms_seen` | a follower whose election had closed that held an election on a request vote whose candidate term id or a commit position whose leadership term id above its own term: a term the cluster began without it (ADR 0082) |

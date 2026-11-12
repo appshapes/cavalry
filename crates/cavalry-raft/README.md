@@ -217,14 +217,15 @@ A member made with `Consensus::with_election` has every state of `spec/cluster.m
 election, and the consensus module runs it over a driver. One thing the page's
 election does, the module does not yet:
 
-- A truncation whose command faults after an earlier one succeeded leaves the
-  member reporting the end and the log term it had until the leader asks again;
-  ADR 0095's Consequences say where that is tested.
 - Over a driver a member does not start on a log directory that holds a term or a
   stored candidate term: the module refuses, and says to start the cluster again
   as a new one. The core starts on such a directory (ADR 0089). The module does once
   it reads back which recordings hold the log it kept, the sixth change of ADR 0100.
   Until then a cluster that lost a member goes on with the members that remain.
+
+A truncation whose command faults after an earlier one succeeded leaves the member
+reporting the end and the log term it had until the leader asks again; ADR 0095's
+Consequences say where that is tested.
 
 ## What it must never do
 
