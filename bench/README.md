@@ -149,6 +149,16 @@ nothing depends on it.
   off the isolated CPUs, and joined by a fourth process the same day when it read the
   checked client claim row above the three's band
   ([ADR 0034](../docs/decisions/0034-run-the-gate-on-grip-and-the-soak-on-kip.md)).
+  On 2026-11-12 both hosts' four profiles were re-recorded from the eight processes
+  each host had run at the tree of 620a2e2, the first entries measured with the
+  subscriber's samples kept out of the histogram until its loop is over, which is the
+  re-record that decision asked for
+  ([ADR 0090](../docs/decisions/0090-keep-a-subscribers-samples-out-of-the-histogram-until-its-loop-is-over.md)):
+  the slowest run the gate compares with is 494 ns and 498 ns on `grip`'s checked
+  `one_way_32_client` and `one_way_32_recorded` rows, where 1,117 ns and 1,152 ns
+  stood, and 520 ns on `bench`'s checked `one_way_32_recorded` row, where 730 ns
+  stood. The link's profile, `bench-linux-link`, stands as it was recorded on
+  2026-11-04: its gated row, `udp_round_trip_32`, did not move with the harness.
 
 ## What it must never do
 
