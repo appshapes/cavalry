@@ -34,7 +34,7 @@ use cavalry_proto::cluster::{
 };
 #[cfg(target_os = "linux")]
 use cavalry_proto::udp::DATAGRAMS_PER_BURST;
-use cavalry_proto::udp::{LINGER, MTU_LENGTH_DEFAULT, SOCKET_RCVBUF_LENGTH};
+use cavalry_proto::udp::{LINGER, MTU_LENGTH_DEFAULT, SOCKET_RCVBUF_LENGTH, UDP_TERM_LENGTH};
 use cavalry_shm::command_ring::{CommandRing, CommandRingError, layout::DRIVER_CLOSED};
 use cavalry_shm::counters::generated::{
     CHANNEL_DESTINATIONS, CHANNEL_IMAGES, CHANNEL_PUBLICATIONS, CHANNEL_SOCKET_RCVBUF,
@@ -44,8 +44,8 @@ use cavalry_shm::counters::generated::{
     RECORDING_ARMED, RECORDING_ARMED_DROPPED, RECORDING_ARMED_FAILED, RECORDING_ARMED_STARTED,
     RECORDING_BYTES, RECORDING_INVALIDATED, RECORDING_POSITION, RECORDING_SYNCED_POSITION,
     RECORDING_WRITE_FAILED, SENDER_BYTES_UNSENT, SENDER_FLOW_CONTROL_RECEIVERS,
-    SENDER_FLOW_CONTROL_RECEIVERS_FULL, SENDER_FLOW_CONTROL_RECEIVERS_TIMED_OUT, SENDER_LIMIT,
-    SENDER_POSITION, SUBSCRIPTION_POSITION,
+    SENDER_FLOW_CONTROL_RECEIVERS_FULL, SENDER_FLOW_CONTROL_RECEIVERS_TIMED_OUT,
+    SENDER_JOINS_REFUSED, SENDER_LIMIT, SENDER_POSITION, SUBSCRIPTION_POSITION,
 };
 use cavalry_shm::counters::generated::{
     CLUSTER_APPEND_POSITION, CLUSTER_APPOINTED_LEADER_BEHIND, CLUSTER_COMMIT_POSITION,
@@ -1624,7 +1624,11 @@ struct ImageCounters {
 /// `sender.bytes_unsent` of its own, and whose stream has a live recording is
 /// connected by that recording: a note, `udp-publication-recorded-alone`, and not the
 /// warning; and the warning names the key where it would help, a recorded stream
-/// without it, or a recording where the key waits for one (ADR 0098). Every endpoint is
+/// without it, or a recording where the key waits for one (ADR 0098). Such a
+/// publication whose `sender.joins_refused` is above 0 is a warning,
+/// `udp-publication-join-refused`: a receiver tried to join it and named a position
+/// more than a term behind, which is a term too short for the publisher's rate, and
+/// the finding names `term-length` (ADR 0099). Every endpoint is
 /// listed as a note, as recordings are, with its status,
 /// its publications or images, its destinations on a control channel, and its buffers.
 fn udp_checks(reader: &CountersReader, running: bool, findings: &mut Vec<Finding>) -> usize {
@@ -1639,6 +1643,8 @@ fn udp_checks(reader: &CountersReader, running: bool, findings: &mut Vec<Finding
     // the bytes its sender passed unsent; and the live recordings' streams, by session
     // id and stream id, each with its recording id (ADR 0098).
     let mut spied: Vec<(i64, i64)> = Vec::new();
+    // The joins each of those publications refused, by correlation id (ADR 0099).
+    let mut refused: Vec<(i64, i64)> = Vec::new();
     let mut recorded: Vec<(i32, i32, i64)> = Vec::new();
     let mut images: Vec<ImageCounters> = Vec::new();
     let mut positions: Vec<([u8; 16], i32, i64)> = Vec::new();
@@ -1738,6 +1744,8 @@ fn udp_checks(reader: &CountersReader, running: bool, findings: &mut Vec<Finding
             }
         } else if type_id == SENDER_BYTES_UNSENT.0 {
             spied.push((endpoint_id(fields.key()), value));
+        } else if type_id == SENDER_JOINS_REFUSED.0 {
+            refused.push((endpoint_id(fields.key()), value));
         } else if type_id == RECORDING_POSITION.0 {
             // The label: the name, the recording id, the session id and the stream id.
             let mut words = fields.label().split_whitespace().skip(1);
@@ -1823,8 +1831,35 @@ fn udp_checks(reader: &CountersReader, running: bool, findings: &mut Vec<Finding
             .iter()
             .find(|(session, stream, _)| session == session_id && stream == stream_id)
             .map(|(_, _, recording)| *recording);
-        // Connected by its recording alone: what the channel asked for, so a note.
+        // Connected by its recording alone: what the channel asked for, so a note,
+        // unless a receiver tried to join it and could not: a term too short for what
+        // the publisher writes while a join takes, so a warning (ADR 0099).
         if let (Some(unsent), Some(recording)) = (unsent, recording) {
+            let joins_refused = refused
+                .iter()
+                .find(|(correlation, _)| correlation == correlation_id)
+                .map_or(0, |(_, refused)| *refused);
+            if joins_refused > 0 {
+                findings.push(Finding {
+                    check: "udp-publication-join-refused",
+                    level: Level::Warn,
+                    message: format!(
+                        "publication {correlation_id} on stream {stream_id} (session \
+                         {session_id}) names ssc=true and is alone with recording \
+                         {recording}, and {joins_refused} status message(s) of a receiver \
+                         that would join it on {channel} named a position more than a term \
+                         behind its sender: the publisher writes more than a term between a \
+                         setup frame and the receiver's answer, so the receiver's image \
+                         receives nothing, times out and tries again; name a longer \
+                         term-length on the publication's channel, one that holds what the \
+                         publisher writes in 16 milliseconds at its fastest, or leave the \
+                         key out for the 16 MiB term; what the receiver missed is in \
+                         recording {recording}, for a replay"
+                    ),
+                    doc: DOC_UDP_SENDER,
+                });
+                continue;
+            }
             let destinations = if is_control(*endpoint_id) {
                 format!(
                     "the control channel {channel}, {} destination(s)",
@@ -2473,6 +2508,17 @@ fn recording_checks(
         let room = limit.saturating_sub(recording.position);
         let behind = publisher.saturating_sub(recording.position);
         if !slower_reader && room > 0 && behind.saturating_mul(7) >= room.saturating_mul(5) {
+            // A window of a quarter of the default term or less is a short term's: a
+            // burst fills it on any disk, and the remedy is the term (ADR 0099).
+            let short = if room <= i64::from(UDP_TERM_LENGTH / 4) {
+                "; a window this short is a short term's, which a term-length on a \
+                 cavalry:udp publication's channel or the driver's term length gives, \
+                 and a burst longer than it waits for the recorder on any disk: if the \
+                 recorder has caught up when doctor runs again and the publisher reads \
+                 back-pressured, name a longer term-length"
+            } else {
+                ""
+            };
             findings.push(Finding {
                 check: "recording-stalled",
                 level: Level::Warn,
@@ -2484,7 +2530,7 @@ fn recording_checks(
                      slow or failing disk, so check recording.write_failed and the log \
                      directory's disk, and `recording stopped` if it gives up, and run \
                      doctor again, since a recorder that has caught up by then was waiting \
-                     for a sync",
+                     for a sync{short}",
                     recording.recording_id
                 ),
                 doc: DOC_RECORDING_COMMANDS,
@@ -3214,6 +3260,43 @@ mod tests {
             "{}",
             note.message
         );
+
+        // A receiver that could not join it: the warning that names term-length, and
+        // no note (ADR 0099).
+        let joins_refused = counters
+            .allocate(
+                SENDER_JOINS_REFUSED,
+                &key,
+                "sender.joins_refused 7 5 1001 9",
+            )
+            .expect("room");
+        joins_refused.add(3);
+        let report = examine(&dir.0);
+        let refused = finding(&report, "udp-publication-join-refused");
+        assert_eq!(refused.level, Level::Warn);
+        assert!(
+            refused.message.starts_with(
+                "publication 7 on stream 1001 (session 5) names ssc=true and is alone \
+                 with recording 3, and 3 status message(s) of a receiver that would join \
+                 it on cavalry:udp?control=10.0.0.1:40456|control-mode=manual named a \
+                 position more than a term behind its sender"
+            ),
+            "{}",
+            refused.message
+        );
+        assert!(
+            refused.message.contains("name a longer term-length"),
+            "{}",
+            refused.message
+        );
+        assert!(
+            !report
+                .findings
+                .iter()
+                .any(|finding| finding.check == "udp-publication-recorded-alone"),
+            "{report}"
+        );
+        counters.free(joins_refused.id(), 0).expect("freed");
 
         // The key and no recording: the warning, saying what would connect it.
         counters.free(recording.id(), 0).expect("freed");
@@ -4135,6 +4218,14 @@ mod tests {
             "{}",
             found[1]
         );
+        // The short window is named as one, with its remedy, and the default is not
+        // (ADR 0099).
+        assert!(
+            found[1].ends_with("name a longer term-length"),
+            "{}",
+            found[1]
+        );
+        assert!(!found[0].contains("term-length"), "{}", found[0]);
 
         // Just under five sevenths of the room: nothing. At it: the warning.
         udp.position.store_release(mib + 5 * mib - 64);

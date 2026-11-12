@@ -30,7 +30,11 @@ is Archive's `startRecording` ([glossary](../glossary.md)).
   the stream from where the sender stands and replays the recording for what came
   before ([Replay a recording](replay-a-recording.md)). While no receiver answers,
   `doctor` has a `note udp-publication-recorded-alone` line for the publication, with
-  the bytes that went to the recording alone.
+  the bytes that went to the recording alone. A channel that also names a short
+  `term-length` needs a term that holds what the publisher writes in 16 milliseconds
+  at its fastest, 64 KiB for 4 MiB a second: with a shorter one a receiver cannot join
+  while the publication is alone, and `doctor` warns with
+  `udp-publication-join-refused`.
 
 ## Steps
 
@@ -62,7 +66,9 @@ is Archive's `startRecording` ([glossary](../glossary.md)).
    The publisher's limit respects the recording's position, so a disk slower than the
    stream back-pressures the publisher and never loses a byte; `doctor` says
    `recording-stalled` when the publisher has used most of the room its limit gives it
-   past the recorder, which is when the recorder holds it or is about to.
+   past the recorder, which is when the recorder holds it or is about to. When that
+   room is 4 MiB or less the finding says that the window is a short term's, and names
+   `term-length`: a burst longer than half the term waits for the recorder on any disk.
 
 3. Stop it:
 

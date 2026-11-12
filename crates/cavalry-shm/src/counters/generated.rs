@@ -1545,6 +1545,6 @@ pub const COUNTERS: &[CounterDef] = &[
         kind: Kind::Counter,
         scope: Scope::Instance,
         doc: "Status messages of a receiver that would have joined one cavalry:udp publication while it was alone with its recording, refused because they named a position more than a term behind the sender position: what the receiver needs is no longer in the log. Each is counted in sender.status_messages_rejected as well. Allocated for a publication whose channel names ssc=true and no other; key and label as sender.position (spec/udp.md, The sender; ADR 0098, ADR 0099).",
-        doctor: "The publisher writes more than a term between a setup frame and a receiver's answer, so no receiver joins while the publication is alone with its recording: the receiver's image receives nothing, times out and tries again. Name a longer term-length on the publication's channel, one that holds what the publisher writes in 16 milliseconds at its fastest, or leave the key out for the 16 MiB default.",
+        doctor: "The publisher writes more than a term between a setup frame and a receiver's answer, so no receiver joins while the publication is alone with its recording: the receiver's image receives nothing, times out and tries again. Name a longer term-length on the publication's channel, one that holds what the publisher writes in 16 milliseconds at its fastest, or leave the key out for the 16 MiB default. While the publication is alone, doctor warns with udp-publication-join-refused.",
     },
 ];
