@@ -567,6 +567,293 @@ fn a_replication_whose_replay_never_arrives_fails_and_is_asked_again() {
     assert_eq!(cluster.log(behind), cluster.log_to(ahead, entry));
 }
 
+/// Card 267. A term that fewer than a quorum recorded does not stay in a member's
+/// record under a leader whose record has none, and so strands nobody (ADR 0096).
+///
+/// Five members. W leads term 0 and commits to b; a tail of two entries more, to b2,
+/// reaches Y alone, the first of them in one recording and the second in another. W
+/// stops and Y is cut off. X wins term 1 at b, and its new leadership term reaches M
+/// and not Z: X and M record term 1 at b, and X, with no quorum that recorded it,
+/// appends nothing. Term 1 has no byte anywhere. X and M are cut off, and W or Y
+/// leads a later term at b2 with Z's vote: in its log, term 0 runs on from b to b2,
+/// and its record has no term 1.
+///
+/// M comes back and reports a log of term 1 that ends at b. Its leader answers for
+/// term 0, the highest term its own record holds at or below 1: M drops term 1,
+/// counted, cuts nothing, and replicates b to b2 as the rest of term 0. Its record is
+/// then its leader's. Before ADR 0096 the leader answered "for term 1", M replicated
+/// those bytes under term 1 and kept term 1 at b in its record, inside the leader's
+/// term 0.
+///
+/// Z is parted from the leader one entry into the same span and is then told the
+/// commit position b2. The leader and the other member stop. M, Z and X are three of
+/// five, a quorum, and M, whose log is the longest, leads. It tells Z, whose log is
+/// of term 0, that the leader's term of before is next, at b2, and Z replicates the
+/// entry it lacks. Before ADR 0096 M told Z that term 1 was next, at b, below the
+/// commit position Z knows: Z refused the truncation at every election, 295 times in
+/// 30 s, M had X and no quorum, and three running members of five committed nothing.
+#[test]
+fn a_term_fewer_than_a_quorum_recorded_strands_no_member() {
+    let ids = [0, 1, 2, 3, 4];
+    let mut safety = Safety::new(&ids);
+    let mut cluster = Cluster::with_election(&ids, 1).expect("five members");
+    safety.run_until(&mut cluster, 6_000, "the first election", |cluster| {
+        settled(cluster, &ids)
+    });
+    let w = cluster.leader().expect("a leader");
+    safety.run(&mut cluster, 10);
+    let frame = cluster.append_position(w).expect("the leader");
+    cluster
+        .offer(b"committed by all")
+        .expect("the leader appends");
+    safety.run(&mut cluster, 1_000);
+    let b = cluster.commit_position(w).expect("the leader");
+    let others: Vec<i32> = ids.iter().copied().filter(|&id| id != w).collect();
+    let y = others[0];
+    let three = &others[1..];
+
+    // Two entries more reach Y alone: a tail of term 0 from b to b2, which W and Y
+    // each hold in two recordings, so that a replay of it ends between the two.
+    for &id in three {
+        cluster.cut_between(w, id);
+    }
+    let b_mid = cluster.offer(&payload_of_frame(frame)).expect("appends");
+    safety.run(&mut cluster, 50);
+    assert_eq!(cluster.append_position(y), Some(b_mid));
+    cluster.end_recording(w);
+    cluster.end_recording(y);
+    let b2 = cluster.offer(&payload_of_frame(frame)).expect("appends");
+    safety.run(&mut cluster, 50);
+    assert_eq!(cluster.append_position(y), Some(b2));
+    assert_eq!(cluster.commit_position(w), Some(b));
+
+    // W stops and Y is cut off: the three elect one of themselves for term 1 at b.
+    cluster.halt(w);
+    cluster.cut(y);
+    safety.run_until(&mut cluster, 14_000, "the leader of term 1", |cluster| {
+        cluster.leader().is_some_and(|id| three.contains(&id))
+    });
+    let x = cluster.leader().expect("a leader");
+    let rest: Vec<i32> = three.iter().copied().filter(|&id| id != x).collect();
+    let (m, z) = (rest[0], rest[1]);
+    // Before its new leadership term has left, it is parted from one voter.
+    cluster.cut_between(x, z);
+    safety.run(&mut cluster, 2_000);
+    assert_eq!(
+        cluster.record_of_terms(m).expect("m").0,
+        vec![(0, 0), (1, b)]
+    );
+    assert_eq!(
+        cluster.record_of_terms(x).expect("x").0,
+        vec![(0, 0), (1, b)]
+    );
+    assert_eq!(cluster.record_of_terms(z).expect("z").0, vec![(0, 0)]);
+    assert_eq!(cluster.append_position(x), Some(b), "term 1 has no byte");
+
+    // X and M are cut off; Y and W come back and one of them leads a later term
+    // with Z.
+    cluster.cut(x);
+    cluster.cut(m);
+    cluster.heal(y);
+    cluster.resume(w);
+    let leads_later = |cluster: &Cluster| {
+        [w, y].into_iter().find(|&id| {
+            let member = cluster.member(id).expect("a member");
+            member.role() == Role::Leader && member.leadership_term_id() >= 2
+        })
+    };
+    safety.run_until(
+        &mut cluster,
+        40_000,
+        "the leader of a later term",
+        |cluster| leads_later(cluster).is_some(),
+    );
+    let l2 = leads_later(&cluster).expect("a leader");
+    let o = if l2 == w { y } else { w };
+    let leaders_record = cluster.record_of_terms(l2).expect("l2").0;
+    assert!(
+        leaders_record.iter().all(|term| term.0 != 1),
+        "its record has no term 1: {leaders_record:?}"
+    );
+
+    // Z replicates the span and is parted from the leader one entry in, where the
+    // leader's first recording of the tail ends.
+    safety.run_until(&mut cluster, 3_000, "Z is one entry in", |cluster| {
+        cluster.append_position(z) == Some(b_mid)
+    });
+    cluster.cut_between(l2, z);
+
+    // M comes back. It drops term 1, replicates b to b2 as the rest of term 0,
+    // records the leader's term there and is counted: the leader's election closes
+    // with a quorum, and it commits b2.
+    cluster.heal(m);
+    safety.run_until(
+        &mut cluster,
+        14_000,
+        "the leader of the later term closes",
+        |cluster| cluster.election_state(l2) == Some(ElectionState::Closed),
+    );
+    safety.run(&mut cluster, 100);
+    // The leader's term began at b2 with its own first entry, which is committed
+    // too.
+    let committed = cluster.commit_position(l2).expect("l2");
+    assert!(committed > b2, "{committed}");
+    let counts = cluster.counts(m).expect("m");
+    assert_eq!(counts.terms_dropped, 1, "{counts:?}");
+    assert_eq!(counts.log_truncations, 0, "{counts:?}");
+    assert_eq!(
+        cluster.record_of_terms(m).expect("m").0,
+        cluster.record_of_terms(l2).expect("l2").0,
+        "M's record is its leader's: the term no quorum recorded is gone"
+    );
+    assert_eq!(cluster.append_position(m), Some(committed));
+    assert_eq!(
+        cluster.log(m),
+        cluster.log(l2),
+        "M's bytes are the leader's"
+    );
+
+    // Z is told the term again, with its commit position, while its recording does
+    // not sync, and is parted again: it knows b2 is committed and holds one entry
+    // of the two.
+    cluster.pause_sync(z);
+    cluster.heal_between(l2, z);
+    safety.run_until(
+        &mut cluster,
+        3_000,
+        "Z is told the commit position",
+        |cluster| cluster.commit_position(z) == Some(committed),
+    );
+    cluster.cut_between(l2, z);
+    safety.run(&mut cluster, 100);
+    assert_eq!(cluster.append_position(z), Some(b_mid));
+
+    // The leader and the other member stop. M, Z and X are a quorum, and M leads.
+    cluster.halt(l2);
+    cluster.halt(o);
+    cluster.heal(x);
+    safety.run_until(&mut cluster, 30_000, "M leads", |cluster| {
+        cluster.leader() == Some(m)
+    });
+    // Z replicates from M what it lacks: it subscribes anew, which leaves what its
+    // recording never synced, and its recording syncs again.
+    safety.run_until(&mut cluster, 30_000, "Z replicates from M", |cluster| {
+        cluster.election_state(z) == Some(ElectionState::FollowerLogReplication)
+    });
+    cluster.resume_sync(z);
+    safety.run_until(&mut cluster, 30_000, "M's election closes", |cluster| {
+        cluster.election_state(m) == Some(ElectionState::Closed)
+    });
+    safety.run(&mut cluster, 1_000);
+    let counts = cluster.counts(z).expect("z");
+    assert_eq!(counts.truncations_refused, 0, "{counts:?}");
+    assert_eq!(counts.log_truncations, 0, "{counts:?}");
+    assert_eq!(
+        cluster.log_to(z, b2),
+        cluster.log_to(m, b2),
+        "Z holds the leader's log to b2"
+    );
+    let counts = cluster.counts(x).expect("x");
+    assert_eq!(
+        counts.terms_dropped, 1,
+        "X drops the term it led: {counts:?}"
+    );
+    for id in [z, x] {
+        assert_eq!(
+            cluster.record_of_terms(id).expect("a member").0,
+            cluster.record_of_terms(m).expect("m").0,
+            "member {id}'s record is its leader's"
+        );
+    }
+    let after = cluster
+        .offer(b"committed by the three")
+        .expect("the leader appends");
+    safety.run(&mut cluster, 1_000);
+    assert_eq!(cluster.commit_position(m), Some(after));
+}
+
+/// Late consensus messages cut nothing that was committed. Since ADR 0096 a member
+/// that reads a new leadership term naming a term below its own log term may drop
+/// terms, so an old message must change nothing: an answer to a report the member
+/// made before it recorded more, or a copy from a leader it has since joined. Three
+/// members, at eight seeds, every consensus message up to two seconds late and out
+/// of order. Three times over, the leader appends an entry, is stopped, another
+/// member leads, and the first runs again. The check after every step holds
+/// throughout: no committed entry is lost or replaced, and no member holds, below
+/// the commit position it knows, bytes that were not committed. No member refuses a
+/// truncation, and once the messages arrive in order again the three settle on one
+/// leader and one log. The rule runs under these messages: at five of the eight
+/// seeds members drop terms, twelve drops in all, and three of them cut their log
+/// first, and the check holds through each. `dropped_terms.rs` has the rule's own
+/// cases.
+#[test]
+fn late_new_leadership_terms_cut_nothing_that_was_committed() {
+    let (mut dropped, mut truncated) = (0, 0);
+    for seed in 1..=8 {
+        let ids = [0, 1, 2];
+        let mut safety = Safety::new(&ids);
+        let mut cluster = Cluster::with_election(&ids, seed).expect("three members");
+        assert_eq!(cluster.set_delivery(0, 2_000), 2_000);
+        for round in 0..3u8 {
+            // An entry, once a leader's election has closed and takes it.
+            let mut offered = None;
+            for _ in 0..120_000 {
+                if let Ok(position) = cluster.offer(&[b'a' + round; 40]) {
+                    offered = Some(position);
+                    break;
+                }
+                cluster.step();
+                safety.check(&cluster);
+            }
+            assert!(
+                offered.is_some(),
+                "seed {seed}, round {round}: no leader took an entry"
+            );
+            safety.run(&mut cluster, 3_000);
+            // Whoever leads by now: with messages this late the member that took
+            // the entry may have held an election since.
+            safety.run_until(&mut cluster, 120_000, "a member leads", |cluster| {
+                cluster.leader().is_some()
+            });
+            let leader = cluster.leader().expect("a leader");
+            cluster.halt(leader);
+            safety.run_until(&mut cluster, 120_000, "another member leads", |cluster| {
+                cluster.leader().is_some_and(|id| id != leader)
+            });
+            cluster.resume(leader);
+            safety.run(&mut cluster, 15_000);
+        }
+        assert_eq!(cluster.set_delivery(0, 0), 0);
+        safety.run_until(&mut cluster, 120_000, "the three settle", |cluster| {
+            settled(cluster, &ids)
+        });
+        safety.run(&mut cluster, 1_000);
+        let leader = cluster.leader().expect("a leader");
+        let commit = cluster.commit_position(leader).expect("the leader");
+        for id in ids {
+            let counts = cluster.counts(id).expect("a member");
+            assert_eq!(counts.truncations_refused, 0, "seed {seed}: {counts:?}");
+            dropped += counts.terms_dropped;
+            truncated += counts.log_truncations;
+            assert_eq!(
+                cluster.log_to(id, commit),
+                cluster.log_to(leader, commit),
+                "seed {seed}: member {id}'s log is the leader's"
+            );
+        }
+    }
+    // The rule ran under these messages, and members truncated under them: the check
+    // above held through drops and truncations, not in their absence. The count of
+    // truncations is every cut, one to a next term's base as well as one before a
+    // drop; `dropped_terms.rs` holds the cut that a drop makes.
+    println!(
+        "election: late messages at eight seeds: {dropped} terms dropped, {truncated} logs \
+         truncated"
+    );
+    assert!(dropped > 0, "no member dropped a term at any seed");
+    assert!(truncated > 0, "no member truncated at any seed");
+}
+
 /// A payload whose session message takes a frame of `frame` bytes in the log.
 fn payload_of_frame(frame: i64) -> Vec<u8> {
     use cavalry_proto::cluster::{Message, entry_position};
