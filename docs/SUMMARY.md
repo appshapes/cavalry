@@ -145,4 +145,5 @@ under `docs/` is listed here; `just lint-docs` fails on one that is not.
 - [0094. Record a member's replays over a driver, and count the live recording once the log reaches it](decisions/0094-record-a-members-replays-over-a-driver-and-count-the-live-recording-once-the-log-reaches-it.md)
 - [0101. Read a publisher held by its recorder from its limit, in doctor](decisions/0101-read-a-publisher-held-by-its-recorder-from-its-limit-in-doctor.md)
 - [0095. Truncate a member's log over a driver, recording by recording, then its record of terms](decisions/0095-truncate-a-members-log-over-a-driver-recording-by-recording-then-its-record-of-terms.md)
+- [0098. Let a recording connect a cavalry:udp publication whose channel names ssc](decisions/0098-let-a-recording-connect-a-cavalry-udp-publication-whose-channel-names-ssc.md)
 - [0109. Measure every interval on a nano clock, and keep the epoch clock for what another process reads](decisions/0109-measure-every-interval-on-a-nano-clock-and-keep-the-epoch-clock-for-what-another-process-reads.md)

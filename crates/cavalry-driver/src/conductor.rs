@@ -1557,15 +1557,16 @@ impl Conductor {
         else {
             return;
         };
-        // A destination names its endpoint and nothing else: `interface`, `fc` or a
-        // position key on it is refused, as a subscription's channel refuses a
+        // A destination names its endpoint and nothing else: `interface`, `fc`, `ssc`
+        // or a position key on it is refused, as a subscription's channel refuses a
         // publication's keys, since a key that does nothing is a key the reader cannot
-        // check (ADR 0053, ADR 0059).
+        // check (ADR 0053, ADR 0059, ADR 0098).
         let destination = match parsed {
             Channel::Udp(udp)
                 if !udp.is_control()
                     && udp.interface().is_none()
                     && !udp.names_flow_control()
+                    && !udp.names_ssc()
                     && !udp.names_position() =>
             {
                 udp.endpoint()
@@ -1915,6 +1916,24 @@ impl Conductor {
     ) {
         if self.registration_count >= spec::MAX_PUBLICATIONS {
             self.registry_full(correlation_id, "publications", spec::MAX_PUBLICATIONS);
+            return;
+        }
+        // Version 3's `ssc=true` has a live recording connect the publication, which
+        // card 271's driver change builds (ADR 0098); until it lands the key is
+        // answered with code 11, as the position keys were before card 227's driver
+        // change (ADR 0059). `ssc=false` is what every publication is.
+        if channel.spies_simulate_connection() {
+            self.send_error(
+                correlation_id,
+                ErrorCode::GenericError,
+                &format!(
+                    "the channel names ssc=true, by which a live recording connects a \
+                     publication that no receiver answers (spec/udp.md, version 3; ADR 0098): \
+                     this driver does not do that yet, card 271's driver change does; remove \
+                     the key until it lands, and until then give the publication a receiver, \
+                     a subscription on this driver among them; see {ERRORS_DOC}"
+                ),
+            );
             return;
         }
         let Some(target) = self.resolve_target(correlation_id, &channel) else {
@@ -2964,19 +2983,23 @@ impl Conductor {
             self.registry_full(correlation_id, "subscriptions", spec::MAX_SUBSCRIPTIONS);
             return;
         }
-        // `control`, `control-mode`, `fc` and the position keys are a publication's
-        // (`spec/udp.md`, "The channel URI"; `spec/client-protocol.md`, "Commands", add
-        // subscription; ADR 0059).
-        if channel.is_control() || channel.names_flow_control() || channel.names_position() {
+        // `control`, `control-mode`, `fc`, `ssc` and the position keys are a
+        // publication's (`spec/udp.md`, "The channel URI"; `spec/client-protocol.md`,
+        // "Commands", add subscription; ADR 0059, ADR 0098).
+        if channel.is_control()
+            || channel.names_flow_control()
+            || channel.names_ssc()
+            || channel.names_position()
+        {
             self.statics.rejected_command.increment();
             self.send_error(
                 correlation_id,
                 ErrorCode::InvalidChannel,
                 &format!(
                     "the channel: channel refused (subscription): it names control, \
-                     control-mode, fc, init-term-id, term-id or term-offset, which this version \
-                     reads on a publication's channel only; remove them, since a subscription \
-                     receives on its endpoint; see {ERRORS_DOC}"
+                     control-mode, fc, ssc, init-term-id, term-id or term-offset, which this \
+                     version reads on a publication's channel only; remove them, since a \
+                     subscription receives on its endpoint; see {ERRORS_DOC}"
                 ),
             );
             return;
@@ -5489,6 +5512,25 @@ impl Conductor {
                      position; a replay starts at the command's position under its \
                      recording's initial term id, so remove the keys and name the position in \
                      the command; see {ERRORS_DOC}"
+                ),
+            );
+            return;
+        }
+        // A replay moves only while a receiver answers, so `ssc` on its channel, by
+        // which a recording of the replay's own publication would move it, is refused
+        // at the same point (`spec/udp.md`, version 3, "The channel URI"; ADR 0098).
+        if let Channel::Udp(udp) = &channel
+            && udp.names_ssc()
+        {
+            self.statics.rejected_command.increment();
+            self.send_error(
+                correlation_id,
+                ErrorCode::InvalidChannel,
+                &format!(
+                    "the replay channel: channel refused (ssc): it names ssc, by which a \
+                     recording connects a client's publication; a replay goes to its \
+                     receivers and moves only while one answers, so remove the key; see \
+                     {ERRORS_DOC}"
                 ),
             );
             return;
@@ -8491,6 +8533,57 @@ mod recording {
         assert_eq!(code, 1, "{message}");
         assert!(message.contains("(position)"), "{message}");
         assert!(h.conductor.replays.is_empty());
+        // Version 3's `ssc` is a publication's too: refused on a subscription, a
+        // destination and a replay channel, the last with the reason `ssc`, whichever
+        // value it names (ADR 0098).
+        h.conductor.add_subscription(
+            1,
+            204,
+            7,
+            b"cavalry:udp?endpoint=127.0.0.1:40123|ssc=false",
+            h.now,
+        );
+        let (code, message) = h.last_error(204).expect("an error");
+        assert_eq!(code, 1, "{message}");
+        assert!(message.contains("(subscription)"), "{message}");
+        assert!(h.conductor.receive_endpoints.is_empty());
+        h.conductor.change_destination(
+            1,
+            205,
+            6,
+            b"cavalry:udp?endpoint=127.0.0.1:41000|ssc=true",
+            true,
+        );
+        let (code, message) = h.last_error(205).expect("an error");
+        assert_eq!(code, 1, "{message}");
+        assert!(message.contains("(destination)"), "{message}");
+        h.conductor.start_replay(
+            206,
+            0,
+            cavalry_proto::client_protocol::NULL_POSITION,
+            NULL_LENGTH,
+            7,
+            b"cavalry:udp?endpoint=127.0.0.1:40123|ssc=true",
+        );
+        let (code, message) = h.last_error(206).expect("an error");
+        assert_eq!(code, 1, "{message}");
+        assert!(message.contains("(ssc)"), "{message}");
+        assert!(h.conductor.replays.is_empty());
+        // On a publication's channel `ssc=true` is answered with code 11 until the
+        // driver's change lands (ADR 0098), with nothing registered.
+        let publications = h.conductor.publications.len();
+        h.conductor.add_publication(
+            1,
+            207,
+            9,
+            b"cavalry:udp?endpoint=127.0.0.1:40123|ssc=true",
+            false,
+            now,
+        );
+        let (code, message) = h.last_error(207).expect("an error");
+        assert_eq!(code, 11, "{message}");
+        assert!(message.contains("ssc=true"), "{message}");
+        assert_eq!(h.conductor.publications.len(), publications);
         // A publication that names them is created at their position, and a start
         // recording on a subscription with no image arms the recording: each its own
         // test (ADR 0059).
@@ -8511,10 +8604,11 @@ mod recording {
             "14 joined 2"
         );
         assert_eq!(h.conductor.publications.len(), 2);
-        // Ten of version 5's refusals, and the position keys refused on a subscription,
-        // on a destination and on a replay channel; the code 11 answers count nothing,
-        // and a recording channel's keys take no part (ADR 0059).
-        assert_eq!(h.counter(CLIENT_PROTOCOL_REJECTED_COMMAND), 13);
+        // Ten of version 5's refusals, the position keys refused on a subscription, on
+        // a destination and on a replay channel, and `ssc` refused on the same three;
+        // the code 11 answers count nothing, and a recording channel's keys take no
+        // part (ADR 0059, ADR 0098).
+        assert_eq!(h.counter(CLIENT_PROTOCOL_REJECTED_COMMAND), 16);
     }
 
     /// An RTT measurement that reaches a control channel's socket is answered to the
@@ -9366,6 +9460,26 @@ mod recording {
             fold_offered(offered),
             "and holds it as it was offered"
         );
+    }
+
+    /// `ssc=false` on a publication's channel is what every publication is: the
+    /// publication is added, and is not connected until a receiver answers
+    /// (`spec/udp.md`, version 3, "The channel URI"; ADR 0098).
+    #[test]
+    fn a_publication_that_names_ssc_false_is_added_as_any_other() {
+        let mut h = Harness::new("udp-ssc-false");
+        let receiver = TestReceiver::bind();
+        let channel = format!(
+            "{}|ssc=false",
+            String::from_utf8(receiver.channel()).expect("utf-8")
+        );
+        let now = h.now;
+        h.conductor
+            .add_publication(1, 2, 7, channel.as_bytes(), false, now);
+        assert_eq!(h.last_error(2), None);
+        assert_eq!(h.conductor.publications.len(), 1);
+        h.conductor.duty_cycle(now);
+        assert!(!h.conductor.publications[0].log.is_connected());
     }
 
     /// A closed publication lingers with the sender: the conductor keeps its log until
