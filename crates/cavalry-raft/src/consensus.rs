@@ -703,6 +703,10 @@ pub fn terms_above(
 
 /// The highest term of `record` at or below `term`, −1 where the record holds none:
 /// what [`Io::term_at_or_below`] returns, from a record of terms read in any order.
+/// The rule is the page's, and `cavalry_proto::cluster::answered_term` is the copy of
+/// it that the `answered-term` vectors pin (`spec/cluster.md`, "New leadership term,
+/// template 53"; ADR 0096): this is the same rule over a member's record as its
+/// `Io` holds it, and a change to one is a change to both.
 ///
 /// ```
 /// use cavalry_raft::consensus::term_at_or_below;
