@@ -528,10 +528,10 @@ counter ("Counters").
 
 | Code | State | What the member does, and what moves it on |
 | --- | --- | --- |
-| 0 | init | consolidates its log: stops any replay or catch-up and leaves the live log, removing its subscription on its `log` endpoint and so stopping its recording of the leader's image there, so that the image it joins next is a new one whose join position state 15 checks; takes the higher of its stored candidate term and the highest term in its record as its candidate term, both read from its log directory in the member's first init since it started and held in memory from then on ("The log"; ADR 0089). A cluster of one member goes to leader log replication as leader of candidate term + 1; every other member goes to canvass |
-| 1 | canvass | as a follower, sends canvass position to every other member every election status interval; moves to nominate at once when every member has reported and no member's log is ahead of its own, a unanimous candidate, or when the canvass deadline has passed and the members that have reported with a log not ahead of its own, itself among them, make a quorum, a quorum candidate ("Logs compared"; the arithmetic vectors pin both). The deadline is the startup canvass timeout after the state began until the member's first election since it started has closed, on an empty log directory or on one it kept, and the leader heartbeat timeout after the last word from a leader from then on (ADR 0081, ADR 0089). A member that receives a request vote for a term above its candidate term while canvassing votes for it, when the candidate's log is at least its own, and goes to follower ballot, as "Messages during an election" says; one that receives new leadership term for a term at least its candidate term goes to follower replay or follower log replication as that message's rules say |
+| 0 | init | consolidates its log: stops any replay or catch-up and leaves the live log, removing its subscription on its `log` endpoint and so stopping its recording of the leader's image there, so that the image it joins next is a new one whose join position state 15 checks; takes the higher of its stored candidate term and the highest term in its record as its candidate term, both read from its log directory in the member's first init since it started and held in memory from then on ("The log"; ADR 0089); and forgets every member's report, so that the reports a member in canvass holds are the canvass positions it has read since its last init, or since it last left follower log replication, which forgets them too (state 9; ADR 0106). A cluster of one member goes to leader log replication as leader of candidate term + 1; every other member goes to canvass |
+| 1 | canvass | as a follower, sends canvass position to every other member every election status interval; a member has reported once this member has read a canvass position from it since this member's last init or since it last left follower log replication (states 0 and 9), and its report is the last one read; moves to nominate at once when every member has reported and no member's log is ahead of its own, a unanimous candidate, or when the canvass deadline has passed and the members that have reported with a log not ahead of its own, itself among them, make a quorum, a quorum candidate ("Logs compared"; the arithmetic vectors pin both). The deadline is the startup canvass timeout after the state began until the member's first election since it started has closed, on an empty log directory or on one it kept, and the leader heartbeat timeout after the last word from a leader from then on (ADR 0081, ADR 0089). A member that receives a request vote for a term above its candidate term while canvassing votes for it, when the candidate's log is at least its own, and goes to follower ballot, as "Messages during an election" says; one that receives new leadership term for a term at least its candidate term goes to follower replay or follower log replication as that message's rules say |
 | 2 | nominate | waits a random delay up to half the election timeout, sending canvass position every election status interval, then takes candidate term + 1 as its candidate term, stores it before it sends anything, records its vote for itself and goes to candidate ballot; while it waits it reads request vote and new leadership term as a member in canvass does, voting for a candidate and going to follower ballot, or following a leader, so that a member that learns of a leader during its delay opens no ballot against it (ADR 0081) |
-| 3 | candidate ballot | as a candidate, sends request vote to every member it has not sent one to; becomes leader of the candidate term, going to leader log replication, at once when the votes for it for that term, its own among them, make a quorum and every member it has heard has cast one of them, or when the election timeout has passed and a quorum has voted for it, no member having voted against for that term in either case, a vote for an older candidate term of its own counting for nothing ("Messages during an election"); a member is heard once the candidate has read a consensus message from it since its election began at init, so that a member that has said nothing since then, a leader that was killed among them, is not waited for, a departure from Aeron, whose candidate waits the election timeout for every member but a leader that closed gracefully (ADR 0077); goes back to canvass at once when it can no longer win, a vote against for that term having been cast, since no ballot with one makes a leader, a second departure from Aeron, whose candidate waits out the election timeout with a vote against (ADR 0105); and goes back to canvass when the election timeout has passed and it has not become leader, short of a quorum. A request vote from another candidate for a higher term is answered as "Messages during an election" says: for, moving it to follower ballot, when that candidate's log is at least its own; against, taking the term, when that candidate's log is behind, after which it holds no vote for its candidate term, its own included, can lead nothing in this ballot, and goes back to canvass at once |
+| 3 | candidate ballot | as a candidate, sends request vote to every member it has not sent one to; becomes leader of the candidate term, going to leader log replication, at once when the votes for it for that term, its own among them, make a quorum and every member it has heard has cast one of them, or when the election timeout has passed and a quorum has voted for it, no member having voted against for that term in either case, a vote for an older candidate term of its own counting for nothing ("Messages during an election"); a member is heard once the candidate has read a consensus message from it since its election began at init, so that a member that has said nothing since then, a leader that was killed among them, is not waited for, a departure from Aeron, whose candidate waits the election timeout for every member but a leader that closed gracefully (ADR 0077); goes back to canvass at once when it can no longer win, a vote against for that term having been cast, since no ballot with one makes a leader, a second departure from Aeron, whose candidate waits out the election timeout with a vote against (ADR 0105); and goes back to canvass when the election timeout has passed and it has not become leader, short of a quorum. A request vote from another candidate for a higher term is answered as "Messages during an election" says: for, moving it to follower ballot, when that candidate's log is at least its own; against, taking the term, when that candidate's log is behind, after which it holds no vote for its candidate term, its own included, can lead nothing in this ballot, and goes back to canvass at once; the `ballot` vectors name no candidate, so they say only whether a vote against the candidate term has been cast, and that the candidate still holds its own vote is the member's to check. A member that goes back to canvass from a ballot, a candidate from this state or a voter from state 4, keeps the reports it holds, a third departure from Aeron, whose election forgets every member's report each time it enters canvass: the two candidates of a split vote can be candidates again without waiting an election status interval for each other's canvass position (ADR 0081, ADR 0106) |
 | 4 | follower ballot | waits for the candidate it voted for; goes to follower replay or follower log replication on its new leadership term, or back to canvass when the election timeout passes |
 | 5 | leader log replication | as the leader, records its term with its append position as its base, before its own position counts, then adds its log publication at that position, the term base log position, which needs a publication created at a position ("Members and streams"); sends new leadership term and commit position every leader heartbeat interval; serves the catch-up positions of followers replicating what they lack (state 9, "Messages outside an election"); and waits until the quorum position reaches its append position, then goes to leader replay. It fails the election when its active members, those whose last append position is younger than the leader heartbeat timeout, fall below a quorum, and begins again at init |
 | 6 | leader replay | replays its own log, its recordings in position order, from its log position to its append position, into the consensus module's own state: the open sessions and their ids, which the session open and close events it replays carry ("Sessions"). The replay feeds no service: a service reads its member's recording itself, from a position of its own ("The service"). Then it goes to leader init; a leader with nothing to replay goes at once |
@@ -603,7 +603,9 @@ than init marks its sender as heard for the reader's election, until the reader'
 init, and a candidate waits before the election timeout for the vote of a member it
 has heard and of no other (state 3); the `ballot` vectors carry the candidate's term,
 each vote's and the members heard, and say whether the candidate leads and whether
-its ballot is lost. New
+a vote against its candidate term has been cast, which loses the ballot at once; they
+name no candidate, so a candidate that holds no vote of its own is not among them
+(state 3). New
 leadership term for the reader's candidate term, in follower ballot or candidate
 ballot, or in canvass or nominate for a term at least its candidate term, is read against the
 reader's log leadership term id, and one for any other term is ignored, counted in
@@ -615,13 +617,19 @@ as its leader nor the term, but for one case, a message whose log leadership ter
 is below the reader's own and whose next leadership term id is above it: the leader's
 record then holds none of the reader's terms above the one named, terms that fewer
 than a quorum recorded, and the reader drops them, truncating its log first to the
-base of the lowest of them when its append position is above it, under the rule of a
-truncation below, a commit position the reader knows among it, and then taking every
+base of the lowest of them when its append position is above it, by the rule of a
+truncation below, under which a reader that knows a commit position above that base
+truncates nothing, drops nothing and fails its election, and then taking every
 term above the one named out of its record of terms, by term and not by base, since
 the lowest is based where the log is cut, counted in `cluster.terms_dropped`; it
-then reads the message again with the log it holds, whose term is the one named, so
+then reads the message again with the log it holds, whose term is then at or below
+the one named: the one named, and it replicates or joins as below, or, when it
+never recorded the term named, a lower one, and it canvasses as it does for any
+message that is not for its log term, a ballot it was in being lost, and reports
+that lower term, so
 that a member's record becomes its leader's before it replicates or joins, Raft's
-consistency check (ADR 0096); a next leadership term id at or below the reader's log
+consistency check, and a departure from Aeron, whose leader names the term the
+member reported whether or not its own record holds it (ADR 0096); a next leadership term id at or below the reader's log
 leadership term id says nothing of the reader's terms from that one up, which may be
 the leader's own, as in an answer to a report the reader made before it recorded
 them or a copy from a leader it has since joined, and drops nothing; when they are the same the sender becomes the reader's
@@ -629,12 +637,16 @@ leader and the term its term, its candidate term too when the term is higher, in
 memory alone ("The log"), and a
 reader whose append position is above a next
 term base log position the message carries, one not −1, truncates its log to that
-position first, the uncommitted tail of an older term, `truncate recording` on the
-recording that begins at or below the position and ends above it and `purge
+position first, the uncommitted tail of an older term, `truncate recording` on each
+recording that begins at or below the position and ends above it, which are two that
+overlap after a catch-up (state 13; ADR 0095), and `purge
 recording` on every recording that begins above it, every recorded term whose base is
 above the position leaving its record of terms with them, so that it votes as a
 member of no term it no longer holds, and a message whose next term base log
-position is −1 truncates nothing. A truncation is counted in
+position is −1 truncates nothing. A member truncates only once
+`cluster.log_recording_id` holds −1, which the duty cycle that left the log stores:
+told to truncate before then, it cuts nothing, and the leader's next new
+leadership term tells it again ("The service"; ADR 0103). A truncation is counted in
 `cluster.log_truncations`. A reader that knows a commit position above the position
 it is told to truncate to truncates nothing and fails its election, counted in
 `cluster.truncations_refused` and `cluster.elections_failed`: a committed entry is
@@ -918,11 +930,17 @@ A member's consensus module writes one file in its driver's directory
 member's id in decimal: the recordings that hold the member's log, for the member's
 service ("The service"; ADR 0103). The module writes the file whole under the name
 `log-recordings-<member id>.tmp` and renames it over the file, so a reader reads one
-whole file or the one before it; a reader opens the file once and reads it to its
-end. The module writes it each time it names a recording, before it stores the
-recording's id in `cluster.log_recording_id`, and removes it when it closes. A file
-the module cannot write is its duty cycle's error, and the member stores −1 in the
-counter until a later cycle has written the file. All integers are little-endian.
+whole file or the one before it; a reader opens the file once and reads at most
+24,641 bytes of it, one byte more than the longest file, 40 + 1,025 × 24, so that a
+file longer than that fails a check whatever it holds, `recordings-length` when the
+checks before it pass ("What a reader rejects"); a file
+the operating system will not let it open or read is the reader's error, which
+names the file. The module writes it each time it names a recording, before it
+stores the recording's id in `cluster.log_recording_id`, and removes it when it
+closes. A file the module cannot write is its duty cycle's error, counted in
+`cluster.log_recordings_unwritten` each cycle it fails, and the member stores −1 in
+the counter until a later cycle has written the file. All integers are
+little-endian.
 
 The header, 40 bytes:
 
@@ -969,10 +987,11 @@ that a reader of a counters file knows which transition it saw.
 | `cluster.role` | a gauge: 0 follower, 1 candidate, 2 leader |
 | `cluster.election_state` | a gauge: the election state's code of "Roles and the election", 17 when no election runs |
 | `cluster.leadership_term_id` | a gauge: the member's leadership term id, −1 before the first |
-| `cluster.leader_member_id` | a gauge: the id of the member this member leads as or follows, −1 while it has none: from init until it leads a term, on entering leader log replication, or takes a leader's new leadership term, on leaving canvass, nominate or a ballot for a follower's state (ADR 0077, ADR 0102) |
+| `cluster.leader_member_id` | a gauge: the id of the member this member leads as or follows, −1 while it has none, which is in init, canvass, nominate and the two ballots: from the init of an election until it leads a term, on entering leader log replication, or takes a leader's new leadership term, on leaving canvass, nominate or a ballot for a follower's state; and again in the canvass a member goes back to when a follower log replication has ended, which begins no election and leaves `cluster.election_cause` as it is (ADR 0077, ADR 0102) |
 | `cluster.election_cause` | a gauge: why the member's last election began, the election it is in or the one that closed last: 0 the member started; 1 it followed and its leader said nothing for the leader heartbeat timeout; 2 it followed and its image of the leader's log was no longer available; 3 it led and its active members fell below a quorum; 4 its election had closed and a message carried a term above its own; 5 its election before failed (ADR 0077, ADR 0102) |
 | `cluster.commit_position` | a gauge: the commit position the member knows, the bound of its service's reading |
 | `cluster.log_recording_id` | a gauge: the id of the recording the member records the live log into, −1 while it records none; the recording its service replays, or reads below through the member's file of recordings, which the member writes before it stores an id here ("The service", "The log's recordings"; ADR 0103) |
+| `cluster.log_recordings_unwritten` | a duty cycle in which the member had a recording to name and could not write the file of its log's recordings, so that it stored −1 in `cluster.log_recording_id` ("The log's recordings"; ADR 0103) |
 | `cluster.append_position` | a gauge: the member's append position |
 | `cluster.elections` | an election begun, from init |
 | `cluster.terms_led` | a term the member began to lead, on entering leader log replication: `cluster.role` going to leader |
@@ -984,12 +1003,12 @@ that a reader of a counters file knows which transition it saw.
 | `cluster.leader_heartbeat_timeouts` | a follower that held an election for want of a leader's heartbeat |
 | `cluster.leader_step_downs` | a leader whose election had closed that held an election on a canvass position with either term, a request vote whose candidate term id or a commit position whose leadership term id above its own term |
 | `cluster.higher_terms_seen` | a follower whose election had closed that held an election on a request vote whose candidate term id or a commit position whose leadership term id above its own term: a term the cluster began without it (ADR 0082) |
-| `cluster.log_truncations` | a member that truncated its log to the next term base log position of a new leadership term: the tail of an older term that no quorum recorded ("Messages during an election"; ADR 0083) |
+| `cluster.log_truncations` | a member that truncated its log on a new leadership term, to one of two positions: the message's next term base log position, the tail of an older term that no quorum recorded (ADR 0083); or, before it dropped the terms its leader's record lacks, the base of the lowest of them, the drop counted in `cluster.terms_dropped` (ADR 0096) ("Messages during an election") |
 | `cluster.truncations_refused` | a member told to truncate below the commit position it knows, which kept its log and failed its election ("Messages during an election"; ADR 0083) |
 | `cluster.terms_dropped` | a member that dropped from its record of terms the terms its leader's record lacks, on a new leadership term whose log leadership term id was below its own and whose next leadership term id was above it ("Messages during an election"; ADR 0096) |
 | `cluster.votes_for`, `cluster.votes_against` | a vote sent, by its value |
 | `cluster.candidacies` | a ballot begun: a member in nominate that stored candidate term + 1, voted for itself and went to candidate ballot, `cluster.role` going to candidate (ADR 0081) |
-| `cluster.ballots_lost` | a ballot that ended with no leader for the member, which canvasses again: a candidate on a vote against its candidate term or once it holds no vote of its own for that term, at once (ADR 0105), or at the election timeout short of a quorum, a member in follower ballot whose candidate's new leadership term did not come within the election timeout, or either that reads a new leadership term for a log term that is not its own and that drops none of its terms ("Messages during an election"; ADR 0096); two members that count one with `cluster.candidacies` each are a split vote (ADR 0081) |
+| `cluster.ballots_lost` | a ballot that ended with no leader for the member, which canvasses again: a candidate on a vote against its candidate term or once it holds no vote of its own for that term, at once (ADR 0105), or at the election timeout short of a quorum, a member in follower ballot whose candidate's new leadership term did not come within the election timeout, or either that reads a new leadership term for a log term that is not its own, once it has dropped any terms the message says its leader's record lacks ("Messages during an election"; ADR 0096); two members that count one with `cluster.candidacies` each are a split vote (ADR 0081) |
 | `cluster.leadership_terms_ignored` | a new leadership term ignored for its term: below the reader's candidate term in canvass, or not the candidate term in a ballot state |
 | `cluster.sessions` | a gauge: open sessions |
 | `cluster.sessions_refused` | a session connect refused, with the version, the response channel or the limit as the detail |
@@ -1089,7 +1108,7 @@ encoder. Each vector has a `kind`:
   the quorum position and the commit position from the members' append positions, the
   terms they were reported for, their ages, and the leader's own position, term and
   term base; whether one log is at least another; whether a candidate
-  wins a ballot, at once or at the election timeout, or has lost it, from its candidate term, the
+  wins a ballot, at once or at the election timeout, or has lost it to a vote against its candidate term, from its candidate term, the
   votes with their terms and the members it has heard; whether a canvassing member is a unanimous or a
   quorum candidate from the members' reports; the stop position of a follower's log
   replication from its append position and the next term's base and end positions;

@@ -147,7 +147,9 @@ commit path runs per message.
   position, truncates each that stopped above it, which after a catch-up can be two
   that overlap, then takes every term based above the position out of the `terms`
   file. Each command waits for the driver's answer, so it is one step; asked again,
-  it changes nothing.
+  it changes nothing. `drop_terms_above` takes the terms a leader's record lacks out
+  of that file by term, after such a truncation, each write synced
+  (`TermsFile::drop_above_term`; ADR 0096).
 - Asks for the sync a commit waits for: a member's append position is its
   recording's synced position, and the driver's recorder syncs a recording by itself
   once a second. So the module asks its driver to sync its recording of the log,
@@ -167,13 +169,17 @@ commit path runs per message.
 - Tells a service where the log is below that recording: before the counter names a
   recording, the module writes the file `log-recordings-<member id>` in its driver
   directory, which lists the recordings that hold the member's log below the live
-  one, each with where it begins and where it stopped, so that a service at any
-  position the member keeps replays the recording that holds it. A member whose log
-  is in several recordings, one that left the log and joined it again or caught up
-  through a replay, is read from position 0 as one that never left. A file that
-  cannot be written is `RaftError::LogRecordings` from `do_work()`, which says what
-  to do; the member replicates meanwhile and names no recording until a later call
-  has written the file. It truncates no recording of its log while the counter
+  one, each with where it begins and where it stopped, or, for the recording of a
+  catch-up's replay that is still being made, what it has synced, so that a service
+  at any position the member keeps replays the recording that holds it. A member
+  whose log is in several recordings, one that left the log and joined it again or
+  caught up through a replay, is read from position 0 as one that never left. A
+  file that cannot be written is `RaftError::LogRecordings` from `do_work()`, which
+  says what to do. In each call that fails so the member still records and
+  replicates, and it names no recording until a later call has written the file;
+  `cavalry run` makes that call again every 100 ms and gives the member up after
+  10 s of calls that fail, as for any error of a duty cycle. It truncates no
+  recording of its log while the counter
   names one, and removes the file when it closes (`spec/cluster.md`, "The log's
   recordings"; ADR 0103).
 - Runs the same core in memory: `memory::Cluster` is one to eight members in one process
@@ -211,6 +217,9 @@ A member made with `Consensus::with_election` has every state of `spec/cluster.m
 election, and the consensus module runs it over a driver. One thing the page's
 election does, the module does not yet:
 
+- A truncation whose command faults after an earlier one succeeded leaves the
+  member reporting the end and the log term it had until the leader asks again;
+  ADR 0095's Consequences say where that is tested.
 - Over a driver a member does not start on a log directory that holds a term or a
   stored candidate term: the module refuses, and says to start the cluster again
   as a new one. The core starts on such a directory (ADR 0089). The module does once

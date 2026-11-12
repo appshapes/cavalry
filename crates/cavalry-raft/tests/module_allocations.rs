@@ -37,9 +37,10 @@ fn three_members_run_their_duty_cycles_without_an_allocation() {
         })
         .collect::<Vec<_>>()
         .join("|");
-    // Started in an order that does not put the member with the lowest id first: the
-    // leader is found below, never taken for the first.
-    let mut cluster: Vec<(Driver, ConsensusModule)> = [1, 0, 2]
+    // Started in the order 1, 2, 0, so that no member's place is its id, before the
+    // leader is put first or after: the leader is found below, never taken for the
+    // first.
+    let mut cluster: Vec<(Driver, ConsensusModule)> = [1, 2, 0]
         .into_iter()
         .map(|id| {
             let driver_dir = dir.join(format!("member-{id}"));

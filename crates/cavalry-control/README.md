@@ -41,10 +41,11 @@ is allowed here.
   (`cluster.messages_rejected`), a leader it stopped hearing
   (`cluster.leader_heartbeat_timeouts`) and a leader's log stream it lost
   (`cluster.log_images_lost`). `cluster-no-leader` and `cluster-joining` end with the
-  elections the member has failed and the counter of each rule. A member begins its
-  election again after one that fails, so no finding tells an operator to start the
-  cluster again (ADR 0100). Every member elects its leader, and `doctor` has one set
-  of findings for it (ADR 0107). [Run a cluster of three
+  elections the member has failed, the counters of three rules that fail one, and
+  how many failed on none of the three. A member begins its election again after one
+  that fails, so no finding tells an operator to start the cluster again (ADR 0100).
+  Every member elects its leader, and `doctor` has one set of findings for it (ADR
+  0107). [Run a cluster of three
   members](../../docs/how-to/run-a-cluster.md#when-it-does-not-work) says what an
   operator does about each.
 - May use `async` and an executor: nothing a message passes through lives here.

@@ -25,7 +25,7 @@ use std::net::{Ipv4Addr, ToSocketAddrs};
 use std::path::{Path, PathBuf};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
-use cavalry_driver::{IdleStrategy, spec};
+use cavalry_driver::IdleStrategy;
 use cavalry_log::catalog::CatalogReader;
 use cavalry_log::layout::{Descriptor, State as SlotState, locate};
 use cavalry_proto::cluster::{
@@ -40,11 +40,11 @@ use cavalry_shm::counters::generated::{
     CHANNEL_DESTINATIONS, CHANNEL_IMAGES, CHANNEL_PUBLICATIONS, CHANNEL_SOCKET_RCVBUF,
     CHANNEL_SOCKET_SNDBUF, CHANNEL_STATUS, CONDUCTOR_IDLE_STRATEGY as IDLE_STRATEGY_COUNTER,
     COUNTERS, COUNTERS_ALLOCATED, COUNTERS_ALLOCATION_FAILED, IMAGE_CREATED, IMAGE_ENDED,
-    IMAGE_HWM_POSITION, IMAGE_REBUILD_POSITION, PUBLICATION_POSITION, RECORDING_ARMED,
-    RECORDING_ARMED_DROPPED, RECORDING_ARMED_FAILED, RECORDING_ARMED_STARTED, RECORDING_BYTES,
-    RECORDING_INVALIDATED, RECORDING_POSITION, RECORDING_SYNCED_POSITION, RECORDING_WRITE_FAILED,
-    SENDER_FLOW_CONTROL_RECEIVERS, SENDER_FLOW_CONTROL_RECEIVERS_FULL,
-    SENDER_FLOW_CONTROL_RECEIVERS_TIMED_OUT, SENDER_LIMIT,
+    IMAGE_HWM_POSITION, IMAGE_REBUILD_POSITION, PUBLICATION_LIMIT, PUBLICATION_POSITION,
+    RECORDING_ARMED, RECORDING_ARMED_DROPPED, RECORDING_ARMED_FAILED, RECORDING_ARMED_STARTED,
+    RECORDING_BYTES, RECORDING_INVALIDATED, RECORDING_POSITION, RECORDING_SYNCED_POSITION,
+    RECORDING_WRITE_FAILED, SENDER_FLOW_CONTROL_RECEIVERS, SENDER_FLOW_CONTROL_RECEIVERS_FULL,
+    SENDER_FLOW_CONTROL_RECEIVERS_TIMED_OUT, SENDER_LIMIT, SENDER_POSITION, SUBSCRIPTION_POSITION,
 };
 use cavalry_shm::counters::generated::{
     CLUSTER_APPEND_POSITION, CLUSTER_COMMIT_POSITION, CLUSTER_ELECTION_CAUSE,
@@ -298,8 +298,9 @@ pub fn examine(dir: &Path) -> Report {
 /// the `log.dir` key's check), under a tenth of its filesystem free with the purge that
 /// frees the most (`log-directory-space`), the catalog slots recovery set to invalid,
 /// named (`recording-invalid`), every recording's two positions from the counters file,
-/// with a recorder a full window behind its publisher (`recording-stalled`) and failed
-/// writes (`recording-write-failed`) as findings (ADR 0025), and a recording over half
+/// with a recorder that holds its publisher (`recording-stalled`), and
+/// failed
+/// writes (`recording-write-failed`) as findings (ADR 0025, ADR 0101), and a recording over half
 /// its filesystem, live by its gauge or stopped by its descriptor
 /// (`recording-over-half`, ADR 0031).
 pub fn examine_with(dir: &Path, log_dir: Option<&Path>) -> Report {
@@ -1055,14 +1056,17 @@ fn election_cause_text(code: i64) -> String {
         3 => "it led and its active members fell below a quorum".to_string(),
         4 => "a message carried a term above its own".to_string(),
         5 => "its election before failed".to_string(),
-        _ => format!("of cause {code}, one this doctor does not know"),
+        _ => format!(
+            "of cause {code}, one this doctor does not know: run the doctor of the \
+             driver's own version"
+        ),
     }
 }
 
 /// What the members string doctor was given says of the cluster: its members' ids, so
 /// that doctor knows whether the driver's member is in it and how many members a
-/// quorum is; and each member's consensus and log endpoints, so that a check of a path
-/// between two members names their ports.
+/// quorum is; and each member's consensus, log and catchup endpoints, so that a check
+/// of a path between two members names their ports.
 #[derive(Clone, Debug, PartialEq, Eq)]
 struct Cluster {
     ids: [i32; MAX_MEMBERS],
@@ -1071,6 +1075,9 @@ struct Cluster {
     consensus: [String; MAX_MEMBERS],
     /// Each member's log endpoint, `host:port`, in the order of `ids`.
     log: [String; MAX_MEMBERS],
+    /// Each member's catchup endpoint, `host:port`, in the order of `ids`: where a
+    /// leader's replay reaches a member that replicates or catches up.
+    catchup: [String; MAX_MEMBERS],
 }
 
 /// An endpoint of the members string as the string writes it, `host:port`, an IPv6
@@ -1095,16 +1102,19 @@ impl Cluster {
             count,
             consensus: Default::default(),
             log: Default::default(),
+            catchup: Default::default(),
         };
         for (index, member) in parsed.iter().take(count).enumerate() {
-            if let (Some(id), Some(consensus), Some(log)) = (
+            if let (Some(id), Some(consensus), Some(log), Some(catchup)) = (
                 cluster.ids.get_mut(index),
                 cluster.consensus.get_mut(index),
                 cluster.log.get_mut(index),
+                cluster.catchup.get_mut(index),
             ) {
                 *id = member.id;
                 *consensus = endpoint_text(&member.consensus);
                 *log = endpoint_text(&member.log);
+                *catchup = endpoint_text(&member.catchup);
             }
         }
         Some(cluster)
@@ -1118,6 +1128,12 @@ impl Cluster {
     fn endpoints(&self, id: i32) -> Option<(&str, &str)> {
         let index = self.ids().iter().position(|&member| member == id)?;
         Some((self.consensus.get(index)?, self.log.get(index)?))
+    }
+
+    /// Member `id`'s catchup endpoint, none for an id the string does not hold.
+    fn catchup(&self, id: i32) -> Option<&str> {
+        let index = self.ids().iter().position(|&member| member == id)?;
+        self.catchup.get(index).map(String::as_str)
     }
 }
 
@@ -1260,13 +1276,16 @@ fn cluster_checks(
     5 + MEMBER_COUNTS.len()
 }
 
-/// The path between member `id` and its leader that the member's election needs, as
-/// the members string names it: the leader's log to this member's log endpoint, and
-/// this member's consensus messages to the leader's consensus endpoint. The leader is
-/// the member its gauge `cluster.leader_member_id` names (ADR 0102).
+/// The path between a member and its leader that the member's election needs, as the
+/// members string names it: the leader's log to this member's log endpoint, the
+/// leader's replay to this member's catchup endpoint, and this member's consensus
+/// messages to the leader's consensus endpoint. The leader is the member its gauge
+/// `cluster.leader_member_id` names (ADR 0102).
 struct LogPath {
     /// This member's log endpoint, followed by a comma.
     own_log: String,
+    /// This member's catchup endpoint, with no comma after it.
+    own_catchup: String,
     /// The leader the member has taken, as the words after "has taken": `its leader,
     /// member N,` when the member's gauge names it, and `its leader` when the gauge
     /// names none, so that the sentence names no leader twice.
@@ -1278,7 +1297,7 @@ struct LogPath {
 }
 
 impl LogPath {
-    /// The path of member `id`, its endpoints named from `cluster` when it holds the
+    /// The path of `member`, its endpoints named from `cluster` when it holds the
     /// member, and by their field in the member's entry when it does not.
     fn of(member: &MemberCounters, cluster: Option<&Cluster>) -> LogPath {
         let id = member.id;
@@ -1290,11 +1309,18 @@ impl LogPath {
                 format!("this member's log endpoint, the fourth field of its entry in {members},")
             }
         };
+        let own_catchup = match known.and_then(|cluster| cluster.catchup(id)) {
+            Some(catchup) => format!("this member's catchup endpoint in {members}, {catchup}"),
+            None => {
+                format!("this member's catchup endpoint, the fifth field of its entry in {members}")
+            }
+        };
         // The leader this member has taken, by its own gauge (ADR 0102).
         if let Some(leader) = member.followed() {
             let consensus = known.and_then(|cluster| cluster.endpoints(leader));
             return LogPath {
                 own_log,
+                own_catchup,
                 taken: format!("its leader, member {leader},"),
                 leader_host: format!("member {leader}'s host"),
                 leader_consensus: match consensus {
@@ -1312,6 +1338,7 @@ impl LogPath {
         // endpoint by its field.
         LogPath {
             own_log,
+            own_catchup,
             taken: "its leader".to_string(),
             leader_host: "its leader's host".to_string(),
             leader_consensus: format!(
@@ -1323,9 +1350,15 @@ impl LogPath {
 
     /// What to check of the path: both of its directions.
     fn check(&self) -> String {
+        self.check_toward("this member's log endpoint")
+    }
+
+    /// What to check of the path, the leader's direction toward `endpoints`, a phrase
+    /// for the endpoints of this member that its state receives on: the log endpoint
+    /// for the live log's image, the catchup endpoint for a replay.
+    fn check_toward(&self, endpoints: &str) -> String {
         format!(
-            "that {} reaches this member's log endpoint over UDP, and that this host reaches \
-             {}",
+            "that {} reaches {endpoints} over UDP, and that this host reaches {}",
             self.leader_host, self.leader_consensus
         )
     }
@@ -1340,19 +1373,44 @@ const JOINING_STATES: [i64; 8] = [9, 10, 11, 12, 13, 14, 15, 16];
 /// What a member is told of the elections it has failed, as a sentence to end a
 /// finding with, empty when it has failed none. A member begins again after each
 /// (`spec/cluster.md`, "Roles and the election"), so the count is history unless it
-/// keeps rising; the three counters beside it say which rule failed an election
-/// (`spec/cluster.md`, "Counters").
+/// keeps rising. Three counters beside it each count one rule that fails an election,
+/// and they do not hold every failure: an election also fails on a step that made no
+/// progress for the leader heartbeat timeout, on a log the member cannot join its
+/// leader with, and, for a member that leads before its election has closed, on a
+/// term above its own or on the loss of its quorum, the last counted in
+/// `cluster.leader_quorum_losses` (`counters.toml`, `cluster.elections_failed`). So
+/// the failures the three do not hold are counted out and said too.
 fn failed_elections_text(member: &MemberCounters) -> String {
     if member.elections_failed == 0 {
         return String::new();
     }
+    let timeout = LEADER_HEARTBEAT_TIMEOUT_NS / 1_000_000_000;
+    let named = member
+        .join_position_mismatches
+        .saturating_add(member.truncations_refused)
+        .saturating_add(member.replications_unavailable);
+    let others = member.elections_failed.saturating_sub(named);
+    let rest = if others > 0 {
+        format!(
+            " The other {others} failed on none of these three: a step that made no \
+             progress for the leader heartbeat timeout, {timeout} s, a log this member \
+             cannot join its leader with, or, while this member led and before its \
+             election closed, a term above its own or active members that fell below a \
+             quorum. cluster.leader_quorum_losses counts each time this member lost its \
+             quorum as a leader, before its election closed or after: {} on this member.",
+            member.leader_quorum_losses
+        )
+    } else {
+        String::new()
+    };
     format!(
         " {} of its elections have failed, and it began again after each: {} on an image \
          that joined somewhere other than where its log ends \
          (cluster.join_position_mismatches), {} on a truncation below a commit position it \
          knows (cluster.truncations_refused), and {} on a replication that did not move for \
-         the leader heartbeat timeout (cluster.log_replications_unavailable). If the count \
-         keeps rising, run doctor again and read which of the three rises with it.",
+         the leader heartbeat timeout (cluster.log_replications_unavailable).{rest} If the \
+         count keeps rising, run doctor again and read which of these counters rises with \
+         it.",
         member.elections_failed,
         member.join_position_mismatches,
         member.truncations_refused,
@@ -1363,7 +1421,11 @@ fn failed_elections_text(member: &MemberCounters) -> String {
 /// What `cluster-no-leader` says of a member that has no leader: where its election
 /// stands, why it began, what elects a leader, and where to look when it stays so
 /// (`spec/cluster.md`, "Roles and the election", states 1 to 4; ADR 0077). With
-/// `cluster`, when it holds the member, the quorum is named by its size.
+/// `cluster`, when it holds the member, the quorum is named by its size. In canvass
+/// it also says what a canvass after a replication is: a member that has replicated
+/// a term it missed goes back to canvass with no leader, in the election it was in,
+/// its cause as it was (follower log replication; ADR 0086), and what it waits for
+/// there is one member's answer and not a quorum's votes.
 fn no_leader_message(member: &MemberCounters, state: i64, cluster: Option<&Cluster>) -> String {
     let id = member.id;
     let startup = STARTUP_CANVASS_TIMEOUT_NS / 1_000_000_000;
@@ -1379,6 +1441,15 @@ fn no_leader_message(member: &MemberCounters, state: i64, cluster: Option<&Clust
         ),
         None => format!("a quorum of the members in {members}"),
     };
+    let replicated = if state == 1 {
+        " A member that has replicated a term it missed from a leader's recordings also \
+         canvasses again, with no leader, in the same election: it waits there for that \
+         leader to answer its canvass position with the next new leadership term, and if \
+         it stays, this host and that leader's host do not reach each other's consensus \
+         endpoints."
+    } else {
+        ""
+    };
     format!(
         "member {id} follows no leader: its election is in {}{began}. The members elect \
          their leader: each canvasses, one that no member which reported is ahead of \
@@ -1387,7 +1458,7 @@ fn no_leader_message(member: &MemberCounters, state: i64, cluster: Option<&Clust
          member to report, and nominates at once when all have. If this member stays \
          without a leader, fewer than a quorum of the members run or reach each other: run \
          doctor on each member's host, and check that each reaches the consensus endpoint \
-         of every other, the third field of its entry in {members}.{}",
+         of every other, the third field of its entry in {members}.{replicated}{}",
         election_state_name(state),
         failed_elections_text(member)
     )
@@ -1399,39 +1470,61 @@ fn no_leader_message(member: &MemberCounters, state: i64, cluster: Option<&Clust
 fn joining_message(member: &MemberCounters, state: i64, cluster: Option<&Cluster>) -> String {
     let id = member.id;
     let timeout = LEADER_HEARTBEAT_TIMEOUT_NS / 1_000_000_000;
-    let members = MEMBERS_KEY.env;
     let path = LogPath::of(member, cluster);
     let replays = format!(
-        "The leader's replay must arrive, over UDP, on this member's catchup endpoint, \
-         the fifth field of its entry in {members}"
+        "The leader's replay must arrive, over UDP, on {}",
+        path.own_catchup
     );
-    let step = match state {
-        9 => format!(
-            "It replicates a term it missed from its leader's recordings, one replay for \
-             each request. {replays}"
+    // What the state does; which waits the leader heartbeat timeout bounds; and the
+    // endpoints of this member that the leader's host must reach for it.
+    let (step, waits, check) = match state {
+        9 => (
+            format!(
+                "It replicates a term it missed from its leader's recordings, one replay \
+                 for each request. {replays}"
+            ),
+            "Each wait",
+            path.check_toward("this member's catchup endpoint"),
         ),
-        10 => "It replays its own log, for as long as that takes".to_string(),
-        11..=13 => format!(
-            "It catches up within its leader's term: the leader replays what this member \
-             lacks while this member also records the live log, and the catch-up ends \
-             when its log reaches where that recording begins. {replays}, and an image of \
-             the leader's log on {}",
-            path.own_log.trim_end_matches(',')
+        // Its own replay needs no other member and has no timeout (`spec/cluster.md`,
+        // follower replay); what follows it is a catch-up or the live log's image.
+        10 => (
+            "It replays its own log first, for as long as that takes: no timeout bounds \
+             the replay, and it needs no other member. Then it joins its leader's log, \
+             through a catch-up when its append position is behind the leader's log \
+             position"
+                .to_string(),
+            "Each wait after the replay",
+            path.check_toward("this member's log endpoint and its catchup endpoint"),
         ),
-        _ => format!(
-            "An image of the leader's log must arrive, over UDP, on {} and this member's \
-             append position must reach the leader",
-            path.own_log
+        11..=13 => (
+            format!(
+                "It catches up within its leader's term: the leader replays what this \
+                 member lacks while this member also records the live log, and the \
+                 catch-up ends when its log reaches where that recording begins. \
+                 {replays}, and an image of the leader's log on {}",
+                path.own_log.trim_end_matches(',')
+            ),
+            "Each wait",
+            path.check_toward("this member's catchup endpoint and its log endpoint"),
+        ),
+        _ => (
+            format!(
+                "An image of the leader's log must arrive, over UDP, on {} and this \
+                 member's append position must reach the leader",
+                path.own_log
+            ),
+            "Each wait",
+            path.check(),
         ),
     };
     format!(
         "member {id} has taken {} and joins its log: its election is in {}. \
-         {step}. Each wait is bounded by the leader heartbeat timeout, {timeout} s; when \
+         {step}. {waits} is bounded by the leader heartbeat timeout, {timeout} s; when \
          one is not met the election fails, counted in cluster.elections_failed, and the \
-         member begins again. If it does not close, check {}.{}",
+         member begins again. If it does not close, check {check}.{}",
         path.taken,
         election_state_name(state),
-        path.check(),
         failed_elections_text(member)
     )
 }
@@ -1493,14 +1586,17 @@ fn member_findings(
         });
     }
     if leads && member.leader_quorum_losses > 0 {
+        // A leader that loses its quorum stops leading and holds an election
+        // (`spec/cluster.md`, "The commit position"), so this one leads again.
+        let then = "each time it stopped leading and held an election, and it leads again now";
         findings.push(Finding {
             check: "cluster-quorum-lost",
             level: Level::Warn,
             message: format!(
                 "the leader, member {id}, has lost its quorum {} time(s): fewer than a \
-                 majority of the members reported within 10 s, and nothing is committed \
-                 while that lasts. Check that a majority of the members in {} run and reach \
-                 this member's consensus endpoint",
+                 majority of the members reported within 10 s, and {then}. Check that a \
+                 majority of the members in {} run and reach this member's consensus \
+                 endpoint",
                 member.leader_quorum_losses, MEMBERS_KEY.env
             ),
             doc: DOC_CLUSTER,
@@ -2233,10 +2329,27 @@ struct RecordingCounters {
 }
 
 /// The recordings: every `recording.position` counter with its `recording.synced_position`,
-/// listed; a recorder a full publication window behind its publisher
-/// (`recording-stalled`); writes that failed (`recording-write-failed`); and the catalog
-/// slots recovery set to invalid, named from the catalog when the log directory is
-/// known (`recording-invalid`) (`spec/client-protocol.md`, "Commands"; ADR 0025).
+/// listed; a recorder that holds its publisher (`recording-stalled`);
+/// writes that failed (`recording-write-failed`); and the catalog slots recovery set to
+/// invalid, named from the catalog when the log directory is known
+/// (`recording-invalid`) (`spec/client-protocol.md`, "Commands"; ADR 0025).
+///
+/// `recording-stalled` reads no window of its own (ADR 0101). The driver keeps a
+/// recorded publication's limit one publication window past its slowest reader, so
+/// when the recorder is that reader, `publication.limit` less `recording.position` is
+/// the room the recorder gives the publisher, whatever the log's term: it is the
+/// window, or up to an eighth short of it, since the limit is raised in steps of an
+/// eighth. A claim is refused when the publisher's position is not below its limit,
+/// and one that starts below it is reserved whole (`spec/log-buffer.md`, "Claim,
+/// commit and abort", step 1), so a publisher held by its recorder stands at its
+/// limit or up to a message past it. The check warns when `publication.position` has
+/// reached `publication.limit`, the condition the publisher is refused on, and at no
+/// fraction of the room below it, where nobody is held.
+/// It judges a recording only when it can tell which publication it reads: one
+/// publication on this driver with the recording's session id and stream id, and no
+/// image with them, since a recording's label names neither. And it leaves a recording
+/// alone when another reader of the publication, its sender or a subscriber, is
+/// further behind than the recorder: that reader holds the publisher then.
 fn recording_checks(
     reader: &CountersReader,
     log_dir: Option<&Path>,
@@ -2249,7 +2362,15 @@ fn recording_checks(
     // position, keyed by correlation id, session id and stream id.
     let mut recordings: Vec<RecordingCounters> = Vec::new();
     let mut synced: Vec<([u8; 8], i64)> = Vec::new();
-    let mut publications: Vec<(i32, i32, i64)> = Vec::new();
+    // By key, 16 bytes: the correlation id, the session id and the stream id. A
+    // publication's position and limit, and its other readers' positions, its sender's
+    // and its subscribers', are under the publication's key; an image's high-water
+    // mark is under the image's, with the stream's session id and stream id.
+    let mut publications: Vec<([u8; 16], i64)> = Vec::new();
+    let mut limits: Vec<([u8; 16], i64)> = Vec::new();
+    let mut readers: Vec<([u8; 16], i64)> = Vec::new();
+    let mut images: Vec<[u8; 8]> = Vec::new();
+    let key_of = |key: &[u8]| -> Option<[u8; 16]> { key.get(..16)?.try_into().ok() };
     let mut live_bytes: Vec<(i64, i64)> = Vec::new();
     for id in 0..capacity {
         let Some(fields) = record(id) else { continue };
@@ -2284,9 +2405,23 @@ fn recording_checks(
             rid.copy_from_slice(&key[..8]);
             synced.push((rid, value));
         } else if fields.type_id() == PUBLICATION_POSITION.0 {
-            let session = i32::from_le_bytes([key[8], key[9], key[10], key[11]]);
-            let stream = i32::from_le_bytes([key[12], key[13], key[14], key[15]]);
-            publications.push((session, stream, value));
+            if let Some(key) = key_of(key) {
+                publications.push((key, value));
+            }
+        } else if fields.type_id() == PUBLICATION_LIMIT.0 {
+            if let Some(key) = key_of(key) {
+                limits.push((key, value));
+            }
+        } else if fields.type_id() == SENDER_POSITION.0
+            || fields.type_id() == SUBSCRIPTION_POSITION.0
+        {
+            if let Some(key) = key_of(key) {
+                readers.push((key, value));
+            }
+        } else if fields.type_id() == IMAGE_HWM_POSITION.0 {
+            if let Some(stream) = key.get(8..16).and_then(|tail| tail.try_into().ok()) {
+                images.push(stream);
+            }
         } else if fields.type_id() == RECORDING_BYTES.0 {
             // The gauge's label is the position's: the name, then the recording id.
             if let Some(rid) = fields.label().split_whitespace().nth(1)
@@ -2300,7 +2435,6 @@ fn recording_checks(
         let rid = recording.recording_id.to_le_bytes();
         recording.synced = synced.iter().find(|(key, _)| *key == rid).map(|(_, v)| *v);
     }
-    let window = i64::from(spec::IPC_PUBLICATION_WINDOW);
     for recording in &recordings {
         checks += 1;
         let synced = recording
@@ -2319,25 +2453,46 @@ fn recording_checks(
             ),
             doc: DOC_RECORDING_COMMANDS,
         });
-        let publisher = publications
+        // The one publication the recording can be reading, or none that the counters
+        // name: see the function's comment.
+        let mut stream = [0u8; 8];
+        stream[..4].copy_from_slice(&recording.session_id.to_le_bytes());
+        stream[4..].copy_from_slice(&recording.stream_id.to_le_bytes());
+        let mut on_stream = publications.iter().filter(|(key, _)| key[8..] == stream);
+        let (Some((key, publisher)), None) = (on_stream.next(), on_stream.next()) else {
+            continue;
+        };
+        if images.contains(&stream) {
+            continue;
+        }
+        let Some(limit) = limits
             .iter()
-            .find(|(session, stream, _)| {
-                *session == recording.session_id && *stream == recording.stream_id
-            })
-            .map(|(_, _, position)| *position);
-        if let Some(publisher) = publisher
-            && publisher.saturating_sub(recording.position) >= window
-        {
+            .find(|(limit_key, _)| limit_key == key)
+            .map(|(_, limit)| *limit)
+        else {
+            continue;
+        };
+        let slower_reader = readers
+            .iter()
+            .any(|(reader_key, position)| reader_key == key && *position < recording.position);
+        let room = limit.saturating_sub(recording.position);
+        let behind = publisher.saturating_sub(recording.position);
+        // Held now: the publisher's position has reached its limit, which is what its
+        // next claim is refused on, and the limit waits for the recorder.
+        if !slower_reader && room > 0 && *publisher >= limit {
             findings.push(Finding {
                 check: "recording-stalled",
                 level: Level::Warn,
                 message: format!(
-                    "recording {} is {} bytes behind its publisher, a full publication window: \
-                     the recorder's disk is slow or failing, and the publisher is \
-                     back-pressured until it catches up; check recording.write_failed and the \
-                     log directory's disk, and `recording stopped` if it gives up",
-                    recording.recording_id,
-                    publisher - recording.position
+                    "recording {} holds its publisher: the publisher's position is {behind} \
+                     bytes past the recorder's and its limit {room} bytes past it, and a \
+                     publisher whose position has reached its limit is back-pressured \
+                     until the limit rises, which waits for the recorder; a recorder that \
+                     stays behind is on a slow or failing disk, so check \
+                     recording.write_failed and the log directory's disk, and `recording \
+                     stopped` if it gives up, and run doctor again, since a recorder that \
+                     has caught up by then was waiting for a sync",
+                    recording.recording_id
                 ),
                 doc: DOC_RECORDING_COMMANDS,
             });
@@ -3732,35 +3887,82 @@ mod tests {
         );
     }
 
-    /// Every recording is listed with its two positions, and a recorder a full
-    /// publication window behind its publisher is `recording-stalled`.
+    /// A counters file with the counters a recorded publication has, for the tests of
+    /// `recording-stalled`: its key is its correlation id, its session id and its
+    /// stream id, and its recording's label names the last two.
+    struct Recorded {
+        position: cavalry_shm::counters::Counter,
+        limit: cavalry_shm::counters::Counter,
+        recorder: cavalry_shm::counters::Counter,
+    }
+
+    fn position_key(correlation: i64, session: i32, stream: i32) -> [u8; 16] {
+        let mut key = [0u8; 16];
+        key[..8].copy_from_slice(&correlation.to_le_bytes());
+        key[8..12].copy_from_slice(&session.to_le_bytes());
+        key[12..].copy_from_slice(&stream.to_le_bytes());
+        key
+    }
+
+    fn recorded(
+        counters: &mut CountersFile,
+        correlation: i64,
+        session: i32,
+        stream: i32,
+        recording: i64,
+    ) -> Recorded {
+        let key = position_key(correlation, session, stream);
+        let label = |name: &str| format!("{name} {correlation} {session} {stream}");
+        Recorded {
+            position: counters
+                .allocate(PUBLICATION_POSITION, &key, &label("publication.position"))
+                .expect("the publication's position"),
+            limit: counters
+                .allocate(PUBLICATION_LIMIT, &key, &label("publication.limit"))
+                .expect("the publication's limit"),
+            recorder: counters
+                .allocate(
+                    RECORDING_POSITION,
+                    &recording.to_le_bytes(),
+                    &format!("recording.position {recording} {session} {stream}"),
+                )
+                .expect("the recording's position"),
+        }
+    }
+
+    fn stalled(report: &Report) -> Vec<String> {
+        report
+            .findings
+            .iter()
+            .filter(|finding| finding.check == "recording-stalled")
+            .map(|finding| finding.message.clone())
+            .collect()
+    }
+
+    /// Every recording is listed with its two positions, and a recorder that holds its
+    /// publisher is `recording-stalled`: the publisher stands at its limit, here a
+    /// `cavalry:ipc` window of 32 MiB past the recorder, or a message past it, since a
+    /// claim that starts below the limit is reserved whole. A frame short of the limit
+    /// nobody is held, and nothing is said.
     #[test]
-    fn recordings_are_listed_and_a_recorder_a_window_behind_warns() {
+    fn recordings_are_listed_and_a_recorder_that_holds_its_publisher_warns() {
         let dir = TestDir::new("recordings");
         let mut counters = CountersFile::create(&dir.0, 128).expect("counters");
         let ring = CommandRing::create(&dir.0, 4096).expect("ring");
         let _consumer = ring.consumer(Duration::from_secs(10)).expect("consumer");
-        let mut key = [0u8; 16];
-        key[..8].copy_from_slice(&7i64.to_le_bytes());
-        key[8..12].copy_from_slice(&(-5i32).to_le_bytes());
-        key[12..].copy_from_slice(&1001i32.to_le_bytes());
-        let publisher = counters
-            .allocate(PUBLICATION_POSITION, &key, "publication.position 7 -5 1001")
-            .expect("the publication's position");
-        publisher.store_release(40 * 1024 * 1024);
-        let rid = 3i64.to_le_bytes();
-        let position = counters
-            .allocate(RECORDING_POSITION, &rid, "recording.position 3 -5 1001")
-            .expect("the recording's position");
+        let publication = recorded(&mut counters, 7, -5, 1001, 3);
+        let mib = 1024 * 1024;
+        publication.recorder.store_release(2 * mib);
+        publication.limit.store_release(34 * mib);
+        publication.position.store_release(34 * mib);
         let synced = counters
             .allocate(
                 RECORDING_SYNCED_POSITION,
-                &rid,
+                &3i64.to_le_bytes(),
                 "recording.synced_position 3 -5 1001",
             )
             .expect("the recording's synced position");
-        position.store_release(2 * 1024 * 1024);
-        synced.store_release(1024 * 1024);
+        synced.store_release(mib);
 
         let report = examine(&dir.0);
         let listed = finding(&report, "recording");
@@ -3769,25 +3971,159 @@ mod tests {
             listed.message,
             "recording 3 of stream 1001 session -5: position 2097152, synced 1048576"
         );
-        let stalled = finding(&report, "recording-stalled");
-        assert_eq!(stalled.level, Level::Warn);
+        let found = finding(&report, "recording-stalled");
+        assert_eq!(found.level, Level::Warn);
         assert!(
-            stalled
-                .message
-                .starts_with("recording 3 is 39845888 bytes behind"),
+            found.message.starts_with(
+                "recording 3 holds its publisher: the publisher's position is 33554432 \
+                 bytes past the recorder's and its limit 33554432 bytes past it"
+            ),
             "{}",
-            stalled.message
+            found.message
+        );
+        // A message past the limit, which the last claim below it was reserved to.
+        publication.position.store_release(34 * mib + 4096);
+        let past = stalled(&examine(&dir.0));
+        assert_eq!(past.len(), 1, "{past:?}");
+        assert!(
+            past[0].starts_with(
+                "recording 3 holds its publisher: the publisher's position is 33558528 \
+                 bytes past the recorder's and its limit 33554432 bytes past it"
+            ),
+            "{}",
+            past[0]
+        );
+        // A frame short of the limit: the next claim is reserved, so nobody is held.
+        publication.position.store_release(34 * mib - 64);
+        let report = examine(&dir.0);
+        assert!(stalled(&report).is_empty(), "not held: {report}");
+
+        // The recorder catches up and the conductor raises the limit a window past it.
+        publication.position.store_release(34 * mib);
+        publication.recorder.store_release(34 * mib - 64);
+        publication.limit.store_release(34 * mib - 64 + 32 * mib);
+        let report = examine(&dir.0);
+        assert!(stalled(&report).is_empty(), "caught up: {report}");
+    }
+
+    /// `recording-stalled` reads the room from the publication's own limit, so it
+    /// needs no window (ADR 0101). A `cavalry:udp` publication held by its recorder
+    /// stands as the driver leaves it: the limit an eighth of its 8 MiB window short
+    /// of the recorder's position plus the window, the publisher at the limit, the
+    /// sender ahead of the recorder. A log of another term reads the same way, its
+    /// publisher a message past its limit. A frame short of the limit, nothing; and a
+    /// reader further behind than the recorder, a sender whose receivers are slow or a
+    /// subscriber, is the one that holds the publisher, so the recorder is not named.
+    #[test]
+    fn a_held_publisher_is_read_from_its_limit_and_its_slowest_reader() {
+        let dir = TestDir::new("recordings-held");
+        let mut counters = CountersFile::create(&dir.0, 128).expect("counters");
+        let ring = CommandRing::create(&dir.0, 4096).expect("ring");
+        let _consumer = ring.consumer(Duration::from_secs(10)).expect("consumer");
+        let mib = 1024 * 1024;
+        // A cavalry:udp publication, window 8 MiB, with its sender's position.
+        let udp = recorded(&mut counters, 7, -5, 1001, 3);
+        let sender = counters
+            .allocate(
+                SENDER_POSITION,
+                &position_key(7, -5, 1001),
+                "sender.position 7 -5 1001 9",
+            )
+            .expect("its sender position");
+        udp.recorder.store_release(mib);
+        udp.limit.store_release(mib + 7 * mib);
+        udp.position.store_release(mib + 7 * mib);
+        sender.store_release(mib + 7 * mib);
+        // A publication whose log has a 1 MiB term, window 512 KiB, held the same way,
+        // a message past its limit.
+        let small = recorded(&mut counters, 8, -6, 1002, 4);
+        small.recorder.store_release(mib);
+        small.limit.store_release(mib + 512 * 1024);
+        small.position.store_release(mib + 512 * 1024 + 4096);
+        let found = stalled(&examine(&dir.0));
+        assert_eq!(found.len(), 2, "{found:?}");
+        assert!(
+            found[0].starts_with(
+                "recording 3 holds its publisher: the publisher's position is 7340032 \
+                 bytes past the recorder's and its limit 7340032 bytes past it"
+            ),
+            "{}",
+            found[0]
+        );
+        assert!(
+            found[1].starts_with(
+                "recording 4 holds its publisher: the publisher's position is 528384 \
+                 bytes past the recorder's and its limit 524288 bytes past it"
+            ),
+            "{}",
+            found[1]
         );
 
-        position.store_release(40 * 1024 * 1024);
-        let report = examine(&dir.0);
-        assert!(
-            !report
-                .findings
-                .iter()
-                .any(|f| f.check == "recording-stalled"),
-            "caught up: {report}"
-        );
+        // A frame short of the limit: the next claim is reserved, nobody is held. At
+        // the limit: the warning.
+        udp.position.store_release(mib + 7 * mib - 64);
+        small.position.store_release(mib + 512 * 1024 - 64);
+        assert!(stalled(&examine(&dir.0)).is_empty());
+        udp.position.store_release(mib + 7 * mib);
+        assert_eq!(stalled(&examine(&dir.0)).len(), 1);
+
+        // The sender further behind than the recorder: its receivers hold the
+        // publisher, and the recorder keeps up.
+        sender.store_release(mib - 64);
+        assert!(stalled(&examine(&dir.0)).is_empty());
+        // A subscriber further behind than the recorder, over cavalry:ipc, the same.
+        sender.store_release(mib + 7 * mib);
+        small.position.store_release(mib + 512 * 1024);
+        assert_eq!(stalled(&examine(&dir.0)).len(), 2);
+        let subscriber = counters
+            .allocate(
+                SUBSCRIPTION_POSITION,
+                &position_key(8, -6, 1002),
+                "subscription.position 8 -6 1002",
+            )
+            .expect("a subscriber's position");
+        subscriber.store_release(mib - 64);
+        let found = stalled(&examine(&dir.0));
+        assert_eq!(found.len(), 1, "{found:?}");
+        assert!(found[0].starts_with("recording 3 "), "{}", found[0]);
+    }
+
+    /// A recording's label names a session id and a stream id and not what it reads, so
+    /// `recording-stalled` judges none it cannot place: two publications on this driver
+    /// with them, or an image with them, which a driver that receives its own stream
+    /// has (ADR 0101).
+    #[test]
+    fn a_recording_that_cannot_be_placed_is_not_judged() {
+        let dir = TestDir::new("recordings-unplaced");
+        let mut counters = CountersFile::create(&dir.0, 128).expect("counters");
+        let ring = CommandRing::create(&dir.0, 4096).expect("ring");
+        let _consumer = ring.consumer(Duration::from_secs(10)).expect("consumer");
+        let mib = 1024 * 1024;
+        let held = recorded(&mut counters, 7, -5, 1001, 3);
+        held.recorder.store_release(mib);
+        held.limit.store_release(9 * mib);
+        held.position.store_release(9 * mib);
+        assert_eq!(stalled(&examine(&dir.0)).len(), 1, "placed: judged");
+        // An image of the same session and stream: the recording may be the image's.
+        let image = counters
+            .allocate(
+                IMAGE_HWM_POSITION,
+                &position_key(20, -5, 1001),
+                "image.hwm_position 20 -5 1001",
+            )
+            .expect("an image's high-water mark");
+        assert!(stalled(&examine(&dir.0)).is_empty());
+        counters.free(image.id(), 0).expect("freed");
+        assert_eq!(stalled(&examine(&dir.0)).len(), 1);
+        // A second publication with the session id and the stream id.
+        counters
+            .allocate(
+                PUBLICATION_POSITION,
+                &position_key(9, -5, 1001),
+                "publication.position 9 -5 1001",
+            )
+            .expect("another publication's position");
+        assert!(stalled(&examine(&dir.0)).is_empty());
     }
 
     /// `recording-write-failed` and `recording-invalid`, the latter naming the catalog's
@@ -4793,8 +5129,10 @@ mod tests {
 
     /// A member that has no leader is told where its election stands, why it began,
     /// from its gauge, and what elects a leader, and never that a member leads without
-    /// a vote or to start the cluster again (ADR 0100, ADR 0102). The elections it has
-    /// failed are named with the three counters that say which rule failed each.
+    /// a vote or to start the cluster again (ADR 0100, ADR 0102). In canvass it is told
+    /// what a canvass after a replication waits for. The elections it has failed are
+    /// counted against the three counters that each name a rule, and those the three
+    /// do not hold are counted out, with what else fails an election.
     #[test]
     fn a_member_that_elects_and_has_no_leader_is_told_why_its_election_began() {
         let cluster = Cluster::of(Some(THREE_MEMBERS)).expect("the members string parses");
@@ -4837,13 +5175,77 @@ mod tests {
             message.contains("waits in canvass up to 60 s for every member to report"),
             "{message}"
         );
+        let replicated = "the third field of its entry in CAVALRY_CLUSTER_MEMBERS. A member \
+                          that has replicated a term it missed from a leader's recordings \
+                          also canvasses again, with no leader, in the same election: it \
+                          waits there for that leader to answer its canvass position with \
+                          the next new leadership term, and if it stays, this host and that \
+                          leader's host do not reach each other's consensus endpoints.";
+        assert!(message.ends_with(replicated), "{message}");
+        for absent in [
+            "appointed",
+            "new cluster",
+            "lowest id",
+            "elections have failed",
+        ] {
+            assert!(!message.contains(absent), "{absent}: {message}");
+        }
+
+        // The canvass after a replication: no leader, the cause as it was, and the
+        // same sentence. A state that is not canvass does not say it.
+        let after_replication = [
+            (CLUSTER_ROLE, 0),
+            (CLUSTER_ELECTION_STATE, 1),
+            (CLUSTER_LEADERSHIP_TERM_ID, 4),
+            (CLUSTER_LEADER_MEMBER_ID, -1),
+            (CLUSTER_ELECTION_CAUSE, 4),
+        ];
+        let (_, findings) =
+            cluster_findings_in("elects-after-replication", 2, None, &after_replication);
+        let message = &findings[1].message;
+        assert!(
+            message.starts_with(
+                "member 2 follows no leader: its election is in canvass, and began because \
+                 a message carried a term above its own."
+            ),
+            "{message}"
+        );
+        assert!(message.ends_with(replicated), "{message}");
+        let nominate = [
+            (CLUSTER_ROLE, 0),
+            (CLUSTER_ELECTION_STATE, 2),
+            (CLUSTER_LEADERSHIP_TERM_ID, 4),
+            (CLUSTER_LEADER_MEMBER_ID, -1),
+            (CLUSTER_ELECTION_CAUSE, 4),
+        ];
+        let (_, findings) = cluster_findings_in("elects-nominate", 2, None, &nominate);
+        let message = &findings[1].message;
+        assert!(
+            message.contains("its election is in nominate,"),
+            "{message}"
+        );
         assert!(
             message.ends_with("the third field of its entry in CAVALRY_CLUSTER_MEMBERS."),
             "{message}"
         );
-        for absent in ["appointed", "new cluster", "lowest id"] {
-            assert!(!message.contains(absent), "{absent}: {message}");
-        }
+        // A candidate, in its ballot, is a member with no leader too.
+        let ballot = [
+            (CLUSTER_ROLE, 1),
+            (CLUSTER_ELECTION_STATE, 3),
+            (CLUSTER_LEADERSHIP_TERM_ID, 4),
+            (CLUSTER_LEADER_MEMBER_ID, -1),
+            (CLUSTER_ELECTION_CAUSE, 1),
+        ];
+        let (_, findings) = cluster_findings_in("elects-candidate", 2, None, &ballot);
+        let found: Vec<&str> = findings.iter().map(|finding| finding.check).collect();
+        assert_eq!(found, ["cluster-member", "cluster-no-leader"]);
+        assert!(
+            findings[1]
+                .message
+                .contains("its election is in candidate ballot,"),
+            "{}",
+            findings[1].message
+        );
 
         // With elections that failed: how many, and on which rule.
         let failed = [
@@ -4877,13 +5279,132 @@ mod tests {
             ),
             "{message}"
         );
-        assert!(!message.contains("new cluster"), "{message}");
+        assert!(
+            message.ends_with(
+                "(cluster.log_replications_unavailable). If the count keeps rising, run \
+                 doctor again and read which of these counters rises with it."
+            ),
+            "{message}"
+        );
+        for absent in ["new cluster", "The other"] {
+            assert!(!message.contains(absent), "{absent}: {message}");
+        }
+
+        // Elections that failed on none of the three rules: the three counters hold
+        // none of the four, and the message says so and what else fails an election.
+        let others = [
+            (CLUSTER_ROLE, 0),
+            (CLUSTER_ELECTION_STATE, 1),
+            (CLUSTER_LEADERSHIP_TERM_ID, 6),
+            (CLUSTER_LEADER_MEMBER_ID, -1),
+            (CLUSTER_ELECTION_CAUSE, 5),
+            (CLUSTER_ELECTIONS_FAILED, 4),
+            (CLUSTER_LEADER_QUORUM_LOSSES, 1),
+        ];
+        let (_, findings) = cluster_findings_in("elects-failed-others", 2, None, &others);
+        let message = &findings[1].message;
+        assert!(
+            message.contains(
+                " 4 of its elections have failed, and it began again after each: 0 on an \
+                 image"
+            ),
+            "{message}"
+        );
+        assert!(
+            message.ends_with(
+                "(cluster.log_replications_unavailable). The other 4 failed on none of \
+                 these three: a step that made no progress for the leader heartbeat \
+                 timeout, 10 s, a log this member cannot join its leader with, or, while \
+                 this member led and before its election closed, a term above its own or \
+                 active members that fell below a quorum. cluster.leader_quorum_losses \
+                 counts each time this member lost its quorum as a leader, before its \
+                 election closed or after: 1 on this member. If the count keeps rising, \
+                 run doctor again and read which of these counters rises with it."
+            ),
+            "{message}"
+        );
+        // One the three hold and one they do not.
+        let mixed = [
+            (CLUSTER_ROLE, 0),
+            (CLUSTER_ELECTION_STATE, 1),
+            (CLUSTER_LEADERSHIP_TERM_ID, 6),
+            (CLUSTER_LEADER_MEMBER_ID, -1),
+            (CLUSTER_ELECTION_CAUSE, 5),
+            (CLUSTER_ELECTIONS_FAILED, 2),
+            (CLUSTER_LOG_REPLICATIONS_UNAVAILABLE, 1),
+        ];
+        let (_, findings) = cluster_findings_in("elects-failed-mixed", 2, None, &mixed);
+        let message = &findings[1].message;
+        assert!(
+            message.contains(
+                "and 1 on a replication that did not move for the leader heartbeat timeout \
+                 (cluster.log_replications_unavailable). The other 1 failed on none of \
+                 these three:"
+            ),
+            "{message}"
+        );
+        assert!(message.contains(": 0 on this member."), "{message}");
+    }
+
+    /// Every cause `cluster.election_cause` holds has its words, and a code this
+    /// doctor does not know says what to run (`spec/cluster.md`, "Counters"; ADR 0102).
+    #[test]
+    fn every_election_cause_has_its_words() {
+        let causes = [
+            (0, "the member started"),
+            (
+                1,
+                "its leader said nothing for the leader heartbeat timeout",
+            ),
+            (2, "its image of the leader's log was no longer available"),
+            (3, "it led and its active members fell below a quorum"),
+            (4, "a message carried a term above its own"),
+            (5, "its election before failed"),
+            (
+                6,
+                "of cause 6, one this doctor does not know: run the doctor of the driver's \
+                 own version",
+            ),
+        ];
+        for (code, words) in causes {
+            assert_eq!(election_cause_text(code), words, "cause {code}");
+        }
+        // The member's own line carries them, a leader's too.
+        let lost = [
+            (CLUSTER_ROLE, 2),
+            (CLUSTER_ELECTION_STATE, 17),
+            (CLUSTER_LEADERSHIP_TERM_ID, 5),
+            (CLUSTER_LEADER_MEMBER_ID, 1),
+            (CLUSTER_ELECTION_CAUSE, 3),
+            (CLUSTER_LEADER_QUORUM_LOSSES, 2),
+        ];
+        let (_, findings) = cluster_findings_in("elects-quorum-lost", 1, None, &lost);
+        let found: Vec<&str> = findings.iter().map(|finding| finding.check).collect();
+        assert_eq!(found, ["cluster-member", "cluster-quorum-lost"]);
+        assert!(
+            findings[0].message.ends_with(
+                "; its last election began because it led and its active members fell \
+                 below a quorum"
+            ),
+            "{}",
+            findings[0].message
+        );
+        // A leader that elects stopped leading at each loss, and leads again.
+        assert!(
+            findings[1].message.starts_with(
+                "the leader, member 1, has lost its quorum 2 time(s): fewer than a \
+                 majority of the members reported within 10 s, and each time it stopped \
+                 leading and held an election, and it leads again now. Check that"
+            ),
+            "{}",
+            findings[1].message
+        );
     }
 
     /// A member that elects and has taken a leader names the member its gauge holds,
     /// whichever member that is, and is told what its state does:
-    /// the live log's image, a replication, or a catch-up, each with the endpoint it
-    /// needs (ADR 0102).
+    /// the live log's image, a replication, its own replay, or a catch-up, each with
+    /// the endpoint it needs and the endpoints to check (ADR 0102).
     #[test]
     fn a_member_that_elects_and_joins_names_the_leader_its_gauge_holds() {
         let cluster = Cluster::of(Some(THREE_MEMBERS)).expect("the members string parses");
@@ -4935,28 +5456,97 @@ mod tests {
             assert!(!message.contains(absent), "{absent}: {message}");
         }
 
+        // A replication's replay arrives on the catchup endpoint, so that is the
+        // endpoint named and the one to check, with its address from the string.
         let message = joining("elects-replication", 9, Some(&cluster));
         assert!(
             message.contains(
                 "its election is in follower log replication. It replicates a term it \
                  missed from its leader's recordings, one replay for each request. The \
-                 leader's replay must arrive, over UDP, on this member's catchup endpoint, \
-                 the fifth field of its entry in CAVALRY_CLUSTER_MEMBERS."
+                 leader's replay must arrive, over UDP, on this member's catchup endpoint \
+                 in CAVALRY_CLUSTER_MEMBERS, 127.0.0.1:9023. Each wait is bounded by the \
+                 leader heartbeat timeout, 10 s;"
+            ),
+            "{message}"
+        );
+        assert!(
+            message.ends_with(
+                "If it does not close, check that member 1's host reaches this member's \
+                 catchup endpoint over UDP, and that this host reaches member 1's \
+                 consensus endpoint, 127.0.0.1:9011."
+            ),
+            "{message}"
+        );
+        assert!(!message.contains("log endpoint"), "{message}");
+        let message = joining("elects-replication-no-string", 9, None);
+        assert!(
+            message.contains(
+                "on this member's catchup endpoint, the fifth field of its entry in \
+                 CAVALRY_CLUSTER_MEMBERS. Each wait"
             ),
             "{message}"
         );
 
-        let message = joining("elects-catch-up", 12, Some(&cluster));
+        // Its own replay has no timeout and needs no other member; what follows has
+        // both.
+        let message = joining("elects-replay", 10, Some(&cluster));
         assert!(
             message.contains(
-                "its election is in follower catch-up await. It catches up within its \
-                 leader's term:"
+                "its election is in follower replay. It replays its own log first, for as \
+                 long as that takes: no timeout bounds the replay, and it needs no other \
+                 member. Then it joins its leader's log, through a catch-up when its \
+                 append position is behind the leader's log position. Each wait after the \
+                 replay is bounded by the leader heartbeat timeout, 10 s;"
             ),
             "{message}"
         );
         assert!(
-            message
-                .contains("the fifth field of its entry in CAVALRY_CLUSTER_MEMBERS, and an image"),
+            message.contains(
+                "check that member 1's host reaches this member's log endpoint and its \
+                 catchup endpoint over UDP, and that this host reaches"
+            ),
+            "{message}"
+        );
+
+        // A catch-up, in each of its three states, needs the replay and the live log.
+        for (state, name) in [
+            (11, "follower catch-up init"),
+            (12, "follower catch-up await"),
+            (13, "follower catch-up"),
+        ] {
+            let message = joining(&format!("elects-catch-up-{state}"), state, Some(&cluster));
+            assert!(
+                message.contains(&format!(
+                    "its election is in {name}. It catches up within its leader's term:"
+                )),
+                "{message}"
+            );
+            assert!(
+                message.contains(
+                    "The leader's replay must arrive, over UDP, on this member's catchup \
+                     endpoint in CAVALRY_CLUSTER_MEMBERS, 127.0.0.1:9023, and an image of \
+                     the leader's log on this member's log endpoint in \
+                     CAVALRY_CLUSTER_MEMBERS, 127.0.0.1:9022. Each wait is bounded"
+                ),
+                "{message}"
+            );
+            assert!(
+                message.contains(
+                    "check that member 1's host reaches this member's catchup endpoint and \
+                     its log endpoint over UDP, and that this host reaches"
+                ),
+                "{message}"
+            );
+        }
+
+        // Follower log init waits for what follower log await does.
+        let message = joining("elects-log-init", 14, Some(&cluster));
+        assert!(
+            message.contains(
+                "its election is in follower log init. An image of the leader's log must \
+                 arrive, over UDP, on this member's log endpoint in \
+                 CAVALRY_CLUSTER_MEMBERS, 127.0.0.1:9022,"
+            ),
             "{message}"
         );
 
@@ -5029,8 +5619,14 @@ mod tests {
                 )),
                 "{message}"
             );
+            // Every state's waits have the one bound; follower replay's own replay has
+            // none, so its sentence is of the waits after it.
             assert!(
-                message.contains("Each wait is bounded by the leader heartbeat timeout, 10 s;"),
+                message.contains(if state == 10 {
+                    "Each wait after the replay is bounded by the leader heartbeat timeout, 10 s;"
+                } else {
+                    "Each wait is bounded by the leader heartbeat timeout, 10 s;"
+                }),
                 "{message}"
             );
 

@@ -94,8 +94,11 @@ its services read what it appends in the same way.
    `log.recording_id()` names. So when a handle is ended and all three are `None`,
    call `client.committed_log(log.position())` again. It returns the handle of the
    member's next recording at once when the log goes on in one, and `None` when the
-   member has closed or left its log, as it does before a member has a log. The
-   example does this, and prints a `reading member` line for each recording. A
+   member has closed or left its log, or is between two recordings, as it does
+   before a member has a log. A member between two recordings names its next one
+   once its election has closed, so a service that is to go on asks again after a
+   pause. The example does the first of these, stops on `None`, and prints a
+   `reading member` line for each recording. A
    service that starts at 0 beside a member whose log is in three recordings opens
    the log three times and reads every entry once, in order.
 
@@ -155,8 +158,12 @@ its services read what it appends in the same way.
   a `next position` that a run on this member printed, or 0. When that recording
   begins above `--from`, the member no longer keeps the recording that held that
   position: a member keeps the last 1,024 recordings of its log that it stopped, one
-  for each time it joined the log, and forgets the oldest. Read the entries below on
-  a member that has left the log less often.
+  for each time it joined the log, led a term or caught up through a replay, and
+  forgets the oldest. Read the entries below on a member that has left the log less
+  often. A member of a version of Cavalry before this file writes none, as one does
+  while a cluster is being upgraded: beside it a position below its live recording
+  is refused in the same way, and the entries below are read beside a member of
+  this version.
 - `cannot read the file of the cluster member's log's recordings at ...`, and the
   program exits 1: the member lists the recordings that hold its log in the file
   `log-recordings-<member id>` in its driver directory
