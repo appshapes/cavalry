@@ -85,7 +85,7 @@ order would leave bytes above the record's last term that nothing names.
 
 ## Evidence
 
-- `crates/cavalry-raft/src/module/tests.rs`, four tests over two drivers, the
+- `crates/cavalry-raft/src/module/tests.rs`, five tests over two drivers, the
   leader and the member each a module on a driver of its own.
   - A member holds term 0 in one recording, 0 to 192, and term 1 in another, 192
     to 384, with both terms in its record. Truncated to 288, the second recording
@@ -98,15 +98,21 @@ order would leave bytes above the record's last term that nothing names.
     from the catalog and from the table; the first is cut to 96; the record holds
     term 0; a replay of this member's own from 96 finds no recording. Asked again,
     nothing changes.
+  - A purge whose answer was never read. The member's own client purges the
+    second recording, 192 to 384, and the table still names it. Truncated to 96,
+    the purge is answered "unknown recording" and taken as done: the second is
+    gone from the table, the first is cut to 96, and the record holds term 0.
   - After a catch-up the member keeps the replay's recording, 0 to 288, and the
     live one, which began below 192. Truncated to 192, both stop there in the
     catalog and in the table.
   - A member that still follows the log, asked to truncate, does nothing and says
     a step is under way.
 - Each rule taken out fails a test: with only the first recording cut, the test of
-  the two that overlap; with the record of terms left as it was, the first two;
-  with a recording that begins above the position cut and not purged, the second.
-- A fifth test, of the sync a member asks for. The mark of the last sync asked is
+  the two that overlap; with the record of terms left as it was, the first three;
+  with a recording that begins above the position cut and not purged, the second;
+  with a purge answered "unknown recording" returned as a fault, the third, whose
+  call returns the driver's code 21.
+- A sixth test, of the sync a member asks for. The mark of the last sync asked is
   one recording's. A member follows term 0 to 192, where its last request was made,
   truncates to 96 and follows term 1 from there: the new recording writes 192 with
   its first entry. Taken in hand, that recording has no mark, so its sync is asked;
@@ -114,7 +120,7 @@ order would leave bytes above the record's last term that nothing names.
   commit only at the recorder's own sync, up to a second later. The second review
   of pull request 241 noted the mark; a truncation is what makes the position
   repeat. With the reset taken out the test fails: the mark reads 192.
-- `cargo test -p cavalry-raft`: 165 passed.
+- `cargo test -p cavalry-raft`: 166 passed.
 - Not shown: a command that faults part way, which is read from the code; and a
   stop between the two steps, which Consequences leaves to the change that starts a
   member on a kept log.
