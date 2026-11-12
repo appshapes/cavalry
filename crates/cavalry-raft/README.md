@@ -35,6 +35,11 @@ commit path runs per message.
   member told a next term whose base is below its append position truncates to that base
   first, the tail of an older term that no quorum recorded, and never below the commit
   position it knows: told to, it keeps its log and fails its election (ADR 0083). A
+  leader answers a member for the highest term its own record holds at or below the one
+  the member reported, and a member told a term below its own log term, with a next
+  term above it, drops from its record the terms its leader's lacks, terms that fewer
+  than a quorum recorded, cutting first what it holds above the base of the lowest, so
+  that a member's record is its leader's before it replicates or joins (ADR 0096). A
   leader answers a member that asks for a term it missed, with a catch-up position below
   the leader's term base: it replays the recording of its own that holds the position
   asked, to the end of the term that holds it or to that recording's end, through
@@ -97,9 +102,10 @@ commit path runs per message.
   `cluster.role`, `cluster.election_state`, `cluster.leadership_term_id`,
   `cluster.append_position`, `cluster.commit_position`, `cluster.messages_rejected`,
   `cluster.log_recording_id`, the recording that holds its log, which its service
-  replays, and the twenty-two counts of `Counts::by_counter`, of which the four of the
-  ballot, the two of an election held on a higher term, the two of a truncation, the two
-  of a replication and the one of a catch-up stay 0 while the leader is appointed. The
+  replays, and the twenty-three counts of `Counts::by_counter`, of which the four of the
+  ballot, the two of an election held on a higher term, the two of a truncation, the one
+  of dropped terms, the two of a replication and the one of a catch-up stay 0 while the
+  leader is appointed. The
   counters of sessions and of the service's version in `spec/cluster.md`, "Counters",
   come with those features. One thread calls `do_work()`; the leader's process appends
   with `offer(payload)`, up to 1,344 bytes an entry. A follower that leaves the log
@@ -197,12 +203,6 @@ election does more, it does this instead, until the step that builds it (ADR 008
   log up and replay it (ADR 0091), record the replays a member asks for and catch
   up (ADR 0094), and truncate (ADR 0095). The module's own member is still
   appointed and asks for none of it, until the change that moves it (ADR 0081).
-- A leader answers a member for the term the member reports, and does not check that
-  its own record of terms holds that term. A member that recorded a term which fewer
-  than a quorum recorded keeps it in its record under a leader whose record has none.
-  When that member leads, it can ask another for a truncation below a commit position
-  that member knows, which is refused at every election: the member does not join
-  (card 267, with a test that makes the history).
 - Over a driver a member does not start on a log directory that holds a term or a
   stored candidate term: the module refuses, and says to start the cluster again
   as a new one. The core starts on such a directory (ADR 0089); the module does

@@ -141,3 +141,4 @@ under `docs/` is listed here; `just lint-docs` fails on one that is not.
 - [0093. Take where a member's recording of the log begins from the catalog, and count it once its image is checked](decisions/0093-take-where-a-members-recording-of-the-log-begins-from-the-catalog-and-count-it-once-its-image-is-checked.md)
 - [0094. Record a member's replays over a driver, and count the live recording once the log reaches it](decisions/0094-record-a-members-replays-over-a-driver-and-count-the-live-recording-once-the-log-reaches-it.md)
 - [0095. Truncate a member's log over a driver, recording by recording, then its record of terms](decisions/0095-truncate-a-members-log-over-a-driver-recording-by-recording-then-its-record-of-terms.md)
+- [0096. Answer a member for a term the leader's record holds, and drop from a member's record the terms its leader's lacks](decisions/0096-answer-a-member-for-a-term-the-leaders-record-holds-and-drop-the-terms-its-leaders-lacks.md)

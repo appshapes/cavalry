@@ -329,7 +329,7 @@ that reports a term behind the leader's.
 
 | Offset | Size | Field | Type | Meaning |
 | --- | --- | --- | --- | --- |
-| 8 | 8 | log leadership term id | i64 | the term the receiver reported, which this message describes |
+| 8 | 8 | log leadership term id | i64 | the term this message describes: the highest term in the leader's record at or below the term the receiver reported, which is the reported term when the leader's record holds it, and −1 when the record holds none at or below it, so that a leader answers for no term its own record lacks (ADR 0096), the `answered-term` vectors pinning it |
 | 16 | 8 | next leadership term id | i64 | the lowest term in the leader's record above the log leadership term id, the leader's own term when none lies between, so that a reader whose log holds an uncommitted tail of the reported term truncates it to the next term's base, a departure from Aeron's lookup of the term one above, whose record has no gaps (ADR 0058), the `next-fields` vectors pinning it; −1 when the log leadership term id is the leader's own term |
 | 24 | 8 | next term base log position | i64 | that term's base position, which is the leader's term base log position when the next term is the leader's own; −1 when the next leadership term id is −1 |
 | 32 | 8 | next log position | i64 | that term's end position, the base position of the term after it in the leader's record; −1 when the next term is the leader's own, whose end is not known, or the next leadership term id is −1 |
@@ -604,7 +604,20 @@ reader's log leadership term id, and one for any other term is ignored, counted 
 them, a departure from Aeron, which reads any term in canvass (ADR 0058), so that a member that has voted in a term follows no leader of
 a lower one and never counts toward that leader's commits, Raft's rule: when the two
 differ the reader goes back to canvass and takes neither the sender
-as its leader nor the term; when they are the same the sender becomes the reader's
+as its leader nor the term, but for one case, a message whose log leadership term id
+is below the reader's own and whose next leadership term id is above it: the leader's
+record then holds none of the reader's terms above the one named, terms that fewer
+than a quorum recorded, and the reader drops them, truncating its log first to the
+base of the lowest of them when its append position is above it, under the rule of a
+truncation below, a commit position the reader knows among it, and then taking every
+term above the one named out of its record of terms, by term and not by base, since
+the lowest is based where the log is cut, counted in `cluster.terms_dropped`; it
+then reads the message again with the log it holds, whose term is the one named, so
+that a member's record becomes its leader's before it replicates or joins, Raft's
+consistency check (ADR 0096); a next leadership term id at or below the reader's log
+leadership term id says nothing of the reader's terms from that one up, which may be
+the leader's own, as in an answer to a report the reader made before it recorded
+them or a copy from a leader it has since joined, and drops nothing; when they are the same the sender becomes the reader's
 leader and the term its term, its candidate term too when the term is higher, in
 memory alone ("The log"), and a
 reader whose append position is above a next
@@ -944,6 +957,7 @@ that a reader of a counters file knows which transition it saw.
 | `cluster.higher_terms_seen` | a follower whose election had closed that held an election on a request vote whose candidate term id or a commit position whose leadership term id above its own term: a term the cluster began without it (ADR 0082) |
 | `cluster.log_truncations` | a member that truncated its log to the next term base log position of a new leadership term: the tail of an older term that no quorum recorded ("Messages during an election"; ADR 0083) |
 | `cluster.truncations_refused` | a member told to truncate below the commit position it knows, which kept its log and failed its election ("Messages during an election"; ADR 0083) |
+| `cluster.terms_dropped` | a member that dropped from its record of terms the terms its leader's record lacks, on a new leadership term whose log leadership term id was below its own and whose next leadership term id was above it ("Messages during an election"; ADR 0096) |
 | `cluster.votes_for`, `cluster.votes_against` | a vote sent, by its value |
 | `cluster.candidacies` | a ballot begun: a member in nominate that stored candidate term + 1, voted for itself and went to candidate ballot, `cluster.role` going to candidate (ADR 0081) |
 | `cluster.ballots_lost` | a ballot that ended with no leader for the member, which canvasses again: a candidate at the election timeout short of a quorum or with a vote against, a member in follower ballot whose candidate's new leadership term did not come within the election timeout, or either that reads a new leadership term for a log term it did not report; two members that count one with `cluster.candidacies` each are a split vote (ADR 0081) |
