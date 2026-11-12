@@ -138,6 +138,7 @@ under `docs/` is listed here; `just lint-docs` fails on one that is not.
 - [0089. Start a member that elects on the log directory it kept](decisions/0089-start-a-member-that-elects-on-the-log-directory-it-kept.md)
 - [0091. Give a leader's log up, and replay it over a driver, from the recordings the module stopped](decisions/0091-give-a-leaders-log-up-and-replay-it-over-a-driver-from-the-recordings-the-module-stopped.md)
 - [0092. Have the member ask for each replay of a replication, so that a recording is armed for its image](decisions/0092-have-the-member-ask-for-each-replay-of-a-replication-so-that-a-recording-is-armed-for-its-image.md)
+- [0090. Keep a subscriber's samples out of the histogram until its loop is over](decisions/0090-keep-a-subscribers-samples-out-of-the-histogram-until-its-loop-is-over.md)
 - [0093. Take where a member's recording of the log begins from the catalog, and count it once its image is checked](decisions/0093-take-where-a-members-recording-of-the-log-begins-from-the-catalog-and-count-it-once-its-image-is-checked.md)
 - [0094. Record a member's replays over a driver, and count the live recording once the log reaches it](decisions/0094-record-a-members-replays-over-a-driver-and-count-the-live-recording-once-the-log-reaches-it.md)
 - [0095. Truncate a member's log over a driver, recording by recording, then its record of terms](decisions/0095-truncate-a-members-log-over-a-driver-recording-by-recording-then-its-record-of-terms.md)
