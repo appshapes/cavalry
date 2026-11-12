@@ -41,7 +41,7 @@ use cavalry_proto::cluster::{LEADER_HEARTBEAT_TIMEOUT_NS, Message, Stream, entry
 
 use crate::consensus::{
     Clock, Consensus, Counts, ElectionState, Io, Log, MembersRefused, Refused, ReplayStopped, Role,
-    base_above, terms_above,
+    base_above, term_at_or_below, terms_above,
 };
 
 /// The MTU length the cluster's log positions are computed with: the UDP transport's
@@ -97,8 +97,9 @@ struct Publication {
     position: i64,
     /// Every entry appended to it, for the cluster's life.
     entries: Vec<Entry>,
-    /// Gone: the member that added it was started again on an empty log directory, or
-    /// gave its log up to hold an election ([`Io::remove_log`]).
+    /// Gone: the member that added it was started again, on an empty log directory
+    /// ([`Cluster::wipe`]) or on the one it kept ([`Cluster::restart`]), or gave its log
+    /// up to hold an election ([`Io::remove_log`]).
     closed: bool,
 }
 
@@ -482,6 +483,24 @@ impl Io for MemberIo<'_> {
     fn term_base_above(&mut self, position: i64) -> Option<i64> {
         let record = self.world.disks.get(self.own).map(|disk| &disk.terms);
         base_above(record.into_iter().flatten().copied(), position)
+    }
+
+    fn term_at_or_below(&mut self, term: i64) -> i64 {
+        let record = self.world.disks.get(self.own).map(|disk| &disk.terms);
+        term_at_or_below(record.into_iter().flatten().copied(), term)
+    }
+
+    fn drop_terms_above(&mut self, term: i64) -> Result<i64, Self::Fault> {
+        let Some(disk) = self.world.disks.get_mut(self.own) else {
+            return Ok(-1);
+        };
+        disk.terms.retain(|&(recorded, _)| recorded <= term);
+        Ok(disk
+            .terms
+            .iter()
+            .map(|&(recorded, _)| recorded)
+            .max()
+            .unwrap_or(-1))
     }
 
     fn start_replay(

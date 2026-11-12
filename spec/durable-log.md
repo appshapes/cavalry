@@ -386,7 +386,10 @@ two leaves an empty entry. An entry's fields are written once, by its append, an
 only its state changes after it. The module truncates by writing state 3 over each
 valid entry whose term base log position is above the truncation position, from the
 last entry backwards, each write synced, before the member reports its log leadership
-term id again. It raises the candidate term in one synced write, the other slot's
+term id again. It drops the terms a leader's record lacks the same way, by writing
+state 3 over each valid entry whose leadership term id is above the term the leader
+named, whatever its base (`spec/cluster.md`, "Messages during an election"; ADR
+0096). It raises the candidate term in one synced write, the other slot's
 value and checksum, before the vote or request vote that raises it is sent. A crash
 leaves at most one write torn, which the reader reads as the state before it: an
 empty entry, a valid entry not yet deleted, or the candidate term stored before the
