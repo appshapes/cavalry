@@ -256,8 +256,9 @@ fn an_appointed_leader_whose_log_is_behind_a_members_never_leads() {
     assert_eq!(io.count(|c| matches!(c, Call::Append(_))), 0);
 }
 
-/// Leader ready waits for every member it has heard, and a member is heard whenever
-/// it first reports. The leader leads at the canvass deadline with one member heard and
+/// The appointed leader's leader ready waits for every member it has heard, and a
+/// member is heard whenever it first reports; a leader that elects closes on a quorum
+/// (`step_down.rs`). The leader leads at the canvass deadline with one member heard and
 /// one silent. The silent one then reports and joins; the one the canvass heard is
 /// slow. Two of three count, which is a quorum and as many as the canvass heard, and
 /// the leader still waits: the member it heard has not joined. And a member that

@@ -281,12 +281,16 @@ fn to_leader_log_replication(
     ms + 4
 }
 
-/// The leader taken on to leader ready, where it waits: member 1 has joined its log,
-/// and member 2, heard in canvass, has not. Returns the next millisecond.
+/// The leader taken on to leader ready, where it stays: member 1 joined its log and
+/// then canvassed again, so no member but the leader counts for the term. Returns the
+/// next millisecond.
 fn to_leader_ready(watch: &mut Watch, member: &mut Consensus, io: &mut Stub, ms: u64) -> u64 {
     let ms = to_leader_log_replication(watch, member, io, ms);
     watch.read(member, io, ms, &append_position(1, 0));
-    for step in 0..4 {
+    watch.work(member, io, ms);
+    assert_eq!(member.election_state(), ElectionState::LeaderReplay);
+    watch.read(member, io, ms, &canvass_position(1, -1, 0));
+    for step in 1..4 {
         watch.work(member, io, ms + step);
     }
     assert_eq!(member.election_state(), ElectionState::LeaderReady);
