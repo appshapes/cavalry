@@ -23,8 +23,9 @@ pub enum Call {
     RemoveLog,
     TruncateLog(i64),
     Append(Template),
-    /// A replay started: the member it is to, its position and its end.
-    StartReplay(i32, i64, i64),
+    /// A replay started: the member it is to, its position and its end, none for a
+    /// catch-up's.
+    StartReplay(i32, i64, Option<i64>),
     StopReplay(i32),
     AddCatchup,
     RemoveCatchup,
@@ -62,6 +63,8 @@ pub struct Stub {
     pub purged: bool,
     /// Whether `start_replay` fails.
     pub fail_start: bool,
+    /// The member a `start_replay` fails for, the others' succeeding.
+    pub fail_start_to: Option<i32>,
     /// Whether `stop_replay` fails.
     pub fail_stop: bool,
     /// How the replay to each member ended, by the member's id, once the test has
@@ -95,6 +98,7 @@ impl Stub {
             last_term: None,
             purged: false,
             fail_start: false,
+            fail_start_to: None,
             fail_stop: false,
             stopped: [None; Stub::MEMBERS],
             catchup_image: None,
@@ -256,9 +260,14 @@ impl Io for Stub {
         base_above(self.terms.iter().flatten().copied(), position)
     }
 
-    fn start_replay(&mut self, member: i32, position: i64, end: i64) -> Result<bool, Self::Fault> {
+    fn start_replay(
+        &mut self,
+        member: i32,
+        position: i64,
+        end: Option<i64>,
+    ) -> Result<bool, Self::Fault> {
         self.call(Call::StartReplay(member, position, end));
-        if self.fail_start {
+        if self.fail_start || self.fail_start_to == Some(member) {
             return Err("the replay cannot be started");
         }
         Ok(!self.purged)

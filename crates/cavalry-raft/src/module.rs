@@ -579,10 +579,10 @@ impl Io for ClientIo {
         &mut self,
         _member: i32,
         _position: i64,
-        _end: i64,
+        _end: Option<i64>,
     ) -> Result<bool, Self::Fault> {
         Err(RaftError::Unsupported {
-            what: "a leader that replays its recordings to a member that replicates",
+            what: "a leader that replays its recordings to a member that is behind",
         })
     }
 

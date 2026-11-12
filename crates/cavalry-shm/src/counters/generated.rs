@@ -416,6 +416,9 @@ pub const CLUSTER_LOG_REPLICATIONS: CounterId = CounterId(135);
 /// `cluster.log_replications_unavailable`, a client counter: Times one cluster member failed its election in follower log replication because its append position stayed below its stop position without moving for the leader heartbeat timeout: the leader's recordings do not hold the span, purged by retention, a replay stopped for a fault, or the replay never reached the member's catchup endpoint. Counted in cluster.elections_failed too (spec/cluster.md, follower log replication, and Counters; ADR 0086); key: member id (i32), little-endian; label text: the member id in decimal.
 pub const CLUSTER_LOG_REPLICATIONS_UNAVAILABLE: CounterId = CounterId(136);
 
+/// `cluster.catchups`, a client counter: Times one cluster member began, or served, a catch-up within the leader's term: on a follower, a catch-up position it sent from follower catch-up init; on the leader, a replay of its live recording that it started for such a member, which follows the recording until the leader stops it (spec/cluster.md, follower catch-up init, Messages outside an election, and Counters; ADR 0087). A member of this version counts the leader's replays alone; key: member id (i32), little-endian; label text: the member id in decimal.
+pub const CLUSTER_CATCHUPS: CounterId = CounterId(137);
+
 /// Every entry of `counters.toml`, in the file's order.
 pub const COUNTERS: &[CounterDef] = &[
     CounterDef {
@@ -1513,5 +1516,13 @@ pub const COUNTERS: &[CounterDef] = &[
         scope: Scope::Client,
         doc: "Times one cluster member failed its election in follower log replication because its append position stayed below its stop position without moving for the leader heartbeat timeout: the leader's recordings do not hold the span, purged by retention, a replay stopped for a fault, or the replay never reached the member's catchup endpoint. Counted in cluster.elections_failed too (spec/cluster.md, follower log replication, and Counters; ADR 0086); key: member id (i32), little-endian; label text: the member id in decimal.",
         doctor: "This member asked its leader for a term it missed and nothing more arrived for 10 s. Check, on the leader's host, that its recordings still hold the log from this member's cluster.append_position: where a retention purged it, this member cannot rejoin from the log at all, and this version has no snapshot to bring it back with, so the leader's log must be kept until every member has it. Check that this member's catchup endpoint in the members string is the same on both hosts and that the leader's host can reach it: a leader replays to the endpoint its own members string names. If cluster.log_replications rises on the leader for this member each time, the replays start and do not arrive.",
+    },
+    CounterDef {
+        id: CLUSTER_CATCHUPS,
+        name: "cluster.catchups",
+        kind: Kind::Counter,
+        scope: Scope::Client,
+        doc: "Times one cluster member began, or served, a catch-up within the leader's term: on a follower, a catch-up position it sent from follower catch-up init; on the leader, a replay of its live recording that it started for such a member, which follows the recording until the leader stops it (spec/cluster.md, follower catch-up init, Messages outside an election, and Counters; ADR 0087). A member of this version counts the leader's replays alone; key: member id (i32), little-endian; label text: the member id in decimal.",
+        doctor: "A member that joined its leader's term behind the leader's log catches up from the leader's live recording, and this rises on both by one. It is how such a member returns, and nothing to act on. If it rises on a leader again and again for one member while that member's cluster.append_position does not reach the leader's, the member cannot keep up with the replay or cannot receive it: check that its catchup endpoint in the members string is the one its host listens on, and compare its cluster.append_position with the leader's over a few seconds.",
     },
 ];

@@ -18,16 +18,16 @@
 //! [`MAX_MEMBERS`].
 
 use cavalry_proto::cluster::{
-    CanvassAction, CanvassTerms, ELECTION_STATUS_INTERVAL_NS, ELECTION_TIMEOUT_NS,
-    LEADER_HEARTBEAT_INTERVAL_NS, LEADER_HEARTBEAT_TIMEOUT_NS, LogReport, MAX_MEMBERS,
-    MemberPosition, Message, PROTOCOL_VERSION, STARTUP_CANVASS_TIMEOUT_NS, TermAction, TermFields,
-    TermSpan, TimeUnit, Vote, VoteRequest, appointed_canvass, appointed_leader, ballot, candidate,
-    canvass_position_action, commit_position, leader_ready, log_at_least,
+    APPEND_POSITION_FLAG_CATCHUP, CanvassAction, CanvassTerms, ELECTION_STATUS_INTERVAL_NS,
+    ELECTION_TIMEOUT_NS, LEADER_HEARTBEAT_INTERVAL_NS, LEADER_HEARTBEAT_TIMEOUT_NS, LogReport,
+    MAX_MEMBERS, MemberPosition, Message, PROTOCOL_VERSION, STARTUP_CANVASS_TIMEOUT_NS, TermAction,
+    TermFields, TermSpan, TimeUnit, Vote, VoteRequest, appointed_canvass, appointed_leader, ballot,
+    candidate, canvass_position_action, commit_position, leader_ready, log_at_least,
     new_leadership_term_action, next_fields, quorum, request_vote,
 };
 use cavalry_shm::counters::CounterId;
 use cavalry_shm::counters::generated::{
-    CLUSTER_APPOINTED_LEADER_BEHIND, CLUSTER_BALLOTS_LOST, CLUSTER_CANDIDACIES,
+    CLUSTER_APPOINTED_LEADER_BEHIND, CLUSTER_BALLOTS_LOST, CLUSTER_CANDIDACIES, CLUSTER_CATCHUPS,
     CLUSTER_ELECTION_STEPS, CLUSTER_ELECTIONS, CLUSTER_ELECTIONS_CLOSED, CLUSTER_ELECTIONS_FAILED,
     CLUSTER_HIGHER_TERMS_SEEN, CLUSTER_JOIN_POSITION_MISMATCHES, CLUSTER_LEADER_HEARTBEAT_TIMEOUTS,
     CLUSTER_LEADER_QUORUM_LOSSES, CLUSTER_LEADER_STEP_DOWNS, CLUSTER_LEADERSHIP_TERMS_IGNORED,
@@ -246,19 +246,26 @@ pub trait Io {
     /// Starts a replay of this member's own recordings of the log, on stream 100, to
     /// the `catchup` endpoint the members string gives the member with id `member`:
     /// from `position`, in the recording that begins at or below it and ends above
-    /// it, the one that begins first where two do, to `end` or to that recording's
-    /// end, whichever is lower. `Ok(false)` when no recording of this member's holds
-    /// `position`, purged by retention: nothing is started. `Ok(true)` once the
-    /// replay is asked for: it runs from then until [`Io::replay_stopped`] says how
-    /// it ended, and how any earlier replay to the member ended is forgotten. The
-    /// core holds at most one replay a member (ADR 0085), and calls this for a member
-    /// it holds none for. One case is the I/O's to order: a member that led, asked a
-    /// replay to stop and held an election does not wait in init for that replay to
-    /// have stopped, and may lead again and call this for the same member while the
-    /// driver's `replay stopped` is still to come. The I/O then starts the new
-    /// replay once the old one has stopped, as the page has a leader keep a request
-    /// that arrives in that window.
-    fn start_replay(&mut self, member: i32, position: i64, end: i64) -> Result<bool, Self::Fault>;
+    /// it, the one that begins first where two do. With `end`, a replication's, it
+    /// runs to `end` or to that recording's end, whichever is lower. With none, a
+    /// catch-up's, it is of the recording of the term this member leads and follows
+    /// it as it grows, until it is stopped (ADR 0087). `Ok(false)` when no recording
+    /// of this member's holds `position`, purged by retention: nothing is started.
+    /// `Ok(true)` once the replay is asked for: it runs from then until
+    /// [`Io::replay_stopped`] says how it ended, and how any earlier replay to the
+    /// member ended is forgotten. The core holds at most one replay a member (ADR
+    /// 0085), and calls this for a member it holds none for. One case is the I/O's
+    /// to order: a member that led, asked a replay to stop and held an election does
+    /// not wait in init for that replay to have stopped, and may lead again and call
+    /// this for the same member while the driver's `replay stopped` is still to
+    /// come. The I/O then starts the new replay once the old one has stopped, as the
+    /// page has a leader keep a request that arrives in that window.
+    fn start_replay(
+        &mut self,
+        member: i32,
+        position: i64,
+        end: Option<i64>,
+    ) -> Result<bool, Self::Fault>;
 
     /// Asks the replay running to `member` to stop, the driver's `stop replay`. The
     /// replay runs on until [`Io::replay_stopped`] says it stopped, unless the core
@@ -493,11 +500,14 @@ pub struct Counts {
     /// whose append position stayed below its stop position without moving for the
     /// leader heartbeat timeout, so that its election failed (ADR 0086).
     pub log_replications_unavailable: u64,
+    /// `cluster.catchups`: on the leader, a replay started for a member that catches
+    /// up within the leader's term (ADR 0087).
+    pub catchups: u64,
 }
 
 impl Counts {
     /// How many counts a member keeps: one counter of `counters.toml` each.
-    pub const LEN: usize = 21;
+    pub const LEN: usize = 22;
 
     /// Each count with the id of its counter in `counters.toml`, the constant
     /// `cavalry-shm` generates from it: what the consensus module stores, each as a
@@ -553,6 +563,7 @@ impl Counts {
                 CLUSTER_LOG_REPLICATIONS_UNAVAILABLE,
                 self.log_replications_unavailable,
             ),
+            (CLUSTER_CATCHUPS, self.catchups),
         ]
     }
 }
@@ -670,25 +681,27 @@ struct Peer {
     ahead_counted: bool,
 }
 
-/// What a leader holds of one member's replication: the replays of its own recordings
-/// that it serves a member in follower log replication with, one at a time
-/// (`spec/cluster.md`, "Messages outside an election"; ADR 0085).
+/// What a leader holds of one member that is behind: the replays of its own recordings
+/// that it serves the member with, one at a time, for a replication (state 9) or for
+/// a catch-up within its term (state 11) (`spec/cluster.md`, "Messages outside an
+/// election"; ADR 0085, ADR 0087).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Serving {
     /// No replay runs to the member and none is owed.
     Idle,
-    /// A replay runs to the member. The replication's replays end at `end`, the first
-    /// term base log position above the position the member asked from.
-    Running { end: i64 },
+    /// A replay runs to the member. A replication's replays end at `end`, the first
+    /// term base log position above the position the member asked from. A catch-up's
+    /// has no end: it follows the leader's live recording until the leader stops it.
+    Running { end: Option<i64> },
     /// The leader asked the replay to stop and waits for it to have stopped. `next`
     /// is the newest request the member has sent since: its position, and its end.
-    Stopping { next: Option<(i64, i64)> },
+    Stopping { next: Option<(i64, Option<i64>)> },
     /// A replay is owed from `position`, and begins once the member's reported
     /// append position has reached it, so that the member's image of it joins at its
-    /// append position. Either the last replay ended by itself there, at a
-    /// recording's end below `end`, or the member asked from there and the start
-    /// faulted: the request is kept this way until a start succeeds.
-    Next { position: i64, end: i64 },
+    /// append position. Either the last replay of a replication ended by itself
+    /// there, at a recording's end below `end`, or the member asked from there and
+    /// the start faulted: the request is kept this way until a start succeeds.
+    Next { position: i64, end: Option<i64> },
 }
 
 /// A member's replication of one term (state 9): from the new leadership term that
@@ -976,10 +989,11 @@ impl Consensus {
     /// nothing. A member whose leader is appointed ignores request vote and vote, which
     /// no such member sends, and catch-up position, and every member ignores stop
     /// catch-up, which this version's members do not send (`spec/cluster.md`, "The
-    /// appointed leader"). A leader that elects answers a catch-up position below its
-    /// term base log position with a replay of its own recordings, and stops the
-    /// replay it runs to a member that canvasses again ("Messages outside an
-    /// election"; ADR 0085). A member that elects and reads a new leadership term
+    /// appointed leader"). A leader that elects answers a catch-up position at or below
+    /// its log position with a replay of its own recordings, stops the replay it runs
+    /// to a member that canvasses again, and stops a catch-up, with stop catch-up,
+    /// when the member it serves reports the leader's own append position
+    /// ("Messages outside an election"; ADR 0085, ADR 0087). A member that elects and reads a new leadership term
     /// which leaves it below its leader's term base goes to follower log replication
     /// (ADR 0086). A member that elects notes the sender of whatever it reads
     /// as heard, for its ballot (ADR 0077). Once its election has closed it holds an
@@ -1091,12 +1105,21 @@ impl Consensus {
                 leadership_term_id,
                 log_position,
                 follower_member_id,
-                ..
+                flags,
             } => {
                 if self.role == Role::Leader
                     && let Some(index) = self.other(follower_member_id)
                 {
                     self.report(index, log_position, leadership_term_id, true, clock);
+                    // A position appended from a catch-up replay, for this leader's
+                    // term, that has reached the leader's own: the catch-up is over.
+                    if self.election.is_some()
+                        && flags & APPEND_POSITION_FLAG_CATCHUP != 0
+                        && leadership_term_id == self.term
+                        && log_position >= self.append_position
+                    {
+                        self.stop_catchup(index, io)?;
+                    }
                 }
                 Ok(())
             }
@@ -1586,28 +1609,41 @@ impl Consensus {
     }
 
     /// A catch-up position from the member at `index`, read by a leader that elects
-    /// (`spec/cluster.md`, "Messages outside an election"). A position below this
-    /// leader's term base log position is a replication (state 9): the leader
-    /// replays its recordings from the position to the first term base above it.
-    /// With no replay running to the member it starts one at once. With one running,
-    /// the member failed and asks again: the leader stops that one and keeps the
-    /// request, the newest, until the replay has stopped. A position at or above the
-    /// base is a catch-up within this leader's term (state 11), which this version
-    /// does not serve: nothing is started, and the member's own timer counts it. A
-    /// start that faults leaves the request as a replay owed, which the duty cycle
-    /// starts once the member has reported the position.
+    /// (`spec/cluster.md`, "Messages outside an election"). The position tells the
+    /// two requests apart. One below this leader's term base log position is a
+    /// replication (state 9): the leader replays its recordings from the position to
+    /// the first term base above it. One from the base to the leader's own append
+    /// position is a catch-up within its term (state 11): the replay follows the
+    /// leader's live recording, with no end, until the leader stops it. One above
+    /// the leader's append position asks for what the leader does not hold: nothing
+    /// is started, the member's own timer counts it, and what the leader held for
+    /// the member is ended, since the member has left whatever it was in.
+    ///
+    /// With no replay running to the member the leader starts one at once. With one
+    /// running, the member failed and asks again: the leader stops that one and keeps
+    /// the request, the newest, until the replay has stopped. A start that faults
+    /// leaves the request as a replay owed, which the duty cycle starts once the
+    /// member has reported the position.
     fn on_catchup_position<I: Io>(
         &mut self,
         index: usize,
         position: i64,
         io: &mut I,
     ) -> Result<(), I::Fault> {
-        if position < 0 || position >= self.term_base {
-            return Ok(());
+        if position < 0 || position > self.append_position {
+            // Nothing this leader can replay. The member asked all the same, so what
+            // the leader held for it, of an older request, is ended as a canvass
+            // position ends it: the replay stopped, the one owed dropped.
+            return self.end_serving(index, io);
         }
-        // This leader's own term is in its record at its base, above the position.
-        let Some(end) = io.term_base_above(position) else {
-            return Ok(());
+        let end = if position < self.term_base {
+            // This leader's own term is in its record at its base, above the position.
+            let Some(end) = io.term_base_above(position) else {
+                return Ok(());
+            };
+            Some(end)
+        } else {
+            None
         };
         let member = self.peer(index).id;
         let serving = match self.serving(index) {
@@ -1629,25 +1665,53 @@ impl Consensus {
         Ok(())
     }
 
-    /// Starts a replay to `member` from `position`, for a replication whose replays
-    /// end at `end`, counted in `cluster.log_replications`. A position this leader's
-    /// recordings do not hold is answered by nothing and counts nothing.
+    /// The member at `index` has caught up: it reported, from a catch-up replay, an
+    /// append position at or past this leader's own. The leader stops the replay it
+    /// runs to it and tells it so with stop catch-up, on which the member removes
+    /// its catch-up subscription. The member reports with the catch-up flag until it
+    /// has read one, so a stop catch-up that did not leave is sent again on its next
+    /// report, and the replay is asked to stop once.
+    fn stop_catchup<I: Io>(&mut self, index: usize, io: &mut I) -> Result<(), I::Fault> {
+        let member = self.peer(index).id;
+        if self.serving(index) == (Serving::Running { end: None }) {
+            io.stop_replay(member)?;
+            self.serve(index, Serving::Stopping { next: None });
+        }
+        io.send(
+            member,
+            &Message::StopCatchup {
+                leadership_term_id: self.term,
+                follower_member_id: member,
+            },
+        );
+        Ok(())
+    }
+
+    /// Starts a replay to `member` from `position`: a replication's, whose replays end
+    /// at `end`, counted in `cluster.log_replications`, or a catch-up's, with no end,
+    /// counted in `cluster.catchups`. A position this leader's recordings do not hold
+    /// is answered by nothing and counts nothing.
     fn start_replay<I: Io>(
         &mut self,
         member: i32,
         position: i64,
-        end: i64,
+        end: Option<i64>,
         io: &mut I,
     ) -> Result<Serving, I::Fault> {
         if !io.start_replay(member, position, end)? {
             return Ok(Serving::Idle);
         }
-        count(&mut self.counts.log_replications);
+        count(if end.is_some() {
+            &mut self.counts.log_replications
+        } else {
+            &mut self.counts.catchups
+        });
         Ok(Serving::Running { end })
     }
 
-    /// Ends what this leader serves the member at `index`, which canvasses again:
-    /// the replay it runs is stopped, and the next it owed is dropped.
+    /// Ends what this leader serves the member at `index`, which canvasses again or
+    /// asks for what the leader cannot replay: the replay it runs is stopped, and the
+    /// next it owed is dropped.
     fn end_serving<I: Io>(&mut self, index: usize, io: &mut I) -> Result<(), I::Fault> {
         let serving = match self.serving(index) {
             Serving::Idle | Serving::Next { .. } => Serving::Idle,
@@ -1672,37 +1736,59 @@ impl Consensus {
     /// is tried again on a later cycle, when the member has reported its position.
     fn serve_replays<I: Io>(&mut self, io: &mut I) -> Result<usize, I::Fault> {
         let mut work = 0;
+        // Every member is served in every cycle: one member's fault, which may last,
+        // is kept and returned after the others have had their turn.
+        let mut fault = None;
         for index in 0..self.count {
-            let peer = self.peer(index);
-            let serving = match self.serving(index) {
-                Serving::Idle => continue,
-                Serving::Running { end } => match io.replay_stopped(peer.id)? {
-                    None => continue,
-                    Some(stopped) if stopped.ended && stopped.position < end => Serving::Next {
+            match self.serve_member(index, io) {
+                Ok(served) => work = work.max(served),
+                Err(error) => {
+                    fault.get_or_insert(error);
+                }
+            }
+        }
+        match fault {
+            Some(error) => Err(error),
+            None => Ok(work),
+        }
+    }
+
+    /// One member's turn in [`Consensus::serve_replays`]: returns 1 when what the
+    /// leader holds for it changed.
+    fn serve_member<I: Io>(&mut self, index: usize, io: &mut I) -> Result<usize, I::Fault> {
+        let peer = self.peer(index);
+        let serving = match self.serving(index) {
+            Serving::Idle => return Ok(0),
+            Serving::Running { end } => match io.replay_stopped(peer.id)? {
+                None => return Ok(0),
+                // A replication's replay that ended at its recording's end, below
+                // the replication's: the next recording's is owed. A catch-up's
+                // replay is followed by nothing, however it ended.
+                Some(stopped) if stopped.ended && end.is_some_and(|end| stopped.position < end) => {
+                    Serving::Next {
                         position: stopped.position,
                         end,
-                    },
-                    Some(_) => Serving::Idle,
-                },
-                Serving::Stopping { next } => match (io.replay_stopped(peer.id)?, next) {
-                    (None, _) => continue,
-                    (Some(_), None) => Serving::Idle,
-                    (Some(_), Some((position, end))) => {
-                        self.serve(index, Serving::Next { position, end });
-                        self.start_replay(peer.id, position, end, io)?
                     }
-                },
-                Serving::Next { position, end } => {
-                    if !(peer.reported && peer.appended && peer.position >= position) {
-                        continue;
-                    }
+                }
+                Some(_) => Serving::Idle,
+            },
+            Serving::Stopping { next } => match (io.replay_stopped(peer.id)?, next) {
+                (None, _) => return Ok(0),
+                (Some(_), None) => Serving::Idle,
+                (Some(_), Some((position, end))) => {
+                    self.serve(index, Serving::Next { position, end });
                     self.start_replay(peer.id, position, end, io)?
                 }
-            };
-            self.serve(index, serving);
-            work = 1;
-        }
-        Ok(work)
+            },
+            Serving::Next { position, end } => {
+                if !(peer.reported && peer.appended && peer.position >= position) {
+                    return Ok(0);
+                }
+                self.start_replay(peer.id, position, end, io)?
+            }
+        };
+        self.serve(index, serving);
+        Ok(1)
     }
 
     fn due(last: Option<u64>, interval_ns: u64, clock: Clock) -> bool {

@@ -27,6 +27,9 @@
 //!   interval, so a loss delays the cluster and never stops it.
 //! - A message is late by at most [`MAX_DELAY_MS`], the leader heartbeat timeout;
 //!   [`Cluster::set_delivery`] holds a longer delay to it.
+//! - A member runs at most one replay to each other member: one started to a member
+//!   that has one takes its place, and one that stopped is dropped when the member that
+//!   started it asks how it ended. So eight members hold 56 replays at most.
 //! - The logs and the records of terms have no bound: a log publication holds every
 //!   entry appended to it for the cluster's life, each member's log holds every entry
 //!   that reached it, and a member's record of terms holds every term it records. A
@@ -446,7 +449,19 @@ impl Io for MemberIo<'_> {
         base_above(record.into_iter().flatten().copied(), position)
     }
 
-    fn start_replay(&mut self, member: i32, position: i64, end: i64) -> Result<bool, Self::Fault> {
+    fn start_replay(
+        &mut self,
+        member: i32,
+        position: i64,
+        end: Option<i64>,
+    ) -> Result<bool, Self::Fault> {
+        // A catch-up's replay, with no end, follows a leader's log as it grows. This
+        // cluster does not play one yet: no member in it asks for a catch-up until
+        // the member's side is built (ADR 0087), and a leader answers such a
+        // position as one whose recordings do not hold it.
+        let Some(end) = end else {
+            return Ok(false);
+        };
         let Some(to) = self.world.disks.iter().position(|disk| disk.id == member) else {
             return Ok(false);
         };
