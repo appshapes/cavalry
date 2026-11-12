@@ -1,4 +1,4 @@
-# UDP transport, version 2
+# UDP transport, version 3
 
 The UDP transport carries one publication's stream from the driver on one host to the
 driver on another: the sender puts the frames of the publication's log buffer into
@@ -20,7 +20,11 @@ name is. Version 2 adds the position keys, `init-term-id`, `term-id` and
 version 1 is unchanged and its version byte stays 0, so a receiver of version 1 reads a
 sender of version 2, whose setup frame carries a position every version's receiver
 reads, and a channel of version 2 is refused by a reader of version 1 as a key it does
-not name.
+not name. Version 3 adds `ssc`, by which a live recording connects a publication that
+no receiver answers (ADR 0098); every frame of version 2 is unchanged and its version
+byte stays 0, so a receiver of version 2 reads a sender of version 3, which it joins at
+the position the setup frame carries as it joins any sender, and a channel of version
+3 is refused by a reader of version 2 as a key it does not name.
 
 ## The datagram
 
@@ -170,6 +174,18 @@ lets the fastest receiver set the pace, and `min` the slowest. `control`,
 `control-mode` and `fc` are a publication's: an `add subscription` whose channel names
 one is refused, since this version receives on no control address.
 
+A publication's channel, with an endpoint or a control address, may name `ssc=true` or
+`ssc=false`, *spies simulate connection*: under `true` a live recording of the
+publication connects it while no receiver answers, so that a publisher appends to a
+recorded stream that nobody receives yet ("The sender"); `false` is the default, what a
+channel that names no `ssc` gets, and under it a publication is connected by a receiver
+alone. In Aeron, this is the channel parameter `ssc`: a spy there is a subscription
+that reads a publication's log on the publisher's own driver, which is how Aeron's
+archive records a publication, and the one spy this version has is the driver's
+recorder (ADR 0098). `ssc` is a publication's, as `fc` is: an `add subscription`, a
+destination channel or a `start replay` channel that names it is refused, and on a
+`start recording` channel it takes no part, as `fc` takes none.
+
 A publication's channel may name `init-term-id`, `term-id` and `term-offset`, all three
 or none, each a 32-bit integer in decimal, ASCII digits after an optional `+` or `-`,
 leading zeros allowed, as a port is read: the *position keys*, which create the
@@ -196,13 +212,17 @@ subscriptions on the same channel share one receive endpoint, and publications o
 same control address share one send endpoint and its destinations. `fc` is the
 publication's, read from the command that created it, and not part of the channel: an
 `add publication` that would join a live publication under a different `fc` is refused.
+`ssc` is the publication's in the same way: an `add publication` that would join a live
+publication under another `ssc` is refused, `true` against `false` or against a channel
+that names none, since a shared log is connected one way.
 The position keys are the publication's too, read from the command that created it: an
 `add publication` that would join a live publication whose position keys differ from
 its own, or that names them where the live one named none or the reverse, is refused,
 since a shared log has one position.
 A channel is refused as "What a reader rejects" says: the grammar, an unknown key, a
 port of 0 or above 65535, a control address without its mode or beside an endpoint, an
-`fc` this version does not name, position keys that are incomplete or out of range,
+`fc` this version does not name, an `ssc` that is not `true` or `false`, position keys
+that are incomplete or out of range,
 and a multicast address are error code 1 with a message naming what; a host that does
 not resolve is code 9.
 
@@ -368,6 +388,37 @@ publisher and no recorded byte is cleaned before the recorder has written it
 (`spec/log-buffer.md`, "The driver"; ADR 0025, ADR 0097). The recorder moves neither
 where the limit rests while the publication is not connected nor where the log is
 unblocked: both stay the sender position.
+
+A publication whose channel names `ssc=true` is connected by its recording as well as
+by a receiver. While a recording of it is live, the conductor keeps the publication
+connected whether or not a receiver answers: `publication.limit` at the consumer
+position above plus the publication window, and `is connected` to match. When the
+recording stops and no receiver answers, the publication is not connected, as any
+publication is. While such a publication has a live recording and no receiver answers,
+from its creation to its first status message without the send-setup flag and from
+each connection timeout to the next such status message, it is *alone with its
+recording*: the sender sends no data frame of it, and on every duty cycle moves its
+sender position up to the recording's position, `recording.position`, when that is
+ahead, as it advances past a burst to no destination, and counts the bytes passed in
+`sender.bytes_unsent`. Its setup frames before the first status message and its
+heartbeats after it go on, at the sender position. The recording's position is a frame
+boundary at most the producer position, so the sender position stays one; and since
+the consumer position is then the sender position, which follows the recorder, a
+publisher alone with its recording is back-pressured one window past its recorder, as
+over `cavalry:ipc`.
+
+Nothing a publication sends while it is alone with its recording is counted as sent,
+and no receiver is told it was. A receiver that joins is given a setup frame at the
+sender position, as a subscription joins at the producer's position: its image begins
+there, and what was published before is in the recording, for a replay
+(`spec/client-protocol.md`, "Commands", start replay). A receiver whose image is older
+than the publication's time alone is treated as any receiver whose sender has moved
+on. Within half a term of the sender position its status message is accepted, and it
+NAKs what it missed, which the resend window holds. Further behind, its status message
+is rejected and every data frame and heartbeat it is sent is an over-run, which is no
+activity ("The receiver", steps 2 and 5): the image times out, its subscribers are
+told with `unavailable image`, and after the cool-down a new image joins at the sender
+position. No image is left waiting for frames that will not come (ADR 0098).
 After the publication is closed
 it lingers for the linger timeout, sending heartbeats with EOS and answering NAKs; then
 its log is removed. On a channel with an endpoint a status message with the
@@ -490,7 +541,8 @@ receiver id is a random i64 chosen when it starts. On a datagram from a source a
    a subscription its client removed (`spec/client-protocol.md`, "Commands"), and the
    sender, hearing no status message for the connection timeout, disconnects its
    publication, so that the publisher reads `not connected` as it does over
-   `cavalry:ipc` when the last subscriber goes. From the removal of its last
+   `cavalry:ipc` when the last subscriber goes, unless its channel names `ssc=true` and
+   a recording of it is live ("The sender"). From the removal of its last
    subscription an image is being retired, whether or not the receiver has finished:
    it is given to no subscription added on its endpoint and stream meanwhile, and no
    recording starts on it, since its log goes when the retire is done (ADR 0068). An
@@ -608,6 +660,7 @@ lands: the sender's and the endpoint's rows, the publication's connection and
 | --- | --- |
 | `sender.bytes_sent`, `sender.frames_sent` | a data or padding frame is sent: the bytes put on the wire, 32 for a padding frame, and one frame each; once per destination on a control channel |
 | `sender.setups_sent`, `sender.heartbeats_sent` | a setup frame or a heartbeat is sent; once per destination on a control channel |
+| `sender.bytes_unsent` | the sender position of a publication alone with its recording moves: the bytes it passed, which went to the recording and to no receiver (ADR 0098) |
 | `sender.retransmits_sent`, `sender.retransmitted_bytes` | a NAK is answered; the bytes once per destination on a control channel |
 | `sender.retransmit_overflow` | a NAK for another range arrives while a retransmit is outstanding |
 | `sender.short_sends`, `sender.send_failed` | the socket took part of a datagram, or refused one; once per destination on a control channel |
@@ -699,13 +752,14 @@ and nothing from a rejected datagram is delivered.
 A channel is checked in this order, each check over the whole string before the next:
 `grammar` (the scheme, the `?`, the `key=value` form of every parameter, a key outside
 `[a-z0-9-]+`, an empty value, a repeated key), `key` (a key this version does not name:
-not `endpoint`, `interface`, `control`, `control-mode`, `fc`, `init-term-id`,
+not `endpoint`, `interface`, `control`, `control-mode`, `fc`, `ssc`, `init-term-id`,
 `term-id` or `term-offset`), `control` (a control
 address without `control-mode` or `control-mode` without a control address; a control
 mode other than `manual`; a control address beside an endpoint or an interface; a
 control address with no port, a port of 0 or above 65535, or malformed), `endpoint`
 (neither an endpoint nor a control address; an endpoint or interface with a port of 0
 or above 65535 or a malformed address), `fc` (a value other than `max` or `min`),
+`ssc` (a value other than `true` or `false`),
 `position` (one or two of `init-term-id`, `term-id` and `term-offset` without the rest;
 a value that is not a 32-bit integer in decimal, an optional sign and digits; a
 `term-id` below `init-term-id` by
@@ -716,8 +770,9 @@ code 1 with the reason in the message; then `host` (the name does not resolve), 
 code 9. A string wrong in two ways reports the earlier check, as the vectors pin. The
 socket that cannot be opened, bound or connected is error code 4 with the operating
 system's reason. The driver's own checks on a channel that parses, a control channel,
-`fc` or a position key on an `add subscription`, a position key on a `start replay`
-channel, a join under a different `fc` or under different position keys, a destination
+`fc`, `ssc` or a position key on an `add subscription`, `ssc` or a position key on a
+`start replay` channel, a join under a different `fc`, another `ssc` or different
+position keys, a destination
 channel that is `cavalry:ipc` or a control channel or names more than its endpoint,
 and a destination with no address the control address can send to ("The sender"), are
 error code 1 too
@@ -737,7 +792,7 @@ vector has a `kind`:
   among them is its header alone, as "The datagram" carries it.
 - `channel`: a channel `string` and the `fields` it parses to (endpoint host and port,
   interface host and port, control host and port, control mode, `fc`, `max` when the
-  string names none, and the position keys `initial_term_id`, `term_id` and
+  string names none, `ssc`, false when the string names none, and the position keys `initial_term_id`, `term_id` and
   `term_offset` with the `position` they make under the UDP term length of "Values"; a
   field the string does not name is null) or the `error` and its `code`.
 - `arithmetic`: `inputs` and the `fields` that follow: the sender limit from a status

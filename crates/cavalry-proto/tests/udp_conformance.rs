@@ -273,6 +273,17 @@ fn channel_vector(name: &str, vector: &Value) {
         string.contains("fc="),
         "{name}: names_flow_control"
     );
+    // Version 3: `ssc`, false when the string names none (ADR 0098).
+    assert_eq!(
+        udp.spies_simulate_connection(),
+        fields["ssc"].as_bool().expect("ssc"),
+        "{name}: ssc"
+    );
+    assert_eq!(
+        udp.names_ssc(),
+        string.contains("ssc="),
+        "{name}: names_ssc"
+    );
     // Version 2: the position keys and the position they make (ADR 0059).
     match fields["initial_term_id"].as_i64() {
         None => {
@@ -422,7 +433,7 @@ fn arithmetic_vector(name: &str, vector: &Value) {
 #[test]
 fn every_vector_in_spec_vectors_udp_json() {
     let doc: Value = serde_json::from_str(VECTORS).expect("udp.json parses");
-    assert_eq!(doc["version"], 2, "the vectors are for version 2");
+    assert_eq!(doc["version"], 3, "the vectors are for version 3");
     let vectors = doc["vectors"].as_array().expect("vectors is an array");
     assert!(vectors.len() >= 96, "udp.py writes at least 96 vectors");
     for vector in vectors {
