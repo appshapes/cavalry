@@ -291,16 +291,16 @@ fn terms_headers_and_entries_never_panic() {
 fn recordings_slot(random: &mut XorShift, round: u64) -> Vec<u8> {
     let count = (random.next() % 6) as usize;
     let whole = SLOT_HEADER_LENGTH + count * 16;
-    let length = if round % 7 == 0 {
+    let length = if round.is_multiple_of(7) {
         (random.next() % 200) as usize
     } else {
         whole
     };
     let mut slot = random.bytes(length);
-    if round % 2 == 0 && slot.len() >= 8 {
+    if round.is_multiple_of(2) && slot.len() >= 8 {
         slot[4..8].copy_from_slice(&(count as i32).to_le_bytes());
     }
-    if round % 4 != 0 && slot.len() >= whole {
+    if !round.is_multiple_of(4) && slot.len() >= whole {
         slot[4..8].copy_from_slice(&(count as i32).to_le_bytes());
         let sequence = (random.next() % 1_000) as i64;
         let mut position = ((random.next() % 16) as i64) * 32;
@@ -315,13 +315,13 @@ fn recordings_slot(random: &mut XorShift, round: u64) -> Vec<u8> {
         }
         // One field in five rounds is whatever the generator gives: a sequence, a
         // floor, a recording id or a start position a reader may refuse.
-        if round % 5 == 0 {
+        if round.is_multiple_of(5) {
             let fields = 2 + 2 * count;
             let at = 8 + 8 * (random.next() as usize % fields);
             slot[at..at + 8].copy_from_slice(&(random.next() as i64 >> 40).to_le_bytes());
         }
     }
-    if round % 3 != 0 && slot.len() >= whole && slot.len() >= SLOT_HEADER_LENGTH {
+    if !round.is_multiple_of(3) && slot.len() >= whole && slot.len() >= SLOT_HEADER_LENGTH {
         let count = i32::from_le_bytes([slot[4], slot[5], slot[6], slot[7]]);
         if let Ok(count) = usize::try_from(count)
             && slot.len() >= SLOT_HEADER_LENGTH + count * 16
