@@ -19,11 +19,10 @@ use cavalry_proto::cluster::{
 use cavalry_raft::{ConsensusModule, ElectionState, NO_SESSION, RaftError, Refused, Role};
 use cavalry_shm::counters::CountersReader;
 use cavalry_shm::counters::generated::{
-    CLUSTER_APPEND_POSITION, CLUSTER_APPOINTED_LEADER_BEHIND, CLUSTER_COMMIT_POSITION,
-    CLUSTER_ELECTION_CAUSE, CLUSTER_ELECTION_STATE, CLUSTER_ELECTION_STEPS, CLUSTER_ELECTIONS,
-    CLUSTER_ELECTIONS_CLOSED, CLUSTER_LEADER_MEMBER_ID, CLUSTER_LEADERSHIP_TERM_ID,
-    CLUSTER_LOG_RECORDING_ID, CLUSTER_LOG_RECORDINGS_UNWRITTEN, CLUSTER_ROLE, CLUSTER_TERMS_LED,
-    SUBSCRIPTION_POSITION,
+    CLUSTER_APPEND_POSITION, CLUSTER_COMMIT_POSITION, CLUSTER_ELECTION_CAUSE,
+    CLUSTER_ELECTION_STATE, CLUSTER_ELECTION_STEPS, CLUSTER_ELECTIONS, CLUSTER_ELECTIONS_CLOSED,
+    CLUSTER_LEADER_MEMBER_ID, CLUSTER_LEADERSHIP_TERM_ID, CLUSTER_LOG_RECORDING_ID,
+    CLUSTER_LOG_RECORDINGS_UNWRITTEN, CLUSTER_ROLE, CLUSTER_TERMS_LED, SUBSCRIPTION_POSITION,
 };
 
 struct TestDir(PathBuf);
@@ -181,11 +180,11 @@ fn three_members_replicate_a_hundred_thousand_entries_and_their_recordings_are_e
         // It names no leader, and the cause of its election is its start (ADR 0102).
         assert_eq!(counter(member, CLUSTER_LEADER_MEMBER_ID.0), -1);
         assert_eq!(counter(member, CLUSTER_ELECTION_CAUSE.0), 0);
-        // No member adds the counter of the appointed leader's check: that it is
-        // not there is how `cavalry doctor` knows a member that elects (ADR 0104).
+        // No member adds a counter of type 113, which was
+        // `cluster.appointed_leader_behind` until it was retired (ADR 0107).
         assert!(
-            !has_counter(member, CLUSTER_APPOINTED_LEADER_BEHIND.0),
-            "member {} added cluster.appointed_leader_behind",
+            !has_counter(member, 113),
+            "member {} added a counter of the retired type 113",
             member.module.member_id()
         );
     }

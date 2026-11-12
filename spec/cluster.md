@@ -1099,7 +1099,6 @@ that a reader of a counters file knows which transition it saw.
 | `cluster.elections` | an election begun, from init |
 | `cluster.terms_led` | a term the member began to lead, on entering leader log replication: `cluster.role` going to leader |
 | `cluster.leader_quorum_losses` | a leader whose active members fell below a quorum, once each time they fall: the election's leader holds an election, which in leader log replication and leader ready is its election failed, counted in `cluster.elections_failed` too (ADR 0082) |
-| `cluster.appointed_leader_behind` | nothing: no member of this version adds or counts it. It counted a member an appointed leader found holding a log ahead of its own, and stays registered until `cavalry doctor`'s check that reads it leaves (ADR 0104) |
 | `cluster.log_images_lost` | a follower whose image of its leader's log was no longer available, so that it held an election |
 | `cluster.elections_failed` | an election that failed in a state and began again at init |
 | `cluster.elections_closed` | an election that closed: leader ready to closed, the term's first entry appended, or follower ready to closed, the append position sent |
