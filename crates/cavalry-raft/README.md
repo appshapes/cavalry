@@ -36,16 +36,20 @@ commit path runs per message.
   first, the tail of an older term that no quorum recorded, and never below the commit
   position it knows: told to, it keeps its log and fails its election (ADR 0083). A
   leader answers a member that asks for a term it missed, with a catch-up position below
-  the leader's term base: it replays its own recordings from the position asked to the
-  end of the term that holds it, through `Io::start_replay`, one replay a member at a
-  time, the next recording's once the member has reported the end of the last. It stops
-  the replay of a member that canvasses or asks again, and every replay when it holds an
-  election (ADR 0085). A member below its leader's term base replicates one term it
-  lacks, to that term's end, and canvasses again (follower log replication): it records
-  a term it holds none of at its base before it asks, checks that each replay's image
-  joins where its log ends, fails its election when its append position does not move
-  for the leader heartbeat timeout, and at its leader's base records the leader's term
-  and waits for the commit position (ADR 0086). A leader answers a member that is behind
+  the leader's term base: it replays the recording of its own that holds the position
+  asked, to the end of the term that holds it or to that recording's end, through
+  `Io::start_replay`, one replay a member at a time and one for each catch-up position.
+  A replay that has stopped is followed by nothing of the leader's own. It stops the
+  replay of a member that canvasses or asks again, and every replay when it holds an
+  election (ADR 0085, ADR 0092). A member below its leader's term base replicates one
+  term it lacks, to that term's end, and canvasses again (follower log replication): it
+  records a term it holds none of at its base before it asks, and asks for one replay
+  at a time. When a replay's image has gone and its log ends further on, it subscribes
+  again and asks from there, so that a recording is armed for each image; it asks from
+  a position once (ADR 0092). It checks that each replay's image joins where it asked
+  from, fails its election when its append position does not move for the leader
+  heartbeat timeout, and at its leader's base records the leader's term and waits for
+  the commit position (ADR 0086). A leader answers a member that is behind
   within the leader's own term too, with a catch-up position from its term base to its
   append position: the replay follows its live recording, with no end, and the leader
   stops it and sends stop catch-up when the member reports with the catch-up flag (ADR
@@ -132,8 +136,11 @@ commit path runs per message.
   members parted from each other (`cut_between`) or one that the other stops hearing
   (`cut_one_way`), a member that stops (`halt`) or whose module stands still while its
   driver receives (`stall`), paused syncs, a member started again on an empty log
-  directory (`wipe`) and one that elects started again on the log it kept (`restart`)
-  to set, and a leader's replay of its own log to a member that asked for it:
+  directory (`wipe`), one that elects started again on the log it kept (`restart`)
+  and a member's recording ended where its log stands (`end_recording`) to set, and a
+  leader's replay of its own log to a member that asked for it, which a member
+  records only when it subscribed for it, as a driver arms one recording for one
+  image (ADR 0092):
   what the example below and most of the crate's tests run. Every member holds a log of
   its own, the entries that reached it, so `log(member)` is that member's bytes and a
   test can find two members that hold different bytes at one position.
