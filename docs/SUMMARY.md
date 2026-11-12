@@ -144,5 +144,6 @@ under `docs/` is listed here; `just lint-docs` fails on one that is not.
 - [0100. Move the module to the election in ordered changes, around one that takes the appointed path out](decisions/0100-move-the-module-to-the-election-in-ordered-changes-around-one-that-takes-the-appointed-path-out.md)
 - [0094. Record a member's replays over a driver, and count the live recording once the log reaches it](decisions/0094-record-a-members-replays-over-a-driver-and-count-the-live-recording-once-the-log-reaches-it.md)
 - [0101. Read a publisher held by its recorder from its limit, in doctor](decisions/0101-read-a-publisher-held-by-its-recorder-from-its-limit-in-doctor.md)
+- [0095. Truncate a member's log over a driver, recording by recording, then its record of terms](decisions/0095-truncate-a-members-log-over-a-driver-recording-by-recording-then-its-record-of-terms.md)
 - [0098. Let a recording connect a cavalry:udp publication whose channel names ssc](decisions/0098-let-a-recording-connect-a-cavalry-udp-publication-whose-channel-names-ssc.md)
 - [0099. Let a cavalry:udp publication's channel name its term length](decisions/0099-let-a-cavalry-udp-publications-channel-name-its-term-length.md)
