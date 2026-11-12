@@ -40,6 +40,15 @@ The client API implementation, re-exported by the `cavalry` crate. Data plane.
   subscription's next poll returns `Fault::Image` with the reason `Fault::GONE` and
   `NULL_POSITION`, once, which says that frames published after the join, if any,
   were not delivered, and the subscription and the client go on (ADR 0078).
+- Lets a `cavalry:udp` publication choose the term length of its log:
+  `|term-length=<length>` on its channel, a power of two from 65536 to 67108864 written
+  in bytes or with `k`, `m` or `g`, as `|term-length=1m`. The log is three terms,
+  resident from its creation, so a channel that names none holds 48 MiB and one that
+  names `64k` holds 196 KiB; `Publication::max_message_length` is the term ÷ 8 and the
+  publication window is half the term. Name a term that holds what the publisher
+  writes in 16 milliseconds at its fastest: 64 KiB for 4 MiB a second, 1 MiB for 64 MiB
+  a second. A subscription's channel names none, since an image takes its sender's
+  (ADR 0099).
 - Gives a publication on a control channel,
   `cavalry:udp?control=<host>:<port>|control-mode=manual`, its destinations:
   `Cavalry::add_destination(publication.registration_id(), "cavalry:udp?endpoint=<host>:<port>")`
@@ -47,6 +56,13 @@ The client API implementation, re-exported by the `cavalry` crate. Data plane.
   the sender sends every datagram to each destination, multi-destination cast (ADR
   0053); `|fc=min` on the control channel lets the slowest destination's receiver pace
   the sender.
+- Appends to a recorded `cavalry:udp` stream that nobody receives yet, when the
+  publication's channel names `|ssc=true`: a live recording of the publication then
+  connects it, so `offer` and `try_claim` succeed with no receiver, and are back
+  pressured by the recorder alone. A receiver that joins later is given the stream
+  from where the sender stands, and what came before is in the recording, for
+  `Cavalry::start_replay`. Without the key a `cavalry:udp` publication is connected by
+  a receiver, recorded or not (ADR 0098).
 - Records a stream to the durable log: `Cavalry::start_recording(channel, stream_id)`
   asks the driver to record the stream's live publication and returns a `Recording`
   whose `position()` and `synced_position()` read the recorder's two counters;
