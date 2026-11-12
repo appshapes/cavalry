@@ -74,7 +74,8 @@ position starts nothing and returns `false`: the position is below what the tabl
 still holds, or above the member's log.
 
 **One replay a member, by its handle.** The module holds the handle of the replay
-it started for each member, eight at most. `stop_replay` sends `stop replay` for it.
+it started for each other member of the cluster, seven at most. `stop_replay` sends
+`stop replay` for it.
 A replay asked for a member whose last one has not ended stops that one first and
 starts once it has stopped. The core leaves that order to the I/O for one case: a
 leader that asked a replay to stop, held an election and leads again does not wait
@@ -111,6 +112,16 @@ it tries again each cycle still shows its role, its state and its counts.
   from leading or following to keep its ability to replay its oldest recording. A
   position the leader cannot replay is already a case the member's side has: its
   timer counts it in `cluster.log_replications_unavailable`.
+- **Count a recording the table forgets.** Not in this change. Nothing reads the
+  table until the module moves to the election (ADR 0081): an appointed leader
+  serves no replay, so a table that fills, on a follower that has left its leader's
+  log 1,024 times, costs nothing yet. A counter is a name and an id that stay, and
+  this bound is to be revisited before any member can meet it: once the table is
+  filled from the catalog its bound is the catalog's (Consequences, below). If the
+  change that moves the module keeps a bound under which a recording can be
+  forgotten, the counter and its `doctor` text come with that change. A member that
+  asks for a position its leader no longer replays counts it on its own side, in
+  `cluster.log_replications_unavailable`.
 - **Close the publication first and let the recording end with it.** Lost. The
   module would have to tell a recording the driver ended from one still running,
   and the log's end would be whatever the recorder had written when the stream
