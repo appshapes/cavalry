@@ -149,7 +149,9 @@ commit path runs per message.
   position, truncates each that stopped above it, which after a catch-up can be two
   that overlap, then takes every term based above the position out of the `terms`
   file. Each command waits for the driver's answer, so it is one step; asked again,
-  it changes nothing.
+  it changes nothing. `drop_terms_above` takes the terms a leader's record lacks out
+  of that file by term, after such a truncation, each write synced
+  (`TermsFile::drop_above_term`; ADR 0096).
 - Asks for the sync a commit waits for: a member's append position is its
   recording's synced position, and the driver's recorder syncs a recording by itself
   once a second. So the module asks its driver to sync its recording of the log,

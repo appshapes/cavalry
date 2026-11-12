@@ -782,10 +782,13 @@ fn a_term_fewer_than_a_quorum_recorded_strands_no_member() {
 /// throughout: no committed entry is lost or replaced, and no member holds, below
 /// the commit position it knows, bytes that were not committed. No member refuses a
 /// truncation, and once the messages arrive in order again the three settle on one
-/// leader and one log. At these seeds no member drops a term or truncates: the
-/// test is the net under the rule, and `dropped_terms.rs` has the rule's own cases.
+/// leader and one log. The rule runs under these messages: at five of the eight
+/// seeds members drop terms, twelve drops in all, and three of them cut their log
+/// first, and the check holds through each. `dropped_terms.rs` has the rule's own
+/// cases.
 #[test]
 fn late_new_leadership_terms_cut_nothing_that_was_committed() {
+    let (mut dropped, mut truncated) = (0, 0);
     for seed in 1..=8 {
         let ids = [0, 1, 2];
         let mut safety = Safety::new(&ids);
@@ -830,6 +833,8 @@ fn late_new_leadership_terms_cut_nothing_that_was_committed() {
         for id in ids {
             let counts = cluster.counts(id).expect("a member");
             assert_eq!(counts.truncations_refused, 0, "seed {seed}: {counts:?}");
+            dropped += counts.terms_dropped;
+            truncated += counts.log_truncations;
             assert_eq!(
                 cluster.log_to(id, commit),
                 cluster.log_to(leader, commit),
@@ -837,6 +842,14 @@ fn late_new_leadership_terms_cut_nothing_that_was_committed() {
             );
         }
     }
+    // The rule ran under these messages, and so did its cut: the check above held
+    // through drops and truncations, not in their absence.
+    println!(
+        "election: late messages at eight seeds: {dropped} terms dropped, {truncated} logs \
+         truncated"
+    );
+    assert!(dropped > 0, "no member dropped a term at any seed");
+    assert!(truncated > 0, "no member truncated at any seed");
 }
 
 /// A payload whose session message takes a frame of `frame` bytes in the log.

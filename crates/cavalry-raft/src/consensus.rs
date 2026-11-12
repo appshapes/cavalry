@@ -523,8 +523,8 @@ pub struct Counts {
     /// canvasses again: a candidate at the election timeout short of a quorum or with
     /// a vote against, a member in follower ballot whose candidate's new leadership
     /// term did not come within the election timeout, or either that reads a new
-    /// leadership term for a log term that is not its own and that drops none of its
-    /// terms (ADR 0096). A candidate that follows another member's new leadership term
+    /// leadership term for a log term that is not its own, once it has dropped any
+    /// terms the message says its leader's record lacks (ADR 0096). A candidate that follows another member's new leadership term
     /// for its own candidate term has a leader and counts none (ADR 0081).
     pub ballots_lost: u64,
     /// `cluster.votes_for`: a vote the member sent for a candidate.
@@ -1371,7 +1371,12 @@ impl Consensus {
                     // by now, under the guard of a truncation; the terms leave its
                     // record, and it reads the message again with the log it then
                     // holds: once, since its log term is then at or below the term
-                    // named (ADR 0096).
+                    // named (ADR 0096). Below it, when the member never recorded the
+                    // term named: the second read canvasses. A drop that faults
+                    // leaves the log cut and the record holding some of those terms
+                    // or all of them, with `log_term` as it was: the member reports
+                    // it again, the leader answers again, and the drop, which changes
+                    // nothing already dropped, runs again.
                     TermAction::Drop if self.election.is_some() => {
                         self.log_term = io.drop_terms_above(log_leadership_term_id)?;
                         count(&mut self.counts.terms_dropped);
@@ -1710,9 +1715,10 @@ impl Consensus {
     }
 
     /// A ballot that ended with no leader, this member's own or its candidate's, at the
-    /// election timeout or on a new leadership term for a log term that is not its own
-    /// and that drops none of its terms: counted, and the member canvasses again as a
-    /// follower, with the reports and the members heard that it has.
+    /// election timeout or on a new leadership term for a log term that is not its own,
+    /// once any terms the message says its leader's record lacks are dropped: counted,
+    /// and the member canvasses again as a follower, with the reports and the members
+    /// heard that it has.
     fn lose_ballot(&mut self, clock: Clock) -> usize {
         count(&mut self.counts.ballots_lost);
         self.role = Role::Follower;

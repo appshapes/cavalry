@@ -15,8 +15,12 @@
   the page said "the recording". Changes one sentence of `spec/durable-log.md`,
   "The driver": what the module writes state 3 over. No message's layout changes and
   no file's format changes; both pages stay at their versions, since no member over
-  a driver elects yet (ADR 0081). Adds the `answered-term` vectors and five
-  `new-leadership-term` vectors.
+  a driver elects yet (ADR 0081). The appointed leader answers by the same rule, and
+  over a driver every member starts on an empty log directory, so there the term
+  answered is the term reported, as before. Adds the `answered-term` vectors and
+  five `new-leadership-term` vectors. Amends ADR 0081 in one clause: what
+  `cluster.ballots_lost` counts on a new leadership term that is not for the
+  reader's log term.
 
 ## Context
 
@@ -69,8 +73,12 @@ message's next leadership term id is above the reader's log term:
    counted in `cluster.terms_dropped`. They are named by term and not by base: the
    lowest of them is based where the log now ends, so a truncation "above that
    position" leaves it, and a term at or below the one named can share that base.
-3. It reads the message again with the log it then holds, whose term is the one
-   named, and replicates or joins as the page has it.
+3. It reads the message again with the log it then holds, whose term is at or
+   below the one named. With the term named, it replicates or joins as the page has
+   it. With a lower one, it never recorded the term named, which fewer than a
+   quorum recorded too: the message is then for a log term that is not its own, and
+   it canvasses, a ballot it was in counted in `cluster.ballots_lost`, and reports
+   the lower term, which the leader answers.
 
 A message that names a term below the reader's own with a next term at or below the
 reader's log term drops nothing, and the reader canvasses on, as it does for any
@@ -109,7 +117,15 @@ term, from the last backwards, each write synced, as a truncation does.
 
 **The reader reads the message twice at most.** After the drop its log term is at
 or below the term named. A record that still held a term above it would be a fault
-of the `Io`: the member fails its election and reads nothing again.
+of the `Io`: the member fails its election and reads nothing again. A drop that
+faults after its truncation leaves the log cut and the record with some of those
+terms: the member reports its log term again, the leader answers again, and the
+drop runs again, changing nothing that is already dropped.
+
+**A departure from Aeron.** Aeron's leader names the term the member reported,
+whatever its own record holds, and looks up in its record only the term after it;
+a reader whose log term is not the one named canvasses, and drops nothing. So a
+term that fewer than a quorum recorded stays in a member's record there.
 
 ## Alternatives considered
 
@@ -141,7 +157,7 @@ of the `Io`: the member fails its election and reads nothing again.
   cut when the reader holds nothing above its base and with a cut when it does, in
   canvass and in a ballot; an answer to an older report canvasses; a leader that
   holds no term of the reader's drops them all.
-- `crates/cavalry-raft/tests/dropped_terms.rs`, one core driven by hand, five
+- `crates/cavalry-raft/tests/dropped_terms.rs`, one core driven by hand, seven
   tests. A member whose record is (0, 0), (1, 64), told term 0 with term 3 next at
   128: with its log ending at 64 it cuts nothing, drops term 1, counted, and goes to
   follower log replication under that leader; with its log ending at 96 it truncates
@@ -150,6 +166,10 @@ of the `Io`: the member fails its election and reads nothing again.
   next term is 1, and a late copy from the leader of term 1, change nothing. A
   leader whose record is (0, 0), (2, 96) answers a member of term 1 for term 0, with
   its own term 2 at 96 as the next; with term 1 in its record it answers for term 1.
+  A member whose record is (0, 0), (2, 64), told term 1 with term 3 next, never
+  recorded the term named: it drops term 2, once, its log term is 0, and it
+  canvasses with no election failed; as a candidate of term 3 it drops the term and
+  its ballot is lost, both counted.
 - `crates/cavalry-raft/tests/election.rs`, in memory, with the check after every
   step that no committed entry is lost or replaced.
   - The history of the card, five members. The member that recorded term 1 with
@@ -164,10 +184,18 @@ of the `Io`: the member fails its election and reads nothing again.
   - Three members at eight seeds, every consensus message up to two seconds late
     and out of order, three leaders stopped and run again in turn: the check holds
     at every step, no member refuses a truncation, and the three settle on one
-    log. At these seeds no member drops a term: it is the net under the rule.
-- `crates/cavalry-log`: `drop_above_term` deletes two terms of one base by term,
-  keeps the term below them at that base, and a term appended after reads back.
-- `cargo test -p cavalry-raft`: 169 passed.
+    log. The rule runs under those messages: at five of the eight seeds members
+    drop terms, twelve drops in all, three of them after a cut, and the test fails
+    if none does.
+- `crates/cavalry-log`, `terms_above_a_term_are_dropped_by_term_whatever_their_base`:
+  of two terms at one base, `drop_above_term` deletes the higher and keeps the
+  lower, and deletes the term above them at another base; a term appended after
+  reads back from a file opened again; and dropping above −1 empties the record.
+- Aeron's `Election`, read on 2026-11-12: `onCanvassPosition` passes the member's
+  log leadership term id on to `publishNewLeadershipTerm`, which sends it as it is
+  and finds the next term with `findTermEntry(logLeadershipTermId + 1)`;
+  `onNewLeadershipTerm` moves a reader whose log leadership term id differs to
+  canvass.
 - Not shown: the argument that a term a later leader lacks holds nothing committed
   is made above and rests on the election's own rules (ADR 0058, ADR 0081); the
   in-memory check would catch a counter-example in the histories the tests make,
@@ -195,6 +223,10 @@ of the `Io`: the member fails its election and reads nothing again.
   election"; "Counters". `spec/durable-log.md`, "The driver".
 - [ADR 0058](0058-specify-the-cluster-protocol-from-aerons-codecs.md), the election
   and its departures from Aeron.
+- [ADR 0081](0081-build-the-election-beside-the-appointed-leader-and-move-the-module-to-it-once.md),
+  what `cluster.ballots_lost` counted.
+- Aeron's `Election`:
+  <https://github.com/aeron-io/aeron/blob/master/aeron-cluster/src/main/java/io/aeron/cluster/Election.java>
 - [ADR 0083](0083-truncate-to-the-next-terms-base-and-never-below-the-commit-position.md),
   the truncation and its guard.
 - [ADR 0086](0086-record-a-term-when-its-replication-begins-and-check-each-replays-image-against-the-position-last-sent.md),
