@@ -275,10 +275,27 @@ struct Held {
     /// is. It is the image's join position when the recording was armed before the
     /// image arrived, and past it when the image came first (ADR 0093).
     start: i64,
+    /// Where the member's log ended when the driver handed this recording over. A
+    /// recording of the live log that began below it is no part of the log: its image
+    /// joined below the member's append position (ADR 0094).
+    floor: i64,
     /// Whether the election has been told this recording's image: [`Io::log_image`]
-    /// has returned its start for the image's session. Only then is the recording
-    /// part of the member's log.
+    /// has returned its start for the image's session, or [`Io::catchup_image`] has
+    /// returned it. Only then is the recording part of the member's log.
     checked: bool,
+}
+
+impl Held {
+    /// Whether this recording of the live log carries the member's log on from
+    /// `end`: the election was told its image, it began at or past where the log
+    /// ended when it was handed over, and the log has since reached where it begins.
+    /// With no catch-up that is a recording that began where the log ended (ADR
+    /// 0093). In follower catch-up it is the live recording, which begins ahead of
+    /// the log and counts once the replay's recording has reached its start (ADR
+    /// 0094).
+    fn carries_on_from(&self, end: i64) -> bool {
+        self.checked && self.start >= self.floor && self.start <= end
+    }
 }
 
 /// The image of the log on a follower's subscription, as the module noted it.
@@ -336,11 +353,26 @@ struct ClientIo {
     /// The driver's catalog, in the member's log directory: where a recording of the
     /// log begins is read from it, once for each recording handed over (ADR 0093).
     catalog: CatalogReader,
+    // A member's catch-up: its subscription on its `catchup` endpoint (ADR 0094).
+    /// This member's id, which its catch-up position carries.
+    member_id: i32,
+    /// This member's `catchup` endpoint as a channel, and as the `host:port` its
+    /// catch-up position carries.
+    catchup_endpoint_channel: String,
+    catchup_endpoint: String,
+    catchup_subscription: Option<Subscription>,
+    catchup_armed: Option<ArmedRecording>,
+    /// As `starting`, for the recording armed on the catch-up subscription.
+    catchup_starting: Option<Recording>,
+    /// The recording of the replay's image the armed recording took.
+    catchup_held: Option<Held>,
     /// The end of the contiguous span the recordings this member has stopped hold.
     stopped_at: i64,
     /// The position its recording of the log had written when this member last asked
     /// the recorder to sync it ([`ask_sync`]).
     sync_asked_at: i64,
+    /// The same for its recording of a replay.
+    catchup_sync_asked_at: i64,
 }
 
 /// Asks the driver to sync `recording`, this member's recording of the log, when the
@@ -386,14 +418,125 @@ fn stop_recording(client: &mut Cavalry, recording: &Recording) -> Result<i64, Ra
     }
 }
 
+/// Takes the recording the driver has started for an armed `start recording`, and
+/// reads where it begins. That is the catalog's word, never the image's: an image
+/// that arrived between this member's `add subscription` and its `start recording`
+/// is recorded from what it had received by then, past its join position (ADR 0093).
+/// The driver writes the descriptor before it says the recording started; a read
+/// that fails leaves the recording waiting in `starting`, and the next cycle reads
+/// again. `floor` is where the member's log ends now.
+fn take_started(
+    armed: &mut Option<ArmedRecording>,
+    starting: &mut Option<Recording>,
+    catalog: &CatalogReader,
+    floor: i64,
+) -> Result<Option<Held>, RaftError> {
+    if let Some(waiting) = armed.as_mut()
+        && let Some(recording) = waiting.poll()?
+    {
+        *starting = Some(recording);
+        *armed = None;
+    }
+    let Some(recording) = starting.take() else {
+        return Ok(None);
+    };
+    match catalog.get(recording.recording_id()) {
+        Ok(Some(descriptor)) => Ok(Some(Held {
+            recording,
+            start: descriptor.start_position(),
+            floor,
+            checked: false,
+        })),
+        Ok(None) => {
+            *starting = Some(recording);
+            Ok(None)
+        }
+        Err(error) => {
+            *starting = Some(recording);
+            Err(error.into())
+        }
+    }
+}
+
 impl ClientIo {
-    /// The recording of the leader's image that is part of this member's log: the one
-    /// held, once the election has been told its image and when it begins where the
-    /// log ended before it (ADR 0093).
-    fn counted(&self) -> Option<&Held> {
-        self.held
+    /// Where this member's log ends below its recording of the live log: the end of
+    /// the recordings it has stopped, and past it what its recording of a replay has
+    /// synced, once the election was told the replay's image and when that recording
+    /// begins where the stopped ones end. Nothing is asked of the driver.
+    fn end_below_live(&self) -> i64 {
+        let end = self.stopped_at;
+        self.catchup_held
             .as_ref()
-            .filter(|held| held.checked && held.start == self.stopped_at)
+            .filter(|held| held.checked && held.start == end)
+            .map_or(end, |held| end.max(held.recording.synced_position()))
+    }
+
+    /// The recording of the leader's image that is part of this member's log: the one
+    /// held, once the election has been told its image and when it carries the log
+    /// on from where the log ends below it (ADR 0093, ADR 0094).
+    fn counted(&self) -> Option<&Held> {
+        let end = self.end_below_live();
+        self.held.as_ref().filter(|held| held.carries_on_from(end))
+    }
+
+    /// Stops this member's recording of a replay and takes its stop as the log's end
+    /// when the election was told its image and it began where the log ended; the
+    /// recording is then kept for a replay of this member's own. One the election was
+    /// never told, or that began elsewhere, is stopped and is no part of the log. The
+    /// recording stays held until its stop has been read, as in [`Io::leave_log`].
+    fn settle_catchup(&mut self) -> Result<(), RaftError> {
+        if let Some(held) = self.catchup_held.as_ref() {
+            let stop = stop_recording(&mut self.client, &held.recording)?;
+            let kept = Kept {
+                recording_id: held.recording.recording_id(),
+                start: held.start,
+                stop,
+            };
+            if held.checked && kept.start == self.stopped_at {
+                self.stopped_at = stop;
+                self.keep(kept);
+            }
+            self.catchup_held = None;
+        }
+        if let Some(recording) = self.catchup_starting.as_ref() {
+            stop_recording(&mut self.client, recording)?;
+            self.catchup_starting = None;
+        }
+        Ok(())
+    }
+
+    /// Takes what arrived on the catch-up subscription: applies the images the driver
+    /// announced or withdrew, reads past what has arrived of the image this member's
+    /// recording holds, so that the replay is not held back and its image can go when
+    /// it has ended, and takes the armed recording once the driver has started it.
+    /// The module acts on no entry in this version: the recording is the member's
+    /// log. An image of another session, a replay this member's recording did not
+    /// take, is never read.
+    fn observe_catchup(&mut self) -> Result<(), RaftError> {
+        let Some(subscription) = self.catchup_subscription.as_mut() else {
+            return Ok(());
+        };
+        subscription.poll(|_, _| {}, 0).map_err(RaftError::Poll)?;
+        if let Some(held) = self.catchup_held.as_ref() {
+            subscription
+                .bounded_poll(
+                    held.recording.session_id(),
+                    |_, _| {},
+                    i64::MAX,
+                    LOG_POLL_LIMIT,
+                )
+                .map_err(RaftError::Poll)?;
+        }
+        let floor = self.stopped_at;
+        if let Some(held) = take_started(
+            &mut self.catchup_armed,
+            &mut self.catchup_starting,
+            &self.catalog,
+            floor,
+        )? {
+            self.catchup_held = Some(held);
+        }
+        Ok(())
     }
 
     /// Keeps a recording this member stopped, for the replays a leader serves. A full
@@ -473,33 +616,10 @@ impl ClientIo {
         subscription
             .bounded_poll(session_id, |_, _| {}, i64::MAX, LOG_POLL_LIMIT)
             .map_err(RaftError::Poll)?;
-        if let Some(armed) = self.armed.as_mut()
-            && let Some(recording) = armed.poll()?
+        let floor = self.end_below_live();
+        if let Some(held) = take_started(&mut self.armed, &mut self.starting, &self.catalog, floor)?
         {
-            self.starting = Some(recording);
-            self.armed = None;
-        }
-        // Where the recording begins is the catalog's word, never the image's: an
-        // image that arrived between this member's `add subscription` and its `start
-        // recording` is recorded from what it had received by then, past its join
-        // position (ADR 0093). The driver writes the descriptor before it says the
-        // recording started; a read that fails leaves the recording waiting, and the
-        // next cycle reads again.
-        if let Some(recording) = self.starting.take() {
-            match self.catalog.get(recording.recording_id()) {
-                Ok(Some(descriptor)) => {
-                    self.held = Some(Held {
-                        recording,
-                        start: descriptor.start_position(),
-                        checked: false,
-                    });
-                }
-                Ok(None) => self.starting = Some(recording),
-                Err(error) => {
-                    self.starting = Some(recording);
-                    return Err(error.into());
-                }
-            }
+            self.held = Some(held);
         }
         Ok(())
     }
@@ -643,6 +763,12 @@ impl Io for ClientIo {
     /// So a leave that fails never loses the recording whose stop is the log's end, and
     /// it never takes a synced position short of the stop.
     fn leave_log(&mut self) -> Result<(), Self::Fault> {
+        // A member that leaves in follower catch-up holds two recordings, and the
+        // live one begins inside what the replay's holds: the replay's recording is
+        // stopped first, so that the live one is kept after it and the log's end is
+        // the further of the two stops (ADR 0094). Init removes the catch-up
+        // subscription next.
+        self.settle_catchup()?;
         if let Some(held) = self.held.as_ref() {
             let stop = stop_recording(&mut self.client, &held.recording)?;
             let kept = Kept {
@@ -651,11 +777,13 @@ impl Io for ClientIo {
                 stop,
             };
             // The recording's stop is where this member's log ends when the election
-            // was told its image and it began where the log ended before it. One that
-            // began past that, or whose image the election never asked for, is no part
-            // of the member's contiguous log, and is not kept for a replay.
-            if held.checked && kept.start == self.stopped_at {
-                self.stopped_at = stop;
+            // was told its image and the recording carries the log on: it began where
+            // the log ended, or, in a catch-up, ahead of it and no further than the
+            // replay's recording reached. One that began past that, or whose image
+            // the election never asked for, is no part of the member's contiguous
+            // log, and is not kept for a replay.
+            if held.carries_on_from(self.stopped_at) {
+                self.stopped_at = self.stopped_at.max(stop);
                 self.keep(kept);
             }
             self.held = None;
@@ -723,15 +851,27 @@ impl Io for ClientIo {
             ask_sync(&mut self.client, recording, &mut self.sync_asked_at);
             return recording.synced_position();
         }
-        let Some(held) = self
-            .held
+        // The contiguous end of what this member's recordings hold: the ones it has
+        // stopped, then its recording of a replay, then its recording of the live
+        // log once the log has reached where that one begins (ADR 0094).
+        let mut end = self.stopped_at;
+        if let Some(held) = self
+            .catchup_held
             .as_ref()
-            .filter(|held| held.checked && held.start == self.stopped_at)
-        else {
-            return self.stopped_at;
-        };
-        ask_sync(&mut self.client, &held.recording, &mut self.sync_asked_at);
-        held.recording.synced_position()
+            .filter(|held| held.checked && held.start == end)
+        {
+            ask_sync(
+                &mut self.client,
+                &held.recording,
+                &mut self.catchup_sync_asked_at,
+            );
+            end = end.max(held.recording.synced_position());
+        }
+        if let Some(held) = self.held.as_ref().filter(|held| held.carries_on_from(end)) {
+            ask_sync(&mut self.client, &held.recording, &mut self.sync_asked_at);
+            end = end.max(held.recording.synced_position());
+        }
+        end
     }
 
     fn terms_after(&mut self, term: i64) -> [Option<(i64, i64)>; 2] {
@@ -861,34 +1001,85 @@ impl Io for ClientIo {
         }))
     }
 
-    /// Refused: only a member that elects replicates, and the module's member is
-    /// appointed (ADR 0081, ADR 0086). The module's own, a subscription on its
-    /// `catchup` endpoint with a recording armed on it, comes with the rest of its I/O
-    /// for the election.
+    /// Subscribes to stream 100 on this member's `catchup` endpoint and arms a
+    /// recording on it (ADR 0086, ADR 0094). The core calls it with no catch-up
+    /// subscription held and before it asks its leader for a replay (ADR 0092), so
+    /// the stream has no image when the recording is armed, and the replay's image
+    /// is recorded from its join position. A call that failed at its second command
+    /// is tried again and sends that one alone. The module's own core is appointed
+    /// and never asks (ADR 0081).
     fn add_catchup(&mut self) -> Result<(), Self::Fault> {
-        Err(RaftError::Unsupported {
-            what: "a member that subscribes on its catchup endpoint to replicate",
-        })
+        if self.catchup_subscription.is_none() {
+            self.catchup_subscription = Some(
+                self.client
+                    .add_subscription(&self.catchup_endpoint_channel, LOG_STREAM_ID)?,
+            );
+        }
+        if self.catchup_armed.is_none()
+            && self.catchup_starting.is_none()
+            && self.catchup_held.is_none()
+        {
+            self.catchup_armed = Some(
+                self.client
+                    .arm_recording(&self.catchup_endpoint_channel, LOG_STREAM_ID)?,
+            );
+        }
+        Ok(())
     }
 
-    /// Not sent, as a publication that is not connected sends nothing: the module's
-    /// core never asks, since [`Io::add_catchup`] is refused before it.
-    fn send_catchup_position(&mut self, _leader: i32, _term: i64, _position: i64) -> bool {
-        false
+    /// Sends catch-up position to `leader` with this member's id and its own
+    /// `catchup` endpoint, `host:port` as its members string has it. The message is
+    /// encoded into the module's scratch, 1,408 bytes, since an endpoint with a long
+    /// host name does not fit the 128 bytes the other consensus messages are encoded
+    /// into. `false` when the leader is no member, or its publication did not take
+    /// the message: the core sends again on a later cycle.
+    fn send_catchup_position(&mut self, leader: i32, term: i64, position: i64) -> bool {
+        let message = Message::CatchupPosition {
+            leadership_term_id: term,
+            log_position: position,
+            follower_member_id: self.member_id,
+            catchup_endpoint: self.catchup_endpoint.as_bytes(),
+        };
+        let Some(peer) = self.peers.iter_mut().find(|peer| peer.id == leader) else {
+            return false;
+        };
+        let Ok(length) = message.write(self.scratch.as_mut_slice()) else {
+            return false;
+        };
+        self.scratch
+            .get(..length)
+            .is_some_and(|bytes| peer.consensus.offer(bytes).is_ok())
     }
 
-    /// Refused, as [`Io::add_catchup`] is here.
+    /// Where this member's recording of the replay's image begins, which is the
+    /// image's join position as the election is to check it (ADR 0093, ADR 0094):
+    /// `None` before the driver has started the recording armed on the catch-up
+    /// subscription, and again once that recording has stopped, which it does when
+    /// its image goes, the replay having ended or been stopped. A recording is
+    /// reported once at least, so that a replay short enough to come and go between
+    /// two duty cycles is still checked, counted and seen to have gone. Reporting it
+    /// is what makes it part of the member's log.
     fn catchup_image(&mut self) -> Result<Option<i64>, Self::Fault> {
-        Err(RaftError::Unsupported {
-            what: "a member that reads the image of a replay it replicates from",
-        })
+        let Some(held) = self.catchup_held.as_mut() else {
+            return Ok(None);
+        };
+        if held.checked && held.recording.stop_position().is_some() {
+            return Ok(None);
+        }
+        held.checked = true;
+        Ok(Some(held.start))
     }
 
-    /// Refused, as [`Io::add_catchup`] is here.
+    /// Stops this member's recording of the replay, whose stop is where its log ends
+    /// when the election was told its image and it began where the log ended, then
+    /// removes the catch-up subscription. A stop the driver did not answer in time
+    /// returns with the recording still held, and the core calls again.
     fn remove_catchup(&mut self) -> Result<(), Self::Fault> {
-        Err(RaftError::Unsupported {
-            what: "a member that removes its catchup subscription",
-        })
+        self.settle_catchup()?;
+        // The driver drops a recording still armed with the stream's last subscription.
+        self.catchup_armed = None;
+        self.catchup_subscription = None;
+        Ok(())
     }
 
     fn append(&mut self, entry: &Message<'_>) -> Result<bool, Self::Fault> {
@@ -1164,6 +1355,14 @@ impl ConsensusModule {
                     host_port(&own.log)
                 ),
                 log_endpoint_channel: endpoint_channel(&own.log),
+                member_id,
+                catchup_endpoint_channel: endpoint_channel(&own.catchup),
+                catchup_endpoint: host_port(&own.catchup),
+                catchup_subscription: None,
+                catchup_armed: None,
+                catchup_starting: None,
+                catchup_held: None,
+                catchup_sync_asked_at: NO_SYNC_ASKED,
                 scratch: Box::new([0u8; 1408]),
                 log_publication: None,
                 log_term: None,
@@ -1230,6 +1429,7 @@ impl ConsensusModule {
             return Err(error);
         }
         io.observe_log()?;
+        io.observe_catchup()?;
         // The core's fault is returned after the counters are stored: a member that
         // faults at a step it tries again each cycle, a replay it cannot start, still
         // shows its role, its state and its counts (ADR 0091).
