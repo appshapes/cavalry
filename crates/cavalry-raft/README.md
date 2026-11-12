@@ -215,8 +215,9 @@ commit path runs per message.
   cut is mended, the driver's image cool-down (`spec/udp.md`, "The receiver"); and a
   throttled follower paces the cluster, since the leader's log is sent under
   `fc=min`: offered 30,000 entries of 96 bytes a second, the cluster committed
-  about 12,000 a second while one follower was throttled, one receiver window each
-  100 ms, though the other two members were a quorum (ADR 0052, "Harder").
+  about 12,000 a second while one follower was throttled, there by a stop of 95 ms
+  in every 100 ms, one receiver window each 100 ms, though the other two members
+  were a quorum (ADR 0052, "Harder").
 - To come, each with its card: the C ABI's calls for a service, so that a service is
   a program in any of the five client languages (card 227), a member's start on the
   log directory it kept and mixed versions in a rolling upgrade (card 228), the

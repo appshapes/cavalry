@@ -1,11 +1,12 @@
 //! A member of a cluster throttled as a cgroup CPU limit throttles it (`CLAUDE.md`,
 //! gate 3; ADR 0052, feature 4; ADR 0077). Three members elect a leader, which offers
 //! thirty thousand entries a second. One follower is then given a twentieth of a
-//! processor for five seconds. The test holds that the cluster stays available while
-//! a quorum remains, that the throttled member unseats nobody, and that once the
-//! throttle ends the three hold one log with every committed entry in it, and it
-//! prints what the throttle cost: the entries committed a second before it, under it
-//! and after it, and how far behind the throttled member was.
+//! processor for five seconds. The test holds that the cluster commits under the
+//! throttle, that the throttled member unseats nobody, and that once the throttle
+//! ends the three hold one log with every committed entry in it. Where it stops the
+//! member outright it also holds that the two others commit alone. It prints what
+//! the throttle cost: the entries committed a second before it, under it and after
+//! it, and how far behind the throttled member was.
 //!
 //! # What the throttle costs, and why the test prints it
 //!
@@ -16,8 +17,12 @@
 //! paces the leader, though the leader and the other follower are a quorum without
 //! it: under the throttle the cluster commits about one window each period, some
 //! 13,000 entries of 96 bytes a second, whatever the leader is offered (ADR 0052,
-//! "Harder"). The test asserts only that entries are committed. The rates are what
-//! an operator reads the cost from, so they are printed and no bound is put on them.
+//! "Harder"). So under a quota no moment shows the two others alone, and the test
+//! asserts there only that entries are committed. Where the member is stopped
+//! outright it asserts more: that the leader's commit position rose in at least one
+//! stop, which a cluster that needed all three members could not do. The rates are
+//! what an operator reads the cost from, so they are printed and no bound is put on
+//! them.
 //!
 //! # Why the members are processes
 //!
@@ -42,7 +47,17 @@
 //!   starvation, harsher in one way: a quota stops a member only once it has used its
 //!   share, and this stops it whether or not it had work.
 //!
-//! The line the test prints says which of the two it was, and why.
+//! The test prints which of the two it is, and why, before it throttles, and again
+//! in its last line.
+//!
+//! A member the test has stopped cannot end itself: [`LIFETIME`] is read by a
+//! process that runs. So a test that is ended by SIGKILL, or by an interrupt, inside
+//! one of those 95 ms leaves that member's process stopped. It holds three UDP ports
+//! and a directory under the system's temporary one, and nothing else. `kill -CONT`
+//! with its process id lets it end by itself, and the test's own line before the
+//! throttle names the id. A runner is thrown away after its job, so this is a
+//! laptop's matter, and of twenty runs in a row with `scripts/test-times.sh` that
+//! were interrupted.
 //!
 //! A program with no test harness (`harness = false` in the crate's `Cargo.toml`): a
 //! program that starts itself again as a member needs its own `main`, and one thread
@@ -92,8 +107,11 @@ const RUNS: Duration = Duration::from_millis(5);
 const STOPPED: Duration = Duration::from_millis(95);
 
 /// How long a member's process lives when nothing tells it to stop: a test that
-/// died leaves no member behind for longer.
-const LIFETIME: Duration = Duration::from_secs(180);
+/// died leaves no member behind for longer. It is above the sum of the test's own
+/// waits, 90 s for the election, 2 s, 5 s, 60 s, 2 s, 60 s, three logs read within
+/// 120 s each and 30 s to stop, 609 s, so that no member ends itself under a test
+/// that still waits for it.
+const LIFETIME: Duration = Duration::from_secs(900);
 
 /// `cluster.role` of a leader, and `cluster.election_state` with no election running
 /// (`spec/cluster.md`, "Counters").
@@ -249,7 +267,10 @@ fn unit(id: i32) -> String {
 /// The three members' processes. Dropped, it tells them to stop and waits for them.
 struct Cluster {
     dir: PathBuf,
+    /// Each member with the process the test started for it: the member itself, or
+    /// `sudo`, whose `systemd-run` runs the member in its scope, when `scoped`.
     members: Vec<(i32, Child)>,
+    scoped: bool,
 }
 
 impl Cluster {
@@ -291,6 +312,7 @@ impl Cluster {
         Self {
             dir: dir.to_path_buf(),
             members: started,
+            scoped: matches!(throttle, Throttle::Cgroup { .. }),
         }
     }
 
@@ -309,10 +331,14 @@ impl Cluster {
         let _ = std::fs::write(self.dir.join("stop"), b"");
         let deadline = Instant::now() + Duration::from_secs(30);
         let mut clean = true;
+        let scoped = self.scoped;
         for (id, child) in &mut self.members {
             // A member left stopped by a test that failed mid-throttle cannot read
             // the file: it is continued first. To a process that runs it is nothing.
-            let _ = ran("kill", &["-CONT", &child.id().to_string()]);
+            // A member in a scope is never stopped, and its child here is `sudo`.
+            if !scoped {
+                let _ = ran("kill", &["-CONT", &child.id().to_string()]);
+            }
             loop {
                 match child.try_wait() {
                     Ok(Some(status)) => {
@@ -324,7 +350,18 @@ impl Cluster {
                     }
                     _ => {
                         eprintln!("throttle: member {id} did not stop; its process is ended");
-                        let _ = child.kill();
+                        if scoped {
+                            // The child is root's `sudo`, which this user cannot
+                            // signal: the member is ended through its scope, and
+                            // `sudo` ends with it.
+                            let scope = format!("{}.scope", unit(*id));
+                            let _ = ran(
+                                "sudo",
+                                &["-n", "systemctl", "kill", "--signal=KILL", &scope],
+                            );
+                        } else {
+                            let _ = child.kill();
+                        }
                         let _ = child.wait();
                         clean = false;
                         break;
@@ -652,6 +689,20 @@ fn test() {
         .expect("one member leads");
     let throttled = (0..3).find(|&id| id != leader).expect("a follower");
     let throttled_id = i32::try_from(throttled).expect("a member id");
+    // Said before the throttle, so that a run that fails inside it has said which
+    // throttle it was, and which process a stop may have left.
+    match &how {
+        Throttle::Cgroup { .. } => println!(
+            "throttle: member {throttled} is throttled by its cgroup, CPUQuota={QUOTA}, in \
+             the scope {}.scope",
+            unit(throttled_id)
+        ),
+        Throttle::StopAndContinue { why } => println!(
+            "throttle: member {throttled}, process {}, is throttled by SIGSTOP and SIGCONT \
+             ({why})",
+            cluster.process(throttled_id)
+        ),
+    }
 
     let (before, _) = committed_in(dir, leader, BEFORE);
     let (during, at_end, what) = throttle(&cluster, &how, throttled_id, leader);
