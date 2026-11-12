@@ -2109,6 +2109,50 @@ fn a_truncation_cuts_both_of_two_recordings_that_overlap() {
     assert_eq!(pair.member.io.recording_at(two), None);
 }
 
+/// The mark of the last sync asked is one recording's. A member follows term 0 to
+/// 192, and its last request was for the position written then, 192. It truncates
+/// to 96 and follows term 1 from there: the new recording will write 192 again with
+/// its first entry. Taken in hand, the recording starts with no mark, so that sync
+/// is asked; with the mark left at 192 it was skipped, and the entry counted toward
+/// a commit only at the recorder's own sync, up to a second later.
+#[test]
+fn a_recording_taken_in_hand_starts_with_no_sync_asked() {
+    let mut pair = pair("sync-mark");
+    let (two, _) = pair.follow_and_leave(0, 0, &[b"one", b"two"]);
+    let one = two / 2;
+    pair.member
+        .io
+        .record_term(0, 0)
+        .expect("term 0 is recorded");
+    assert_eq!(pair.member.io.sync_asked_at, two);
+    assert_eq!(
+        pair.member.io.truncate_log(one).expect("truncated"),
+        Some(0)
+    );
+    assert_eq!(pair.member.io.sync_asked_at, two, "the mark is the old one");
+
+    pair.member.io.join_log().expect("subscribed and armed");
+    let log = pair
+        .leader
+        .io
+        .add_log(1, one)
+        .expect("the driver takes the commands")
+        .expect("the log has its recording");
+    pair.observe("the recording is taken in hand", |io| {
+        io.held.as_ref().map(|_| ())
+    });
+    assert_eq!(pair.member.io.sync_asked_at, NO_SYNC_ASKED);
+
+    assert_eq!(pair.append(b"two", one), two);
+    pair.observe_both("the log is told", |io| {
+        io.log_image(log.session_id).expect("the image is read")
+    });
+    pair.observe_both("the member holds the entry", |io| {
+        (io.append_position() == two).then_some(())
+    });
+    assert_eq!(pair.member.io.sync_asked_at, two);
+}
+
 /// A member drops a term its leader's record lacks from its record, over a driver
 /// (ADR 0096). It holds term 0 to 192 and has recorded term 1 at 192, where its log
 /// ends, with no byte of it. A truncation to 192 leaves term 1, whose base is not
