@@ -10221,6 +10221,203 @@ mod recording {
         );
     }
 
+    /// A receiver that was sent the stream, went quiet for the connection timeout and
+    /// comes back with a status message below what it was sent, its subscriber having
+    /// read less than its image took: the sender goes back to it, and
+    /// `sender.bytes_unsent` takes off only the bytes the sender position passed while
+    /// the publication was alone, never what went to the receiver before, so the gauge
+    /// reads 0 and never less (`spec/udp.md`, version 3, "The sender"; ADR 0111).
+    #[test]
+    fn a_receiver_that_comes_back_below_what_it_was_sent_takes_off_only_what_was_passed() {
+        use cavalry_shm::counters::generated::{
+            SENDER_BYTES_SENT, SENDER_NAKS_RECEIVED, SENDER_STATUS_MESSAGES_RECEIVED,
+            SENDER_STATUS_MESSAGES_REJECTED,
+        };
+        let mut h = Harness::new("udp-ssc-back-again");
+        let mut receiver = TestReceiver::bind();
+        receiver.set_read_timeout(Duration::from_millis(20));
+        let channel = format!(
+            "{}|ssc=true",
+            String::from_utf8(receiver.channel()).expect("utf-8")
+        );
+        let now = h.now;
+        h.conductor
+            .add_publication(1, 2, 7, channel.as_bytes(), false, now);
+        assert_eq!(h.last_error(2), None);
+        h.conductor.start_recording(3, 7, &receiver.channel(), now);
+        assert_eq!(h.last_error(3), None);
+        // The recording goes live and the sender follows it.
+        let deadline = Instant::now() + Duration::from_secs(60);
+        while !matches!(
+            h.conductor.publications[0]
+                .udp
+                .as_ref()
+                .expect("udp")
+                .followed,
+            Followed::Recording(_)
+        ) {
+            let now = now_nanos();
+            h.recorder.duty_cycle(now);
+            h.sender.duty_cycle(now);
+            h.conductor.duty_cycle(now);
+            assert!(Instant::now() < deadline, "the recording went live");
+        }
+        // The receiver answers a setup frame, at position 0, before anything is
+        // offered: connected by a receiver.
+        let setup = loop {
+            match receiver.next_control() {
+                Some(ControlFrame::Setup(setup)) => break setup,
+                Some(_) => {}
+                None => {
+                    h.sender.duty_cycle(now_nanos());
+                }
+            }
+            assert!(Instant::now() < deadline, "a setup frame");
+        };
+        let positions =
+            cavalry_shm::log::Positions::new(setup.initial_term_id, spec::UDP_TERM_LENGTH);
+        let at = |position: i64| StatusMessage {
+            flags: 0,
+            session_id: setup.session_id,
+            stream_id: 7,
+            consumption_term_id: positions.term_id_of(position),
+            consumption_term_offset: positions.term_offset_of(position) as i32,
+            receiver_window_length: 131072,
+            receiver_id: 9,
+            group_tag: None,
+        };
+        receiver.send_status_message(&at(0));
+        assert!(wait_for(&mut h, |h| {
+            h.conductor.publications[0]
+                .udp
+                .as_ref()
+                .is_some_and(|udp| udp.connected)
+        }));
+        h.conductor.duty_cycle(now_nanos());
+
+        // 1. Connected: 100 messages go to the receiver, and none is counted unsent.
+        let mut appender = h.conductor.publications[0]
+            .log
+            .appender()
+            .expect("an appender");
+        let limit = h.conductor.publications[0].limit.get();
+        for n in 0..100u64 {
+            appender.offer(&n.to_le_bytes(), limit, 0).expect("offered");
+        }
+        let sent = 100 * 64;
+        let mut next = 0i64;
+        while next < sent {
+            let now = now_nanos();
+            h.recorder.duty_cycle(now);
+            h.sender.duty_cycle(now);
+            h.conductor.duty_cycle(now);
+            if let Some(frames) = next_frames(&mut receiver) {
+                for (header, body) in &frames {
+                    assert_eq!(
+                        positions.position(header.term_id(), header.term_offset() as u32),
+                        next
+                    );
+                    assert_eq!(body.as_slice(), ((next / 64) as u64).to_le_bytes());
+                    next += 64;
+                }
+            }
+            assert!(
+                Instant::now() < deadline,
+                "the receiver got to {next} of {sent}"
+            );
+        }
+        assert_eq!(h.counter(SENDER_BYTES_SENT), sent);
+        assert_eq!(unsent(&h), 0, "sent to a receiver, so not unsent");
+
+        // 2. Its subscriber has read 60 of the 100, and its status message says so:
+        //    the sender takes it while the receiver answers.
+        let read = 60 * 64;
+        receiver.send_status_message(&at(read));
+        assert!(wait_for(&mut h, |h| {
+            h.counter(SENDER_STATUS_MESSAGES_RECEIVED) == 2
+        }));
+
+        // 3. The receiver goes quiet for the connection timeout: the publication is
+        //    alone with its recording. The recorder has what was sent, so the sender
+        //    stays; then 5 messages are offered, and the sender position passes them.
+        let later = now_nanos() + spec::nanos(CONNECTION_TIMEOUT) * 2;
+        h.sender.duty_cycle(later);
+        h.conductor.duty_cycle(now_nanos());
+        assert_eq!(h.counter(PUBLICATION_DISCONNECTED), 1);
+        assert!(
+            h.conductor.publications[0].log.is_connected(),
+            "the recording connects it"
+        );
+        assert_eq!(unsent(&h), 0, "nothing passed yet");
+        let limit = h.conductor.publications[0].limit.get();
+        for n in 100..105u64 {
+            appender.offer(&n.to_le_bytes(), limit, 0).expect("offered");
+        }
+        let end = sent + 5 * 64;
+        while h.sender.positions_of(2).map(|(position, _)| position) != Some(end) {
+            h.recorder.duty_cycle(later);
+            h.sender.duty_cycle(later);
+            h.conductor.duty_cycle(now_nanos());
+            assert!(
+                Instant::now() < deadline,
+                "the sender followed the recorder"
+            );
+        }
+        assert_eq!(
+            unsent(&h),
+            5 * 64,
+            "what was passed alone, and nothing sent"
+        );
+        assert_eq!(h.counter(SENDER_BYTES_SENT), sent);
+
+        // 4. The receiver comes back, its status message at what its subscriber read,
+        //    within a term behind the sender position: the sender goes back to it. Of
+        //    the bytes gone back over, only the 5 messages passed while alone come off
+        //    the gauge; the 40 messages sent before are not taken off a second time.
+        receiver.send_status_message(&at(read));
+        assert!(wait_at(&mut h, later, |h| {
+            h.conductor.publications[0]
+                .udp
+                .as_ref()
+                .is_some_and(|udp| udp.connected)
+        }));
+        assert_eq!(h.counter(SENDER_STATUS_MESSAGES_REJECTED), 0);
+        assert_eq!(h.counter(PUBLICATION_CONNECTED), 2);
+        assert_eq!(unsent(&h), 0, "the gauge never goes below zero");
+
+        // 5. The receiver is sent every frame from its own position on, in order, the
+        //    ones passed while alone among them, with nothing to NAK. What is sent again
+        //    is counted as sent, as any data frame is.
+        let mut next = read;
+        while next < end {
+            h.recorder.duty_cycle(later);
+            h.sender.duty_cycle(later);
+            h.conductor.duty_cycle(now_nanos());
+            if let Some(frames) = next_frames(&mut receiver) {
+                for (header, body) in &frames {
+                    assert_eq!(
+                        positions.position(header.term_id(), header.term_offset() as u32),
+                        next,
+                        "every frame from its own position, in order"
+                    );
+                    assert_eq!(body.as_slice(), ((next / 64) as u64).to_le_bytes());
+                    next += 64;
+                }
+            }
+            assert!(
+                Instant::now() < deadline,
+                "the receiver got to {next} of {end}"
+            );
+        }
+        assert_eq!(h.counter(SENDER_BYTES_SENT), sent + (end - read));
+        assert_eq!(unsent(&h), 0);
+        assert_eq!(h.counter(SENDER_NAKS_RECEIVED), 0);
+        assert_eq!(
+            h.sender.positions_of(2).map(|(position, _)| position),
+            Some(end)
+        );
+    }
+
     /// A recording does not connect a `cavalry:udp` publication whose channel names no
     /// `ssc`: with no receiver it is not connected, and the sender is told of no
     /// recording to follow (`spec/udp.md`, "The sender"; ADR 0041, ADR 0098).

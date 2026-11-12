@@ -361,9 +361,15 @@ struct Live {
     /// no data goes (`spec/udp.md`, "The sender"; ADR 0098). `None` for every other
     /// publication, and once the recording has stopped.
     recording: Option<Counter>,
-    /// Its `sender.bytes_unsent`: what the sender position passed while following, less
-    /// what it went back for when a receiver joined.
+    /// Its `sender.bytes_unsent`: what the sender position passed while following above
+    /// `sent_position`, less what it went back over above `sent_position` when a
+    /// receiver joined (ADR 0111).
     unsent: Option<Counter>,
+    /// The highest position a data burst took the sender position to: every byte below
+    /// it was sent or was passed while following, and nothing at or above it was sent.
+    /// `sender.bytes_unsent` counts no byte below it, so that a byte sent before the
+    /// publication was alone is never counted as unsent nor taken off (ADR 0111).
+    sent_position: i64,
     /// The last recording position the sender could not follow, counted once.
     refused_position: i64,
 }
@@ -384,11 +390,14 @@ impl Live {
     }
 
     /// Moves the sender position up to the recording's position, for a publication
-    /// alone with its recording, and returns whether it moved. The recording's
-    /// position is a frame boundary at most the producer position, which the
-    /// publisher's limit holds within a window of the sender position; one that is
-    /// not a multiple of the frame alignment, or more than two terms ahead, is not
-    /// this publication's recording's: it is counted once and the sender stays.
+    /// alone with its recording, and returns whether it moved; `sender.bytes_unsent`
+    /// counts the bytes passed above the highest position sent, the others having
+    /// been sent already or counted already (ADR 0111). The recording's position is a
+    /// frame boundary at most the producer position, which the publisher's limit holds
+    /// within a term and a half of the sender position; one that is not a multiple of
+    /// the frame alignment, or more than two terms ahead, is not this publication's
+    /// recording's: it is counted once in `log_buffer.rejected_position` and the
+    /// sender stays (`spec/udp.md`, "The sender"; ADR 0111).
     fn follow_recording(&mut self, statics: &Statics) -> bool {
         let Some(recording) = &self.recording else {
             return false;
@@ -407,8 +416,11 @@ impl Live {
             }
             return false;
         }
-        if let Some(unsent) = &self.unsent {
-            unsent.add(target - self.sender_position);
+        let passed = target - self.sender_position.max(self.sent_position);
+        if let Some(unsent) = &self.unsent
+            && passed > 0
+        {
+            unsent.add(passed);
         }
         self.sender_position = target;
         self.position.store_release(target);
@@ -918,6 +930,7 @@ impl Sender {
                     receivers_gauge: add.receivers,
                     recording: None,
                     unsent: add.unsent,
+                    sent_position: sender_position,
                     refused_position: -1,
                 });
             }
@@ -1058,13 +1071,16 @@ impl Sender {
         // receiver this status message is from stands where a setup frame, or the end
         // of an earlier connection, left it: at most a term behind, the sender goes
         // back to it and sends from there, so the receiver has nothing to NAK; the
-        // term behind the sender position is never cleaned, and nothing in it was sent.
-        // Further behind, what it would need is no longer in the log: rejected, and its
-        // image times out and joins again. The limit is set anew from this receiver. A
-        // receiver ahead of the sender position, whose image began where an earlier
-        // setup frame put it before the sender went back for another, is no join to go
-        // back for: its status message is taken below as any is, and it drops what the
-        // sender sends below its position as under-runs.
+        // term behind the sender position is never cleaned. Of the bytes gone back
+        // over, those above the highest position sent were passed while alone and
+        // are now to be sent, and come off `sender.bytes_unsent`; those below it went
+        // to a receiver before, the one that comes back among them, and were never
+        // counted (ADR 0111). Further behind, what it would need is no longer in the
+        // log: rejected, and its image times out and joins again. The limit is set
+        // anew from this receiver. A receiver ahead of the sender position, whose image
+        // began where an earlier setup frame put it before the sender went back for
+        // another, is no join to go back for: its status message is taken below as any
+        // is, and it drops what the sender sends below its position as under-runs.
         if live.alone(now) {
             let position = cavalry_proto::udp::position(
                 message.consumption_term_id,
@@ -1078,8 +1094,13 @@ impl Sender {
                 return;
             }
             if behind >= 0 {
-                if let Some(unsent) = &live.unsent {
-                    unsent.add(-behind);
+                // At most a term: the position is within a term below the sender
+                // position, so neither difference overflows.
+                let to_send = live.sender_position - position.max(live.sent_position);
+                if let Some(unsent) = &live.unsent
+                    && to_send > 0
+                {
+                    unsent.add(-to_send);
                 }
                 live.sender_position = position;
                 live.position.store_release(position);
@@ -1424,6 +1445,7 @@ impl Sender {
                 statics.bytes_sent.add(delivery.bytes as i64);
                 statics.frames_sent.add(delivery.frames as i64);
                 live.sender_position += advanced as i64;
+                live.sent_position = live.sent_position.max(live.sender_position);
                 // A burst ends at its term, so the seek is within the term. The reader's
                 // own position is read by nothing: every read names its position, and a
                 // sender position that followed a recording or went back for a receiver

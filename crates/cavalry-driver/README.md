@@ -130,12 +130,14 @@ The daemon: conductor, sender, receiver and idle strategies. Data plane.
   linger passes. A publication whose channel names `ssc=true` is connected by a live
   recording of it as well, from the recorder's first write until its stop is asked:
   while no receiver answers, the conductor tells the sender which recording to follow,
-  the sender sends no data and moves its position with the recorder's, counting what
-  it passed in `sender.bytes_unsent`; a receiver whose first status message names a
-  position at most a term behind is joined there, the sender going back to send from
-  it, and one further behind is rejected; and when the recording stops, the conductor
-  frees its position counter only after the sender has answered that it reads it no
-  more (ADR 0098). On a control channel, `cavalry:udp?control=<host>:<port>|control-mode=manual`,
+  the sender sends no data and moves its position with the recorder's, counting in
+  `sender.bytes_unsent` what it passed above the highest position it had sent to; a
+  receiver whose first status message names a position at most a term behind is
+  joined there, the sender going back to send from it and taking off the gauge only
+  what it had passed above that highest position, so that the gauge is never below
+  zero, and one further behind is rejected; and when the recording stops, the
+  conductor frees its position counter only after the sender has answered that it
+  reads it no more (ADR 0098, ADR 0111). On a control channel, `cavalry:udp?control=<host>:<port>|control-mode=manual`,
   the endpoint's socket is bound to the control address and connected to nothing, and
   the sender sends every datagram to each destination a client added with `add
   destination`, at most 64 per endpoint, each resolved when it is added to an address
