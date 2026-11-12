@@ -109,8 +109,9 @@ pub enum ElectionState {
     /// position.
     FollowerCatchupAwait = 12,
     /// It records the replay, adds the live log once it is near the leader's
-    /// position, and goes on to join when it has reached the live log and the commit
-    /// position it was told, and the leader has sent stop catch-up.
+    /// position, and goes on to join when the leader has sent stop catch-up and it
+    /// has reached the live log and the commit position it had been told when it read
+    /// stop catch-up.
     FollowerCatchup = 13,
     /// A follower subscribes to the log and arms its recording.
     FollowerLogInit = 14,
