@@ -631,10 +631,12 @@ impl Io for ClientIo {
         Ok(())
     }
 
-    /// Refused, as [`Io::remove_log`] is here: only a member that elects truncates,
-    /// and the module's member is appointed (ADR 0081, ADR 0083). The module's own,
-    /// `truncate recording`, `purge recording` and the `terms` file's
-    /// `truncate_above`, comes with the rest of its I/O for the election.
+    /// Refused: only a member that elects truncates, and the module's member is
+    /// appointed (ADR 0081, ADR 0083). The module's own, `truncate recording`,
+    /// `purge recording` and the `terms` file's `truncate_above`, comes with the rest
+    /// of its I/O for the election, and forgets, or cuts at the position, each
+    /// recording the module keeps (ADR 0091) that holds bytes above it, so that no
+    /// replay brings entries the log no longer holds.
     fn truncate_log(&mut self, _position: i64) -> Result<Option<i64>, Self::Fault> {
         Err(RaftError::Unsupported {
             what: "a member that truncates its log to join a leader",
@@ -782,10 +784,10 @@ impl Io for ClientIo {
         }))
     }
 
-    /// Refused, as [`Io::remove_log`] is here: only a member that elects replicates,
-    /// and the module's member is appointed (ADR 0081, ADR 0086). The module's own,
-    /// a subscription on its `catchup` endpoint with a recording armed on it, comes
-    /// with the rest of its I/O for the election.
+    /// Refused: only a member that elects replicates, and the module's member is
+    /// appointed (ADR 0081, ADR 0086). The module's own, a subscription on its
+    /// `catchup` endpoint with a recording armed on it, comes with the rest of its I/O
+    /// for the election.
     fn add_catchup(&mut self) -> Result<(), Self::Fault> {
         Err(RaftError::Unsupported {
             what: "a member that subscribes on its catchup endpoint to replicate",
