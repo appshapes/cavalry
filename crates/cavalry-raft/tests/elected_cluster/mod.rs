@@ -99,6 +99,17 @@ impl Safety {
         }
     }
 
+    /// Starts `member` again on an empty log directory ([`Cluster::wipe`]). It knows
+    /// no commit position, so the last it knew is forgotten here; what the cluster
+    /// committed is not, so a quorum that loses its directories and commits another
+    /// history fails the check.
+    pub fn wipe(&mut self, cluster: &mut Cluster, member: i32) {
+        cluster.wipe(member);
+        if let Some(index) = self.ids.iter().position(|&id| id == member) {
+            self.last_commit[index] = 0;
+        }
+    }
+
     /// Steps until `done`, for at most `limit_ms`, and returns how many steps it took.
     pub fn run_until(
         &mut self,
