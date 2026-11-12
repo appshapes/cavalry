@@ -231,7 +231,9 @@ committed once a quorum, two of three, has it on disk.
   `cluster.leader_member_id`, and what the state waits for: an image of the leader's
   log on the member's `log` endpoint, the leader's replay on its `catchup` endpoint,
   the fifth field of its entry, or both during a catch-up. The check at the end of the
-  message names the endpoints of that state. A member that elects begins again after
+  message names the endpoints of that state. In `follower ready` the image has
+  arrived, and the message names the append position alone and the leader's
+  `consensus` endpoint as the one to check. A member that elects begins again after
   an election that fails, so neither message says to start the cluster again. Both
   end with how many elections have failed. Three counters each count one rule that
   fails an election: `cluster.join_position_mismatches`,

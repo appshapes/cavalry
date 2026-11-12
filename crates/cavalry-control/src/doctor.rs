@@ -1692,6 +1692,10 @@ fn electing_no_leader_message(
 /// What `cluster-joining` says of a member that elects, its election in `state`: the
 /// leader it has taken, what the state does, what bounds it, and the path it needs
 /// (`spec/cluster.md`, "Roles and the election", states 9 to 16; ADR 0085, ADR 0088).
+/// States 9 to 15 wait on endpoints of this member that the leader's host sends to.
+/// In follower ready the image has arrived, and what is left is this member's append
+/// position: the one direction to check is this host's toward the leader's consensus
+/// endpoint, as `joining_message` says of a member whose leader is appointed.
 fn electing_joining_message(
     member: &MemberCounters,
     state: i64,
@@ -1737,6 +1741,18 @@ fn electing_joining_message(
             "Each wait",
             path.check_toward("this member's catchup endpoint and its log endpoint"),
         ),
+        // The image arrived in follower log await; what is left is the append
+        // position, sent to the leader (`spec/cluster.md`, follower ready), so the one
+        // direction to check is this host's toward the leader's consensus endpoint.
+        16 => (
+            format!(
+                "The image of the leader's log has arrived on {} and what is left is this \
+                 member's append position, which must reach the leader",
+                path.own_log
+            ),
+            "Sending it",
+            format!("that this host reaches {}", path.leader_consensus),
+        ),
         _ => (
             format!(
                 "An image of the leader's log must arrive, over UDP, on {} and this \
@@ -1750,7 +1766,7 @@ fn electing_joining_message(
     format!(
         "member {id} has taken its leader, {}, and joins its log: its election is in {}. \
          {step}. {waits} is bounded by the leader heartbeat timeout, {timeout} s; when \
-         one is not met the election fails, counted in cluster.elections_failed, and the \
+         it runs out, the election fails, counted in cluster.elections_failed, and the \
          member begins again. If it does not close, check {check}.{}",
         path.leader,
         election_state_name(state),
@@ -5691,7 +5707,8 @@ mod tests {
     /// A member that elects and has taken a leader names the member its gauge holds,
     /// which need not be the one with the lowest id, and is told what its state does:
     /// the live log's image, a replication, its own replay, or a catch-up, each with
-    /// the endpoint it needs and the endpoints to check (ADR 0102).
+    /// the endpoint it needs and the endpoints to check, and in follower ready the
+    /// append position alone and the leader's consensus endpoint (ADR 0102).
     #[test]
     fn a_member_that_elects_and_joins_names_the_leader_its_gauge_holds() {
         let cluster = Cluster::of(Some(THREE_MEMBERS)).expect("the members string parses");
@@ -5837,16 +5854,59 @@ mod tests {
             "{message}"
         );
 
+        // In follower ready the image has arrived: what is left is the append position,
+        // and the one direction to check is this host's toward the leader's consensus
+        // endpoint (`spec/cluster.md`, follower ready).
+        let message = joining("elects-ready", 16, Some(&cluster));
+        assert!(
+            message.contains(
+                "its election is in follower ready. The image of the leader's log has \
+                 arrived on this member's log endpoint in CAVALRY_CLUSTER_MEMBERS, \
+                 127.0.0.1:9022, and what is left is this member's append position, which \
+                 must reach the leader. Sending it is bounded by the leader heartbeat \
+                 timeout, 10 s;"
+            ),
+            "{message}"
+        );
+        assert!(
+            message.ends_with(
+                "If it does not close, check that this host reaches member 1's consensus \
+                 endpoint, 127.0.0.1:9011."
+            ),
+            "{message}"
+        );
+        for absent in [
+            "must arrive",
+            "reaches this member's log endpoint",
+            "catchup",
+        ] {
+            assert!(!message.contains(absent), "{absent}: {message}");
+        }
+
         // Without the members string the leader is still named, its endpoint by its
         // field.
         let message = joining("elects-no-string", 16, None);
         assert!(
             message.contains(
-                "that this host reaches member 1's consensus endpoint, the third field of \
-                 its entry in CAVALRY_CLUSTER_MEMBERS."
+                "has arrived on this member's log endpoint, the fourth field of its entry in \
+                 CAVALRY_CLUSTER_MEMBERS, and what is left is this member's append position"
             ),
             "{message}"
         );
+        assert!(
+            message.ends_with(
+                "If it does not close, check that this host reaches member 1's consensus \
+                 endpoint, the third field of its entry in CAVALRY_CLUSTER_MEMBERS."
+            ),
+            "{message}"
+        );
+        for absent in [
+            "must arrive",
+            "reaches this member's log endpoint",
+            "catchup",
+        ] {
+            assert!(!message.contains(absent), "{absent}: {message}");
+        }
     }
 
     /// A member whose leader is appointed keeps the texts of that path, with the two
