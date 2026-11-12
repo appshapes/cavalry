@@ -82,7 +82,7 @@ file or the other and never a part.
 id in `cluster.log_recording_id`, each time it names a recording. The member's
 table does not lose a position while the member names a recording: it cuts its
 table only in a truncation, and it truncates only with every recording stopped
-(ADR 0095) and −1 stored in the counter, a condition this change adds to the
+(ADR 0095) and −1 stored in the counter, a condition this decision adds to the
 truncation so that the rule does not rest on the order of two steps elsewhere. So
 a file whose live recording is the id the counter holds is the member's log as it
 is now. A file that cannot be written
@@ -175,43 +175,39 @@ as before.
   written and read, and one entry more is refused. `cluster_no_panic.rs` reads over
   60,000 byte strings and writes 20,000 files from entries at the edges of their
   types: each is taken or refused by name.
-- `crates/cavalry-raft/tests/cluster.rs`, three members over three drivers.
-  - A follower leaves the log and joins it again. Its file lists the recording it
-    left, from 0 to its stop, below the one it names, and the counter holds the id
-    the file names. A service that starts at 0 reads the first recording to its
-    stop, is ended there with no report set, opens the log again and reads on in
-    the live recording: the 21 entries two services had read before, once each, in
-    order. The member removes its file when it closes.
-  - A follower whose file cannot be written, a directory in the place of the name
-    it is written under: every duty cycle returns the error with the path and what
-    to do; the member records and counts toward the commit of ten entries;
-    `cluster.log_recording_id` stays −1 and `Cavalry::committed_log(0)` finds no
-    log. With the directory removed, the next cycle writes the file, the counter
-    names the recording, and a service reads the eleven entries.
-- `crates/cavalry-raft/src/module/tests.rs`, a leader and a member over two
-  drivers. In a catch-up the file lists the replay's recording, still being made,
-  to what it has synced, at or past the live recording's start; after the member
-  left, both recordings it stopped, which overlap, in the order they begin; and
-  the leader's lists its recording of the term it gave up. A truncation asked
-  while the counter still names the recording the member left cuts nothing and is
-  asked again; asked after, it cuts.
-- `crates/cavalry-client/tests/committed_log.rs`, a service beside a client that
-  plays the member: its recordings, its two counters and its file.
-  - Below a live recording, a recording of ten entries with four committed: the
-    service is given four, though the replay has played all ten, and the other six
-    once the commit position covers them; the handle is ended at the recording's
-    stop with no report set, and the log opened again there is the live recording.
-  - The member names another recording and stores a commit position past the first
-    recording's stop, as a member does that cut its log and went on: the handle is
-    ended at the bound it took, four entries, and delivers nothing past it.
-  - A recording still being made, listed to 640: the service follows it to where
-    it stops, 768, and a position two recordings share is read from the earlier.
-  - A commit position that stays below a stopped recording's end: the handle is
-    ended after the 5 s linger with `withdrawn_at` at the service's position, and
-    the log opened again there is the same recording.
-  - No file: the live recording, as before. A file of another live recording: no
-    log now. A file that is not one, and a file four times the longest: an error
-    that names the file and the check, and no replay started.
+- A prototype on the laptop, 2026-11-12: the member's write and the service's read
+  built on this change's reader and writer, as the two changes that follow it.
+  - Three members over three drivers; a follower left the log and joined it again.
+    Its file listed the recording it left, from 0 to its stop, below the one it
+    named, and its counter held the id the file named. A service that started at 0
+    read the first recording to its stop, was ended there with no report set,
+    opened the log again and read on in the live recording: the 21 entries two
+    services had read before, once each, in order.
+  - A follower whose file could not be written, a directory in the place of the
+    name it is written under: every duty cycle returned the error; the member
+    recorded and counted toward the commit of ten entries; its
+    `cluster.log_recording_id` stayed −1 and a service found no log. With the
+    directory removed, the next cycle wrote the file, the counter named the
+    recording, and a service read the eleven entries.
+  - A leader and a member over two drivers, the member in a catch-up: the file
+    listed the replay's recording, still being made, to what it had synced, at or
+    past the live recording's start; after the member left, both recordings it had
+    stopped, which overlap, in the order they begin. A truncation asked while the
+    counter still named the recording the member left cut nothing; asked after, it
+    cut.
+  - A service beside a client that played the member. Below a live recording, a
+    recording of ten entries with four committed: the service was given four,
+    though the replay had played all ten, and the other six once the commit
+    position covered them. The member named another recording and stored a commit
+    position past the first recording's stop, as a member does that cut its log
+    and went on: the handle was ended at the bound it took, four entries, and
+    delivered nothing past it. A commit position that stayed below a stopped
+    recording's end: the handle was ended after the 5 s linger with `withdrawn_at`
+    at the service's position, and the log opened again there was the same
+    recording. A file that was not one, and a file four times the longest: an
+    error that named the file and the check, and no replay started.
+- The tests this decision lands with are named in the pull requests that build
+  it, as ADR 0066's were: those of the prototype above, over drivers.
 
 ## Consequences
 
