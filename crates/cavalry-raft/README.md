@@ -196,7 +196,7 @@ commit path runs per message.
   loses, and counts, one sent while it is full, and a leader's log publication and each
   member's log hold every entry appended or received for the cluster's life.
 - Is held to gate 3's faults over real drivers, by three tests beside the ones in
-  memory. `tests/cluster.rs` stops the leader's driver: the two that remain elect
+  memory (ADR 0111). `tests/cluster.rs` stops the leader's driver: the two that remain elect
   another and commit. `tests/partition.rs` sends every datagram between the members
   through a relay that loses one data frame in 23 and holds back one in 7, and cuts a
   member off: a follower cut off joins again and holds what was committed without

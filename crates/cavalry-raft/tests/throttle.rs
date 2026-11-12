@@ -35,7 +35,7 @@
 //!   unit of its own, and the test sets `CPUQuota` on one follower's scope: the kernel
 //!   stops every thread of that member for the rest of each 100 ms period once they
 //!   have run 5 ms of it. The scope's `cpu.stat` says how many periods the kernel
-//!   throttled, and the test fails when it says none. CI's Linux runner allows it.
+//!   throttled, and the test fails when it says none.
 //! - **Elsewhere, by stop and continue.** On macOS, and on a Linux host that refuses
 //!   any of the above, the test stops the member's process for 95 ms in every 100 ms
 //!   with `SIGSTOP` and `SIGCONT`, sent to that process by its id. It is the same
