@@ -1,0 +1,72 @@
+# Run one test many times in a row on both of CI's runners, by hand
+# (docs/how-to/run-a-test-many-times.md).
+#
+# `ci` runs every test once for a change. That does not hold a test that waits on a
+# clock, a socket or another process to anything: the tests of three drivers on the
+# loopback are held to twenty runs in a row on both runners (ADR 0077, "Evidence"; card
+# 228), and a test that failed once in `ci` is found again by running it until it
+# fails (card 197 and issue 245 are of that kind). This workflow is
+# those runs: `scripts/test-times.sh` with the arguments given, on the Linux runner and
+# on the macOS runner, at the branch or commit it is started on.
+#
+#   gh workflow run test-times.yml --ref <branch> -f arguments='-p cavalry-raft --test cluster'
+#   gh workflow run test-times.yml --ref <branch> -f arguments='-p cavalry-raft --test cluster' -f times=50
+#
+# It is started by hand alone: no push and no pull request starts it, it is no check of
+# a pull request, and nothing waits on it. Its result is evidence for whoever started
+# it, to be linked from the pull request or the card it is for. It runs on hosted
+# runners, never on a bench host: it measures nothing, and a bench host takes one job at
+# a time for the latency gate (ADR 0071).
+#
+# The token reads the repository and nothing else. The two inputs reach the script
+# through the environment and are never part of the command's text: the arguments are
+# split into words by the shell, with file name expansion off, and no word is evaluated.
+name: test times
+
+on:
+  workflow_dispatch:
+    inputs:
+      arguments:
+        description: "cargo test's arguments, as scripts/test-times.sh takes them: -p cavalry-raft --test cluster"
+        required: true
+        type: string
+      times:
+        description: "How many runs in a row, 1 to 1000"
+        required: false
+        default: "20"
+        type: string
+
+permissions:
+  contents: read
+
+jobs:
+  test-times:
+    name: test times (${{ matrix.name }})
+    runs-on: ${{ matrix.runner }}
+    # A bound for a hung runner, not a measurement. Twenty runs of the slowest test
+    # program there is today, `cavalry-raft`'s `cluster`, about a minute a run with a
+    # cold build before them, end inside half of it.
+    timeout-minutes: 90
+    strategy:
+      fail-fast: false
+      # The two runners `ci`'s gates run on, by the names its jobs give them.
+      matrix:
+        include:
+          - name: linux
+            runner: blacksmith-4vcpu-ubuntu-2404
+          - name: macos
+            runner: blacksmith-6vcpu-macos-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8 # v1
+        with:
+          toolchain: stable
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
+      - name: Run the test that many times in a row
+        run: |
+          set -f
+          # shellcheck disable=SC2086  # the arguments are split into words on purpose
+          scripts/test-times.sh "$TIMES" $ARGUMENTS
+        env:
+          TIMES: ${{ inputs.times }}
+          ARGUMENTS: ${{ inputs.arguments }}
