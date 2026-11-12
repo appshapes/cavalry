@@ -777,7 +777,8 @@ stop cut short, and the log ends at the furthest end of the recordings that are
 left. The member then writes the file with the recordings it took, when they are not
 the ones it read, one being gone or holding nothing, and deletes from its record of
 terms each term whose base is above the end of its log, as that truncation would
-have; a start that does either is counted in `cluster.truncations_finished`. What
+have; a start that found a recording gone or deleted a term is counted, once, in
+`cluster.truncations_finished`. What
 that truncation had not yet cut stays in the member's log, uncommitted, and the
 leader's next new leadership term has the member cut it. Nothing else shortens the
 log a member starts with.

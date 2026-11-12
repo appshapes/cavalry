@@ -151,6 +151,15 @@ pub enum RecordingsError {
     /// A list of more than [`MAX_ENTRIES`] recordings was given to
     /// [`RecordingsFile::write`], which wrote nothing.
     Full,
+    /// A list given to [`RecordingsFile::write`] holds a recording id, a start
+    /// position or a floor position that a reader would refuse; nothing was
+    /// written, and the file is as it was. The fault is the writer's, where
+    /// [`RecordingsError::Recording`] and [`RecordingsError::Position`] are a
+    /// file's.
+    List {
+        /// The recording id or the position the list held.
+        found: i64,
+    },
 }
 
 impl RecordingsError {
@@ -172,6 +181,7 @@ impl RecordingsError {
             RecordingsError::Recording { .. } => "recording",
             RecordingsError::Position { .. } => "position",
             RecordingsError::Full => "log-recordings-full",
+            RecordingsError::List { .. } => "list",
         }
     }
 }
@@ -287,6 +297,13 @@ impl std::fmt::Display for RecordingsError {
                 "a member's log is in more than {MAX_ENTRIES} recordings, more than the \
                  log recordings file holds; nothing was written. This is a fault in \
                  Cavalry: report it with the member's counters; see {DOC}"
+            ),
+            RecordingsError::List { found } => write!(
+                f,
+                "a list of recordings given to the log recordings file holds {found}, \
+                 which is no recording id, or a position no list holds there; nothing \
+                 was written and the file is as it was. This is a fault in Cavalry and \
+                 not damage to the file: report it with the member's counters; see {DOC}"
             ),
         }
     }
@@ -748,9 +765,10 @@ impl RecordingsFile {
     /// Replaces the list with `entries` over `floor_position` and syncs: one write of
     /// the slot the list is not read from, with the next sequence, and one sync. A
     /// crash before the sync has ended leaves the list as it was. A list a reader
-    /// would refuse, or one of more than [`MAX_ENTRIES`], is refused and nothing is
-    /// written, and so is any list for a file that holds the highest sequence there
-    /// is ([`RecordingsError::Sequence`]). On an error the list in memory is the one
+    /// would refuse is [`RecordingsError::List`], one of more than [`MAX_ENTRIES`]
+    /// is [`RecordingsError::Full`], and nothing is written; so is any list for a
+    /// file that holds the highest sequence there is
+    /// ([`RecordingsError::Sequence`]). On an error the list in memory is the one
     /// before the call, as the file's is.
     pub fn write(
         &mut self,
@@ -766,7 +784,17 @@ impl RecordingsFile {
             sequence,
             floor_position,
         };
-        let length = encode_slot(fields, entries.clone(), &mut self.scratch)?;
+        // What a reader would call damage is, in a list not yet written, the
+        // writer's fault: the file holds no such thing.
+        let length =
+            encode_slot(fields, entries.clone(), &mut self.scratch).map_err(
+                |error| match error {
+                    RecordingsError::Recording { found } | RecordingsError::Position { found } => {
+                        RecordingsError::List { found }
+                    }
+                    other => other,
+                },
+            )?;
         let next = 1 - self.slot;
         let io = |what: &'static str, path: &Path| {
             let path = path.to_path_buf();
@@ -830,13 +858,13 @@ mod tests {
         let first = [listed(0, 0)];
         file.write(0, first).expect("the list is written");
         let second = [listed(0, 0), listed(3, 192), listed(4, 160)];
-        // An entry that begins below the one before it is refused, and nothing changes.
-        assert_eq!(
-            file.write(0, second)
-                .expect_err("an entry out of order")
-                .reason(),
-            "position"
-        );
+        // An entry that begins below the one before it is refused, as the writer's
+        // fault and not as damage to the file, and nothing changes.
+        let refused = file.write(0, second).expect_err("an entry out of order");
+        assert_eq!(refused.reason(), "list");
+        let text = refused.to_string();
+        assert!(text.contains("a fault in Cavalry"), "{text}");
+        assert!(!text.contains("new log directory"), "{text}");
         assert_eq!(file.entries(), &first);
         let second = [listed(0, 0), listed(3, 160), listed(4, 192)];
         file.write(0, second).expect("the list is written");
@@ -874,7 +902,7 @@ mod tests {
                 file.write(floor, entries.iter().copied())
                     .expect_err("a floor the list does not begin at")
                     .reason(),
-                "position",
+                "list",
                 "floor {floor}"
             );
         }

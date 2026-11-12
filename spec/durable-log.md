@@ -643,13 +643,15 @@ The two slots together, slot 0's checks and then slot 1's:
 | a slot's check | A slot passes `checksum` and fails `sequence`, `position` or `recording`: the file is damaged, since a writer writes no such slot. Slot 0's failure is reported before slot 1's. |
 | `sequence` | Both slots pass every check and hold the same sequence. |
 
-A member that opens its file reports three more, which no vector pins since none
+A member that opens its file reports four more, which no vector pins since none
 is a property of the bytes a reader is given: `absent`, when the terms file holds a
 term and there is no log recordings file ("The driver"); `log-recordings-full`, when
-a list of more than 1026 recordings is given to a write, which writes nothing; and
-`sequence`, when a write is asked of a file whose list holds the sequence
-9223372036854775807, which no count of writes reaches and above which there is
-none, and that write writes nothing either.
+a list of more than 1026 recordings is given to a write, which writes nothing;
+`list`, when a write is given a list that a reader would refuse with `recording` or
+`position`, which writes nothing either and is the writer's fault, where those two
+checks are damage to a file; and `sequence`, when a write is asked of a file whose
+list holds the sequence 9223372036854775807, which no count of writes reaches and
+above which there is none, and that write writes nothing either.
 
 ## Vectors
 
