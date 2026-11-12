@@ -761,9 +761,10 @@ impl Drop for Runs {
 /// member id, and a name does not move when an id in that file does.
 const CLUSTER_ROLE: &str = "cluster.role";
 const CLUSTER_ELECTION_STATE: &str = "cluster.election_state";
+const CLUSTER_LEADERSHIP_TERM_ID: &str = "cluster.leadership_term_id";
 
 #[test]
-fn run_with_the_cluster_keys_starts_a_member_and_three_of_them_appoint_a_leader() {
+fn run_with_the_cluster_keys_starts_a_member_and_three_of_them_elect_a_leader() {
     let ports = loopback_ports(15);
     let members = (0..3)
         .map(|member| {
@@ -796,8 +797,9 @@ fn run_with_the_cluster_keys_starts_a_member_and_three_of_them_appoint_a_leader(
             c
         });
     }
-    // Every member's election closes, state 17, the member with the lowest id leading,
-    // role 2, and the others following, role 0: read from each driver's counters file.
+    // Every member's election closes, state 17, one member leading, role 2, whichever
+    // the members elected, and the others following, role 0: read from each driver's
+    // counters file.
     // A wait that fails says where each member's election stood, from the same
     // counters, and the members string, whose ports a member's error names; `Runs`
     // then prints what each member's `run` wrote. Together they tell a member that
@@ -823,16 +825,32 @@ fn run_with_the_cluster_keys_starts_a_member_and_three_of_them_appoint_a_leader(
         }
         std::thread::sleep(Duration::from_millis(1));
     }
-    assert_eq!(cluster_counter(&dirs[0].0, CLUSTER_ROLE), Some(2));
-    assert_eq!(cluster_counter(&dirs[1].0, CLUSTER_ROLE), Some(0));
-    assert_eq!(cluster_counter(&dirs[2].0, CLUSTER_ROLE), Some(0));
+    let roles: Vec<Option<i64>> = dirs
+        .iter()
+        .map(|dir| cluster_counter(&dir.0, CLUSTER_ROLE))
+        .collect();
+    let mut sorted = roles.clone();
+    sorted.sort_unstable();
+    assert_eq!(
+        sorted,
+        [Some(0), Some(0), Some(2)],
+        "one leader and two followers: {roles:?}"
+    );
+    // The term they elected in: 0, or 1 when the first ballot was split.
+    let follower = roles
+        .iter()
+        .position(|role| *role == Some(0))
+        .expect("a follower");
+    let term = cluster_counter(&dirs[follower].0, CLUSTER_LEADERSHIP_TERM_ID)
+        .expect("the follower's term");
+    assert!((0..=1).contains(&term), "term {term}");
 
     // Doctor with the keys set as the members have them finds nothing wrong with them,
     // and explains the member.
     let output = cavalry()
-        .args(["doctor", "--dir", &dirs[1].arg()])
+        .args(["doctor", "--dir", &dirs[follower].arg()])
         .env("CAVALRY_CLUSTER_MEMBERS", &members)
-        .env("CAVALRY_CLUSTER_MEMBER_ID", "1")
+        .env("CAVALRY_CLUSTER_MEMBER_ID", follower.to_string())
         .output()
         .expect("doctor runs");
     let text = String::from_utf8_lossy(&output.stdout);
@@ -840,8 +858,10 @@ fn run_with_the_cluster_keys_starts_a_member_and_three_of_them_appoint_a_leader(
     // And says what the member is, from its counters.
     assert!(
         text.contains("note cluster-member")
-            && text
-                .contains("this driver is cluster member 1, a follower in term 0, election closed"),
+            && text.contains(&format!(
+                "this driver is cluster member {follower}, a follower in term {term}, election \
+                 closed"
+            )),
         "{text}"
     );
 
