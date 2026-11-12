@@ -308,6 +308,19 @@ committed once a quorum, two of three, has it on disk.
 - `WARN cluster.log_images_lost`: the follower lost its image of the leader's log
   stream and began its election again. Check the network path from the leader's log
   endpoint to this host, and the image counters of stream 100 on this member's driver.
+- `WARN cluster.log_recordings_unsynced`: the member could not write or sync
+  `log-recordings` in its log directory, the count says how many times, and while
+  that lasted the recording it was making was no part of its log. Check that the
+  log directory is writable by the member's user and that its file system has
+  room. A count that no longer rises is a fault that has passed.
+- `WARN cluster.log_recordings_unwritten`: the member could not write the file of
+  its log's recordings in its driver directory, and no service beside it read the
+  log while that lasted. Check that the driver directory is writable and has room.
+- `WARN cluster.log_recordings_forgotten`: the member's log is in more than 1,024
+  recordings, and it has forgotten the oldest. It runs on. It will not start again
+  on this log directory: when it stops, `cavalry run` refuses it with `member
+  refused (log-forgotten)`, above. Plan to start the cluster again as a new
+  cluster before you next stop this member.
 - `note cluster-commit-waits`: the leader has appended more than a quorum has
   recorded. Each member asks its recorder to sync an entry as soon as it is written,
   so what waits at any moment is what was appended since the syncs now running began.

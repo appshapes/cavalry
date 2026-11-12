@@ -39,8 +39,13 @@ is allowed here.
   and, with each counter's own doctor sentence from `counters.toml`, consensus messages
   the member rejected, as from a member of another version
   (`cluster.messages_rejected`), a leader it stopped hearing
-  (`cluster.leader_heartbeat_timeouts`) and a leader's log stream it lost
-  (`cluster.log_images_lost`). `cluster-no-leader` and `cluster-joining` end with the
+  (`cluster.leader_heartbeat_timeouts`), a leader's log stream it lost
+  (`cluster.log_images_lost`), the file of its log's recordings that it could not
+  write for its service (`cluster.log_recordings_unwritten`), the list of them in
+  its log directory that it could not write or sync
+  (`cluster.log_recordings_unsynced`), and a recording of its log that it forgot,
+  after which it does not start again on its log directory
+  (`cluster.log_recordings_forgotten`). `cluster-no-leader` and `cluster-joining` end with the
   elections the member has failed, the counters of three rules that fail one, and
   how many failed on none of the three. A member begins its election again after one
   that fails, so no finding tells an operator to start the cluster again (ADR 0100).

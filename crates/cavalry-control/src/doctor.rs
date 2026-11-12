@@ -50,8 +50,10 @@ use cavalry_shm::counters::generated::{
     CLUSTER_APPEND_POSITION, CLUSTER_COMMIT_POSITION, CLUSTER_ELECTION_CAUSE,
     CLUSTER_ELECTION_STATE, CLUSTER_ELECTIONS_FAILED, CLUSTER_JOIN_POSITION_MISMATCHES,
     CLUSTER_LEADER_HEARTBEAT_TIMEOUTS, CLUSTER_LEADER_MEMBER_ID, CLUSTER_LEADER_QUORUM_LOSSES,
-    CLUSTER_LEADERSHIP_TERM_ID, CLUSTER_LOG_IMAGES_LOST, CLUSTER_LOG_REPLICATIONS_UNAVAILABLE,
-    CLUSTER_MESSAGES_REJECTED, CLUSTER_ROLE, CLUSTER_TRUNCATIONS_REFUSED,
+    CLUSTER_LEADERSHIP_TERM_ID, CLUSTER_LOG_IMAGES_LOST, CLUSTER_LOG_RECORDINGS_FORGOTTEN,
+    CLUSTER_LOG_RECORDINGS_UNSYNCED, CLUSTER_LOG_RECORDINGS_UNWRITTEN,
+    CLUSTER_LOG_REPLICATIONS_UNAVAILABLE, CLUSTER_MESSAGES_REJECTED, CLUSTER_ROLE,
+    CLUSTER_TRUNCATIONS_REFUSED,
 };
 use cavalry_shm::counters::{CounterId, CountersError, CountersReader, Scope};
 
@@ -1001,11 +1003,19 @@ const DOC_CLUSTER: &str = "docs/how-to/run-a-cluster.md#when-it-does-not-work";
 /// doctor sentence that says what to do when it is above 0: each is reported by its
 /// name with that sentence, as a static counter is (`counters_checks`), since a client
 /// counter is not in that loop. A peer of another version shows in the first, a leader
-/// gone silent in the second, the leader's log stream lost in the third.
-const MEMBER_COUNTS: [CounterId; 3] = [
+/// gone silent in the second, the leader's log stream lost in the third. The last
+/// three are of the two files a member writes of its log's recordings: the one for
+/// its service in its driver directory that it could not write (ADR 0103), the list
+/// in its log directory that it could not write or sync, so that a recording stayed
+/// out of its log, and a recording of its log that it forgot, after which it does
+/// not start again on its log directory (ADR 0108).
+const MEMBER_COUNTS: [CounterId; 6] = [
     CLUSTER_MESSAGES_REJECTED,
     CLUSTER_LEADER_HEARTBEAT_TIMEOUTS,
     CLUSTER_LOG_IMAGES_LOST,
+    CLUSTER_LOG_RECORDINGS_UNWRITTEN,
+    CLUSTER_LOG_RECORDINGS_UNSYNCED,
+    CLUSTER_LOG_RECORDINGS_FORGOTTEN,
 ];
 
 /// One cluster member as its counters show it (`spec/cluster.md`, "Counters"): what its
@@ -5948,6 +5958,70 @@ mod tests {
             "{}",
             findings[2].message
         );
+
+        // A member that could not write the two files of its log's recordings, and
+        // one that forgot a recording: each count says what it means and what to do.
+        let (_, findings) = cluster_findings(
+            "cluster-lists",
+            0,
+            &[
+                (CLUSTER_ROLE, 0),
+                (CLUSTER_ELECTION_STATE, 17),
+                (CLUSTER_LEADERSHIP_TERM_ID, 3),
+                (CLUSTER_LOG_RECORDINGS_UNWRITTEN, 4),
+                (CLUSTER_LOG_RECORDINGS_UNSYNCED, 7),
+                (CLUSTER_LOG_RECORDINGS_FORGOTTEN, 1),
+            ],
+        );
+        let found: Vec<&str> = findings.iter().map(|finding| finding.check).collect();
+        assert_eq!(
+            found,
+            [
+                "cluster-member",
+                "cluster.log_recordings_unwritten",
+                "cluster.log_recordings_unsynced",
+                "cluster.log_recordings_forgotten"
+            ]
+        );
+        for (finding, begins, holds) in [
+            (
+                &findings[1],
+                "member 0's cluster.log_recordings_unwritten is 4: A member that counts here \
+                 cannot write in its driver's directory",
+                "check that the driver directory is writable",
+            ),
+            (
+                &findings[2],
+                "member 0's cluster.log_recordings_unsynced is 7: A member that counts here \
+                 cannot write or sync a file in its log directory",
+                "check that the log directory is writable",
+            ),
+            (
+                &findings[3],
+                "member 0's cluster.log_recordings_forgotten is 1: This member's log is in \
+                 more recordings than a member keeps, 1,024",
+                "this member will not start again on this log directory",
+            ),
+        ] {
+            assert_eq!(finding.level, Level::Warn);
+            assert_eq!(finding.doc, DOC_CLUSTER);
+            assert!(finding.message.starts_with(begins), "{}", finding.message);
+            assert!(finding.message.contains(holds), "{}", finding.message);
+        }
+        // At 0 none of the three is reported.
+        let (_, findings) = cluster_findings(
+            "cluster-lists-none",
+            0,
+            &[
+                (CLUSTER_ROLE, 0),
+                (CLUSTER_ELECTION_STATE, 17),
+                (CLUSTER_LEADERSHIP_TERM_ID, 3),
+                (CLUSTER_LOG_RECORDINGS_UNWRITTEN, 0),
+                (CLUSTER_LOG_RECORDINGS_UNSYNCED, 0),
+                (CLUSTER_LOG_RECORDINGS_FORGOTTEN, 0),
+            ],
+        );
+        assert_eq!(findings.len(), 1, "{findings:?}");
     }
 
     #[test]
@@ -5972,7 +6046,7 @@ mod tests {
 
         // A follower that follows: the note alone, with who it is and what it knows.
         let (checks, findings) = cluster_findings("cluster-follower", 1, &follower);
-        assert_eq!(checks, 8);
+        assert_eq!(checks, 11);
         assert_eq!(findings.len(), 1, "{findings:?}");
         assert_eq!(findings[0].check, "cluster-member");
         assert_eq!(findings[0].level, Level::Note);
