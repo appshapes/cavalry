@@ -828,8 +828,13 @@ shared runner is
   2. Whether the code on the row's path is the same. The workspace sets no profile,
      so a release build has no cross-crate link-time optimisation: a function's code
      is fixed when its own crate is compiled, and an `#[inline]` or generic function
-     is compiled into the crate that calls it. Emit the assembly of each crate the
-     row runs through, and of the bench binary, at `master` and at the change, and
+     is compiled into the crate that calls it. So a row's code is spread over the
+     files of all six crates and the bench's. Every delivery row runs
+     `TermReader::poll`, which is `#[inline(always)]` and lands in the bench's file,
+     but the `DataFrameHeader::parse_within` it calls, or `decode_unchecked` in the
+     unchecked build, is compiled in `cavalry-proto`'s: the bench's file holds only a
+     `call` to its name, and the name stays when the body changes. Emit the assembly
+     of all six crates and of the bench binary, at `master` and at the change, and
      compare the files:
 
      ```sh
@@ -847,7 +852,7 @@ shared runner is
        export CARGO_TARGET_X86_64_UNKNOWN_LINUX_GNU_LINKER=/usr/bin/true
      for pair in "MASTER:$MASTER" "CHANGE:$CHANGE"; do
        tree=${pair%%:*} dir=${pair#*:}
-       for crate in cavalry-shm cavalry-log cavalry-client cavalry-ffi; do
+       for crate in cavalry-proto cavalry-shm cavalry-log cavalry-client cavalry-driver cavalry-ffi; do
          (cd "$dir" && cargo rustc --release -p "$crate" --lib --target "$TARGET" \
            --target-dir "$OUT/$tree" -- --emit asm -C debuginfo=0)
        done
@@ -861,20 +866,25 @@ shared runner is
      done)
      ```
 
-     The loop prints `same:` and a file's name for each file that is byte for byte
-     the same in the two trees, and `cmp`'s own line for one that differs. For a
-     row of an `-unchecked` profile, run `export RUSTFLAGS="--cfg cavalry_unchecked"`
-     before the block and give `OUT` another directory: that profile is another
-     build of the same crates, the one `just bench-unchecked` makes. Every
+     The loop prints `same:` and a file's name for each of the seven files that is
+     byte for byte the same in the two trees, and `cmp`'s own line for one that
+     differs. For a row of an `-unchecked` profile, run
+     `export RUSTFLAGS="--cfg cavalry_unchecked"` before the block and give `OUT`
+     another directory: that profile is another build of the same crates, the one
+     `just bench-unchecked` makes. The files compare the two trees with each other;
+     they are not the bench binary's own bytes. `--emit asm` makes rustc compile each
+     crate as one codegen unit, the piece of a crate the code generator optimises as
+     a whole, where the bench's build splits a crate into up to sixteen. Every
      file the same: no instruction the row runs changed, and the row moved by
-     placement. Pull request 249's five files were the same in both builds, while
-     the same comparison of the two crates it changed, `cavalry-proto` and
-     `cavalry-driver`, found six functions that differed. A file that differs is not
+     placement. Pull request 249 changed `cavalry-proto` and `cavalry-driver`: their
+     two files differed, in six functions, none of which a claim runs through, and
+     the other five files were the same, in both builds. A file that differs is not
      yet a change on the row's path: it may differ in data alone, or in a function
      the row never calls. `diff` of the two files shows which. A difference in data
      is lines that begin `.ascii`, `.asciz` or `.size` and no instruction. Pull
-     request 251's `cavalry_shm` file differed so in both builds: the text of two
-     counters' descriptions, 558 bytes longer, and nothing else in the five files.
+     request 251's `cavalry_shm` and `cavalry_driver` files differed so in both
+     builds: the text of two counters' descriptions, 558 bytes longer, which the
+     driver's file holds too, and nothing else in the seven files.
      Otherwise read the
      functions the row runs through in both files, each between its
      `.type <name>,@function` line and its `.size <name>` line; the C ABI's keep
