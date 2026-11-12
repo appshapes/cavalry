@@ -8,7 +8,7 @@
 # A round expects one entry at position 0 in one recording that it then follows, which
 # is a member whose log is one recording that begins at 0. A member that elects is such
 # a member unless it joined late: a follower that was slow at its start catches up
-# through a replay and holds its log in two recordings (ADR 0103, ADR 0104), and a
+# through a replay and holds its log in two recordings (ADR 0103), and a
 # round beside it would read its one entry from a recording that has stopped. So this
 # script reads each member's file of its log's recordings, `log-recordings-<member id>`
 # in its driver directory (spec/cluster.md, "The log's recordings"): the live recording
