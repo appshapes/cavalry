@@ -165,7 +165,11 @@ multiple of 32, at a frame boundary the recorder has written). The recorder appe
 first entry when the recording starts, at the start position, then an entry at most
 once per millisecond while the position moves, and one when the recording stops;
 timestamps and positions never decrease from one entry to the next, and the last
-entry's position is at most the stop position. The file holds n whole entries after
+entry's position is at most the stop position. A timestamp is the recorder's epoch
+clock (`spec/client-protocol.md`, "Liveness and timeouts"), and the millisecond is that
+clock's: after the host's clock is set back the recorder appends no entry until the
+clock has passed the last entry's timestamp, and a stop before then writes its entry
+with the last entry's timestamp. The file holds n whole entries after
 the header; only the last entry can be part-written, so a reader ignores bytes past
 the last whole entry and a last entry that breaks the order, and recovery truncates
 the file to whole entries and drops such an entry.
@@ -382,7 +386,10 @@ two leaves an empty entry. An entry's fields are written once, by its append, an
 only its state changes after it. The module truncates by writing state 3 over each
 valid entry whose term base log position is above the truncation position, from the
 last entry backwards, each write synced, before the member reports its log leadership
-term id again. It raises the candidate term in one synced write, the other slot's
+term id again. It drops the terms a leader's record lacks the same way, by writing
+state 3 over each valid entry whose leadership term id is above the term the leader
+named, whatever its base (`spec/cluster.md`, "Messages during an election"; ADR
+0096). It raises the candidate term in one synced write, the other slot's
 value and checksum, before the vote or request vote that raises it is sent. A crash
 leaves at most one write torn, which the reader reads as the state before it: an
 empty entry, a valid entry not yet deleted, or the candidate term stored before the
