@@ -86,7 +86,8 @@ impl fmt::Display for Offer {
                 f,
                 "offer refused ({reason}): a message of {found} bytes, this publication allows \
                  {limit}; split the message, or use offer, which fragments up to the term \
-                 length ÷ 8; see {DOC}"
+                 length ÷ 8, a term a cavalry:udp publication's channel may name longer \
+                 with term-length; see {DOC}"
             ),
             other => write!(
                 f,
