@@ -449,6 +449,30 @@ pub const CLUSTER_TRUNCATIONS_FINISHED: CounterId = CounterId(147);
 /// `run.member_given_up`, a static counter: Times `cavalry run` gave up the cluster member it ran beside this driver, and then closed the driver: the member's duty cycle had failed for 10 s on end, or its thread had panicked. `cavalry run` adds one before it closes the driver, so the count is in the directory a closed driver leaves.
 pub const RUN_MEMBER_GIVEN_UP: CounterId = CounterId(148);
 
+/// `cluster.sessions`, a client gauge: The sessions open on one cluster member: those a committed session open event opened and no committed session close event has closed, at most 10 (spec/cluster.md, Sessions and Values). Every member holds them, the leader and each follower, since a new leader takes them up; key: member id (i32), little-endian; label text: the member id in decimal.
+pub const CLUSTER_SESSIONS: CounterId = CounterId(149);
+
+/// `cluster.sessions_accepted`, a client counter: Session connects the leader accepted: it gave the session an id and an egress publication on the client's response channel, and appends its session open event (spec/cluster.md, Sessions). key: member id (i32), little-endian; label text: the member id in decimal.
+pub const CLUSTER_SESSIONS_ACCEPTED: CounterId = CounterId(150);
+
+/// `cluster.sessions_opened`, a client counter: Sessions opened on one cluster member by a committed session open event of the log: on the leader, the session it accepted, which it then sends the ok event; on a follower, the same session, which it holds for the day it leads (spec/cluster.md, Sessions). key: member id (i32), little-endian; label text: the member id in decimal.
+pub const CLUSTER_SESSIONS_OPENED: CounterId = CounterId(151);
+
+/// `cluster.sessions_closed`, a client counter: Sessions closed on one cluster member by a committed session close event of the log, whatever its reason: the client's session close, or the session timeout (spec/cluster.md, Sessions). key: member id (i32), little-endian; label text: the member id in decimal.
+pub const CLUSTER_SESSIONS_CLOSED: CounterId = CounterId(152);
+
+/// `cluster.sessions_timed_out`, a client counter: Sessions the leader closed for the session timeout: nothing had come from the client for 10 s, a keepalive included, or the ok event could not be sent to it in that time. The leader appends a session close event with the reason timeout and sends the client a session event of code closed with the detail TIMEOUT (spec/cluster.md, Sessions and Values). key: member id (i32), little-endian; label text: the member id in decimal.
+pub const CLUSTER_SESSIONS_TIMED_OUT: CounterId = CounterId(153);
+
+/// `cluster.sessions_refused`, a client counter: Session connects the leader refused and answered with a session event of code error: the client's protocol version has a major other than the cluster's (invalid client version), the response stream id is not 102 or the response channel is not cavalry:udp?endpoint=<host:port> (invalid response channel), or 10 sessions are open or connecting (concurrent session limit) (spec/cluster.md, Sessions). key: member id (i32), little-endian; label text: the member id in decimal.
+pub const CLUSTER_SESSIONS_REFUSED: CounterId = CounterId(154);
+
+/// `cluster.connects_dropped`, a client counter: Session connects one cluster member dropped unanswered: its 10 pending answers were taken, the driver refused the response channel, a redirect or a refusal was still unsent at the session connect timeout, 5 s, or the leader gave up a connect it had accepted, because its log took no session open event for that long or it stopped leading before the event was committed. The client's connect timeout reports each (spec/cluster.md, Sessions and Values). key: member id (i32), little-endian; label text: the member id in decimal.
+pub const CLUSTER_CONNECTS_DROPPED: CounterId = CounterId(155);
+
+/// `cluster.ingress_ignored`, a client counter: Session messages, keepalives and session closes one cluster member read from its ingress stream and did not act on: the member does not lead, the message names a term that is not the leader's, or its session is not open. The client learns of a new leader by the new leader event and sends again (spec/cluster.md, Sessions). key: member id (i32), little-endian; label text: the member id in decimal.
+pub const CLUSTER_INGRESS_IGNORED: CounterId = CounterId(156);
+
 /// Every entry of `counters.toml`, in the file's order.
 pub const COUNTERS: &[CounterDef] = &[
     CounterDef {
@@ -1634,5 +1658,69 @@ pub const COUNTERS: &[CounterDef] = &[
         scope: Scope::Static,
         doc: "Times `cavalry run` gave up the cluster member it ran beside this driver, and then closed the driver: the member's duty cycle had failed for 10 s on end, or its thread had panicked. `cavalry run` adds one before it closes the driver, so the count is in the directory a closed driver leaves.",
         doctor: "`cavalry run` stopped this driver because its cluster member could not go on: the member's duty cycle failed for 10 s on end, or its thread panicked. The line that process printed beginning `cavalry run: the cluster member stopped` says why, and what to do. Correct what it names, then start `cavalry run` again with the same directories: the member starts on the log directory it kept, and the other members elect a leader meanwhile.",
+    },
+    CounterDef {
+        id: CLUSTER_SESSIONS,
+        name: "cluster.sessions",
+        kind: Kind::Gauge,
+        scope: Scope::Client,
+        doc: "The sessions open on one cluster member: those a committed session open event opened and no committed session close event has closed, at most 10 (spec/cluster.md, Sessions and Values). Every member holds them, the leader and each follower, since a new leader takes them up; key: member id (i32), little-endian; label text: the member id in decimal.",
+        doctor: "The clients with an open session, as this member has read them from its log. It is the same on every member that has read the log to the same position. At 10 the leader refuses the next connect, which cluster.sessions_refused counts: close a client that is done, or wait for the session timeout, 10 s, to close one that has gone.",
+    },
+    CounterDef {
+        id: CLUSTER_SESSIONS_ACCEPTED,
+        name: "cluster.sessions_accepted",
+        kind: Kind::Counter,
+        scope: Scope::Client,
+        doc: "Session connects the leader accepted: it gave the session an id and an egress publication on the client's response channel, and appends its session open event (spec/cluster.md, Sessions). key: member id (i32), little-endian; label text: the member id in decimal.",
+        doctor: "A connect the leader accepted becomes a session once its session open event is committed, which cluster.sessions_opened counts on every member. If this rises on the leader and cluster.sessions_opened does not, the leader cannot commit: compare cluster.commit_position with cluster.append_position on it, and see what cluster.role and cluster.append_position say on the other members.",
+    },
+    CounterDef {
+        id: CLUSTER_SESSIONS_OPENED,
+        name: "cluster.sessions_opened",
+        kind: Kind::Counter,
+        scope: Scope::Client,
+        doc: "Sessions opened on one cluster member by a committed session open event of the log: on the leader, the session it accepted, which it then sends the ok event; on a follower, the same session, which it holds for the day it leads (spec/cluster.md, Sessions). key: member id (i32), little-endian; label text: the member id in decimal.",
+        doctor: "",
+    },
+    CounterDef {
+        id: CLUSTER_SESSIONS_CLOSED,
+        name: "cluster.sessions_closed",
+        kind: Kind::Counter,
+        scope: Scope::Client,
+        doc: "Sessions closed on one cluster member by a committed session close event of the log, whatever its reason: the client's session close, or the session timeout (spec/cluster.md, Sessions). key: member id (i32), little-endian; label text: the member id in decimal.",
+        doctor: "",
+    },
+    CounterDef {
+        id: CLUSTER_SESSIONS_TIMED_OUT,
+        name: "cluster.sessions_timed_out",
+        kind: Kind::Counter,
+        scope: Scope::Client,
+        doc: "Sessions the leader closed for the session timeout: nothing had come from the client for 10 s, a keepalive included, or the ok event could not be sent to it in that time. The leader appends a session close event with the reason timeout and sends the client a session event of code closed with the detail TIMEOUT (spec/cluster.md, Sessions and Values). key: member id (i32), little-endian; label text: the member id in decimal.",
+        doctor: "A client's session ended because the leader heard nothing from it for 10 s. A client that is still running did not reach the leader: check the route from the client's host to the leader's ingress endpoint in the members string, and from the leader to the client's response channel. A client sends a keepalive every 500 ms when it sends nothing else, so a program that holds its session and does not run its client's duty cycle is closed the same way.",
+    },
+    CounterDef {
+        id: CLUSTER_SESSIONS_REFUSED,
+        name: "cluster.sessions_refused",
+        kind: Kind::Counter,
+        scope: Scope::Client,
+        doc: "Session connects the leader refused and answered with a session event of code error: the client's protocol version has a major other than the cluster's (invalid client version), the response stream id is not 102 or the response channel is not cavalry:udp?endpoint=<host:port> (invalid response channel), or 10 sessions are open or connecting (concurrent session limit) (spec/cluster.md, Sessions). key: member id (i32), little-endian; label text: the member id in decimal.",
+        doctor: "The leader refused a client's connect and told the client why, in the detail of the session event. The client's own error says which: a client of another protocol version, a response channel that is not cavalry:udp?endpoint=<host:port>, or a cluster whose 10 sessions are taken, which cluster.sessions shows.",
+    },
+    CounterDef {
+        id: CLUSTER_CONNECTS_DROPPED,
+        name: "cluster.connects_dropped",
+        kind: Kind::Counter,
+        scope: Scope::Client,
+        doc: "Session connects one cluster member dropped unanswered: its 10 pending answers were taken, the driver refused the response channel, a redirect or a refusal was still unsent at the session connect timeout, 5 s, or the leader gave up a connect it had accepted, because its log took no session open event for that long or it stopped leading before the event was committed. The client's connect timeout reports each (spec/cluster.md, Sessions and Values). key: member id (i32), little-endian; label text: the member id in decimal.",
+        doctor: "A client's connect got no answer from this member. Most often the member could not reach the client's response channel: check that the host and port the client names there are reachable from this member's host, and that the client subscribes before it connects. If it rises on a leader whose log does not move, see cluster.commit_position and cluster.append_position on it.",
+    },
+    CounterDef {
+        id: CLUSTER_INGRESS_IGNORED,
+        name: "cluster.ingress_ignored",
+        kind: Kind::Counter,
+        scope: Scope::Client,
+        doc: "Session messages, keepalives and session closes one cluster member read from its ingress stream and did not act on: the member does not lead, the message names a term that is not the leader's, or its session is not open. The client learns of a new leader by the new leader event and sends again (spec/cluster.md, Sessions). key: member id (i32), little-endian; label text: the member id in decimal.",
+        doctor: "A client sent to a member that was not its leader, or for a term or a session that has ended. Some after each election are expected: a client goes on sending to the old leader until the new leader event reaches it. If it keeps rising on one member, a client there holds a session the cluster has closed, or sends to a follower: the client's own error says which.",
     },
 ];

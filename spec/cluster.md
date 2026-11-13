@@ -873,15 +873,26 @@ A client opens a session by sending session connect on the ingress stream to one
 member's `ingress` endpoint, from a publication of its own, after subscribing to the
 egress stream on its response channel. A follower answers with a session event of code
 redirect, its leader member id and the ingress endpoints as its detail, and opens
-nothing; a member with no leader answers the same with leader member id −1. The leader
+nothing; a member with no leader answers the same with leader member id −1. A member
+that leads a term whose election has not closed answers nothing yet: it leaves the
+connect unread on its ingress image until its election closes or fails, since a
+redirect to itself would only come back (ADR 0115). The leader
 answers: code error with the detail `invalid client version` when the connect's version
 has a major other than its own; code error with the detail `invalid response channel`
 when the response stream id is not 102 or the response channel is not
-`cavalry:udp?endpoint=<host:port>`; code error with the detail `concurrent session
+`cavalry:udp?endpoint=<host:port>`, which one that names any other key or is longer
+than 280 bytes, the prefix, a host name of 253 bytes, `:` and five digits, is not; code error with the detail `concurrent session
 limit` when its sessions, open and connecting, are at the bound ("Values"); otherwise it
 gives the session the next session id, appends a session open event, and once that
 entry is committed sends the session event of code ok with the session id, the
-correlation id and an empty detail. The session is open from then. Every refusal is
+correlation id and an empty detail. The session is open from then. A session is
+opened by its committed session open event and closed by its committed session close
+event, on every member that reads them in its own log ("Roles and the election",
+states 6 and 10), the leader among them: the leader that accepted a connect holds the
+session as connecting until it reads the entry at or below its commit position, and a
+follower holds the open sessions with no publication, so that a member that wins an
+election has them. The next session id is one more than the highest the member has
+given or has read in a session open event (ADR 0115). Every refusal is
 counted in `cluster.sessions_refused`. A redirect or a refusal is answered on an egress
 publication to the connect's response channel on stream 102, the one egress stream of
 this version, whatever response stream id the connect named; the member holds the
@@ -914,12 +925,21 @@ message is appended: it buffers no message and drops none, so that the back pres
 reaches the client's publication and its caller (`spec/log-buffer.md`, "Claim, commit
 and abort"); an entry of the leader's own, a session open or close event, a timer
 event or the new leadership term event, waits the same way and is tried again on a
-later duty cycle. The client sends session
+later duty cycle. A session open event the log has not taken at the session connect
+timeout is given up with its connect, counted in `cluster.connects_dropped`, and so is
+a connect the leader had accepted and had not read back as committed when it stopped
+leading; a session open event that was appended and that a later leader commits opens
+a session no client knows, which the session timeout closes (ADR 0115). The client sends session
 keepalive when the keepalive interval has passed since it last sent anything; a session
 with nothing from its client for the session timeout is closed: the leader appends a
 session close event with the reason timeout and sends a session event of code closed
-with the detail `TIMEOUT`. A client closes its session with session close; the leader
-appends a session close event with the reason client action and sends nothing. The
+with the detail `TIMEOUT`, once, when the session's egress publication takes it. A
+client closes its session with session close; the leader
+appends a session close event with the reason client action and sends nothing. From
+when the leader has decided a session's close, by the client's session close or by
+the timeout, it ignores what the client sends for that session, each counted in
+`cluster.ingress_ignored`, and the session stays open on every member until the
+session close event is committed (ADR 0115). The
 service's replies to a session are session messages on the egress stream, from the
 leader alone ("The service"). When a term begins, its leader sends a new leader event
 to every open session with the ingress endpoints, whether or not the leader changed,
@@ -1120,10 +1140,13 @@ that a reader of a counters file knows which transition it saw.
 | `cluster.candidacies` | a ballot begun: a member in nominate that stored candidate term + 1, voted for itself and went to candidate ballot, `cluster.role` going to candidate (ADR 0081) |
 | `cluster.ballots_lost` | a ballot that ended with no leader for the member, which canvasses again: a candidate on a vote against its candidate term or once it holds no vote of its own for that term, at once (ADR 0105), or at the election timeout short of a quorum, a member in follower ballot whose candidate's new leadership term did not come within the election timeout, or either that reads a new leadership term for a log term that is not its own, once it has dropped any terms the message says its leader's record lacks ("Messages during an election"; ADR 0096); two members that count one with `cluster.candidacies` each are a split vote (ADR 0081) |
 | `cluster.leadership_terms_ignored` | a new leadership term ignored for its term: below the reader's candidate term in canvass, or not the candidate term in a ballot state |
-| `cluster.sessions` | a gauge: open sessions |
+| `cluster.sessions` | a gauge: open sessions, on every member, as its log's committed session open and close events left them |
+| `cluster.sessions_accepted` | a session connect the leader accepted: a session id given, and a session open event to append |
+| `cluster.sessions_opened` | a session opened by a committed session open event, on every member |
+| `cluster.sessions_closed` | a session closed by a committed session close event, on every member, whatever its reason |
 | `cluster.sessions_refused` | a session connect refused, with the version, the response channel or the limit as the detail |
-| `cluster.connects_dropped` | a session connect dropped unanswered: the member's pending answers at their bound, the response channel refused by the driver, or the answer unsent at the session connect timeout |
-| `cluster.ingress_ignored` | a session message, keepalive or close the leader ignored, for a term not its own or a session not open |
+| `cluster.connects_dropped` | a session connect dropped unanswered: the member's pending answers at their bound, the response channel refused by the driver, the answer unsent at the session connect timeout, or a connect the leader had accepted and gave up, its session open event not taken by the log for that timeout or not committed when the leader stopped leading |
+| `cluster.ingress_ignored` | a session message, keepalive or close a member ignored: it does not lead, the term is not its own, or the session is not open or is being closed |
 | `cluster.log_replications` | on the follower, a catch-up position sent from state 9, one for each replay it asks for (ADR 0092); on the leader, a replay started for a replication, once per replay where a replication spans several recordings |
 | `cluster.log_replications_unavailable` | a replication whose append position did not move for the leader heartbeat timeout while below the stop position, so the member failed its election: the leader's recordings not holding the position asked, purged by retention; a replay that stopped for a fault; or a leader lost mid-replication |
 | `cluster.app_version_mismatches` | a member that failed its election because the service's major version is not the one new leadership term carries |
