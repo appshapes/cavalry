@@ -665,3 +665,80 @@ fn a_member_told_to_wait_stays_where_it_is() {
     assert_eq!(member.counts(), counts);
     assert_eq!(io.made, 0);
 }
+
+/// A replication waits for the stop of its replay's recording without holding the duty
+/// cycle (card 256): `Io::remove_catchup` answers `false` while the stop is asked and
+/// not yet read, and the member comes back to the same place on its next cycle. At the
+/// replication's stop it has recorded the leader's term once and stays in the state
+/// until the removal is done, then canvasses. Where a replay's image has gone below
+/// the stop, the subscription stays until the removal is done, and only the cycle
+/// after that asks again.
+#[test]
+fn a_replication_waits_for_the_stop_of_its_recording_and_asks_again_each_cycle() {
+    // At the stop.
+    let mut io = Stub::new();
+    let (mut member, ms) = after_term_zero(&mut io, 32);
+    read(&mut member, &mut io, ms, &told(1, 64, 0, [1, 64, -1], 64));
+    work(&mut member, &mut io, ms + 1);
+    io.catchup_image = Some(32);
+    io.append_position = 64;
+    io.stops_pending = 2;
+    for cycle in 0..2 {
+        work(&mut member, &mut io, ms + 2 + cycle);
+        assert_eq!(
+            member.election_state(),
+            ElectionState::FollowerLogReplication,
+            "cycle {cycle}"
+        );
+    }
+    assert_eq!(io.count(|call| *call == Call::RemoveCatchup), 2);
+    work(&mut member, &mut io, ms + 4);
+    assert_eq!(io.count(|call| *call == Call::RemoveCatchup), 3, "and read");
+    assert_eq!(member.election_state(), ElectionState::Canvass);
+    assert_eq!(
+        io.count(|call| *call == Call::RecordTerm(1, 64)),
+        1,
+        "the leader's term is recorded once"
+    );
+    assert_eq!(member.counts().elections_failed, 0);
+
+    // A replay's image gone below the stop.
+    let mut io = Stub::new();
+    let (mut member, ms) = after_term_zero(&mut io, 0);
+    read(&mut member, &mut io, ms, &told(1, 64, 0, [1, 64, -1], 64));
+    work(&mut member, &mut io, ms + 1);
+    io.catchup_image = Some(0);
+    io.append_position = 32;
+    work(&mut member, &mut io, ms + 2);
+    io.catchup_image = None;
+    io.stops_pending = 2;
+    work(&mut member, &mut io, ms + 3);
+    work(&mut member, &mut io, ms + 4);
+    assert_eq!(
+        asks(&io),
+        vec![
+            Call::AddCatchup,
+            Call::CatchupPosition(2, 1, 0),
+            Call::RemoveCatchup,
+            Call::RemoveCatchup,
+        ],
+        "asked each cycle, and nothing else while the subscription is there"
+    );
+    work(&mut member, &mut io, ms + 5);
+    work(&mut member, &mut io, ms + 6);
+    assert_eq!(
+        asks(&io),
+        vec![
+            Call::AddCatchup,
+            Call::CatchupPosition(2, 1, 0),
+            Call::RemoveCatchup,
+            Call::RemoveCatchup,
+            Call::RemoveCatchup,
+            Call::AddCatchup,
+            Call::CatchupPosition(2, 1, 32),
+        ],
+        "the cycle after the removal asks from where the log ends"
+    );
+    assert_eq!(member.counts().log_replications, 2);
+    assert_eq!(member.counts().elections_failed, 0);
+}

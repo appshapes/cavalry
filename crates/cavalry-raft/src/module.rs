@@ -75,6 +75,7 @@ const NO_SYNC_ASKED: i64 = -1;
 
 const DOC: &str = "docs/reference/cluster.md#roles-and-the-election";
 const DOC_MEMBERS: &str = "docs/reference/cluster.md#members-and-streams";
+const DOC_LOG: &str = "docs/reference/cluster.md#the-log";
 const DOC_LOG_RECORDINGS: &str = "docs/reference/cluster.md#the-logs-recordings";
 const DOC_KEPT_LOG: &str = "docs/reference/durable-log.md#log-recordings";
 
@@ -156,9 +157,21 @@ pub enum RaftError {
     },
     /// The offer was refused by the member's state; offer again as the reason says.
     Offer(Refused),
+    /// The leader's log publication refused an entry for a reason that waiting does
+    /// not mend (`spec/cluster.md`, "The log"): the stream is at the largest position
+    /// its term length allows, the member's client is closed, or the entry is longer
+    /// than the publication takes, which the module's own bound refuses first. Back
+    /// pressure, a log no member has joined yet and a term that rotated are not this
+    /// error: the entry is not appended, and the leader appends it again.
+    Append {
+        /// The publication's refusal.
+        refusal: Offer,
+    },
     /// A member leaving the log stopped the recording it held, and 1 s later had not
     /// read where the recording stopped. It holds the recording still, in init, and the
-    /// next duty cycle stops it again and waits for its stop.
+    /// next duty cycle stops it again. No duty cycle waits for a stop: each one that
+    /// finds the stop not yet read returns, and this is the error of the first to
+    /// find it a second old.
     StopTimeout {
         /// The recording held.
         recording_id: i64,
@@ -215,7 +228,7 @@ pub enum ListedFound {
 impl RaftError {
     /// The reason's name: `members`, `member`, `recordings`, `terms-lost`,
     /// `log-forgotten`, `listed-recording`, `terms`, `catalog`, `client`, `poll`,
-    /// `unsupported`, `payload-too-long`, `offer`, `stop-timeout`,
+    /// `unsupported`, `payload-too-long`, `offer`, `append`, `stop-timeout`,
     /// `start-stop-timeout` or `log-recordings`.
     pub const fn reason(&self) -> &'static str {
         match self {
@@ -232,6 +245,7 @@ impl RaftError {
             RaftError::Unsupported { .. } => "unsupported",
             RaftError::PayloadTooLong { .. } => "payload-too-long",
             RaftError::Offer(_) => "offer",
+            RaftError::Append { .. } => "append",
             RaftError::StopTimeout { .. } => "stop-timeout",
             RaftError::StartStopTimeout { .. } => "start-stop-timeout",
             RaftError::LogRecordings { .. } => "log-recordings",
@@ -385,14 +399,52 @@ impl core::fmt::Display for RaftError {
                  at most {MAX_PAYLOAD_LENGTH}; send it in parts of that length; see {DOC}"
             ),
             RaftError::Offer(refused) => write!(f, "{refused}"),
+            RaftError::Append { refusal } => {
+                write!(
+                    f,
+                    "member stopped ({reason}): the leader's log publication refused an \
+                     entry, {}: ",
+                    refusal.reason()
+                )?;
+                match refusal {
+                    Offer::MaxPositionExceeded => write!(
+                        f,
+                        "the cluster's log is at the largest position its term length \
+                         allows, and no leader can append past it. This version takes no \
+                         snapshot to begin a new log from: stop every member, and start \
+                         the cluster again as a new cluster, every member on a new log \
+                         directory"
+                    )?,
+                    Offer::Closed => write!(
+                        f,
+                        "the member's client is closed, because its driver stopped \
+                         answering it or was closed. Run `cavalry doctor` on the member's \
+                         driver directory to see whether the driver runs, and start the \
+                         member again: it starts on the log directory it kept, and the \
+                         other members elect a leader meanwhile"
+                    )?,
+                    Offer::TooLong { found, limit } => write!(
+                        f,
+                        "an entry of {found} bytes where the publication takes {limit}. \
+                         The consensus module checks an entry's length before it appends, \
+                         so this is a fault of the module and not of what was offered: \
+                         report it, with this message"
+                    )?,
+                    // Never built into this error: `log_refusal` has the leader append
+                    // again.
+                    Offer::NotConnected | Offer::BackPressured | Offer::AdminAction => {
+                        write!(f, "the entry was not appended; append it again")?;
+                    }
+                }
+                write!(f, "; see {DOC_LOG}")
+            }
             RaftError::StopTimeout { recording_id } => write!(
                 f,
                 "member stopped ({reason}): the member stopped recording {recording_id} as \
                  it left the log, and 1 s later the driver had not said where it stopped, so \
                  the member does not know where its log ends; it stays in init holding the \
-                 recording. Call do_work again, which stops it again and waits; if this \
-                 repeats, run `cavalry doctor`: the driver or this process is starved of CPU; \
-                 see {DOC}"
+                 recording. Call do_work again, which stops it again; if this repeats, run \
+                 `cavalry doctor`: the driver or this process is starved of CPU; see {DOC}"
             ),
             RaftError::StartStopTimeout { recording_id } => write!(
                 f,
@@ -688,6 +740,13 @@ struct ClientIo {
     sync_asked_at: i64,
     /// The same for its recording of a replay.
     catchup_sync_asked_at: i64,
+    /// The recording whose stop this member last asked and has not yet read, and when
+    /// that stop must have been read by, [`STOP_TIMEOUT`] after the command; `None`
+    /// while no stop is awaited. A member stops its recordings one at a time and comes
+    /// back to the one it asked before it stops another, so one slot serves them all.
+    /// The id is kept so that a stop asked of another recording is never taken for
+    /// asked, or held to this one's time ([`stop_recording`]).
+    stop_asked: Option<(i64, Instant)>,
     // The file of the log's recordings, for the member's service (ADR 0103).
     /// `log-recordings-<member id>` in the driver directory.
     recordings_path: PathBuf,
@@ -721,25 +780,42 @@ fn ask_sync(client: &mut Cavalry, recording: &Recording, asked_at: &mut i64) {
     }
 }
 
-/// Stops `recording` and waits for its stop position, within [`STOP_TIMEOUT`]: where
-/// this member's log ends when the recording began where the log ended before it. A
-/// stop already read, the driver's at the stream's end or this member's own on a cycle
-/// before, needs no command.
-fn stop_recording(client: &mut Cavalry, recording: &Recording) -> Result<i64, RaftError> {
-    if recording.stop_position().is_none() {
-        client.stop_recording(recording.recording_id())?;
+/// Stops `recording` and says where it stopped, once the driver has said so: where
+/// this member's log ends when the recording began where the log ended before it. It
+/// never waits. `Ok(None)` says that the stop is asked and its position is not yet
+/// read: the caller returns to the duty cycle with nothing else changed and calls
+/// again on the next one, so that the thread that polls the member's streams is not
+/// held for a stop (card 256). `asked` is the recording whose stop is awaited and
+/// when it must have been read by, [`STOP_TIMEOUT`] after the command: a call for
+/// that recording past that time is [`RaftError::StopTimeout`], and the call after
+/// it sends the command again. A call for any other recording sends its own command
+/// and takes the slot: a stop is never taken for asked, or timed, by another
+/// recording's. A stop already read, the driver's at the stream's end or this
+/// member's own on a cycle before, needs no command.
+fn stop_recording(
+    client: &mut Cavalry,
+    recording: &Recording,
+    asked: &mut Option<(i64, Instant)>,
+) -> Result<Option<i64>, RaftError> {
+    let recording_id = recording.recording_id();
+    let awaited = asked.filter(|(id, _)| *id == recording_id);
+    if let Some(stop) = recording.stop_position() {
+        if awaited.is_some() {
+            *asked = None;
+        }
+        return Ok(Some(stop));
     }
-    let deadline = Instant::now() + STOP_TIMEOUT;
-    loop {
-        if let Some(stop) = recording.stop_position() {
-            return Ok(stop);
+    match awaited {
+        None => {
+            client.stop_recording(recording_id)?;
+            *asked = Some((recording_id, Instant::now() + STOP_TIMEOUT));
+            Ok(None)
         }
-        if Instant::now() >= deadline {
-            return Err(RaftError::StopTimeout {
-                recording_id: recording.recording_id(),
-            });
+        Some((_, deadline)) if Instant::now() >= deadline => {
+            *asked = None;
+            Err(RaftError::StopTimeout { recording_id })
         }
-        std::thread::sleep(Duration::from_micros(50));
+        Some(_) => Ok(None),
     }
 }
 
@@ -1117,10 +1193,15 @@ impl ClientIo {
     /// when the election was told its image and it began where the log ended; the
     /// recording is then kept for a replay of this member's own. One the election was
     /// never told, or that began elsewhere, is stopped and is no part of the log. The
-    /// recording stays held until its stop has been read, as in [`Io::leave_log`].
-    fn settle_catchup(&mut self) -> Result<(), RaftError> {
+    /// recording stays held until its stop has been read, as in [`Io::leave_log`]:
+    /// `Ok(false)` says that a stop is asked and not yet read.
+    fn settle_catchup(&mut self) -> Result<bool, RaftError> {
         if let Some(held) = self.catchup_held.as_ref() {
-            let stop = stop_recording(&mut self.client, &held.recording)?;
+            let Some(stop) =
+                stop_recording(&mut self.client, &held.recording, &mut self.stop_asked)?
+            else {
+                return Ok(false);
+            };
             let kept = Kept {
                 recording_id: held.recording.recording_id(),
                 start: held.start,
@@ -1133,10 +1214,12 @@ impl ClientIo {
             self.catchup_held = None;
         }
         if let Some(recording) = self.catchup_starting.as_ref() {
-            stop_recording(&mut self.client, recording)?;
+            if stop_recording(&mut self.client, recording, &mut self.stop_asked)?.is_none() {
+                return Ok(false);
+            }
             self.catchup_starting = None;
         }
-        Ok(())
+        Ok(true)
     }
 
     /// Takes what arrived on the catch-up subscription: applies the images the driver
@@ -1511,22 +1594,31 @@ impl Io for ClientIo {
     }
 
     /// Stops the recording held and takes its stop as the log's end, then drops the
-    /// subscription. The recording stays held until its stop has been read: a stop the
-    /// driver refused or did not answer, or a stop position not read within
-    /// `STOP_TIMEOUT`, returns with nothing else changed. The core then stays in init
-    /// with the log joined and calls again on the next cycle, which stops the recording
-    /// again, a success with nothing written for one already stopped, and waits again.
-    /// So a leave that fails never loses the recording whose stop is the log's end, and
-    /// it never takes a synced position short of the stop.
-    fn leave_log(&mut self) -> Result<(), Self::Fault> {
+    /// subscription. The recording stays held until its stop has been read. A stop
+    /// that is asked and not yet read returns `Ok(false)` at once, with nothing else
+    /// changed, and so does each call until the driver has said where the recording
+    /// stopped: the core stays in init with the log joined and calls again on its
+    /// next cycle, and the duty cycle's thread is never held for the stop. A stop the
+    /// driver refused, or one not read within `STOP_TIMEOUT`, is a fault, with
+    /// nothing else changed either, and the call after it stops the recording again,
+    /// a success with nothing written for one already stopped. So a leave that fails
+    /// never loses the recording whose stop is the log's end, and it never takes a
+    /// synced position short of the stop.
+    fn leave_log(&mut self) -> Result<bool, Self::Fault> {
         // A member that leaves in follower catch-up holds two recordings, and the
         // live one begins inside what the replay's holds: the replay's recording is
         // stopped first, so that the live one is kept after it and the log's end is
         // the further of the two stops (ADR 0094). Init removes the catch-up
         // subscription next.
-        self.settle_catchup()?;
+        if !self.settle_catchup()? {
+            return Ok(false);
+        }
         if let Some(held) = self.held.as_ref() {
-            let stop = stop_recording(&mut self.client, &held.recording)?;
+            let Some(stop) =
+                stop_recording(&mut self.client, &held.recording, &mut self.stop_asked)?
+            else {
+                return Ok(false);
+            };
             let kept = Kept {
                 recording_id: held.recording.recording_id(),
                 start: held.start,
@@ -1547,14 +1639,16 @@ impl Io for ClientIo {
         // A recording handed over whose start was never read is stopped the same way,
         // and is no part of the log: the election was never told its image.
         if let Some(recording) = self.starting.as_ref() {
-            stop_recording(&mut self.client, recording)?;
+            if stop_recording(&mut self.client, recording, &mut self.stop_asked)?.is_none() {
+                return Ok(false);
+            }
             self.starting = None;
         }
         // The driver drops a recording still armed with the stream's last subscription.
         self.armed = None;
         self.log_subscription = None;
         self.image = LogImage::Awaited;
-        Ok(())
+        Ok(true)
     }
 
     /// Gives up the log of the term this member led (ADR 0082, ADR 0091): stops its
@@ -1563,13 +1657,17 @@ impl Io for ClientIo {
     /// the next term the member leads has a publication of its own at that term's
     /// base. What the leader appended and its recorder had not written is not in its
     /// log: it never reported it. The recording stays held until its stop has been
-    /// read, so a stop the driver refused or did not answer in time returns with
-    /// nothing else changed, and init calls again on the next cycle. The core asks
-    /// it of a member that led and holds an election, in init, and not again once it
-    /// returned `Ok`.
-    fn remove_log(&mut self) -> Result<(), Self::Fault> {
+    /// read: a stop asked and not yet read returns `Ok(false)` at once, and one the
+    /// driver refused or did not answer in time is a fault, each with nothing else
+    /// changed, and init calls again on the next cycle. The core asks it of a member
+    /// that led and holds an election, in init, and not again once it returned
+    /// `Ok(true)`.
+    fn remove_log(&mut self) -> Result<bool, Self::Fault> {
         if let Some(recording) = self.log_recording.as_ref() {
-            let stop = stop_recording(&mut self.client, recording)?;
+            let Some(stop) = stop_recording(&mut self.client, recording, &mut self.stop_asked)?
+            else {
+                return Ok(false);
+            };
             let kept = Kept {
                 recording_id: recording.recording_id(),
                 start: self.log_base,
@@ -1591,7 +1689,7 @@ impl Io for ClientIo {
         }
         self.log_term = None;
         self.destinations_added = 0;
-        Ok(())
+        Ok(true)
     }
 
     /// Truncates the member's log to `position` (ADR 0083, ADR 0095): of the
@@ -1913,14 +2011,17 @@ impl Io for ClientIo {
 
     /// Stops this member's recording of the replay, whose stop is where its log ends
     /// when the election was told its image and it began where the log ended, then
-    /// removes the catch-up subscription. A stop the driver did not answer in time
-    /// returns with the recording still held, and the core calls again.
-    fn remove_catchup(&mut self) -> Result<(), Self::Fault> {
-        self.settle_catchup()?;
+    /// removes the catch-up subscription. A stop asked and not yet read returns
+    /// `Ok(false)` at once, and one the driver did not answer in time is a fault,
+    /// each with the recording still held, and the core calls again.
+    fn remove_catchup(&mut self) -> Result<bool, Self::Fault> {
+        if !self.settle_catchup()? {
+            return Ok(false);
+        }
         // The driver drops a recording still armed with the stream's last subscription.
         self.catchup_armed = None;
         self.catchup_subscription = None;
-        Ok(())
+        Ok(true)
     }
 
     fn append(&mut self, entry: &Message<'_>) -> Result<bool, Self::Fault> {
@@ -1935,10 +2036,20 @@ impl Io for ClientIo {
         };
         match publication.offer(bytes) {
             Ok(_) => Ok(true),
-            Err(Offer::BackPressured | Offer::NotConnected | Offer::AdminAction) => Ok(false),
-            Err(other) => Err(RaftError::Client(ClientError::Driver {
-                what: format!("the log publication refused an entry: {other}"),
-            })),
+            Err(refusal) => log_refusal(refusal),
+        }
+    }
+}
+
+/// What a refusal of the leader's log publication is to the election: `Ok(false)`,
+/// the entry is not appended and the leader appends it again, for back pressure, a
+/// log no member has joined yet and a term that rotated; and for every other refusal
+/// [`RaftError::Append`], which says what the operator does next.
+fn log_refusal(refusal: Offer) -> Result<bool, RaftError> {
+    match refusal {
+        Offer::BackPressured | Offer::NotConnected | Offer::AdminAction => Ok(false),
+        Offer::MaxPositionExceeded | Offer::Closed | Offer::TooLong { .. } => {
+            Err(RaftError::Append { refusal })
         }
     }
 }
@@ -2384,6 +2495,7 @@ impl ConsensusModule {
                 catchup_starting: None,
                 catchup_held: None,
                 catchup_sync_asked_at: NO_SYNC_ASKED,
+                stop_asked: None,
                 scratch: Box::new([0u8; 1408]),
                 log_publication: None,
                 log_term: None,
@@ -2421,8 +2533,12 @@ impl ConsensusModule {
     /// follower's log subscription holds, the core's own cycle, and the counters that
     /// moved. Returns how much it did, 0 for nothing, for the caller's idle strategy.
     /// An error is a step the member cannot go on without; the member stays in the
-    /// state it was in, and a later call tries the step again. An error of the core's
-    /// own cycle is returned after the counters are stored (ADR 0091). One error is
+    /// state it was in, and a later call tries the step again. A consensus message
+    /// whose step faults does not take the rest of its batch with it: every message
+    /// the poll read is handed to the core, as it would be on the next cycle, and the
+    /// first fault among them is returned once the batch is done, before the log is
+    /// observed. An error of the core's own cycle is returned after the counters are
+    /// stored (ADR 0091). One error is
     /// not of that kind: [`RaftError::LogRecordings`], a file of the log's recordings
     /// that could not be written, is returned after the core's cycle has run, so the
     /// member has moved on, records and replicates, and names no recording to a
@@ -2438,27 +2554,46 @@ impl ConsensusModule {
             ..
         } = self;
         let mut fault = None;
-        let read = consensus
-            .poll(
-                |body, header| {
-                    // A consensus message is one frame; a fragment of something longer
-                    // is none of this page's, and is counted as a message that failed
-                    // its length.
-                    let whole = header.flags().contains(Flags::UNFRAGMENTED);
-                    match Message::parse(Stream::Consensus, body) {
-                        Ok(message) if whole => {
-                            if fault.is_none()
-                                && let Err(error) = core.on_message(clock, &message, io)
-                            {
-                                fault = Some(error);
+        // A member in init reads nothing (`spec/cluster.md`, "Messages during an
+        // election"): what has arrived stays on the stream for the cycle after the
+        // member has left init. Init can last several cycles, while a recording's
+        // stop is asked and not yet read, and a message polled in it would be taken
+        // from the stream and acted on by nobody. One case is left: a message of a
+        // batch can itself move the core to init, by a term above the member's own
+        // or a step that fails its election, and the rest of that batch is then
+        // handed to a core in init, which acts on none of it, with no count. Leaving
+        // it on the stream needs a poll that can stop inside a batch, which the
+        // client does not have (card 282).
+        let read = if core.election_state() == ElectionState::Init {
+            0
+        } else {
+            consensus
+                .poll(
+                    |body, header| {
+                        // A consensus message is one frame; a fragment of something longer
+                        // is none of this page's, and is counted as a message that failed
+                        // its length.
+                        let whole = header.flags().contains(Flags::UNFRAGMENTED);
+                        match Message::parse(Stream::Consensus, body) {
+                            Ok(message) if whole => {
+                                // A message that faults leaves the rest of the poll's
+                                // batch to the core all the same. They are what the next
+                                // cycle would have read, and a message taken from the
+                                // stream and handed to nobody is lost with no count
+                                // (invariant 4). The first fault is the one returned.
+                                if let Err(error) = core.on_message(clock, &message, io)
+                                    && fault.is_none()
+                                {
+                                    fault = Some(error);
+                                }
                             }
+                            _ => *messages_rejected += 1,
                         }
-                        _ => *messages_rejected += 1,
-                    }
-                },
-                CONSENSUS_POLL_LIMIT,
-            )
-            .map_err(RaftError::Poll)?;
+                    },
+                    CONSENSUS_POLL_LIMIT,
+                )
+                .map_err(RaftError::Poll)?
+        };
         if let Some(error) = fault {
             return Err(error);
         }

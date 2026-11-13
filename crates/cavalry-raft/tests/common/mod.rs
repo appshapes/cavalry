@@ -48,6 +48,9 @@ pub struct Stub {
     pub fail_record: bool,
     /// Whether `remove_log` fails.
     pub fail_remove: bool,
+    /// How many more times a call that stops a recording, `leave_log`, `remove_log`
+    /// or `remove_catchup`, answers that the stop is asked and not yet read.
+    pub stops_pending: u32,
     /// Whether `truncate_log` is still under way: it cuts nothing and returns `None`.
     pub truncating: bool,
     /// Whether `append` is back-pressured.
@@ -107,6 +110,7 @@ impl Stub {
             image: None,
             fail_record: false,
             fail_remove: false,
+            stops_pending: 0,
             truncating: false,
             back_pressured: false,
             refuse_send: false,
@@ -126,6 +130,16 @@ impl Stub {
             last_canvass: None,
             last_startup: None,
         }
+    }
+
+    /// Whether a recording's stop has been read: false for the next
+    /// [`Stub::stops_pending`] asks, which it counts down.
+    fn stopped(&mut self) -> bool {
+        if self.stops_pending == 0 {
+            return true;
+        }
+        self.stops_pending -= 1;
+        false
     }
 
     fn call(&mut self, call: Call) {
@@ -254,17 +268,17 @@ impl Io for Stub {
         Ok(self.image)
     }
 
-    fn leave_log(&mut self) -> Result<(), Self::Fault> {
+    fn leave_log(&mut self) -> Result<bool, Self::Fault> {
         self.call(Call::LeaveLog);
-        Ok(())
+        Ok(self.stopped())
     }
 
-    fn remove_log(&mut self) -> Result<(), Self::Fault> {
+    fn remove_log(&mut self) -> Result<bool, Self::Fault> {
         self.call(Call::RemoveLog);
         if self.fail_remove {
             return Err("the recording cannot be stopped");
         }
-        Ok(())
+        Ok(self.stopped())
     }
 
     fn truncate_log(&mut self, position: i64) -> Result<Option<i64>, Self::Fault> {
@@ -371,9 +385,9 @@ impl Io for Stub {
         Ok(self.catchup_image)
     }
 
-    fn remove_catchup(&mut self) -> Result<(), Self::Fault> {
+    fn remove_catchup(&mut self) -> Result<bool, Self::Fault> {
         self.call(Call::RemoveCatchup);
-        Ok(())
+        Ok(self.stopped())
     }
 }
 

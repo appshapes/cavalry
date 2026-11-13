@@ -518,3 +518,67 @@ fn a_leader_gives_its_log_up_in_init_and_adds_a_new_one_for_its_next_term() {
         .expect("the log added");
     assert!(stored < recorded && recorded < added, "{:?}", io.calls);
 }
+
+/// A recording's stop that is asked and not yet read keeps a member in init with no
+/// fault (card 256): `Io::leave_log` and `Io::remove_log` answer `false`, the cycle
+/// that asked returns at once with nothing done, and each cycle after it asks again
+/// and nothing else, until the stop is read. The member then canvasses, as it does
+/// when the stop is read at the first ask. So the thread that runs the duty cycle is
+/// never held for a stop, and a stop that takes its time is no fault.
+#[test]
+fn a_member_waits_in_init_for_a_stop_that_is_not_yet_read_and_faults_nothing() {
+    // A follower that holds an election leaves the log in init.
+    let mut io = Stub::new();
+    let mut follower = elector(3);
+    let ms = to_closed_follower(&mut follower, &mut io);
+    read(&mut follower, &mut io, ms + 1, &request_vote(2, 1));
+    assert_eq!(follower.election_state(), ElectionState::Init);
+    let elections = follower.counts().elections;
+    io.clear();
+    io.stops_pending = 3;
+    for cycle in 0..3 {
+        let done = follower
+            .do_work(at(ms + 2 + cycle), &mut io)
+            .expect("a stop not yet read is no fault");
+        assert_eq!(done, 0, "the cycle did nothing but ask");
+        assert_eq!(follower.election_state(), ElectionState::Init);
+    }
+    assert_eq!(io.count(|call| *call == Call::LeaveLog), 3);
+    assert_eq!(
+        io.count(|call| *call != Call::LeaveLog),
+        0,
+        "{:?}",
+        io.calls
+    );
+    work(&mut follower, &mut io, ms + 5);
+    assert_eq!(io.count(|call| *call == Call::LeaveLog), 4, "and read");
+    assert_eq!(follower.election_state(), ElectionState::Canvass);
+    assert_eq!(follower.counts().elections, elections + 1, "one election");
+    assert_eq!(follower.counts().elections_failed, 0);
+
+    // A leader that steps down gives its log up in init, the same way.
+    let mut io = Stub::new();
+    let mut leader = elector(1);
+    let ms = to_closed_leader(&mut leader, &mut io);
+    read(&mut leader, &mut io, ms, &canvass_with(2, 1, 1));
+    assert_eq!(leader.election_state(), ElectionState::Init);
+    io.clear();
+    io.stops_pending = 2;
+    for cycle in 0..2 {
+        let done = leader
+            .do_work(at(ms + 1 + cycle), &mut io)
+            .expect("a stop not yet read is no fault");
+        assert_eq!(done, 0);
+        assert_eq!(leader.election_state(), ElectionState::Init);
+    }
+    assert_eq!(io.count(|call| *call == Call::RemoveLog), 2);
+    assert_eq!(
+        io.count(|call| *call != Call::RemoveLog),
+        0,
+        "{:?}",
+        io.calls
+    );
+    work(&mut leader, &mut io, ms + 3);
+    assert_eq!(io.count(|call| *call == Call::RemoveLog), 3, "and read");
+    assert_eq!(leader.election_state(), ElectionState::Canvass);
+}
