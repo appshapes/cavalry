@@ -97,7 +97,8 @@ reply the session's publication does not take, not connected or back-pressured, 
 Once a session's publication has taken nothing for 500 ms since it first refused a
 reply, the answer is `Reply::Dropped`, counted in `cluster.replies_dropped`, and
 each later reply to that session is offered once and dropped at once until the
-publication takes one. 500 ms is how often a client reads its session at the least
+publication takes one. The service reads its clock for a reply that was refused,
+and for no other: a reply that is sent reads none. 500 ms is how often a client reads its session at the least
 (ADR 0117), so a client that keeps its own rule loses no reply to this one.
 
 The service holds its sessions' publications from the first entry it answers and
@@ -204,7 +205,9 @@ allocated, for a session message or its reply.
   messages again, from position 0, and is answered `NotAnswering` for each, the first
   being of an older term and the second below the member's append position when the
   service opened; the client reads nothing. The third message it answers, once.
-  `cluster.replies_dropped` reads 0 beside both members. SERIES
+  `cluster.replies_dropped` reads 0 beside both members. The pull request's body
+  has the runs: how many times the test ran in a row, on a laptop and on both of
+  CI's runners.
 - Aeron's source named in Context.
 
 ## Consequences

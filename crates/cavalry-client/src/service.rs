@@ -252,7 +252,6 @@ pub struct Replies<'a> {
     answering: bool,
     leadership_term_id: i64,
     timestamp: i64,
-    now_ns: i64,
 }
 
 impl Replies<'_> {
@@ -263,7 +262,9 @@ impl Replies<'_> {
     /// more than one.
     ///
     /// [`Reply`] says what became of it, and [`Reply::Retry`] is the one answer that
-    /// asks something of the handler. Nothing here allocates, and nothing waits.
+    /// asks something of the handler. Nothing here allocates, and nothing waits. A
+    /// reply that is sent reads no clock; one that is refused reads it once, to
+    /// measure the keepalive interval.
     pub fn reply(&mut self, session_id: i64, payload: &[u8]) -> Reply {
         if !self.answering {
             return Reply::NotAnswering;
@@ -304,11 +305,14 @@ impl Replies<'_> {
                 limit: limit.saturating_sub(SESSION_MESSAGE_HEADER_LENGTH),
             },
             Err(Offer::NotConnected | Offer::BackPressured | Offer::AdminAction) => {
+                // The one clock read, and only for a reply that was refused: a reply
+                // that is sent reads none.
+                let now_ns = nano_time();
                 if session.refusing_since_ns == 0 {
-                    session.refusing_since_ns = self.now_ns.max(1);
+                    session.refusing_since_ns = now_ns.max(1);
                 }
                 if !session.unresponsive
-                    && self.now_ns.saturating_sub(session.refusing_since_ns) < REPLY_TIMEOUT_NS
+                    && now_ns.saturating_sub(session.refusing_since_ns) < REPLY_TIMEOUT_NS
                 {
                     return Reply::Retry;
                 }
@@ -408,7 +412,6 @@ impl ClusterService {
             }
             self.log = Some(log);
         }
-        let now_ns = nano_time();
         let Self {
             log,
             member,
@@ -562,7 +565,6 @@ impl ClusterService {
                         answering: answers,
                         leadership_term_id,
                         timestamp,
-                        now_ns,
                     },
                 );
                 // A session is closed once its close event is taken, and its
