@@ -319,7 +319,7 @@ shared runner is
    gate there with no data-plane change behind it, from the tree's first three
    processes and every one after them; the commit lists every gated row's slowest run
    before and after and names the cause of every row that loosens by more than 5
-   percent, or the card that will find it. It is re-recorded at a new tree as well
+   percent, or the work item that will find it. It is re-recorded at a new tree as well
    after a change to the harness under `bench/`, with no data-plane crate changed,
    when that change's Accepted ADR asks for it in its Consequences, as
    [ADR 0090](../decisions/0090-keep-a-subscribers-samples-out-of-the-histogram-until-its-loop-is-over.md)
@@ -346,7 +346,7 @@ shared runner is
      overtakes stays where it is.
 
    Record each red that counts before you do anything else about it: the first before
-   its re-run, the second before the re-record or the card. The second red can come
+   its re-run, the second before the re-record or the work item. The second red can come
    days later, on another pull request and in another session, and the re-record
    needs the first red's process. After a re-run, each attempt's artifact is under the
    same name and is taken by its id, and the artifact expires after seven days. So the
@@ -385,15 +385,15 @@ shared runner is
       If it prints nothing, your red is the first. If it prints one address, your red
       is the second. If it prints two or more, your red is a later one: record it as
       a second red, linking the record before it, and do not re-run it. Its pull
-      request waits on the re-record or the card the second red already has; nothing
-      is re-recorded or carded twice.
+      request waits on the re-record or the work item the second red already has; nothing
+      is re-recorded twice, and no second work item is opened.
    4. **List the changes**, at a second red only: the changes behind the band. These
       are the commits on master after the entry's tree, up to master's commit from
       **Find the tree**, on the tree's paths except `crates/cavalry-control` and
       `crates/cavalry`, the two crates CLAUDE.md does not mark data plane. The list
       keeps, on purpose, the data-plane crates the harness does not build yet,
       `crates/cavalry-ffi` and `crates/cavalry-raft`, and test files, which it never
-      compiles: the guard errs toward a card. Start the range at
+      compiles: the guard errs toward a work item. Start the range at
       one of the entry's `git` commits that is on master (`git merge-base
       --is-ancestor <commit> origin/master` exits 0 for one), or, for a pull request's
       merge commit, at its first parent, read as in **Find the tree**. For a second
@@ -446,9 +446,9 @@ shared runner is
      the reds by run, attempt and row.
    - **One commit or more.** The second red re-records nothing. The band may have
      risen with those changes rather than with the host, and one process at each
-     change's own tree could not tell the two apart. A person's session opens a card
+     change's own tree could not tell the two apart. A person's session opens a work item
      that names the two reds and the commits on the row's path. The pull request
-     waits until the card's answer is on master. The answer is either a fix, which
+     waits until the work item's answer is on master. The answer is either a fix, which
      begins a new tree, or a re-record, made as below, whose message says why each row
      loosened, by any amount, as `REGRESSION` on a p99.99 under
      [When it does not work](#when-it-does-not-work) says.
@@ -463,7 +463,7 @@ shared runner is
    ```
 
    The re-record, in any of the three cases above, is made by a person or by a person's
-   session, a Claude Code session that works a card for that person, on a branch of its
+   session, a Claude Code session that works a work item for that person, on a branch of its
    own through the review loop.
    A session tells the person before it starts, which case this is, at which tree and
    how long it holds the hosts, and does not wait for an answer
@@ -473,12 +473,12 @@ shared runner is
    holds a red is the fixer, when the reviewer blocked on a red bench job at the head
    before it; the writer's session ends before its pull request's first run. The
    fixer records the red as above, re-runs nothing, changes no `bench/baseline.json`
-   and opens no card, and its run ends with no push, which fails as
+   and opens no work item, and its run ends with no push, which fails as
    `.claude/agents/developer.md` designs it. A person's session then re-runs the job
-   after a first red, and after a second makes the re-record or opens the card. The
+   after a first red, and after a second makes the re-record or opens the work item. The
    pull request that holds the second red waits, and its job is not re-run: its next
    run is the one that a merge of master into the branch starts once the re-record or
-   the card's answer is on master, judged against the entry master then holds.
+   the work item's answer is on master, judged against the entry master then holds.
 
    A new row joins a baseline that already exists by adding its entry from the tree's
    processes that have it and leaving the other rows as they were recorded, in a

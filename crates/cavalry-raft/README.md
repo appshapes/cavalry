@@ -276,8 +276,10 @@ commit path runs per message.
   it leads: a publication for each, the term's new leader event, and the session
   timeout counted from its election's close. The leader appends a session's messages
   with its own term and the cluster's time, leaves one unread while the log is
-  back-pressured (`Ingress::Unread`), closes a session it has heard nothing from
-  for 10 s, and counts what it refuses, drops and ignores in `SessionCounts`, eight
+  back-pressured (`Ingress::Unread`), and closes a session it has heard nothing from
+  for 10 s: the session close event goes to the log first, and the closed event
+  follows, owed until the session's publication takes it or the close is
+  committed. It counts what it refuses, drops and ignores in `SessionCounts`, eight
   counters of `counters.toml` with the gauge `cluster.sessions`. It allocates nothing
   after `Sessions::new`.
 - Serves those sessions over a driver (ADR 0116): the consensus module subscribes to

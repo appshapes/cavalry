@@ -97,7 +97,7 @@ class Check(Repository):
             ("6-tab.md", "- A change\n\tcontinued.\n", "6-tab.md:2: a line begins"),
             ("7-space.md", "- A change. \n", "7-space.md:1: the line ends in white space"),
             ("8-indent.md", " - A change.\n", "8-indent.md: the first line begins `- `"),
-            ("9-Nine.md", ONE, "9-Nine.md: the name is the card's number, or the pull request's, a hyphen"),
+            ("9-Nine.md", ONE, "9-Nine.md: the name is the work item's number, or the pull request's, a hyphen"),
             ("10 spaces.md", ONE, "10 spaces.md: the name is"),
             ("11-entry.txt", ONE, "11-entry.txt: the name is"),
             ("fix.md", ONE, "fix.md: the name is"),

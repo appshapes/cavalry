@@ -23,7 +23,7 @@ nothing else. Read `CLAUDE.md` first: its invariants are what the reader is bein
 Someone who asked to hear about Cavalry, or whom its maintainers know. They are an engineer
 who knows what a message transport is and may never have seen Aeron. They may be evaluating
 Cavalry, watching it, or running the ten-minute path on a laptop. They did not read the
-changelog, the commits, the cards or the plans, and they will give this email one minute.
+changelog, the commits, the work items or the plans, and they will give this email one minute.
 
 ## The sources, and nothing else
 
@@ -64,7 +64,7 @@ its findings with their line numbers. Leave out a section that would be empty.
 2. One or two sentences: what Cavalry is, for someone who forgot, and what this email covers.
    The words that say what this email covers are bold.
 3. `## What's new`: grouped by what a reader can now **do** or now **know**, never by commit
-   or by card. Three to six groups. Each group is a `### <lead>` heading, the lead saying what
+   or by work item. Three to six groups. Each group is a `### <lead>` heading, the lead saying what
    the reader can now do, and one to three sentences under it. Where the words to type are the
    point, put them in a fenced block under the sentences, with a label of two to four words as
    the fence's info string saying where they are typed, for example ```` ```in a terminal ````
@@ -104,7 +104,7 @@ the card, the terminal cards, the callout, is the renderer's. You write the word
   goes nowhere from an inbox, and a link outside this repository is refused.
 - Use Aeron's vocabulary where the concept matches, as the glossary does, and say "In Aeron,
   this is …" at most once in the whole email.
-- Never write: a commit hash, a card, issue or pull request number, a path into a crate's
+- Never write: a commit hash, a work item, card, issue or pull request number, a path into a crate's
   `src/`, a bench result file, the name or the address of a person, the word "Unreleased", a
   placeholder.
 - Never invent a change. If the sources do not say what a change means for a reader, leave

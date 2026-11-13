@@ -178,6 +178,10 @@ struct Session {
     /// decided on, and whether it is in the log yet.
     closing: Option<CloseReason>,
     close_appended: bool,
+    /// Open, on the leader, closing for the timeout: the closed event is yet to be
+    /// sent. Owed from when the log takes the session close event, never before,
+    /// until the publication takes it or the committed close frees the slot.
+    closed_owed: bool,
     /// When the connect was accepted, or the session opened.
     since_ns: u64,
     /// When the leader last heard from the client, or its election closed.
@@ -197,6 +201,7 @@ impl Session {
         leader_owed: false,
         closing: None,
         close_appended: false,
+        closed_owed: false,
         since_ns: 0,
         activity_ns: 0,
         channel: [0; MAX_RESPONSE_CHANNEL_LENGTH],
@@ -393,9 +398,13 @@ impl Sessions {
                 if !appended {
                     return Ok(Ingress::Unread);
                 }
+                // The client asked: it is sent nothing more, what it was owed
+                // included.
                 if let Some(session) = self.sessions.get_mut(index) {
                     session.closing = Some(CloseReason::ClientAction);
                     session.close_appended = true;
+                    session.ok_owed = false;
+                    session.leader_owed = false;
                 }
                 Ok(Ingress::Taken)
             }
@@ -494,7 +503,11 @@ impl Sessions {
     /// One duty cycle. On a member that leads: the session open and close events the
     /// back-pressured log did not take are appended, the ok events and new leader
     /// events owed are sent, and a session with nothing from its client for the
-    /// session timeout is closed. On every member: the redirects and refusals owed
+    /// session timeout is closed, its session close event appended and then, once
+    /// the log holds it, its closed event sent, tried on each cycle until the
+    /// publication takes it or the committed close frees the session. From when the
+    /// leader decides a session's close, it sends the session nothing it still owed
+    /// but that closed event. On every member: the redirects and refusals owed
     /// are sent, and one unsent at the session connect timeout is dropped. A member
     /// that stops leading gives up the connects it had accepted and every egress
     /// publication of a session; a member that begins to lead a term takes up the
@@ -698,6 +711,7 @@ impl Sessions {
                     session.leader_owed = false;
                     session.closing = None;
                     session.close_appended = false;
+                    session.closed_owed = false;
                     if held {
                         io.remove_egress(index)?;
                         work += 1;
@@ -729,6 +743,7 @@ impl Sessions {
                 session.activity_ns = clock.now_ns;
                 session.closing = None;
                 session.close_appended = false;
+                session.closed_owed = false;
             }
             work += 1;
         }
@@ -801,15 +816,37 @@ impl Sessions {
                 }
                 let mut closing = session.closing;
                 let mut close_appended = session.close_appended;
+                let mut closed_owed = session.closed_owed;
                 // Nothing from the client for the session timeout, an ok event it
-                // could not be sent among that nothing: the session is closed, and
-                // told so when its publication takes the event.
+                // could not be sent among that nothing: the session is closed. What
+                // it was still owed is not sent after this decision.
                 if closing.is_none()
                     && clock.now_ns.saturating_sub(session.activity_ns) >= SESSION_TIMEOUT_NS
                 {
                     closing = Some(CloseReason::Timeout);
+                    owed = (false, false);
                     self.counts.timed_out = self.counts.timed_out.saturating_add(1);
-                    io.send_egress(
+                    work += 1;
+                }
+                // The close event first, as Aeron's `SessionManager.checkSessions`
+                // does: the client is told of a timeout only once the log holds it.
+                if let Some(close_reason) = closing
+                    && !close_appended
+                    && io.append(&Message::SessionCloseEvent {
+                        leadership_term_id: lead.leadership_term_id,
+                        cluster_session_id: session.id,
+                        timestamp: clock.time_ms,
+                        close_reason,
+                    })?
+                {
+                    close_appended = true;
+                    closed_owed = close_reason == CloseReason::Timeout;
+                    work += 1;
+                }
+                // Owed until the publication takes it, as the ok event is; the
+                // committed close frees the slot and ends the debt.
+                if closed_owed
+                    && io.send_egress(
                         index,
                         &Message::SessionEvent {
                             cluster_session_id: session.id,
@@ -821,19 +858,9 @@ impl Sessions {
                             leader_heartbeat_timeout_ns: LEADER_HEARTBEAT_TIMEOUT_NS as i64,
                             detail: TIMEOUT_DETAIL,
                         },
-                    );
-                    work += 1;
-                }
-                if let Some(close_reason) = closing
-                    && !close_appended
-                    && io.append(&Message::SessionCloseEvent {
-                        leadership_term_id: lead.leadership_term_id,
-                        cluster_session_id: session.id,
-                        timestamp: clock.time_ms,
-                        close_reason,
-                    })?
+                    )
                 {
-                    close_appended = true;
+                    closed_owed = false;
                     work += 1;
                 }
                 if let Some(session) = self.sessions.get_mut(index) {
@@ -841,6 +868,7 @@ impl Sessions {
                     session.leader_owed = owed.1;
                     session.closing = closing;
                     session.close_appended = close_appended;
+                    session.closed_owed = closed_owed;
                 }
                 Ok(work)
             }

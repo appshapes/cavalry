@@ -16,7 +16,7 @@ under `docs/` is listed here; `just lint-docs` fails on one that is not.
 # How-to
 
 - [Ask the agent to make a change](how-to/ask-the-agent.md)
-- [Implement a feature, from card to commit](how-to/implement-a-feature.md)
+- [Implement a feature, from work item to commit](how-to/implement-a-feature.md)
 - [Run the bench and compare it with the baseline](how-to/run-the-bench.md)
 - [Run a driver and read doctor](how-to/run-the-driver.md)
 - [Record a stream to the durable log](how-to/record-a-stream.md)

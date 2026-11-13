@@ -9,12 +9,14 @@ so of two open pull requests the second to land conflicted with the first, whate
 else they changed, and went round again: merge, gates, review, bench. An entry is now
 a file under `changelog.d/`, which no other change touches:
 
-    changelog.d/<card or pull request>-<a few words>.md
+    changelog.d/<work item or pull request>-<a few words>.md
 
-The name begins with the card's number, or the pull request's when there is no card,
-so that two changes do not choose one name. The file holds what would have been
-appended, as it would have been written: one or more entries, each a line that begins
-`- ` with its continuation lines indented two spaces, in the reader's words, with its
+The name begins with the work item's number, or the pull request's when there is no
+work item, so that two changes do not choose one name. An entry added before commit
+5bbd2ad8, where Cavalry's work moved to the Brigade Board, begins with its Trello
+card's number (ADR 0113). The file holds what would have been appended, as it would
+have been written: one or more entries, each a line that begins `- ` with its
+continuation lines indented two spaces, in the reader's words, with its
 links written from the repository's root, as CHANGELOG.md's are.
 
 `check` reads every file of `changelog.d/` but its README, and but a file whose name
@@ -86,10 +88,10 @@ def fragments(root):
 def problems(root, path):
     """What is wrong with one entry file, in words, or nothing."""
     if not path.is_file():
-        return [f"{path.name} is not a file: an entry is one file, {DIRECTORY}/<card>-<a few words>.md"]
+        return [f"{path.name} is not a file: an entry is one file, {DIRECTORY}/<work item>-<a few words>.md"]
     found = []
     if not NAME.fullmatch(path.name):
-        found.append(f"{path.name}: the name is the card's number, or the pull request's, a hyphen, then "
+        found.append(f"{path.name}: the name is the work item's number, or the pull request's, a hyphen, then "
                      f"lower-case letters, digits and hyphens, then .md, as in 255-changelog-entries-as-files.md")
     try:
         text = path.read_text(encoding="utf-8")

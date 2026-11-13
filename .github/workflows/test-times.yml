@@ -14,7 +14,7 @@
 #
 # It is started by hand alone: no push and no pull request starts it, it is no check of
 # a pull request, and nothing waits on it. Its result is evidence for whoever started
-# it, to be linked from the pull request or the card it is for. It runs on hosted
+# it, to be linked from the pull request or the work item it is for. It runs on hosted
 # runners, never on a bench host: it measures nothing, and a bench host takes one job at
 # a time for the latency gate (ADR 0071).
 #

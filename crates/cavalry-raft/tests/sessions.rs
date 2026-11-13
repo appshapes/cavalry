@@ -784,22 +784,125 @@ fn a_silent_session_is_closed_at_the_session_timeout_and_a_keepalive_holds_it() 
     );
 }
 
-/// A close event the back-pressured log does not take waits and is appended by a
-/// later cycle, once.
+/// A timeout's session close event goes to the log before its closed event goes to
+/// the client, as in Aeron's `SessionManager.checkSessions`: while the log is
+/// back-pressured nothing is appended and nothing is sent, and the closed event is
+/// sent in the cycle the log takes the close event. Each once, and counted once.
 #[test]
-fn a_timeouts_close_event_waits_for_the_log() {
+fn a_timeouts_closed_event_waits_for_its_close_event_in_the_log() {
     let (mut sessions, mut world) = leading(1);
     world.back_pressured = true;
     work(&mut sessions, &mut world, 10_000, leader(1));
     work(&mut sessions, &mut world, 10_100, leader(1));
     assert_eq!(world.log.len(), 1);
+    assert_eq!(
+        world.sent(),
+        [] as [String; 0],
+        "nothing told while the log holds no close"
+    );
     assert_eq!(sessions.counts().timed_out, 1, "counted once");
     world.back_pressured = false;
     work(&mut sessions, &mut world, 10_200, leader(1));
-    work(&mut sessions, &mut world, 10_300, leader(1));
     assert_eq!(
         world.entries(1),
         ["close session 0 term 1 at 10200 Timeout"]
+    );
+    assert_eq!(
+        world.sent(),
+        [format!(
+            "0: event Closed session 0 correlation -1 term 1 leader 0 detail {:?}",
+            String::from_utf8_lossy(TIMEOUT_DETAIL)
+        )],
+        "in the cycle the log took the close"
+    );
+    work(&mut sessions, &mut world, 10_300, leader(1));
+    assert_eq!(
+        (world.log.len(), world.sent().len()),
+        (2, 0),
+        "appended and sent once"
+    );
+    assert_eq!(sessions.counts().timed_out, 1);
+}
+
+/// A closed event the session's publication does not take is owed, as an ok event
+/// is, and is sent in the cycle the publication takes it. The committed close frees
+/// the session and its publication, and the debt with them. What the session was
+/// still owed when the leader decided its close, an ok event here, is never sent:
+/// nothing follows the closed event.
+#[test]
+fn a_closed_event_is_owed_until_taken_or_the_close_is_committed() {
+    let mut sessions = Sessions::new(0, ENDPOINTS);
+    let mut world = World::new();
+    work(&mut sessions, &mut world, 0, leader(1));
+    // Two sessions, opened at 0 s and at 5 s, whose clients have not connected to
+    // their publications: each ok event is owed.
+    world.connected = false;
+    for (n, ms) in [(0u16, 0), (1, 5_000)] {
+        let response = channel(20_000 + n);
+        ingress(
+            &mut sessions,
+            &mut world,
+            ms,
+            leader(1),
+            &connect(i64::from(n), &response),
+        );
+        commit(&mut sessions, &mut world, ms);
+    }
+    work(&mut sessions, &mut world, 5_001, leader(1));
+    assert_eq!(sessions.open(), 2);
+    // Session 0 times out at 10 s: its close event is in the log, its closed event
+    // owed while the publication takes nothing.
+    work(&mut sessions, &mut world, 10_000, leader(1));
+    work(&mut sessions, &mut world, 10_100, leader(1));
+    assert_eq!(
+        world.entries(2),
+        ["close session 0 term 1 at 10000 Timeout"]
+    );
+    assert_eq!(world.sent(), [] as [String; 0]);
+    // The clients connect: session 0 is told it is closed and not that it is open;
+    // session 1, still open, is told ok.
+    world.connected = true;
+    work(&mut sessions, &mut world, 10_200, leader(1));
+    assert_eq!(
+        world.sent(),
+        [
+            format!(
+                "0: event Closed session 0 correlation -1 term 1 leader 0 detail {:?}",
+                String::from_utf8_lossy(TIMEOUT_DETAIL)
+            ),
+            "1: event Ok session 1 correlation 1 term 1 leader 0 detail \"\"".to_owned(),
+        ]
+    );
+    work(&mut sessions, &mut world, 10_300, leader(1));
+    assert_eq!(world.sent(), [] as [String; 0], "sent once");
+    assert_eq!(commit(&mut sessions, &mut world, 10_300), [true]);
+    assert_eq!(world.held(), [1]);
+    // Session 1 times out at 15 s while its publication takes nothing, and its close
+    // is committed before it takes anything: nothing is sent for it after.
+    world.connected = false;
+    work(&mut sessions, &mut world, 15_000, leader(1));
+    assert_eq!(
+        world.entries(3),
+        ["close session 1 term 1 at 15000 Timeout"]
+    );
+    assert_eq!(commit(&mut sessions, &mut world, 15_001), [true]);
+    world.connected = true;
+    work(&mut sessions, &mut world, 15_002, leader(1));
+    assert_eq!(
+        world.sent(),
+        [] as [String; 0],
+        "the committed close ended it"
+    );
+    assert_eq!((sessions.open(), world.held().len()), (0, 0));
+    assert_eq!(
+        sessions.counts(),
+        SessionCounts {
+            accepted: 2,
+            opened: 2,
+            closed: 2,
+            timed_out: 2,
+            ..SessionCounts::default()
+        }
     );
 }
 
