@@ -466,6 +466,82 @@ fn a_service_held_below_a_stopped_recordings_end_opens_that_recording_again() {
     member.close();
 }
 
+/// A member whose live recording has stopped while its counter still names it: the
+/// driver retired the image a follower recorded, or a write to the recording's
+/// segment file failed, and the member has not yet left its log. A service that read
+/// the recording to its stop is ended whole there; the log opened again at the stop is
+/// the same recording, ended at once, before the 5 s linger, with no report set and no
+/// entry, which is the answer a service pauses after before it asks again. Once the
+/// member stores −1 the call answers that there is no log.
+#[test]
+fn the_log_opened_at_the_stop_of_a_named_live_recording_that_stopped_is_ended_at_once() {
+    let mut member = Member::start("stopped");
+    let live = member.record(72, 4);
+    let live_id = live.recording.recording_id();
+    member.name(live_id, 0, &[], 4 * ENTRY);
+
+    let mut service = Cavalry::connect_to(&member.dir).expect("the service's client connects");
+    let mut log = open(&mut service, 0);
+    assert_eq!(log.recording_id(), live_id);
+    let mut read = Read::new();
+    wait("the service read what was committed", || {
+        poll(&mut log, &mut read);
+        log.position() == 4 * ENTRY
+    });
+    // The recording stops; the member still names it.
+    let (_, stopped_at) = member.stop(live);
+    assert_eq!(stopped_at, 4 * ENTRY);
+    wait("the handle is ended at the recording's stop", || {
+        poll(&mut log, &mut read);
+        log.is_ended()
+    });
+    assert_eq!(
+        (log.failed_at(), log.withdrawn_at(), log.faulted()),
+        (None, None, None)
+    );
+    assert_eq!(log.position(), stopped_at);
+    log.close(&mut service).expect("the handle closes");
+
+    // Opened again at the stop: the same recording, ended at once.
+    for _ in 0..3 {
+        let opened = Instant::now();
+        let mut again = open(&mut service, stopped_at);
+        assert_eq!(again.recording_id(), live_id, "the same recording");
+        wait("the handle on the same recording is ended", || {
+            poll(&mut again, &mut read);
+            again.is_ended()
+        });
+        assert!(
+            opened.elapsed() < Duration::from_secs(4),
+            "ended at once, not by the driver's withdrawal 5 s after the replay ended: {:?}",
+            opened.elapsed()
+        );
+        assert_eq!(
+            (again.failed_at(), again.withdrawn_at(), again.faulted()),
+            (None, None, None)
+        );
+        assert_eq!(again.position(), stopped_at);
+        again.close(&mut service).expect("the handle closes");
+    }
+    let expected: Read = (0..4).map(|number| (number * ENTRY, number, 72)).collect();
+    assert_eq!(
+        read, expected,
+        "every entry once, and none from the handles after"
+    );
+
+    // The member leaves its log: no log now.
+    member.log_recording_id.store_release(-1).expect("stores");
+    assert!(
+        service
+            .committed_log(stopped_at)
+            .expect("the driver answers")
+            .is_none(),
+        "the member names no recording"
+    );
+    service.close().expect("the service's client closes");
+    member.close();
+}
+
 /// What the call answers for each state of the member's file. No file: a member of a
 /// version that writes none, and the live recording is replayed. A file of another
 /// live recording than the counter names: the member has moved on, and the call

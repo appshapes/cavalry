@@ -92,15 +92,30 @@ its services read what it appends in the same way.
    term, or once the member has caught up through a replay. A handle reads one
    recording: the one that holds the position the log was opened at, which
    `log.recording_id()` names. So when a handle is ended and all three are `None`,
-   call `client.committed_log(log.position())` again. It returns the handle of the
-   member's next recording at once when the log goes on in one, and `None` when the
-   member has closed or left its log, or is between two recordings, as it does
-   before a member has a log. A member between two recordings names its next one
-   once its election has closed, so a service that is to go on asks again after a
-   pause. The example does the first of these, stops on `None`, and prints a
-   `reading member` line for each recording. A
-   service that starts at 0 beside a member whose log is in three recordings opens
-   the log three times and reads every entry once, in order.
+   call `client.committed_log(log.position())` again. It gives one of three answers:
+
+   - The handle of the member's next recording, at once, when the log goes on in
+     one.
+   - `None` when the member has closed or left its log, or is between two
+     recordings, as it does before a member has a log. A member between two
+     recordings names its next one once its election has closed.
+   - A handle on the same recording, `log.recording_id()` unchanged. When the member
+     still names that recording, it has stopped at the handle's position, and the
+     new handle is ended at once, with all three `None` and no entry. A follower's
+     recording stops so when its driver retires the image of a leader it has lost;
+     the member leaves its log within seconds, and the call then gives `None` or the
+     next recording. Any recording stops so when a write to its segment file fails,
+     counted in `recording.write_failed`, and the member may name it for longer;
+     `cavalry doctor` on the member's directory names the failure. When the member
+     has named a later recording since the handle was opened, the same recording
+     lies below it, and the new handle reads on in it as entries are committed.
+
+   So a service that is to go on asks again after a pause, after `None` and after
+   the same recording, and not in a loop that spins. The example opens the next
+   recording at once, pauses 100 ms after the same recording, stops on `None`, and
+   prints a `reading member` line each time it moves to another recording. A service that
+   starts at 0 beside a member whose log is in three recordings opens the log three
+   times and reads every entry once, in order.
 
    A poll can return 0
    while committed entries are still on their way: the service reads only what the
