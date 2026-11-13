@@ -99,9 +99,16 @@ fn a_split_vote_costs_a_second_delay_and_not_the_election_timeout() {
     let took = safety.run_until(&mut cluster, 3_000, "the first election", |cluster| {
         settled(cluster, &ids)
     });
-    assert_eq!(
-        took, 132,
-        "the election took {took} ms: two ballots, and no election timeout between them"
+    // Two ballots with no election timeout between them close inside one election
+    // timeout of the cluster's start: a candidate that waited the timeout out, as
+    // before ADR 0105, could not. The time itself, 132 ms at this seed, is printed
+    // and not asserted, so a change to the in-memory network's timing that keeps
+    // the rule does not fail the test.
+    let timeout_ms = cavalry_proto::cluster::ELECTION_TIMEOUT_NS / 1_000_000;
+    println!("a_split_vote: the election took {took} ms");
+    assert!(
+        took < timeout_ms,
+        "the election took {took} ms: two ballots, and an election timeout between them"
     );
     let leader = cluster.leader().expect("a leader");
     let mut candidates = 0;
