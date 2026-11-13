@@ -82,7 +82,7 @@ tests' twenty runs on both runners among it.
    You will see both jobs end with success when all twenty runs passed on both.
 
 5. Put the run's link where the evidence belongs: in the pull request body of the change
-   the test is for, with the count and both jobs' results, or on the card of the
+   the test is for, with the count and both jobs' results, or on the work item of the
    failure you were looking for.
 
 ## How to verify it worked
@@ -101,8 +101,8 @@ tests' twenty runs on both runners among it.
   failed run's output is in the job's log, above that line. A failure that comes once
   in many runs is a finding, not a reason to run again: read the test's own message,
   look for what the test waited on, and record the run's link and the message on the
-  card before changing anything. A test that fails only when another test run shares
-  the machine is a test that depends on the machine's load; say so on the card, with
+  work item before changing anything. A test that fails only when another test run shares
+  the machine is a test that depends on the machine's load; say so on the work item, with
   both runs.
 - A job ends without success and with no `test-times: N of N runs passed` line, and
   its log ends with GitHub's notice that the job has exceeded the maximum execution
@@ -115,7 +115,7 @@ tests' twenty runs on both runners among it.
   300 runs of it fit; the slowest test program in the workspace, `cavalry-client`'s
   `image_announced`, takes 72.05 s, so about 65 runs of it fit; 1000 runs fit for
   neither. The runs whose `passed` lines the log holds did pass. Ask for fewer, or start the workflow more than once and put each workflow
-  run's link and count on the card.
+  run's link and count on the work item.
 - `gh workflow run` stops with `HTTP 422` and `Workflow does not have
   'workflow_dispatch' trigger`: the branch does not hold
   `.github/workflows/test-times.yml`, because it was made from `master` before that

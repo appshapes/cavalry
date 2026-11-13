@@ -222,7 +222,7 @@ retention commands the soak runs do is
      next, `awk '$2 == "driver" { print $1, $5, $9, $10 }' "$run"`: a step that
      happened once has a cause
      in `soak.log` at that minute, as the rotation is of those 16 KiB, and a value
-     that rises hour after hour is a finding, with a card as its next step.
+     that rises hour after hour is a finding, with a work item as its next step.
    - `rss_kib` and `vsz_kib` follow from the others. Use `rss_kib` alone only where
      the parts read `-`, and expect it to rise there for a reason that is not growth.
      On Linux the driver brings every page of a mapping in when it maps it. macOS has
@@ -300,7 +300,7 @@ retention commands the soak runs do is
   says why it stopped.
 - The program exits with `message <n> arrived when <m> was next`: a message out of
   order or twice, which never happens (invariant 1); the log, the samples and the
-  recording at that minute are the evidence, and the next step is a card with them.
+  recording at that minute are the evidence, and the next step is a work item with them.
   `a <n>-byte message arrived when <m> was next ... not this program's` is a message
   from another publisher on the stream, which the prerequisites rule out; find that
   publisher before reading anything else into the run.

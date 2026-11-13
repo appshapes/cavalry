@@ -1,12 +1,12 @@
 ---
 name: next-task
-description: Say what the next task is, read from the repository and its process alone (master's CI, open pull requests and issues, the Cavalry list, the slice ADR's feature order, the gates that print not built yet, Proposed ADRs, fired Revisit clauses, active sessions); an optional count lists that many, in order
+description: Say what the next task is, read from the repository and its process alone (master's CI, open pull requests and issues, Cavalry's work items on the Brigade Board, the slice ADR's feature order, the gates that print not built yet, Proposed ADRs, fired Revisit clauses, active sessions); an optional count lists that many, in order
 argument-hint: "[count]"
 ---
 
 Answer "What is the next task?" from the repository and its process, not from memory or
 preference. Print the top task, or the top N in order, each as a title and a short
-description. Every task names the file, card, run or command it was read from, so a
+description. Every task names the file, work item, run or command it was read from, so a
 stranger can check it (CLAUDE.md, invariant 6). A task with no source is not listed.
 
 The count is: $ARGUMENTS. Empty means 1. Not a positive integer means 1, and say so.
@@ -19,7 +19,8 @@ session that read it. Create nothing, change nothing, start nothing.
 
 The process fixes the order of work, so the next task is a reading, not a choice.
 `master` is green after every commit (CLAUDE.md, Working rules for agents). A feature is
-a card and follows `docs/how-to/implement-a-feature.md`. The slice ADR fixes the order
+a work item on the team's Brigade Board and follows
+`docs/how-to/implement-a-feature.md`. The slice ADR fixes the order
 of the slice's features and which gates each one builds: ADR 0007 for the first slice,
 then the ADR its Revisit clause leads to, once that one is Accepted. A gate that prints
 `not built yet` is built by the first feature that needs it (CLAUDE.md, Gates). A
@@ -35,38 +36,49 @@ to `master` while this one runs.
 - `gh run list --branch master --workflow ci.yml --limit 1`: CI at `master`'s head.
 - `gh pr list --state open` and `gh issue list --state open`: work in flight through
   `docs/how-to/ask-the-agent.md`.
-- `trello card:list --board "AppShapes" --list "Cavalry" --format json`: the open cards.
-  The number is the path segment before the slug in `url`; `description` is the brief,
-  with its "Done when" section. On `no such table` or `not found on board`, run
-  `trello sync` once and retry. On a missing key or token, say the list was not read and
-  continue: the slice ADR still gives the order.
+- `brigade work-item list --tag cavalry --all`: Cavalry's open work items on the team's
+  Brigade Board, every list included (ADR 0113). The board's lists are Wanting, Doing,
+  Done and Hibernating, and the plain listing hides Hibernating. A work item in Done
+  was moved there when its last pull request landed and every "Done when" item held,
+  so it is finished, though `master` stays the evidence when the two disagree. One in
+  Hibernating is parked and is not a candidate. The others are open. For a
+  candidate, `brigade work-item show <number>` gives the brief, with its "Done when"
+  section, its assignee and its comments. A work item whose description begins "Trello
+  card N" is that card, carried under a new number (ADR 0113). When the board cannot be read
+  (`config` or `no_board`), say so and continue: the slice ADR still gives the order.
 - `brigade sessions`, when `brigade` is installed: the line under an active session is
   what it says it is doing, in its owner's words, unverified and possibly stale.
 - `grep -n 'not built yet' justfile`: the gates that do not exist.
 - `grep -H -m1 'Status' docs/decisions/*.md`: the Proposed ADRs.
 - `grep -n -A4 '^Revisit' docs/decisions/*.md`: the Revisit clauses.
 - The Decision section of the slice ADR, `docs/decisions/0007-build-ipc-pub-sub-first.md`:
-  the features in order, the card number where it names one, and the gates each feature
+  the features in order, the card number where it names one (a Trello card's, read
+  through ADR 0113's table), and the gates each feature
   builds. When its Revisit clause has fired (`just quickstart` passes on both runners),
   the slice is done, and until the next slice's ADR is Accepted, writing it is the task.
-- For every feature of the slice and every open card:
-  `git log --oneline origin/master --grep '^<n>:'`.
+- For every feature of the slice and every open work item:
+  `git log --oneline origin/master --grep '^<n>:'`. A commit before 5bbd2ad8 names a
+  Trello card by its number, so for the five work items ADR 0113 renumbered, grep the
+  Trello number as well.
 
 ## 2. Decide what is done, in flight or free
 
-- A feature of the slice is **done** when its card's "Done when" holds or, with no card,
+- A feature of the slice is **done** when its work item's "Done when" holds or, with no
+  work item,
   when the gates the slice ADR says it builds no longer print `not built yet` and its
   crate's README example is no longer "Not yet". `master` is the only evidence: a
   branch, a pull request or a session's line is not done.
 - A task is **in flight** when it has an open pull request or issue, has commits on
-  `origin/master` with its card prefix but is not done, or an active session's line
-  names it.
-- Everything else is **free**.
+  `origin/master` with its work item's prefix but is not done, or an active session's
+  line names it.
+- Everything else is **free**. A work item in Doing that nothing above holds is free
+  too: the session that took it ended, blocked or with a "Done when" item open, and its
+  last comment says what is left. Finishing it is the task.
 
 ## 3. Order the candidates
 
-Highest first. Within one rule, the slice ADR's order, then the card's position on the
-list.
+Highest first. Within one rule, the slice ADR's order, then the work item's list
+(Doing before Wanting), then its number.
 
 1. **A red `master`.** CI failed at `origin/master`'s head: the task is to make it
    green, titled with the failing run's subject. A run that is queued or in progress is
@@ -75,18 +87,19 @@ list.
    conflicting, or at the fix cap; an issue labelled `claude` whose run failed. The
    "When it does not work" section of `docs/how-to/ask-the-agent.md` says what each
    needs.
-3. **The first feature of the slice that is not done.** With a card: the card, titled
-   `<n>: <card title>`, and when commits with its prefix exist, the description says
-   which of the card's commits is next. Without a card: the feature, titled in the
-   imperative from the slice ADR's words, and the description says that step 1 of
-   `docs/how-to/implement-a-feature.md`, writing the card, is the first move. The
+3. **The first feature of the slice that is not done.** With a work item: the work
+   item, titled `<n>: <work item title>`, and when commits with its prefix exist, the
+   description says which of the work item's commits is next. Without a work item: the
+   feature, titled in the imperative from the slice ADR's words, and the description
+   says that step 1 of `docs/how-to/implement-a-feature.md`, writing the work item, is
+   the first move. The
    features after it follow in the slice's order, each waiting on the one before.
 4. **A Proposed ADR whose evidence now exists.** Its Evidence or Revisit section says
    what acceptance waits on; when that is on `master`, accepting it is a task. When it
    is not, the ADR is not a task.
 5. **A fired Revisit clause.** The trigger has happened on `master`, the action it names
-   has not, and no open card lists it. Cite the trigger and the evidence that it fired.
-6. **Every other open card**, by position on the list.
+   has not, and no open work item lists it. Cite the trigger and the evidence that it fired.
+6. **Every other open work item**, Doing before Wanting, then by number.
 
 A task in flight in another session is reported in one line as taken, with the
 session's name, and does not count toward N. A task in flight on a pull request or an
@@ -101,18 +114,22 @@ For each task, in order:
    <Description>
 ```
 
-- **Title**: imperative, capitalized, under 72 characters, usable verbatim as the card
-  title and the commit subject. A card's own title when one exists, prefixed `<n>: `.
+- **Title**: imperative, capitalized, under 72 characters, usable verbatim as the work
+  item's title and the commit subject. A work item's own title when one exists,
+  prefixed `<n>: `.
 - **Description**: two to four sentences, under 80 words. What it is. Why it is next,
-  with the source: a file and section, a card number, a run id or a command's output.
+  with the source: a file and section, a work item number, a run id or a command's
+  output.
   Which invariant, by number. What the first move is. What it waits on, when N > 1. No
   code block, and at most one path per sentence.
 
 After the list, one footer line beginning `Read:` with what was consulted: `origin/master`'s
-head and its CI state, the counts of open pull requests, issues and cards, the slice's
+head and its CI state, the counts of open pull requests, issues and work items, the slice's
 done count out of its total, the Proposed ADRs, and the active sessions. A source that
 could not be read is named here.
 
-End with the one command that starts the top task: `/trello-read <n>` when it has a
-card, `/trello-create "<title>"` when it does not, or `gh pr view <n>` for a pull
-request. Do not run it.
+End with the one command that starts the top task: `/work-item-start <n>` when it has a
+work item; `brigade work-item add --tag cavalry` when it does not, with the title, a
+blank line and the brief on stdin (what changes, a "Done when" section and the
+invariant by number, as `docs/how-to/implement-a-feature.md`, step 1, says); or `gh pr
+view <n>` for a pull request. Do not run it.

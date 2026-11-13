@@ -44,7 +44,7 @@ says about why they received it are decided here, by code that release-notes-tes
               lacks; a `CAVALRY_` variable that is no key of config.toml; a backticked dotted
               name that is neither a counter nor a key; a backticked path the checkout lacks;
               an ADR number with no file; a link outside this repository, or into a path or
-              heading that does not exist; a commit hash, a card or issue number, an address,
+              heading that does not exist; a commit hash, a work item, card or issue number, an address,
               a placeholder, the word Unreleased, anything secret-shaped, more than MAX_WORDS
               words; and a draft the renderer refuses, with its line numbers.
   recipients  The addresses of RELEASE_NOTES_RECIPIENTS, a list the maintainers keep by hand.
@@ -695,12 +695,12 @@ def lint(ctx, notes):
         fail("the draft names a commit (above)")
     else:
         ok("no commit hash")
-    hits = lines_matching(r"(?i)(?<![A-Za-z])(card|ticket|issue|pull request)s? #?\d+|(?<![\w/&#])#\d+\b", every)
+    hits = lines_matching(r"(?i)(?<![A-Za-z])(work item|card|ticket|issue|pull request)s? #?\d+|(?<![\w/&#])#\d+\b", every)
     if hits:
         show(hits)
-        fail("the draft names a card, an issue or a pull request (above)")
+        fail("the draft names a work item, a card, an issue or a pull request (above)")
     else:
-        ok("no card, issue or pull request")
+        ok("no work item, card, issue or pull request")
     hits = lines_matching(r"[A-Za-z0-9._%+-]+@([A-Za-z0-9-]+\.)+[A-Za-z]{2,}", every)
     if hits:
         show(hits)

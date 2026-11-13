@@ -609,12 +609,18 @@ class Lint(Base):
                      f"the link https://example.com/x is outside {REPO_URL}",
                      f"the link {REPO_URL}/blob/master/docs/nope.md names docs/nope.md, which is not in the checkout",
                      f"the link {REPO_URL}/blob/master/README.md#nope names a heading README.md does not have",
-                     "the draft names a commit (above)", "the draft names a card, an issue or a pull request (above)",
+                     "the draft names a commit (above)", "the draft names a work item, a card, an issue or a pull request (above)",
                      "the draft carries an address (above)", "the draft carries something secret-shaped (above)",
                      "the draft does not render as the email (above)"):
             self.assertTrue(any(want in f for f in fails), f"no FAIL line says {want!r}:\n{run.out}")
         self.assertIn("  line 14: a table is not supported", run.out)
         self.assertIn(f"release-notes-lint: {len(fails)} finding(s)", run.out)
+
+    def test_a_work_item_number_is_named(self):
+        run = self.lint("# The title\n\nWork item 295 moved the skills to the board.\n")
+        fails = [line for line in run.out.splitlines() if line.startswith("FAIL: ")]
+        self.assertIn("FAIL: the draft names a work item, a card, an issue or a pull request (above)", fails, run.out)
+        self.assertIn("  line 3: Work item 295 moved the skills to the board.", run.out)
 
     def test_bounded_words(self):
         run = self.lint("# The title\n\n" + " ".join(["word"] * (rn.MAX_WORDS + 1)) + "\n")

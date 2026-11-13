@@ -1,7 +1,7 @@
 ---
 name: commit
 description: Commit, pull and push the working tree to master after just lint, just test, just docs and just lint-docs, with a commit message that is the review record
-argument-hint: "[card number]"
+argument-hint: "[work item number]"
 ---
 
 Commit the current working tree to `master` with this repository's commit sequence.
@@ -30,7 +30,7 @@ to keep both sides with `master`'s lines first, anywhere else keep what both cha
 meant, run the gates again, and name the files and the resolution in the commit
 message (CLAUDE.md, Working rules for agents; card 218).
 
-The optional Trello card number is: $ARGUMENTS
+The optional work item number is: $ARGUMENTS
 
 ## 1. Analyze changes
 
@@ -104,8 +104,10 @@ a dead or overlapping arm shows only elsewhere.
 ## 5. Write the commit message
 
 - Subject: imperative mood, capitalized, under 72 characters, the intent rather than a
-  list of files. When a card number was given, prefix it: `<card>: <Subject>`. The
-  number is the AppShapes Trello card the work belongs to (see `/trello-read`).
+  list of files. When a work item number was given, prefix it: `<work item>: <Subject>`.
+  The number is that of the work item on the team's Brigade Board that the work belongs
+  to (`brigade work-item show <number>`; ADR 0113). A number is never invented: with
+  none given, the subject has no prefix.
 - Body: the review record. What changed. Which invariant it serves, by number. The
   evidence: the gate results, both histograms for a data-plane change, the ADR number,
   and the `just conformance` and `just replay-check` results when the change claims
