@@ -7,7 +7,9 @@ binary's `main`.
 
 - `cargo add cavalry` gives the client API, `cavalry::Cavalry`, `Publication` and
   `Subscription`, re-exported from `cavalry-client`, and an embeddable driver,
-  `cavalry::Driver`, re-exported from `cavalry-driver` with its `IdleStrategy`, and with
+  `cavalry::Driver`, re-exported from `cavalry-driver` with its `IdleStrategy`, with
+  `Idler`, a strategy with the state of its backoff, for a duty cycle the program
+  runs itself, and with
   `DriverThread` and `ThreadStart`, the hook `Driver::start_with_threads` takes, so a
   program can run with no separate daemon and can pin the driver's threads with no
   second dependency. One shared driver per host, `cavalry run`, is the production shape
@@ -27,7 +29,11 @@ binary's `main`.
   `CAVALRY_CLUSTER_MEMBERS`, the cluster's members string, and
   `CAVALRY_CLUSTER_MEMBER_ID`, this host's id in it, the driver is that member of the
   cluster: `run` starts the member's consensus module on a thread of its own, stops it
-  before the driver, and refuses one key without the other; `doctor` explains the
+  before the driver, and refuses one key without the other. When the member cannot go
+  on, its duty cycle failing for 10 s on end or its thread panicking, `run` gives it
+  up at once, counts that in the driver's `run.member_given_up`, closes the driver
+  and exits 1, and `doctor` reports the count from the directory the driver left;
+  `doctor` explains the
   driver from its counters and exits 0 when no check failed, listing every recording's
   two positions and, on a driver that is a cluster member, what the member is and
   what it waits for; `record <stream id>` records a stream's live publication to the durable

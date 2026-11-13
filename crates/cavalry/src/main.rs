@@ -23,8 +23,8 @@ use std::time::{Duration, Instant};
 use cavalry::cluster::ConsensusModule;
 use cavalry::config::Config;
 use cavalry::{
-    Cavalry, ClientError, Driver, FOLLOW_LENGTH, IdleStrategy, Image, NULL_LENGTH, NULL_POSITION,
-    Positions, Subscription, doctor, index,
+    Cavalry, ClientError, Driver, FOLLOW_LENGTH, IdleStrategy, Idler, Image, NULL_LENGTH,
+    NULL_POSITION, Positions, Subscription, doctor, index,
 };
 
 const USAGE: &str = "usage: cavalry <command> [--dir <path>] [--log-dir <path>]
@@ -772,7 +772,7 @@ fn run(config: &Config) -> ExitCode {
         match stopped.recv() {
             Ok(Stop::Signal) => eprintln!("cavalry run: stopping"),
             Ok(Stop::Member(error)) => {
-                eprintln!("cavalry run: the cluster member stopped, so the driver stops: {error}");
+                give_member_up(dir, &error);
                 failed = true;
             }
             // Every sender is gone without a signal: a bug, never silent.
@@ -807,17 +807,72 @@ fn run(config: &Config) -> ExitCode {
     }
 }
 
+/// What `cavalry run` does when the cluster member it runs cannot go on, before it
+/// closes the driver: says so, and adds one to `run.member_given_up` in the counters
+/// file of the driver in `dir`. The counter is the driver's own, so it stays in the
+/// directory once the driver has closed, where `cavalry doctor` reports it with what to
+/// do (invariant 4); what the member counted is gone by then, freed with its client. A
+/// count that cannot be written is said and stops nothing: the driver closes either way.
+fn give_member_up(dir: &Path, error: &str) {
+    eprintln!("cavalry run: the cluster member stopped, so the driver stops: {error}");
+    if let Err(error) = cavalry_control::run::member_given_up(dir) {
+        eprintln!(
+            "cavalry run: the counter run.member_given_up could not be written, so `cavalry \
+             doctor` will not say that the member was given up: {error}"
+        );
+    }
+}
+
 /// How long a cluster member's duty cycle may fail without a cycle that works before
 /// `cavalry run` gives the member up and stops: the leader heartbeat timeout, after
 /// which the cluster has counted the member out anyway.
 const MEMBER_FAILURE_TIMEOUT: Duration = Duration::from_secs(10);
 
+/// How long the member's thread waits after a duty cycle that failed before the next.
+const MEMBER_RETRY_INTERVAL: Duration = Duration::from_millis(100);
+
+/// What the thread `cavalry-consensus` runs: a consensus module, or a test's stand-in
+/// whose cycle fails or panics when the test says.
+trait Member: Send + 'static {
+    /// One duty cycle: how much work it did, or why it failed, with what to do.
+    fn do_work(&mut self) -> Result<usize, String>;
+
+    /// Closes the member: its client of the driver, while the driver is there to hear.
+    fn close(self) -> Result<(), String>;
+}
+
+impl Member for ConsensusModule {
+    fn do_work(&mut self) -> Result<usize, String> {
+        ConsensusModule::do_work(self).map_err(|error| error.to_string())
+    }
+
+    fn close(self) -> Result<(), String> {
+        ConsensusModule::close(self).map_err(|error| error.to_string())
+    }
+}
+
+/// Tells `cavalry run` to stop when the thread that holds it panics: without it the
+/// panic would end the member and leave `run` waiting for a signal, a plain driver with
+/// the cluster's keys set. Its `Drop` runs as the thread unwinds.
+struct StopOnPanic(std::sync::mpsc::Sender<Stop>);
+
+impl Drop for StopOnPanic {
+    fn drop(&mut self) {
+        if std::thread::panicking() {
+            let _ = self.0.send(Stop::Member(
+                "its thread panicked, which is a bug in Cavalry: the panic's message is \
+                 above; report it with that message, then start `cavalry run` again with the \
+                 same directories"
+                    .to_string(),
+            ));
+        }
+    }
+}
+
 /// Starts the cluster member `id` of `members` as a client of the driver in `dir`,
 /// with its record of terms in `log_dir`, and runs its duty cycle on a thread of its
-/// own with the conductor's idle strategy, until `stop` is set. An error of the start
-/// is returned; a duty cycle that fails is tried again every 100 ms, said once for each
-/// different error, and given up after [`MEMBER_FAILURE_TIMEOUT`] of failures on end,
-/// which `stopped` is told.
+/// own with the conductor's idle strategy, until `stop` is set ([`spawn_member`]). An
+/// error of the start is returned.
 fn start_member(
     dir: &Path,
     log_dir: &Path,
@@ -827,7 +882,7 @@ fn start_member(
     stop: Arc<AtomicBool>,
     stopped: std::sync::mpsc::Sender<Stop>,
 ) -> Result<std::thread::JoinHandle<()>, String> {
-    let mut module =
+    let module =
         ConsensusModule::start(dir, log_dir, members, id).map_err(|error| error.to_string())?;
     // Where the member's state is: the file and the labels a client reads the two
     // counters by, and doctor's note, which explains the member from them.
@@ -839,94 +894,68 @@ fn start_member(
          explains the member from them in its `cluster-member` note",
         dir.join("counters").display()
     );
+    spawn_member(id, module, strategy, MEMBER_FAILURE_TIMEOUT, stop, stopped).map_err(|error| {
+        format!(
+            "the cluster member's thread could not start: {error}; free a thread on this \
+             host and run cavalry again"
+        )
+    })
+}
+
+/// Runs `member`'s duty cycle on the thread `cavalry-consensus` with the idle strategy
+/// `strategy`, until `stop` is set, and closes the member there. A duty cycle that
+/// fails is tried again every 100 ms, said once for each different error, and given up
+/// after `give_up_after` of failures on end, which `stopped` is told with the last
+/// error; a panic of the thread, in a cycle or in the close, is told to `stopped` too,
+/// as it unwinds ([`StopOnPanic`]). So `run` hears of a member that cannot go on at
+/// once, whichever way it ended.
+fn spawn_member<M: Member>(
+    id: i32,
+    member: M,
+    strategy: IdleStrategy,
+    give_up_after: Duration,
+    stop: Arc<AtomicBool>,
+    stopped: std::sync::mpsc::Sender<Stop>,
+) -> std::io::Result<std::thread::JoinHandle<()>> {
     std::thread::Builder::new()
         .name("cavalry-consensus".to_string())
         .spawn(move || {
-            let mut idle = Idle::new(strategy);
+            // The guard first and the member after it, so that the guard is dropped last:
+            // a panic's unwinding drops the member before `run` is told.
+            let _on_panic = StopOnPanic(stopped.clone());
+            let mut member = member;
+            // The conductor's idler: one definition of the backoff's figures.
+            let mut idler = Idler::new(strategy);
             let mut failing_since: Option<Instant> = None;
             let mut last_error = String::new();
             while !stop.load(Ordering::Acquire) {
-                match module.do_work() {
-                    Ok(work) => {
+                match member.do_work() {
+                    Ok(0) => {
                         failing_since = None;
-                        idle.idle(work);
+                        idler.idle();
                     }
-                    Err(error) => {
-                        let text = error.to_string();
+                    Ok(_) => {
+                        failing_since = None;
+                        idler.reset();
+                    }
+                    Err(text) => {
                         if text != last_error {
                             eprintln!("cavalry run: cluster member {id}: {text}");
                             last_error = text;
                         }
                         let since = *failing_since.get_or_insert_with(Instant::now);
-                        if since.elapsed() >= MEMBER_FAILURE_TIMEOUT {
+                        if since.elapsed() >= give_up_after {
                             let _ = stopped.send(Stop::Member(last_error));
                             break;
                         }
-                        std::thread::sleep(Duration::from_millis(100));
+                        std::thread::sleep(MEMBER_RETRY_INTERVAL);
                     }
                 }
             }
-            if let Err(error) = module.close() {
+            if let Err(error) = member.close() {
                 eprintln!("cavalry run: cluster member {id}: {error}");
             }
         })
-        .map_err(|error| {
-            format!(
-                "the cluster member's thread could not start: {error}; free a thread on this \
-                 host and run cavalry again"
-            )
-        })
-}
-
-/// The idle strategy of the consensus module's thread, the conductor's: busy-spin never
-/// leaves the CPU, yield gives it up on every idle cycle, and backoff spins, then
-/// yields, then sleeps from 1 µs to 1 ms, doubling, until there is work again.
-struct Idle {
-    strategy: IdleStrategy,
-    spins: u32,
-    yields: u32,
-    park: Duration,
-}
-
-impl Idle {
-    const MAX_SPINS: u32 = 10;
-    const MAX_YIELDS: u32 = 20;
-    const MIN_PARK: Duration = Duration::from_micros(1);
-    const MAX_PARK: Duration = Duration::from_millis(1);
-
-    fn new(strategy: IdleStrategy) -> Self {
-        Self {
-            strategy,
-            spins: 0,
-            yields: 0,
-            park: Self::MIN_PARK,
-        }
-    }
-
-    fn idle(&mut self, work: usize) {
-        if work > 0 {
-            self.spins = 0;
-            self.yields = 0;
-            self.park = Self::MIN_PARK;
-            return;
-        }
-        match self.strategy {
-            IdleStrategy::BusySpin => std::hint::spin_loop(),
-            IdleStrategy::Yield => std::thread::yield_now(),
-            IdleStrategy::Backoff => {
-                if self.spins < Self::MAX_SPINS {
-                    self.spins += 1;
-                    std::hint::spin_loop();
-                } else if self.yields < Self::MAX_YIELDS {
-                    self.yields += 1;
-                    std::thread::yield_now();
-                } else {
-                    std::thread::sleep(self.park);
-                    self.park = (self.park * 2).min(Self::MAX_PARK);
-                }
-            }
-        }
-    }
 }
 
 /// Prints the report and exits with its verdict: 0 when no check failed, 1 otherwise.
@@ -1901,5 +1930,198 @@ mod tests {
         line.clear();
         format_line(&mut line, 320, b"end", &header(Flags::END));
         assert_eq!(line, "320 fragment end end");
+    }
+
+    /// What a test's member does on each duty cycle.
+    #[derive(Clone, Copy)]
+    enum Cycle {
+        /// Finds no work.
+        Idles,
+        /// Fails, with the same error every time.
+        Fails,
+        /// Panics.
+        Panics,
+    }
+
+    /// A stand-in for the consensus module on the thread `cavalry-consensus`.
+    struct TestMember {
+        cycle: Cycle,
+        cycles: Arc<std::sync::atomic::AtomicUsize>,
+        closed: Arc<AtomicBool>,
+    }
+
+    impl Member for TestMember {
+        fn do_work(&mut self) -> Result<usize, String> {
+            self.cycles.fetch_add(1, Ordering::Relaxed);
+            match self.cycle {
+                Cycle::Idles => Ok(0),
+                Cycle::Fails => Err("the test's member cannot work; nothing to do".to_string()),
+                Cycle::Panics => panic!("the test's member panics in its duty cycle"),
+            }
+        }
+
+        fn close(self) -> Result<(), String> {
+            self.closed.store(true, Ordering::Release);
+            Ok(())
+        }
+    }
+
+    /// A member's thread as `cavalry run` starts it, and what a test reads of it.
+    struct Started {
+        thread: std::thread::JoinHandle<()>,
+        stop: Arc<AtomicBool>,
+        /// Kept as the signal handler keeps its sender in `run`: the channel stays open
+        /// when the member's thread and its sender are gone, so `run` waits.
+        _signal: std::sync::mpsc::Sender<Stop>,
+        stopped: std::sync::mpsc::Receiver<Stop>,
+        cycles: Arc<std::sync::atomic::AtomicUsize>,
+        closed: Arc<AtomicBool>,
+    }
+
+    fn started(cycle: Cycle, give_up_after: Duration) -> Started {
+        let (signal, stopped) = std::sync::mpsc::channel::<Stop>();
+        let stop = Arc::new(AtomicBool::new(false));
+        let cycles = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let closed = Arc::new(AtomicBool::new(false));
+        let member = TestMember {
+            cycle,
+            cycles: Arc::clone(&cycles),
+            closed: Arc::clone(&closed),
+        };
+        let thread = spawn_member(
+            7,
+            member,
+            IdleStrategy::Backoff,
+            give_up_after,
+            Arc::clone(&stop),
+            signal.clone(),
+        )
+        .expect("the member's thread");
+        Started {
+            thread,
+            stop,
+            _signal: signal,
+            stopped,
+            cycles,
+            closed,
+        }
+    }
+
+    /// How long a test waits for the member's thread to tell `run`: far over the 100 ms
+    /// between two cycles that fail, and short of a test that hangs.
+    const TOLD_WITHIN: Duration = Duration::from_secs(10);
+
+    /// Card 257, the first note: a panic on the thread `cavalry-consensus` ended the
+    /// member and told nobody, so `run` went on as a plain driver until a signal.
+    #[test]
+    fn a_member_whose_thread_panics_stops_run_at_once() {
+        let member = started(Cycle::Panics, MEMBER_FAILURE_TIMEOUT);
+        match member.stopped.recv_timeout(TOLD_WITHIN) {
+            Ok(Stop::Member(error)) => {
+                assert!(error.contains("its thread panicked"), "{error}");
+                assert!(error.contains("start `cavalry run` again"), "{error}");
+            }
+            Ok(Stop::Signal) => panic!("a signal, and none was sent"),
+            Err(error) => panic!(
+                "the member's thread panicked and `run` was not told within {} s: {error}",
+                TOLD_WITHIN.as_secs()
+            ),
+        }
+        assert!(
+            member.thread.join().is_err(),
+            "the thread ended by its panic"
+        );
+        assert_eq!(member.cycles.load(Ordering::Relaxed), 1);
+        assert!(
+            !member.closed.load(Ordering::Acquire),
+            "a member that panicked is dropped, not closed"
+        );
+    }
+
+    /// A member whose cycles fail on end is given up after the time `run` allows, with
+    /// the last error, and closed; one whose cycles work goes on until `run` stops it,
+    /// and is closed then, with nothing told.
+    #[test]
+    fn a_member_is_given_up_after_cycles_that_fail_on_end_and_runs_on_otherwise() {
+        let give_up_after = Duration::from_millis(150);
+        let began = Instant::now();
+        let member = started(Cycle::Fails, give_up_after);
+        match member.stopped.recv_timeout(TOLD_WITHIN) {
+            Ok(Stop::Member(error)) => {
+                assert_eq!(error, "the test's member cannot work; nothing to do");
+            }
+            Ok(Stop::Signal) => panic!("a signal, and none was sent"),
+            Err(error) => panic!("the member was not given up: {error}"),
+        }
+        assert!(began.elapsed() >= give_up_after, "{:?}", began.elapsed());
+        member.thread.join().expect("the thread ends by itself");
+        assert!(
+            member.cycles.load(Ordering::Relaxed) >= 2,
+            "a cycle that failed was tried again before the member was given up"
+        );
+        assert!(
+            member.closed.load(Ordering::Acquire),
+            "given up, then closed"
+        );
+
+        let member = started(Cycle::Idles, give_up_after);
+        assert!(
+            member.stopped.recv_timeout(give_up_after * 3).is_err(),
+            "a member whose cycles work tells `run` nothing"
+        );
+        member.stop.store(true, Ordering::Release);
+        member
+            .thread
+            .join()
+            .expect("the thread ends when it is stopped");
+        assert!(
+            member.closed.load(Ordering::Acquire),
+            "stopped, then closed"
+        );
+    }
+
+    /// Card 257, the second note: a member given up left no count, so `cavalry doctor`
+    /// could not say why the driver had closed. The count is the driver's own, and is in
+    /// the directory the closed driver leaves.
+    #[test]
+    fn a_member_given_up_is_counted_where_doctor_reads_it_after_the_driver_closed() {
+        let dir = std::env::temp_dir().join(format!("cavalry-run-given-up-{}", std::process::id()));
+        let log_dir = dir.with_extension("log");
+        let _ = std::fs::remove_dir_all(&dir);
+        let _ = std::fs::remove_dir_all(&log_dir);
+        let driver = Driver::start_with(&dir, &log_dir, IdleStrategy::Backoff).expect("a driver");
+        let said = |report: &doctor::Report| {
+            report
+                .findings
+                .iter()
+                .find(|finding| finding.check == "run.member_given_up")
+                .map(|finding| (finding.level, finding.message.clone()))
+        };
+        assert_eq!(
+            said(&doctor::examine(&dir)),
+            None,
+            "nothing was given up yet"
+        );
+
+        give_member_up(&dir, "the test's member cannot work");
+        driver.close().expect("the driver closes");
+
+        let report = doctor::examine(&dir);
+        assert!(
+            report
+                .to_string()
+                .contains("closed; its counters below are the last it wrote"),
+            "{report}"
+        );
+        let (level, message) = said(&report).unwrap_or_else(|| {
+            panic!("doctor says nothing of the member that was given up: {report}")
+        });
+        assert_eq!(level, doctor::Level::Warn);
+        assert!(
+            message.starts_with("run.member_given_up is 1: `cavalry run` stopped this driver"),
+            "{message}"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+        let _ = std::fs::remove_dir_all(&log_dir);
     }
 }
