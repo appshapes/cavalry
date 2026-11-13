@@ -59,6 +59,12 @@ cavalry-driver = { path = "../cavalry-driver" }
 name = "allocations"
 harness = false
 
+# The sessions' allocation test, a program with no test harness for the same reason
+# (ADR 0115).
+[[test]]
+name = "sessions_allocations"
+harness = false
+
 # The throttled member's test, held as a program with no test harness: it starts
 # itself again as each of three members, a process each, since a CPU limit is a
 # process's, and it must have one thread when it starts them (`tests/throttle.rs`;
