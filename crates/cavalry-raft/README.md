@@ -135,7 +135,15 @@ commit path runs per message.
   twenty-two counts of `Counts::by_counter`. The
   counters of sessions and of the service's version in `spec/cluster.md`, "Counters",
   come with those features. One thread calls `do_work()`; the leader's process appends
-  with `offer(payload)`, up to 1,344 bytes an entry. A follower that leaves the log
+  with `offer(payload)`, up to 1,344 bytes an entry. A consensus message whose step
+  faults does not take the rest of its poll with it: `do_work()` hands every message
+  the poll read to the election, as the next cycle would have, and returns the first
+  fault. An entry that the leader's log publication refuses for a reason that waiting
+  does not mend, a stream at its largest position, a closed client or an entry longer
+  than the publication takes, is an `append` error, `RaftError::Append`, whose message
+  says what to do; under back pressure, on a log no member has joined yet and where a
+  term rotated, nothing is appended and the leader appends again. A follower that
+  leaves the log
   holds its recording until the driver has said where it stopped, and that stop is where
   its log ends. A stop that the driver refuses or does not answer is a `client` error,
   and a stop position not read within 1 s is a `stop-timeout` error. Either way the

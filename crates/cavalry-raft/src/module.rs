@@ -75,6 +75,7 @@ const NO_SYNC_ASKED: i64 = -1;
 
 const DOC: &str = "docs/reference/cluster.md#roles-and-the-election";
 const DOC_MEMBERS: &str = "docs/reference/cluster.md#members-and-streams";
+const DOC_LOG: &str = "docs/reference/cluster.md#the-log";
 const DOC_LOG_RECORDINGS: &str = "docs/reference/cluster.md#the-logs-recordings";
 const DOC_KEPT_LOG: &str = "docs/reference/durable-log.md#log-recordings";
 
@@ -156,6 +157,16 @@ pub enum RaftError {
     },
     /// The offer was refused by the member's state; offer again as the reason says.
     Offer(Refused),
+    /// The leader's log publication refused an entry for a reason that waiting does
+    /// not mend (`spec/cluster.md`, "The log"): the stream is at the largest position
+    /// its term length allows, the member's client is closed, or the entry is longer
+    /// than the publication takes, which the module's own bound refuses first. Back
+    /// pressure, a log no member has joined yet and a term that rotated are not this
+    /// error: the entry is not appended, and the leader appends it again.
+    Append {
+        /// The publication's refusal.
+        refusal: Offer,
+    },
     /// A member leaving the log stopped the recording it held, and 1 s later had not
     /// read where the recording stopped. It holds the recording still, in init, and the
     /// next duty cycle stops it again and waits for its stop.
@@ -215,7 +226,7 @@ pub enum ListedFound {
 impl RaftError {
     /// The reason's name: `members`, `member`, `recordings`, `terms-lost`,
     /// `log-forgotten`, `listed-recording`, `terms`, `catalog`, `client`, `poll`,
-    /// `unsupported`, `payload-too-long`, `offer`, `stop-timeout`,
+    /// `unsupported`, `payload-too-long`, `offer`, `append`, `stop-timeout`,
     /// `start-stop-timeout` or `log-recordings`.
     pub const fn reason(&self) -> &'static str {
         match self {
@@ -232,6 +243,7 @@ impl RaftError {
             RaftError::Unsupported { .. } => "unsupported",
             RaftError::PayloadTooLong { .. } => "payload-too-long",
             RaftError::Offer(_) => "offer",
+            RaftError::Append { .. } => "append",
             RaftError::StopTimeout { .. } => "stop-timeout",
             RaftError::StartStopTimeout { .. } => "start-stop-timeout",
             RaftError::LogRecordings { .. } => "log-recordings",
@@ -385,6 +397,45 @@ impl core::fmt::Display for RaftError {
                  at most {MAX_PAYLOAD_LENGTH}; send it in parts of that length; see {DOC}"
             ),
             RaftError::Offer(refused) => write!(f, "{refused}"),
+            RaftError::Append { refusal } => {
+                write!(
+                    f,
+                    "member stopped ({reason}): the leader's log publication refused an \
+                     entry, {}: ",
+                    refusal.reason()
+                )?;
+                match refusal {
+                    Offer::MaxPositionExceeded => write!(
+                        f,
+                        "the cluster's log is at the largest position its term length \
+                         allows, and no leader can append past it. This version takes no \
+                         snapshot to begin a new log from: stop every member, and start \
+                         the cluster again as a new cluster, every member on a new log \
+                         directory"
+                    )?,
+                    Offer::Closed => write!(
+                        f,
+                        "the member's client is closed, because its driver stopped \
+                         answering it or was closed. Run `cavalry doctor` on the member's \
+                         driver directory to see whether the driver runs, and start the \
+                         member again: it starts on the log directory it kept, and the \
+                         other members elect a leader meanwhile"
+                    )?,
+                    Offer::TooLong { found, limit } => write!(
+                        f,
+                        "an entry of {found} bytes where the publication takes {limit}. \
+                         The consensus module checks an entry's length before it appends, \
+                         so this is a fault of the module and not of what was offered: \
+                         report it, with this message"
+                    )?,
+                    // Never built into this error: `log_refusal` has the leader append
+                    // again.
+                    Offer::NotConnected | Offer::BackPressured | Offer::AdminAction => {
+                        write!(f, "the entry was not appended; append it again")?;
+                    }
+                }
+                write!(f, "; see {DOC_LOG}")
+            }
             RaftError::StopTimeout { recording_id } => write!(
                 f,
                 "member stopped ({reason}): the member stopped recording {recording_id} as \
@@ -1935,10 +1986,20 @@ impl Io for ClientIo {
         };
         match publication.offer(bytes) {
             Ok(_) => Ok(true),
-            Err(Offer::BackPressured | Offer::NotConnected | Offer::AdminAction) => Ok(false),
-            Err(other) => Err(RaftError::Client(ClientError::Driver {
-                what: format!("the log publication refused an entry: {other}"),
-            })),
+            Err(refusal) => log_refusal(refusal),
+        }
+    }
+}
+
+/// What a refusal of the leader's log publication is to the election: `Ok(false)`,
+/// the entry is not appended and the leader appends it again, for back pressure, a
+/// log no member has joined yet and a term that rotated; and for every other refusal
+/// [`RaftError::Append`], which says what the operator does next.
+fn log_refusal(refusal: Offer) -> Result<bool, RaftError> {
+    match refusal {
+        Offer::BackPressured | Offer::NotConnected | Offer::AdminAction => Ok(false),
+        Offer::MaxPositionExceeded | Offer::Closed | Offer::TooLong { .. } => {
+            Err(RaftError::Append { refusal })
         }
     }
 }
@@ -2421,8 +2482,12 @@ impl ConsensusModule {
     /// follower's log subscription holds, the core's own cycle, and the counters that
     /// moved. Returns how much it did, 0 for nothing, for the caller's idle strategy.
     /// An error is a step the member cannot go on without; the member stays in the
-    /// state it was in, and a later call tries the step again. An error of the core's
-    /// own cycle is returned after the counters are stored (ADR 0091). One error is
+    /// state it was in, and a later call tries the step again. A consensus message
+    /// whose step faults does not take the rest of its batch with it: every message
+    /// the poll read is handed to the core, as it would be on the next cycle, and the
+    /// first fault among them is returned once the batch is done, before the log is
+    /// observed. An error of the core's own cycle is returned after the counters are
+    /// stored (ADR 0091). One error is
     /// not of that kind: [`RaftError::LogRecordings`], a file of the log's recordings
     /// that could not be written, is returned after the core's cycle has run, so the
     /// member has moved on, records and replicates, and names no recording to a
@@ -2447,8 +2512,13 @@ impl ConsensusModule {
                     let whole = header.flags().contains(Flags::UNFRAGMENTED);
                     match Message::parse(Stream::Consensus, body) {
                         Ok(message) if whole => {
-                            if fault.is_none()
-                                && let Err(error) = core.on_message(clock, &message, io)
+                            // A message that faults leaves the rest of the poll's
+                            // batch to the core all the same. They are what the next
+                            // cycle would have read, and a message taken from the
+                            // stream and handed to nobody is lost with no count
+                            // (invariant 4). The first fault is the one returned.
+                            if let Err(error) = core.on_message(clock, &message, io)
+                                && fault.is_none()
                             {
                                 fault = Some(error);
                             }

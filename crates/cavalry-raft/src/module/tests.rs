@@ -3576,3 +3576,153 @@ fn a_truncation_that_empties_the_table_keeps_where_the_log_ends() {
     let terms = TermsFile::open(&member_log_dir).expect("the record of terms");
     assert_eq!(terms.log_leadership_term_id(), 0, "no term was deleted");
 }
+
+/// A consensus message whose step faults does not take the rest of its poll with it:
+/// a message taken from the stream and handed to nobody would be lost with no count
+/// (invariant 4). A member of two canvasses alone. A peer's client sends it two
+/// requests for a vote, and reads the member's stream beside it, so that the member's
+/// next poll finds both. The first request is for a term below the candidate term the
+/// member's `terms` file holds, which the test raised where the core does not see it:
+/// the store the core asks for is refused, a fault. The second is for a term above it.
+/// The duty cycle that reads them returns the first request's fault, and has handed
+/// the second to the core all the same: the member stored its term.
+#[test]
+fn a_message_that_faults_leaves_the_rest_of_its_poll_to_the_core() {
+    let dir = TestDir::new("fault-in-a-poll");
+    let driver_dir = dir.0.join("driver");
+    let log_dir = dir.0.join("log");
+    let ports = free_ports(10);
+    let member = |id: usize| {
+        let endpoints: Vec<String> = ports[id * 5..id * 5 + 5]
+            .iter()
+            .map(|port| format!("127.0.0.1:{port}"))
+            .collect();
+        format!("{id},{}", endpoints.join(","))
+    };
+    let members = format!("{}|{}", member(0), member(1));
+    let _driver = Driver::start(&driver_dir, &log_dir).expect("the driver starts");
+    let mut module =
+        ConsensusModule::start(&driver_dir, &log_dir, &members, 0).expect("the member starts");
+    // Out of init, where a member reads no message, into canvass.
+    wait_for("the member canvasses", || {
+        module.do_work().expect("the member's duty cycle");
+        (module.election_state() == ElectionState::Canvass).then_some(())
+    });
+
+    // Member 0's consensus endpoint is the second of its five.
+    let channel = format!("cavalry:udp?endpoint=127.0.0.1:{}", ports[1]);
+    let mut peer = Cavalry::connect_to(&driver_dir).expect("the peer's client");
+    let mut requests = peer
+        .add_publication(&channel, CONSENSUS_STREAM_ID)
+        .expect("the peer publishes to the member");
+    let mut beside = peer
+        .add_subscription(&channel, CONSENSUS_STREAM_ID)
+        .expect("the peer reads the member's stream");
+
+    module
+        .io
+        .terms
+        .set_candidate_term(9)
+        .expect("the file takes a higher candidate term");
+    let mut bytes = [0u8; 128];
+    for candidate_term_id in [5, 12] {
+        let request = Message::RequestVote {
+            log_leadership_term_id: -1,
+            log_position: 0,
+            candidate_term_id,
+            candidate_member_id: 1,
+            protocol_version: 0,
+        };
+        let length = request.write(&mut bytes).expect("a request vote");
+        wait_for("the request is taken", || {
+            requests.offer(&bytes[..length]).ok()
+        });
+    }
+    let mut arrived = 0;
+    wait_for("both requests have arrived", || {
+        arrived += beside.poll(|_, _| {}, 16).expect("the peer's poll");
+        (arrived == 2).then_some(())
+    });
+
+    // The first cycle that reads the stream reads both, and returns the first one's
+    // fault: the file refuses a candidate term below the one it holds.
+    let fault = wait_for("the cycle that reads the requests", || {
+        module.do_work().err()
+    });
+    assert!(matches!(fault, RaftError::Terms(_)), "{fault}");
+    assert_eq!(
+        module.io.terms.candidate_term(),
+        12,
+        "the second request reached the core in the cycle that returned the fault"
+    );
+    assert_eq!(module.messages_rejected, 0, "neither was rejected");
+    // The fault was one message's: the next cycle has nothing to return.
+    module.do_work().expect("the member's duty cycle");
+    assert_eq!(module.election_state(), ElectionState::Canvass);
+}
+
+/// What a refusal of the leader's log publication is to the election, and what its
+/// error says. A refusal that waiting mends appends nothing and is no error: the
+/// leader appends the entry again. Every other one is [`RaftError::Append`], whose
+/// message names the refusal, says what to do next, and names the page's section on
+/// the log, where a reader of the message looks first.
+#[test]
+fn a_refusal_of_the_leaders_log_says_what_to_do_next_or_has_the_leader_append_again() {
+    for wait in [
+        Offer::BackPressured,
+        Offer::NotConnected,
+        Offer::AdminAction,
+    ] {
+        assert!(
+            matches!(log_refusal(wait), Ok(false)),
+            "{wait:?} is no error"
+        );
+    }
+    for (refusal, does_next) in [
+        (
+            Offer::MaxPositionExceeded,
+            "start the cluster again as a new cluster, every member on a new log directory",
+        ),
+        (
+            Offer::Closed,
+            "Run `cavalry doctor` on the member's driver directory",
+        ),
+        (
+            Offer::TooLong {
+                found: 2_000,
+                limit: 1_408,
+            },
+            "report it, with this message",
+        ),
+    ] {
+        let error = log_refusal(refusal).expect_err("a refusal that waiting does not mend");
+        assert!(
+            matches!(&error, RaftError::Append { refusal: found } if *found == refusal),
+            "{error}"
+        );
+        assert_eq!(error.reason(), "append");
+        let text = error.to_string();
+        assert!(
+            text.starts_with(&format!(
+                "member stopped (append): the leader's log publication refused an entry, {}: ",
+                refusal.reason()
+            )),
+            "{text}"
+        );
+        assert!(text.contains(does_next), "{text}");
+        assert!(
+            text.ends_with("; see docs/reference/cluster.md#the-log"),
+            "{text}"
+        );
+    }
+    let text = log_refusal(Offer::TooLong {
+        found: 2_000,
+        limit: 1_408,
+    })
+    .expect_err("too long")
+    .to_string();
+    assert!(
+        text.contains("an entry of 2000 bytes where the publication takes 1408"),
+        "{text}"
+    );
+}

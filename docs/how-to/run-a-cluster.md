@@ -243,6 +243,21 @@ committed once a quorum, two of three, has it on disk.
   truncation of this member's log stopped on a fault part way, and the member then
   led a term, so its file names a recording that begins past the cut. Leave this
   member stopped, as for a directory that is lost.
+- `cavalry run: cluster member <id>: member stopped (append)`: the member leads, and
+  its log publication refused an entry for a reason that waiting does not mend. The
+  message names the reason and says what to do:
+  - `closed`: the member's client is closed, because its driver stopped answering it
+    or was closed. Run `cavalry doctor --dir <the member's driver directory>` to see
+    whether the driver runs, and start the member again with its command of step 3.
+    It starts on the log directory it had.
+  - `max-position-exceeded`: the cluster's log is at the largest position its term
+    length allows, and no leader can append past it. Stop every member and start a
+    new cluster, as step 6 does.
+  - `too-long`: the consensus module appended an entry longer than its own bound.
+    That is a fault of Cavalry: report it, with the message.
+
+  `cavalry run` tries the member's cycle again every 100 ms and stops the member
+  after 10 s of failures on end. The other two elect a leader meanwhile.
 - `cavalry run: member refused (log-forgotten)`: the member's `log-recordings` file
   begins above position 0, or names more than 1,024 recordings that hold a part of
   the log. A member makes one recording each time it joins a log, catches up or
