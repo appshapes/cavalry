@@ -12,14 +12,17 @@ use std::time::{Duration, Instant};
 use cavalry_client::{Cavalry, ClientError, CommittedLog, Fault};
 use cavalry_driver::Driver;
 use cavalry_log::catalog::CatalogReader;
-use cavalry_proto::cluster::{Message, SERVICE_LOG_STREAM_ID, Stream};
+use cavalry_proto::cluster::{
+    LOG_RECORDINGS_FILE_PREFIX, LOG_RECORDINGS_TMP_SUFFIX, LogRecordings, Message,
+    SERVICE_LOG_STREAM_ID, Stream,
+};
 use cavalry_raft::{ConsensusModule, ElectionState, NO_SESSION, RaftError, Refused, Role};
 use cavalry_shm::counters::CountersReader;
 use cavalry_shm::counters::generated::{
     CLUSTER_APPEND_POSITION, CLUSTER_COMMIT_POSITION, CLUSTER_ELECTION_CAUSE,
     CLUSTER_ELECTION_STATE, CLUSTER_ELECTION_STEPS, CLUSTER_ELECTIONS, CLUSTER_ELECTIONS_CLOSED,
-    CLUSTER_LEADER_MEMBER_ID, CLUSTER_LEADERSHIP_TERM_ID, CLUSTER_LOG_RECORDING_ID, CLUSTER_ROLE,
-    CLUSTER_TERMS_LED, SUBSCRIPTION_POSITION,
+    CLUSTER_LEADER_MEMBER_ID, CLUSTER_LEADERSHIP_TERM_ID, CLUSTER_LOG_RECORDING_ID,
+    CLUSTER_LOG_RECORDINGS_UNWRITTEN, CLUSTER_ROLE, CLUSTER_TERMS_LED, SUBSCRIPTION_POSITION,
 };
 
 struct TestDir(PathBuf);
@@ -1252,12 +1255,36 @@ fn a_service_whose_image_was_withdrawn_unread_is_told_where_its_entries_stop() {
     service.close(driver);
 }
 
+/// The member's file of its log's recordings, read as a service reads it
+/// (`spec/cluster.md`, "The log's recordings"): the live recording's id and start, and
+/// the recordings below it, each as its id, its start and its stop.
+fn log_recordings(member: &Member) -> (i64, i64, Vec<(i64, i64, i64)>) {
+    let id = member.module.member_id();
+    let bytes = std::fs::read(member.dir.join(format!("{LOG_RECORDINGS_FILE_PREFIX}{id}")))
+        .expect("the member's file of its log's recordings");
+    let file = LogRecordings::read(&bytes, id).expect("the file passes its checks");
+    (
+        file.live_recording_id(),
+        file.live_start_position(),
+        file.entries()
+            .map(|entry| {
+                (
+                    entry.recording_id,
+                    entry.start_position,
+                    entry.stop_position,
+                )
+            })
+            .collect(),
+    )
+}
+
 /// A service beside a follower that left the log and joined it again
 /// (`spec/cluster.md`, "The service"). The member names a new recording, which begins
-/// where it joined, its append position. A service that had read to that position
-/// opens the log there and reads on. A service whose position is below it is refused
-/// the replay with code 23: the entries before it are in the recording the member
-/// left, which this version names to no service.
+/// where it joined, its append position, and its file of its log's recordings lists
+/// the recording it left below that one (ADR 0103). A service that had read to that
+/// position opens the log there and reads on. A service whose position is below it
+/// is still refused the replay with code 23: the service's read of the recordings
+/// the file lists is the change after this one.
 #[test]
 fn a_service_reads_on_where_the_recording_its_member_joined_again_on_begins() {
     let dir = TestDir::new("service-joins-again");
@@ -1280,6 +1307,11 @@ fn a_service_reads_on_where_the_recording_its_member_joined_again_on_begins() {
         .expect("the driver answers")
         .expect("the member has its log");
     let first_recording = log.recording_id();
+    // The member's log is one recording, and its file says so.
+    assert_eq!(
+        log_recordings(&members[1]),
+        (first_recording, 0, Vec::new())
+    );
     let mut read = Read::new();
     run_until(&mut members, "the service read the first entries", |_| {
         poll_log(&mut log, &mut read);
@@ -1332,6 +1364,21 @@ fn a_service_reads_on_where_the_recording_its_member_joined_again_on_begins() {
         },
     );
 
+    // The member's file: the recording it left, from 0 to where it stopped, below the
+    // one it names now, which begins there. The counter holds the id the file names.
+    let second_recording = members[1]
+        .module
+        .log_recording_id()
+        .expect("the member names its new recording");
+    assert_eq!(
+        log_recordings(&members[1]),
+        (second_recording, first, vec![(first_recording, 0, first)])
+    );
+    assert_eq!(
+        counter(&members[1], CLUSTER_LOG_RECORDING_ID.0),
+        second_recording
+    );
+
     // Below the start of the recording the member names now: refused, and said so.
     let refused = client
         .committed_log(0)
@@ -1358,6 +1405,188 @@ fn a_service_reads_on_where_the_recording_its_member_joined_again_on_begins() {
     });
     assert_eq!(after.len(), usize::try_from(ENTRIES).expect("a count"));
     assert_eq!(after[0].0, first);
+    log.close(&mut client).expect("the handle closes");
+    client.close().expect("the service's client closes");
+
+    // A member that closes takes its file with it.
+    let file = members[1].dir.join(format!(
+        "{LOG_RECORDINGS_FILE_PREFIX}{}",
+        members[1].module.member_id()
+    ));
+    assert!(file.exists());
+
+    for member in members {
+        member.module.close().expect("the member closes");
+        member.driver.close().expect("the driver closes");
+    }
+    assert!(!file.exists(), "the member removed its file when it closed");
+}
+
+/// The third rule of order (`spec/cluster.md`, "The service"; ADR 0103): a member
+/// writes the file of its log's recordings before it stores a recording's id in
+/// `cluster.log_recording_id`. A follower whose file cannot be written, a directory
+/// in the place of the name it is written under, records the log and counts toward
+/// its commits as before, says what could not be written and what to do each duty
+/// cycle, and names no recording, so no service opens its log; once the file can be
+/// written the next cycle writes it and the counter names the recording.
+#[test]
+fn a_member_names_no_recording_until_it_has_written_the_file_of_its_logs_recordings() {
+    let dir = TestDir::new("file-before-counter");
+    let members_string = members_string();
+    let mut members = start(dir.path(), &members_string);
+    // The follower with id 2 is last in the vector; the leader, id 0, is not first.
+    let blocked = members
+        .iter()
+        .position(|m| m.module.member_id() == 2)
+        .expect("member 2");
+    let file = members[blocked]
+        .dir
+        .join(format!("{LOG_RECORDINGS_FILE_PREFIX}2"));
+    let tmp = members[blocked].dir.join(format!(
+        "{LOG_RECORDINGS_FILE_PREFIX}2{LOG_RECORDINGS_TMP_SUFFIX}"
+    ));
+    std::fs::create_dir(&tmp).expect("a directory where the file is written");
+
+    // Every member's duty cycle; the blocked member's error is kept, not a failure.
+    let run = |members: &mut [Member], what: &str, done: &mut dyn FnMut(&[Member]) -> bool| {
+        let deadline = Instant::now() + Duration::from_secs(60);
+        let mut last = None;
+        while !done(members) {
+            assert!(Instant::now() < deadline, "{what}: {:?}", states(members));
+            for (index, member) in members.iter_mut().enumerate() {
+                match member.module.do_work() {
+                    Ok(_) => {}
+                    Err(error) if index == blocked => last = Some(error),
+                    Err(error) => panic!("member {index}: {error}"),
+                }
+            }
+            std::thread::sleep(Duration::from_micros(200));
+        }
+        last
+    };
+
+    let refused = run(&mut members, "every election closed", &mut |members| {
+        members
+            .iter()
+            .all(|m| m.module.election_state() == ElectionState::Closed)
+    })
+    .expect("the member whose file cannot be written says so");
+    assert!(
+        matches!(&refused, RaftError::LogRecordings { path, .. } if *path == tmp),
+        "{refused}"
+    );
+    let text = refused.to_string();
+    assert!(text.contains("log-recordings-2.tmp"), "{text}");
+    assert!(
+        text.contains("Make the driver directory writable")
+            && text.contains("docs/reference/cluster.md#the-logs-recordings"),
+        "{text}"
+    );
+
+    // It records the log and counts toward a commit; it names no recording, and no
+    // service finds a log on its driver.
+    let leader = members
+        .iter()
+        .position(|m| m.module.role() == Role::Leader)
+        .expect("one member leads");
+    let offered_by = Instant::now() + Duration::from_secs(60);
+    for index in 0..10u8 {
+        loop {
+            assert!(
+                Instant::now() < offered_by,
+                "entry {index} was not taken: {:?}",
+                states(&members)
+            );
+            match members[leader].module.offer(&[index]) {
+                Ok(()) => break,
+                Err(RaftError::Offer(Refused::BackPressured)) => {
+                    for (place, member) in members.iter_mut().enumerate() {
+                        // The blocked member's cycle fails and still does its work;
+                        // no other member's may fail.
+                        if let Err(error) = member.module.do_work() {
+                            assert_eq!(place, blocked, "member {place}: {error}");
+                        }
+                    }
+                }
+                Err(error) => panic!("{error}"),
+            }
+        }
+    }
+    let end = 96 + 10 * 96;
+    run(
+        &mut members,
+        "the entries committed on every member",
+        &mut |members| {
+            members
+                .iter()
+                .all(|m| m.module.commit_position() == end && m.module.append_position() == end)
+        },
+    );
+    assert!(members[blocked].module.log_recording_id().is_some());
+    assert_eq!(counter(&members[blocked], CLUSTER_LOG_RECORDING_ID.0), -1);
+    assert!(!file.exists());
+    // Each cycle that could not write the file is counted, on this member alone:
+    // what tells it from a member whose recording never started.
+    let unwritten = counter(&members[blocked], CLUSTER_LOG_RECORDINGS_UNWRITTEN.0);
+    assert!(unwritten > 0, "no failed write was counted");
+    for (index, member) in members.iter().enumerate() {
+        if index != blocked {
+            assert_eq!(counter(member, CLUSTER_LOG_RECORDINGS_UNWRITTEN.0), 0);
+        }
+    }
+    let mut client =
+        Cavalry::connect_to(&members[blocked].dir).expect("the service's client connects");
+    assert!(
+        client
+            .committed_log(0)
+            .expect("the driver answers")
+            .is_none(),
+        "no member names a recording on this driver"
+    );
+
+    // The directory goes: the next cycle writes the file, and then the counter names
+    // the recording the file names.
+    std::fs::remove_dir(&tmp).expect("the directory is removed");
+    let after = run(
+        &mut members,
+        "the member named its recording",
+        &mut |members| counter(&members[blocked], CLUSTER_LOG_RECORDING_ID.0) >= 0,
+    );
+    assert!(
+        after.is_none(),
+        "no cycle failed once the file could be written"
+    );
+    let named = members[blocked]
+        .module
+        .log_recording_id()
+        .expect("the member's recording");
+    assert_eq!(
+        counter(&members[blocked], CLUSTER_LOG_RECORDING_ID.0),
+        named
+    );
+    assert_eq!(log_recordings(&members[blocked]), (named, 0, Vec::new()));
+    assert!(!tmp.exists(), "the file was renamed from its other name");
+    // The count stands where the last failed cycle left it.
+    let counted = counter(&members[blocked], CLUSTER_LOG_RECORDINGS_UNWRITTEN.0);
+    assert!(counted >= unwritten);
+    for member in members.iter_mut() {
+        member.module.do_work().expect("the member's duty cycle");
+    }
+    assert_eq!(
+        counter(&members[blocked], CLUSTER_LOG_RECORDINGS_UNWRITTEN.0),
+        counted,
+        "a cycle that has nothing to write counts nothing"
+    );
+    let mut log = client
+        .committed_log(0)
+        .expect("the driver answers")
+        .expect("the member has its log");
+    let mut read = Read::new();
+    run(&mut members, "the service read the log", &mut |_| {
+        poll_log(&mut log, &mut read);
+        log.position() == end
+    });
+    assert_eq!(read.len(), 11);
     log.close(&mut client).expect("the handle closes");
     client.close().expect("the service's client closes");
 

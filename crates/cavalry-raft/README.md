@@ -177,6 +177,19 @@ commit path runs per message.
   recording and reads it no further than `cluster.commit_position`:
   `cavalry-client`'s `Cavalry::committed_log` (`spec/cluster.md`, "The service"; ADR
   0066).
+- Tells a service where the log is below that recording: before the counter names a
+  recording, the module writes the file `log-recordings-<member id>` in its driver
+  directory, which lists the recordings that hold the member's log below the live
+  one, each with where it begins and where it stopped, or, for the recording of a
+  catch-up's replay that is still being made, what it has synced, so that a service
+  at any position the member keeps can replay the recording that holds it. A file
+  that cannot be written is `RaftError::LogRecordings` from `do_work()`, which says
+  what to do. In each call that fails so the member still records and replicates,
+  and it names no recording until a later call has written the file; `cavalry run`
+  makes that call again every 100 ms and gives the member up after 10 s of calls
+  that fail, as for any error of a duty cycle. It truncates no recording of its log
+  while the counter names one, and removes the file when it closes, after it has
+  stored −1 in the counter (`spec/cluster.md`, "The log's recordings"; ADR 0103).
 - Runs the same core in memory: `memory::Cluster` is one to eight members in one process
   on a clock the caller steps, with loss, delay, a member cut from every other, two
   members parted from each other (`cut_between`) or one that the other stops hearing
@@ -197,17 +210,11 @@ commit path runs per message.
   double and allocates; its consensus stream holds at most 4,096 messages in flight and
   loses, and counts, one sent while it is full, and a leader's log publication and each
   member's log hold every entry appended or received for the cluster's life.
-- Not built yet, the two changes that follow ADR 0103's file: the member's write of
-  `log-recordings-<member id>` in its driver directory, and the service's read below
-  the member's live recording. `spec/cluster.md`, "The service" and "The log's
-  recordings", say what both do. Until they land a member writes no such file, and a
-  service whose position is below the recording its member names is refused with
-  error code 23, as before. Four more sentences of the page wait for the member's
-  write: a member does not yet wait for `cluster.log_recording_id` to hold −1
-  before it truncates ("Messages during an election"); it does not store −1 there
-  when the file cannot be written; `cluster.log_recordings_unwritten`, the count
-  of such a cycle, is not registered yet; and no member removes a file at its
-  close, after it has stored −1 there.
+- Not built yet, the change that follows this one under ADR 0103: the service's read
+  below the member's live recording, in `cavalry-client`. `spec/cluster.md`, "The
+  service", says what it does. Until it lands a service whose position is below the
+  recording its member names is refused with error code 23, as before, though the
+  member's file lists the recording that holds that position.
 - To come, each with its card: the C ABI's calls for a service, so that a service is
   a program in any of the five client languages (card 227), the election and mixed
   versions in a rolling upgrade (card 228), the cluster client (card 229), snapshots

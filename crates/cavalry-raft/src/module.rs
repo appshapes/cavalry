@@ -14,10 +14,13 @@
 //! gives up the log, where a leader starts or stops a replay for a member that is
 //! behind (ADR 0091), where a member that is behind subscribes on its `catchup`
 //! endpoint for a replay or removes that subscription (ADR 0094), and where a member
-//! truncates its log (ADR 0095).
+//! truncates its log (ADR 0095). One cycle more leaves the rule: the one in which a
+//! member names a recording of its log writes the file of the log's recordings in the
+//! driver directory, for the member's service, before the counter holds the id (ADR
+//! 0103).
 
 use std::collections::VecDeque;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use cavalry_client::{
@@ -28,15 +31,18 @@ use cavalry_log::catalog::{CatalogError, CatalogReader};
 use cavalry_log::terms::{NO_RECORDING, TermsError, TermsFile};
 use cavalry_proto::client_protocol::{ErrorCode, FOLLOW_LENGTH, ReplayStopReason};
 use cavalry_proto::cluster::{
-    CONSENSUS_STREAM_ID, EMPTY_MEMBER, Endpoint, LOG_STREAM_ID, MAX_MEMBERS, MembersError, Message,
-    Stream, parse_members,
+    CONSENSUS_STREAM_ID, EMPTY_MEMBER, Endpoint, LOG_RECORDINGS_FILE_PREFIX,
+    LOG_RECORDINGS_TMP_SUFFIX, LOG_STREAM_ID, LogRecording, LogRecordingsError,
+    MAX_LOG_RECORDINGS_LENGTH, MAX_MEMBERS, MembersError, Message, Stream, parse_members,
+    write_log_recordings,
 };
 use cavalry_proto::udp::UDP_TERM_LENGTH;
 use cavalry_shm::counters::CounterId;
 use cavalry_shm::counters::generated::{
     CLUSTER_APPEND_POSITION, CLUSTER_COMMIT_POSITION, CLUSTER_ELECTION_CAUSE,
     CLUSTER_ELECTION_STATE, CLUSTER_LEADER_MEMBER_ID, CLUSTER_LEADERSHIP_TERM_ID,
-    CLUSTER_LOG_RECORDING_ID, CLUSTER_MESSAGES_REJECTED, CLUSTER_ROLE, COUNTERS,
+    CLUSTER_LOG_RECORDING_ID, CLUSTER_LOG_RECORDINGS_UNWRITTEN, CLUSTER_MESSAGES_REJECTED,
+    CLUSTER_ROLE, COUNTERS,
 };
 
 use crate::consensus::{
@@ -66,6 +72,7 @@ const NO_SYNC_ASKED: i64 = -1;
 
 const DOC: &str = "docs/reference/cluster.md#roles-and-the-election";
 const DOC_MEMBERS: &str = "docs/reference/cluster.md#members-and-streams";
+const DOC_LOG_RECORDINGS: &str = "docs/reference/cluster.md#the-logs-recordings";
 
 /// Why a consensus module did not start, or stopped.
 #[derive(Debug)]
@@ -114,11 +121,24 @@ pub enum RaftError {
         /// The recording held.
         recording_id: i64,
     },
+    /// The file of the member's log's recordings could not be written in the driver
+    /// directory (`spec/cluster.md`, "The log's recordings"; ADR 0103). The member
+    /// names no recording to its service until a later duty cycle has written it,
+    /// and every cycle until then returns this error after it has done its work.
+    /// What calls `do_work` decides how long that may last: `cavalry run` tries a
+    /// cycle that fails again every 100 ms and gives the member up after 10 s.
+    LogRecordings {
+        /// The file, or the name it is written under before it is renamed.
+        path: PathBuf,
+        /// The error.
+        source: std::io::Error,
+    },
 }
 
 impl RaftError {
     /// The reason's name: `members`, `member`, `restart`, `terms`, `catalog`, `client`,
-    /// `poll`, `unsupported`, `payload-too-long`, `offer` or `stop-timeout`.
+    /// `poll`, `unsupported`, `payload-too-long`, `offer`, `stop-timeout` or
+    /// `log-recordings`.
     pub const fn reason(&self) -> &'static str {
         match self {
             RaftError::Members(_) => "members",
@@ -132,6 +152,7 @@ impl RaftError {
             RaftError::PayloadTooLong { .. } => "payload-too-long",
             RaftError::Offer(_) => "offer",
             RaftError::StopTimeout { .. } => "stop-timeout",
+            RaftError::LogRecordings { .. } => "log-recordings",
         }
     }
 }
@@ -188,9 +209,54 @@ impl core::fmt::Display for RaftError {
                  repeats, run `cavalry doctor`: the driver or this process is starved of CPU; \
                  see {DOC}"
             ),
+            RaftError::LogRecordings { path, source } => {
+                // The module's own writer refuses a list only if the module made one
+                // the page forbids: nothing an operator can put right.
+                let remedy = if source.kind() == std::io::ErrorKind::InvalidData {
+                    "This is a fault of the consensus module and not of the directory: \
+                     report it with this message"
+                } else {
+                    "Make the driver directory writable by the member's user and give it \
+                     room"
+                };
+                write!(
+                    f,
+                    "member stopped ({reason}): {} could not be written: {source}. The \
+                     member lists the recordings of its log there for its service, and \
+                     names no recording in `cluster.log_recording_id` until the file is \
+                     written: in each duty cycle that fails so it still records and \
+                     replicates, and its service reads nothing. {remedy}; do_work writes \
+                     the file again on its next call, and `cavalry run` makes that call \
+                     every 100 ms and gives the member up after 10 s of cycles that fail; \
+                     see {DOC_LOG_RECORDINGS}",
+                    path.display()
+                )
+            }
         }
     }
 }
+
+/// A list of its log's recordings that the module made and the file's writer refused
+/// ([`write_log_recordings`]). The writer's error is the reader's, and a reader's
+/// advice, to stop whatever else writes in the driver directory, is wrong here: no
+/// other process made this list. So the member says what the check found and no
+/// more, and [`RaftError::LogRecordings`] adds that the fault is the module's own.
+#[derive(Debug)]
+struct RefusedList(LogRecordingsError);
+
+impl std::fmt::Display for RefusedList {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "the list the member made of its log's recordings is one the file's format \
+             refuses ({}): {}",
+            self.0.reason(),
+            self.0.found()
+        )
+    }
+}
+
+impl std::error::Error for RefusedList {}
 
 impl std::error::Error for RaftError {
     fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
@@ -202,6 +268,7 @@ impl std::error::Error for RaftError {
             RaftError::Client(error) => Some(error),
             RaftError::Poll(fault) => Some(fault),
             RaftError::Offer(error) => Some(error),
+            RaftError::LogRecordings { source, .. } => Some(source),
             _ => None,
         }
     }
@@ -391,6 +458,16 @@ struct ClientIo {
     sync_asked_at: i64,
     /// The same for its recording of a replay.
     catchup_sync_asked_at: i64,
+    // The file of the log's recordings, for the member's service (ADR 0103).
+    /// `log-recordings-<member id>` in the driver directory.
+    recordings_path: PathBuf,
+    /// The name the file is written under before it is renamed.
+    recordings_tmp_path: PathBuf,
+    /// The file's bytes, the longest file's length, allocated at the member's start.
+    recordings_file: Vec<u8>,
+    /// The id `cluster.log_recording_id` holds, as the last duty cycle left it: −1
+    /// while the member names no recording. A truncation waits for −1 (ADR 0103).
+    named: i64,
 }
 
 /// Asks the driver to sync `recording`, this member's recording of the log, when the
@@ -577,6 +654,78 @@ impl ClientIo {
             self.kept.pop_front();
         }
         self.kept.push_back(kept);
+    }
+
+    /// The recording this member records the live log into, with where it begins: the
+    /// leader's of its publication, from the base it was created at, or a follower's
+    /// of the leader's image once it is part of the member's log ([`Self::counted`]).
+    fn live_recording(&self) -> Option<(i64, i64)> {
+        match &self.log_recording {
+            Some(recording) => Some((recording.recording_id(), self.log_base)),
+            None => self
+                .counted()
+                .map(|held| (held.recording.recording_id(), held.start)),
+        }
+    }
+
+    /// Writes the file of this member's log's recordings for the live recording
+    /// `live_recording_id`, which begins at `live_start_position` (`spec/cluster.md`,
+    /// "The log's recordings"; ADR 0103): the recordings the member stopped and
+    /// keeps, in the order they begin, and after them its recording of a catch-up's
+    /// replay while it still makes it, with what that recording has synced. One that
+    /// holds nothing has no entry. The file is written whole under its other name
+    /// and renamed, so that a service reads this file or the one before it. A write
+    /// and a rename, four system calls, in the duty cycle in which the member names a
+    /// recording, and again in each cycle while one of them fails. A write that
+    /// succeeds allocates nothing: the bytes and both paths were made at the member's
+    /// start. One that fails clones the path into its error.
+    fn write_log_recordings(
+        &mut self,
+        live_recording_id: i64,
+        live_start_position: i64,
+    ) -> Result<(), RaftError> {
+        let kept = self.kept.iter().map(|kept| LogRecording {
+            recording_id: kept.recording_id,
+            start_position: kept.start,
+            stop_position: kept.stop,
+        });
+        let end = self.stopped_at;
+        let replayed = self
+            .catchup_held
+            .as_ref()
+            .filter(|held| held.checked && held.start == end)
+            .map(|held| LogRecording {
+                recording_id: held.recording.recording_id(),
+                start_position: held.start,
+                stop_position: held.recording.synced_position(),
+            });
+        let entries = kept
+            .chain(replayed)
+            .filter(|entry| entry.stop_position > entry.start_position);
+        let length = write_log_recordings(
+            &mut self.recordings_file,
+            self.member_id,
+            live_recording_id,
+            live_start_position,
+            entries,
+        )
+        .map_err(|error| RaftError::LogRecordings {
+            path: self.recordings_path.clone(),
+            source: std::io::Error::new(std::io::ErrorKind::InvalidData, RefusedList(error)),
+        })?;
+        let bytes = self.recordings_file.get(..length).unwrap_or(&[]);
+        std::fs::write(&self.recordings_tmp_path, bytes).map_err(|source| {
+            RaftError::LogRecordings {
+                path: self.recordings_tmp_path.clone(),
+                source,
+            }
+        })?;
+        std::fs::rename(&self.recordings_tmp_path, &self.recordings_path).map_err(|source| {
+            RaftError::LogRecordings {
+                path: self.recordings_path.clone(),
+                source,
+            }
+        })
     }
 
     /// The recording that holds `position`, and where it stopped, `None` for the
@@ -885,8 +1034,12 @@ impl Io for ClientIo {
     /// record holds is returned.
     ///
     /// Every command waits for the driver's answer, so the truncation is one step
-    /// and `Ok(None)` is returned in one case alone: the member still holds a
-    /// recording of the log or of a replay, which the core never asks of. A command
+    /// and `Ok(None)` is returned in two cases alone. The member still holds a
+    /// recording of the log or of a replay, which the core never asks of. Or
+    /// `cluster.log_recording_id` still holds the id of the recording the member
+    /// left, which the duty cycle that left it stores −1 over: a service takes the
+    /// member's commit position as its bound while the counter names a recording, and
+    /// no recording of the log is cut under that bound (ADR 0103). A command
     /// that faults returns with what was cut so far cut in the table too, and the
     /// leader's next new leadership term asks again: a purge of a recording already
     /// purged, or a truncation to where a recording already stops, changes nothing.
@@ -897,6 +1050,7 @@ impl Io for ClientIo {
             || self.starting.is_some()
             || self.catchup_held.is_some()
             || self.catchup_starting.is_some()
+            || self.named != NO_RECORDING
         {
             return Ok(None);
         }
@@ -1299,6 +1453,9 @@ struct Counters {
     /// [`Counts::LEN`] of them, added once when the module starts.
     counts: Vec<Stored>,
     messages_rejected: Stored,
+    /// `cluster.log_recordings_unwritten`: the duty cycles in which the file of the
+    /// log's recordings could not be written (ADR 0103).
+    log_recordings_unwritten: Stored,
 }
 
 impl Counters {
@@ -1362,6 +1519,11 @@ impl Counters {
                 counts
             },
             messages_rejected: add(CLUSTER_MESSAGES_REJECTED, "cluster.messages_rejected", 0)?,
+            log_recordings_unwritten: add(
+                CLUSTER_LOG_RECORDINGS_UNWRITTEN,
+                "cluster.log_recordings_unwritten",
+                0,
+            )?,
         })
     }
 
@@ -1370,7 +1532,11 @@ impl Counters {
     /// The recording id is stored before the commit position, and a commit position
     /// only once the counter holds that id, so that no commit position is stored
     /// beside a recording id that does not hold it (`spec/cluster.md`, "The service").
-    fn store(&mut self, core: &Consensus, messages_rejected: u64, log_recording_id: i64) {
+    /// Returns the recording id the counter holds after it. `module` is the module's
+    /// own two counts: the consensus messages it rejected, and the duty cycles in
+    /// which it could not write the file of its log's recordings.
+    fn store(&mut self, core: &Consensus, module: [u64; 2], log_recording_id: i64) -> i64 {
+        let [messages_rejected, log_recordings_unwritten] = module;
         let counts: Counts = core.counts();
         self.role.store(role_code(core));
         self.election_state
@@ -1387,6 +1553,9 @@ impl Counters {
             stored.store(count_value(value));
         }
         self.messages_rejected.store(count_value(messages_rejected));
+        self.log_recordings_unwritten
+            .store(count_value(log_recordings_unwritten));
+        self.log_recording_id.last
     }
 }
 
@@ -1397,6 +1566,9 @@ pub struct ConsensusModule {
     io: ClientIo,
     counters: Counters,
     messages_rejected: u64,
+    /// The duty cycles in which the file of the log's recordings could not be
+    /// written, `cluster.log_recordings_unwritten` (ADR 0103).
+    log_recordings_unwritten: u64,
     started: Instant,
     /// The clock of the last duty cycle, which an offer between two cycles is stamped
     /// with: the clock is read once a cycle and never per entry.
@@ -1452,6 +1624,12 @@ impl ConsensusModule {
             });
         }
 
+        let recordings_path = dir
+            .as_ref()
+            .join(format!("{LOG_RECORDINGS_FILE_PREFIX}{member_id}"));
+        let recordings_tmp_path = dir.as_ref().join(format!(
+            "{LOG_RECORDINGS_FILE_PREFIX}{member_id}{LOG_RECORDINGS_TMP_SUFFIX}"
+        ));
         let mut client = Cavalry::connect_to(dir)?;
         let consensus =
             client.add_subscription(&endpoint_channel(&own.consensus), CONSENSUS_STREAM_ID)?;
@@ -1509,9 +1687,14 @@ impl ConsensusModule {
                 catalog,
                 stopped_at: 0,
                 sync_asked_at: NO_SYNC_ASKED,
+                recordings_path,
+                recordings_tmp_path,
+                recordings_file: vec![0; MAX_LOG_RECORDINGS_LENGTH],
+                named: NO_RECORDING,
             },
             counters,
             messages_rejected: 0,
+            log_recordings_unwritten: 0,
             started,
             clock: read_clock(started),
         })
@@ -1564,10 +1747,36 @@ impl ConsensusModule {
         // faults at a step it tries again each cycle, a replay it cannot start, still
         // shows its role, its state and its counts (ADR 0091).
         let stepped = core.do_work(clock, io);
-        let log_recording_id = self.log_recording_id().unwrap_or(NO_RECORDING);
-        self.counters
-            .store(&self.core, self.messages_rejected, log_recording_id);
-        Ok(read + stepped?)
+        // The file of the log's recordings is written before the counter names a
+        // recording it did not name (`spec/cluster.md`, "The service"; ADR 0103). A
+        // file that could not be written leaves the counter at −1, and the next
+        // cycle writes it again; its error is returned after the core's own.
+        let mut written = Ok(());
+        let log_recording_id = match self.io.live_recording() {
+            Some((id, start)) if id != self.io.named => {
+                match self.io.write_log_recordings(id, start) {
+                    Ok(()) => id,
+                    Err(error) => {
+                        // Counted, so that `cavalry doctor` tells this member from
+                        // one whose recording never started (invariant 4).
+                        self.log_recordings_unwritten =
+                            self.log_recordings_unwritten.saturating_add(1);
+                        written = Err(error);
+                        NO_RECORDING
+                    }
+                }
+            }
+            Some((id, _)) => id,
+            None => NO_RECORDING,
+        };
+        self.io.named = self.counters.store(
+            &self.core,
+            [self.messages_rejected, self.log_recordings_unwritten],
+            log_recording_id,
+        );
+        let work = read + stepped?;
+        written?;
+        Ok(work)
     }
 
     /// Appends `payload` to the cluster's log as a session message of no session, for
@@ -1633,23 +1842,34 @@ impl ConsensusModule {
     /// cycle stores it in `cluster.log_recording_id`, −1 for `None`, before the commit
     /// position (`spec/cluster.md`, "The service").
     pub fn log_recording_id(&self) -> Option<i64> {
-        self.io
-            .log_recording
-            .as_ref()
-            .or(self.io.counted().map(|held| &held.recording))
-            .map(Recording::recording_id)
+        self.io.live_recording().map(|(id, _)| id)
     }
 
-    /// Stops the module: closes its client, which removes its publications, its
-    /// subscriptions and its counters. Its recordings are the driver's and stay; the
-    /// driver stops each when its publication or its image ends.
+    /// Stops the module. It stores −1 in `cluster.log_recording_id`, closes its client,
+    /// which removes its publications, its subscriptions and its counters, and then
+    /// removes its file of the log's recordings (`spec/cluster.md`, "The log's
+    /// recordings"; ADR 0103). The store comes first because it is done when it
+    /// returns, and the driver removes a client's counters only when it reads the
+    /// command: a service that finds no file loads the counter again, and must not
+    /// find there the id of a recording whose file is gone. The member's recordings
+    /// are the driver's and stay; the driver stops each when its publication or its
+    /// image ends.
     pub fn close(self) -> Result<(), RaftError> {
+        self.close_observed(|| ())
+    }
+
+    /// [`close`](Self::close), with `stored` called once −1 is stored in
+    /// `cluster.log_recording_id` and before anything else is done: the window through
+    /// which a test sees that the counter names no recording while the file is there.
+    fn close_observed(self, stored: impl FnOnce()) -> Result<(), RaftError> {
         let Self {
             consensus,
             io,
-            counters,
+            mut counters,
             ..
         } = self;
+        counters.log_recording_id.store(NO_RECORDING);
+        stored();
         drop(counters);
         drop(consensus);
         let ClientIo {
@@ -1657,12 +1877,23 @@ impl ConsensusModule {
             peers,
             log_publication,
             log_subscription,
+            recordings_path,
+            recordings_tmp_path,
             ..
         } = io;
         drop(peers);
         drop(log_publication);
         drop(log_subscription);
-        Ok(client.close()?)
+        let closed = client.close();
+        // The file, and what a write that failed left under its other name. A file
+        // that is not there was never written: the member named no recording. Any
+        // other error is ignored too: a file left behind names a recording that the
+        // counter no longer names, so no service reads a log from it
+        // (`spec/cluster.md`, "The service"), and the driver removes it with the rest
+        // of its directory when it next starts.
+        let _ = std::fs::remove_file(recordings_path);
+        let _ = std::fs::remove_file(recordings_tmp_path);
+        Ok(closed?)
     }
 }
 

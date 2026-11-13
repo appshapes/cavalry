@@ -2249,3 +2249,290 @@ fn a_member_drops_a_term_from_its_record_by_term_where_a_truncation_leaves_it() 
         vec![(0, 0), (3, two)]
     );
 }
+
+/// The member's file of its log's recordings as a service reads it: the live
+/// recording and where it begins, and the recordings below it.
+fn log_recordings_of(module: &ConsensusModule) -> (i64, i64, Vec<(i64, i64, i64)>) {
+    let bytes = std::fs::read(&module.io.recordings_path).expect("the member's file");
+    let file = cavalry_proto::cluster::LogRecordings::read(&bytes, module.io.member_id)
+        .expect("the file passes its checks");
+    (
+        file.live_recording_id(),
+        file.live_start_position(),
+        file.entries()
+            .map(|entry| {
+                (
+                    entry.recording_id,
+                    entry.start_position,
+                    entry.stop_position,
+                )
+            })
+            .collect(),
+    )
+}
+
+/// What the file of a member's log's recordings lists (`spec/cluster.md`, "The log's
+/// recordings"; ADR 0103). In a catch-up, once the live recording is the member's
+/// log: the replay's recording, which is still being made, from where it begins to
+/// what it has synced, at or past where the live recording begins. After the member
+/// left that log, for the recording it names next, which begins where its log ends:
+/// the two recordings it stopped, which overlap, in the order they begin. And the
+/// leader's, in the next term it leads: its recording of the term it gave up.
+#[test]
+fn the_file_of_recordings_lists_a_catch_ups_recording_and_then_what_the_member_kept() {
+    let mut pair = pair("recordings-file");
+    let _receiver = pair.receive_log();
+    let log = pair
+        .leader
+        .io
+        .add_log(0, 0)
+        .expect("the driver takes the commands")
+        .expect("the log has its recording");
+    let one = pair.append(b"one", 0);
+    let two = pair.append(b"two", one);
+    pair.member.io.add_catchup().expect("subscribed and armed");
+    assert!(
+        pair.leader
+            .io
+            .start_replay(1, 0, None)
+            .expect("the replay starts")
+    );
+    pair.observe_both("the replay's image is told", |io| {
+        io.catchup_image().expect("the image is read")
+    });
+    pair.observe_both("the append position reaches the leader's", |io| {
+        (io.append_position() == two).then_some(())
+    });
+    assert_eq!(pair.member.io.live_recording(), None);
+    pair.member.io.join_log().expect("subscribed and armed");
+    let live_start = pair.observe_both("the live recording's start is told", |io| {
+        io.log_image(log.session_id).expect("the image is read")
+    });
+    let three = pair.append(b"three", two);
+    pair.observe_both("the append position reaches the third entry", |io| {
+        (io.append_position() == three).then_some(())
+    });
+
+    // The member names its live recording: the file it writes first.
+    let (live_id, start) = pair
+        .member
+        .io
+        .live_recording()
+        .expect("the live recording is the member's log now");
+    assert_eq!(start, live_start);
+    let replay = pair
+        .member
+        .io
+        .catchup_held
+        .as_ref()
+        .expect("the replay's recording is held");
+    let replay_id = replay.recording.recording_id();
+    let synced = replay.recording.synced_position();
+    assert!(synced >= live_start, "{synced} {live_start}");
+    pair.member
+        .io
+        .write_log_recordings(live_id, start)
+        .expect("the file is written");
+    let (live, begins, below) = log_recordings_of(&pair.member);
+    assert_eq!((live, begins), (live_id, live_start));
+    assert_eq!(below.len(), 1);
+    let (id, from, to) = below[0];
+    assert_eq!((id, from), (replay_id, 0));
+    assert!((synced..=three).contains(&to), "{to} {synced} {three}");
+    assert!(
+        !pair.member.io.recordings_tmp_path.exists(),
+        "no file is left under the other name"
+    );
+
+    // The member leaves the log. The file it writes for the recording it names next,
+    // one that begins where its log ends: both recordings it stopped.
+    pair.leader
+        .io
+        .stop_replay(1)
+        .expect("the replay is stopped");
+    pair.member
+        .io
+        .remove_catchup()
+        .expect("the catch-up subscription is removed");
+    let replay_stop = pair.member.io.stopped_at;
+    pair.member.io.leave_log().expect("the log is left");
+    assert_eq!(pair.member.io.live_recording(), None);
+    assert_eq!(pair.member.io.append_position(), three);
+    let next_id = live_id + 100;
+    pair.member
+        .io
+        .write_log_recordings(next_id, three)
+        .expect("the file is written");
+    assert_eq!(
+        log_recordings_of(&pair.member),
+        (
+            next_id,
+            three,
+            vec![(replay_id, 0, replay_stop), (live_id, live_start, three)]
+        )
+    );
+
+    // The leader's own file: the recording of the term it gave up, below its
+    // recording of the term it leads next.
+    pair.leader.io.remove_log().expect("the log is given up");
+    pair.leader
+        .io
+        .add_log(1, three)
+        .expect("the driver takes the commands")
+        .expect("the log has its recording");
+    let (leads_id, base) = pair
+        .leader
+        .io
+        .live_recording()
+        .expect("the leader's recording of its log");
+    assert_eq!(base, three);
+    pair.leader
+        .io
+        .write_log_recordings(leads_id, base)
+        .expect("the file is written");
+    let (live, begins, below) = log_recordings_of(&pair.leader);
+    assert_eq!((live, begins), (leads_id, three));
+    assert_eq!(
+        below
+            .iter()
+            .map(|&(_, from, to)| (from, to))
+            .collect::<Vec<_>>(),
+        vec![(0, three)]
+    );
+}
+
+/// A truncation waits until `cluster.log_recording_id` holds −1 (ADR 0103): a
+/// service takes the member's commit position as its bound while the counter names
+/// a recording, so no recording of the log is cut before the duty cycle that left
+/// the log has stored −1. Asked while the counter still names the recording the
+/// member left, the truncation does nothing and says a step is under way; asked
+/// after, it cuts.
+#[test]
+fn a_truncation_waits_until_the_counter_names_no_recording() {
+    let mut pair = pair("truncate-named");
+    let (two, first) = pair.follow_and_leave(0, 0, &[b"one", b"two"]);
+    let one = two / 2;
+    pair.member
+        .io
+        .record_term(0, 0)
+        .expect("term 0 is recorded");
+
+    // The member has left the log, and the cycle that stores −1 has not run.
+    pair.member.io.named = first;
+    assert_eq!(pair.member.io.truncate_log(one).expect("asked"), None);
+    assert_eq!(pair.member.io.append_position(), two);
+    assert_eq!(pair.stop_of(first), Some(two), "nothing was cut");
+    assert_eq!(pair.member.io.kept.len(), 1);
+
+    pair.member.io.named = NO_RECORDING;
+    assert_eq!(
+        pair.member.io.truncate_log(one).expect("truncated"),
+        Some(0)
+    );
+    assert_eq!(pair.member.io.append_position(), one);
+    assert_eq!(pair.stop_of(first), Some(one));
+}
+
+/// A member that closes stores −1 in `cluster.log_recording_id` before it removes its
+/// file of the log's recordings (`spec/cluster.md`, "The log's recordings"; ADR 0103).
+/// A service that finds no file loads the counter again, and must not find there the
+/// id of the recording the file was for. Closing the member's client would not do it:
+/// the driver removes a client's counters when it reads the command, some time after
+/// the close has returned, and the store is done when it returns. So once the store
+/// is made, and before the client is closed, the counter holds −1 and the file is
+/// there; when the close returns the file is gone.
+#[test]
+fn a_member_that_closes_names_no_recording_before_it_removes_its_file() {
+    let Leader {
+        mut module,
+        log,
+        catchup,
+        _follower,
+        _driver,
+        _dir,
+    } = leader("close-order");
+    // The member names recording 7 from position 0: the file first, then the id.
+    module
+        .io
+        .write_log_recordings(7, 0)
+        .expect("the file is written");
+    module.counters.log_recording_id.store(7);
+    let file = module.io.recordings_path.clone();
+    assert!(file.exists());
+    let reader = cavalry_shm::counters::CountersReader::open(&_dir.0.join("driver"))
+        .expect("the counters file opens");
+    let key = module.io.member_id.to_le_bytes();
+    let named = || {
+        (0..reader.capacity()).find_map(|id| match reader.record(id) {
+            Ok(Some(record))
+                if record.type_id() == CLUSTER_LOG_RECORDING_ID.0
+                    && record.key().starts_with(&key) =>
+            {
+                Some(reader.read_acquire(id).expect("the counter is read"))
+            }
+            _ => None,
+        })
+    };
+    assert_eq!(named(), Some(7));
+
+    let mut seen = false;
+    module
+        .close_observed(|| {
+            assert_eq!(named(), Some(NO_RECORDING), "the counter names a recording");
+            assert!(file.exists(), "the file is removed only after the store");
+            seen = true;
+        })
+        .expect("the member closes");
+    assert!(seen);
+    assert!(!file.exists(), "the member removed its file when it closed");
+    drop((log, catchup));
+}
+
+/// A list of recordings that the module's own writer refuses is the module's fault,
+/// and the member says so: what the check found, that it is a fault to report, and
+/// none of the advice a reader of the file is given, since no other process wrote
+/// the list. A file the operating system would not write keeps its own remedy.
+#[test]
+fn a_list_the_writer_refuses_is_said_to_be_the_modules_fault_and_not_the_directorys() {
+    let refused = RaftError::LogRecordings {
+        path: PathBuf::from("/driver/log-recordings-2"),
+        source: std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            RefusedList(LogRecordingsError::Entry { index: 3 }),
+        ),
+    };
+    let text = refused.to_string();
+    assert!(
+        text.starts_with(
+            "member stopped (log-recordings): /driver/log-recordings-2 could not be written: \
+             the list the member made of its log's recordings is one the file's format \
+             refuses (recordings-entry): entry 3 has an id below 0,"
+        ),
+        "{text}"
+    );
+    assert!(
+        text.contains(
+            "This is a fault of the consensus module and not of the directory: report it \
+             with this message"
+        ),
+        "{text}"
+    );
+    for absent in [
+        "whatever else writes in the driver directory",
+        "open the log again",
+        "Make the driver directory writable",
+    ] {
+        assert!(!text.contains(absent), "{absent}: {text}");
+    }
+
+    let unwritable = RaftError::LogRecordings {
+        path: PathBuf::from("/driver/log-recordings-2.tmp"),
+        source: std::io::Error::from(std::io::ErrorKind::PermissionDenied),
+    };
+    let text = unwritable.to_string();
+    assert!(
+        text.contains("Make the driver directory writable by the member's user"),
+        "{text}"
+    );
+    assert!(!text.contains("fault of the consensus module"), "{text}");
+}
