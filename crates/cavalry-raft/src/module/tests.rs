@@ -1694,6 +1694,232 @@ fn a_live_recording_that_begins_below_the_members_log_end_is_never_counted() {
     assert_eq!(pair.member.io.kept.len(), 1);
 }
 
+/// The log carries entries of one frame alone (ADR 0066). An entry longer than one
+/// frame of the leader's log publication, 1,376 bytes at the 1,408-byte MTU, is
+/// refused by the module's append as the fault it is, `too-long`, before anything
+/// is written, and never as `Ok(false)`, the back pressure its caller would hold the
+/// message that made it for. A session message of 1,344 bytes of payload, the
+/// longest, is an entry of 1,376 bytes, and the follower reads it as one frame.
+#[test]
+fn an_entry_longer_than_one_frame_of_the_log_is_a_fault_and_not_back_pressure() {
+    let mut leader = leader("entry-over-a-frame");
+    leader
+        .module
+        .io
+        .add_log(0, 0)
+        .expect("the driver takes the commands")
+        .expect("the log has its recording");
+    let over = vec![b'a'; MAX_PAYLOAD_LENGTH + 1];
+    let error = leader
+        .module
+        .io
+        .append(&entry(&over))
+        .expect_err("an entry longer than a frame");
+    assert!(
+        matches!(
+            error,
+            RaftError::Append {
+                refusal: Offer::TooLong {
+                    found: 1377,
+                    limit: 1376
+                }
+            }
+        ),
+        "{error}"
+    );
+    assert_eq!(error.reason(), "append");
+    let text = error.to_string();
+    assert!(
+        text.contains("an entry of 1377 bytes where the publication takes 1376"),
+        "{text}"
+    );
+
+    let longest = vec![b'a'; MAX_PAYLOAD_LENGTH];
+    wait_for("the longest entry is appended", || {
+        leader.log.poll(|_, _| {}, 16).expect("the follower polls");
+        leader
+            .module
+            .io
+            .append(&entry(&longest))
+            .expect("the publication takes the entry")
+            .then_some(())
+    });
+    let mut frames = Vec::new();
+    wait_for("the follower reads the entry", || {
+        leader
+            .log
+            .poll(
+                |body, header| {
+                    frames.push((body.len(), header.flags().contains(Flags::UNFRAGMENTED)));
+                },
+                16,
+            )
+            .expect("the follower polls");
+        (!frames.is_empty()).then_some(())
+    });
+    assert_eq!(frames, [(1408 - 32, true)], "one entry, in one frame");
+}
+
+/// What the module's read of its ingress stream reaches, in memory: a log that takes
+/// each entry, or none while it is back-pressured, and egress publications that take
+/// every message.
+#[derive(Default)]
+struct Appends {
+    back_pressured: bool,
+    /// The length of each entry appended.
+    entries: Vec<usize>,
+}
+
+impl SessionIo for Appends {
+    type Fault = RaftError;
+
+    fn add_egress(&mut self, _: usize, _: &[u8]) -> Result<bool, RaftError> {
+        Ok(true)
+    }
+
+    fn send_egress(&mut self, _: usize, _: &Message<'_>) -> bool {
+        true
+    }
+
+    fn remove_egress(&mut self, _: usize) -> Result<(), RaftError> {
+        Ok(())
+    }
+
+    fn append(&mut self, entry: &Message<'_>) -> Result<bool, RaftError> {
+        if self.back_pressured {
+            return Ok(false);
+        }
+        self.entries.push(entry.encoded_length());
+        Ok(true)
+    }
+}
+
+/// A session message whose payload is longer than 1,344 bytes, which a sender whose
+/// MTU is longer than 1,408 bytes delivers whole in one frame, is rejected by the
+/// module's read of its ingress stream as a fragment of a longer message is: counted
+/// in `cluster.messages_rejected`, taken, never appended, and the read goes on to the
+/// next message, of another image, in the same poll (`spec/cluster.md`, "Sessions";
+/// ADR 0116). Before, the module appended one of up to 1,376 bytes of payload as a
+/// fragmented entry, and left a longer one unread as if the log were back-pressured:
+/// its image held, every other client's message aborted until every session timed
+/// out. Only a message the log does not take yet holds its image and stops the read.
+/// A Cavalry client of this version cannot name `mtu` on its channel, so the test
+/// hands the read each frame, by image, as a controlled poll does.
+#[test]
+fn a_session_message_longer_than_an_entry_is_rejected_and_holds_no_image() {
+    let mut sessions = Sessions::new(0, b"0=127.0.0.1:20000");
+    let mut io = Appends::default();
+    let clock = Clock {
+        now_ns: 0,
+        time_ms: 0,
+    };
+    let lead = Leadership {
+        leads: true,
+        leadership_term_id: 1,
+        leader_member_id: 0,
+    };
+    // Session 0, opened by its committed session open event.
+    let open = Message::SessionOpenEvent {
+        leadership_term_id: 1,
+        correlation_id: 1,
+        cluster_session_id: 0,
+        timestamp: 0,
+        response_stream_id: EGRESS_STREAM_ID,
+        response_channel: b"cavalry:udp?endpoint=127.0.0.1:20001",
+        encoded_principal: &[],
+    };
+    assert!(
+        sessions
+            .on_entry(clock, &open, &mut io)
+            .expect("the entry is taken")
+    );
+    let encode = |message: &Message<'_>| {
+        let mut bytes = vec![0u8; message.encoded_length()];
+        message.write(&mut bytes).expect("the message is encoded");
+        bytes
+    };
+    let message = |payload: &[u8]| {
+        encode(&Message::SessionMessage {
+            leadership_term_id: 1,
+            cluster_session_id: 0,
+            timestamp: 0,
+            payload,
+        })
+    };
+    let over = message(&[b'a'; MAX_PAYLOAD_LENGTH + 1]);
+    let longest = message(&[b'a'; MAX_PAYLOAD_LENGTH]);
+    let keepalive = encode(&Message::SessionKeepalive {
+        leadership_term_id: 1,
+        cluster_session_id: 0,
+    });
+    let (mut held, mut rejected) = (None, 0u64);
+
+    let mut read = IngressRead {
+        sessions: &mut sessions,
+        io: &mut io,
+        clock,
+        lead,
+        held: &mut held,
+        rejected: &mut rejected,
+        stopped: false,
+        fault: None,
+    };
+    // Image 7's message, whole in one frame: taken and counted.
+    assert_eq!(
+        read.fragment(7, Flags::UNFRAGMENTED, &over),
+        Action::Continue
+    );
+    // Image 9's messages are read in the same poll, the longest a session message
+    // carries among them.
+    assert_eq!(
+        read.fragment(9, Flags::UNFRAGMENTED, &keepalive),
+        Action::Continue
+    );
+    assert_eq!(
+        read.fragment(9, Flags::UNFRAGMENTED, &longest),
+        Action::Continue
+    );
+    // A fragment of a longer message, as before.
+    assert_eq!(read.fragment(7, Flags::BEGIN, &longest), Action::Continue);
+    assert!(!read.stopped && read.fault.is_none());
+    assert_eq!((held, rejected), (None, 2));
+    assert_eq!(
+        io.entries,
+        [1408 - 32],
+        "the longest, as one frame of the log"
+    );
+
+    // A back-pressured log is never asked for the message it could not hold: it is
+    // rejected all the same, and holds nothing.
+    io.back_pressured = true;
+    let mut read = IngressRead {
+        sessions: &mut sessions,
+        io: &mut io,
+        clock,
+        lead,
+        held: &mut held,
+        rejected: &mut rejected,
+        stopped: false,
+        fault: None,
+    };
+    assert_eq!(
+        read.fragment(7, Flags::UNFRAGMENTED, &over),
+        Action::Continue
+    );
+    // What the log does not take yet holds its image, and image 9's message waits.
+    assert_eq!(
+        read.fragment(7, Flags::UNFRAGMENTED, &longest),
+        Action::Abort
+    );
+    assert_eq!(
+        read.fragment(9, Flags::UNFRAGMENTED, &keepalive),
+        Action::Abort
+    );
+    assert!(read.stopped && read.fault.is_none());
+    assert_eq!((held, rejected), (Some(7), 3));
+    assert_eq!(io.entries.len(), 1);
+}
+
 /// Why the catch-up position is encoded into the module's scratch: with a host name
 /// of the length DNS allows, the message is longer than the 128 bytes the other
 /// consensus messages are encoded into, and fits 1,408.

@@ -64,7 +64,8 @@ use crate::sessions::{EGRESS_SLOTS, Ingress, Leadership, SessionCounts, SessionI
 /// The longest payload [`ConsensusModule::offer`] takes: what one frame of the log
 /// carries after the frame header and the session message header, at the UDP
 /// transport's MTU length of 1,408 bytes. An entry is one frame in this version, so
-/// that no entry lies across the commit position.
+/// that no entry lies across the commit position. It is a client's session message's
+/// bound too: a longer one is [`Ingress::Rejected`](crate::Ingress::Rejected).
 pub const MAX_PAYLOAD_LENGTH: usize = 1408 - 32 - 32;
 
 /// How many consensus messages one duty cycle reads.
@@ -189,7 +190,9 @@ pub enum RaftError {
     /// The leader's log publication refused an entry for a reason that waiting does
     /// not mend (`spec/cluster.md`, "The log"): the stream is at the largest position
     /// its term length allows, the member's client is closed, or the entry is longer
-    /// than the publication takes, which the module's own bound refuses first. Back
+    /// than one frame of the publication carries, which the module's own bounds
+    /// refuse first: [`MAX_PAYLOAD_LENGTH`] for an offer and for a client's session
+    /// message alike. Back
     /// pressure, a log no member has joined yet and a term that rotated are not this
     /// error: the entry is not appended, and the leader appends it again.
     Append {
@@ -2074,13 +2077,29 @@ impl ClientIo {
     /// Appends `entry` to the leader's log: what the election's [`Io::append`] and
     /// the sessions' [`SessionIo::append`] both are. `Ok(false)` when the publication
     /// is back-pressured, not yet connected or rotating a term, and nothing was
-    /// written.
+    /// written. An entry longer than one frame of the log carries, the publication's
+    /// [`Publication::max_payload_length`], is [`RaftError::Append`] with
+    /// [`Offer::TooLong`], and nothing is written: the publication would split it
+    /// into fragments, and the log holds entries of one frame alone (ADR 0066).
+    /// Waiting never makes it fit, so it is never `Ok(false)`, which would have the
+    /// caller hold what made it. The module checks every entry's length before it
+    /// appends, so this is the module's fault.
     fn append(&mut self, entry: &Message<'_>) -> Result<bool, RaftError> {
         let Some(publication) = self.log_publication.as_mut() else {
             return Ok(false);
         };
-        let Ok(length) = entry.write(self.scratch.as_mut_slice()) else {
-            return Ok(false);
+        let limit = publication.max_payload_length().min(self.scratch.len());
+        let written = self
+            .scratch
+            .get_mut(..limit)
+            .map(|scratch| entry.write(scratch));
+        let Some(Ok(length)) = written else {
+            return Err(RaftError::Append {
+                refusal: Offer::TooLong {
+                    found: entry.encoded_length(),
+                    limit,
+                },
+            });
         };
         let Some(bytes) = self.scratch.get(..length) else {
             return Ok(false);
@@ -2143,14 +2162,84 @@ impl SessionIo for ClientIo {
     }
 }
 
+/// The module's controlled read of its ingress stream for one duty cycle
+/// (`spec/cluster.md`, "Sessions"; ADR 0114, ADR 0116): what it does with each
+/// fragment the poll hands it, and what the poll is to do next.
+struct IngressRead<'a, I: SessionIo> {
+    sessions: &'a mut Sessions,
+    io: &'a mut I,
+    clock: Clock,
+    lead: Leadership,
+    /// The session id of the image whose message the sessions left unread, from one
+    /// cycle to the next: until that message is taken, nothing of another image is.
+    held: &'a mut Option<i32>,
+    /// `cluster.messages_rejected`, as the module counts it.
+    rejected: &'a mut u64,
+    /// Whether this cycle left a message unread or met a fault: nothing more is read
+    /// until the next.
+    stopped: bool,
+    /// The first fault of the sessions' calls this cycle.
+    fault: Option<I::Fault>,
+}
+
+impl<I: SessionIo> IngressRead<'_, I> {
+    /// One fragment of the image with `session_id`. A fragment of a longer message,
+    /// a message that does not parse, and a message the sessions reject, a session
+    /// message whose payload is longer than [`MAX_PAYLOAD_LENGTH`], are each counted
+    /// in `rejected` and taken: nothing of them is acted on, and the read goes on to
+    /// the next fragment, of this image or another. Only a message the sessions leave
+    /// unread, or a fault, stops the read and holds its image.
+    fn fragment(&mut self, session_id: i32, flags: Flags, body: &[u8]) -> Action {
+        if self.stopped || (*self.held).is_some_and(|image| image != session_id) {
+            return Action::Abort;
+        }
+        if !flags.contains(Flags::UNFRAGMENTED) {
+            *self.rejected = self.rejected.saturating_add(1);
+            return Action::Continue;
+        }
+        let Ok(message) = Message::parse(Stream::Ingress, body) else {
+            *self.rejected = self.rejected.saturating_add(1);
+            return Action::Continue;
+        };
+        match self
+            .sessions
+            .on_ingress(self.clock, self.lead, &message, self.io)
+        {
+            Ok(Ingress::Taken) => {
+                *self.held = None;
+                Action::Continue
+            }
+            Ok(Ingress::Rejected) => {
+                *self.held = None;
+                *self.rejected = self.rejected.saturating_add(1);
+                Action::Continue
+            }
+            Ok(Ingress::Unread) => {
+                *self.held = Some(session_id);
+                self.stopped = true;
+                Action::Abort
+            }
+            Err(error) => {
+                if self.fault.is_none() {
+                    self.fault = Some(error);
+                }
+                self.stopped = true;
+                Action::Abort
+            }
+        }
+    }
+}
+
 /// One duty cycle of the member's sessions (`spec/cluster.md`, "Sessions"; ADR 0115,
 /// ADR 0116), after the election's own. First the member's own committed log: the
 /// read a service makes of it, on the log replay stream, opened where the last one
-/// stopped, whose session open and close events open and close the member's sessions. Then the ingress stream, by
-/// a controlled poll: a message the sessions leave unread stays at its image's
-/// position, and until it is taken no fragment of another image is. Then what the
-/// sessions owe. An entry or a message that is not one frame, does not parse, or is an
-/// entry the table cannot hold is counted in `rejected`. Returns how much it did.
+/// stopped, whose session open and close events open and close the member's
+/// sessions. Then the ingress stream, by a controlled poll ([`IngressRead`]): a
+/// message the sessions leave unread stays at its image's position, and until it is
+/// taken no fragment of another image is. Then what the sessions owe. An entry or a
+/// message that is not one frame, does not parse, is a session message longer than
+/// an entry of one frame holds, or is an entry the table cannot hold is counted in
+/// `rejected`. Returns how much it did.
 #[allow(clippy::too_many_arguments)]
 fn work_sessions(
     core: &Consensus,
@@ -2211,44 +2300,25 @@ fn work_sessions(
         leadership_term_id: core.leadership_term_id(),
         leader_member_id: i32::try_from(core.leader_gauge()).unwrap_or(-1),
     };
-    let mut unread = false;
+    let mut read = IngressRead {
+        sessions: &mut *sessions,
+        io: &mut *io,
+        clock,
+        lead,
+        held: &mut *held,
+        rejected: &mut *rejected,
+        stopped: false,
+        fault: None,
+    };
     let taken = ingress
         .controlled_poll(
-            |body, header| {
-                let session_id = header.session_id();
-                if unread || (*held).is_some_and(|image| image != session_id) {
-                    return Action::Abort;
-                }
-                if !header.flags().contains(Flags::UNFRAGMENTED) {
-                    *rejected = rejected.saturating_add(1);
-                    return Action::Continue;
-                }
-                let Ok(message) = Message::parse(Stream::Ingress, body) else {
-                    *rejected = rejected.saturating_add(1);
-                    return Action::Continue;
-                };
-                match sessions.on_ingress(clock, lead, &message, io) {
-                    Ok(Ingress::Taken) => {
-                        *held = None;
-                        Action::Continue
-                    }
-                    Ok(Ingress::Unread) => {
-                        *held = Some(session_id);
-                        unread = true;
-                        Action::Abort
-                    }
-                    Err(error) => {
-                        if fault.is_none() {
-                            fault = Some(error);
-                        }
-                        unread = true;
-                        Action::Abort
-                    }
-                }
-            },
+            |body, header| read.fragment(header.session_id(), header.flags(), body),
             INGRESS_POLL_LIMIT,
         )
         .map_err(RaftError::Poll)?;
+    if fault.is_none() {
+        fault = read.fault;
+    }
     work += taken;
     // An image that went while its message was held holds nothing any more.
     if let Some(image) = *held

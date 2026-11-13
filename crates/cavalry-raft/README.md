@@ -297,7 +297,12 @@ commit path runs per message.
   closed and that read has reached its term's base, so that it has every session and
   every session id of the terms before it. A message of the ingress stream is one
   frame, 1,344 bytes of payload at most; a fragment, and an entry its table cannot
-  hold, are counted in `cluster.messages_rejected`. A members string whose ingress
+  hold, are counted in `cluster.messages_rejected`. So is a session message longer
+  than 1,344 bytes that a sender with a longer MTU delivers in one frame
+  (`Ingress::Rejected`): nothing of it is acted on, and it holds no client's
+  message behind it. The module's append refuses an entry longer than one frame
+  of the log as a fault, `RaftError::Append` with `too-long`, and never as back
+  pressure. A members string whose ingress
   endpoints do not fit one frame of the egress stream as a redirect lists them,
   1,320 bytes, is `RaftError::IngressEndpoints`, and the member does not start.
 - To come, each with its card: the C ABI's calls for a service, so that a service is

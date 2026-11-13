@@ -31,6 +31,7 @@ use cavalry_shm::counters::generated::{
 };
 
 use crate::consensus::Clock;
+use crate::module::MAX_PAYLOAD_LENGTH;
 
 /// The longest response channel a session holds: `cavalry:udp?endpoint=`, a host name
 /// of 253 bytes, `:` and a port of five digits. A longer one is not
@@ -78,7 +79,9 @@ pub trait SessionIo {
     fn remove_egress(&mut self, slot: usize) -> Result<(), Self::Fault>;
 
     /// Appends `entry` to the leader's log. `Ok(false)` when the log is
-    /// back-pressured and nothing was written.
+    /// back-pressured and nothing was written. An entry the log can never take, one
+    /// longer than a frame of it, is the fault, never `Ok(false)`: waiting does not
+    /// make it fit, and the message that made it would be left unread for good.
     fn append(&mut self, entry: &Message<'_>) -> Result<bool, Self::Fault>;
 }
 
@@ -93,6 +96,12 @@ pub enum Ingress {
     /// position and reads nothing more from the ingress stream this cycle
     /// (`Action::Abort` of a controlled poll, ADR 0114).
     Unread,
+    /// The message is none this version's session protocol carries: a session
+    /// message whose payload is longer than [`MAX_PAYLOAD_LENGTH`], which no entry of
+    /// one frame of the log holds. Nothing of it is acted on, on any member: the
+    /// reader takes it, as it does a fragment, and counts it in
+    /// `cluster.messages_rejected` (`spec/cluster.md`, "Sessions"; ADR 0116).
+    Rejected,
 }
 
 /// What a member's sessions have counted, each the counter of `spec/cluster.md`,
@@ -325,7 +334,10 @@ impl Sessions {
     /// [`Ingress::Unread`] asks the reader to leave the message where it is: a
     /// session message or a session close whose entry the back-pressured log did not
     /// take, and a connect that reached a member whose election as leader has not
-    /// closed yet.
+    /// closed yet. [`Ingress::Rejected`] is a session message whose payload is longer
+    /// than [`MAX_PAYLOAD_LENGTH`], whichever member reads it: it is checked before
+    /// anything else, so it is never appended, never the session's activity, and
+    /// never left unread, which would hold every other client's message behind it.
     pub fn on_ingress<I: SessionIo>(
         &mut self,
         clock: Clock,
@@ -355,6 +367,11 @@ impl Sessions {
                 payload,
                 ..
             } => {
+                // No entry of one frame of the log holds it, whoever reads it: a
+                // sender with a longer MTU delivers it whole (ADR 0116).
+                if payload.len() > MAX_PAYLOAD_LENGTH {
+                    return Ok(Ingress::Rejected);
+                }
                 let Some(index) = self.acting(lead, leadership_term_id, cluster_session_id) else {
                     self.counts.ingress_ignored = self.counts.ingress_ignored.saturating_add(1);
                     return Ok(Ingress::Taken);

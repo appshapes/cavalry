@@ -6,7 +6,9 @@
   that replaces a lost leader has the session from its log and sends the client the
   new leader event. The member's `cluster.sessions` gauge and its seven session
   counters are in its driver's counters file. A message of a session is one frame,
-  1,344 bytes of payload at most. A members string whose ingress endpoints are
+  1,344 bytes of payload at most: a longer one, a fragment or a message whole in
+  one frame of a longer MTU, is counted in `cluster.messages_rejected` and nothing
+  of it is acted on. A members string whose ingress endpoints are
   longer than 1,320 bytes as a redirect lists them is refused when the member
   starts. The member's consensus module reads its own log for its sessions on a
   stream of its own, the log replay stream, 103: `Cavalry::committed_log_on(stream_id,
