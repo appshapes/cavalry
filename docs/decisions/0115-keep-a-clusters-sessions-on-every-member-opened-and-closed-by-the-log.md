@@ -70,7 +70,13 @@ What the leader adds to the table:
   the session is **open** and the leader sends the ok event. A follower that reads
   the same entry opens the same session, with no publication.
 - The next session id is one more than the highest the member has given or has
-  read in a session open event, so a new leader gives no id twice.
+  read in a session open event. A member that wins an election has read every
+  entry below its term base log position in leader replay ("Roles and the
+  election", state 6), before its election closes and before it accepts a connect:
+  the commit position reaches that base once a quorum has recorded the leader's
+  term ("The commit position"), and the replay runs to the leader's append
+  position, which is that base. So a new leader has read every session open and
+  close event of the terms before its own, and gives no id twice.
 - A session open event the back-pressured log does not take waits, as the page
   says of every entry of the leader's own. One the log has not taken at the
   session connect timeout, 5 s, is given up with its connect.
@@ -79,9 +85,12 @@ What the leader adds to the table:
 - A member that begins to lead a term adds an egress publication for every open
   session, owes each the term's new leader event, and counts each session's timeout
   from that cycle.
-- A session open event a leader reads that it did not write, an entry of the term
-  before its own that is committed in its term, opens a session the leader takes up
-  the same way, with no ok event: the leader that accepted the connect owed that.
+- A session open event of a term before the leader's own is read in that leader
+  replay, so it opens its session as it does on a follower. The member takes the
+  session up with the others when its election closes, with no ok event: the
+  leader that accepted the connect owed that. While it leads, a member reads only
+  the entries of its own term, and each session open event among them names an id
+  it gave, so it finds its own connecting session by that id.
 - A session the leader closes for the timeout is told so only once the log has
   taken its session close event, as in Aeron. The closed event is then owed, as
   the ok event is, until the session's publication takes it. The committed close
@@ -120,6 +129,16 @@ position.
 - **The table rebuilt from position 0 at each election.** Lost: this version takes
   no snapshot, so the replay grows with the log, and an election would wait for it.
   A member that reads its committed log as it follows is at most one batch behind.
+- **A leader that reads the end of the term before its own after its election has
+  closed**, once its own first entry is committed, as in Raft's paper, where a
+  leader commits no older term's entry until one of its own is. Lost: the page's
+  commit position reaches the term base log position before the election closes,
+  and leader replay reads to it, so no entry of an older term is left to read. A
+  leader that read one later would accept connects before it had read every id the
+  log names. It would have to give ids past entries it has not read, and could take
+  another leader's session open event for its own connecting session of the same
+  id. The review of pull request 277 found that collision in a test of this
+  change's first form.
 - **Sessions inside `Consensus`.** Lost: that file is 3,000 lines of election, and
   the sessions need nothing of it but who leads, in which term. A type of its own
   is tested by itself, with no cluster.
@@ -164,7 +183,8 @@ position.
   closed at 10 s and a keepalive holds one; a timeout's closed event waits for its
   close event to be in the log; a closed event is owed until its publication takes
   it or the close is committed, and no ok event follows it; a client's close; a
-  new leader takes up the sessions its log holds, with the
+  new leader takes up the sessions its log holds, one whose session open event of
+  the term before it reads in its leader replay among them, with no ok event, the
   timeout counted from its election's close and the next id after the log's; and
   the entries no leader of this version writes change nothing.
 - `crates/cavalry-raft/tests/sessions_allocations.rs`: ten thousand rounds of a
