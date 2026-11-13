@@ -2123,7 +2123,9 @@ fn a_service_reads_across_the_recordings_of_a_member_that_joined_the_log_again()
 /// with id 2, whichever role the election gives it, and its file is blocked before its
 /// first duty cycle. It may be a follower that joined the log late, which this test
 /// does not make happen: its file then lists its catch-up's recording below the live
-/// one, and the service beside it reads across the two.
+/// one, and the service beside it reads across the two. It may also lead while another
+/// member joins late: it then counts the catch-up it served, and its log is one
+/// recording.
 #[test]
 fn a_member_names_no_recording_until_it_has_written_the_file_of_its_logs_recordings() {
     let dir = TestDir::new("file-before-counter");
@@ -2263,11 +2265,13 @@ fn a_member_names_no_recording_until_it_has_written_the_file_of_its_logs_recordi
     // The file names the recording the counter names. The member's log is that one
     // recording, from 0, unless it was a follower that joined the log late and caught
     // up through a replay: the file then names the replay's recording below it, from 0
-    // to where the live one begins (ADR 0103).
+    // to where the live one begins (ADR 0103). `cluster.catchups` alone does not say
+    // which: a leader counts there the replay it started for another member that
+    // joined late, and its own log is one recording.
     let (live, start, below) = log_recordings(&members[blocked]);
     assert_eq!(live, named);
     let counts = members[blocked].module.counts();
-    if counts.catchups == 0 {
+    if blocked == leader || counts.catchups == 0 {
         assert_eq!((start, below), (0, Vec::new()), "{counts:?}");
     } else {
         assert!(
