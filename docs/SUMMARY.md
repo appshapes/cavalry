@@ -161,4 +161,5 @@ under `docs/` is listed here; `just lint-docs` fails on one that is not.
 - [0107. Take the appointed leader out of cavalry doctor, and retire its counter](decisions/0107-take-the-appointed-leader-out-of-cavalry-doctor-and-retire-its-counter.md)
 - [0108. List the recordings of a member's log in its log directory, and start a member on the log it kept](decisions/0108-list-the-recordings-of-a-members-log-in-its-log-directory-and-start-a-member-on-the-log-it-kept.md)
 - [0113. Track Cavalry's work on the Brigade Board, and map the Trello cards it carried](decisions/0113-track-cavalrys-work-on-the-brigade-board-and-map-the-trello-cards-it-carried.md)
+- [0114. Give a subscription a controlled poll, whose handler can leave a fragment unread](decisions/0114-give-a-subscription-a-controlled-poll-whose-handler-can-leave-a-fragment-unread.md)
 - [0115. Keep a cluster's sessions on every member, opened and closed by the log](decisions/0115-keep-a-clusters-sessions-on-every-member-opened-and-closed-by-the-log.md)
