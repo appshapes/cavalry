@@ -991,9 +991,9 @@ checks before it pass ("What a reader rejects"); a file
 the operating system will not let it open or read is the reader's error, which
 names the file. The module writes it each time it names a recording, before it
 stores the recording's id in `cluster.log_recording_id`, and removes it when it
-closes, after its client is closed and its counters are gone, so that the file is
-there for as long as a counter of the member names a recording. A file the module
-cannot write is its duty cycle's error, counted in
+closes, after it has stored −1 in `cluster.log_recording_id`, so that the file is
+there for as long as the counter names a recording. A file the module cannot
+write is its duty cycle's error, counted in
 `cluster.log_recordings_unwritten` each cycle it fails, and the member stores −1 in
 the counter until a later cycle has written the file. All integers are
 little-endian.

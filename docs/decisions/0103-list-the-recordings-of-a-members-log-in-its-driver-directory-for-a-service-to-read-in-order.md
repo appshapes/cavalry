@@ -91,8 +91,11 @@ truncation so that the rule does not rest on the order of two steps elsewhere. A
 table that is full forgets its oldest recording and leaves it as it is in the
 catalog. So a file whose live recording is the id the counter holds lists
 recordings that hold the member's log as it is now. A member removes the file when
-it closes, and only after its client is closed and its counters are gone: the file
-is there for as long as a counter of the member names a recording. A file that cannot be written
+it closes, and only after it has stored −1 in the counter: the file is there for
+as long as the counter names a recording. The store is the member's own, into
+shared memory, and is done when it returns. Closing the member's client is not
+enough: the driver removes a client's counters when it reads the command, some
+time after the member has sent it. A file that cannot be written
 is the duty cycle's error, with what to do, and the member stores −1 until a later
 cycle has written it: in each such cycle it records and replicates, and names no
 recording to a service. Each cycle in which the write fails is counted in

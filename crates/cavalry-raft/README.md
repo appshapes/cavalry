@@ -207,7 +207,7 @@ commit path runs per message.
   before it truncates ("Messages during an election"); it does not store −1 there
   when the file cannot be written; `cluster.log_recordings_unwritten`, the count
   of such a cycle, is not registered yet; and no member removes a file at its
-  close, after its counters are gone.
+  close, after it has stored −1 there.
 - To come, each with its card: the C ABI's calls for a service, so that a service is
   a program in any of the five client languages (card 227), the election and mixed
   versions in a rolling upgrade (card 228), the cluster client (card 229), snapshots
