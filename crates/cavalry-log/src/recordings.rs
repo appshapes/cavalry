@@ -958,6 +958,24 @@ mod tests {
     fn a_torn_creation_is_written_again_and_damage_is_refused() {
         let dir = dir("damage");
         let path = RecordingsFile::path_in(&dir);
+        // A file shorter than its header is a creation the crash took inside its
+        // first write, whatever it holds: the header's bytes after a zero magic, as
+        // that write leaves them, or bytes that are no magic at all, one short of the
+        // header. It is created again, at its full length, and is whole from then on.
+        let mut cut = RecordingsHeader { member_id: 1 }.encode();
+        cut[..8].fill(0);
+        for short in [&cut[..40], &[0xFFu8; HEADER_LENGTH - 1][..]] {
+            std::fs::write(&path, short).expect("a file cut short of its header");
+            let file = RecordingsFile::open(&dir, 1).expect("the file is created again");
+            assert_eq!(file.entries(), &[]);
+            assert!(file.was_created());
+            drop(file);
+            assert_eq!(
+                std::fs::metadata(&path).expect("the file").len(),
+                FILE_LENGTH as u64
+            );
+            assert!(!RecordingsFile::open(&dir, 1).expect("whole").was_created());
+        }
         // A creation the crash took before its magic: the file is created again.
         std::fs::write(&path, vec![0u8; FILE_LENGTH]).expect("a file of zeros");
         let file = RecordingsFile::open(&dir, 1).expect("the file is created again");
