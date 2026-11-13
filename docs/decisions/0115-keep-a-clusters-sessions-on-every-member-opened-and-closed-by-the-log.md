@@ -43,7 +43,10 @@ further than the commit position, `logAdapter.poll(min(notifiedCommitPosition,
 limit))`, and that read opens and closes its sessions, `onReplaySessionOpen` and
 `onReplaySessionClose`. So every member holds the sessions, and a new leader has
 them. The leader holds a connect it has accepted as a pending session until the
-session open event is appended.
+session open event is appended. The review of pull request 277 read
+`SessionManager.checkSessions`, in `SessionManager.java` at `master`, on the same
+day: for a timed-out session the leader sends the `CLOSED` event only after
+`appendSessionClose` has succeeded.
 
 ## Decision
 
@@ -79,9 +82,17 @@ What the leader adds to the table:
 - A session open event a leader reads that it did not write, an entry of the term
   before its own that is committed in its term, opens a session the leader takes up
   the same way, with no ok event: the leader that accepted the connect owed that.
+- A session the leader closes for the timeout is told so only once the log has
+  taken its session close event, as in Aeron. The closed event is then owed, as
+  the ok event is, until the session's publication takes it. The committed close
+  frees the session and ends the debt, and so does the leader's stopping leading.
+  A client that is never told finds its leader silent for the leader heartbeat
+  timeout.
 - When the leader has decided a session's close, by the client's session close or
-  by the timeout, it ignores what the client sends for that session. The session
-  stays open on every member until the session close event is committed.
+  by the timeout, it ignores what the client sends for that session. It sends the
+  session nothing it still owed, an ok event or a new leader event, but the closed
+  event of a timeout. The session stays open on every member until the session
+  close event is committed.
 
 A member that leads a term whose election has not closed leaves a connect unread
 on its ingress image (`Ingress::Unread`, the abort of ADR 0114's controlled poll),
@@ -119,6 +130,12 @@ position.
   fails.
 - **A session message kept while the log is back-pressured.** Lost in ADR 0114: the
   page says "it buffers no message", and the message stays unread.
+- **The closed event of a timeout sent when the timeout is decided, or tried
+  once.** Lost: sent before the log holds the close, the event tells the client
+  of a close that a leader which stops leading first never appends, and the next
+  leader takes the session up. Tried once, the event never reaches a client whose
+  publication is not connected, or is back-pressured, in that one cycle, where the
+  ok event is owed until it is taken.
 - **A session's close applied by the leader when it appends the close event.**
   Lost: the leader's table would run ahead of the log, and a leader that stopped
   before the entry committed would have closed a session every other member holds
@@ -133,8 +150,8 @@ position.
 
 ## Evidence
 
-- `crates/cavalry-raft/tests/sessions.rs`, twelve tests on one `Sessions` driven by
-  hand, the bounds first: an eleventh session is refused with `concurrent session
+- `crates/cavalry-raft/tests/sessions.rs`, thirteen tests on one `Sessions` driven
+  by hand, the bounds first: an eleventh session is refused with `concurrent session
   limit` and a connect that finds the ten pending answers taken is dropped and
   counted; a connect is accepted, opened by its committed event and told ok, once,
   when its publication takes the event; a session open event waits for the log and
@@ -144,8 +161,10 @@ position.
   member can answer; an answer unsent at 5 s is dropped; a session message is
   appended with the leader's term and time, left unread under back pressure, and
   ignored for another term, another session or on a follower; a silent session is
-  closed at 10 s and a keepalive holds one; a close event waits for the log; a
-  client's close; a new leader takes up the sessions its log holds, with the
+  closed at 10 s and a keepalive holds one; a timeout's closed event waits for its
+  close event to be in the log; a closed event is owed until its publication takes
+  it or the close is committed, and no ok event follows it; a client's close; a
+  new leader takes up the sessions its log holds, with the
   timeout counted from its election's close and the next id after the log's; and
   the entries no leader of this version writes change nothing.
 - `crates/cavalry-raft/tests/sessions_allocations.rs`: ten thousand rounds of a
@@ -186,3 +205,5 @@ for the close reason service action.
 - Aeron, read 2026-11-13 at `master` (1.55.0-SNAPSHOT):
   `aeron-cluster/src/main/java/io/aeron/cluster/ConsensusModuleAgent.java`
   (<https://github.com/aeron-io/aeron/blob/master/aeron-cluster/src/main/java/io/aeron/cluster/ConsensusModuleAgent.java>)
+  and `aeron-cluster/src/main/java/io/aeron/cluster/SessionManager.java`
+  (<https://github.com/aeron-io/aeron/blob/master/aeron-cluster/src/main/java/io/aeron/cluster/SessionManager.java>)
