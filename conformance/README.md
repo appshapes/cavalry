@@ -26,8 +26,16 @@ A committed log round reads beside a member whose log is one recording that begi
 position 0, and checks the recording's id. Each `run.sh` asks `log-member.sh` which
 member that is: member 1, unless it joined its leader's log late and holds its log in
 two recordings, and then member 0 or member 2. The script reads each member's file of
-its log's recordings in its driver directory (`spec/cluster.md`, "The log's
-recordings"; ADR 0103) and prints the member's id and the recording's.
+its log's recordings in its driver directory (`spec/cluster.md`, "The log's recordings";
+ADR 0103) and prints the member's id and the recording's. It waits 60 s for such a
+member, since a member writes its file as it joins the log, and then fails with what
+each member's file holds. A member renames each new file over the one before, so the
+script opens a member's file once per read, copies its 40-byte header, and takes every
+field from the copy: two opens could find two files, and mix their fields. It reads the
+integers through `od` in hex, because
+`od`'s signed decimal of eight bytes is wrong on macOS 26.6, and before it reads a file
+it reads eight bytes it knows to be 4096 and chooses no member on a host that reads them
+otherwise.
 
 The Python runner is the shape the Node, Go, JVM and .NET runners copy (ADR 0046,
 cards 206 to 209): a package of another ABI version refused when it loads the library; the C

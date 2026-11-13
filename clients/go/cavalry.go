@@ -1003,10 +1003,11 @@ func (l *CommittedLog) CommitPosition() int64 {
 func (l *CommittedLog) IsEnded() bool { return bool(C.cavalry_committed_log_is_ended(l.handle)) }
 
 // FailedAt is the position after the last frame the driver's replay of the member's
-// recording played before it failed, and true; or 0 and false for a log that is live or
-// that ended because its member closed or left the recording. No entry from that
-// position on is delivered. The entries below it may still be on their way when this
-// first is true, so read it once IsEnded is true. They have all been delivered by then
+// recording played before it failed, and true; or 0 and false for a log that is live,
+// that ended because its member closed or left the recording, or that ended whole at the
+// stop of a recording below the member's live one. No entry from that position on is
+// delivered. The entries below it may still be on their way when this first is true, so
+// read it once IsEnded is true. They have all been delivered by then
 // unless the driver withdrew the replay first, which it does 5 s after a replay ends, one
 // that failed included: WithdrawnAt is then true with a position below this one, and the
 // entries from there on, those below this position among them, were not delivered
@@ -1023,9 +1024,11 @@ func (l *CommittedLog) FailedAt() (int64, bool) {
 // true, when the driver withdrew the replay before the polls had read it to its end; or
 // 0 and false. The driver keeps a replay 5 s after it ends and then withdraws it, read
 // or not: a service that did not poll for that long after its member closed or left the
-// log, or whose handler took that long, ends so. The entries from that position on were
-// played and not delivered. A replay that failed is withdrawn in the same way: FailedAt
-// is then true too, and this position is the lower. Read it once IsEnded is true.
+// log, or whose handler took that long, ends so, and so does a log on a recording below
+// the member's live one while the member's commit position stays below that recording's
+// stop for that long. The entries from that position on were played and not delivered.
+// A replay that failed is withdrawn in the same way: FailedAt is then true too, and this
+// position is the lower. Read it once IsEnded is true.
 func (l *CommittedLog) WithdrawnAt() (int64, bool) {
 	var position C.int64_t
 	if !bool(C.cavalry_committed_log_withdrawn_at(l.handle, &position)) {

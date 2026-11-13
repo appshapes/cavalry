@@ -68,7 +68,8 @@ use ports::free_ports;
 /// test starts them. `members[0]` is the member that leads and `members[1..]` are its
 /// followers, whichever member the cluster has for a leader: `start` finds it, and
 /// starts the members in the order 1, 2, 0, so that no member's place is its id,
-/// before the leader is put first or after (ADR 0100, change 3).
+/// before the leader is put first or after (ADR 0100, change 3). `members[1]` is a
+/// follower that joined the leader's log on time, whose log is one recording.
 struct Cluster {
     members: Vec<(Driver, ConsensusModule, PathBuf)>,
     _dir: TestDir,
@@ -113,7 +114,37 @@ impl Cluster {
             .expect("one member leads");
         cluster.members.swap(0, leader);
         assert_eq!(cluster.members[0].1.role(), Role::Leader);
+        // The follower a service reads beside, `members[1]`, is one whose log is one
+        // recording, from 0. A follower that joined the leader's log late holds what
+        // lies below its live image in its recording of the replay it caught up by
+        // (ADR 0103; ADR 0104), and a handle opened at 0 beside it replays that
+        // recording and ends where it stops, after the term's first entry; the tests
+        // here read past it through one handle. The leader closes its election on a
+        // quorum of members that joined its log at its position, so one follower at
+        // least did. Each member writes its file before it names its recording.
+        cluster.run_until("every member named its recording", |cluster| {
+            cluster
+                .members
+                .iter()
+                .all(|(_, module, _)| module.log_recording_id().is_some())
+        });
+        let on_time = (1..3)
+            .find(|&place| cluster.is_one_recording(place))
+            .expect("a follower that joined the log on time");
+        cluster.members.swap(1, on_time);
         cluster
+    }
+
+    /// Whether the member in `place` holds its log in one recording, from 0: its file
+    /// of its log's recordings names none below the live one, which begins at 0.
+    fn is_one_recording(&self, place: usize) -> bool {
+        use cavalry_proto::cluster::{LOG_RECORDINGS_FILE_PREFIX, LogRecordings};
+        let (_, module, dir) = &self.members[place];
+        let member_id = module.member_id();
+        let bytes = std::fs::read(dir.join(format!("{LOG_RECORDINGS_FILE_PREFIX}{member_id}")))
+            .expect("the member's file of its log's recordings");
+        let file = LogRecordings::read(&bytes, member_id).expect("the file passes its checks");
+        file.is_empty() && file.live_start_position() == 0
     }
 
     fn work(&mut self) -> usize {
@@ -390,24 +421,11 @@ fn a_service_reads_the_committed_log_through_the_c_handler_with_each_entrys_posi
         assert!(!log.is_null(), "the follower has a recording of the log");
         let mut constants = std::mem::zeroed::<cavalry_committed_log_constants_t>();
         assert_eq!(cavalry_committed_log_constants(log, &mut constants), 0);
-        // The recording a service at position 0 reads: the first that the member's
-        // file names as holding it, which is not the live one beside a follower that
-        // joined late and caught up through a replay.
-        let recording_at_0 = {
-            use cavalry_proto::cluster::{LOG_RECORDINGS_FILE_PREFIX, LogRecordings};
-            let bytes = std::fs::read(
-                cluster.members[1]
-                    .2
-                    .join(format!("{LOG_RECORDINGS_FILE_PREFIX}{member_id}")),
-            )
-            .expect("the member's file of its log's recordings");
-            LogRecordings::read(&bytes, member_id)
-                .expect("the file passes its checks")
-                .recording_at(0)
-        };
+        // The follower's log is one recording (`Cluster::start`), so a service at
+        // position 0 reads the live one.
         assert_eq!(
-            (constants.member_id, constants.recording_id),
-            (member_id, recording_at_0)
+            (constants.member_id, Some(constants.recording_id)),
+            (member_id, cluster.members[1].1.log_recording_id())
         );
         assert_eq!(cavalry_committed_log_position(log), 0);
         assert_eq!(cavalry_committed_log_commit_position(log), 0);
@@ -605,7 +623,7 @@ fn a_service_reads_the_committed_log_through_the_c_handler_with_each_entrys_posi
 #[test]
 fn a_service_whose_replay_the_driver_withdrew_unread_is_told_where_its_entries_stop() {
     let mut cluster = Cluster::start("service-withdrawn");
-    let (context, client) = connect(&cluster.members[2].2);
+    let (context, client) = connect(&cluster.members[1].2);
     // SAFETY: the ABI's conventions, held by this test.
     unsafe {
         // The service opens its log before any entry is offered.
@@ -650,7 +668,7 @@ fn a_service_whose_replay_the_driver_withdrew_unread_is_told_where_its_entries_s
         assert!(cavalry_committed_log_position(log) <= 96);
         assert!(!cavalry_committed_log_is_ended(log));
 
-        // Follower 2's consensus module closes. Its recording stops, the replay ends,
+        // The follower's consensus module closes. Its recording stops, the replay ends,
         // and the service does not read: a poll with a fragment limit of 0 applies the
         // events the subscription has and reads no frame, so the handle is ended only
         // when the driver has withdrawn the image, the linger after the replay's end.
@@ -659,7 +677,7 @@ fn a_service_whose_replay_the_driver_withdrew_unread_is_told_where_its_entries_s
         // The time below is taken before the close begins, so that it is at or before
         // the replay's end and the five seconds are a lower bound: taken after the
         // close returned, it read 4.993 s on a run of `master`.
-        let (driver, module, _) = cluster.members.remove(2);
+        let (driver, module, _) = cluster.members.remove(1);
         let closed = Instant::now();
         module.close().expect("the member closes");
         let deadline = Instant::now() + Duration::from_secs(30);

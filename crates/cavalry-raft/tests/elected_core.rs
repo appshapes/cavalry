@@ -8,7 +8,9 @@ mod common;
 
 use cavalry_proto::cluster::{Message, Template};
 use cavalry_raft::{Consensus, ElectionState, Refused, Role};
-use common::{Call, Stub, append_position, at, canvass_position, new_leadership_term};
+use common::{
+    Call, Stub, append_position, at, canvass_position, leadership_term, new_leadership_term,
+};
 
 /// Member 0 of three, which elects, taken by hand to the cycle after it has both
 /// votes of its ballot for term 0: it canvassed, heard both others with logs level
@@ -237,6 +239,7 @@ fn a_follower_records_the_term_before_it_reports_for_it() {
         .on_message(at(0), &new_leadership_term(1, 0), &mut io)
         .expect("no fault");
     assert_eq!(follower.election_state(), ElectionState::Init);
+    assert_eq!(io.made, 0, "in init it reads nothing");
 
     follower.do_work(at(1), &mut io).expect("no fault");
     follower.do_work(at(2), &mut io).expect("no fault");
@@ -315,4 +318,85 @@ fn a_follower_records_the_term_before_it_reports_for_it() {
         Some(0)
     );
     assert_eq!(follower.append_position(), 4096);
+}
+
+/// A member whose elections fail one after another sends one round of canvass
+/// positions every election status interval, 100 ms, and no oftener (invariant 3): the
+/// interval runs on from the last election and does not begin again with each. A
+/// leader answers a canvass position and sends no new leadership term unasked, so
+/// such a member fails one election an interval at most. Here each election fails
+/// three milliseconds after the leader's answer: the image of the leader's log joins
+/// past the end of the member's own log, in follower log await. The member is back
+/// in canvass at once, and waits there for the rest of the interval. In a second it
+/// sends ten rounds, two messages each, and fails ten elections, or one more of each.
+#[test]
+fn a_member_whose_elections_fail_one_after_another_canvasses_once_an_interval() {
+    let mut io = Stub::new();
+    let mut member = Consensus::with_election(&[0, 1, 2], 1, 7).expect("a member");
+    io.image = Some(64);
+    let mut canvass_positions = 0;
+    let mut longest_wait_in_canvass = 0;
+    let mut in_canvass_since = None;
+    for ms in 1..=1_000 {
+        member.do_work(at(ms), &mut io).expect("no fault");
+        canvass_positions += io.count(|call| {
+            matches!(
+                call,
+                Call::Send {
+                    template: Template::CanvassPosition,
+                    ..
+                }
+            )
+        });
+        let asked_the_leader = io
+            .first(|call| {
+                *call
+                    == Call::Send {
+                        to: 0,
+                        template: Template::CanvassPosition,
+                    }
+            })
+            .is_some();
+        io.clear();
+        if member.election_state() == ElectionState::Canvass {
+            let since = *in_canvass_since.get_or_insert(ms);
+            longest_wait_in_canvass = longest_wait_in_canvass.max(ms - since);
+        } else {
+            in_canvass_since = None;
+        }
+        if asked_the_leader {
+            // The leader's answer to the log the member reported: no term before
+            // its first election recorded term 0, and term 0 from then on.
+            let answer = if member.counts().elections_failed == 0 {
+                new_leadership_term(0, 0)
+            } else {
+                leadership_term(0, 0, 0, 0, 0, [-1, -1, -1])
+            };
+            member
+                .on_message(at(ms), &answer, &mut io)
+                .expect("no fault");
+            assert_eq!(
+                member.election_state(),
+                ElectionState::FollowerReplay,
+                "at {ms} ms the member takes its leader's answer"
+            );
+        }
+    }
+    let counts = member.counts();
+    assert_eq!(
+        counts.join_position_mismatches, counts.elections_failed,
+        "{counts:?}"
+    );
+    assert!(
+        (10..=11).contains(&counts.elections_failed),
+        "one failed election an interval: {counts:?}"
+    );
+    assert!(
+        (20..=22).contains(&canvass_positions),
+        "{canvass_positions} canvass positions in a second; {counts:?}"
+    );
+    assert!(
+        (90..100).contains(&longest_wait_in_canvass),
+        "the member waited {longest_wait_in_canvass} ms in canvass for its next round"
+    );
 }

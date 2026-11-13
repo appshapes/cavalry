@@ -1331,6 +1331,18 @@ impl Cavalry {
     /// keeps the last 1,024 recordings it stopped: a position below them is refused
     /// with code 23.
     ///
+    /// The call at the position where a handle ended whole has a third answer, beside
+    /// the next recording and `None`: a handle on the same recording,
+    /// [`CommittedLog::recording_id`] unchanged. When the member still names that
+    /// recording as its live one, the recording has stopped there and the member has
+    /// not yet left its log, as for the seconds a follower takes to leave a leader it
+    /// lost once its driver has retired the leader's image, or after a write to the
+    /// recording's segment file failed: the handle is ended at once, with no report
+    /// set and no entry. When the member has named a later recording since, the same
+    /// recording lies below it, and the handle reads on in it. A service asks again
+    /// after a pause in both cases, as it does after `None`, and not in a loop that
+    /// spins.
+    ///
     /// A service reads a handle until [`CommittedLog::is_ended`] says that no poll will
     /// deliver another entry, and not until a poll returns 0: when its member closes or
     /// leaves the log, entries below the bound the handle took may still be on their
@@ -1416,9 +1428,10 @@ impl Cavalry {
     ///                 )
     ///                 .into());
     ///             }
-    ///             // None of the three: the member closed or left its log, and every
-    ///             // entry below the last commit position the handle took has been
-    ///             // delivered.
+    ///             // None of the three: every entry the handle's recording holds
+    ///             // below the last commit position the handle took has been
+    ///             // delivered. The caller opens the log again from `next`, after a
+    ///             // pause when that is the same recording or `None`.
     ///             return Ok(next);
     ///         }
     ///         if entries == 0 {

@@ -720,9 +720,10 @@ class CommittedLog {
    * case what the log delivered ends at `position()`, where a service opens the log again. */
   get isEnded() { return addon.cavalry_committed_log_is_ended(this.handle); }
   /** The position after the last frame the driver's replay of the member's recording played
-   * before it failed, or null for a log that is live or that ended because its member closed or
-   * left the recording. No entry from that position on is delivered. The entries below it may
-   * still be on their way when this first is a position, so read it once `isEnded` is true.
+   * before it failed, or null for a log that is live, that ended because its member closed or
+   * left the recording, or that ended whole at the stop of a recording below the member's live
+   * one. No entry from that position on is delivered. The entries below it may still be on
+   * their way when this first is a position, so read it once `isEnded` is true.
    * They have all been delivered by then unless the driver withdrew the replay first, which it
    * does 5 s after a replay ends, one that failed included: `withdrawnAt()` is then a position
    * below this one, and the entries from there on, those below this position among them, were
@@ -734,10 +735,11 @@ class CommittedLog {
   /** The position at which the entries this log was not given begin, when the driver withdrew
    * the replay before the polls had read it to its end, or null. The driver keeps a replay 5 s
    * after it ends and then withdraws it, read or not: a service that did not poll for that long
-   * after its member closed or left the log, or whose handler took that long, ends so. The
-   * entries from that position on were played and not delivered. A replay that failed is
-   * withdrawn in the same way: `failedAt()` is then a position too, and this one is the lower.
-   * Read it once `isEnded` is true. */
+   * after its member closed or left the log, or whose handler took that long, ends so, and so
+   * does a log on a recording below the member's live one while the member's commit position
+   * stays below that recording's stop for that long. The entries from that position on were
+   * played and not delivered. A replay that failed is withdrawn in the same way: `failedAt()`
+   * is then a position too, and this one is the lower. Read it once `isEnded` is true. */
   withdrawnAt() {
     const [withdrawn, position] = addon.cavalry_committed_log_withdrawn_at(this.handle);
     return withdrawn ? position : null;
