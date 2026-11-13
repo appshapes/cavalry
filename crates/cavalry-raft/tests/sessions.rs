@@ -948,7 +948,10 @@ fn a_clients_close_is_appended_and_answered_with_nothing() {
 /// up, each with a publication on its response channel, the term's new leader event
 /// and the session timeout counted from the close of its election. The leader it
 /// replaces gives up its publications and the connect it had accepted, and keeps
-/// the sessions.
+/// the sessions. That connect's session open event, in the log of the term before,
+/// is read in the new leader's replay before its election closes (`spec/cluster.md`,
+/// state 6): a session no client knows, taken up with the others, with no ok event,
+/// and its id is given no second time.
 #[test]
 fn a_new_leader_takes_up_the_sessions_its_log_holds() {
     let (mut old, mut old_world) = leading(2);
@@ -971,74 +974,57 @@ fn a_new_leader_takes_up_the_sessions_its_log_holds() {
         &connect(3, &third),
     );
     assert_eq!(old_world.held(), [0, 1, 2]);
+    assert!(
+        old_world.entries(2)[0].starts_with("open session 2 correlation 3 term 1"),
+        "{:?}",
+        old_world.entries(2)
+    );
     work(&mut old, &mut old_world, 8_001, follower(1, -1));
     assert_eq!(old_world.held(), [] as [usize; 0]);
     assert_eq!((old.open(), old.counts().connects_dropped), (2, 1));
 
-    // The follower leads term 2 from 9 s: publications, and a new leader event each.
+    // Member 1 wins term 2. Its log holds the third connect's session open event,
+    // below its term base log position: its leader replay reads it before the
+    // election closes, while it does not lead yet, as a follower reads an entry.
+    let replaying = Leadership {
+        leads: false,
+        leadership_term_id: 2,
+        leader_member_id: 1,
+    };
+    new_world.log.push(old_world.log[2].clone());
+    work(&mut new, &mut new_world, 8_500, replaying);
+    assert_eq!(commit(&mut new, &mut new_world, 8_500), [true]);
+    assert_eq!((new.open(), new_world.held().len()), (3, 0));
+    assert_eq!(new_world.sent(), [] as [String; 0]);
+
+    // Its election closes at 9 s: a publication and a new leader event for each of
+    // the three, and no ok event, which the leader that accepted the connect owed.
     let lead = Leadership {
         leads: true,
         leadership_term_id: 2,
         leader_member_id: 1,
     };
     work(&mut new, &mut new_world, 9_000, lead);
-    assert_eq!(new_world.held(), [0, 1]);
+    assert_eq!(new_world.held(), [0, 1, 2]);
     assert_eq!(
         new_world.egress[1].as_deref(),
         Some(channel(20_001).as_slice())
     );
+    assert_eq!(new_world.egress[2].as_deref(), Some(third.as_slice()));
     let endpoints = String::from_utf8_lossy(ENDPOINTS).into_owned();
     assert_eq!(
         new_world.sent(),
         [
             format!("0: new leader session 0 term 2 leader 1 endpoints {endpoints:?}"),
             format!("1: new leader session 1 term 2 leader 1 endpoints {endpoints:?}"),
+            format!("2: new leader session 2 term 2 leader 1 endpoints {endpoints:?}"),
         ]
     );
-    // A session open event of the term before, committed only now that this leader's
-    // first entry is: the session is taken up as the two the election found open.
-    let late = channel(20_009);
-    let Ok(known) = new.on_entry(
-        at(9_500),
-        &Message::SessionOpenEvent {
-            leadership_term_id: 1,
-            correlation_id: 9,
-            cluster_session_id: 5,
-            timestamp: TIME,
-            response_stream_id: EGRESS_STREAM_ID,
-            response_channel: &late,
-            encoded_principal: &[],
-        },
-        &mut new_world,
-    );
-    assert!(known);
-    assert_eq!(new_world.held(), [0, 1, 2]);
-    work(&mut new, &mut new_world, 9_501, lead);
-    assert_eq!(
-        new_world.sent(),
-        [format!(
-            "2: new leader session 5 term 2 leader 1 endpoints {endpoints:?}"
-        )],
-        "no ok event: this leader did not accept its connect"
-    );
-    let Ok(known) = new.on_entry(
-        at(9_502),
-        &Message::SessionCloseEvent {
-            leadership_term_id: 2,
-            cluster_session_id: 5,
-            timestamp: TIME,
-            close_reason: CloseReason::ClientAction,
-        },
-        &mut new_world,
-    );
-    assert!(known);
-    assert_eq!(new_world.held(), [0, 1]);
     // The timeout runs from the election's close, not from the sessions' last
-    // message under the old leader: nothing at 18.999 s, both at 19 s.
+    // message under the old leader: nothing at 18.999 s, two at 19 s.
     work(&mut new, &mut new_world, 18_999, lead);
-    assert_eq!(new_world.log.len(), 2);
-    // A message with the old term is ignored; one with the new term is appended,
-    // with the next session's id still the next after the log's.
+    assert_eq!(new_world.log.len(), 3);
+    // A message with the old term is ignored; one with the new term is appended.
     let message = |term: i64| Message::SessionMessage {
         leadership_term_id: term,
         cluster_session_id: 0,
@@ -1049,20 +1035,25 @@ fn a_new_leader_takes_up_the_sessions_its_log_holds() {
     assert_eq!(new.counts().ingress_ignored, 1);
     ingress(&mut new, &mut new_world, 18_999, lead, &message(2));
     assert_eq!(
-        new_world.entries(2),
+        new_world.entries(3),
         ["message session 0 term 2 at 18999 \"again\""]
     );
     work(&mut new, &mut new_world, 19_000, lead);
     assert_eq!(
-        new_world.entries(3),
-        ["close session 1 term 2 at 19000 Timeout"]
+        new_world.entries(4),
+        [
+            "close session 1 term 2 at 19000 Timeout",
+            "close session 2 term 2 at 19000 Timeout",
+        ]
     );
+    // The next session's id is past every id the log has named, the given-up
+    // connect's among them: 3, not 2.
     let fourth = channel(20_003);
     ingress(&mut new, &mut new_world, 19_001, lead, &connect(4, &fourth));
     assert!(
-        new_world.entries(4)[0].starts_with("open session 6 correlation 4 term 2"),
+        new_world.entries(6)[0].starts_with("open session 3 correlation 4 term 2"),
         "{:?}",
-        new_world.entries(4)
+        new_world.entries(6)
     );
 }
 

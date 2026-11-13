@@ -898,26 +898,26 @@ event, on every member that reads them in its own log ("Roles and the election",
 states 6 and 10), the leader among them: the leader that accepted a connect holds the
 session as connecting until it reads the entry at or below its commit position, and a
 follower holds the open sessions with no publication, so that a member that wins an
-election has them. A session whose session open event a leader reads and did not
-write, an entry of the term before its own, is one that leader sends a new leader
-event and no ok event. The next session id is one more than the highest the member has
-given or has read in a session open event (ADR 0115). The member's consensus module
-reads its own committed log for those entries as a service reads it, through a
-replay of its recordings on the service log stream and no further than its commit
-position ("The service"), in every role and every state of its election, from
-position 0 when it starts. A leader serves sessions, which is to accept a connect,
-append a session's message and send the new leader event, from when its election
-has closed and that read has reached its term base log position: every session the
-terms before it opened, and every session id they gave, is then in its table, and it
-gives no id twice, and it reads no entry of a term before its own from then on,
-since each is below its term base log position (ADR 0116). A message of the ingress
-stream is one frame in this
-version, as an entry of the log is: a session message carries at most 1,344 bytes of
-payload after its header. No member reassembles: a fragment of a longer message is
-counted in `cluster.messages_rejected` and nothing of the message is acted on. A
-member reads its ingress stream so that a message it cannot take yet stays unread
-(`spec/log-buffer.md`, "Reading", the controlled read), and until that message is
-taken it reads no message of another client's image. Every refusal is
+election has them. The member's consensus module reads its own committed log for those
+entries as a service reads it, through a replay of its recordings on the service log
+stream and no further than its commit position ("The service"), in every role and
+every state of its election, from position 0 when it starts (ADR 0116). A member that
+wins an election serves sessions, which is to accept a connect, append a session's
+message and send the new leader event, from when its election has closed and that read
+has reached its term base log position, which its commit position reaches once a
+quorum has recorded its term ("The commit position"). It has then read every session
+open and close event of the terms before its own, before it accepts a connect, and
+while it serves it reads only the entries of its own term. A session whose session
+open event is of a term before the leader's own is one that leader sends a new leader
+event when it begins to serve, and no ok event. The next session id is one more than
+the highest the member has given or has read in a session open event, so that a new
+leader gives no id twice (ADR 0115, ADR 0116). A message of the ingress stream is one
+frame in this version, as an entry of the log is: a session message carries at most
+1,344 bytes of payload after its header. No member reassembles: a fragment of a longer
+message is counted in `cluster.messages_rejected` and nothing of the message is acted
+on. A member reads its ingress stream so that a message it cannot take yet stays
+unread (`spec/log-buffer.md`, "Reading", the controlled read), and until that message
+is taken it reads no message of another client's image. Every refusal is
 counted in `cluster.sessions_refused`. A redirect or a refusal is answered on an egress
 publication to the connect's response channel on stream 102, the one egress stream of
 this version, whatever response stream id the connect named; the member holds the
@@ -929,10 +929,10 @@ time, and a connect that arrives with no room is dropped unanswered and counted 
 whose response channel the driver refuses, one that is not `cavalry:udp`, is malformed
 or names a host that does not resolve, since no publication to it can exist; the
 driver's refusal runs before the leader's own check of the channel's form, so such a
-connect is dropped and never answered `invalid response channel`. A
-connecting session whose ok event the leader cannot send within the session timeout
-is closed as a timed-out session is, its session close event appended with the reason
-timeout. A client that
+connect is dropped and never answered `invalid response channel`. An open session whose ok event the leader has not sent within the session timeout, its
+client having heard nothing and so sent nothing, is closed as a timed-out session is:
+its session close event is appended with the reason timeout, and the ok event is not
+sent after it (ADR 0115). A client that
 has no session event within the session connect timeout reports the connect lost to
 its caller and may send it again with a new correlation id; one that reads a session
 event whose version has a major other than its own reports the cluster's version to
@@ -954,18 +954,22 @@ later duty cycle. A session open event the log has not taken at the session conn
 timeout is given up with its connect, counted in `cluster.connects_dropped`, and so is
 a connect the leader had accepted and had not read back as committed when it stopped
 leading; a session open event that was appended and that a later leader commits opens
-a session no client knows, which the session timeout closes (ADR 0115). The client sends session
-keepalive when the keepalive interval has passed since it last sent anything; a session
-with nothing from its client for the session timeout is closed: the leader appends a
-session close event with the reason timeout and sends a session event of code closed
-with the detail `TIMEOUT`, once, when the session's egress publication takes it. A
-client closes its session with session close; the leader
-appends a session close event with the reason client action and sends nothing. From
-when the leader has decided a session's close, by the client's session close or by
-the timeout, it ignores what the client sends for that session, each counted in
-`cluster.ingress_ignored`, and the session stays open on every member until the
-session close event is committed (ADR 0115). The
-service's replies to a session are session messages on the egress stream, from the
+a session no client knows, which the session timeout closes (ADR 0115). The client sends session keepalive when the keepalive interval has passed since it
+last sent anything; a session with nothing from its client for the session timeout is
+closed: the leader appends a session close event with the reason timeout and, only
+once the log has taken that entry, never before, sends a session event of code closed
+with the detail `TIMEOUT`, as Aeron's `SessionManager.checkSessions` does. That closed
+event is owed as an ok event is: tried on each duty cycle until the session's egress
+publication takes it, and sent once. The debt ends when the session close event is
+committed, which frees the session, or when the leader stops leading; a client that is
+never told finds its leader silent for the leader heartbeat timeout. A client closes
+its session with session close; the leader appends a session close event with the
+reason client action and sends nothing. From when the leader has decided a session's
+close, by the client's session close or by the timeout, it sends the session nothing
+it still owed, an ok event or a new leader event, but the closed event of a timeout;
+it ignores what the client sends for that session, each counted in
+`cluster.ingress_ignored`; and the session stays open on every member until the
+session close event is committed (ADR 0115). The service's replies to a session are session messages on the egress stream, from the
 leader alone ("The service"). When a term begins, its leader sends a new leader event
 to every open session with the ingress endpoints, whether or not the leader changed,
 since the clients' messages carry the term and the leader ignores one for another

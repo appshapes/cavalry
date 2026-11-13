@@ -9,8 +9,12 @@
 //! order and no further than the commit position, through [`Sessions::on_entry`]:
 //! they alone open and close a session, on the leader and on a follower alike, so
 //! that every member holds the same sessions at the same position and a new leader
-//! has them. And a duty cycle, [`Sessions::do_work`], which sends what is owed and
-//! counts the timeouts. What it sends and appends goes through [`SessionIo`].
+//! has them. A member that wins an election has read every entry below its term base
+//! log position in leader replay (`spec/cluster.md`, "Roles and the election", state
+//! 6), before its election closes and before it accepts a connect: so while it leads
+//! it reads only the entries of its own term. And a duty cycle,
+//! [`Sessions::do_work`], which sends what is owed and counts the timeouts. What it
+//! sends and appends goes through [`SessionIo`].
 
 use cavalry_proto::channel::Channel;
 use cavalry_proto::cluster::{
@@ -109,8 +113,9 @@ pub struct SessionCounts {
     pub refused: u64,
     /// `cluster.connects_dropped`: a session connect dropped unanswered.
     pub connects_dropped: u64,
-    /// `cluster.ingress_ignored`: a session message, keepalive or close ignored, for
-    /// a term not the leader's or a session not open.
+    /// `cluster.ingress_ignored`: a session message, keepalive or close ignored: on a
+    /// member that does not lead, for a term not the leader's, or for a session that
+    /// is not open or whose close the leader has decided.
     pub ingress_ignored: u64,
 }
 
@@ -422,12 +427,20 @@ impl Sessions {
     /// closes it, on every member; any other entry is none of the sessions'.
     ///
     /// On the leader that accepted the connect, the session open event is what the
-    /// ok event waits for. A session open event a leader reads that it did not write,
-    /// an entry of the term before its own, opens a session it takes up at once: a
-    /// publication, and the new leader event. A session open event with the table full, or for an id
-    /// that is open, and a session close event for a session that is not open, are
-    /// entries no leader of this version writes: nothing is done with one, and the
-    /// answer is `false`, for the caller to count as a message rejected.
+    /// ok event waits for. The caller hands a member every entry below its term base
+    /// log position before it reports the member as leading, in leader replay
+    /// (`spec/cluster.md`, "Roles and the election", state 6): the commit position
+    /// reaches that base once a quorum has recorded the leader's term, and the
+    /// election closes after the replay. So a session open event of a term before the
+    /// leader's own opens its session as it does on a follower, and the member takes
+    /// the session up with the others when its election closes, with a publication
+    /// and the new leader event, and no ok event. While the member leads, every
+    /// session open event it reads is of its own term and names an id it gave, so
+    /// its own connecting session is found by that id. A session open event with
+    /// the table full, or for an id that is open, and a session close event for a
+    /// session that is not open, are entries no leader of this version writes:
+    /// nothing is done with one, and the answer is `false`, for the caller to count
+    /// as a message rejected.
     pub fn on_entry<I: SessionIo>(
         &mut self,
         clock: Clock,
@@ -458,10 +471,12 @@ impl Sessions {
                         None => return Ok(false),
                     },
                 };
-                let leads = self.led.is_some();
                 let Some(session) = self.sessions.get_mut(index) else {
                     return Ok(false);
                 };
+                // A follower's entry, or one a leader replays before its election
+                // closes: no publication yet, and the election's close takes the
+                // session up (`take_up`).
                 if connecting.is_none() {
                     *session = Session::FREE;
                     if !session.set_channel(response_channel) {
@@ -469,13 +484,6 @@ impl Sessions {
                     }
                     session.id = cluster_session_id;
                     session.correlation_id = correlation_id;
-                    // An entry this leader did not write: a leader before it accepted
-                    // the connect, and the entry is committed in this leader's term.
-                    // The session is taken up as the ones the election found open.
-                    if leads {
-                        session.egress = io.add_egress(index, response_channel)?;
-                        session.leader_owed = true;
-                    }
                 }
                 session.state = SessionState::Open;
                 session.ok_owed = connecting.is_some();
