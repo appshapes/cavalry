@@ -133,8 +133,8 @@ and `--request-changes` in place of `--approve` for findings.
   entry, a justification in the pull request body and an ADR (ADR 0001, ADR 0003).
 - **Scope.** One crate per pull request where possible; data-plane and control-plane changes
   in separate pull requests. `cavalry` holds re-exports and `main` only (ADR 0002).
-- **Commits and merges.** Pull request title `<card>: <Imperative subject>` when the issue
-  names a card, otherwise an imperative subject; body as above. Merges only, never rebase,
+- **Commits and merges.** Pull request title `<work item>: <Imperative subject>` when the
+  issue names a work item of the Brigade Board, otherwise an imperative subject; body as above. Merges only, never rebase,
   no force push, no rewritten history.
 - **Paths an agent may not touch.** On a branch the writer made (`claude/...`), a change
   under `.github/workflows/` or `.claude/`, to `spec/` without an ADR, or to

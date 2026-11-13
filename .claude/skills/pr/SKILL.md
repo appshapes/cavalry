@@ -1,18 +1,18 @@
 ---
 name: pr
 description: Open this branch's pull request and see it through the review loop from the author's side: the four gates one command at a time, the review record as the body, master merged in, the auto-merge label, then the wait each stage needs and the one manual step each stall needs, and just tidy after the merge
-argument-hint: "[card number] | watch <pull request number>"
+argument-hint: "[work item number] | watch <pull request number>"
 ---
 
 Land a branch on `master` through a pull request. `/commit` is a person's path, straight
-to `master`; this is the path for a Claude Code session working a card on a branch, which
+to `master`; this is the path for a Claude Code session working a work item on a branch, which
 CLAUDE.md gives to bots and agents (Working rules for agents; ADR 0004). The pull request
 is reviewed by the loop in `docs/how-to/ask-the-agent.md`, and that page describes the
 loop from the issue's side. This skill is the author's side: what to run, what to wait
 for, and the one thing to do at each stall. Everything the loop does by itself is left to
 it; a hand on the controls at the wrong moment is what this skill exists to prevent.
 
-The arguments are: $ARGUMENTS. A card number opens the pull request (section 1) and then
+The arguments are: $ARGUMENTS. A work item number opens the pull request (section 1) and then
 watches it (section 2). `watch <number>` watches an open pull request. Empty: on a branch
 with commits ahead of `origin/master` and no pull request, open; with an open pull
 request, watch; on `master`, stop and say that `/commit` is the path from `master`.
@@ -24,8 +24,8 @@ conflict: a conflict is resolved in place, as step 4 says.
 
 1. **Read the state.** `git fetch --quiet origin`, then `git status` (never `-uall`),
    `git log --oneline origin/master..HEAD`, `git diff` and `git diff --cached`. The branch
-   is `<card>-<slug>`; a change sitting on `master` moves to one first with
-   `git switch -c <card>-<slug>`. Check the diff against CLAUDE.md as `/commit` does
+   is `<work item>-<slug>`; a change sitting on `master` moves to one first with
+   `git switch -c <work item>-<slug>`. Check the diff against CLAUDE.md as `/commit` does
    (one crate per commit, docs in the same commit, histograms for a data-plane change, a
    dependency's justification, an ADR for `spec/`), and scan every added line for a
    secret. A diff over about a thousand changed lines, generated and recorded files
@@ -67,7 +67,7 @@ conflict: a conflict is resolved in place, as step 4 says.
    2026-11-01 was two constants defined twice on every target but Linux and macOS.
 
 3. **Commit.** The message is the review record, as `/commit` writes it: subject
-   `<card>: <Imperative subject>` under 72 characters; body with what changed, which
+   `<work item>: <Imperative subject>` under 72 characters; body with what changed, which
    invariant by number, and the evidence (the gate results, the ADR number, both
    histograms for a change under a data-plane crate, the `just conformance` and `just
    replay-check` results when the change claims correctness). Several commits on the
@@ -103,7 +103,7 @@ conflict: a conflict is resolved in place, as step 4 says.
    issue exists. Then:
 
    ```
-   gh pr create --title "<card>: <Imperative subject>" --body-file <file> --label auto-merge
+   gh pr create --title "<work item>: <Imperative subject>" --body-file <file> --label auto-merge
    ```
 
    `auto-merge` goes on at creation: the reviewer's approval of the current head then
@@ -228,11 +228,16 @@ gh pr checks <number>
   change it is: fix yours forward, and tell the session whose it is when it is not
   yours. The run is the first of
   `gates (macos)` for the change, which a pull request does not have (ADR 0073): a
-  red one there is yours to fix forward, before the card and before any other work.
+  red one there is yours to fix forward, before the work item and before any other work.
   Its bench jobs report in seconds when the pull request's own run measured the same
-  tree (ADR 0074). Then comment the commit hash on the card and archive it, and run
-  `just tidy`: it retires the branch locally, with its worktree, and GitHub has already
-  deleted it on origin.
+  tree (ADR 0074). Then comment the commit hash and the run on the work item (`brigade
+  work-item comment <number>`, the text on stdin), and run `just tidy`: it retires the
+  branch locally, with its worktree, and GitHub has already deleted it on origin. The
+  work item moves to Done only when this was its last pull request and every "Done
+  when" item holds (`docs/how-to/implement-a-feature.md`, step 4): under
+  `/work-item-start` that is its step 5, whose landing comment is then this comment;
+  otherwise `brigade work-item move <number> done`. Never `close` it, which is the
+  owner's word.
 
 ## 3. Report
 

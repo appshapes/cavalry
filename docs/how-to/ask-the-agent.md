@@ -8,14 +8,15 @@ first one. Why the loop is built this way is in ADR 0004
 
 - Write access to the repository. The agent runs only for a person with write access;
   a comment from anyone else is ignored by design.
-- A Trello card for the work, when there is one. Its number becomes the prefix of
-  the pull request title and so of the commit on `master`.
+- A work item for the work on the team's Brigade Board, tagged `cavalry`, when there
+  is one (`brigade work-item show <number>`). Its number becomes the prefix of the pull
+  request title and so of the commit on `master`.
 
 ## Steps
 
 1. Open an issue. The title is the pull request title the agent will use, so write
-   it as a commit subject: `75: Add a timeout to every CI job`, or without the card
-   prefix when there is no card. The body is the agent's whole brief: what to change,
+   it as a commit subject: `75: Add a timeout to every CI job`, or without the work
+   item's prefix when there is no work item. The body is the agent's whole brief: what to change,
    where, what done looks like, and which invariant in `CLAUDE.md` it serves. The
    agent reads nothing else from you.
 2. Add the `claude` label. Add `auto-merge` as well if the pull request should merge

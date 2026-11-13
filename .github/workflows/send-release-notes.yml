@@ -29,7 +29,7 @@
 # 3. The text is gated, because an email cannot be taken back. A writer agent drafts from the
 #    sources; `release-notes.py lint` refuses a `just` recipe, a `cavalry` command, a key, a
 #    counter, an ADR, a path or a link that does not exist in the checkout, and a commit hash,
-#    a card number, an address, a placeholder; a reviewer agent reads the draft against the
+#    a work item's or a card's number, an address, a placeholder; a reviewer agent reads the draft against the
 #    sources; the writer gets exactly one fix cycle; and only an APPROVED, lint-clean draft is
 #    sent. Both agents follow `.claude/agents/release-notes-email.md`. Neither can write to the
 #    repository: the job's token is `contents: read` and the edit tools are denied. Brigade's
