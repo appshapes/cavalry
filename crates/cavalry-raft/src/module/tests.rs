@@ -1126,6 +1126,126 @@ fn a_member_started_on_a_directory_with_no_catalog_is_refused_and_writes_nothing
     );
 }
 
+/// A members string of eight members whose ingress endpoints, as a redirect lists
+/// them, `<id>=<host:port>` joined by `,`, are `length` bytes long. The hosts are
+/// names DNS allows, labels of 63 bytes at most and 253 bytes in all; the other
+/// endpoints are the loopback's. Returns the string and the list it gives.
+fn members_listing(length: usize) -> (String, String) {
+    // `<id>=` and `:20000` for each member, and the seven commas.
+    let besides_hosts = MAX_MEMBERS * (2 + 6) + (MAX_MEMBERS - 1);
+    let hosts_length = length - besides_hosts;
+    let host = |n: usize| -> String {
+        (0..n)
+            .map(|at| if at % 64 == 63 { '.' } else { 'a' })
+            .collect()
+    };
+    let hosts: Vec<String> = (0..MAX_MEMBERS)
+        .map(|id| host(hosts_length / MAX_MEMBERS + usize::from(id < hosts_length % MAX_MEMBERS)))
+        .collect();
+    let members = hosts
+        .iter()
+        .enumerate()
+        .map(|(id, host)| {
+            format!(
+                "{id},{host}:20000,127.0.0.1:20001,127.0.0.1:20002,127.0.0.1:20003,\
+                 127.0.0.1:20004"
+            )
+        })
+        .collect::<Vec<_>>()
+        .join("|");
+    let listed = hosts
+        .iter()
+        .enumerate()
+        .map(|(id, host)| format!("{id}={host}:20000"))
+        .collect::<Vec<_>>()
+        .join(",");
+    for host in &hosts {
+        assert!(host.len() <= 253 && !host.ends_with('.'), "{host}");
+    }
+    (members, listed)
+}
+
+/// The bound of the ingress endpoints a redirect carries, at its capacity
+/// (`spec/cluster.md`, "Members and streams"; ADR 0116). Eight members whose
+/// endpoints are listed in 1,320 bytes pass the check, and the start fails on what
+/// follows it, a log directory with no catalog. One byte more is
+/// `RaftError::IngressEndpoints` with the length, before anything is opened: its
+/// reason is `ingress-endpoints`, and its message says what to change and names
+/// the page's "Members and streams". `parse_members` resolves no host and the check
+/// opens nothing, so no driver is needed.
+#[test]
+fn ingress_endpoints_longer_than_one_frame_of_the_egress_stream_are_refused_at_the_start() {
+    let dir = TestDir::new("ingress-endpoints");
+    let (members, listed) = members_listing(MAX_INGRESS_ENDPOINTS_LENGTH);
+    assert_eq!(listed.len(), 1_320);
+    let Err(error) = ConsensusModule::start(dir.0.join("driver"), dir.0.join("log"), &members, 0)
+    else {
+        panic!("a member started on no driver");
+    };
+    assert!(matches!(error, RaftError::Catalog(_)), "{error}");
+
+    let (members, listed) = members_listing(MAX_INGRESS_ENDPOINTS_LENGTH + 1);
+    assert_eq!(listed.len(), 1_321);
+    let Err(error) = ConsensusModule::start(dir.0.join("driver"), dir.0.join("log"), &members, 0)
+    else {
+        panic!("a member started on no driver");
+    };
+    assert!(
+        matches!(error, RaftError::IngressEndpoints { length: 1_321 }),
+        "{error}"
+    );
+    assert_eq!(error.reason(), "ingress-endpoints");
+    let message = error.to_string();
+    assert!(
+        message.starts_with(
+            "member refused (ingress-endpoints): the members' ingress endpoints are 1321 \
+             bytes as a redirect lists them"
+        ),
+        "{message}"
+    );
+    assert!(message.contains("carries 1320"), "{message}");
+    assert!(
+        message.ends_with(&format!("see {DOC_MEMBERS}")),
+        "{message}"
+    );
+    assert!(!dir.0.exists(), "nothing was written");
+}
+
+/// `MAX_INGRESS_ENDPOINTS_LENGTH` is what the encoder fits in one frame of the egress
+/// stream: a redirect, a session event whose detail is the list, of 1,320 bytes is
+/// 1,376 bytes, the payload of one frame at the 1,408-byte MTU, and one byte more
+/// is a frame too long. A new leader event, which carries the same list, is shorter.
+#[test]
+fn the_ingress_endpoints_bound_is_one_frame_of_a_redirect() {
+    let frame = 1408 - cavalry_proto::frame::HEADER_LENGTH;
+    let redirect = |detail: &[u8]| {
+        let event = Message::SessionEvent {
+            cluster_session_id: -1,
+            correlation_id: 1,
+            leadership_term_id: 1,
+            leader_member_id: 0,
+            code: cavalry_proto::cluster::EventCode::Redirect,
+            version: 0,
+            leader_heartbeat_timeout_ns: 10_000_000_000,
+            detail,
+        };
+        let mut bytes = [0u8; 1408];
+        event.write(&mut bytes).expect("the event is encoded")
+    };
+    assert_eq!(redirect(&[b'a'; MAX_INGRESS_ENDPOINTS_LENGTH]), frame);
+    assert_eq!(
+        redirect(&[b'a'; MAX_INGRESS_ENDPOINTS_LENGTH + 1]),
+        frame + 1
+    );
+    let new_leader = Message::NewLeaderEvent {
+        leadership_term_id: 1,
+        cluster_session_id: 0,
+        leader_member_id: 0,
+        ingress_endpoints: &[b'a'; MAX_INGRESS_ENDPOINTS_LENGTH],
+    };
+    assert!(new_leader.encoded_length() <= frame);
+}
+
 /// A catalog that is not the driver's gives no start position (ADR 0093). The
 /// leader's driver holds a recording of another stream in slot 0 of its catalog.
 /// The member's driver starts the member's recording of the log, recording 0 of its
