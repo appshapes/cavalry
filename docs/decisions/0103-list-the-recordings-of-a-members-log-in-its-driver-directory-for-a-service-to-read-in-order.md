@@ -90,7 +90,9 @@ recording only in a truncation, and it truncates only with every recording stopp
 truncation so that the rule does not rest on the order of two steps elsewhere. A
 table that is full forgets its oldest recording and leaves it as it is in the
 catalog. So a file whose live recording is the id the counter holds lists
-recordings that hold the member's log as it is now. A file that cannot be written
+recordings that hold the member's log as it is now. A member removes the file when
+it closes, and only after its client is closed and its counters are gone: the file
+is there for as long as a counter of the member names a recording. A file that cannot be written
 is the duty cycle's error, with what to do, and the member stores −1 until a later
 cycle has written it: in each such cycle it records and replicates, and names no
 recording to a service. Each cycle in which the write fails is counted in
@@ -109,8 +111,15 @@ finds the member's counters as before, reads the file, and starts the replay,
 still one that follows, of the recording that rule gives. Where the file names
 another live recording than the counter does, the member has moved on, and the
 call answers as it does while the member names none. Where there is no file, the
+call loads the counter again. When it still holds the id the call loaded, the
 member is of a version that writes none, and the call replays the live recording
-as before. A file that fails a check of "What a reader rejects" is an error that
+as before. When it does not, the member closed between the two loads and removed
+its file, and the call answers as it does while the member names none. Without the
+second load it would ask for a replay of a recording the member has left, and a
+position below that recording's start would be refused with code 23, the answer
+the page gives for a position the member has forgotten for good, where the true
+answer is to ask again: a member that restarts in a rolling upgrade makes that
+window routine. A file that fails a check of "What a reader rejects" is an error that
 names the file and the check.
 
 **The bound is the commit position while the member names the same live
