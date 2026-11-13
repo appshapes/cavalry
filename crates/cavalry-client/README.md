@@ -124,6 +124,29 @@ The client API implementation, re-exported by the `cavalry` crate. Data plane.
   entries begin. If the client's own read of the replay's image stopped on a fault,
   the poll that met it returned the fault, and `CommittedLog::faulted()` gives it
   from then on, for as long as the handle is held (ADR 0080).
+- Holds a session with a cluster: `Cavalry::connect_cluster(members,
+  response_channel)` takes the members string the cluster was started with and a
+  channel of this client's host, `cavalry:udp?endpoint=<host:port>`, for the cluster's
+  answers. It asks one member after another, follows a redirect to the leader, and
+  returns a `ClusterSession` once the leader has opened the session, or a
+  `ClusterError` that says what to do: the leader's refusal with its reason, a
+  cluster of another protocol version, a members string that fails a check, or no
+  answer in 20 s. `ClusterSession::offer(message)` sends the leader a message of one
+  frame, 1,344 bytes at most on the default MTU, with back pressure returned as
+  `Offer`. `ClusterSession::poll(handler, fragment_limit)` hands over the cluster's
+  replies, each with the cluster's time, and is the session's duty cycle: it sends a
+  keepalive when 500 ms have passed since the session last sent anything, turns the
+  session to a new leader when the cluster elects one, and closes it when the cluster
+  says so, after which `closed()` gives the reason. A session whose leader is lost,
+  which it knows by the leader's image going from its response channel, waits 20 s
+  for the member that leads next to say so, and then closes itself with the reason
+  `NO LEADER`. A program calls `poll` at least
+  every 500 ms: the leader closes a session it has heard nothing from for 10 s. The
+  session holds a publication to every member from the connect on, so nothing in
+  `offer` or `poll` allocates or sends the driver a command. `offer` reads no clock:
+  the next `poll` counts the message as sent, for the keepalive, and a poll reads the
+  clock once. A message `offer` accepted is on its way, not committed: a program that
+  must know asks its service to reply (ADR 0117).
 - Holds a recording the driver arms: `Cavalry::arm_recording(channel, stream_id)`, on a
   `cavalry:udp` stream with a subscription and no publication or image yet, returns
   an `ArmedRecording`, and `ArmedRecording::poll()` returns the `Recording` once the

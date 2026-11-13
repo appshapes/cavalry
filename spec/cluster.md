@@ -985,7 +985,17 @@ leader alone ("The service"). When a term begins, its leader sends a new leader 
 to every open session with the ingress endpoints, whether or not the leader changed,
 since the clients' messages carry the term and the leader ignores one for another
 term; the client sends its next message, a keepalive first, with the new term to the
-new leader's `ingress` endpoint. The session ids and open sessions are the log's: a
+new leader's `ingress` endpoint. A leader sends an open session nothing of its own
+but the events of this page, and no heartbeat, so a client cannot tell an idle leader
+from a lost one by what it reads. It learns that its leader is lost when the image of
+the leader's egress publication on its response channel is no longer available
+(`spec/client-protocol.md`, "Events", unavailable image). It keeps its session, goes on
+offering its keepalive to the member it knows, and waits for the new leader event of
+the member that leads next, which holds the session from its log. A client that has
+had none for twice the leader heartbeat timeout its session event gave it, 20 s, since
+it lost that image reports the session closed to its caller and sends nothing more:
+the cluster has no leader, or cannot reach the client, and the caller may connect
+again. In Aeron, this is the client's new leader timeout (ADR 0117). The session ids and open sessions are the log's: a
 new leader recovers them from the session open and close events it has replayed, so
 that a session survives its leader, and counts each session's timeout from the close
 of the election, not from the session's last message under the old leader. A
