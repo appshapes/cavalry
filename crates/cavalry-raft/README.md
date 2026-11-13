@@ -133,8 +133,9 @@ commit path runs per message.
   `cluster.log_recording_id`, the recording that holds its log, which its service
   replays, the four counts of its list of its log's recordings (ADR 0108), and the
   twenty-two counts of `Counts::by_counter`. The
-  counters of sessions and of the service's version in `spec/cluster.md`, "Counters",
-  come with those features. One thread calls `do_work()`; the leader's process appends
+  counters of sessions in `spec/cluster.md`, "Counters", are `Sessions`'s, which the
+  module does not drive yet, and the counter of the service's version comes with
+  that feature. One thread calls `do_work()`; the leader's process appends
   with `offer(payload)`, up to 1,344 bytes an entry. A consensus message whose step
   faults does not take the rest of its poll with it: `do_work()` hands every message
   the poll read to the election, as the next cycle would have, and returns the first
@@ -261,6 +262,29 @@ commit path runs per message.
   were a quorum (ADR 0052, "Harder"). Under a cgroup's quota of a twentieth of a
   processor, on CI's Linux runner, it committed 13,000 to 18,000 a second: the
   member runs a part of every period (ADR 0111, "Evidence").
+- Holds a member's sessions, the member's side of the session protocol
+  (`spec/cluster.md`, "Sessions"; ADR 0115): `Sessions` is plain state, as `Consensus`
+  is. Its caller hands it each message of the ingress stream, each entry of the
+  member's own log at or below the commit position, and a duty cycle, and it sends
+  and appends through a trait, `SessionIo`. A follower answers a session connect with
+  a redirect that names its leader and every member's ingress endpoint. The leader
+  refuses a connect for its version, its response channel or the limit of 10
+  sessions, or accepts it: the session has the next id and an egress publication,
+  and its session open event goes to the log. A session is opened by its committed
+  session open event and closed by its committed session close event, on every
+  member, so a follower holds the sessions its leader opened and takes them up when
+  it leads: a publication for each, the term's new leader event, and the session
+  timeout counted from its election's close. A member that wins an election reads
+  every entry of the terms before its own in leader replay, before its election
+  closes, so it has every session they opened before it accepts a connect and gives
+  no session id twice. The leader appends a session's messages
+  with its own term and the cluster's time, leaves one unread while the log is
+  back-pressured (`Ingress::Unread`), and closes a session it has heard nothing from
+  for 10 s: the session close event goes to the log first, and the closed event
+  follows, owed until the session's publication takes it or the close is
+  committed. It counts what it refuses, drops and ignores in `SessionCounts`, eight
+  counters of `counters.toml` with the gauge `cluster.sessions`. It allocates nothing
+  after `Sessions::new`.
 - To come, each with its card: the C ABI's calls for a service, so that a service is
   a program in any of the five client languages (card 227), mixed versions in a
   rolling upgrade (card 228), the
@@ -270,6 +294,13 @@ commit path runs per message.
 
 In Aeron, this is Cluster, with Cluster Standby as a paid component
 ([glossary](../../docs/glossary.md)).
+
+### What the sessions do not do yet
+
+The consensus module does not drive `Sessions` yet: no member reads the ingress
+stream or its own log for them, and no member allocates their counters, so a client
+has nothing to connect to. That is the next change of work item 229, with the
+client's own session after it (ADR 0115, Consequences).
 
 ### What the election does not do yet
 
@@ -338,6 +369,9 @@ for member in [0, 1, 2] {
   leader was appointed until the election was built, and
   [ADR 0104](../../docs/decisions/0104-have-the-consensus-module-elect-its-leader-and-take-the-appointed-leader-out.md)
   took that path out.
+- [ADR 0115](../../docs/decisions/0115-keep-a-clusters-sessions-on-every-member-opened-and-closed-by-the-log.md),
+  why every member holds the sessions, opened and closed by committed entries of
+  the log, and what the leader adds to that table.
 - [ADR 0067](../../docs/decisions/0067-register-the-elections-state-machine-with-its-core-and-count-each-step.md),
   why the election's machine is registered with the core and what its two step
   counters count.
