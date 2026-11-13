@@ -149,7 +149,10 @@ commit path runs per message.
   so the thread that calls `do_work()` is never held for a stop. A leader that gives
   its log up, and a member that ends a catch-up or a replication, stop their
   recordings the same way. A member in init reads no consensus message: what arrives
-  meanwhile stays on the stream for the cycle after it has left init. A stop that the
+  meanwhile stays on the stream for the cycle after it has left init. One case is
+  left: a message that moves the member to init in the middle of a poll leaves the
+  rest of that poll's messages, 15 at most, handed to a member in init, which acts
+  on none of them and counts none (card 282). A stop that the
   driver refuses is a `client` error, and a stop position not read within 1 s is a
   `stop-timeout` error. Either way the member stays where it was with the recording
   held, and the next `do_work()` stops it again.

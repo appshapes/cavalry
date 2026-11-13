@@ -2558,7 +2558,12 @@ impl ConsensusModule {
         // election"): what has arrived stays on the stream for the cycle after the
         // member has left init. Init can last several cycles, while a recording's
         // stop is asked and not yet read, and a message polled in it would be taken
-        // from the stream and acted on by nobody.
+        // from the stream and acted on by nobody. One case is left: a message of a
+        // batch can itself move the core to init, by a term above the member's own
+        // or a step that fails its election, and the rest of that batch is then
+        // handed to a core in init, which acts on none of it, with no count. Leaving
+        // it on the stream needs a poll that can stop inside a batch, which the
+        // client does not have (card 282).
         let read = if core.election_state() == ElectionState::Init {
             0
         } else {
