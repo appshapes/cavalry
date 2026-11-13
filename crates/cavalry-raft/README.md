@@ -187,9 +187,9 @@ commit path runs per message.
   what to do. In each call that fails so the member still records and replicates,
   and it names no recording until a later call has written the file; `cavalry run`
   makes that call again every 100 ms and gives the member up after 10 s of calls
-  that fail, as for any error of a duty cycle. It truncates no recording of its log while the counter
-  names one, and removes the file when it closes (`spec/cluster.md`, "The log's
-  recordings"; ADR 0103).
+  that fail, as for any error of a duty cycle. It truncates no recording of its log
+  while the counter names one, and removes the file when it closes, after it has
+  stored −1 in the counter (`spec/cluster.md`, "The log's recordings"; ADR 0103).
 - Runs the same core in memory: `memory::Cluster` is one to eight members in one process
   on a clock the caller steps, with loss, delay, a member cut from every other, two
   members parted from each other (`cut_between`) or one that the other stops hearing

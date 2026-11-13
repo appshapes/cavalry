@@ -913,8 +913,13 @@ recording in the file that holds the position, and the live recording when none 
 It reads the file when it starts a replay, after it has loaded
 `cluster.log_recording_id`. A file whose live recording id is not the id it loaded is
 of a member that has since named another recording or none, and the service starts no
-replay: it finds its member's recording again. With no file the member is of a version
-that writes none, and the service replays the live recording. A file that fails a
+replay: it finds its member's recording again. With no file the service loads
+`cluster.log_recording_id` again, from a record that is the member's by the test of
+the next paragraph. When it holds the id the service loaded before, the member is of
+a version that writes none, and the service replays the live recording. When it holds
+another value, or the member has no such record, the member closed or left its log
+between the two loads, and the service starts no replay: it finds its member's
+recording again. A file that fails a
 check of "What a reader rejects" is reported to the service's caller, and nothing is
 replayed.
 
@@ -986,7 +991,9 @@ checks before it pass ("What a reader rejects"); a file
 the operating system will not let it open or read is the reader's error, which
 names the file. The module writes it each time it names a recording, before it
 stores the recording's id in `cluster.log_recording_id`, and removes it when it
-closes. A file the module cannot write is its duty cycle's error, counted in
+closes, after it has stored −1 in `cluster.log_recording_id`, so that the file is
+there for as long as the counter names a recording. A file the module cannot
+write is its duty cycle's error, counted in
 `cluster.log_recordings_unwritten` each cycle it fails, and the member stores −1 in
 the counter until a later cycle has written the file. All integers are
 little-endian.

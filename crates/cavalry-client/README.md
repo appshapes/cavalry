@@ -97,7 +97,8 @@ The client API implementation, re-exported by the `cavalry` crate. Data plane.
   "The service", describes, is not built yet: a position below the recording the
   member names is refused with error code 23 (ADR 0103). Not built with it: the
   answer of no log while the member's file names another live recording than its
-  counter does, the handle's end at the stop of a recording below the live one, and
+  counter does, the second load of the counter when there is no file, the handle's
+  end at the stop of a recording below the live one, and
   the error for a file that fails a check or cannot be read. A service may
   start before its member, with it or after it, at position 0 or where it stopped.
   It reads until `CommittedLog::is_ended()`, and then three calls say whether it was
