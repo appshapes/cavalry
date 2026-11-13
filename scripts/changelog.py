@@ -14,8 +14,9 @@ a file under `changelog.d/`, which no other change touches:
 The name begins with the work item's number, or the pull request's when there is no
 work item, so that two changes do not choose one name. An entry added before commit
 5bbd2ad8, where Cavalry's work moved to the Brigade Board, begins with its Trello
-card's number (ADR 0113). The file holds what would have been appended, as it would have been written: one or more entries, each a line that begins
-`- ` with its continuation lines indented two spaces, in the reader's words, with its
+card's number (ADR 0113). The file holds what would have been appended, as it would
+have been written: one or more entries, each a line that begins `- ` with its
+continuation lines indented two spaces, in the reader's words, with its
 links written from the repository's root, as CHANGELOG.md's are.
 
 `check` reads every file of `changelog.d/` but its README, and but a file whose name
