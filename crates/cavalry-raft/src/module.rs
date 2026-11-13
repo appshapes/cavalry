@@ -18,6 +18,13 @@
 //! member names a recording of its log writes the file of the log's recordings in the
 //! driver directory, for the member's service, before the counter holds the id (ADR
 //! 0103).
+//!
+//! The module serves its member's sessions in the same cycle (ADR 0115, ADR 0116): it
+//! reads the ingress stream on the member's `ingress` endpoint, answers on egress
+//! publications, and reads the member's own committed log on the log replay stream
+//! for the entries that open and close a session. Those cycles send a command too
+//! where a session connects, closes or is answered, where the member begins to lead
+//! or stops, and where its read of its log is opened again at a recording's end.
 
 use std::collections::VecDeque;
 use std::path::{Path, PathBuf};
@@ -34,9 +41,9 @@ use cavalry_log::terms::{NO_RECORDING, TermsError, TermsFile};
 use cavalry_proto::client_protocol::{ErrorCode, FOLLOW_LENGTH, ReplayStopReason};
 use cavalry_proto::cluster::{
     CONSENSUS_STREAM_ID, EGRESS_STREAM_ID, EMPTY_MEMBER, Endpoint, INGRESS_STREAM_ID,
-    LOG_RECORDINGS_FILE_PREFIX, LOG_RECORDINGS_TMP_SUFFIX, LOG_STREAM_ID, LogRecording,
-    LogRecordingsError, MAX_LOG_RECORDINGS_LENGTH, MAX_MEMBERS, MembersError, Message, Stream,
-    parse_members, write_log_recordings,
+    LOG_RECORDINGS_FILE_PREFIX, LOG_RECORDINGS_TMP_SUFFIX, LOG_REPLAY_STREAM_ID, LOG_STREAM_ID,
+    LogRecording, LogRecordingsError, MAX_LOG_RECORDINGS_LENGTH, MAX_MEMBERS, MembersError,
+    Message, Stream, parse_members, write_log_recordings,
 };
 use cavalry_proto::udp::UDP_TERM_LENGTH;
 use cavalry_shm::counters::CounterId;
@@ -2138,8 +2145,8 @@ impl SessionIo for ClientIo {
 
 /// One duty cycle of the member's sessions (`spec/cluster.md`, "Sessions"; ADR 0115,
 /// ADR 0116), after the election's own. First the member's own committed log: the
-/// read a service makes of it, opened where the last one stopped, whose session open
-/// and close events open and close the member's sessions. Then the ingress stream, by
+/// read a service makes of it, on the log replay stream, opened where the last one
+/// stopped, whose session open and close events open and close the member's sessions. Then the ingress stream, by
 /// a controlled poll: a message the sessions leave unread stays at its image's
 /// position, and until it is taken no fragment of another image is. Then what the
 /// sessions owe. An entry or a message that is not one frame, does not parse, or is an
@@ -2159,7 +2166,9 @@ fn work_sessions(
     let mut work = 0;
     let mut fault: Option<RaftError> = None;
     if log.is_none() {
-        *log = io.client.committed_log(*position)?;
+        *log = io
+            .client
+            .committed_log_on(LOG_REPLAY_STREAM_ID, *position)?;
     }
     if let Some(reader) = log.as_mut() {
         let polled = reader.poll(
@@ -2953,6 +2962,15 @@ impl ConsensusModule {
         self.core
             .offer(self.clock, payload, &mut self.io)?
             .map_err(RaftError::Offer)
+    }
+
+    /// How far this member has read its own committed log for its sessions: the
+    /// position after the last entry it handed them, 0 before the first. It follows
+    /// the commit position by the member's read through its driver's replayer, and
+    /// a leader serves sessions once it has reached its term base log position (ADR
+    /// 0116).
+    pub fn session_log_position(&self) -> i64 {
+        self.session_log_position
     }
 
     /// This member's id.

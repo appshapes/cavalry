@@ -8,8 +8,8 @@
   member's start", which had the consensus module's own state come from a replay at
   each election; "Sessions", which says how a member reads its log for its sessions,
   when a leader serves them, and that a message of the ingress stream is one frame;
-  "Members and streams", for the module as one more reader of the service log stream
-  and for the length of the ingress endpoints; and "Counters". Amends ADR 0115 in
+  "Members and streams" and "Values", for the log replay stream, 103, on which the
+  module reads, and for the length of the ingress endpoints; and "Counters". Amends ADR 0115 in
   one clause, where a member reads the entries of the terms before its own: ADR 0115
   has it read them "in leader replay", before its election closes, as the page then
   said, and this ADR has it read them in the read that runs all the time, before it
@@ -57,9 +57,14 @@ Cavalry's read for themselves (ADR 0066).
 
 ## Decision
 
-A member's consensus module reads its own committed log as a service does, with
-`Cavalry::committed_log`, in every role and every state of its election, from
-position 0 when it starts. Each entry it reads goes to `Sessions::on_entry`. When
+A member's consensus module reads its own committed log as a service does, in every
+role and every state of its election, from position 0 when it starts. It reads on a
+stream of its own, the log replay stream, 103 on `cavalry:ipc`, with
+`Cavalry::committed_log_on`, which is `Cavalry::committed_log` on a stream the caller
+names. Every subscription on a stream is given every publication's image, so on one
+stream a reader that opens its log again would cost every other reader on that
+driver an image to open; on its own stream the module's replay and a service's never
+reach each other. In Aeron, 103 is the cluster's replay stream. Each entry it reads goes to `Sessions::on_entry`. When
 the handle ends, at a recording's stop, the module opens the log again where it
 stopped, as a service does. States 6 and 10 replay nothing into the module's state:
 the read that runs all the time is that state's one source, and nothing above the
@@ -116,11 +121,18 @@ each cycle.
   member's log reaches it four ways, the live image, a replication, a catch-up and
   the recordings it kept at its start, and only the recordings hold all four. An
   entry read from an image is also above the commit position.
-- **A stream of the module's own for its replay, Aeron's replay stream, 103.** Lost
-  for now: `Cavalry::committed_log` reads stream 104, and a second stream id is a
-  second constant, a second call and a second row of the page for one reader. On
-  stream 104 the module is one more replay each service reads past, 64 fragments a
-  poll at most (ADR 0066). The Revisit clause names when that cost is measured.
+- **The module's replay on the service log stream, 104, beside the services'.** The
+  first form of this change, since `Cavalry::committed_log` reads that stream and a
+  second stream is a second constant and a second call. Lost on a measurement. A
+  follower that joins the log late holds it in two recordings, and its module opens
+  its log again where the first one stops. On one stream that new replay's image is
+  announced to the service's subscription on the same driver, whose client then
+  opens and maps it. `tests/module_allocations.rs`, which counts the allocations of
+  three members' duty cycles and their services' polls, counted one in 9 of 25 runs
+  on a macOS laptop, 120 bytes, the mapping of that image in the service client's
+  conductor; with the module on its own stream it counted none in 25 runs. On one
+  stream each service would also read past the module's replay at every poll, 64
+  fragments at most (ADR 0066).
 - **Serve sessions as soon as the election closes.** Lost: the leader's read may
   not have reached its term's base yet, and it would give a session id that a
   session open event of the term before already holds; two sessions with one id are
@@ -152,6 +164,10 @@ each cycle.
   driver lost, the new leader event from the member that replaces it, with its
   term, a message with that term committed and read by a service, and the client's
   close closing the session on both members.
+- `crates/cavalry-raft/tests/module_allocations.rs`: three members, their services
+  and now each member's own read of its log, twenty thousand cycles with an entry
+  offered in each, no allocation; 25 of 25 runs on a macOS laptop with the module on
+  the log replay stream, and 16 of 25 with it on the service log stream.
 - The pull request's body has the runs: how many times each test ran, on the laptop
   and on both runners, and with a follower forced to join late.
 - Aeron's source named in Context.
@@ -163,7 +179,7 @@ at an election and nothing is undone after a truncation; the path is the service
 with its checks and its tests; a client now has a member to connect to.
 
 Harder: each member holds one replay of its own log for as long as it runs, of the
-driver's 64, and each service on that driver reads past it; the ok event, a
+driver's 64, and one more stream id is the page's; the ok event, a
 session's opening and a new leader's serving each wait for the member's own read of
 an entry it has committed, a round through its driver's replayer; a leader does not
 serve sessions between the close of its election and the cycle its read reaches its
@@ -175,8 +191,7 @@ the two leaves the session open in the log, and the next leader, which has the
 session from that log, takes it up and closes it again by the timeout, 10 s later.
 Aeron has the same window. The page now says so.
 
-Revisit: when a service's reads are measured beside a member whose module reads the
-same stream, for a stream of the module's own; when a snapshot is taken, for where
+Revisit: when a snapshot is taken, for where
 the module's read begins (ADR 0052, feature 6); when a client needs a session
 message longer than one frame, for reassembly on the ingress and the egress
 streams; when a cluster's host names do not fit the ingress endpoints' bound, for a

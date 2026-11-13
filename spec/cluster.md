@@ -40,7 +40,7 @@ are where a member receives:
 | `catchup` | the member, on the log stream | the leader's replay of the log to a member that is behind, from the position it asked for |
 | `archive` | the member | a peer's request to replicate its recording of the log; named here, used by no message of this version |
 
-The streams are `cavalry:udp` streams, but for the service log, with these stream ids,
+The streams are `cavalry:udp` streams, but for the service log and the log replay, with these stream ids,
 constants in this version:
 
 | Stream | Stream id | Publication | Subscriptions |
@@ -49,7 +49,8 @@ constants in this version:
 | consensus | 108 | one per member per peer, `cavalry:udp?endpoint=<the peer's consensus endpoint>` | each member's, `cavalry:udp?endpoint=<its consensus endpoint>` |
 | ingress | 101 | a client's, `cavalry:udp?endpoint=<a member's ingress endpoint>` | each member's, `cavalry:udp?endpoint=<its ingress endpoint>` |
 | egress | 102 | the leader's, one per open session, and any member's, one per connect it answers with a redirect or a refusal, at most the pending answers of "Values" at a time, each on the client's response channel | the client's, on its response channel |
-| service log | 104 | the member's driver's, one for each service and one for the member's own consensus module, which reads its log as a service does, for its sessions ("Sessions"; ADR 0116): a replay of the member's recording of the log that follows it, on `cavalry:ipc` ("The service") | the service's, on `cavalry:ipc` |
+| service log | 104 | the member's driver's, one for each service: a replay of the member's recording of the log that follows it, on `cavalry:ipc` ("The service") | the service's, on `cavalry:ipc` |
+| log replay | 103 | the member's driver's, one: a replay of the member's recordings of the log that follows them, on `cavalry:ipc`, which the member's own consensus module reads as a service reads the service log, for its sessions ("Sessions"; ADR 0116). A stream of its own, so that this replay and a service's never reach each other's subscription | the consensus module's, on `cavalry:ipc` |
 
 The members' ingress endpoints, listed as a redirect lists them ("Session event,
 template 2"), `<id>=<host:port>` for each member separated by `,`, are at most 1,320
@@ -899,7 +900,7 @@ states 6 and 10), the leader among them: the leader that accepted a connect hold
 session as connecting until it reads the entry at or below its commit position, and a
 follower holds the open sessions with no publication, so that a member that wins an
 election has them. The member's consensus module reads its own committed log for those
-entries as a service reads it, through a replay of its recordings on the service log
+entries as a service reads it, through a replay of its recordings on the log replay
 stream and no further than its commit position ("The service"), in every role and
 every state of its election, from position 0 when it starts (ADR 0116). A member that
 wins an election serves sessions, which is to accept a connect, append a session's
@@ -1198,7 +1199,7 @@ that a reader of a counters file knows which transition it saw.
 | Value | This version |
 | --- | --- |
 | schema id, version | 1, 0 |
-| stream ids | log 100, ingress 101, egress 102, service log 104, consensus 108; 105 and 107 reserved for Aeron's consensus module and snapshot streams, out of this version. In Aeron 104 is the service stream, which carries the consensus module's messages to a service; here it carries the log a service reads ("The service") |
+| stream ids | log 100, ingress 101, egress 102, log replay 103, service log 104, consensus 108; 105 and 107 reserved for Aeron's consensus module and snapshot streams, out of this version. In Aeron 104 is the service stream, which carries the consensus module's messages to a service; here it carries the log a service reads ("The service") |
 | members | at most 8; a ninth is `members-count` |
 | member id | 0 to 2147483647, unique |
 | leader heartbeat interval | 200 ms: how often the leader sends commit position with nothing to report, and new leadership term during an election |

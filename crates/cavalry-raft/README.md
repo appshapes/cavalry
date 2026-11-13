@@ -290,7 +290,8 @@ commit path runs per message.
   controlled poll, so that a message its sessions leave unread stays on the stream
   and holds its client, and no message of another client is read past it. It answers
   on exclusive publications to the clients' response channels, 20 at most. It reads
-  its own committed log as a service does, `Cavalry::committed_log`, in every role,
+  its own committed log as a service does, with `Cavalry::committed_log_on` on a
+  stream of its own, the log replay stream, 103, in every role,
   and that read alone opens and closes its sessions: nothing above the commit
   position is in its table. A leader serves sessions from when its election has
   closed and that read has reached its term's base, so that it has every session and
