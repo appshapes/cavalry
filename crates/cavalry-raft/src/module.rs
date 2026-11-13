@@ -1845,18 +1845,31 @@ impl ConsensusModule {
         self.io.live_recording().map(|(id, _)| id)
     }
 
-    /// Stops the module: closes its client, which removes its publications, its
-    /// subscriptions and its counters, and then removes its file of the log's
-    /// recordings, which no counter names any more (ADR 0103). Its recordings are the
-    /// driver's and stay; the driver stops each when its publication or its image
-    /// ends.
+    /// Stops the module. It stores −1 in `cluster.log_recording_id`, closes its client,
+    /// which removes its publications, its subscriptions and its counters, and then
+    /// removes its file of the log's recordings (`spec/cluster.md`, "The log's
+    /// recordings"; ADR 0103). The store comes first because it is done when it
+    /// returns, and the driver removes a client's counters only when it reads the
+    /// command: a service that finds no file loads the counter again, and must not
+    /// find there the id of a recording whose file is gone. The member's recordings
+    /// are the driver's and stay; the driver stops each when its publication or its
+    /// image ends.
     pub fn close(self) -> Result<(), RaftError> {
+        self.close_observed(|| ())
+    }
+
+    /// [`close`](Self::close), with `stored` called once −1 is stored in
+    /// `cluster.log_recording_id` and before anything else is done: the window through
+    /// which a test sees that the counter names no recording while the file is there.
+    fn close_observed(self, stored: impl FnOnce()) -> Result<(), RaftError> {
         let Self {
             consensus,
             io,
-            counters,
+            mut counters,
             ..
         } = self;
+        counters.log_recording_id.store(NO_RECORDING);
+        stored();
         drop(counters);
         drop(consensus);
         let ClientIo {
@@ -1874,8 +1887,8 @@ impl ConsensusModule {
         let closed = client.close();
         // The file, and what a write that failed left under its other name. A file
         // that is not there was never written: the member named no recording. Any
-        // other error is ignored too: a file left behind names a recording that no
-        // counter names once the client is closed, so no service reads it
+        // other error is ignored too: a file left behind names a recording that the
+        // counter no longer names, so no service reads a log from it
         // (`spec/cluster.md`, "The service"), and the driver removes it with the rest
         // of its directory when it next starts.
         let _ = std::fs::remove_file(recordings_path);

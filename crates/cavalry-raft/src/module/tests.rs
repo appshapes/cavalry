@@ -2433,6 +2433,61 @@ fn a_truncation_waits_until_the_counter_names_no_recording() {
     assert_eq!(pair.stop_of(first), Some(one));
 }
 
+/// A member that closes stores −1 in `cluster.log_recording_id` before it removes its
+/// file of the log's recordings (`spec/cluster.md`, "The log's recordings"; ADR 0103).
+/// A service that finds no file loads the counter again, and must not find there the
+/// id of the recording the file was for. Closing the member's client would not do it:
+/// the driver removes a client's counters when it reads the command, some time after
+/// the close has returned, and the store is done when it returns. So once the store
+/// is made, and before the client is closed, the counter holds −1 and the file is
+/// there; when the close returns the file is gone.
+#[test]
+fn a_member_that_closes_names_no_recording_before_it_removes_its_file() {
+    let Leader {
+        mut module,
+        log,
+        catchup,
+        _follower,
+        _driver,
+        _dir,
+    } = leader("close-order");
+    // The member names recording 7 from position 0: the file first, then the id.
+    module
+        .io
+        .write_log_recordings(7, 0)
+        .expect("the file is written");
+    module.counters.log_recording_id.store(7);
+    let file = module.io.recordings_path.clone();
+    assert!(file.exists());
+    let reader = cavalry_shm::counters::CountersReader::open(&_dir.0.join("driver"))
+        .expect("the counters file opens");
+    let key = module.io.member_id.to_le_bytes();
+    let named = || {
+        (0..reader.capacity()).find_map(|id| match reader.record(id) {
+            Ok(Some(record))
+                if record.type_id() == CLUSTER_LOG_RECORDING_ID.0
+                    && record.key().starts_with(&key) =>
+            {
+                Some(reader.read_acquire(id).expect("the counter is read"))
+            }
+            _ => None,
+        })
+    };
+    assert_eq!(named(), Some(7));
+
+    let mut seen = false;
+    module
+        .close_observed(|| {
+            assert_eq!(named(), Some(NO_RECORDING), "the counter names a recording");
+            assert!(file.exists(), "the file is removed only after the store");
+            seen = true;
+        })
+        .expect("the member closes");
+    assert!(seen);
+    assert!(!file.exists(), "the member removed its file when it closed");
+    drop((log, catchup));
+}
+
 /// A list of recordings that the module's own writer refuses is the module's fault,
 /// and the member says so: what the check found, that it is a fault to report, and
 /// none of the advice a reader of the file is given, since no other process wrote

@@ -1,7 +1,7 @@
 - A cluster member lists the recordings that hold its log in a file in its driver
   directory, `log-recordings-<member id>`, written before its
   `cluster.log_recording_id` counter names a recording and removed when the member
-  closes. `ConsensusModule::do_work` returns the new `RaftError::LogRecordings`,
+  closes, after the member has stored −1 in that counter. `ConsensusModule::do_work` returns the new `RaftError::LogRecordings`,
   with what to do, when the member cannot write the file: to make the driver
   directory writable, or, when the list the member made is one the file's format
   refuses, that the fault is the member's own and is to be reported. In each duty cycle
