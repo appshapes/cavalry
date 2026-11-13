@@ -234,9 +234,11 @@ directory: there is no rolling upgrade across this change.
 
 ## Consequences
 
-Easier. A cluster that loses its leader has another after the leader heartbeat
-timeout and an election, with no person in the path. The core has one path, and
-the page one set of rules.
+Easier. A cluster that loses its leader with its driver has another after the
+leader heartbeat timeout and an election, with no person in the path. One whose
+leader's module stops while its driver runs has another too, after more than one
+election in about half the runs measured, as "Harder" says below. The core has one
+path, and the page one set of rules.
 
 Against invariant 1, and named so. A member started alone on an empty log
 directory, where it had a log, now joins and votes with no record of the votes it
@@ -257,13 +259,24 @@ appointed leader it led at once when the appointed member was one of the two. A
 member still does not start on the log directory it kept, so a member that stops
 is replaced by starting the cluster again, as before.
 
-A leader whose consensus module stops while its driver runs on was not replaced,
-in three runs of three on a laptop. Its log publication stays alive with nobody
-behind it. The two members that remain timed it out and held ballot after ballot,
-terms 1 to 6 in 60 s in one run, and in two runs a member's driver refused a
-channel's endpoint, "Address already in use". Under the appointed leader that
-cluster stopped as well, so nothing is lost; it is a loss of a leader that the
-election does not recover from yet. It is not diagnosed, and card 280 holds it.
+A leader whose consensus module stops while its driver runs on is replaced, and
+often late. Its log publication stays alive with nobody behind it. The two members
+that remain time it out and elect one of themselves. The one that follows joins
+the log again, and a member takes the first image on its new subscription as the
+log's and records that one: while the old leader's publication is alive that image
+can be the old leader's. The new leader's log is then never the one the follower
+records, the follower waits in follower log await, the election fails at the
+leader heartbeat timeout, 10 s, and the two begin again. A member's catalog shows
+it: an empty recording of the first term's session, begun where that term's log
+ended, beside the recording of the term that was joined at last. In seventeen runs
+on a laptop, with the leader's module not run and its driver left running, the two
+had a leader with its election closed 10.3 s to 10.7 s after the silence began in
+eight, after one election; 20.4 s and 20.9 s in two, after two; 30.6 s to 30.9 s in
+five, after three; and 51.3 s and 52.2 s in two, after five. No duty cycle
+returned an error in any of them. A leader stopped with its driver is replaced
+after one election. Under the appointed leader this cluster stopped until its
+leader ran again, so nothing is lost; card 280 holds the remedy, which is a
+follower's choice of the image it records.
 
 A truncation is now something a member over a driver does. One that faults part
 way, a purge that succeeded and a later `truncate recording` that did not, leaves
@@ -274,9 +287,10 @@ of pull request 246 named it). The fault-injection tests of ADR 0100's seventh
 change are where it is shown or closed.
 
 To maintain. The tests over drivers must not assume which member leads, which
-term is first, how many ballots an election takes, that every follower joined on
-time, or that followers left without a leader hold no ballot. `cavalry doctor`
-still has texts for an appointed leader until the change that follows.
+term is first, how many ballots an election takes, or that every follower joined
+on time. A test that stops a leader's module must not leave a quorum of followers
+running without it: they hold a ballot of their own. `cavalry doctor` still has
+texts for an appointed leader until the change that follows.
 
 Revisit when the lost-leader test's election times are known on Linux: `just
 test` shows a passing test's output nowhere, so this record has the laptop's
