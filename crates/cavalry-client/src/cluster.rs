@@ -1,5 +1,6 @@
 //! A client's session with a cluster (`spec/cluster.md`, "The session protocol" and
-//! "Sessions"; ADR 0117). In Aeron, this is `AeronCluster` (`docs/glossary.md`).
+//! "Sessions"; ADR 0117). In Aeron, this is the cluster session, which a client holds
+//! as an `AeronCluster` (`docs/glossary.md`, cluster session).
 //!
 //! [`Cavalry::connect_cluster`] opens the session: a subscription on the client's
 //! response channel, a publication to every member's `ingress` endpoint, and a session
