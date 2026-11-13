@@ -25,6 +25,13 @@ The client API implementation, re-exported by the `cavalry` crate. Data plane.
   that begins at or past a limit position, for a stream that may be read only as far
   as something else has got, as a cluster's service reads its log no further than the
   commit position (ADR 0066).
+- Lets a handler leave a fragment unread: `Subscription::controlled_poll` hands each
+  fragment to a handler that returns an `Action`. `Action::Continue` takes the fragment
+  and goes on, `Action::Break` takes it and ends the read of that image, and
+  `Action::Abort` leaves it at the image's position, so the next read hands the same
+  fragment over again. A reader that must offer what it reads on a publication that
+  is back-pressured aborts, and its own publisher is then held at its window: nothing
+  is buffered between the two (ADR 0114).
 - Returns back-pressure as a result code when the receiver window or the log buffer is
   full. The caller decides what to do; the driver never buffers more.
 - Says when its client is gone. Once the client is closed, by `close` or because the

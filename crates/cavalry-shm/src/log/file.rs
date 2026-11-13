@@ -1097,6 +1097,21 @@ pub struct Poll {
     pub fragments: usize,
 }
 
+/// What the handler of a controlled read does with the data frame it was given
+/// (`spec/log-buffer.md`, "Reading"; ADR 0114). In Aeron, this is
+/// `ControlledFragmentHandler.Action`, without its `COMMIT`: a read stores its
+/// position once, when it ends.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum Action {
+    /// The frame is taken and the read goes on to the next.
+    Continue,
+    /// The frame is taken and the read ends after it.
+    Break,
+    /// The frame is not taken: the read ends with the position at the frame's first
+    /// byte, and the next read begins with the same frame.
+    Abort,
+}
+
 /// A subscriber's reader on a log (`spec/log-buffer.md`, "Reading"): it keeps its
 /// position, delivers committed data frames in order to a handler, skips padding, and
 /// stops at a length of 0 or less or at the end of a term. The subscriber stores the
@@ -1253,6 +1268,79 @@ impl TermReader {
             }
             offset += aligned_length(frame_length);
             self.position = term_begin + i64::from(offset);
+        }
+        Ok(Poll {
+            position: self.position,
+            fragments,
+        })
+    }
+
+    /// [`TermReader::bounded_poll`] whose handler says, for each data frame, whether
+    /// the read takes it (`spec/log-buffer.md`, "Reading"; ADR 0114). After
+    /// [`Action::Continue`] the read goes on. After [`Action::Break`] it ends with the
+    /// frame taken. After [`Action::Abort`] it ends with the frame not taken: the
+    /// position stays at the frame's first byte, the frame is not counted, and the
+    /// next read hands the same frame to its handler again. Padding below a frame
+    /// that is not taken is passed, as in any read. A `limit_position` of `i64::MAX`
+    /// reads with no bound. In Aeron, this is `Image.boundedControlledPoll`.
+    ///
+    /// It is for a reader that learns from a frame whether it can take it: a frame it
+    /// must write somewhere that has no room now, or one that ends what the frames
+    /// after it are read for. A handler that was given a frame by [`TermReader::poll`]
+    /// has the position past it and cannot hand it back.
+    ///
+    /// A loop of its own, as [`TermReader::bounded_poll`]'s is and for its reason: the
+    /// loop of [`TermReader::poll`] is measured and is not touched.
+    #[inline]
+    pub fn controlled_poll<F>(
+        &mut self,
+        limit_position: i64,
+        limit: usize,
+        mut handler: F,
+    ) -> Result<Poll, LogError>
+    where
+        F: FnMut(&[u8], &DataFrameHeader) -> Action,
+    {
+        let positions = self.mapped.positions;
+        let term_length = positions.term_length();
+        let partition = positions.partition_of(self.position);
+        let mut offset = positions.term_offset_of(self.position);
+        let term_begin = self.position - i64::from(offset);
+        // As in `bounded_poll`: the limit's offset in this term, or the term's end.
+        let limit_offset = if limit_position <= self.position {
+            offset
+        } else {
+            (limit_position - term_begin).min(i64::from(term_length)) as u32
+        };
+        let mut fragments = 0;
+        while fragments < limit && offset < limit_offset {
+            let frame = self.mapped.frame(partition, offset);
+            let word = frame.word();
+            if layout::frame_word_length(word) <= 0 {
+                break;
+            }
+            let bytes = frame.header(word);
+            // The spec's checks, built out only to measure their cost (ADR 0010).
+            #[cfg(not(cavalry_unchecked))]
+            let header = DataFrameHeader::parse_within(&bytes, (term_length - offset) as usize)?;
+            #[cfg(cavalry_unchecked)]
+            let header = DataFrameHeader::decode_unchecked(&bytes);
+            let frame_length = header.frame_length() as u32;
+            let mut action = Action::Continue;
+            if header.frame_type() == FrameType::Data {
+                let body = self.mapped.body(partition, offset, frame_length);
+                action = handler(body, &header);
+                if action == Action::Abort {
+                    // The position is the frame's first byte: nothing moved for it.
+                    break;
+                }
+                fragments += 1;
+            }
+            offset += aligned_length(frame_length);
+            self.position = term_begin + i64::from(offset);
+            if action == Action::Break {
+                break;
+            }
         }
         Ok(Poll {
             position: self.position,

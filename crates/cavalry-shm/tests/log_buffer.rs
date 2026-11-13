@@ -15,7 +15,7 @@ use cavalry_shm::log::layout::{
     file_name,
 };
 use cavalry_shm::log::{
-    ClaimError, HeaderFields, ImageScan, LogBuffers, LogDirectory, LogError, LogType, Tail,
+    Action, ClaimError, HeaderFields, ImageScan, LogBuffers, LogDirectory, LogError, LogType, Tail,
     UnblockOutcome,
 };
 
@@ -516,6 +516,172 @@ fn a_bounded_poll_reports_a_corrupt_frame_below_its_limit_and_never_reads_one_at
         .unwrap_err();
     assert!(matches!(error, LogError::Frame(_)), "{error}");
     assert_eq!((reader.position(), delivered), (128, 4));
+}
+
+#[test]
+#[cfg_attr(miri, ignore)]
+fn a_controlled_poll_leaves_the_frame_its_handler_aborts_for_the_next_read() {
+    // `spec/log-buffer.md`, "Reading": the controlled read (ADR 0114). Five frames of
+    // 64 bytes at 0, 64, 128, 192 and 256, the third aborted and so padding, and a
+    // sixth claimed at 320 and not committed.
+    let dir = Dir::new("controlled");
+    let log = LogBuffers::create(dir.path(), &fields(LogType::Concurrent)).unwrap();
+    log.set_connected(true).unwrap();
+    let mut appender = log.appender().unwrap();
+    let mut reader = log.reader(0).unwrap();
+    for (n, body) in [b"one..", b"two..", b"three", b"four.", b"five."]
+        .iter()
+        .enumerate()
+    {
+        let mut claim = appender.try_claim(5, unlimited()).unwrap();
+        claim.body().copy_from_slice(*body);
+        if n == 2 {
+            claim.abort();
+        } else {
+            claim.commit();
+        }
+    }
+    let open = appender.try_claim(5, unlimited()).unwrap();
+    // Each read is given the actions its handler returns, in order, and `Continue`
+    // once they run out; it returns the frames taken, the position, and every body
+    // the handler was handed, taken or not.
+    let read = |reader: &mut cavalry_shm::log::TermReader,
+                actions: &[Action],
+                limit_position: i64,
+                fragments: usize| {
+        let mut handed: Vec<Vec<u8>> = Vec::new();
+        let poll = reader
+            .controlled_poll(limit_position, fragments, |body, _| {
+                handed.push(body.to_vec());
+                actions
+                    .get(handed.len() - 1)
+                    .copied()
+                    .unwrap_or(Action::Continue)
+            })
+            .unwrap();
+        assert_eq!(poll.position, reader.position());
+        (poll.fragments, poll.position, handed)
+    };
+    let bodies = |bodies: &[&[u8]]| bodies.iter().map(|body| body.to_vec()).collect::<Vec<_>>();
+
+    // The first frame aborted: nothing is taken and the position does not move.
+    assert_eq!(
+        read(&mut reader, &[Action::Abort], i64::MAX, 8),
+        (0, 0, bodies(&[b"one.."]))
+    );
+    // The same frame is handed over again. Taken, and the second aborted: the
+    // position is the second frame's first byte, and one frame is counted.
+    assert_eq!(
+        read(&mut reader, &[Action::Continue, Action::Abort], i64::MAX, 8),
+        (1, 64, bodies(&[b"one..", b"two.."]))
+    );
+    // A break takes its frame and ends the read: the frame after it is not handed over.
+    assert_eq!(
+        read(&mut reader, &[Action::Break], i64::MAX, 8),
+        (1, 128, bodies(&[b"two.."]))
+    );
+    // Padding below a frame that is not taken is passed: the position is the frame's.
+    assert_eq!(
+        read(&mut reader, &[Action::Abort], i64::MAX, 8),
+        (0, 192, bodies(&[b"four."]))
+    );
+    // A limit position holds as in a bounded read: a frame that begins at or past it
+    // is handed to no handler, and one that begins below it is.
+    assert_eq!(read(&mut reader, &[], 192, 8), (0, 192, bodies(&[])));
+    assert_eq!(
+        read(&mut reader, &[Action::Abort], 193, 8),
+        (0, 192, bodies(&[b"four."]))
+    );
+    // The fragment limit counts the frames taken.
+    assert_eq!(
+        read(&mut reader, &[], i64::MAX, 1),
+        (1, 256, bodies(&[b"four."]))
+    );
+    // A handler that takes every frame reads what is committed and stops at the claim
+    // that is not.
+    assert_eq!(
+        read(&mut reader, &[], i64::MAX, 8),
+        (1, 320, bodies(&[b"five."]))
+    );
+    assert_eq!(read(&mut reader, &[], i64::MAX, 8), (0, 320, bodies(&[])));
+    drop(open);
+
+    // With every frame taken and no bound it reads what `poll` reads.
+    let mut second = log.reader(0).unwrap();
+    let (fragments, position, handed) = read(&mut second, &[], i64::MAX, 64);
+    let mut third = log.reader(0).unwrap();
+    assert_eq!(handed, drain(&mut third));
+    assert_eq!((fragments, position), (handed.len(), third.position()));
+}
+
+#[test]
+#[cfg_attr(miri, ignore)]
+fn a_controlled_poll_ends_at_a_terms_end_and_reports_a_corrupt_frame() {
+    // The controlled read is a loop of its own, with its own end of term and its own
+    // frame check (`spec/frame.md`), as the bounded read's is.
+    let dir = Dir::new("controlled-term");
+    let log = LogBuffers::create(dir.path(), &fields(LogType::Concurrent)).unwrap();
+    log.set_connected(true).unwrap();
+    let mut appender = log.appender().unwrap();
+    let mut reader = log.reader(0).unwrap();
+    let body_len = 1000; // frame 1032, aligned 1056
+    let per_term = (T / 1056) as usize; // 62 frames, 65472 bytes, 64 left
+    for _ in 0..per_term {
+        appender.try_claim(body_len, unlimited()).unwrap().commit();
+    }
+    assert_eq!(
+        appender.try_claim(body_len, unlimited()).unwrap_err(),
+        ClaimError::AdminAction
+    );
+    appender.try_claim(body_len, unlimited()).unwrap().commit();
+    let term = i64::from(T);
+    // This read ends at the term's end, past the padding that fills it; the next is
+    // in the next term, and a frame aborted there leaves the position at the term's
+    // first byte.
+    let poll = reader
+        .controlled_poll(i64::MAX, 1024, |_, _| Action::Continue)
+        .unwrap();
+    assert_eq!((poll.fragments, poll.position), (per_term, term));
+    let poll = reader
+        .controlled_poll(i64::MAX, 1024, |_, _| Action::Abort)
+        .unwrap();
+    assert_eq!((poll.fragments, poll.position), (0, term));
+    let poll = reader
+        .controlled_poll(i64::MAX, 1024, |_, _| Action::Break)
+        .unwrap();
+    assert_eq!((poll.fragments, poll.position), (1, term + 1056));
+
+    // Three frames of 64 bytes, the third's version byte 1: the two good frames are
+    // handed over, the third is reported, and the position stays at it.
+    let dir = Dir::new("controlled-corrupt");
+    let log = LogBuffers::create(dir.path(), &fields(LogType::Concurrent)).unwrap();
+    log.set_connected(true).unwrap();
+    let mut appender = log.appender().unwrap();
+    for _ in 0..3 {
+        appender.try_claim(8, unlimited()).unwrap().commit();
+    }
+    let path = dir.file(CORRELATION);
+    let mut bytes = fs::read(&path).unwrap();
+    bytes[128 + 4] = 1;
+    fs::write(&path, &bytes).unwrap();
+    let log = LogBuffers::open(dir.path(), CORRELATION, false).unwrap();
+    let mut reader = log.reader(0).unwrap();
+    let mut handed = 0;
+    let error = reader
+        .controlled_poll(i64::MAX, 8, |_, _| {
+            handed += 1;
+            Action::Continue
+        })
+        .unwrap_err();
+    assert!(matches!(error, LogError::Frame(_)), "{error}");
+    assert_eq!((reader.position(), handed), (128, 2));
+    // A frame its handler does not take is checked all the same, before the handler
+    // sees it: an aborted read of the corrupt frame is the report, not a retry.
+    let error = reader
+        .controlled_poll(i64::MAX, 8, |_, _| Action::Abort)
+        .unwrap_err();
+    assert!(matches!(error, LogError::Frame(_)), "{error}");
+    assert_eq!(reader.position(), 128);
 }
 
 #[test]
