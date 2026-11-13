@@ -684,19 +684,31 @@ fn a_reply_names_a_session_the_log_holds_open_and_fits_one_frame() {
         "a refusal that is the caller's is not a drop"
     );
 
-    // An entry that is not of the page: the service stops there, and says where.
+    // An entry that is not of the page: the service stops there, and says where,
+    // at every poll from the one that reads it. The polls before it, while the replay
+    // has not brought the entry yet, read nothing.
     let (stray, _) = member.append_bytes(&[0xFF; 24]);
     member.commit();
-    for _ in 0..3 {
-        let stopped = service
-            .poll(&mut client, |_, _| Action::Continue, 16)
-            .expect_err("the entry is not the page's");
-        assert!(
-            matches!(stopped, ClusterError::Entry { position } if position == stray),
-            "{stopped}"
-        );
-        assert_eq!(service.position(), stray, "the entry is not taken");
-    }
+    let mut stops = 0;
+    wait(
+        "the service stops at the entry that is not the page's",
+        || {
+            match service.poll(&mut client, |_, _| Action::Continue, 16) {
+                Ok(taken) => {
+                    assert_eq!((taken, stops), (0, 0), "an entry was taken past the stop");
+                }
+                Err(stopped) => {
+                    assert!(
+                        matches!(stopped, ClusterError::Entry { position } if position == stray),
+                        "{stopped}"
+                    );
+                    stops += 1;
+                }
+            }
+            assert_eq!(service.position(), stray, "the entry is not taken");
+            stops == 3
+        },
+    );
 
     service.close(&mut client).expect("the service closes");
     egress.close().expect("the subscription closes");
