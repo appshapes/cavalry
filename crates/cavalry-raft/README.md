@@ -259,7 +259,11 @@ In Aeron, this is Cluster, with Cluster Standby as a paid component
 
 A truncation whose command faults after an earlier one succeeded leaves the member
 reporting the end and the log term it had until the leader asks again; ADR 0095's
-Consequences say where that is tested.
+Consequences say where that is tested. A member that leads before its leader has
+asked again lists a recording that begins past the cut, and its next start is
+refused for the hole, `member refused (listed-recording)`. Card 277 keeps such a
+member from leading or joining until a truncation has finished (ADR 0108,
+Consequences).
 
 ## What it must never do
 

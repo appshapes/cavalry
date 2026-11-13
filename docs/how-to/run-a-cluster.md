@@ -238,6 +238,11 @@ committed once a quorum, two of three, has it on disk.
   directory is not as the member left it: files were removed from it, or it was put
   together from two directories. Start the member with the log directory it had,
   whole. If that directory is lost, do as for a directory with no file, above.
+  One of its messages can come from a directory that nobody changed: `the
+  recordings before it ending at` a position, `below where it begins`. A
+  truncation of this member's log stopped on a fault part way, and the member then
+  led a term, so its file names a recording that begins past the cut. Leave this
+  member stopped, as for a directory that is lost.
 - `cavalry run: member refused (log-forgotten)`: the member's `log-recordings` file
   begins above position 0, or names more than 1,024 recordings that hold a part of
   the log. A member makes one recording each time it joins a log, catches up or
