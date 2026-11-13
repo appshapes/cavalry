@@ -95,7 +95,7 @@ nothing. It counts in `cluster.messages_rejected` a fragment, and a session mess
 whose payload is longer than 1,344 bytes and that arrives whole in one frame, which
 a sender with a longer MTU delivers. Every member checks that length before it acts
 on the message in any other way. It takes such a message from its ingress image, so
-that the message holds no other client's message, and appends nothing of it: the
+that it holds back no other client's message, and appends nothing of it: the
 message is never its session's activity. The log's append refuses an entry longer
 than one frame as a fault, and never as back pressure, which waiting would not end.
 An entry of its own log that is a fragment, that does not parse, or that the table
