@@ -286,7 +286,10 @@ committed once a quorum, two of three, has it on disk.
   an entry above explains. Or the member's thread panicked, which is a fault of
   Cavalry: report it with the panic's message, which the process printed before
   that line. Correct what the line names, then start `cavalry run` again with the
-  same directories. The other two members elect a leader meanwhile.
+  same directories. The other two members elect a leader meanwhile. The line
+  `cavalry run: the cluster member's thread panicked as the member stopped` is the
+  same fault, met while `cavalry run` was already stopping for a signal: the driver
+  closes as it was asked to, the exit is 1, and the report is the same.
 - `WARN run.member_given_up` in `doctor`, beside `FAIL driver-heartbeat`: the driver
   that made this directory closed because `cavalry run` gave its cluster member up,
   as the entry above says. The count is in the directory the closed driver left, so

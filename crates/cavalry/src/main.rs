@@ -751,6 +751,7 @@ fn run(config: &Config) -> ExitCode {
     let member_stop = Arc::new(AtomicBool::new(false));
     let mut member_thread = None;
     let mut failed = false;
+    let mut given_up = false;
     if let Some((members, id)) = member {
         match start_member(
             dir,
@@ -773,6 +774,7 @@ fn run(config: &Config) -> ExitCode {
             Ok(Stop::Signal) => eprintln!("cavalry run: stopping"),
             Ok(Stop::Member(error)) => {
                 give_member_up(dir, &error);
+                given_up = true;
                 failed = true;
             }
             // Every sender is gone without a signal: a bug, never silent.
@@ -785,7 +787,17 @@ fn run(config: &Config) -> ExitCode {
     if let Some(thread) = member_thread
         && thread.join().is_err()
     {
-        eprintln!("cavalry run: the cluster member's thread panicked");
+        // A panic that gave the member up was said then, with what to do. One that
+        // `run` was not told of came as the member stopped, for a signal: in its close,
+        // or in a cycle that `run` no longer waited for.
+        if !given_up {
+            eprintln!(
+                "cavalry run: the cluster member's thread panicked as the member stopped, \
+                 which is a bug in Cavalry: the panic's message is above; report it with \
+                 that message; the driver closes as it was asked to; see \
+                 docs/how-to/run-a-cluster.md#when-it-does-not-work"
+            );
+        }
         failed = true;
     }
     match driver.close() {
