@@ -138,3 +138,4 @@ conformance/          protocol conformance suite and upgrade tests
 
 # Overrides
 - @./.brigade/CLAUDE.brigade.md
+- @./CLAUDE.user.md
