@@ -58,3 +58,12 @@ cavalry-driver = { path = "../cavalry-driver" }
 [[test]]
 name = "allocations"
 harness = false
+
+# The throttled member's test, held as a program with no test harness: it starts
+# itself again as each of three members, a process each, since a CPU limit is a
+# process's, and it must have one thread when it starts them (`tests/throttle.rs`;
+# `tests/ports/mod.rs`, "What the rule does not cover"). `cargo test` runs it with
+# the others, whatever filter it is given.
+[[test]]
+name = "throttle"
+harness = false

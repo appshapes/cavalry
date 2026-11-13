@@ -38,12 +38,16 @@
 //!   between the choice and the driver's own is a failure.
 //! - A host whose range for port 0 was changed to reach below 32000:
 //!   `net.ipv4.ip_local_port_range` on Linux, `net.inet.ip.portrange.first` on macOS.
-//! - A test that starts child processes. A port is tried by binding a socket, and on
-//!   macOS a socket is marked close-on-exec a moment after it is created, so a child
-//!   started in that moment keeps the socket and the port. No test that takes this
-//!   file starts one. `crates/cavalry/tests/cli.rs` does, and has a rule of its own
-//!   for that reason: `loopback_ports`, from 10000 to 19999, counted out and never
-//!   tried.
+//! - A test that starts child processes while another thread of it chooses a port. A
+//!   port is tried by binding a socket, and on macOS a socket is marked close-on-exec
+//!   a moment after it is created, so a child started in that moment keeps the socket
+//!   and the port. One test that takes this file starts child processes,
+//!   `tests/throttle.rs`, whose three members are processes: it is a program with no
+//!   test harness, has one thread, and chooses its ports before it starts the first
+//!   member, so no socket is being created when a child starts.
+//!   `crates/cavalry/tests/cli.rs` starts children from tests that run on several
+//!   threads, and has a rule of its own for that reason: `loopback_ports`, from 10000
+//!   to 19999, counted out and never tried.
 //! - The bench harness, `bench/src/main.rs`, whose `free_port` binds port 0 and
 //!   releases it. Its rows across two hosts name the port on the host's own address,
 //!   which a loopback port chosen here says nothing about.
