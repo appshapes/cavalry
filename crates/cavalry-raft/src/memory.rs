@@ -431,16 +431,18 @@ impl Io for MemberIo<'_> {
         Ok(Some(image.join_position))
     }
 
-    fn leave_log(&mut self) -> Result<(), Self::Fault> {
+    // A recording in memory stops where it stands, so each of the three calls that
+    // stop one is done when it returns.
+    fn leave_log(&mut self) -> Result<bool, Self::Fault> {
         if let Some(disk) = self.world.disks.get_mut(self.own) {
             disk.joined = false;
             disk.image = None;
             disk.image_lost = false;
         }
-        Ok(())
+        Ok(true)
     }
 
-    fn remove_log(&mut self) -> Result<(), Self::Fault> {
+    fn remove_log(&mut self) -> Result<bool, Self::Fault> {
         // The member's log publication is gone, and with it every follower's image of
         // it: nothing more of it reaches a member, and `log_image` finds no
         // publication with its session id from this step on, where a transport takes
@@ -451,7 +453,7 @@ impl Io for MemberIo<'_> {
                 publication.closed = true;
             }
         }
-        Ok(())
+        Ok(true)
     }
 
     fn truncate_log(&mut self, position: i64) -> Result<Option<i64>, Self::Fault> {
@@ -610,7 +612,7 @@ impl Io for MemberIo<'_> {
             .and_then(|disk| disk.catchup_image))
     }
 
-    fn remove_catchup(&mut self) -> Result<(), Self::Fault> {
+    fn remove_catchup(&mut self) -> Result<bool, Self::Fault> {
         // The subscription goes, with the recording armed on it and every image.
         for replay in &mut self.world.replays {
             if replay.to == self.own {
@@ -622,7 +624,7 @@ impl Io for MemberIo<'_> {
             disk.catchup_armed = false;
             disk.catchup_image = None;
         }
-        Ok(())
+        Ok(true)
     }
 
     fn append(&mut self, entry: &Message<'_>) -> Result<bool, Self::Fault> {

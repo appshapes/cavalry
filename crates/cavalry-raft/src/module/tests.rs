@@ -46,6 +46,13 @@ fn wait_for<T>(what: &str, mut step: impl FnMut() -> Option<T>) -> T {
     }
 }
 
+/// Calls `step`, one of the three calls of [`Io`] that stop a recording, until it says
+/// that the recording's stop has been read, as the core calls it again from one duty
+/// cycle to the next (card 256): a call never waits for the stop.
+fn until_stopped(what: &str, mut step: impl FnMut() -> Result<bool, RaftError>) {
+    wait_for(what, || step().expect(what).then_some(()));
+}
+
 #[test]
 fn the_channel_of_a_log_at_a_base_names_the_position() {
     let control = "cavalry:udp?control=127.0.0.1:20000|control-mode=manual|fc=min";
@@ -436,7 +443,7 @@ fn a_leader_gives_its_log_up_and_leads_the_next_term_where_it_stopped() {
     let one = leader.append(b"one", 0);
     let two = leader.append(b"two", one);
 
-    leader.module.io.remove_log().expect("the log is given up");
+    until_stopped("the log is given up", || leader.module.io.remove_log());
     assert!(leader.module.io.log_publication.is_none());
     assert!(leader.module.io.log_recording.is_none());
     assert_eq!(leader.module.io.log_term, None);
@@ -449,7 +456,7 @@ fn a_leader_gives_its_log_up_and_leads_the_next_term_where_it_stopped() {
             stop: two,
         }]
     );
-    leader.module.io.remove_log().expect("nothing to give up");
+    until_stopped("nothing to give up", || leader.module.io.remove_log());
     assert_eq!(leader.module.io.kept.len(), 1);
 
     let second = leader
@@ -471,7 +478,7 @@ fn a_leader_gives_its_log_up_and_leads_the_next_term_where_it_stopped() {
         two
     );
     let three = leader.append(b"three", two);
-    leader.module.io.remove_log().expect("the log is given up");
+    until_stopped("the log is given up", || leader.module.io.remove_log());
     assert_eq!(leader.module.io.append_position(), three);
     assert_eq!(
         leader.module.io.kept.iter().copied().collect::<Vec<_>>(),
@@ -507,7 +514,7 @@ fn a_leader_replays_the_recordings_it_stopped_to_a_members_catchup_endpoint() {
         .expect("the log has its recording");
     let one = leader.append(b"one", 0);
     let two = leader.append(b"two", one);
-    leader.module.io.remove_log().expect("the log is given up");
+    until_stopped("the log is given up", || leader.module.io.remove_log());
     leader
         .module
         .io
@@ -515,7 +522,7 @@ fn a_leader_replays_the_recordings_it_stopped_to_a_members_catchup_endpoint() {
         .expect("the driver takes the commands")
         .expect("the log has its recording");
     let three = leader.append(b"three", two);
-    leader.module.io.remove_log().expect("the log is given up");
+    until_stopped("the log is given up", || leader.module.io.remove_log());
 
     // From the start to an end in the second recording: the first recording alone.
     assert!(
@@ -742,7 +749,7 @@ fn a_replay_with_no_subscriber_is_said_not_to_have_ended_at_its_end() {
         .expect("the driver takes the commands")
         .expect("the log has its recording");
     let one = leader.append(b"one", 0);
-    leader.module.io.remove_log().expect("the log is given up");
+    until_stopped("the log is given up", || leader.module.io.remove_log());
     // Member 1 is no longer on its catchup endpoint.
     let Leader {
         mut module,
@@ -939,7 +946,7 @@ fn a_recording_armed_before_its_image_is_told_at_the_join_and_counted() {
         "the member's append position reaches the entry's end",
         |io| (io.append_position() == one).then_some(()),
     );
-    pair.member.io.leave_log().expect("the log is left");
+    until_stopped("the log is left", || pair.member.io.leave_log());
     assert_eq!(pair.member.io.append_position(), one);
     assert_eq!(
         pair.member.io.kept.iter().copied().collect::<Vec<_>>(),
@@ -1032,7 +1039,7 @@ fn a_recording_armed_after_its_image_arrived_is_told_where_it_begins_and_never_c
         "the recording begins past where the member's log ends"
     );
     assert_eq!(pair.member.log_recording_id(), None);
-    pair.member.io.leave_log().expect("the log is left");
+    until_stopped("the log is left", || pair.member.io.leave_log());
     assert_eq!(pair.member.io.append_position(), 0);
     assert!(pair.member.io.kept.is_empty());
 }
@@ -1077,7 +1084,7 @@ fn a_recording_of_another_sessions_image_is_never_told_and_never_counted() {
     );
     assert_eq!(pair.member.io.append_position(), 0);
     assert_eq!(pair.member.log_recording_id(), None);
-    pair.member.io.leave_log().expect("the log is left");
+    until_stopped("the log is left", || pair.member.io.leave_log());
     assert_eq!(pair.member.io.append_position(), 0);
     assert!(pair.member.io.kept.is_empty());
 }
@@ -1237,14 +1244,14 @@ fn a_member_records_each_replay_it_asks_for_and_its_log_ends_where_each_stopped(
         .expect("the log has its recording");
     let one = pair.append(b"one", 0);
     let two = pair.append(b"two", one);
-    pair.leader.io.remove_log().expect("the log is given up");
+    until_stopped("the log is given up", || pair.leader.io.remove_log());
     pair.leader
         .io
         .add_log(1, two)
         .expect("the driver takes the commands")
         .expect("the log has its recording");
     let three = pair.append(b"three", two);
-    pair.leader.io.remove_log().expect("the log is given up");
+    until_stopped("the log is given up", || pair.leader.io.remove_log());
 
     assert_eq!(pair.member.io.catchup_image().expect("read"), None);
     let mut kept = Vec::new();
@@ -1320,10 +1327,9 @@ fn a_member_records_each_replay_it_asks_for_and_its_log_ends_where_each_stopped(
             .recording
             .recording_id();
         assert_eq!(pair.start_of(recording_id), from);
-        pair.member
-            .io
-            .remove_catchup()
-            .expect("the subscription is removed");
+        until_stopped("the subscription is removed", || {
+            pair.member.io.remove_catchup()
+        });
         assert!(pair.member.io.catchup_subscription.is_none());
         assert_eq!(pair.member.io.append_position(), to);
         kept.push(Kept {
@@ -1337,7 +1343,7 @@ fn a_member_records_each_replay_it_asks_for_and_its_log_ends_where_each_stopped(
         );
         assert_eq!(pair.member.io.catchup_image().expect("read"), None);
     }
-    pair.member.io.remove_catchup().expect("nothing to remove");
+    until_stopped("nothing to remove", || pair.member.io.remove_catchup());
     assert_eq!(pair.member.log_recording_id(), None, "it is in no log");
 }
 
@@ -1410,10 +1416,9 @@ fn a_member_that_catches_up_adds_the_live_log_and_goes_on_by_it() {
         .expect("the replay's recording is held")
         .recording
         .recording_id();
-    pair.member
-        .io
-        .remove_catchup()
-        .expect("the catch-up subscription is removed");
+    until_stopped("the catch-up subscription is removed", || {
+        pair.member.io.remove_catchup()
+    });
     assert_eq!(pair.member.io.append_position(), three);
     let replay_stop = pair.member.io.stopped_at;
     assert!(replay_stop >= live_start, "{replay_stop} {live_start}");
@@ -1422,7 +1427,7 @@ fn a_member_that_catches_up_adds_the_live_log_and_goes_on_by_it() {
     pair.observe_both("the append position follows the live recording", |io| {
         (io.append_position() == four).then_some(())
     });
-    pair.member.io.leave_log().expect("the log is left");
+    until_stopped("the log is left", || pair.member.io.leave_log());
     assert_eq!(pair.member.io.append_position(), four);
     assert_eq!(
         pair.member.io.kept.iter().copied().collect::<Vec<_>>(),
@@ -1531,7 +1536,7 @@ fn a_replay_that_ended_before_the_election_asked_is_told_once_and_then_gone() {
         .expect("the driver takes the commands")
         .expect("the log has its recording");
     let one = pair.append(b"one", 0);
-    pair.leader.io.remove_log().expect("the log is given up");
+    until_stopped("the log is given up", || pair.leader.io.remove_log());
 
     pair.member.io.add_catchup().expect("subscribed and armed");
     assert!(
@@ -1557,10 +1562,9 @@ fn a_replay_that_ended_before_the_election_asked_is_told_once_and_then_gone() {
         .expect("the record of the log's recordings is written");
     assert_eq!(pair.member.io.append_position(), one);
     assert_eq!(pair.member.io.catchup_image().expect("read"), None);
-    pair.member
-        .io
-        .remove_catchup()
-        .expect("the subscription is removed");
+    until_stopped("the subscription is removed", || {
+        pair.member.io.remove_catchup()
+    });
     assert_eq!(pair.member.io.append_position(), one);
     assert_eq!(pair.member.io.kept.len(), 1);
 }
@@ -1614,11 +1618,10 @@ fn a_member_that_leaves_in_a_catch_up_keeps_both_recordings() {
         (io.append_position() == two).then_some(())
     });
 
-    pair.member.io.leave_log().expect("the log is left");
-    pair.member
-        .io
-        .remove_catchup()
-        .expect("the catch-up subscription is removed");
+    until_stopped("the log is left", || pair.member.io.leave_log());
+    until_stopped("the catch-up subscription is removed", || {
+        pair.member.io.remove_catchup()
+    });
     assert_eq!(pair.member.io.append_position(), two);
     let kept: Vec<_> = pair.member.io.kept.iter().copied().collect();
     assert_eq!(kept.len(), 2, "{kept:?}");
@@ -1649,8 +1652,8 @@ fn a_live_recording_that_begins_below_the_members_log_end_is_never_counted() {
     pair.observe_both("the member holds the first entry", |io| {
         (io.append_position() == one).then_some(())
     });
-    pair.member.io.leave_log().expect("the log is left");
-    pair.leader.io.remove_log().expect("the log is given up");
+    until_stopped("the log is left", || pair.member.io.leave_log());
+    until_stopped("the log is given up", || pair.leader.io.remove_log());
 
     // A log of another term that begins at 0, below where the member's log ends.
     pair.member.io.join_log().expect("subscribed and armed");
@@ -1686,7 +1689,7 @@ fn a_live_recording_that_begins_below_the_members_log_end_is_never_counted() {
     });
     assert_eq!(pair.member.io.append_position(), one);
     assert_eq!(pair.member.log_recording_id(), None);
-    pair.member.io.leave_log().expect("the log is left");
+    until_stopped("the log is left", || pair.member.io.leave_log());
     assert_eq!(pair.member.io.append_position(), one);
     assert_eq!(pair.member.io.kept.len(), 1);
 }
@@ -1772,10 +1775,7 @@ fn a_replay_whose_sender_vanished_is_said_gone_at_the_image_liveness_timeout() {
         "{gone:?}"
     );
     assert_eq!(member.io.append_position(), one);
-    member
-        .io
-        .remove_catchup()
-        .expect("the subscription is removed");
+    until_stopped("the subscription is removed", || member.io.remove_catchup());
     assert_eq!(member.io.append_position(), one);
     assert_eq!(member.io.kept.len(), 1);
 }
@@ -1853,7 +1853,7 @@ fn a_recording_taken_by_an_image_that_went_is_not_the_noted_images() {
     );
     assert_eq!(pair.member.io.append_position(), 0);
     assert_eq!(pair.member.log_recording_id(), None);
-    pair.member.io.leave_log().expect("the log is left");
+    until_stopped("the log is left", || pair.member.io.leave_log());
     assert_eq!(pair.member.io.append_position(), 0);
     assert!(pair.member.io.kept.is_empty());
 }
@@ -1884,8 +1884,8 @@ impl Pair {
             .member
             .log_recording_id()
             .expect("the recording is named");
-        self.member.io.leave_log().expect("the log is left");
-        self.leader.io.remove_log().expect("the log is given up");
+        until_stopped("the log is left", || self.member.io.leave_log());
+        until_stopped("the log is given up", || self.leader.io.remove_log());
         (end, recording_id)
     }
 
@@ -2149,11 +2149,10 @@ fn a_truncation_cuts_both_of_two_recordings_that_overlap() {
             .as_ref()
             .and_then(|held| held.recording.stop_position())
     });
-    pair.member.io.leave_log().expect("the log is left");
-    pair.member
-        .io
-        .remove_catchup()
-        .expect("the catch-up subscription is removed");
+    until_stopped("the log is left", || pair.member.io.leave_log());
+    until_stopped("the catch-up subscription is removed", || {
+        pair.member.io.remove_catchup()
+    });
     let kept: Vec<_> = pair.member.io.kept.iter().copied().collect();
     assert_eq!(kept.len(), 2, "{kept:?}");
     assert!(kept.iter().all(|kept| kept.stop >= three), "{kept:?}");
@@ -2374,12 +2373,11 @@ fn the_file_of_recordings_lists_a_catch_ups_recording_and_then_what_the_member_k
         .io
         .stop_replay(1)
         .expect("the replay is stopped");
-    pair.member
-        .io
-        .remove_catchup()
-        .expect("the catch-up subscription is removed");
+    until_stopped("the catch-up subscription is removed", || {
+        pair.member.io.remove_catchup()
+    });
     let replay_stop = pair.member.io.stopped_at;
-    pair.member.io.leave_log().expect("the log is left");
+    until_stopped("the log is left", || pair.member.io.leave_log());
     assert_eq!(pair.member.io.live_recording(), None);
     assert_eq!(pair.member.io.append_position(), three);
     let next_id = live_id + 100;
@@ -2398,7 +2396,7 @@ fn the_file_of_recordings_lists_a_catch_ups_recording_and_then_what_the_member_k
 
     // The leader's own file: the recording of the term it gave up, below its
     // recording of the term it leads next.
-    pair.leader.io.remove_log().expect("the log is given up");
+    until_stopped("the log is given up", || pair.leader.io.remove_log());
     pair.leader
         .io
         .add_log(1, three)
@@ -3092,7 +3090,7 @@ fn a_member_starts_again_on_the_log_it_kept_and_takes_no_recording_it_never_coun
             .filter(|held| held.recording.synced_position() >= end)
             .map(|held| held.recording.recording_id())
     });
-    pair.member.io.leave_log().expect("the log is left");
+    until_stopped("the log is left", || pair.member.io.leave_log());
     assert_eq!(pair.member.io.append_position(), one);
     assert_eq!(
         pair.stop_of(stray),
@@ -3575,4 +3573,313 @@ fn a_truncation_that_empties_the_table_keeps_where_the_log_ends() {
     assert_eq!(record_in(&member_log_dir, 1), (128, 1, vec![]));
     let terms = TermsFile::open(&member_log_dir).expect("the record of terms");
     assert_eq!(terms.log_leadership_term_id(), 0, "no term was deleted");
+}
+
+/// A consensus message whose step faults does not take the rest of its poll with it:
+/// a message taken from the stream and handed to nobody would be lost with no count
+/// (invariant 4). A member of two canvasses alone. A peer's client sends it two
+/// requests for a vote, and reads the member's stream beside it, so that the member's
+/// next poll finds both. The first request is for a term below the candidate term the
+/// member's `terms` file holds, which the test raised where the core does not see it:
+/// the store the core asks for is refused, a fault. The second is for a term above it.
+/// The duty cycle that reads them returns the first request's fault, and has handed
+/// the second to the core all the same: the member stored its term.
+#[test]
+fn a_message_that_faults_leaves_the_rest_of_its_poll_to_the_core() {
+    let dir = TestDir::new("fault-in-a-poll");
+    let driver_dir = dir.0.join("driver");
+    let log_dir = dir.0.join("log");
+    let ports = free_ports(10);
+    let member = |id: usize| {
+        let endpoints: Vec<String> = ports[id * 5..id * 5 + 5]
+            .iter()
+            .map(|port| format!("127.0.0.1:{port}"))
+            .collect();
+        format!("{id},{}", endpoints.join(","))
+    };
+    let members = format!("{}|{}", member(0), member(1));
+    let _driver = Driver::start(&driver_dir, &log_dir).expect("the driver starts");
+    let mut module =
+        ConsensusModule::start(&driver_dir, &log_dir, &members, 0).expect("the member starts");
+    // Out of init, where a member reads no message, into canvass.
+    wait_for("the member canvasses", || {
+        module.do_work().expect("the member's duty cycle");
+        (module.election_state() == ElectionState::Canvass).then_some(())
+    });
+
+    // Member 0's consensus endpoint is the second of its five.
+    let channel = format!("cavalry:udp?endpoint=127.0.0.1:{}", ports[1]);
+    let mut peer = Cavalry::connect_to(&driver_dir).expect("the peer's client");
+    let mut requests = peer
+        .add_publication(&channel, CONSENSUS_STREAM_ID)
+        .expect("the peer publishes to the member");
+    let mut beside = peer
+        .add_subscription(&channel, CONSENSUS_STREAM_ID)
+        .expect("the peer reads the member's stream");
+
+    module
+        .io
+        .terms
+        .set_candidate_term(9)
+        .expect("the file takes a higher candidate term");
+    let mut bytes = [0u8; 128];
+    for candidate_term_id in [5, 12] {
+        let request = Message::RequestVote {
+            log_leadership_term_id: -1,
+            log_position: 0,
+            candidate_term_id,
+            candidate_member_id: 1,
+            protocol_version: 0,
+        };
+        let length = request.write(&mut bytes).expect("a request vote");
+        wait_for("the request is taken", || {
+            requests.offer(&bytes[..length]).ok()
+        });
+    }
+    let mut arrived = 0;
+    wait_for("both requests have arrived", || {
+        arrived += beside.poll(|_, _| {}, 16).expect("the peer's poll");
+        (arrived == 2).then_some(())
+    });
+
+    // The first cycle that reads the stream reads both, and returns the first one's
+    // fault: the file refuses a candidate term below the one it holds.
+    let fault = wait_for("the cycle that reads the requests", || {
+        module.do_work().err()
+    });
+    assert!(matches!(fault, RaftError::Terms(_)), "{fault}");
+    assert_eq!(
+        module.io.terms.candidate_term(),
+        12,
+        "the second request reached the core in the cycle that returned the fault"
+    );
+    assert_eq!(module.messages_rejected, 0, "neither was rejected");
+    // The fault was one message's: the next cycle has nothing to return.
+    module.do_work().expect("the member's duty cycle");
+    assert_eq!(module.election_state(), ElectionState::Canvass);
+}
+
+/// What a refusal of the leader's log publication is to the election, and what its
+/// error says. A refusal that waiting mends appends nothing and is no error: the
+/// leader appends the entry again. Every other one is [`RaftError::Append`], whose
+/// message names the refusal, says what to do next, and names the page's section on
+/// the log, where a reader of the message looks first.
+#[test]
+fn a_refusal_of_the_leaders_log_says_what_to_do_next_or_has_the_leader_append_again() {
+    for wait in [
+        Offer::BackPressured,
+        Offer::NotConnected,
+        Offer::AdminAction,
+    ] {
+        assert!(
+            matches!(log_refusal(wait), Ok(false)),
+            "{wait:?} is no error"
+        );
+    }
+    for (refusal, does_next) in [
+        (
+            Offer::MaxPositionExceeded,
+            "start the cluster again as a new cluster, every member on a new log directory",
+        ),
+        (
+            Offer::Closed,
+            "Run `cavalry doctor` on the member's driver directory",
+        ),
+        (
+            Offer::TooLong {
+                found: 2_000,
+                limit: 1_408,
+            },
+            "report it, with this message",
+        ),
+    ] {
+        let error = log_refusal(refusal).expect_err("a refusal that waiting does not mend");
+        assert!(
+            matches!(&error, RaftError::Append { refusal: found } if *found == refusal),
+            "{error}"
+        );
+        assert_eq!(error.reason(), "append");
+        let text = error.to_string();
+        assert!(
+            text.starts_with(&format!(
+                "member stopped (append): the leader's log publication refused an entry, {}: ",
+                refusal.reason()
+            )),
+            "{text}"
+        );
+        assert!(text.contains(does_next), "{text}");
+        assert!(
+            text.ends_with("; see docs/reference/cluster.md#the-log"),
+            "{text}"
+        );
+    }
+    let text = log_refusal(Offer::TooLong {
+        found: 2_000,
+        limit: 1_408,
+    })
+    .expect_err("too long")
+    .to_string();
+    assert!(
+        text.contains("an entry of 2000 bytes where the publication takes 1408"),
+        "{text}"
+    );
+}
+
+/// A member that leaves the log never waits for its recording's stop (card 256): the
+/// call that stops the recording returns at once, `Ok(false)`, with the recording
+/// still held and nothing else changed, and a later call, once the driver has said
+/// where the recording stopped, takes the stop as the log's end and leaves. A stop
+/// that is still not read a second after it was asked is `stop-timeout`, with the
+/// recording still held, and the call after it stops the recording again. The test
+/// sets the time the stop was to be read by behind it, where a driver that never
+/// answered would have left it. The time awaited is one recording's: a stop asked
+/// of another recording, past its time, neither times this one out nor passes for
+/// its command.
+#[test]
+fn a_leave_asks_the_stop_and_returns_before_it_is_read() {
+    let mut pair = pair("leave-no-wait");
+    pair.member.io.join_log().expect("subscribed and armed");
+    let log = pair
+        .leader
+        .io
+        .add_log(0, 0)
+        .expect("the driver takes the commands")
+        .expect("the log has its recording");
+    let one = pair.append(b"one", 0);
+    pair.observe("the recording's start is told", |io| {
+        io.log_image(log.session_id).expect("the image is read")
+    });
+    let recording_id = pair
+        .member
+        .log_recording_id()
+        .expect("the recording is named");
+    pair.observe(
+        "the member's append position reaches the entry's end",
+        |io| (io.append_position() == one).then_some(()),
+    );
+    let held =
+        |io: &ClientIo| io.held.is_some() && io.log_subscription.is_some() && io.kept.is_empty();
+
+    // A time behind this one, as a stop that was to be read by then.
+    let past = Instant::now()
+        .checked_sub(Duration::from_millis(1))
+        .expect("a time before now");
+
+    // A stop awaited past its time: the fault, and nothing else changed.
+    pair.member.io.stop_asked = Some((recording_id, past));
+    let late = pair
+        .member
+        .io
+        .leave_log()
+        .expect_err("a stop not read in time");
+    assert!(
+        matches!(late, RaftError::StopTimeout { recording_id: id } if id == recording_id),
+        "{late}"
+    );
+    assert!(
+        pair.member.io.stop_asked.is_none(),
+        "the next call asks again"
+    );
+    assert!(held(&pair.member.io), "the recording is still held");
+
+    // Another recording's stop, awaited past its time, is not this one's: the call
+    // stops this recording and returns before the driver has said where it stopped.
+    // The command is sent, and its answer is read by a later call.
+    pair.member.io.stop_asked = Some((recording_id + 1, past));
+    assert!(
+        !pair.member.io.leave_log().expect("the stop is asked"),
+        "asked, and not yet read"
+    );
+    assert!(
+        pair.member
+            .io
+            .stop_asked
+            .is_some_and(|(id, by)| id == recording_id && by > past),
+        "this recording's stop is the one awaited"
+    );
+    assert!(held(&pair.member.io), "nothing else changed");
+    assert_eq!(pair.member.io.append_position(), one);
+
+    until_stopped("the log is left", || pair.member.io.leave_log());
+    assert!(pair.member.io.stop_asked.is_none(), "no stop is awaited");
+    assert!(pair.member.io.log_subscription.is_none());
+    assert_eq!(pair.member.io.append_position(), one);
+    assert_eq!(
+        pair.member.io.kept.iter().copied().collect::<Vec<_>>(),
+        vec![Kept {
+            recording_id,
+            start: 0,
+            stop: one,
+        }]
+    );
+}
+
+/// A member in init reads nothing, and loses nothing by it (`spec/cluster.md`,
+/// "Messages during an election"): a consensus message that arrives while it is in
+/// init stays on the stream, and the member acts on it in the cycle after it has left
+/// init. Init can last several cycles now, while a recording's stop is asked and not
+/// yet read (card 256); before, a duty cycle polled the stream in init and the core
+/// dropped what it was handed, with no count. A member that has run no cycle is in
+/// init. A peer's request for a vote arrives; the member's first cycle leaves init
+/// and stores nothing, and a cycle after it stores the request's term.
+#[test]
+fn a_message_that_arrives_in_init_is_acted_on_after_it() {
+    let dir = TestDir::new("message-in-init");
+    let driver_dir = dir.0.join("driver");
+    let log_dir = dir.0.join("log");
+    let ports = free_ports(10);
+    let member = |id: usize| {
+        let endpoints: Vec<String> = ports[id * 5..id * 5 + 5]
+            .iter()
+            .map(|port| format!("127.0.0.1:{port}"))
+            .collect();
+        format!("{id},{}", endpoints.join(","))
+    };
+    let members = format!("{}|{}", member(0), member(1));
+    let _driver = Driver::start(&driver_dir, &log_dir).expect("the driver starts");
+    let mut module =
+        ConsensusModule::start(&driver_dir, &log_dir, &members, 0).expect("the member starts");
+    assert_eq!(module.election_state(), ElectionState::Init);
+
+    let channel = format!("cavalry:udp?endpoint=127.0.0.1:{}", ports[1]);
+    let mut peer = Cavalry::connect_to(&driver_dir).expect("the peer's client");
+    let mut requests = peer
+        .add_publication(&channel, CONSENSUS_STREAM_ID)
+        .expect("the peer publishes to the member");
+    let mut beside = peer
+        .add_subscription(&channel, CONSENSUS_STREAM_ID)
+        .expect("the peer reads the member's stream");
+    let request = Message::RequestVote {
+        log_leadership_term_id: -1,
+        log_position: 0,
+        candidate_term_id: 7,
+        candidate_member_id: 1,
+        protocol_version: 0,
+    };
+    let mut bytes = [0u8; 128];
+    let length = request.write(&mut bytes).expect("a request vote");
+    wait_for("the request is taken", || {
+        requests.offer(&bytes[..length]).ok()
+    });
+    let mut arrived = 0;
+    wait_for("the request has arrived", || {
+        arrived += beside.poll(|_, _| {}, 16).expect("the peer's poll");
+        (arrived == 1).then_some(())
+    });
+
+    // The cycle that leaves init reads nothing.
+    module.do_work().expect("the member's duty cycle");
+    assert_eq!(module.election_state(), ElectionState::Canvass);
+    assert_eq!(
+        module.io.terms.candidate_term(),
+        -1,
+        "no candidate term yet"
+    );
+    // The request was sent once, so only a member that left it on the stream in init
+    // can act on it now.
+    wait_for("the request is acted on", || {
+        module.do_work().expect("the member's duty cycle");
+        (module.io.terms.candidate_term() == 7).then_some(())
+    });
+    assert_eq!(module.messages_rejected, 0);
 }

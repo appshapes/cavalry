@@ -380,3 +380,54 @@ fn a_catch_up_has_its_whole_timeout_from_when_the_image_joins() {
     assert_eq!(member.election_state(), ElectionState::Init);
     assert_eq!(member.counts().elections_failed, 1);
 }
+
+/// The leader's stop catch-up is taken where it is read, and the catch-up
+/// subscription's removal may take cycles: it stops a recording, whose stop may be
+/// asked and not yet read (card 256). The member is on the live log and at the commit
+/// position it had been told, so only the removal holds it: follower catch-up asks
+/// again each cycle, is not left before the subscription is gone, and is left in the
+/// cycle that reads the stop. Nothing asks again after that.
+#[test]
+fn a_catch_up_is_not_left_until_the_stop_of_its_recording_is_read() {
+    let mut io = Stub::new();
+    let (mut member, ms) = behind(&mut io, 160, 64);
+    work(&mut member, &mut io, ms);
+    io.catchup_image = Some(64);
+    work(&mut member, &mut io, ms + 1);
+    work(&mut member, &mut io, ms + 2);
+    io.append_position = 160;
+    io.image = Some(128);
+    work(&mut member, &mut io, ms + 3);
+    assert_eq!(io.last_append_flags, APPEND_POSITION_FLAG_CATCHUP);
+
+    io.stops_pending = 2;
+    read(&mut member, &mut io, ms + 4, &stop_catchup(1, 0));
+    assert_eq!(
+        io.count(|call| *call == Call::RemoveCatchup),
+        1,
+        "asked where the message is read"
+    );
+    assert_eq!(member.election_state(), ElectionState::FollowerCatchup);
+    work(&mut member, &mut io, ms + 5);
+    assert_eq!(
+        io.count(|call| *call == Call::RemoveCatchup),
+        2,
+        "asked again"
+    );
+    assert_eq!(
+        member.election_state(),
+        ElectionState::FollowerCatchup,
+        "not left with the subscription still there"
+    );
+    work(&mut member, &mut io, ms + 6);
+    assert_eq!(io.count(|call| *call == Call::RemoveCatchup), 3, "and read");
+    assert_eq!(member.election_state(), ElectionState::FollowerLogInit);
+    work(&mut member, &mut io, ms + 7);
+    assert_eq!(member.election_state(), ElectionState::FollowerReady);
+    assert_eq!(
+        io.count(|call| *call == Call::RemoveCatchup),
+        3,
+        "not asked again"
+    );
+    assert_eq!(member.counts().elections_failed, 0);
+}

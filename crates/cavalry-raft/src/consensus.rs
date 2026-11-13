@@ -254,15 +254,23 @@ pub trait Io {
     /// only once that log has reached where the recording begins, which a catch-up's
     /// replay brings about (ADR 0094): until then, and for ever when nothing brings
     /// it there, [`Io::append_position`] does not count it.
-    fn leave_log(&mut self) -> Result<(), Self::Fault>;
+    ///
+    /// Returns whether the member has left. `Ok(false)` says that a recording's stop
+    /// was asked and where it stopped is not yet known: nothing else has changed, the
+    /// core stays in init and calls again on its next cycle. An implementation never
+    /// waits for the stop inside the call, so that the thread that runs the duty
+    /// cycle is not held (card 256).
+    fn leave_log(&mut self) -> Result<bool, Self::Fault>;
 
     /// Gives the leader's log up: closes the log publication [`Io::add_log`] made and
     /// stops the leader's recording of it, whose stop is where the member's log ends.
     /// A leader that holds an election does it in init, as a follower leaves the log
     /// there, so that the log it leads or joins next is a new one and no follower's
     /// image of the old one goes on (ADR 0082). The core calls it only for a member
-    /// that holds a log, and not again once it returned `Ok`.
-    fn remove_log(&mut self) -> Result<(), Self::Fault>;
+    /// that holds a log, and not again once it returned `Ok(true)`. `Ok(false)` is as
+    /// [`Io::leave_log`]'s: the stop of the leader's recording was asked and is not
+    /// yet read, and the core calls again on its next cycle.
+    fn remove_log(&mut self) -> Result<bool, Self::Fault>;
 
     /// Truncates the member's log to `position`, the base of a term in its leader's
     /// log: every byte its recordings hold above the position is gone, and every term
@@ -378,8 +386,11 @@ pub trait Io {
     /// Removes the catch-up subscription and stops the recording its image started,
     /// whose stop is where the member's log ends. The core calls it when a
     /// replication has reached its stop, when a replay's image has gone below it
-    /// (ADR 0092), and in init for one that failed.
-    fn remove_catchup(&mut self) -> Result<(), Self::Fault>;
+    /// (ADR 0092), when its leader has said that a catch-up is over, and in init for
+    /// one that failed. `Ok(false)` is as [`Io::leave_log`]'s: the stop of the
+    /// recording was asked and is not yet read, the subscription is still there, and
+    /// the core calls again on its next cycle.
+    fn remove_catchup(&mut self) -> Result<bool, Self::Fault>;
 }
 
 /// Why [`Consensus::with_election`] refused its members. The members are checked in
@@ -1541,13 +1552,17 @@ impl Consensus {
                     && catching.flagged
                     && !catching.stopped
                 {
-                    if self.catchup {
-                        io.remove_catchup()?;
-                        self.catchup = false;
-                    }
+                    // The leader's word is taken where it is read, with the commit
+                    // position the member had been told then. The subscription's
+                    // removal stops a recording, whose stop the driver may not have
+                    // said yet, or may fault: follower catch-up asks again each
+                    // cycle until it is gone, and is not left before.
                     catching.stopped = true;
                     catching.commit_target = self.commit_position;
                     self.catching = Some(catching);
+                    if self.catchup && io.remove_catchup()? {
+                        self.catchup = false;
+                    }
                 }
                 Ok(())
             }
@@ -2015,7 +2030,9 @@ impl Consensus {
     /// joined one, gives up the log of a term it led, stops the replays it served, and
     /// canvasses with no report held from the election before; a cluster of one member
     /// leads at once. A fault at any step leaves it in init, and the next cycle tries
-    /// the step again.
+    /// the step again. So does a recording's stop that was asked and is not yet read:
+    /// the member stays in init, with no fault, until the driver has said where the
+    /// recording stopped, and the cycle that asked returns at once.
     fn init<I: Io>(&mut self, clock: Clock, io: &mut I) -> Result<usize, I::Fault> {
         // A member starts on what its log directory holds (ADR 0089): the candidate
         // term it stored, so that it votes once in a term across a restart, and the
@@ -2030,13 +2047,17 @@ impl Consensus {
         // Out of the live log, so that the image joined next is a new one whose join
         // position follower log await checks.
         if self.joined {
-            io.leave_log()?;
+            if !io.leave_log()? {
+                return Ok(0);
+            }
             self.joined = false;
         }
         // And out of a replication that failed: its subscription goes, and with it
         // the image of any replay still on it. So too out of a catch-up that failed.
         if self.catchup {
-            io.remove_catchup()?;
+            if !io.remove_catchup()? {
+                return Ok(0);
+            }
             self.catchup = false;
         }
         self.replication = None;
@@ -2045,7 +2066,9 @@ impl Consensus {
         // gives it up, so that no follower's image of it goes on and the term it leads
         // next has a publication of its own, at that term's base (ADR 0082).
         if self.log.is_some() {
-            io.remove_log()?;
+            if !io.remove_log()? {
+                return Ok(0);
+            }
             self.log = None;
         }
         // And it serves no member from here: a replay it runs is stopped, and it
@@ -2645,10 +2668,13 @@ impl Consensus {
                     // stop of the image's recording is where the log ends, which the
                     // next cycle reads; it asks again there if that is further on.
                     None if replication.image.is_some() => {
-                        io.remove_catchup()?;
-                        self.catchup = false;
-                        replication.image = None;
-                        replication.asked = false;
+                        // Until the driver has said where the recording stopped,
+                        // the subscription stays and the next cycle comes back here.
+                        if io.remove_catchup()? {
+                            self.catchup = false;
+                            replication.image = None;
+                            replication.asked = false;
+                        }
                         work = 1;
                         self.replication = Some(replication);
                     }
@@ -2688,7 +2714,12 @@ impl Consensus {
             return Ok(work);
         }
         if self.catchup {
-            io.remove_catchup()?;
+            if !io.remove_catchup()? {
+                // The recording's stop is asked and not yet read: the next cycle
+                // comes back here, and the member leaves the state once it is.
+                self.replication = Some(replication);
+                return Ok(work);
+            }
             self.catchup = false;
         }
         self.replication = None;
@@ -2859,7 +2890,19 @@ impl Consensus {
             work = 1;
         }
         self.catching = Some(catching);
-        if catching.stopped && on_live && self.append_position >= catching.commit_target {
+        // The leader's stop was read and the catch-up subscription is still there:
+        // the stop of its recording was asked and not yet read, or the removal
+        // faulted. It is asked again here, and the state is not left before it is
+        // gone.
+        if catching.stopped && self.catchup && io.remove_catchup()? {
+            self.catchup = false;
+            work = 1;
+        }
+        if catching.stopped
+            && !self.catchup
+            && on_live
+            && self.append_position >= catching.commit_target
+        {
             self.catching = None;
             return Ok(self.step(ElectionState::FollowerLogInit, clock));
         }
