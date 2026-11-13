@@ -6049,12 +6049,16 @@ mod tests {
                 "{message}"
             );
             // Every state's waits have the one bound; follower replay's own replay has
-            // none, so its sentence is of the waits after it.
+            // none, so its sentence is of the waits after it, and follower ready has one
+            // wait, for its append position to be sent.
             assert!(
-                message.contains(if state == 10 {
-                    "Each wait after the replay is bounded by the leader heartbeat timeout, 10 s;"
-                } else {
-                    "Each wait is bounded by the leader heartbeat timeout, 10 s;"
+                message.contains(match state {
+                    10 => {
+                        "Each wait after the replay is bounded by the leader heartbeat \
+                         timeout, 10 s;"
+                    }
+                    16 => "Sending it is bounded by the leader heartbeat timeout, 10 s;",
+                    _ => "Each wait is bounded by the leader heartbeat timeout, 10 s;",
                 }),
                 "{message}"
             );
