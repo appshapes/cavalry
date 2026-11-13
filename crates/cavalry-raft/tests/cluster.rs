@@ -1,10 +1,14 @@
 //! Three members over three drivers on the loopback: each a [`ConsensusModule`], a
 //! client of its own driver, with its log recorded into its own log directory (ADR
 //! 0060; ADR 0063). The members elect a leader, the followers arm their recordings
-//! before its first frame, a hundred thousand entries are committed at a quorum of synced
-//! positions, and the three recordings hold the same bytes. A member is lost, a follower
-//! or the leader, and a follower leaves the log and joins it again: what a member that
-//! leaves the log holds as its log's end is where the recording it held stopped.
+//! of its log, a hundred thousand entries are committed at a quorum of synced
+//! positions, and the three recordings hold the same bytes but for their frames'
+//! session ids. A member is lost, a follower or the leader, and a follower leaves the
+//! log and joins it again: what a member that leaves the log holds as its log's end is
+//! where the recording it held stopped. A follower that is slow at the start joins the
+//! log after the term's first entry and catches up by a replay (ADR 0104, Evidence);
+//! the three tests where the leader is lost or stands still make one follower do so on
+//! every run.
 
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
@@ -16,7 +20,7 @@ use cavalry_proto::cluster::{
     LOG_RECORDINGS_FILE_PREFIX, LOG_RECORDINGS_TMP_SUFFIX, LogRecordings, Message,
     SERVICE_LOG_STREAM_ID, Stream,
 };
-use cavalry_raft::{ConsensusModule, ElectionState, NO_SESSION, RaftError, Refused, Role};
+use cavalry_raft::{ConsensusModule, Counts, ElectionState, NO_SESSION, RaftError, Refused, Role};
 use cavalry_shm::counters::CountersReader;
 use cavalry_shm::counters::generated::{
     CLUSTER_APPEND_POSITION, CLUSTER_APPOINTED_LEADER_BEHIND, CLUSTER_COMMIT_POSITION,
@@ -157,7 +161,8 @@ fn close(members: Vec<Member>) {
 /// and a service's handle from a start in which every member joined on time. A start
 /// in which a follower joined late is closed and made again, in a directory of its
 /// own, five times at most. The late join is not left to chance either:
-/// `three_members_replicate_with_a_follower_that_joined_late` makes one.
+/// [`run_until_led_with_a_late_follower`] makes one on every run of the tests that
+/// begin with it.
 fn start_led(dir: &Path) -> Vec<Member> {
     for attempt in 0..5 {
         let mut members = start(&dir.join(format!("start-{attempt}")), &members_string());
@@ -172,6 +177,65 @@ fn start_led(dir: &Path) -> Vec<Member> {
         close(members);
     }
     panic!("a follower joined late in each of five starts");
+}
+
+/// As [`run_until_led`], with one follower made to join the log late. A follower that
+/// is slow at the start takes this path by chance (ADR 0104, Evidence); here it takes
+/// it on every run. The first member found in follower log init has taken the leader's
+/// term at position 0 and has not yet subscribed to the leader's log. It runs no duty
+/// cycle until the other two have closed their elections and hold the term's first
+/// entry: the leader closed on a quorum without it. Its image of the log then joins
+/// past its append position. It counts the mismatch, fails its election, and catches
+/// up in the next. Returns the late follower's member id, once it has been seen to do
+/// so.
+fn run_until_led_with_a_late_follower(members: &mut [Member]) -> i32 {
+    let mut late = None;
+    run_until(members, "a member took a leader's term", |members| {
+        late = members
+            .iter()
+            .position(|m| m.module.election_state() == ElectionState::FollowerLogInit);
+        late.is_some()
+    });
+    let late = late.expect("a member in follower log init");
+    let late_id = members[late].module.member_id();
+    let deadline = Instant::now() + Duration::from_secs(60);
+    while !members.iter().enumerate().all(|(index, m)| {
+        index == late
+            || (m.module.election_state() == ElectionState::Closed
+                && m.module.append_position() >= 96)
+    }) {
+        assert!(
+            Instant::now() < deadline,
+            "the others closed without member {late_id}: {:?}",
+            states(members)
+        );
+        let mut work = 0;
+        for (index, member) in members.iter_mut().enumerate() {
+            if index != late {
+                work += member.module.do_work().expect("the member's duty cycle");
+            }
+        }
+        if work == 0 {
+            std::thread::sleep(Duration::from_micros(200));
+        }
+    }
+    run_until_led(members);
+    let member = members
+        .iter()
+        .find(|m| m.module.member_id() == late_id)
+        .expect("the late member");
+    assert_eq!(member.module.role(), Role::Follower);
+    let counts = member.module.counts();
+    assert_eq!(
+        (
+            counts.join_position_mismatches,
+            counts.elections_failed,
+            counts.elections
+        ),
+        (1, 1, 2),
+        "member {late_id} joined late: {counts:?}"
+    );
+    late_id
 }
 
 fn states(members: &[Member]) -> Vec<String> {
@@ -306,9 +370,10 @@ fn three_members_replicate_a_hundred_thousand_entries_and_their_recordings_are_e
         },
     );
 
-    // Each member's recordings hold the same bytes up to the commit position: the
-    // leader's of its publication and each follower's of the leader's image, and, for
-    // a follower that joined late, of the replay it caught up by before it.
+    // Each member's recordings hold the same bytes up to the commit position, but for
+    // the session ids that `log_bytes` sets to 0: the leader's of its publication and
+    // each follower's of the leader's image, and, for a follower that joined late, of
+    // the replay it caught up by before it.
     let recordings: Vec<Vec<u8>> = members
         .iter()
         .map(|member| log_bytes(member, end))
@@ -357,14 +422,27 @@ fn three_members_replicate_a_hundred_thousand_entries_and_their_recordings_are_e
         );
         assert_eq!(counter(member, CLUSTER_LEADERSHIP_TERM_ID.0), term);
         assert_eq!(counter(member, CLUSTER_ELECTION_STATE.0), 17);
-        assert_eq!(counter(member, CLUSTER_ELECTIONS.0), 1);
-        // Every member names the leader, the leader itself among them, and none has
-        // held an election since it started (ADR 0102).
+        // The file holds the elections the member counted: one, or two for a follower
+        // that joined late, whose first failed (above).
+        let counts = member.module.counts();
+        assert_eq!(
+            counter(member, CLUSTER_ELECTIONS.0),
+            i64::try_from(counts.elections).expect("a count")
+        );
+        // Every member names the leader, the leader itself among them (ADR 0102). The
+        // cause of a member's last election is its start, 0, where its one election
+        // closed, and the failed election, 5, for a follower that joined late and
+        // caught up in its second.
         assert_eq!(
             counter(member, CLUSTER_LEADER_MEMBER_ID.0),
             i64::from(leader_id)
         );
-        assert_eq!(counter(member, CLUSTER_ELECTION_CAUSE.0), 0);
+        assert_eq!(
+            counter(member, CLUSTER_ELECTION_CAUSE.0),
+            if counts.elections == 1 { 0 } else { 5 },
+            "member {}: {counts:?}",
+            member.module.member_id()
+        );
         assert_eq!(
             counter(member, CLUSTER_ROLE.0),
             if index == 0 { 2 } else { 0 }
@@ -375,7 +453,6 @@ fn three_members_replicate_a_hundred_thousand_entries_and_their_recordings_are_e
         // which nominated itself and won its ballot, and in four on a follower that
         // took the leader's term from canvass or five on one that voted for it first.
         assert_eq!(counter(member, CLUSTER_ELECTIONS_CLOSED.0), 1);
-        let counts = member.module.counts();
         // Where the first ballot elected, the leader took four steps: to nominate,
         // and three from leader log replication to leader ready. A follower took
         // four from its ballot or from canvass to follower ready, and one more when
@@ -480,7 +557,9 @@ fn three_members_replicate_a_hundred_thousand_entries_and_their_recordings_are_e
 #[test]
 fn ten_entries_each_appended_once_the_last_was_committed_do_not_wait_a_second_each() {
     let dir = TestDir::new("commit-on-sync");
-    let mut members = start_led(dir.path());
+    let members_string = members_string();
+    let mut members = start(dir.path(), &members_string);
+    run_until_led(&mut members);
     // The term event, 56 bytes in a frame of 96, then each entry in a frame of 96.
     let mut end = 96;
     run_until(
@@ -524,7 +603,9 @@ fn ten_entries_each_appended_once_the_last_was_committed_do_not_wait_a_second_ea
 #[test]
 fn a_follower_lost_leaves_a_quorum_that_goes_on_committing() {
     let dir = TestDir::new("follower-lost");
-    let mut members = start_led(dir.path());
+    let members_string = members_string();
+    let mut members = start(dir.path(), &members_string);
+    run_until_led(&mut members);
     members[0]
         .module
         .offer(b"three of three")
@@ -580,11 +661,15 @@ fn a_follower_lost_leaves_a_quorum_that_goes_on_committing() {
 /// no recording in `cluster.log_recording_id`, since none records the live log
 /// (`spec/cluster.md`, "The service"). The next test is the one where the member's own
 /// stop alone ends its recording, and where the end it takes decides what it appends
-/// after.
+/// after. One follower joined the log late at the start
+/// (`run_until_led_with_a_late_follower`), so each run holds one follower of each
+/// kind, and the counts asserted are those added after the leader is lost.
 #[test]
 fn a_leader_lost_leaves_each_follower_at_the_end_its_recording_stopped() {
     let dir = TestDir::new("leader-lost");
-    let mut members = start_led(dir.path());
+    let members_string = members_string();
+    let mut members = start(dir.path(), &members_string);
+    run_until_led_with_a_late_follower(&mut members);
     const ENTRIES: i64 = 100;
     offer_entries(&mut members, ENTRIES);
     // The term's event and a hundred entries, each in a frame of 96.
@@ -610,6 +695,10 @@ fn a_leader_lost_leaves_each_follower_at_the_end_its_recording_stopped() {
             id
         })
         .collect();
+    // What each follower counted before the leader is lost. The late follower's
+    // election failed once at the start, so what follows asserts the change from
+    // here, not totals counted from the start.
+    let before: Vec<Counts> = members[1..].iter().map(|m| m.module.counts()).collect();
 
     let leader = members.remove(0);
     drop(leader.module);
@@ -619,26 +708,38 @@ fn a_leader_lost_leaves_each_follower_at_the_end_its_recording_stopped() {
         &mut members,
         "each follower left the log and canvasses again",
         |members| {
-            members.iter().all(|m| {
+            members.iter().zip(&before).all(|(m, before)| {
                 let counts = m.module.counts();
-                counts.log_images_lost + counts.leader_heartbeat_timeouts == 1
+                counts.log_images_lost + counts.leader_heartbeat_timeouts
+                    == before.log_images_lost + before.leader_heartbeat_timeouts + 1
                     && m.module.election_state() == ElectionState::Canvass
             })
         },
     );
-    for (member, recording_id) in members.iter().zip(held) {
+    for ((member, recording_id), before) in members.iter().zip(held).zip(&before) {
         assert_eq!(member.module.role(), Role::Follower);
-        assert_eq!(member.module.counts().elections, 2);
-        assert_eq!(member.module.counts().elections_failed, 0);
-        assert_eq!(counter(member, CLUSTER_ELECTIONS.0), 2);
+        // One election more than before the leader was lost, and no more failed.
+        let counts = member.module.counts();
+        assert_eq!(counts.elections, before.elections + 1, "{counts:?}");
+        assert_eq!(
+            counts.elections_failed, before.elections_failed,
+            "{counts:?}"
+        );
+        assert_eq!(
+            counter(member, CLUSTER_ELECTIONS.0),
+            i64::try_from(counts.elections).expect("a count")
+        );
         // It names no leader, and the cause of its election is what it lost: the
         // image of the leader's log, 2, or the leader's word for the heartbeat
         // timeout, 1, whichever its duty cycle met first (ADR 0102).
         assert_eq!(counter(member, CLUSTER_LEADER_MEMBER_ID.0), -1);
-        let counts = member.module.counts();
         assert_eq!(
             counter(member, CLUSTER_ELECTION_CAUSE.0),
-            if counts.log_images_lost == 1 { 2 } else { 1 }
+            if counts.log_images_lost > before.log_images_lost {
+                2
+            } else {
+                1
+            }
         );
         // Its log ends where its recording stopped, and its commit position stands.
         assert_eq!(member.module.append_position(), end);
@@ -692,13 +793,18 @@ fn a_stop_timeout_says_what_to_do_next() {
 /// it.
 /// An entry offered to the new leader is committed by the two, a quorum of three,
 /// within five seconds of the leader heartbeat timeout. Nothing that was committed
-/// is lost: the two hold the first hundred entries byte for byte, and what follows
-/// them is the new term's first entry and the one offered. The election's time is
-/// reported and not asserted, since a split vote takes a second longer by design.
+/// is lost: the two hold the first hundred entries byte for byte, but for the frames'
+/// session ids, and what follows them is the new term's first entry and the one
+/// offered. One follower joined the log late at the start
+/// (`run_until_led_with_a_late_follower`), so one of the two holds its log in more
+/// than one recording on every run. The election's time is reported and not
+/// asserted, since a split vote takes a second longer by design.
 #[test]
 fn a_lost_leader_is_replaced_by_the_two_that_remain_and_they_commit() {
     let dir = TestDir::new("leader-replaced");
-    let mut members = start_led(dir.path());
+    let members_string = members_string();
+    let mut members = start(dir.path(), &members_string);
+    run_until_led_with_a_late_follower(&mut members);
     const ENTRIES: i64 = 100;
     offer_entries(&mut members, ENTRIES);
     let end = 96 + ENTRIES * 96;
@@ -804,10 +910,10 @@ fn a_lost_leader_is_replaced_by_the_two_that_remain_and_they_commit() {
     );
 
     // Nothing committed was lost. Each member's log of the first term holds the
-    // same bytes from position 0 to the end of that term, read across the
-    // recordings its file names: a follower that was slow at the start joined after
-    // the term's first entry, and holds what lies below in the recording of the
-    // replay it caught up by.
+    // same bytes from position 0 to the end of that term, but for the session ids
+    // that `log_bytes` sets to 0, read across the recordings its file names: the
+    // follower that joined late at the start holds what lies below its live image in
+    // the recording of the replay it caught up by.
     let held: Vec<Vec<u8>> = members
         .iter()
         .map(|member| log_bytes(member, end))
@@ -863,18 +969,23 @@ fn offer_entries(members: &mut [Member], count: i64) {
 /// the timeout, leaves the log at the end its recording stopped at, and canvasses; the
 /// leader, running again, answers, and the follower joins the log again on a new
 /// recording whose image joins at that end. What the leader appends after is committed
-/// on all three: the follower's append position goes on from the stop of its first
-/// recording through its second, which begins where the member's log ends.
+/// on all three: the follower's append position goes on from the stop of the recording
+/// it held through a new one, which begins where the member's log ends.
 ///
 /// One follower alone runs while the leader stands still. Two that had both timed out
 /// would be a quorum with no leader, and would hold a ballot of their own if the
 /// leader's answer came later than a nomination delay: this test is of the member
 /// that leaves and joins again, so it leaves no quorum to elect. The second follower
-/// stands still with the leader and runs again once the first has joined.
+/// stands still with the leader and runs again once the first has joined. One of the
+/// two joined the log late at the start (`run_until_led_with_a_late_follower`), so
+/// the counts and the recordings asserted are those added after the leader stands
+/// still.
 #[test]
 fn a_follower_that_leaves_the_log_joins_it_again_where_its_recording_stopped() {
     let dir = TestDir::new("join-again");
-    let mut members = start_led(dir.path());
+    let members_string = members_string();
+    let mut members = start(dir.path(), &members_string);
+    run_until_led_with_a_late_follower(&mut members);
     const ENTRIES: i64 = 10;
     offer_entries(&mut members, ENTRIES);
     let first = 96 + ENTRIES * 96;
@@ -884,11 +995,13 @@ fn a_follower_that_leaves_the_log_joins_it_again_where_its_recording_stopped() {
             .all(|m| m.module.commit_position() == first && m.module.append_position() == first)
     });
     let term = members[0].module.leadership_term_id();
-    let held = members[1]
-        .module
-        .log_recording_id()
-        .expect("a follower's recording");
+    // What the follower counted and what its file of recordings held before its
+    // leader stands still: a follower that joined late at the start has a failed
+    // election and a recording of its catch-up from then, so what follows asserts
+    // the change from here.
     let before = members[1].module.counts();
+    let (held, held_from, below_before) = log_recordings(&members[1]);
+    assert_eq!(members[1].module.log_recording_id(), Some(held));
 
     // The leader's module stands still, and the second follower's with it; the
     // leader's driver, and so its log's image on the first follower, runs on.
@@ -905,7 +1018,10 @@ fn a_follower_that_leaves_the_log_joins_it_again_where_its_recording_stopped() {
     {
         let member = &members[1];
         let recording_id = &held;
-        assert_eq!(member.module.counts().log_images_lost, 0);
+        assert_eq!(
+            member.module.counts().log_images_lost,
+            before.log_images_lost
+        );
         assert_eq!(member.module.log_recording_id(), None);
         assert_eq!(counter(member, CLUSTER_LOG_RECORDING_ID.0), -1);
         assert_eq!(member.module.append_position(), first);
@@ -915,7 +1031,7 @@ fn a_follower_that_leaves_the_log_joins_it_again_where_its_recording_stopped() {
                 .stop_position(*recording_id)
                 .expect("the recording's slot is read"),
             Some(first),
-            "member {}'s first recording",
+            "the recording member {} held",
             member.module.member_id()
         );
     }
@@ -958,21 +1074,31 @@ fn a_follower_that_leaves_the_log_joins_it_again_where_its_recording_stopped() {
             })
         },
     );
-    // The follower held one election more, which closed, and its new recording
-    // begins where the one it left stopped.
+    // The follower held one election more, which closed, with no more failed and
+    // no join mismatch: its image joined where its log ends. Its new recording begins
+    // where the one it left stopped, and its file lists that one below it.
     let counts = members[1].module.counts();
-    assert_eq!(counts.elections, before.elections + 1);
-    assert_eq!(counts.elections_closed, before.elections_closed + 1);
-    assert_eq!(counts.elections_failed, before.elections_failed);
-    assert_eq!(counts.join_position_mismatches, 0);
+    assert_eq!(counts.elections, before.elections + 1, "{counts:?}");
+    assert_eq!(
+        counts.elections_closed,
+        before.elections_closed + 1,
+        "{counts:?}"
+    );
+    assert_eq!(
+        counts.elections_failed, before.elections_failed,
+        "{counts:?}"
+    );
+    assert_eq!(
+        counts.join_position_mismatches, before.join_position_mismatches,
+        "{counts:?}"
+    );
     let rejoined = members[1]
         .module
         .log_recording_id()
         .expect("the follower's new recording");
-    assert_eq!(
-        log_recordings(&members[1]),
-        (rejoined, first, vec![(held, 0, first)])
-    );
+    let mut below = below_before;
+    below.push((held, held_from, first));
+    assert_eq!(log_recordings(&members[1]), (rejoined, first, below));
     for member in &members[1..] {
         assert_eq!(counter(member, CLUSTER_APPEND_POSITION.0), second);
         assert_eq!(
@@ -1562,6 +1688,10 @@ fn a_service_whose_image_was_withdrawn_unread_is_told_where_its_entries_stop() {
 /// recordings its file names, in their order, each from where the one before it left
 /// off, and then from its live recording (`spec/cluster.md`, "The log's recordings").
 /// Every recording here lies in its first segment file, whose base is position 0.
+/// Each frame's session id, bytes 12 to 16 of its header, is set to 0. It is the one
+/// field in which members' logs of a span may differ. A follower that joined late
+/// holds the span below its live image in its recording of a catch-up replay, and a
+/// replay has a session id of its own (`spec/cluster.md`, "The log").
 fn log_bytes(member: &Member, end: i64) -> Vec<u8> {
     let (live, live_start, below) = log_recordings(member);
     let at = |position: i64| usize::try_from(position).expect("a position");
@@ -1583,6 +1713,22 @@ fn log_bytes(member: &Member, end: i64) -> Vec<u8> {
         position = stop;
     }
     assert_eq!(position, end, "member {}", member.module.member_id());
+    // Frames lie one after another from position 0, each at its length aligned to 32.
+    let mut frame = 0;
+    while frame < bytes.len() {
+        let length =
+            i32::from_le_bytes(bytes[frame..frame + 4].try_into().expect("a frame length"));
+        assert!(
+            length >= 32,
+            "member {}: a frame of length {length} at {frame}",
+            member.module.member_id()
+        );
+        bytes[frame + 12..frame + 16].fill(0);
+        frame += usize::try_from(length)
+            .expect("a length")
+            .next_multiple_of(32);
+    }
+    assert_eq!(frame, bytes.len(), "member {}", member.module.member_id());
     bytes
 }
 
