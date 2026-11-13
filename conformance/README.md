@@ -29,7 +29,10 @@ two recordings, and then member 0 or member 2. The script reads each member's fi
 its log's recordings in its driver directory (`spec/cluster.md`, "The log's recordings";
 ADR 0103) and prints the member's id and the recording's. It waits 60 s for such a
 member, since a member writes its file as it joins the log, and then fails with what
-each member's file holds. It reads the file's integers through `od` in hex, because
+each member's file holds. A member renames each new file over the one before, so the
+script opens a member's file once per read, copies its 40-byte header, and takes every
+field from the copy: two opens could find two files, and mix their fields. It reads the
+integers through `od` in hex, because
 `od`'s signed decimal of eight bytes is wrong on macOS 26.6, and before it reads a file
 it reads eight bytes it knows to be 4096 and chooses no member on a host that reads them
 otherwise.

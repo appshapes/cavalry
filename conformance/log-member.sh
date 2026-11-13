@@ -27,10 +27,31 @@ number() {
     echo $((16#$(tr -d ' \n')))
 }
 
-# The integer of `$3` bytes at offset `$2` of file `$1`, in the host's order, which is
-# little-endian on every host the runners use.
+# The integer of `$2` bytes at offset `$1` of the copy of a member's file, in the host's
+# order, which is little-endian on every host the runners use.
 field() {
-    od -An -t "x$3" -j "$2" -N "$3" "$1" | number
+    od -An -t "x$2" -j "$1" -N "$2" "$snapshot" | number
+}
+
+# A member writes its file whole under `log-recordings-<member id>.tmp` and renames it
+# over the file (spec/cluster.md, "The log's recordings"), so each open of the name finds
+# one whole file, but two opens may find two files: three reads of the name could take
+# the live recording id from one file and where it begins from the next. So the script
+# opens a member's file once per read, as the spec's reader does, copies its 40-byte
+# header, and takes every field from the copy.
+snapshot=$(mktemp "${TMPDIR:-/tmp}/cavalry-log-member.XXXXXX")
+trap 'rm -f "$snapshot"' EXIT
+
+# Copies the header of member `$1`'s file to the snapshot, with one open; fails when the
+# member has no file, as before it first writes one and after it closes.
+copy() {
+    head -c 40 "$cluster/member-$1/log-recordings-$1" >"$snapshot"
+}
+
+# The bytes the copy holds: 40, or fewer for a file shorter than its header, which no
+# member writes, since the file it renames is whole.
+length() {
+    wc -c <"$snapshot" | tr -d ' '
 }
 
 # The reader is held to eight bytes that are 4096 in little-endian order before it
@@ -49,12 +70,12 @@ fi
 SECONDS=0
 while [ "$SECONDS" -lt 60 ]; do
     for id in 1 0 2; do
-        file="$cluster/member-$id/log-recordings-$id"
-        # A file shorter than its header is one this script did not finish reading
-        # before the member renamed the next over it; the next round reads it again.
-        [ -f "$file" ] && [ "$(wc -c <"$file" | tr -d ' ')" -ge 40 ] || continue
-        if [ "$(field "$file" 24 8)" = 0 ] && [ "$(field "$file" 32 4)" = 0 ]; then
-            echo "$id $(field "$file" 16 8)"
+        # A member with no file yet, or a file shorter than its header, names no
+        # recording this pass; the next pass reads the name again, and the report after
+        # 60 s says which it was.
+        copy "$id" 2>/dev/null && [ "$(length)" -ge 40 ] || continue
+        if [ "$(field 24 8)" = 0 ] && [ "$(field 32 4)" = 0 ]; then
+            echo "$id $(field 16 8)"
             exit 0
         fi
     done
@@ -63,10 +84,14 @@ done
 echo "conformance: no member under $cluster holds its log in one recording that begins at 0 after 60 s:" >&2
 for id in 0 1 2; do
     file="$cluster/member-$id/log-recordings-$id"
-    if [ -f "$file" ]; then
-        echo "  member $id: live recording $(field "$file" 16 8) from position $(field "$file" 24 8), $(field "$file" 32 4) below it" >&2
-    else
+    if [ ! -e "$file" ]; then
         echo "  member $id: no $file, so the member names no recording of its log" >&2
+    elif ! copy "$id"; then
+        echo "  member $id: $file is there and this script cannot read it, as head says above" >&2
+    elif [ "$(length)" -lt 40 ]; then
+        echo "  member $id: $file holds $(length) bytes, fewer than its 40-byte header, so it is no file a member wrote whole (spec/cluster.md, \"The log's recordings\")" >&2
+    else
+        echo "  member $id: live recording $(field 16 8) from position $(field 24 8), $(field 32 4) below it" >&2
     fi
 done
 exit 1
