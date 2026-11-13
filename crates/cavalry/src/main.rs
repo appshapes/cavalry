@@ -906,9 +906,11 @@ fn start_member(
 /// `strategy`, until `stop` is set, and closes the member there. A duty cycle that
 /// fails is tried again every 100 ms, said once for each different error, and given up
 /// after `give_up_after` of failures on end, which `stopped` is told with the last
-/// error; a panic of the thread, in a cycle or in the close, is told to `stopped` too,
-/// as it unwinds ([`StopOnPanic`]). So `run` hears of a member that cannot go on at
-/// once, whichever way it ended.
+/// error; a duty cycle that panics is told to `stopped` too, as the thread unwinds
+/// ([`StopOnPanic`]). So `run` hears at once of a member whose cycles cannot go on,
+/// either way. The close comes only after `run` has set `stop` or the thread has told
+/// `stopped`, so `run` has its one message already: a panic in the close is reported
+/// by the thread's `join`, and is not counted as a member given up.
 fn spawn_member<M: Member>(
     id: i32,
     member: M,
