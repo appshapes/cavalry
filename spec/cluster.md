@@ -891,7 +891,9 @@ event, on every member that reads them in its own log ("Roles and the election",
 states 6 and 10), the leader among them: the leader that accepted a connect holds the
 session as connecting until it reads the entry at or below its commit position, and a
 follower holds the open sessions with no publication, so that a member that wins an
-election has them. The next session id is one more than the highest the member has
+election has them. A session whose session open event a leader reads and did not
+write, an entry of the term before its own, is one that leader sends a new leader
+event and no ok event. The next session id is one more than the highest the member has
 given or has read in a session open event (ADR 0115). Every refusal is
 counted in `cluster.sessions_refused`. A redirect or a refusal is answered on an egress
 publication to the connect's response channel on stream 102, the one egress stream of

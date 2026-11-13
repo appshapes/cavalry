@@ -413,7 +413,9 @@ impl Sessions {
     /// closes it, on every member; any other entry is none of the sessions'.
     ///
     /// On the leader that accepted the connect, the session open event is what the
-    /// ok event waits for. A session open event with the table full, or for an id
+    /// ok event waits for. A session open event a leader reads that it did not write,
+    /// an entry of the term before its own, opens a session it takes up at once: a
+    /// publication, and the new leader event. A session open event with the table full, or for an id
     /// that is open, and a session close event for a session that is not open, are
     /// entries no leader of this version writes: nothing is done with one, and the
     /// answer is `false`, for the caller to count as a message rejected.
@@ -447,6 +449,7 @@ impl Sessions {
                         None => return Ok(false),
                     },
                 };
+                let leads = self.led.is_some();
                 let Some(session) = self.sessions.get_mut(index) else {
                     return Ok(false);
                 };
@@ -457,6 +460,13 @@ impl Sessions {
                     }
                     session.id = cluster_session_id;
                     session.correlation_id = correlation_id;
+                    // An entry this leader did not write: a leader before it accepted
+                    // the connect, and the entry is committed in this leader's term.
+                    // The session is taken up as the ones the election found open.
+                    if leads {
+                        session.egress = io.add_egress(index, response_channel)?;
+                        session.leader_owed = true;
+                    }
                 }
                 session.state = SessionState::Open;
                 session.ok_owed = connecting.is_some();

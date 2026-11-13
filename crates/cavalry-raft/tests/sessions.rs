@@ -892,6 +892,44 @@ fn a_new_leader_takes_up_the_sessions_its_log_holds() {
             format!("1: new leader session 1 term 2 leader 1 endpoints {endpoints:?}"),
         ]
     );
+    // A session open event of the term before, committed only now that this leader's
+    // first entry is: the session is taken up as the two the election found open.
+    let late = channel(20_009);
+    let Ok(known) = new.on_entry(
+        at(9_500),
+        &Message::SessionOpenEvent {
+            leadership_term_id: 1,
+            correlation_id: 9,
+            cluster_session_id: 5,
+            timestamp: TIME,
+            response_stream_id: EGRESS_STREAM_ID,
+            response_channel: &late,
+            encoded_principal: &[],
+        },
+        &mut new_world,
+    );
+    assert!(known);
+    assert_eq!(new_world.held(), [0, 1, 2]);
+    work(&mut new, &mut new_world, 9_501, lead);
+    assert_eq!(
+        new_world.sent(),
+        [format!(
+            "2: new leader session 5 term 2 leader 1 endpoints {endpoints:?}"
+        )],
+        "no ok event: this leader did not accept its connect"
+    );
+    let Ok(known) = new.on_entry(
+        at(9_502),
+        &Message::SessionCloseEvent {
+            leadership_term_id: 2,
+            cluster_session_id: 5,
+            timestamp: TIME,
+            close_reason: CloseReason::ClientAction,
+        },
+        &mut new_world,
+    );
+    assert!(known);
+    assert_eq!(new_world.held(), [0, 1]);
     // The timeout runs from the election's close, not from the sessions' last
     // message under the old leader: nothing at 18.999 s, both at 19 s.
     work(&mut new, &mut new_world, 18_999, lead);
@@ -919,7 +957,7 @@ fn a_new_leader_takes_up_the_sessions_its_log_holds() {
     let fourth = channel(20_003);
     ingress(&mut new, &mut new_world, 19_001, lead, &connect(4, &fourth));
     assert!(
-        new_world.entries(4)[0].starts_with("open session 2 correlation 4 term 2"),
+        new_world.entries(4)[0].starts_with("open session 6 correlation 4 term 2"),
         "{:?}",
         new_world.entries(4)
     );

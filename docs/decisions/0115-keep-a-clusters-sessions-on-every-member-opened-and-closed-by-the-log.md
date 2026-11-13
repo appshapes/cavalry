@@ -76,6 +76,9 @@ What the leader adds to the table:
 - A member that begins to lead a term adds an egress publication for every open
   session, owes each the term's new leader event, and counts each session's timeout
   from that cycle.
+- A session open event a leader reads that it did not write, an entry of the term
+  before its own that is committed in its term, opens a session the leader takes up
+  the same way, with no ok event: the leader that accepted the connect owed that.
 - When the leader has decided a session's close, by the client's session close or
   by the timeout, it ignores what the client sends for that session. The session
   stays open on every member until the session close event is committed.
