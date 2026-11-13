@@ -740,11 +740,13 @@ struct ClientIo {
     sync_asked_at: i64,
     /// The same for its recording of a replay.
     catchup_sync_asked_at: i64,
-    /// When the stop this member last asked of a recording must have been read by,
-    /// [`STOP_TIMEOUT`] after the command; `None` while no stop is awaited. A member
-    /// stops its recordings one at a time and waits for each stop's position before
-    /// the next, so one time serves them all ([`stop_recording`]).
-    stop_asked: Option<Instant>,
+    /// The recording whose stop this member last asked and has not yet read, and when
+    /// that stop must have been read by, [`STOP_TIMEOUT`] after the command; `None`
+    /// while no stop is awaited. A member stops its recordings one at a time and comes
+    /// back to the one it asked before it stops another, so one slot serves them all.
+    /// The id is kept so that a stop asked of another recording is never taken for
+    /// asked, or held to this one's time ([`stop_recording`]).
+    stop_asked: Option<(i64, Instant)>,
     // The file of the log's recordings, for the member's service (ADR 0103).
     /// `log-recordings-<member id>` in the driver directory.
     recordings_path: PathBuf,
@@ -783,31 +785,35 @@ fn ask_sync(client: &mut Cavalry, recording: &Recording, asked_at: &mut i64) {
 /// never waits. `Ok(None)` says that the stop is asked and its position is not yet
 /// read: the caller returns to the duty cycle with nothing else changed and calls
 /// again on the next one, so that the thread that polls the member's streams is not
-/// held for a stop (card 256). `asked` is when the stop must have been read by,
-/// [`STOP_TIMEOUT`] after the command: a call past it is [`RaftError::StopTimeout`],
-/// and the call after that sends the command again. A stop already read, the
-/// driver's at the stream's end or this member's own on a cycle before, needs no
-/// command.
+/// held for a stop (card 256). `asked` is the recording whose stop is awaited and
+/// when it must have been read by, [`STOP_TIMEOUT`] after the command: a call for
+/// that recording past that time is [`RaftError::StopTimeout`], and the call after
+/// it sends the command again. A call for any other recording sends its own command
+/// and takes the slot: a stop is never taken for asked, or timed, by another
+/// recording's. A stop already read, the driver's at the stream's end or this
+/// member's own on a cycle before, needs no command.
 fn stop_recording(
     client: &mut Cavalry,
     recording: &Recording,
-    asked: &mut Option<Instant>,
+    asked: &mut Option<(i64, Instant)>,
 ) -> Result<Option<i64>, RaftError> {
+    let recording_id = recording.recording_id();
+    let awaited = asked.filter(|(id, _)| *id == recording_id);
     if let Some(stop) = recording.stop_position() {
-        *asked = None;
+        if awaited.is_some() {
+            *asked = None;
+        }
         return Ok(Some(stop));
     }
-    match *asked {
+    match awaited {
         None => {
-            client.stop_recording(recording.recording_id())?;
-            *asked = Some(Instant::now() + STOP_TIMEOUT);
+            client.stop_recording(recording_id)?;
+            *asked = Some((recording_id, Instant::now() + STOP_TIMEOUT));
             Ok(None)
         }
-        Some(deadline) if Instant::now() >= deadline => {
+        Some((_, deadline)) if Instant::now() >= deadline => {
             *asked = None;
-            Err(RaftError::StopTimeout {
-                recording_id: recording.recording_id(),
-            })
+            Err(RaftError::StopTimeout { recording_id })
         }
         Some(_) => Ok(None),
     }

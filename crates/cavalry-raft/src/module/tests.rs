@@ -3732,7 +3732,9 @@ fn a_refusal_of_the_leaders_log_says_what_to_do_next_or_has_the_leader_append_ag
 /// that is still not read a second after it was asked is `stop-timeout`, with the
 /// recording still held, and the call after it stops the recording again. The test
 /// sets the time the stop was to be read by behind it, where a driver that never
-/// answered would have left it.
+/// answered would have left it. The time awaited is one recording's: a stop asked
+/// of another recording, past its time, neither times this one out nor passes for
+/// its command.
 #[test]
 fn a_leave_asks_the_stop_and_returns_before_it_is_read() {
     let mut pair = pair("leave-no-wait");
@@ -3758,12 +3760,13 @@ fn a_leave_asks_the_stop_and_returns_before_it_is_read() {
     let held =
         |io: &ClientIo| io.held.is_some() && io.log_subscription.is_some() && io.kept.is_empty();
 
+    // A time behind this one, as a stop that was to be read by then.
+    let past = Instant::now()
+        .checked_sub(Duration::from_millis(1))
+        .expect("a time before now");
+
     // A stop awaited past its time: the fault, and nothing else changed.
-    pair.member.io.stop_asked = Some(
-        Instant::now()
-            .checked_sub(Duration::from_millis(1))
-            .expect("a time before now"),
-    );
+    pair.member.io.stop_asked = Some((recording_id, past));
     let late = pair
         .member
         .io
@@ -3779,13 +3782,21 @@ fn a_leave_asks_the_stop_and_returns_before_it_is_read() {
     );
     assert!(held(&pair.member.io), "the recording is still held");
 
-    // The call after it stops the recording, and returns before the driver has said
-    // where it stopped: the command is sent, and its answer is read by a later call.
+    // Another recording's stop, awaited past its time, is not this one's: the call
+    // stops this recording and returns before the driver has said where it stopped.
+    // The command is sent, and its answer is read by a later call.
+    pair.member.io.stop_asked = Some((recording_id + 1, past));
     assert!(
         !pair.member.io.leave_log().expect("the stop is asked"),
         "asked, and not yet read"
     );
-    assert!(pair.member.io.stop_asked.is_some(), "a stop is awaited");
+    assert!(
+        pair.member
+            .io
+            .stop_asked
+            .is_some_and(|(id, by)| id == recording_id && by > past),
+        "this recording's stop is the one awaited"
+    );
     assert!(held(&pair.member.io), "nothing else changed");
     assert_eq!(pair.member.io.append_position(), one);
 
