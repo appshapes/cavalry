@@ -63,15 +63,28 @@ fn find(
     })
 }
 
+/// What the member's file of its log's recordings says of a position
+/// ([`recording_at`]).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum FromFile {
+    /// The recording the position is read from.
+    Recording(i64),
+    /// The file is of another live recording than the member's counter named.
+    Another,
+    /// There is no file.
+    Absent,
+}
+
 /// The recording of the member's log that `position` is read from, by the member's
 /// file of its log's recordings in the driver directory `dir` (`spec/cluster.md`, "The
 /// log's recordings"; ADR 0103): the first recording the file lists that holds the
-/// position, and the member's live recording when none does. `None` when the file is
-/// of another live recording than `live_recording_id`, the one the member's counter
-/// named: the member has since named another, or none. With no file the member is of
-/// a version that writes none, and the answer is its live recording, as it was before
-/// there was a file. A file that cannot be read, or that fails a check of its page,
-/// is [`ClientError::Io`], the check as its source.
+/// position, and the member's live recording when none does. [`FromFile::Another`]
+/// when the file is of another live recording than `live_recording_id`, the one the
+/// member's counter named: the member has since named another, or none.
+/// [`FromFile::Absent`] when there is no file, which the caller cannot read alone: the
+/// member is of a version that writes none, or it has closed and removed its file. A
+/// file that cannot be read, or that fails a check of its page, is
+/// [`ClientError::Io`], the check as its source.
 ///
 /// The file is read once, whole, and no further than the longest file's length: one
 /// byte more is a file too long, which the length's check refuses.
@@ -80,7 +93,7 @@ fn recording_at(
     member: MemberKey,
     live_recording_id: i64,
     position: i64,
-) -> Result<Option<i64>, ClientError> {
+) -> Result<FromFile, ClientError> {
     const WHAT: &str = "read the file of the cluster member's log's recordings";
     // An error of the operating system, with what to do about it: the file is the
     // member's, in the driver's directory, and the service's user must be able to
@@ -100,7 +113,7 @@ fn recording_at(
     let file = match std::fs::File::open(&path) {
         Ok(file) => file,
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-            return Ok(Some(live_recording_id));
+            return Ok(FromFile::Absent);
         }
         Err(source) => {
             return Err(ClientError::Io {
@@ -121,9 +134,10 @@ fn recording_at(
         });
     }
     match LogRecordings::read(&bytes, member_id) {
-        Ok(file) => Ok(
-            (file.live_recording_id() == live_recording_id).then(|| file.recording_at(position))
-        ),
+        Ok(file) if file.live_recording_id() == live_recording_id => {
+            Ok(FromFile::Recording(file.recording_at(position)))
+        }
+        Ok(_) => Ok(FromFile::Another),
         Err(error) => Err(ClientError::Io {
             what: WHAT,
             path,
@@ -182,6 +196,38 @@ impl Bound {
             commit_position: 0,
             lost: false,
         })
+    }
+
+    /// Whether the member still names the recording it named when this bound was
+    /// found: its counter loaded again, from a record that is still the member's. A
+    /// service that finds no file asks this before it replays the live recording
+    /// (`spec/cluster.md`, "The service"; ADR 0103): a member of this version stores
+    /// −1 here before it removes its file at its close, so the id it named, read
+    /// again, says the member writes no file, and anything else says it has closed or
+    /// left its log since.
+    fn names_its_recording(&self) -> bool {
+        self.recording.load_acquire() == self.recording_id
+            && is_members(
+                &self.counters,
+                self.recording.id(),
+                CLUSTER_LOG_RECORDING_ID,
+                self.member,
+            )
+    }
+
+    /// The recording a replay at `position` is started of, or `None` for no log: the
+    /// member's file is of another live recording than its counter named, or there is
+    /// no file and the counter no longer holds the id this bound read. With no file
+    /// and the same id, the member is of a version that writes none, and the answer
+    /// is its live recording.
+    fn recording_to_replay(&self, dir: &Path, position: i64) -> Result<Option<i64>, ClientError> {
+        Ok(
+            match recording_at(dir, self.member, self.recording_id, position)? {
+                FromFile::Recording(recording_id) => Some(recording_id),
+                FromFile::Another => None,
+                FromFile::Absent => self.names_its_recording().then_some(self.recording_id),
+            },
+        )
     }
 
     /// The member's commit position as the bound of the next read: loaded, and taken
@@ -300,17 +346,17 @@ impl CommittedLog {
     /// Opens the committed log of the member on `client`'s driver at `position`, or
     /// `None` while the driver hosts no member that has a recording of its log, or
     /// while the member's file of its log's recordings is of another live recording
-    /// than the member's counter names, which is a member between two recordings.
+    /// than the member's counter names, or there is no file and the counter no longer
+    /// holds the id read before the file was looked for: a member between two
+    /// recordings, or one that closed meanwhile.
     pub(crate) fn open(client: &mut Cavalry, position: i64) -> Result<Option<Self>, ClientError> {
         let Some(bound) = Bound::find(&client.shared_counters()) else {
             return Ok(None);
         };
         // The file is read after the counter: a file of the recording the counter
-        // named is the member's log as it was while it named it (`spec/cluster.md`,
-        // "The service").
-        let Some(recording_id) =
-            recording_at(client.dir(), bound.member, bound.recording_id, position)?
-        else {
+        // named is the member's log as it was while it named it, and with no file the
+        // counter is loaded again (`spec/cluster.md`, "The service").
+        let Some(recording_id) = bound.recording_to_replay(client.dir(), position)? else {
             return Ok(None);
         };
         // The subscription first: a replay with no subscriber does not move.
@@ -509,14 +555,14 @@ impl CommittedLog {
 
     /// Where the entries this handle was not given begin, when the driver withdrew the
     /// replay's image before the polls had read it to its end, or to the bound once the
-    /// member stopped naming the recording, whichever is lower; `None` otherwise. The
-    /// driver keeps a replay's image for the publication linger, 5 s, after the replay
-    /// ends, and then withdraws it whether or not its subscriber has read it
-    /// (`spec/client-protocol.md`, "Events"): a service that did not poll for that long
-    /// after its member closed or left the log, or whose handler took that long, ends
-    /// so. [`is_ended`](Self::is_ended) is true by then, and the position is
-    /// [`position`](Self::position), or past it by a padding frame, which holds no
-    /// entry.
+    /// member stopped naming the live recording it named when the handle was opened,
+    /// whichever is lower; `None` otherwise. The driver keeps a replay's image for the
+    /// publication linger, 5 s, after the replay ends, and then withdraws it whether or
+    /// not its subscriber has read it (`spec/client-protocol.md`, "Events"): a service
+    /// that did not poll for that long after its member closed or left the log, or
+    /// whose handler took that long, ends so. [`is_ended`](Self::is_ended) is true by
+    /// then, and the position is [`position`](Self::position), or past it by a padding
+    /// frame, which holds no entry.
     ///
     /// The entries from there on were played and not delivered, and nothing else
     /// delivers them. Open the log again from [`position`](Self::position): the new
@@ -543,12 +589,13 @@ impl CommittedLog {
     /// Where the driver's replay of the member's recording failed, when it did: a
     /// segment file could not be read or a frame failed a check, after the frame that
     /// ends at this position (`spec/client-protocol.md`, "Events", `replay stopped`,
-    /// reason 3). `None` for a log that is live or that ended because its member
-    /// closed or left the recording. A log opened at a position where no entry begins
-    /// ends so at once, at that position, with nothing delivered, since the bytes
-    /// there are no frame; a log that read entries before it failed is a recording
-    /// whose files are damaged, which `cavalry doctor` names. Either way no entry from
-    /// the position on is delivered. The entries below it may still be on their way
+    /// reason 3). `None` for a log that is live, that ended because its member closed
+    /// or left the recording, or that ended whole at the stop of a recording below the
+    /// member's live one. A log opened at a position where no entry begins ends so at
+    /// once, at that position, with nothing delivered, since the bytes there are no
+    /// frame; a log that read entries before it failed is a recording whose files are
+    /// damaged, which `cavalry doctor` names. Either way no entry from the position on
+    /// is delivered. The entries below it may still be on their way
     /// when this first says so: read it once [`is_ended`](Self::is_ended) does. They
     /// have all been delivered by then unless the driver withdrew the replay's image
     /// first, which it does 5 s after a replay ends, one that failed included:
@@ -863,5 +910,68 @@ mod tests {
         assert_eq!(bound.load(), 96);
         let _ = std::fs::remove_dir_all(&dir);
         let _ = std::fs::remove_dir_all(&dir_other);
+    }
+
+    /// With no file of the member's log's recordings the counter is loaded again
+    /// (`spec/cluster.md`, "The service"; ADR 0103). A member that still names the
+    /// recording writes no file, and its live recording is replayed. A member of this
+    /// version stores −1 before it removes its file at its close, and one that names
+    /// another recording or whose counters are gone has moved on: each is no log, where
+    /// one load alone would ask for a replay of the recording the member left.
+    #[test]
+    fn with_no_file_the_live_recording_is_replayed_only_while_the_counter_still_names_it() {
+        let dir = counters_dir("no-file");
+        let mut file = CountersFile::create(&dir, 1024).expect("create the counters file");
+        let counters = Arc::new(CountersReader::open(&dir).expect("open the counters file"));
+        let member = 3i32.to_le_bytes();
+        let recording = file
+            .allocate(
+                CLUSTER_LOG_RECORDING_ID,
+                &member,
+                "cluster.log_recording_id 3",
+            )
+            .expect("allocate");
+        recording.store_release(-1);
+        let commit = file
+            .allocate(
+                CLUSTER_COMMIT_POSITION,
+                &member,
+                "cluster.commit_position 3",
+            )
+            .expect("allocate");
+        commit.store_release(960);
+        let found = |counters: &Arc<CountersReader>| {
+            Bound::find(counters).expect("a member that names a recording")
+        };
+        let replayed = |bound: &Bound| {
+            bound
+                .recording_to_replay(&dir, 96)
+                .expect("no file is no error")
+        };
+
+        // A member of a version that writes no file names recording 5 all along.
+        recording.store_release(5);
+        let bound = found(&counters);
+        assert_eq!(replayed(&bound), Some(5));
+
+        // A member of this version closes between the two loads: −1, then no file.
+        let bound = found(&counters);
+        recording.store_release(-1);
+        assert_eq!(replayed(&bound), None, "the member named no recording");
+
+        // A member names another recording between the two loads.
+        recording.store_release(5);
+        let bound = found(&counters);
+        recording.store_release(6);
+        assert_eq!(replayed(&bound), None, "the member named recording 6");
+
+        // The driver has removed the member's counters.
+        let bound = found(&counters);
+        assert_eq!(bound.recording_id, 6);
+        file.free(recording.id(), 0).expect("free");
+        file.free(commit.id(), 0).expect("free");
+        assert_eq!(replayed(&bound), None, "the member's counters were gone");
+
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

@@ -685,7 +685,12 @@ impl Cavalry {
     /// cycle and none while its replies wait for room. So the destination gets what the
     /// endpoint sends from the start of the cycle that takes the change, which is the
     /// next cycle only when nothing waits ahead of it (ADR 0057). A destination already
-    /// added, as written, is added again by nothing and is success. Refused with
+    /// added, as written, is added again by nothing and is success. A destination is
+    /// the channel's send endpoint's and not the publication's: the endpoint keeps it
+    /// while any publication on the control channel is live or lingers after its
+    /// close, so a program that closes a publication and adds the next on the same
+    /// control channel before the linger ends finds its destinations still there, and
+    /// may add them again without a check. Refused with
     /// [`ClientError::Refused`]: code 3 for a
     /// registration this client does not hold; code 1 for a publication whose channel
     /// names no control address, with the reason `control`; code 1 with the reason
@@ -1296,8 +1301,10 @@ impl Cavalry {
     ///
     /// Returns `None` while the driver hosts no member that has a recording of its
     /// log: the member has not started, its election has not given it a log yet, it
-    /// has closed, or it named another recording while this call read its file of
-    /// recordings. A service that starts before its member calls again, with a
+    /// has closed, or it named another recording, or closed and removed its file,
+    /// while this call read its file of recordings: with no file the call loads the
+    /// member's counter again, and opens the live recording only when the counter
+    /// still names it. A service that starts before its member calls again, with a
     /// pause between two calls: each reads the counters file's records to find the
     /// member, which is not a call for a loop that spins. Nothing is sent to the
     /// driver until a member is found.
@@ -1323,6 +1330,18 @@ impl Cavalry {
     /// opens the log three times, and reads every entry once, in order. A member
     /// keeps the last 1,024 recordings it stopped: a position below them is refused
     /// with code 23.
+    ///
+    /// The call at the position where a handle ended whole has a third answer, beside
+    /// the next recording and `None`: a handle on the same recording,
+    /// [`CommittedLog::recording_id`] unchanged. When the member still names that
+    /// recording as its live one, the recording has stopped there and the member has
+    /// not yet left its log, as for the seconds a follower takes to leave a leader it
+    /// lost once its driver has retired the leader's image, or after a write to the
+    /// recording's segment file failed: the handle is ended at once, with no report
+    /// set and no entry. When the member has named a later recording since, the same
+    /// recording lies below it, and the handle reads on in it. A service asks again
+    /// after a pause in both cases, as it does after `None`, and not in a loop that
+    /// spins.
     ///
     /// A service reads a handle until [`CommittedLog::is_ended`] says that no poll will
     /// deliver another entry, and not until a poll returns 0: when its member closes or
@@ -1409,9 +1428,10 @@ impl Cavalry {
     ///                 )
     ///                 .into());
     ///             }
-    ///             // None of the three: the member closed or left its log, and every
-    ///             // entry below the last commit position the handle took has been
-    ///             // delivered.
+    ///             // None of the three: every entry the handle's recording holds
+    ///             // below the last commit position the handle took has been
+    ///             // delivered. The caller opens the log again from `next`, after a
+    ///             // pause when that is the same recording or `None`.
     ///             return Ok(next);
     ///         }
     ///         if entries == 0 {

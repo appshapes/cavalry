@@ -97,6 +97,11 @@ fn three_members_run_their_duty_cycles_without_an_allocation() {
             (client, log)
         })
         .collect();
+    // A follower that joined its leader's log late holds what lies below its live image
+    // in its recording of the replay it caught up by, and a handle opened at 0 beside
+    // it ends at that recording's stop. Its service opens the log again where the
+    // handle ended, as any service does (ADR 0103), and does so here, before the
+    // count starts, so that every handle counted is on its member's live recording.
     let deadline = Instant::now() + Duration::from_secs(30);
     let mut warm = [0usize; 3];
     while warm.iter().any(|&read| read < 20) {
@@ -104,10 +109,32 @@ fn three_members_run_their_duty_cycles_without_an_allocation() {
         for (_, module) in &mut cluster {
             module.do_work().expect("the member's duty cycle");
         }
-        for ((_, log), read) in services.iter_mut().zip(warm.iter_mut()) {
+        for ((client, log), read) in services.iter_mut().zip(warm.iter_mut()) {
             *read += log.poll(|_, _, _| {}, 64).expect("the log polls");
+            if log.is_ended() {
+                let next = client
+                    .committed_log(log.position())
+                    .expect("the driver answers")
+                    .expect("the member has its log");
+                std::mem::replace(log, next)
+                    .close(client)
+                    .expect("the ended handle closes");
+            }
         }
         std::thread::sleep(Duration::from_micros(100));
+    }
+    for (_, log) in &services {
+        let (_, module) = cluster
+            .iter()
+            .find(|(_, module)| module.member_id() == log.member_id())
+            .expect("the service's member");
+        assert_eq!(
+            Some(log.recording_id()),
+            module.log_recording_id(),
+            "member {}'s service reads its live recording",
+            log.member_id()
+        );
+        assert!(!log.is_ended());
     }
 
     // Twenty thousand cycles of all three members and their services, an entry offered

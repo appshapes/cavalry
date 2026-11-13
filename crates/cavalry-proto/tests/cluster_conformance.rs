@@ -726,6 +726,24 @@ fn a_file_of_recordings_holds_1025_entries_and_refuses_one_more() {
     let no_room = write_log_recordings(&mut no_header, 3, 4096, 0, core::iter::empty())
         .expect_err("a buffer shorter than the header");
     assert_eq!(no_room.reason(), "recordings-length", "{no_room}");
+
+    // What the check found is said with no advice, for a writer whose own entries
+    // are refused; the error's own words end with what a reader does next.
+    let found = no_room.found().to_string();
+    assert_eq!(
+        found,
+        "it counts 0 entries, of at most 1025, in 39 bytes, which is not 40 and 24 for each"
+    );
+    let whole = no_room.to_string();
+    assert_eq!(
+        whole,
+        format!(
+            "the file of a cluster member's log's recordings was rejected \
+             (recordings-length): {found}; the member writes the file again when it next \
+             names a recording, so stop whatever else writes in the driver directory and \
+             open the log again; see docs/reference/cluster.md#the-logs-recordings"
+        )
+    );
 }
 
 #[test]
