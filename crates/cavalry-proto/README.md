@@ -65,7 +65,9 @@ Wire types, zero-copy frames and version negotiation. Data plane.
   log for its service, `spec/cluster.md`, "The log's recordings": `LogRecordings::read`
   with the spec's seven checks in the spec's order, `recording_at`, the recording a
   position is read from, and `write_log_recordings`, which writes nothing a reader
-  would refuse, into the caller's buffer, at most 1,025 entries (ADR 0103).
+  would refuse, into the caller's buffer, at most 1,025 entries (ADR 0103). A check
+  that fails says what a reader does next; `LogRecordingsError::found` is what it
+  found alone, for a writer, whose refused entries are its own.
 
 In Aeron, this is the transport protocol specification and its frame layouts
 ([glossary](../../docs/glossary.md)).
