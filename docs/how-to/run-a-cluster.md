@@ -1,8 +1,9 @@
 # Run a cluster of three members
 
 A how-to page: one task, start three drivers as one cluster, see which member the
-others elected to lead, stop the leader and see another take its place, and read what
-`cavalry doctor` says when a member cannot join. What the members say to each other is
+others elected to lead, stop the leader and see another take its place, start the
+member that was stopped again, and read what `cavalry doctor` says when a member
+cannot join. What the members say to each other is
 [`spec/cluster.md`](../reference/cluster.md); how they elect a leader is its section
 "Roles and the election", and why the consensus module elects is
 [ADR 0104](../decisions/0104-have-the-consensus-module-elect-its-leader-and-take-the-appointed-leader-out.md).
@@ -24,20 +25,21 @@ committed once a quorum, two of three, has it on disk.
   cloud security group between the hosts. A member whose `log` port the leader's host
   cannot reach does not join, and `doctor` reports it as `cluster-joining`, with how
   many of its elections have failed.
-- Log directories that hold no cluster yet. A member does not start again on a log
-  directory that holds a term of an earlier run: this version does not yet read back
-  the log a member kept.
+- A log directory for each member. A new cluster starts on log directories that hold
+  no cluster yet. A member that was stopped starts again on the log directory it had,
+  and on no other (step 7).
 - Each member's log directory on storage that outlives the member's host or
   container: a volume, not the container's own file system. The directory holds the
-  member's votes. A member that comes back on an empty one, beside the others, votes
-  with no record of them, and with a member whose log is behind it can elect a leader
-  that lacks an entry the cluster committed. `cavalry run` cannot tell an empty
-  directory from a new cluster's, so nothing stops it: never start one member alone on
-  a new log directory.
+  member's votes and its log. A member that comes back on an empty one, beside the
+  others, votes with no record of them, and with a member whose log is behind it can
+  elect a leader that lacks an entry the cluster committed. `cavalry run` cannot tell
+  an empty directory from a new cluster's, so nothing stops it: never start one
+  member alone on a new log directory.
 - Every member on this version of Cavalry. A member of a version in which the member
-  with the lowest id was the leader casts no vote, so the two are not one cluster. To
-  move a cluster from that version, stop every member and start the cluster again as
-  a new one, as "When it does not work" says for `member refused (restart)`.
+  with the lowest id was the leader casts no vote, so the two are not one cluster,
+  and a log directory that version wrote is refused here. To move a cluster from
+  that version, stop every member and start the cluster again as a new one, every
+  member on a new log directory.
 
 ## Steps
 
@@ -98,8 +100,17 @@ committed once a quorum, two of three, has it on disk.
 5. Stop a follower with Ctrl-C or SIGTERM. It prints `cavalry run: stopping` and
    `cavalry run: closed`. The other two are a quorum and go on.
 
-6. Start again from step 3 with new directories, and stop the leader this time. The
-   two followers hear nothing from it for 10 s, the leader heartbeat timeout, and
+6. Start a new cluster, and stop the leader this time. Stop the two members that
+   still run, remove every member's directories, and start the three again with
+   the commands of step 3:
+
+   ```sh
+   rm -rf /tmp/cavalry-member-0 /tmp/cavalry-member-0-log /tmp/cavalry-member-1 /tmp/cavalry-member-1-log /tmp/cavalry-member-2 /tmp/cavalry-member-2-log
+   ```
+
+   Without the `rm`, the members start again on the log they kept, as step 7
+   shows, and the positions below are higher. Stop the leader that `doctor` names.
+   The two followers hear nothing from it for 10 s, the leader heartbeat timeout, and
    elect one of them. About 11 s after the stop, `doctor` on one of them says `the
    leader in term 1, election closed: append position 192, commit position 192; its
    last election began because its leader said nothing for the leader heartbeat
@@ -108,8 +119,27 @@ committed once a quorum, two of three, has it on disk.
    they lost. A member can notice the loss the other way first: it then says `its
    last election began because its image of the leader's log was no longer
    available`, and prints `WARN cluster.log_images_lost` in place of that line. Both
-   mean that the leader is gone. The member that was stopped does not start again
-   on its log directory in this version: "When it does not work" says what to do.
+   mean that the leader is gone.
+
+7. Start the member you stopped again, with its command of step 3: the same id, the
+   same driver directory and the log directory it had. When member 2 led and was
+   stopped:
+
+   ```sh
+   CAVALRY_CLUSTER_MEMBER_ID=2 target/release/cavalry run --dir /tmp/cavalry-member-2 --log-dir /tmp/cavalry-member-2-log
+   ```
+
+   It prints `cavalry run: cluster member 2 started`. The member reads back the log
+   its log directory holds, joins the leader the other two elected, and replicates
+   from it what was committed while it was away. Within a second, `doctor` on it
+   says `a follower in term 1, election closed: append position 192, commit position
+   192; it follows member 0; its last election began because the member started`,
+   with the id of the member that leads now in place of 0.
+
+   Do this for a member that was stopped, or whose process was ended. Do not do it
+   for a member whose host lost power, or whose operating system crashed, while the
+   member ran: "When it does not work" says why, under "The member's host lost
+   power".
 
 ## How to verify it worked
 
@@ -120,10 +150,10 @@ committed once a quorum, two of three, has it on disk.
   member`.
 - Every member reports `election closed` and the same `commit position`.
 - `ls /tmp/cavalry-member-1-log` lists `terms`, the member's record of the terms it
-  has joined, beside `catalog` and the recording of the leader's log, `0-0.rec` with
-  its time index `0.idx`. A member that joined its leader after the term's first
-  entry holds its log in two recordings: `0-0.rec` is then the replay it caught up
-  by, and `1-0.rec` the recording of the leader's log from where that replay ended.
+  has joined, and `log-recordings`, its record of which recordings hold its log,
+  beside `catalog` and the recording of the leader's log, `0-0.rec` with its time
+  index `0.idx`. A member that was started again holds more recordings: one for each
+  time it joined a log or caught up.
 - A member that started before another may show `WARN receiver.receive_failed`: the
   datagrams it sent before the other member listened were refused by this host's
   kernel. The count stops rising once every member runs.
@@ -165,20 +195,68 @@ committed once a quorum, two of three, has it on disk.
   every member.
 - `FAIL cluster-member-id` in `doctor`: the id is not one of the string's, and the
   message lists the ids it holds; or the string is set and the id is not.
-- `cavalry run: member refused (restart)`: the log directory holds a term of an
-  earlier run. A member of this version does not start again on its log. The cluster
-  goes on without this member while the other two run. To have three members again,
-  start the cluster again as a new cluster: stop every member, give every member a
-  new log directory, and start them together. Do not start this member alone on a
-  new log directory beside the other two. It would join them and replicate the log,
-  but it has lost the record of the votes it cast, and with a member whose log is
-  behind it could then elect a leader that lacks an entry the cluster committed.
-- `cavalry run: member refused (terms-lost)`: the log directory holds recordings of
-  the cluster's log and no `terms` file. The file held the member's votes, and it was
-  removed. Leave the member stopped, and do what `member refused (restart)` says:
-  the cluster goes on with the other two, and has three members again when it is
-  started again as a new cluster. Do not put an older copy of the file back, and do
-  not start the member on a new log directory by itself.
+- `cavalry run: member stopped (recordings): the log directory holds a term in its
+  record of terms and no log recordings file`: the member's log directory holds
+  `terms` and no `log-recordings`. A version of Cavalry before this one wrote the
+  directory, or the file was removed. Without it the member cannot tell which
+  recordings hold its log, and it does not start. The cluster goes on without this
+  member while the other two run. To have three members again, start the cluster
+  again as a new cluster: stop every member, give every member a new log directory,
+  and start them together. Do not start this member alone on a new log directory
+  beside the other two. It would join them and replicate the log, but it has lost
+  the record of the votes it cast and the log it held, and with a member whose log
+  is behind it could then elect a leader that lacks an entry the cluster committed.
+- `cavalry run: member stopped (recordings)` with any other message. Read the
+  message, since three causes share the prefix:
+  - It begins `could not` and names the file and the operating system's reason. The
+    member could not open, read, write or sync `log-recordings`: the log directory
+    is not writable by the member's user, or its file system is full. Correct the
+    permissions or free space, and start the member again on the same log
+    directory. A running member prints the same message after `cavalry run: cluster
+    member <id>:` and is not stopped by it: it tries the write again in each duty
+    cycle, and `cavalry run` gives the member up after 10 s of cycles that fail.
+    Start it again on the same log directory once the directory can be written.
+  - It says the log directory is another member's, and names both members. Start
+    the member with its own log directory.
+  - It says the file is damaged, and names the check it failed. Do as for a
+    directory with no file, above.
+- `cavalry run: member refused (start-stop-timeout)`: the member's driver was still
+  making a recording of the member's log, which happens when the member's process
+  was ended and its driver ran on. The start stopped the recording, and the driver
+  did not say where it stopped within 1 s. Nothing else was changed. Start the
+  member again. If the message repeats, run `cavalry doctor --dir` on the member's
+  driver directory: the driver is starved of CPU or cannot write its log directory.
+- `cavalry run: member refused (terms-lost)`: the member's log directory holds its
+  log and no record of its terms. Either there is no `terms` file, or the file holds
+  no term: it was removed or replaced, and the member's votes and the terms of its
+  log were in it. Start the member with the log directory it had, whole. If the file
+  is lost, do as for a directory with no `log-recordings` file, above. Do not put an
+  older copy of the file back.
+- `cavalry run: member refused (listed-recording)`: the `catalog` in the member's
+  log directory does not hold the recordings that its `log-recordings` file names.
+  The message names the recording and what the catalog holds in its place. The
+  directory is not as the member left it: files were removed from it, or it was put
+  together from two directories. Start the member with the log directory it had,
+  whole. If that directory is lost, do as for a directory with no file, above.
+- `cavalry run: member refused (log-forgotten)`: the member's `log-recordings` file
+  begins above position 0, or names more than 1,024 recordings that hold a part of
+  the log. A member makes one recording each time it joins a log, catches up or
+  leads a term, and it keeps 1,024 of them. Past that it forgets the oldest, which
+  `cluster.log_recordings_forgotten` counts while it runs. A member that starts
+  reads its log from position 0, and this one no longer can, so it does not start.
+  The cluster goes on while the other two run. To have three members again, do as
+  for a directory with no `log-recordings` file, above.
+- The member's host lost power, or its operating system crashed, while the member
+  ran. Do not start the member on that log directory again. Leave it stopped, and
+  do as for a directory with no `log-recordings` file, above. Nothing refuses this
+  start, and no counter tells this crash from a process that was ended, so the rule
+  is yours to keep. A process that was ended is safe to start again. When two of
+  the three hosts lost power together, do not start any member on its log
+  directory: start the cluster again as a new cluster. After such a crash a
+  member's log can end in entries that were not written whole, and a member that
+  starts on them can hand them to the others
+  ([ADR 0108](../decisions/0108-list-the-recordings-of-a-members-log-in-its-log-directory-and-start-a-member-on-the-log-it-kept.md),
+  "What a start does not hold").
 - `WARN cluster-no-leader`: the member is in an election and has no leader to follow.
   The message says which state its election is in and why it began, from
   `cluster.election_cause`. A leader needs the votes of two of three members. At a

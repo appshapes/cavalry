@@ -920,17 +920,46 @@ fn run_with_the_cluster_keys_starts_a_member_and_three_of_them_elect_a_leader() 
         assert!(stderr.contains("closed;"), "{stderr}");
     }
 
-    // A member does not start again on the log directory it had: run says why and what
-    // to do, closes the driver it started, and exits 1.
-    let output = start(2).wait_with_output().expect("run exits");
-    assert_eq!(output.status.code(), Some(1));
-    let stderr = String::from_utf8_lossy(&output.stderr);
-    assert!(stderr.contains("member refused (restart)"), "{stderr}");
-    assert!(
-        stderr.contains("every member on a new log directory"),
-        "{stderr}"
+    // Each member starts again on the log directory it had (ADR 0108): the three
+    // elect a leader again, in a term above the one they held, since each kept its
+    // record of terms and its vote, and SIGTERM closes each cleanly.
+    let mut runs = Runs((0..3).map(start).collect());
+    for (member, run) in runs.0.iter_mut().enumerate() {
+        wait_until_running(run, || {
+            let mut c = cavalry();
+            c.args(["doctor", "--dir", &dirs[member].arg()]);
+            c
+        });
+    }
+    wait(
+        "every member's election closed again in a later term",
+        || {
+            dirs.iter().all(|dir| {
+                cluster_counter(&dir.0, CLUSTER_ELECTION_STATE) == Some(17)
+                    && cluster_counter(&dir.0, CLUSTER_LEADERSHIP_TERM_ID)
+                        .is_some_and(|again| again > term)
+            })
+        },
     );
-    assert!(stderr.contains("closed;"), "{stderr}");
+    let mut roles: Vec<Option<i64>> = dirs
+        .iter()
+        .map(|dir| cluster_counter(&dir.0, CLUSTER_ROLE))
+        .collect();
+    roles.sort_unstable();
+    assert_eq!(
+        roles,
+        [Some(0), Some(0), Some(2)],
+        "one leader and two followers"
+    );
+    while let Some(run) = runs.0.pop() {
+        let member = runs.0.len();
+        let stderr = terminate(run);
+        assert!(
+            stderr.contains(&format!("cluster member {member} started")),
+            "{stderr}"
+        );
+        assert!(stderr.contains("closed;"), "{stderr}");
+    }
     for dir in &dirs {
         let _ = std::fs::remove_dir_all(format!("{}-log", dir.arg()));
     }

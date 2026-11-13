@@ -9,4 +9,4 @@ pub use consensus::{
     Clock, Consensus, Counts, ElectionCause, ElectionState, Io, Log, MembersRefused, NO_SESSION,
     Refused, ReplayStopped, Role,
 };
-pub use module::{ConsensusModule, MAX_PAYLOAD_LENGTH, RaftError};
+pub use module::{ConsensusModule, ListedFound, MAX_PAYLOAD_LENGTH, RaftError};

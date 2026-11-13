@@ -77,8 +77,31 @@ commit path runs per message.
   canvass timeout, 60 s, for a member it has not heard, as at any start, and a new
   leadership term says in `is startup` whether its leader leads it from its first
   election since it started (ADR 0089). The consensus module builds its core so, with a
-  seed from the operating system mixed with the member id, and still refuses a log
-  directory that holds a term, as the next section says (ADR 0104).
+  seed from the operating system mixed with the member id (ADR 0104).
+- Starts a member on the log directory it kept (ADR 0108). The module lists the
+  recordings that hold the member's log in the file `log-recordings` in its log
+  directory, each write synced, and counts a recording toward the append position
+  only once a list names it. At a start it reads the list back against the driver's
+  catalog: the log is the recordings the list names, each to where it stopped, and
+  it ends at the furthest of those ends. A
+  truncation that the member's stop cut short is finished: the log ends where the
+  recordings that are left end, and a term based above that leaves the record of
+  terms. Nothing else shortens the log. A directory of another member's, a record
+  of terms that holds a term beside no list, a log that ends above 0 beside a
+  record of terms that holds no term, and a catalog that holds anything
+  else in place of a listed recording refuse the start, with what to do: a member
+  that started with a shorter log than it reported could vote for a candidate that
+  lacks a committed entry. So does a log the member forgot a recording of, one
+  whose list begins above position 0 or names more than 1,024 recordings that hold
+  bytes (`RaftError::LogForgotten`): a start replays the log from position 0, and
+  this version takes no snapshot. The module counts what its list did in four
+  counters: `cluster.log_recordings_listed`, `cluster.log_recordings_unsynced`,
+  `cluster.log_recordings_forgotten` and `cluster.truncations_finished`. It does
+  not tell a member whose host lost power from one whose process was ended, and
+  the first can hold damaged entries at the end of its log: such a member is not
+  started again, by the operator's hand, until card 275 (ADR 0108, "What a start
+  does not hold"). `tests/restart.rs` stops a follower, the leader and all
+  three members over three drivers and starts them again.
 - Counts every move of the election. `ElectionState` is the state machine
   `cluster_election` of `counters.toml`, and each of its transitions adds one to a
   count of `Counts`, the counter registered for it; `Counts::by_counter` pairs each
@@ -108,7 +131,8 @@ commit path runs per message.
   none, `cluster.election_cause`, why its last election began (ADR 0102),
   `cluster.append_position`, `cluster.commit_position`, `cluster.messages_rejected`,
   `cluster.log_recording_id`, the recording that holds its log, which its service
-  replays, and the twenty-two counts of `Counts::by_counter`. The
+  replays, the four counts of its list of its log's recordings (ADR 0108), and the
+  twenty-two counts of `Counts::by_counter`. The
   counters of sessions and of the service's version in `spec/cluster.md`, "Counters",
   come with those features. One thread calls `do_work()`; the leader's process appends
   with `offer(payload)`, up to 1,344 bytes an entry. A follower that leaves the log
@@ -227,8 +251,8 @@ commit path runs per message.
   processor, on CI's Linux runner, it committed 13,000 to 18,000 a second: the
   member runs a part of every period (ADR 0111, "Evidence").
 - To come, each with its card: the C ABI's calls for a service, so that a service is
-  a program in any of the five client languages (card 227), a member's start on the
-  log directory it kept and mixed versions in a rolling upgrade (card 228), the
+  a program in any of the five client languages (card 227), mixed versions in a
+  rolling upgrade (card 228), the
   cluster client (card 229), snapshots
   and catch-up (card 230), and standby members, which follow the log without voting,
   in the open core.
@@ -237,42 +261,6 @@ In Aeron, this is Cluster, with Cluster Standby as a paid component
 ([glossary](../../docs/glossary.md)).
 
 ### What the election does not do yet
-
-A member made with `Consensus::with_election` has every state of `spec/cluster.md`'s
-election, and the consensus module runs it over a driver. The pages say more of a
-member's log directory than the module does yet. ADR 0108 decided how a member
-starts on the log directory it kept, and its sentences are on `spec/cluster.md` and
-`spec/durable-log.md`, with the file's reader and writer in `cavalry-log`
-(`recordings::RecordingsFile`). The module's use of the file is the change after
-that one (ADR 0108, "Two pull requests"). Until it lands, of what the two pages
-state:
-
-- The module writes no log recordings file. It reports a position a recording holds
-  with no list that names the recording (`spec/cluster.md`, "The log";
-  `spec/durable-log.md`, "The driver"), and a truncation writes no list between its
-  last cut and its first deleted term ("Messages during an election").
-- A member does not start on the log directory it kept ("A member's start"). Over a
-  driver the module refuses a log directory that holds a term or a stored candidate
-  term, and says why and what to do. The core starts on such a directory (ADR
-  0089). The module reads no list back against the driver's catalog, stops no
-  recording that is still being made, and finishes no truncation that its stop cut
-  short.
-- The module gives none of that paragraph's other refusals: a record of terms
-  beside no list, a log that ends above 0 beside a record of terms that holds no
-  term, a file that fails a check or names another member, a log that does not
-  begin at 0 or is in more recordings than a member keeps, and a catalog that holds
-  something else in place of a recording the file names. The refusal it has had
-  since ADR 0104, a recording of the log's stream in a directory with no `terms`
-  file, it gives.
-- A member's append position is what its recordings hold since it started on an
-  empty log directory, and not where the recordings that a file names end.
-- The four counters ADR 0108 adds are in `counters.toml` and count nothing:
-  `cluster.log_recordings_listed`, `cluster.log_recordings_unsynced`,
-  `cluster.log_recordings_forgotten` and `cluster.truncations_finished`. A member
-  that forgets a recording, its table at 1,024, counts nowhere.
-
-Until then a member that stopped stays out, and a cluster that lost a member goes on
-with the members that remain while they are a quorum.
 
 A truncation whose command faults after an earlier one succeeded leaves the member
 reporting the end and the log term it had until the leader asks again; ADR 0095's
