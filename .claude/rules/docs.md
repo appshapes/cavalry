@@ -71,9 +71,12 @@ that.
   evidence not yet measured, is a work item on the Brigade Board tagged `decision`
   beside `cavalry` until it is ruled: the question, the options and the evidence in
   the template's sections, and the ruling as a comment. The ask for the owner's
-  ruling is `brigade decision --card <work item>`. Once it is ruled, the ADR lands
-  with the change it explains, its References name the work item, and the work
-  item's landing comment names the ADR (ADR 0119).
+  ruling is `brigade decision --to <the owner's roster label> --card <work item>`,
+  with the question on stdin in a quoted heredoc. The session that receives the
+  answer, wherever the owner gave it, records it with `brigade work-item comment
+  <work item>` and closes the ask with `brigade decision --close <id>`. Once it is
+  ruled, the ADR lands with the change it explains, its References name the work
+  item, and the work item's landing comment names the ADR (ADR 0119).
 - A decision a session makes on its own inside a work item needs no work item of
   its own: its ADR lands in that work item's change and names it. In Cavalry that is
   most decisions (`CLAUDE.md`, Working rules for agents).

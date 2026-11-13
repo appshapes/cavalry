@@ -103,8 +103,11 @@ Highest first. Within one rule, the slice ADR's order, then the work item's list
    `decision` and `cavalry` says what it waits on. When the ruling is a comment on
    it, or the evidence it names is on `master`, writing its ADR with the change it
    explains is a task. When neither is there, the decision is not a task; when the
-   ruling is the owner's and has not been asked for, asking with `brigade decision
-   --card <work item>` is.
+   ruling is the owner's and has not been asked for, asking is: `brigade decision
+   --to <the owner's roster label> --card <work item>`, with the question on stdin
+   in a quoted heredoc. The session that receives the answer records it with
+   `brigade work-item comment <work item>` and closes the ask with `brigade decision
+   --close <id>`, so that the ruling is the comment this rule reads.
 5. **A fired Revisit clause.** The trigger has happened on `master`, the action it names
    has not, and no open work item lists it. Cite the trigger and the evidence that it
    fired. The first move is the work item that carries it, tagged `decision` and
