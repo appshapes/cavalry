@@ -141,6 +141,26 @@ The client API implementation, re-exported by the `cavalry` crate. Data plane.
   `offer` or `poll` allocates or sends the driver a command. A message `offer`
   accepted is on its way, not committed: a program that must know asks its service
   to reply (ADR 0117).
+- Runs a cluster's service: `Cavalry::cluster_service()` returns a `ClusterService`
+  beside the cluster member on this client's driver, and
+  `ClusterService::poll(client, handler, fragment_limit)` reads the member's
+  committed log from its start and hands over each entry as an `Entry`, a session's
+  message, a session's open or close, or a term's first entry, with its position, its
+  term and the cluster's time, which is the one clock a service reads. The handler
+  answers a session with `Replies::reply(session_id, payload)`, one frame, 1,344
+  bytes at most. Every member's service runs the same handler on the same entries
+  and one of them sends: the service beside the member that led the entry's term,
+  which the log names. The others are answered `Reply::NotAnswering`, and so is a
+  service for the entries its member held before the service first read its log, so
+  that a service that starts again answers no client twice. A reply the client's
+  channel does not take is `Reply::Retry`: the handler returns `Action::Abort` and
+  is handed the entry again, so it replies before it changes its state. A service
+  waits so for one client no longer than 500 ms, the keepalive interval. After that
+  the reply is `Reply::Dropped`, counted in `cluster.replies_dropped`, and each
+  reply to that client is dropped at once until its channel takes one. Nothing in
+  `poll` allocates for an entry or a reply, and its commands to the driver are at a
+  session's opening, at a change of the term's leader and at a recording's end
+  (ADR 0118).
 - Holds a recording the driver arms: `Cavalry::arm_recording(channel, stream_id)`, on a
   `cavalry:udp` stream with a subscription and no publication or image yet, returns
   an `ArmedRecording`, and `ArmedRecording::poll()` returns the `Recording` once the

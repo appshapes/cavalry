@@ -34,12 +34,17 @@ const DISCARD_LIMIT: usize = 64;
 
 /// The member id at the start of a cluster counter's key, little-endian
 /// (`counters.toml`, `cluster.commit_position`).
-type MemberKey = [u8; 4];
+pub(crate) type MemberKey = [u8; 4];
 
 /// Whether record `id` of `counters` is, now, the counter of type `type_id` of the
 /// member whose key is `member`: allocated, of that type, and keyed by that member id.
 /// A record that cannot be read is not.
-fn is_members(counters: &CountersReader, id: u32, type_id: CounterId, member: MemberKey) -> bool {
+pub(crate) fn is_members(
+    counters: &CountersReader,
+    id: u32,
+    type_id: CounterId,
+    member: MemberKey,
+) -> bool {
     matches!(
         counters.record(id),
         Ok(Some(record))
@@ -49,7 +54,7 @@ fn is_members(counters: &CountersReader, id: u32, type_id: CounterId, member: Me
 
 /// The first allocated record of type `type_id`, of `member` when one is given, with
 /// the member id its key begins with.
-fn find(
+pub(crate) fn find(
     counters: &CountersReader,
     type_id: CounterId,
     member: Option<MemberKey>,
@@ -547,6 +552,12 @@ impl CommittedLog {
             Err(Fault::Image { .. } | Fault::ImagesFull { .. }) => Ok(0),
             other => other,
         }
+    }
+
+    /// The four bytes a counter of this log's member begins its key with: the member
+    /// id, little-endian.
+    pub(crate) fn member_key(&self) -> MemberKey {
+        self.bound.member
     }
 
     /// The position after the last entry delivered, or the position the log was opened

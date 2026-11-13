@@ -31,6 +31,7 @@ use crate::publication::Publication;
 use crate::recording::{ArmedRecording, Recording, RecordingAnswer, RecordingStop};
 use crate::replay::{Replay, ReplayEnd};
 use crate::response::Response;
+use crate::service::ClusterService;
 use crate::subscription::{
     IMAGE_QUEUE, ImageEvent, RETIRE_QUEUE, Registration, Retired, Subscription,
 };
@@ -1511,6 +1512,55 @@ impl Cavalry {
         response_channel: &str,
     ) -> Result<ClusterSession, ClusterError> {
         ClusterSession::connect(self, members, response_channel)
+    }
+
+    /// A cluster's service beside the member on this client's driver
+    /// (`spec/cluster.md`, "The service"; ADR 0118). [`ClusterService::poll`] reads the
+    /// member's committed log from its start and hands over each entry as an
+    /// [`Entry`](crate::Entry) with its position and the cluster's time, and the
+    /// handler answers a session through [`Replies::reply`](crate::Replies::reply).
+    /// The service beside the member that led an entry's term sends its replies, and
+    /// the service beside every other member, which runs the same code, sends none.
+    /// Nothing is opened here: the first poll opens the member's log, once the driver
+    /// hosts a member that has one.
+    ///
+    /// ```
+    /// use cavalry_client::{Action, Cavalry, Entry, Reply};
+    ///
+    /// # fn main() -> Result<(), Box<dyn std::error::Error>> {
+    /// # let dir = std::env::temp_dir().join(format!("cavalry-doc-service-{}", std::process::id()));
+    /// # let _ = std::fs::remove_dir_all(&dir);
+    /// # let driver = cavalry_driver::Driver::start(&dir, dir.join("log"))?;
+    /// let mut client = Cavalry::connect_to(&dir)?;
+    /// let mut service = client.cluster_service();
+    /// let mut total = 0u64;
+    /// // An echo that counts: the same state on every member, answered by one.
+    /// let taken = service.poll(
+    ///     &mut client,
+    ///     |committed, replies| {
+    ///         if let Entry::SessionMessage { session_id, payload } = committed.entry {
+    ///             // Reply first, then change the state: an entry that is aborted is
+    ///             // handed over again.
+    ///             if replies.reply(session_id, payload) == Reply::Retry {
+    ///                 return Action::Abort;
+    ///             }
+    ///             total += payload.len() as u64;
+    ///         }
+    ///         Action::Continue
+    ///     },
+    ///     10,
+    /// )?;
+    /// // A driver that hosts no cluster member has no committed log to read.
+    /// assert_eq!((taken, total, service.position()), (0, 0, 0));
+    /// # service.close(&mut client)?;
+    /// # client.close()?;
+    /// # driver.close()?;
+    /// # let _ = std::fs::remove_dir_all(&dir);
+    /// # Ok(())
+    /// # }
+    /// ```
+    pub fn cluster_service(&self) -> ClusterService {
+        ClusterService::new()
     }
 
     /// Sends `client close`, so the driver removes this client's publications and

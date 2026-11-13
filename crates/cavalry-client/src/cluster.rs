@@ -77,11 +77,19 @@ pub enum ClusterError {
     },
     /// The read of the response channel stopped on a fault.
     Egress(Fault),
+    /// A service's read of its member's committed log stopped on a fault.
+    Log(Fault),
+    /// A service read a committed entry that is not an entry of `spec/cluster.md`: the
+    /// log is not this version's, or is damaged.
+    Entry {
+        /// The position the entry begins at.
+        position: i64,
+    },
 }
 
 impl ClusterError {
     /// The reason's name: `members`, `client`, `refused`, `version`,
-    /// `connect-timeout` or `egress`.
+    /// `connect-timeout`, `egress`, `log` or `entry`.
     pub const fn reason(&self) -> &'static str {
         match self {
             ClusterError::Members(_) => "members",
@@ -90,6 +98,8 @@ impl ClusterError {
             ClusterError::Version { .. } => "version",
             ClusterError::ConnectTimeout { .. } => "connect-timeout",
             ClusterError::Egress(_) => "egress",
+            ClusterError::Log(_) => "log",
+            ClusterError::Entry { .. } => "entry",
         }
     }
 }
@@ -131,7 +141,15 @@ impl fmt::Display for ClusterError {
                  {DOC}",
                 CONNECT_GIVE_UP_NS / 1_000_000_000
             ),
-            ClusterError::Egress(fault) => write!(f, "{fault}"),
+            ClusterError::Egress(fault) | ClusterError::Log(fault) => write!(f, "{fault}"),
+            ClusterError::Entry { position } => write!(
+                f,
+                "cluster service stopped ({reason}): the committed entry at position \
+                 {position} is not an entry of this version's cluster protocol; run a \
+                 service of the cluster's version, and if it is, `cavalry doctor` on the \
+                 member's driver says whether its recording is damaged; see \
+                 docs/reference/cluster.md#the-service"
+            ),
         }
     }
 }
@@ -141,7 +159,7 @@ impl std::error::Error for ClusterError {
         match self {
             ClusterError::Members(error) => Some(error),
             ClusterError::Client(error) => Some(error),
-            ClusterError::Egress(fault) => Some(fault),
+            ClusterError::Egress(fault) | ClusterError::Log(fault) => Some(fault),
             _ => None,
         }
     }
@@ -220,7 +238,7 @@ fn host_port(endpoint: &Endpoint<'_>) -> String {
 
 /// Writes `message` into a claim of `publication` and commits it. Nothing is
 /// allocated.
-fn send(publication: &mut Publication, message: &Message<'_>) -> Result<i64, Offer> {
+pub(crate) fn send(publication: &mut Publication, message: &Message<'_>) -> Result<i64, Offer> {
     let length = message.encoded_length();
     let mut claim = publication.try_claim(length)?;
     let limit = claim.body().len();
@@ -638,7 +656,7 @@ impl ClusterSession {
 /// The length of the session message header before a session message's payload: the
 /// message header and its 24 bytes of fields (`spec/cluster.md`, "Session message
 /// header, template 1").
-const SESSION_MESSAGE_HEADER_LENGTH: usize = 32;
+pub(crate) const SESSION_MESSAGE_HEADER_LENGTH: usize = 32;
 
 impl fmt::Debug for ClusterSession {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {

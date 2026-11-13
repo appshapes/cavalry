@@ -164,3 +164,4 @@ under `docs/` is listed here; `just lint-docs` fails on one that is not.
 - [0114. Give a subscription a controlled poll, whose handler can leave a fragment unread](decisions/0114-give-a-subscription-a-controlled-poll-whose-handler-can-leave-a-fragment-unread.md)
 - [0115. Keep a cluster's sessions on every member, opened and closed by the log](decisions/0115-keep-a-clusters-sessions-on-every-member-opened-and-closed-by-the-log.md)
 - [0117. Open a cluster session from the client, with a publication to every member](decisions/0117-open-a-cluster-session-from-the-client-with-a-publication-to-every-member.md)
+- [0118. Reply to a session from the service beside the entry's leader, and wait for no client past the keepalive interval](decisions/0118-reply-to-a-session-from-the-service-beside-the-entrys-leader-and-wait-for-no-client-past-the-keepalive-interval.md)

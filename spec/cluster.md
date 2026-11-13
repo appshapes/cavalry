@@ -991,7 +991,7 @@ path is the same on the leader and on a follower, and a service may start before
 member, with it or after it (ADR 0066). A service reads its own replay's session on
 that stream and reads past any other, which is another service's.
 
-A member keeps three rules of order for the service. It adds `cluster.log_recording_id`
+A member keeps four rules of order for the service. It adds `cluster.log_recording_id`
 and stores −1 in it before it adds `cluster.commit_position`, and a service reads the
 recording's id only of a member whose `cluster.commit_position` it has found: a
 counter holds 0 between its allocation and its first store, and 0 is a recording id.
@@ -999,7 +999,12 @@ It stores another value in `cluster.log_recording_id` before it stores a commit
 position that the recording does not hold. And it writes the file of its log's
 recordings ("The log's recordings") before it stores a recording's id in
 `cluster.log_recording_id`, each time it names a recording, and truncates no recording
-of its log until it has stored −1 there (ADR 0103).
+of its log until it has stored −1 there (ADR 0103). And it adds
+`cluster.leadership_term_id` and `cluster.append_position` before
+`cluster.log_recording_id`, and in every duty cycle stores each before it stores a
+recording's id, so that a service that has found a member's recording loads a term
+and an append position no older than the naming of that recording ("Replies", below;
+ADR 0118).
 
 The member's log below its live recording is in the recordings that file lists, and
 a service takes each position from one recording by the rule of "The log": the first
@@ -1062,14 +1067,62 @@ It reads session messages, timer events,
 session open and close events, cluster actions and new leadership term events in log
 order, each entry once, with the cluster's time as each entry's timestamp field and
 from no clock of its own, so that every member's service reaches the same state at
-the same position, the replay check of invariant 1 (`CLAUDE.md`). The service of the
-leader replies to a session with a session message on the egress stream; the service
-of a follower reaches the same state and sends nothing. A service with a version
+the same position, the replay check of invariant 1 (`CLAUDE.md`). The service beside
+the member that led an entry's term replies to a session, with a session message on
+the egress stream; the service beside every other member reaches the same state and
+sends nothing ("Replies", below). A service with a version
 writes it as the app version field a leader announces, and a member whose service's
 major version differs from the one new leadership term carries fails its election
 from the state that read it, counted in `cluster.app_version_mismatches`, and begins
 again at init, so that it never joins a log its service cannot apply; `doctor` names
 the two versions.
+
+### Replies
+
+A service replies to a session with a session message on the egress stream ("The
+session protocol"), with the leadership term id and the timestamp of the entry it is
+reading and the id of the session, which is any session open at that entry: one that
+a session open event below it opened and no session close event below it closed. It
+sends the reply on an exclusive publication of its own to the session's response
+channel, one for each open session, at most the sessions of "Values". A reply is one
+frame, a payload of 1,344 bytes at most, and a longer one is refused to the service's
+caller (ADR 0118).
+
+One service answers an entry: the service beside the member that led the entry's
+term. The term's new leadership term event, the term's first entry, names that
+member, and a service compares it with the member id that its member's counters are
+keyed by. So the rule is read from the log, and from no member's role at the moment
+of reading. The service beside every other member reaches the same state and sends
+nothing. A member that has stopped leading a term may still have a service that
+reads the term's last committed entries, and that service answers them: no other
+does.
+
+A service does not answer history. When it first opens its member's log it loads
+the member's `cluster.leadership_term_id` and then its `cluster.append_position`,
+each from a record that is the member's by the test above. An entry of a term below
+that term, or of that term and below that append position, is one the member held
+before the service read its log: the service applies it and sends nothing for it. A
+service that starts again reads its member's log from position 0, and so answers no
+session a second time for what a service before it answered. An entry appended while
+no service ran beside its leader is answered by none: a client that needs an answer
+waits for one no longer than it chooses, and sends again.
+
+A service holds its sessions' publications from the first entry it answers, and
+gives them back at the first entry it does not answer, and a session's at its
+session close event.
+
+A reply that the session's publication does not take, because the client's stream is
+not connected yet or is back-pressured, is tried again: the service leaves the entry
+unread, by a controlled read (`spec/log-buffer.md`, "Reading"), and reads it again. A
+service waits so for one session no longer than the keepalive interval ("Values"),
+which is how often a client reads its session at the least. Once a session's
+publication has taken nothing for that long since it first refused a reply, the
+service drops the reply, counts it in `cluster.replies_dropped` and reads on, and it
+drops each later reply to that session at once, counted, until the publication takes
+one. A reply is dropped and counted too when the driver refused the session's
+response channel, or the stream to the client has ended. So a client that does not
+read its replies delays the replies to the other sessions by the keepalive interval,
+once, and never the log: a member appends and commits whatever its service does.
 
 ## The log's recordings
 
@@ -1167,6 +1220,7 @@ that a reader of a counters file knows which transition it saw.
 | `cluster.sessions_refused` | a session connect refused, with the version, the response channel or the limit as the detail |
 | `cluster.connects_dropped` | a session connect dropped unanswered: the member's pending answers at their bound, the response channel refused by the driver, the answer unsent at the session connect timeout, or a connect the leader had accepted and gave up, its session open event not taken by the log for that timeout or not committed when the leader stopped leading |
 | `cluster.ingress_ignored` | a session message, keepalive or close a member ignored: it does not lead, the term is not its own, or the session is not open or is being closed |
+| `cluster.replies_dropped` | a reply the service beside the member dropped: the session's response channel had taken nothing for the keepalive interval since it first refused a reply, the driver refused the channel, or the stream to the client had ended ("The service", "Replies"; ADR 0118). The service adds the counter, as a client of the member's driver, when it first opens the member's log, keyed by the member id |
 | `cluster.log_replications` | on the follower, a catch-up position sent from state 9, one for each replay it asks for (ADR 0092); on the leader, a replay started for a replication, once per replay where a replication spans several recordings |
 | `cluster.log_replications_unavailable` | a replication whose append position did not move for the leader heartbeat timeout while below the stop position, so the member failed its election: the leader's recordings not holding the position asked, purged by retention; a replay that stopped for a fault; or a leader lost mid-replication |
 | `cluster.app_version_mismatches` | a member that failed its election because the service's major version is not the one new leadership term carries |
@@ -1193,7 +1247,7 @@ that a reader of a counters file knows which transition it saw.
 | election status interval | 100 ms: how often canvass position is sent |
 | startup canvass timeout | 60 s: how long a member whose first election since it started has not closed canvasses before a quorum candidate proceeds; at least twice the leader heartbeat timeout |
 | session timeout | 10 s: a session with nothing from its client for this long is closed with the reason timeout |
-| keepalive interval | 500 ms: how often a client sends session keepalive when it has sent nothing else, `spec/client-protocol.md`'s keepalive interval |
+| keepalive interval | 500 ms: how often a client sends session keepalive when it has sent nothing else, `spec/client-protocol.md`'s keepalive interval; and how long a service tries again a reply that a session's response channel does not take, before it drops it ("The service", "Replies") |
 | session connect timeout | 5 s: how long a client waits for the session event answering its connect |
 | sessions | at most 10 open or connecting; an eleventh connect is refused with `concurrent session limit` |
 | pending answers | at most 10 redirects or refusals a member has yet to send; a connect beyond them is dropped unanswered and counted |
