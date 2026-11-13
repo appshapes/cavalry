@@ -18,7 +18,7 @@ git-repository-url = "https://github.com/appshapes/cavalry"
 edit-url-template = "https://github.com/appshapes/cavalry/edit/master/docs/{path}"
 
 # One search document for each page, not for each heading of a page (ADR 0120). The
-# search index is then 7.3 MB where it was 9.9 MB, 0.06 MB under the 10 MB at which
-# mdBook warns that the index is very large, and `just docs` denies a warning.
+# search index is then 7.3 MB where it was 9.9 MB, close to the 10 MB at which mdBook
+# warns that the index is very large, and `just docs` denies a warning.
 [output.html.search]
 heading-split-level = 1
