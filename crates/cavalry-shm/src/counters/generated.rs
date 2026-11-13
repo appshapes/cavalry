@@ -431,6 +431,9 @@ pub const CLUSTER_LEADER_MEMBER_ID: CounterId = CounterId(140);
 /// `cluster.election_cause`, a client gauge: Why one cluster member's last election began, the election it is in or the one that closed last: 0 the member started; 1 it followed and its leader said nothing for the leader heartbeat timeout; 2 it followed and its image of the leader's log was no longer available; 3 it led and its active members fell below a quorum; 4 its election had closed and a message carried a term above its own; 5 its election before failed (spec/cluster.md, Counters; ADR 0077, ADR 0102); key: member id (i32), little-endian; label text: the member id in decimal.
 pub const CLUSTER_ELECTION_CAUSE: CounterId = CounterId(141);
 
+/// `sender.joins_refused`, a instance counter: Status messages of a receiver that would have joined one cavalry:udp publication while it was alone with its recording, refused because they named a position more than a term behind the sender position: what the receiver needs is no longer in the log. The receiver is one that answered a setup frame after the publisher had written more than a term, or one that left and came back after more than a term went by. Each status message is counted, and in sender.status_messages_rejected as well. Allocated for a publication whose channel names ssc=true and no other; key and label as sender.position (spec/udp.md, The sender; ADR 0098, ADR 0099).
+pub const SENDER_JOINS_REFUSED: CounterId = CounterId(142);
+
 /// `cluster.log_recordings_unwritten`, a client counter: Duty cycles in which one cluster member had a recording of its log to name and could not write the file of its log's recordings, whose name is log-recordings- and the member's id, in its driver directory: the member stored -1 in cluster.log_recording_id, named no recording to a service, and tried again in the next cycle (spec/cluster.md, The log's recordings, and Counters; ADR 0103); key: member id (i32), little-endian; label text: the member id in decimal.
 pub const CLUSTER_LOG_RECORDINGS_UNWRITTEN: CounterId = CounterId(143);
 
@@ -570,7 +573,7 @@ pub const COUNTERS: &[CounterDef] = &[
         kind: Kind::Counter,
         scope: Scope::Static,
         doc: "Log buffers the driver could not create or size, refused with error code 12: the filesystem under the driver directory is full or not writable (spec/client-protocol.md, Commands).",
-        doctor: "Free space on the filesystem under the driver directory (/dev/shm on Linux): each cavalry:ipc publication needs 3 × 64 MiB + 4 KiB there while it is live or lingers. Close publications that are not used, or move the driver directory to a filesystem with room.",
+        doctor: "Free space on the filesystem under the driver directory (/dev/shm on Linux): each cavalry:ipc publication needs 3 × 64 MiB + 4 KiB there while it is live or lingers, and each cavalry:udp publication and each image 3 × its term length + 4 KiB, 48 MiB unless the publication's channel names a shorter term-length. Close publications that are not used, name a shorter term-length on the channels of low-rate streams, or move the driver directory to a filesystem with room; a container's default /dev/shm is 64 MiB.",
     },
     CounterDef {
         id: CONDUCTOR_IDLE_STRATEGY,
@@ -1554,7 +1557,7 @@ pub const COUNTERS: &[CounterDef] = &[
         kind: Kind::Gauge,
         scope: Scope::Instance,
         doc: "Bytes of one cavalry:udp publication that went to its recording and to no receiver: what its sender position passed while the publication was alone with its recording, its channel naming ssc=true, a recording of it live and no receiver answering, above its sent position, the highest position the sender had sent to, less what the sender position went back over above the sent position when a receiver joined. Never below zero: a byte a receiver was sent before is neither counted nor taken off, and a byte counted that a receiver whose image began below the sent position is sent later stays counted. Allocated for a publication whose channel names ssc=true and no other; key and label as sender.position (spec/udp.md, The sender; ADR 0098, ADR 0112).",
-        doctor: "A publication on a channel that names ssc=true took messages while no receiver answered: they are in its recording, and a receiver that joins later is sent the stream from its own position, at most a term back, and replays the recording for what came before. Nothing was lost. If receivers were expected, check that a subscription on the stream exists on each destination's host and that its driver receives on that port.",
+        doctor: "A publication on a channel that names ssc=true took messages while no receiver answered: they are in its recording, and a receiver that joins later is sent the stream from its own position, at most a term back, and replays the recording for what came before. Nothing was lost. `cavalry doctor` names the publication in `udp-publication-recorded-alone` while no receiver has answered; if receivers were expected, check that a subscription on the stream exists on each destination's host and that its driver receives on that port.",
     },
     CounterDef {
         id: CLUSTER_LEADER_MEMBER_ID,
@@ -1571,6 +1574,14 @@ pub const COUNTERS: &[CounterDef] = &[
         scope: Scope::Client,
         doc: "Why one cluster member's last election began, the election it is in or the one that closed last: 0 the member started; 1 it followed and its leader said nothing for the leader heartbeat timeout; 2 it followed and its image of the leader's log was no longer available; 3 it led and its active members fell below a quorum; 4 its election had closed and a message carried a term above its own; 5 its election before failed (spec/cluster.md, Counters; ADR 0077, ADR 0102); key: member id (i32), little-endian; label text: the member id in decimal.",
         doctor: "0 is a start and nothing to act on. 1 and 2 on a follower say its leader stopped or could not be reached: look at the leader's process and at the path between the two members' consensus and log endpoints. 3 on a member that led says it could no longer hear a quorum: it is the member that was cut off. 4 says another member held a later term, which is what a member sees when it comes back from a partition. 5 says the election before this one did not close: read cluster.elections_failed and its text, and the counters that rise with a failed election for the rule that failed it, cluster.join_position_mismatches, cluster.truncations_refused and cluster.log_replications_unavailable, and on a member that led, cluster.leader_quorum_losses. An election that failed with none of them risen is a step that made no progress for the leader heartbeat timeout, 10 s, a leader that read a term above its own before its election had closed, or a log the member cannot join its leader with.",
+    },
+    CounterDef {
+        id: SENDER_JOINS_REFUSED,
+        name: "sender.joins_refused",
+        kind: Kind::Counter,
+        scope: Scope::Instance,
+        doc: "Status messages of a receiver that would have joined one cavalry:udp publication while it was alone with its recording, refused because they named a position more than a term behind the sender position: what the receiver needs is no longer in the log. The receiver is one that answered a setup frame after the publisher had written more than a term, or one that left and came back after more than a term went by. Each status message is counted, and in sender.status_messages_rejected as well. Allocated for a publication whose channel names ssc=true and no other; key and label as sender.position (spec/udp.md, The sender; ADR 0098, ADR 0099).",
+        doctor: "A receiver could not join this publication while it was alone with its recording: its image receives nothing, times out and joins again, and what it missed is in the recording. If no receiver has ever joined the publication, the publisher writes more than a term between a setup frame and a receiver's answer: name a longer term-length on the publication's channel, one that holds what the publisher writes in 16 milliseconds at its fastest, or leave the key out for the 16 MiB term; doctor warns with udp-publication-join-refused for it. If a receiver had joined and left, it was away while more than a term was written: it joins again by itself, and replays the recording for what it missed.",
     },
     CounterDef {
         id: CLUSTER_LOG_RECORDINGS_UNWRITTEN,

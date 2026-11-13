@@ -206,6 +206,37 @@ fn a_vote_against_sends_the_candidate_back_to_canvass_at_once() {
     );
 }
 
+/// A candidate that has lost its ballot asks no member for a vote on the cycle it goes
+/// back to canvass. Its publication refused both requests, so both are unsent when it
+/// reads a vote against its term; the cycle that loses the ballot sends neither, where
+/// a request sent then would ask a member for its one vote in the term for a candidate
+/// that has already lost (ADR 0105).
+#[test]
+fn a_candidate_that_lost_its_ballot_asks_no_member_for_a_vote() {
+    let mut io = Stub::new();
+    let mut member = elector(4);
+    let ms = to_candidate_ballot(&mut member, &mut io, &[1, 2]);
+    io.refuse_send = true;
+    member.do_work(at(ms + 1), &mut io).expect("no fault");
+    assert_eq!(member.election_state(), ElectionState::CandidateBallot);
+    member
+        .on_message(at(ms + 2), &vote(2, 0, false), &mut io)
+        .expect("no fault");
+    // The publication takes a message again, and the candidate has two requests to
+    // send and a vote against to read, on the same cycle.
+    io.refuse_send = false;
+    io.clear();
+    member.do_work(at(ms + 3), &mut io).expect("no fault");
+    assert_eq!(member.election_state(), ElectionState::Canvass);
+    assert_eq!(member.role(), Role::Follower);
+    assert_eq!(member.counts().ballots_lost, 1);
+    assert_eq!(
+        sends(&io, Template::RequestVote),
+        0,
+        "a candidate that had lost its ballot asked for a vote"
+    );
+}
+
 /// A member votes once in a term, and stores a term before the vote that raises it. A
 /// request for a higher term from a log at least its own is answered for; a second
 /// request for that term, and one for a lower term, are answered against with nothing
