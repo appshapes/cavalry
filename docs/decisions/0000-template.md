@@ -1,6 +1,6 @@
 # NNNN. Short title in the imperative ("Use AF_XDP for kernel bypass")
 
-- **Status:** Proposed | Accepted | Superseded by NNNN | Rejected
+- **Status:** Accepted | Superseded by NNNN | Rejected
 - **Date:** YYYY-MM-DD
 - **Invariants affected:** list the `CLAUDE.md` invariant numbers this touches
 - **Supersedes:** NNNN, or none
@@ -33,4 +33,6 @@ would make us revisit this decision.
 
 ## References
 
-Links to the commit, the spec section, the docs pages, and any outside discussion.
+The work item on the Brigade Board that the decision was carried by or made in, by
+its number. Links to the commit, the spec section, the docs pages, and any outside
+discussion.
