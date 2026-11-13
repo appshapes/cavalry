@@ -685,7 +685,12 @@ impl Cavalry {
     /// cycle and none while its replies wait for room. So the destination gets what the
     /// endpoint sends from the start of the cycle that takes the change, which is the
     /// next cycle only when nothing waits ahead of it (ADR 0057). A destination already
-    /// added, as written, is added again by nothing and is success. Refused with
+    /// added, as written, is added again by nothing and is success. A destination is
+    /// the channel's send endpoint's and not the publication's: the endpoint keeps it
+    /// while any publication on the control channel is live or lingers after its
+    /// close, so a program that closes a publication and adds the next on the same
+    /// control channel before the linger ends finds its destinations still there, and
+    /// may add them again without a check. Refused with
     /// [`ClientError::Refused`]: code 3 for a
     /// registration this client does not hold; code 1 for a publication whose channel
     /// names no control address, with the reason `control`; code 1 with the reason
@@ -1296,8 +1301,10 @@ impl Cavalry {
     ///
     /// Returns `None` while the driver hosts no member that has a recording of its
     /// log: the member has not started, its election has not given it a log yet, it
-    /// has closed, or it named another recording while this call read its file of
-    /// recordings. A service that starts before its member calls again, with a
+    /// has closed, or it named another recording, or closed and removed its file,
+    /// while this call read its file of recordings: with no file the call loads the
+    /// member's counter again, and opens the live recording only when the counter
+    /// still names it. A service that starts before its member calls again, with a
     /// pause between two calls: each reads the counters file's records to find the
     /// member, which is not a call for a loop that spins. Nothing is sent to the
     /// driver until a member is found.

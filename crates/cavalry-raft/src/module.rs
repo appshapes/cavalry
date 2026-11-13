@@ -32,8 +32,9 @@ use cavalry_log::terms::{NO_RECORDING, TermsError, TermsFile};
 use cavalry_proto::client_protocol::{ErrorCode, FOLLOW_LENGTH, ReplayStopReason};
 use cavalry_proto::cluster::{
     CONSENSUS_STREAM_ID, EMPTY_MEMBER, Endpoint, LOG_RECORDINGS_FILE_PREFIX,
-    LOG_RECORDINGS_TMP_SUFFIX, LOG_STREAM_ID, LogRecording, MAX_LOG_RECORDINGS_LENGTH, MAX_MEMBERS,
-    MembersError, Message, Stream, parse_members, write_log_recordings,
+    LOG_RECORDINGS_TMP_SUFFIX, LOG_STREAM_ID, LogRecording, LogRecordingsError,
+    MAX_LOG_RECORDINGS_LENGTH, MAX_MEMBERS, MembersError, Message, Stream, parse_members,
+    write_log_recordings,
 };
 use cavalry_proto::udp::UDP_TERM_LENGTH;
 use cavalry_shm::counters::CounterId;
@@ -259,6 +260,28 @@ impl core::fmt::Display for RaftError {
         }
     }
 }
+
+/// A list of its log's recordings that the module made and the file's writer refused
+/// ([`write_log_recordings`]). The writer's error is the reader's, and a reader's
+/// advice, to stop whatever else writes in the driver directory, is wrong here: no
+/// other process made this list. So the member says what the check found and no
+/// more, and [`RaftError::LogRecordings`] adds that the fault is the module's own.
+#[derive(Debug)]
+struct RefusedList(LogRecordingsError);
+
+impl std::fmt::Display for RefusedList {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "the list the member made of its log's recordings is one the file's format \
+             refuses ({}): {}",
+            self.0.reason(),
+            self.0.found()
+        )
+    }
+}
+
+impl std::error::Error for RefusedList {}
 
 impl std::error::Error for RaftError {
     fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
@@ -730,7 +753,7 @@ impl ClientIo {
         )
         .map_err(|error| RaftError::LogRecordings {
             path: self.recordings_path.clone(),
-            source: std::io::Error::new(std::io::ErrorKind::InvalidData, error),
+            source: std::io::Error::new(std::io::ErrorKind::InvalidData, RefusedList(error)),
         })?;
         let bytes = self.recordings_file.get(..length).unwrap_or(&[]);
         std::fs::write(&self.recordings_tmp_path, bytes).map_err(|source| {
@@ -1887,18 +1910,31 @@ impl ConsensusModule {
         self.io.live_recording().map(|(id, _)| id)
     }
 
-    /// Stops the module: closes its client, which removes its publications, its
-    /// subscriptions and its counters, and then removes its file of the log's
-    /// recordings, which no counter names any more (ADR 0103). Its recordings are the
-    /// driver's and stay; the driver stops each when its publication or its image
-    /// ends.
+    /// Stops the module. It stores −1 in `cluster.log_recording_id`, closes its client,
+    /// which removes its publications, its subscriptions and its counters, and then
+    /// removes its file of the log's recordings (`spec/cluster.md`, "The log's
+    /// recordings"; ADR 0103). The store comes first because it is done when it
+    /// returns, and the driver removes a client's counters only when it reads the
+    /// command: a service that finds no file loads the counter again, and must not
+    /// find there the id of a recording whose file is gone. The member's recordings
+    /// are the driver's and stay; the driver stops each when its publication or its
+    /// image ends.
     pub fn close(self) -> Result<(), RaftError> {
+        self.close_observed(|| ())
+    }
+
+    /// [`close`](Self::close), with `stored` called once −1 is stored in
+    /// `cluster.log_recording_id` and before anything else is done: the window through
+    /// which a test sees that the counter names no recording while the file is there.
+    fn close_observed(self, stored: impl FnOnce()) -> Result<(), RaftError> {
         let Self {
             consensus,
             io,
-            counters,
+            mut counters,
             ..
         } = self;
+        counters.log_recording_id.store(NO_RECORDING);
+        stored();
         drop(counters);
         drop(consensus);
         let ClientIo {
@@ -1916,8 +1952,8 @@ impl ConsensusModule {
         let closed = client.close();
         // The file, and what a write that failed left under its other name. A file
         // that is not there was never written: the member named no recording. Any
-        // other error is ignored too: a file left behind names a recording that no
-        // counter names once the client is closed, so no service reads it
+        // other error is ignored too: a file left behind names a recording that the
+        // counter no longer names, so no service reads a log from it
         // (`spec/cluster.md`, "The service"), and the driver removes it with the rest
         // of its directory when it next starts.
         let _ = std::fs::remove_file(recordings_path);

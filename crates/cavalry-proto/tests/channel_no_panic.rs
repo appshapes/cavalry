@@ -19,13 +19,14 @@ impl XorShift {
     }
 }
 
-const REASONS: [&str; 8] = [
+const REASONS: [&str; 9] = [
     "grammar",
     "key",
     "control",
     "endpoint",
     "fc",
     "ssc",
+    "term-length",
     "position",
     "multicast",
 ];
@@ -44,6 +45,11 @@ fn check(bytes: &[u8]) {
             );
             assert!(!endpoint.host().is_empty(), "{bytes:02x?}: endpoint host");
             assert!(!endpoint.is_multicast(), "{bytes:02x?}: multicast accepted");
+            let term = udp.term_length();
+            assert!(
+                term.is_power_of_two() && (65_536..=67_108_864).contains(&term),
+                "{bytes:02x?}: term length {term}"
+            );
             if let Some(interface) = udp.interface() {
                 assert!(!interface.host().is_empty(), "{bytes:02x?}: interface host");
                 assert_ne!(interface.port(), Some(0), "{bytes:02x?}: interface port 0");
@@ -60,8 +66,10 @@ fn check(bytes: &[u8]) {
     }
 }
 
-const VALID: [&str; 8] = [
+const VALID: [&str; 10] = [
     "cavalry:ipc",
+    "cavalry:udp?endpoint=10.0.0.2:1|term-length=64k",
+    "cavalry:udp?endpoint=10.0.0.2:1|term-length=1048576|init-term-id=0|term-id=1|term-offset=64",
     "cavalry:udp?endpoint=10.0.0.2:40123|ssc=true",
     "cavalry:udp?endpoint=10.0.0.2:1|init-term-id=7|term-id=9|term-offset=4096",
     "cavalry:udp?endpoint=10.0.0.2:40123",
@@ -71,7 +79,7 @@ const VALID: [&str; 8] = [
     "cavalry:udp?endpoint=a.b-c.d:1",
 ];
 
-const ALPHABET: &[u8] = b"cavlry:iudp?endoint=.-|[]0123456789abcdef:gx \xffstmf";
+const ALPHABET: &[u8] = b"cavlry:iudp?endoint=.-|[]0123456789abcdef:gx \xffstmfhkMG";
 
 #[test]
 fn random_strings_never_panic() {
