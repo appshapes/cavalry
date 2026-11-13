@@ -93,6 +93,11 @@ The client API implementation, re-exported by the `cavalry` crate. Data plane.
   records to other counters a second later, so each read checks that the record is
   still the recording's, and a position is never another counter's value. A client
   follows 1,024 recordings at most, the driver's own bound.
+- Reads a member's committed log on a stream the caller names:
+  `Cavalry::committed_log_on(stream_id, position)` is `committed_log` below on another
+  `cavalry:ipc` stream. A cluster member's consensus module reads its own log so, on
+  the log replay stream, `LOG_REPLAY_STREAM_ID`, 103, so that its replay and a
+  service's never reach each other's subscription (ADR 0116).
 - Reads a cluster's committed log for a service: `Cavalry::committed_log(position)`
   returns a `CommittedLog` once the driver hosts a cluster member that has a recording
   of its log, and `CommittedLog::poll` hands over every entry a quorum of members

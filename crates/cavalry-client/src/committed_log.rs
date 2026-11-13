@@ -11,7 +11,7 @@ use std::sync::Arc;
 
 use cavalry_proto::client_protocol::{FOLLOW_LENGTH, ReplayStopReason};
 use cavalry_proto::cluster::{
-    LOG_RECORDINGS_FILE_PREFIX, LogRecordings, MAX_LOG_RECORDINGS_LENGTH, SERVICE_LOG_STREAM_ID,
+    LOG_RECORDINGS_FILE_PREFIX, LogRecordings, MAX_LOG_RECORDINGS_LENGTH,
 };
 use cavalry_proto::frame::DataFrameHeader;
 use cavalry_shm::counters::generated::{CLUSTER_COMMIT_POSITION, CLUSTER_LOG_RECORDING_ID};
@@ -349,7 +349,11 @@ impl CommittedLog {
     /// than the member's counter names, or there is no file and the counter no longer
     /// holds the id read before the file was looked for: a member between two
     /// recordings, or one that closed meanwhile.
-    pub(crate) fn open(client: &mut Cavalry, position: i64) -> Result<Option<Self>, ClientError> {
+    pub(crate) fn open(
+        client: &mut Cavalry,
+        stream_id: i32,
+        position: i64,
+    ) -> Result<Option<Self>, ClientError> {
         let Some(bound) = Bound::find(&client.shared_counters()) else {
             return Ok(None);
         };
@@ -360,14 +364,9 @@ impl CommittedLog {
             return Ok(None);
         };
         // The subscription first: a replay with no subscriber does not move.
-        let subscription = client.add_subscription(CHANNEL, SERVICE_LOG_STREAM_ID)?;
-        let replay = client.start_replay(
-            recording_id,
-            position,
-            FOLLOW_LENGTH,
-            SERVICE_LOG_STREAM_ID,
-            CHANNEL,
-        )?;
+        let subscription = client.add_subscription(CHANNEL, stream_id)?;
+        let replay =
+            client.start_replay(recording_id, position, FOLLOW_LENGTH, stream_id, CHANNEL)?;
         Ok(Some(Self {
             subscription,
             session_id: replay.session_id(),

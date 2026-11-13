@@ -6526,8 +6526,10 @@ mod tests {
         assert_eq!(rejected.level, Level::Warn);
         assert_eq!(
             rejected.message,
-            "member 1's cluster.messages_rejected is 12: A member sends consensus messages \
-             this member cannot read: check that every member runs the same version."
+            "member 1's cluster.messages_rejected is 12: Another member sends consensus \
+             messages this member cannot read, or a client sends session messages no entry \
+             of the log holds: check that every member and every cluster client runs the \
+             same version, and that a client sends at most 1,344 bytes in a message."
         );
         assert_eq!(rejected.doc, DOC_CLUSTER);
 
