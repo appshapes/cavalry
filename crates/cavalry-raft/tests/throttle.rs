@@ -10,19 +10,21 @@
 //!
 //! # What the throttle costs, and why the test prints it
 //!
-//! The leader's log goes to both followers under `fc=min` (`spec/cluster.md`,
-//! "Members and streams"): the leader sends no further than the receiver window, 128
-//! KiB, past the slower follower's position. A throttled follower still sends its
-//! status messages in the part of each period it runs, so it never times out and it
-//! paces the leader, though the leader and the other follower are a quorum without
-//! it: under the throttle the cluster commits about one window each period, some
-//! 13,000 entries of 96 bytes a second, whatever the leader is offered (ADR 0052,
-//! "Harder"). So under a quota no moment shows the two others alone, and the test
-//! asserts there only that entries are committed. Where the member is stopped
-//! outright it asserts more: that the leader's commit position rose in at least one
-//! stop, which a cluster that needed all three members could not do. The rates are
-//! what an operator reads the cost from, so they are printed and no bound is put on
-//! them.
+//! The leader's log goes to both followers under `fc=min` (`spec/cluster.md`, "Members
+//! and streams"): the leader sends no further than the receiver window, 128 KiB, past the
+//! slower follower's position. A throttled follower still sends its status messages in
+//! the part of each period it runs, so it never times out and it paces the leader, though
+//! the leader and the other follower are a quorum without it: under the throttle the
+//! cluster commits about one window each period, whatever the leader is offered (ADR
+//! 0052, "Harder"). One window each 100 ms is some 13,000 entries of 96 bytes a second.
+//! Measured, it is 10,000 to 12,000 a second where the member is stopped outright, and
+//! 13,000 to 18,000 under a quota, where the member runs a part of every period and the
+//! leader goes a window further in each (ADR 0111, "Evidence"). So under a quota no
+//! moment shows the two others alone, and the test asserts there only that entries are
+//! committed. Where the member is stopped outright it asserts more: that the leader's
+//! commit position rose in at least one stop, which a cluster that needed all three
+//! members could not do. The rates are what an operator reads the cost from, so they are
+//! printed and no bound is put on them.
 //!
 //! # Why the members are processes
 //!
