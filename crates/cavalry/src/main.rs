@@ -668,9 +668,33 @@ fn configure(flags: Flags) -> Result<Config, ExitCode> {
 }
 
 /// Why `cavalry run` stops: a signal, or the cluster member it runs that cannot go on.
+/// `run` reads one of these and acts on it; any message after that one is not read.
 enum Stop {
+    /// SIGINT or SIGTERM.
     Signal,
+    /// The member's duty cycle failed for the time it is given, with the last error.
     Member(String),
+    /// The member's thread panicked, with what the operator does about it
+    /// ([`StopOnPanic`]).
+    MemberPanicked(String),
+}
+
+/// What `cavalry run` prints when it joins the member's thread and finds that the thread
+/// panicked, given `told`, the one message `run` read; or nothing, when that message was
+/// this panic, which `run` said then with what to do. Any other panic came after
+/// `run` had its one message, a signal's or the member's own of cycles that failed: in
+/// the member's close, or in a cycle that `run` no longer waited for. Its own message,
+/// if the thread sent one, is behind the one `run` read, and nobody reads it.
+fn panic_line_at_join(told: Option<&Stop>) -> Option<&'static str> {
+    match told {
+        Some(Stop::MemberPanicked(_)) => None,
+        Some(Stop::Signal | Stop::Member(_)) | None => Some(
+            "cavalry run: the cluster member's thread panicked as the member stopped, which \
+             is a bug in Cavalry: the panic's message is above; report it with that \
+             message; the driver closes all the same; see \
+             docs/how-to/run-a-cluster.md#when-it-does-not-work",
+        ),
+    }
 }
 
 /// Installs the signal handler, then starts a driver and waits for a signal; the driver
@@ -751,7 +775,7 @@ fn run(config: &Config) -> ExitCode {
     let member_stop = Arc::new(AtomicBool::new(false));
     let mut member_thread = None;
     let mut failed = false;
-    let mut given_up = false;
+    let mut told = None;
     if let Some((members, id)) = member {
         match start_member(
             dir,
@@ -770,15 +794,15 @@ fn run(config: &Config) -> ExitCode {
         }
     }
     if !failed {
-        match stopped.recv() {
-            Ok(Stop::Signal) => eprintln!("cavalry run: stopping"),
-            Ok(Stop::Member(error)) => {
-                give_member_up(dir, &error);
-                given_up = true;
+        told = stopped.recv().ok();
+        match &told {
+            Some(Stop::Signal) => eprintln!("cavalry run: stopping"),
+            Some(Stop::Member(error) | Stop::MemberPanicked(error)) => {
+                give_member_up(dir, error);
                 failed = true;
             }
             // Every sender is gone without a signal: a bug, never silent.
-            Err(_) => eprintln!("cavalry run: the signal handler went away; stopping"),
+            None => eprintln!("cavalry run: the signal handler went away; stopping"),
         }
     }
     // The member first: it is a client of the driver, and closes its client while the
@@ -787,16 +811,9 @@ fn run(config: &Config) -> ExitCode {
     if let Some(thread) = member_thread
         && thread.join().is_err()
     {
-        // A panic that gave the member up was said then, with what to do. One that
-        // `run` was not told of came as the member stopped, for a signal: in its close,
-        // or in a cycle that `run` no longer waited for.
-        if !given_up {
-            eprintln!(
-                "cavalry run: the cluster member's thread panicked as the member stopped, \
-                 which is a bug in Cavalry: the panic's message is above; report it with \
-                 that message; the driver closes as it was asked to; see \
-                 docs/how-to/run-a-cluster.md#when-it-does-not-work"
-            );
+        // Said once: a panic that `run` was told of was said as it gave the member up.
+        if let Some(line) = panic_line_at_join(told.as_ref()) {
+            eprintln!("{line}");
         }
         failed = true;
     }
@@ -865,13 +882,16 @@ impl Member for ConsensusModule {
 
 /// Tells `cavalry run` to stop when the thread that holds it panics: without it the
 /// panic would end the member and leave `run` waiting for a signal, a plain driver with
-/// the cluster's keys set. Its `Drop` runs as the thread unwinds.
+/// the cluster's keys set. Its `Drop` runs as the thread unwinds, and sends a message of
+/// its own, [`Stop::MemberPanicked`], so that `run` tells this panic from a member given
+/// up for cycles that failed. A panic after `run` read its one message is sent all the
+/// same and not read; `run` says that one when it joins the thread.
 struct StopOnPanic(std::sync::mpsc::Sender<Stop>);
 
 impl Drop for StopOnPanic {
     fn drop(&mut self) {
         if std::thread::panicking() {
-            let _ = self.0.send(Stop::Member(
+            let _ = self.0.send(Stop::MemberPanicked(
                 "its thread panicked, which is a bug in Cavalry: the panic's message is \
                  above; report it with that message, then start `cavalry run` again with the \
                  same directories; see docs/how-to/run-a-cluster.md#when-it-does-not-work"
@@ -921,8 +941,9 @@ fn start_member(
 /// error; a duty cycle that panics is told to `stopped` too, as the thread unwinds
 /// ([`StopOnPanic`]). So `run` hears at once of a member whose cycles cannot go on,
 /// either way. The close comes only after `run` has set `stop` or the thread has told
-/// `stopped`, so `run` has its one message already: a panic in the close is reported
-/// by the thread's `join`, and is not counted as a member given up.
+/// `stopped`, so `run` has its one message already, a signal's or the member's own of
+/// cycles that failed: a panic in the close is said when `run` joins the thread
+/// ([`panic_line_at_join`]), and is not counted as a member given up.
 fn spawn_member<M: Member>(
     id: i32,
     member: M,
@@ -1957,9 +1978,19 @@ mod tests {
         Panics,
     }
 
+    /// What a test's member does when it is closed.
+    #[derive(Clone, Copy)]
+    enum Close {
+        /// Closes.
+        Works,
+        /// Panics, once it has said that it was closed.
+        Panics,
+    }
+
     /// A stand-in for the consensus module on the thread `cavalry-consensus`.
     struct TestMember {
         cycle: Cycle,
+        close: Close,
         cycles: Arc<std::sync::atomic::AtomicUsize>,
         closed: Arc<AtomicBool>,
     }
@@ -1976,7 +2007,10 @@ mod tests {
 
         fn close(self) -> Result<(), String> {
             self.closed.store(true, Ordering::Release);
-            Ok(())
+            match self.close {
+                Close::Works => Ok(()),
+                Close::Panics => panic!("the test's member panics in its close"),
+            }
         }
     }
 
@@ -1992,13 +2026,14 @@ mod tests {
         closed: Arc<AtomicBool>,
     }
 
-    fn started(cycle: Cycle, give_up_after: Duration) -> Started {
+    fn started(cycle: Cycle, close: Close, give_up_after: Duration) -> Started {
         let (signal, stopped) = std::sync::mpsc::channel::<Stop>();
         let stop = Arc::new(AtomicBool::new(false));
         let cycles = Arc::new(std::sync::atomic::AtomicUsize::new(0));
         let closed = Arc::new(AtomicBool::new(false));
         let member = TestMember {
             cycle,
+            close,
             cycles: Arc::clone(&cycles),
             closed: Arc::clone(&closed),
         };
@@ -2029,9 +2064,16 @@ mod tests {
     /// member and told nobody, so `run` went on as a plain driver until a signal.
     #[test]
     fn a_member_whose_thread_panics_stops_run_at_once() {
-        let member = started(Cycle::Panics, MEMBER_FAILURE_TIMEOUT);
-        match member.stopped.recv_timeout(TOLD_WITHIN) {
-            Ok(Stop::Member(error)) => {
+        let member = started(Cycle::Panics, Close::Works, MEMBER_FAILURE_TIMEOUT);
+        let told = match member.stopped.recv_timeout(TOLD_WITHIN) {
+            Ok(told) => told,
+            Err(error) => panic!(
+                "the member's thread panicked and `run` was not told within {} s: {error}",
+                TOLD_WITHIN.as_secs()
+            ),
+        };
+        match &told {
+            Stop::MemberPanicked(error) => {
                 assert!(error.contains("its thread panicked"), "{error}");
                 assert!(error.contains("start `cavalry run` again"), "{error}");
                 // Every error message names the docs anchor that explains it (CLAUDE.md,
@@ -2041,16 +2083,15 @@ mod tests {
                     "{error}"
                 );
             }
-            Ok(Stop::Signal) => panic!("a signal, and none was sent"),
-            Err(error) => panic!(
-                "the member's thread panicked and `run` was not told within {} s: {error}",
-                TOLD_WITHIN.as_secs()
-            ),
+            Stop::Member(error) => panic!("told of cycles that failed, and none failed: {error}"),
+            Stop::Signal => panic!("a signal, and none was sent"),
         }
         assert!(
             member.thread.join().is_err(),
             "the thread ended by its panic"
         );
+        // `run` said this panic as it gave the member up, so the join says nothing more.
+        assert_eq!(panic_line_at_join(Some(&told)), None);
         assert_eq!(member.cycles.load(Ordering::Relaxed), 1);
         assert!(
             !member.closed.load(Ordering::Acquire),
@@ -2065,11 +2106,12 @@ mod tests {
     fn a_member_is_given_up_after_cycles_that_fail_on_end_and_runs_on_otherwise() {
         let give_up_after = Duration::from_millis(150);
         let began = Instant::now();
-        let member = started(Cycle::Fails, give_up_after);
+        let member = started(Cycle::Fails, Close::Works, give_up_after);
         match member.stopped.recv_timeout(TOLD_WITHIN) {
             Ok(Stop::Member(error)) => {
                 assert_eq!(error, "the test's member cannot work; nothing to do");
             }
+            Ok(Stop::MemberPanicked(error)) => panic!("a panic, and none was made: {error}"),
             Ok(Stop::Signal) => panic!("a signal, and none was sent"),
             Err(error) => panic!("the member was not given up: {error}"),
         }
@@ -2084,7 +2126,7 @@ mod tests {
             "given up, then closed"
         );
 
-        let member = started(Cycle::Idles, give_up_after);
+        let member = started(Cycle::Idles, Close::Works, give_up_after);
         assert!(
             member.stopped.recv_timeout(give_up_after * 3).is_err(),
             "a member whose cycles work tells `run` nothing"
@@ -2098,6 +2140,60 @@ mod tests {
             member.closed.load(Ordering::Acquire),
             "stopped, then closed"
         );
+    }
+
+    /// Card 257, the review of 10a66445: a panic in the member's close comes after `run`
+    /// read its one message, and is said when `run` joins the thread, whatever that
+    /// message was but the panic's own. After cycles that failed, the message `run` reads
+    /// is theirs; `run` once took it for a panic it had said, and said nothing of this one.
+    #[test]
+    fn a_panic_in_the_members_close_is_said_when_run_joins_the_thread() {
+        let member = started(Cycle::Fails, Close::Panics, Duration::from_millis(150));
+        let told = member
+            .stopped
+            .recv_timeout(TOLD_WITHIN)
+            .unwrap_or_else(|error| panic!("the member was not given up: {error}"));
+        match &told {
+            Stop::Member(error) => {
+                assert_eq!(error, "the test's member cannot work; nothing to do");
+            }
+            Stop::MemberPanicked(error) => {
+                panic!("`run` read the close's panic before the cycles' error: {error}")
+            }
+            Stop::Signal => panic!("a signal, and none was sent"),
+        }
+        assert!(
+            member.thread.join().is_err(),
+            "the thread ended by the close's panic"
+        );
+        assert!(
+            member.closed.load(Ordering::Acquire),
+            "given up, then closed"
+        );
+        // The guard told of the panic all the same, behind the message `run` read, and
+        // `run` reads one message.
+        assert!(
+            matches!(member.stopped.try_recv(), Ok(Stop::MemberPanicked(_))),
+            "the guard sent nothing as the close panicked"
+        );
+        let line = panic_line_at_join(Some(&told)).unwrap_or_else(|| {
+            panic!("`run` says nothing of a panic in the close after cycles that failed")
+        });
+        assert!(line.contains("panicked as the member stopped"), "{line}");
+        assert!(line.contains("report it with that message"), "{line}");
+        assert!(
+            line.ends_with("; see docs/how-to/run-a-cluster.md#when-it-does-not-work"),
+            "{line}"
+        );
+
+        // Stopped for a signal, as `run` stops it after one, then a panic in the close.
+        let member = started(Cycle::Idles, Close::Panics, MEMBER_FAILURE_TIMEOUT);
+        member.stop.store(true, Ordering::Release);
+        assert!(
+            member.thread.join().is_err(),
+            "the thread ended by the close's panic"
+        );
+        assert_eq!(panic_line_at_join(Some(&Stop::Signal)), Some(line));
     }
 
     /// Card 257, the second note: a member given up left no count, so `cavalry doctor`
