@@ -195,6 +195,13 @@ does yet.
 - **A check of the replayed recording's own entry at each poll.** Lost. It needs a
   shared layout read on the per-message path. The live recording's id already
   changes before any cut.
+- **A code of the C ABI of its own for a file that fails a check**, as the
+  counters file has 109, `COUNTERS`, and a log buffer 111, `LOG`. Lost in this
+  version. It is a constant more in `cavalry.h` and a version more of the C ABI,
+  for an error a caller treats as it treats a file it could not read: the message
+  names the file and the check that failed, and the caller opens the log again.
+  Code 113, `IO`, is the code it already handles for that. A code of its own is
+  worth its version when a caller has to tell the two apart, and none does yet.
 
 ## Evidence
 
