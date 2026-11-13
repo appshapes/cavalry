@@ -36,9 +36,14 @@ feature that followed this page, commit by commit.
    1. Copy `docs/decisions/0000-template.md` to the next number and fill every section,
       the alternatives that lost included. Set Status to Accepted: an ADR is accepted
       on the evidence that informed it, and what the implementation proves goes in the
-      commit message. If the decision still needs a prototype, leave it Proposed and
-      stop here: `just lint-docs` refuses a change to `spec/` without an Accepted ADR
-      in the same commit.
+      commit message. A decision that still waits, on a prototype not yet measured,
+      on another session or on the owner's own hand, is not written as a file. Put it
+      on the Brigade Board as a work item tagged `decision` and `cavalry`, with the
+      question, the options and the evidence in the template's sections, ask for the
+      owner's ruling with `brigade decision --card <work item>` when the ruling is
+      the owner's, and stop here until it is ruled. `just lint-docs` refuses an ADR
+      whose Status is Proposed, and a change to `spec/` without an Accepted ADR in the
+      same commit. Name the work item in the ADR's References (ADR 0119).
    2. Write the `spec/` page and its vectors as [`spec/README.md`](../../spec/README.md)
       says, and the one-line page under `docs/reference/` that includes it into the
       book, listed in `docs/SUMMARY.md`. Add a row to `docs/glossary.md` for every new

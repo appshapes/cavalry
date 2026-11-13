@@ -1,6 +1,6 @@
 ---
 name: next-task
-description: Say what the next task is, read from the repository and its process alone (master's CI, open pull requests and issues, Cavalry's work items on the Brigade Board, the slice ADR's feature order, the gates that print not built yet, Proposed ADRs, fired Revisit clauses, active sessions); an optional count lists that many, in order
+description: Say what the next task is, read from the repository and its process alone (master's CI, open pull requests and issues, Cavalry's work items on the Brigade Board, the slice ADR's feature order, the gates that print not built yet, the decisions that wait on the board, fired Revisit clauses, active sessions); an optional count lists that many, in order
 argument-hint: "[count]"
 ---
 
@@ -24,8 +24,10 @@ a work item on the team's Brigade Board and follows
 of the slice's features and which gates each one builds: ADR 0007 for the first slice,
 then the ADR its Revisit clause leads to, once that one is Accepted. A gate that prints
 `not built yet` is built by the first feature that needs it (CLAUDE.md, Gates). A
-Proposed ADR is accepted when the evidence it names exists. An accepted ADR's Revisit
-clause says when a new ADR is due.
+decision that waits, on the owner's own hand, on another session or on evidence not
+yet measured, is a work item on the board tagged `decision` beside `cavalry`, and no
+file is Proposed: its ADR lands Accepted with the change it explains, once it is
+ruled (ADR 0119). An accepted ADR's Revisit clause says when a new decision is due.
 
 ## 1. Read the state
 
@@ -49,7 +51,10 @@ to `master` while this one runs.
 - `brigade sessions`, when `brigade` is installed: the line under an active session is
   what it says it is doing, in its owner's words, unverified and possibly stale.
 - `grep -n 'not built yet' justfile`: the gates that do not exist.
-- `grep -H -m1 'Status' docs/decisions/*.md`: the Proposed ADRs.
+- `brigade work-item list --tag decision --all`: the decisions that wait. Cavalry's
+  are those also tagged `cavalry`; `brigade work-item show <number>` gives the
+  question, the options, the evidence, and the ruling when a comment has it (ADR
+  0119). No ADR file is Proposed.
 - `grep -n -A4 '^Revisit' docs/decisions/*.md`: the Revisit clauses.
 - The Decision section of the slice ADR, `docs/decisions/0007-build-ipc-pub-sub-first.md`:
   the features in order, the card number where it names one (a Trello card's, read
@@ -94,11 +99,16 @@ Highest first. Within one rule, the slice ADR's order, then the work item's list
    says that step 1 of `docs/how-to/implement-a-feature.md`, writing the work item, is
    the first move. The
    features after it follow in the slice's order, each waiting on the one before.
-4. **A Proposed ADR whose evidence now exists.** Its Evidence or Revisit section says
-   what acceptance waits on; when that is on `master`, accepting it is a task. When it
-   is not, the ADR is not a task.
+4. **A decision whose ruling or evidence now exists.** An open work item tagged
+   `decision` and `cavalry` says what it waits on. When the ruling is a comment on
+   it, or the evidence it names is on `master`, writing its ADR with the change it
+   explains is a task. When neither is there, the decision is not a task; when the
+   ruling is the owner's and has not been asked for, asking with `brigade decision
+   --card <work item>` is.
 5. **A fired Revisit clause.** The trigger has happened on `master`, the action it names
-   has not, and no open work item lists it. Cite the trigger and the evidence that it fired.
+   has not, and no open work item lists it. Cite the trigger and the evidence that it
+   fired. The first move is the work item that carries it, tagged `decision` and
+   `cavalry`.
 6. **Every other open work item**, Doing before Wanting, then by number.
 
 A task in flight in another session is reported in one line as taken, with the
@@ -125,7 +135,7 @@ For each task, in order:
 
 After the list, one footer line beginning `Read:` with what was consulted: `origin/master`'s
 head and its CI state, the counts of open pull requests, issues and work items, the slice's
-done count out of its total, the Proposed ADRs, and the active sessions. A source that
+done count out of its total, the decisions that wait on the board, and the active sessions. A source that
 could not be read is named here.
 
 End with the one command that starts the top task: `/work-item-start <n>` when it has a

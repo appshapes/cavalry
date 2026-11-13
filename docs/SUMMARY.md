@@ -165,3 +165,4 @@ under `docs/` is listed here; `just lint-docs` fails on one that is not.
 - [0115. Keep a cluster's sessions on every member, opened and closed by the log](decisions/0115-keep-a-clusters-sessions-on-every-member-opened-and-closed-by-the-log.md)
 - [0116. Read a member's sessions from its committed log, and serve them from its term's base](decisions/0116-read-a-members-sessions-from-its-committed-log-and-serve-them-from-its-terms-base.md)
 - [0117. Open a cluster session from the client, with a publication to every member](decisions/0117-open-a-cluster-session-from-the-client-with-a-publication-to-every-member.md)
+- [0119. Keep a decision that waits on the Brigade Board, and never as a Proposed file](decisions/0119-keep-a-decision-that-waits-on-the-brigade-board-and-never-as-a-proposed-file.md)
