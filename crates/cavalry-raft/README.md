@@ -133,9 +133,9 @@ commit path runs per message.
   `cluster.log_recording_id`, the recording that holds its log, which its service
   replays, the four counts of its list of its log's recordings (ADR 0108), and the
   twenty-two counts of `Counts::by_counter`. The
-  counters of sessions in `spec/cluster.md`, "Counters", are `Sessions`'s, which the
-  module does not drive yet, and the counter of the service's version comes with
-  that feature. One thread calls `do_work()`; the leader's process appends
+  counters of sessions in `spec/cluster.md`, "Counters", are `Sessions`'s, eight
+  with the gauge, stored each cycle with the others (ADR 0116), and the counter of
+  the service's version comes with that feature. One thread calls `do_work()`; the leader's process appends
   with `offer(payload)`, up to 1,344 bytes an entry. A consensus message whose step
   faults does not take the rest of its poll with it: `do_work()` hands every message
   the poll read to the election, as the next cycle would have, and returns the first
@@ -274,10 +274,10 @@ commit path runs per message.
   session open event and closed by its committed session close event, on every
   member, so a follower holds the sessions its leader opened and takes them up when
   it leads: a publication for each, the term's new leader event, and the session
-  timeout counted from its election's close. A member that wins an election reads
-  every entry of the terms before its own in leader replay, before its election
-  closes, so it has every session they opened before it accepts a connect and gives
-  no session id twice. The leader appends a session's messages
+  timeout counted from when it begins to serve. A member that wins an election reads
+  every entry of the terms before its own before it serves sessions (ADR 0116), so
+  it has every session they opened before it accepts a connect and gives no session
+  id twice. The leader appends a session's messages
   with its own term and the cluster's time, leaves one unread while the log is
   back-pressured (`Ingress::Unread`), and closes a session it has heard nothing from
   for 10 s: the session close event goes to the log first, and the closed event
@@ -285,6 +285,26 @@ commit path runs per message.
   committed. It counts what it refuses, drops and ignores in `SessionCounts`, eight
   counters of `counters.toml` with the gauge `cluster.sessions`. It allocates nothing
   after `Sessions::new`.
+- Serves those sessions over a driver (ADR 0116): the consensus module subscribes to
+  the ingress stream on its member's `ingress` endpoint and reads it with a
+  controlled poll, so that a message its sessions leave unread stays on the stream
+  and holds its client, and no message of another client is read past it. It answers
+  on exclusive publications to the clients' response channels, 20 at most. It reads
+  its own committed log as a service does, with `Cavalry::committed_log_on` on a
+  stream of its own, the log replay stream, 103, in every role,
+  and that read alone opens and closes its sessions: nothing above the commit
+  position is in its table. A leader serves sessions from when its election has
+  closed and that read has reached its term's base, so that it has every session and
+  every session id of the terms before it. A message of the ingress stream is one
+  frame, 1,344 bytes of payload at most; a fragment, and an entry its table cannot
+  hold, are counted in `cluster.messages_rejected`. So is a session message longer
+  than 1,344 bytes that a sender with a longer MTU delivers in one frame
+  (`Ingress::Rejected`): nothing of it is acted on, and it holds no client's
+  message behind it. The module's append refuses an entry longer than one frame
+  of the log as a fault, `RaftError::Append` with `too-long`, and never as back
+  pressure. A members string whose ingress
+  endpoints do not fit one frame of the egress stream as a redirect lists them,
+  1,320 bytes, is `RaftError::IngressEndpoints`, and the member does not start.
 - To come, each with its card: the C ABI's calls for a service, so that a service is
   a program in any of the five client languages (card 227), mixed versions in a
   rolling upgrade (card 228), the
@@ -297,10 +317,10 @@ In Aeron, this is Cluster, with Cluster Standby as a paid component
 
 ### What the sessions do not do yet
 
-The consensus module does not drive `Sessions` yet: no member reads the ingress
-stream or its own log for them, and no member allocates their counters, so a client
-has nothing to connect to. That is the next change of work item 229, with the
-client's own session after it (ADR 0115, Consequences).
+No client of Cavalry's own speaks the session protocol yet: a program connects by
+writing the messages of `spec/cluster.md` itself, as `tests/cluster_sessions.rs`
+does. The service of the leader does not reply to a session yet. Both are the next
+changes of work item 229.
 
 ### What the election does not do yet
 
@@ -372,6 +392,9 @@ for member in [0, 1, 2] {
 - [ADR 0115](../../docs/decisions/0115-keep-a-clusters-sessions-on-every-member-opened-and-closed-by-the-log.md),
   why every member holds the sessions, opened and closed by committed entries of
   the log, and what the leader adds to that table.
+- [ADR 0116](../../docs/decisions/0116-read-a-members-sessions-from-its-committed-log-and-serve-them-from-its-terms-base.md),
+  how the consensus module reads its own committed log for its sessions, and why a
+  leader serves them only once that read has reached its term's base.
 - [ADR 0067](../../docs/decisions/0067-register-the-elections-state-machine-with-its-core-and-count-each-step.md),
   why the election's machine is registered with the core and what its two step
   counters count.

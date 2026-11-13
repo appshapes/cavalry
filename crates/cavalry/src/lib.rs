@@ -4,8 +4,8 @@
 pub use cavalry_client::{
     Action, ArmedRecording, BufferClaim, Cavalry, ClientError, Closed, ClusterError,
     ClusterSession, CommittedLog, Counter, DataFrameHeader, FOLLOW_LENGTH, Fault, Flags, FrameType,
-    Image, MAX_IMAGES, NULL_LENGTH, NULL_POSITION, Offer, Positions, Publication, Recording,
-    Replay, ReplayStopReason, SERVICE_LOG_STREAM_ID, Subscription,
+    Image, LOG_REPLAY_STREAM_ID, MAX_IMAGES, NULL_LENGTH, NULL_POSITION, Offer, Positions,
+    Publication, Recording, Replay, ReplayStopReason, SERVICE_LOG_STREAM_ID, Subscription,
 };
 pub use cavalry_driver::{
     Driver, DriverError, DriverThread, IdleStrategy, Idler, ThreadStart, spec,

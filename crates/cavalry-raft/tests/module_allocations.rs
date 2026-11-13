@@ -2,8 +2,9 @@
 //! module, not its client, and not the three drivers of this process, while the leader
 //! appends an entry every cycle; and neither does the service beside each member,
 //! which reads the committed log in every cycle, nor the replay the driver plays it
-//! (`CLAUDE.md`, invariant 2; ADR 0066). A test of its own, since the counting
-//! allocator is the whole process's.
+//! (`CLAUDE.md`, invariant 2; ADR 0066). Each member's module reads its own log too,
+//! for its sessions, in every cycle (ADR 0116), and that read is counted with the
+//! rest. A test of its own, since the counting allocator is the whole process's.
 
 use std::alloc::System;
 use std::time::{Duration, Instant};
@@ -135,6 +136,40 @@ fn three_members_run_their_duty_cycles_without_an_allocation() {
             log.member_id()
         );
         assert!(!log.is_ended());
+    }
+
+    // Each member's own read of its log, for its sessions, crosses the same recordings
+    // on a follower that joined late (ADR 0116): it opens its log again once, a
+    // command, and its new replay's image reaches its client's conductor some cycles
+    // after. Both are before the count. The leader appends, and every module reads
+    // past where its service stood: that position is on the member's live recording,
+    // so a module that has read an entry beyond it holds that recording's handle,
+    // with its image.
+    let marks: Vec<(i32, i64)> = services
+        .iter()
+        .map(|(_, log)| (log.member_id(), log.position()))
+        .collect();
+    let deadline = Instant::now() + Duration::from_secs(30);
+    while !marks.iter().all(|&(member, position)| {
+        cluster.iter().any(|(_, module)| {
+            module.member_id() == member && module.session_log_position() > position
+        })
+    }) {
+        assert!(
+            Instant::now() < deadline,
+            "the members' own reads of their logs did not pass {marks:?}"
+        );
+        match cluster[0].1.offer(&[1u8; 64]) {
+            Ok(()) | Err(RaftError::Offer(Refused::BackPressured)) => {}
+            Err(error) => panic!("{error}"),
+        }
+        for (_, module) in &mut cluster {
+            module.do_work().expect("the member's duty cycle");
+        }
+        for (_, log) in services.iter_mut() {
+            log.poll(|_, _, _| {}, 64).expect("the log polls");
+        }
+        std::thread::sleep(Duration::from_micros(100));
     }
 
     // Twenty thousand cycles of all three members and their services, an entry offered

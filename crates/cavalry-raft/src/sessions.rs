@@ -9,10 +9,11 @@
 //! order and no further than the commit position, through [`Sessions::on_entry`]:
 //! they alone open and close a session, on the leader and on a follower alike, so
 //! that every member holds the same sessions at the same position and a new leader
-//! has them. A member that wins an election has read every entry below its term base
-//! log position in leader replay (`spec/cluster.md`, "Roles and the election", state
-//! 6), before its election closes and before it accepts a connect: so while it leads
-//! it reads only the entries of its own term. And a duty cycle,
+//! has them. A member that wins an election has been handed every entry below its
+//! term base log position before its caller reports it as leading
+//! ([`Leadership::leads`]; `spec/cluster.md`, "Sessions"; ADR 0116), and so before it
+//! accepts a connect: while it leads it reads only the entries of its own term. And a
+//! duty cycle,
 //! [`Sessions::do_work`], which sends what is owed and counts the timeouts. What it
 //! sends and appends goes through [`SessionIo`].
 
@@ -30,6 +31,7 @@ use cavalry_shm::counters::generated::{
 };
 
 use crate::consensus::Clock;
+use crate::module::MAX_PAYLOAD_LENGTH;
 
 /// The longest response channel a session holds: `cavalry:udp?endpoint=`, a host name
 /// of 253 bytes, `:` and a port of five digits. A longer one is not
@@ -46,8 +48,10 @@ pub const TIMEOUT_DETAIL: &[u8] = b"TIMEOUT";
 /// What the member's election says, read once for a duty cycle.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub struct Leadership {
-    /// Whether the member is the leader and its election has closed: the one member
-    /// that opens sessions and appends their messages.
+    /// Whether the member serves sessions: it is the leader, its election has closed,
+    /// and every entry of its log below its term base log position has been handed to
+    /// [`Sessions::on_entry`] (ADR 0116). It is the one member that opens sessions
+    /// and appends their messages.
     pub leads: bool,
     /// The member's leadership term id, −1 for none.
     pub leadership_term_id: i64,
@@ -75,7 +79,9 @@ pub trait SessionIo {
     fn remove_egress(&mut self, slot: usize) -> Result<(), Self::Fault>;
 
     /// Appends `entry` to the leader's log. `Ok(false)` when the log is
-    /// back-pressured and nothing was written.
+    /// back-pressured and nothing was written. An entry the log can never take, one
+    /// longer than a frame of it, is the fault, never `Ok(false)`: waiting does not
+    /// make it fit, and the message that made it would be left unread for good.
     fn append(&mut self, entry: &Message<'_>) -> Result<bool, Self::Fault>;
 }
 
@@ -90,6 +96,12 @@ pub enum Ingress {
     /// position and reads nothing more from the ingress stream this cycle
     /// (`Action::Abort` of a controlled poll, ADR 0114).
     Unread,
+    /// The message is none this version's session protocol carries: a session
+    /// message whose payload is longer than [`MAX_PAYLOAD_LENGTH`], which no entry of
+    /// one frame of the log holds. Nothing of it is acted on, on any member: the
+    /// reader takes it, as it does a fragment, and counts it in
+    /// `cluster.messages_rejected` (`spec/cluster.md`, "Sessions"; ADR 0116).
+    Rejected,
 }
 
 /// What a member's sessions have counted, each the counter of `spec/cluster.md`,
@@ -322,7 +334,10 @@ impl Sessions {
     /// [`Ingress::Unread`] asks the reader to leave the message where it is: a
     /// session message or a session close whose entry the back-pressured log did not
     /// take, and a connect that reached a member whose election as leader has not
-    /// closed yet.
+    /// closed yet. [`Ingress::Rejected`] is a session message whose payload is longer
+    /// than [`MAX_PAYLOAD_LENGTH`], whichever member reads it: it is checked before
+    /// anything else, so it is never appended, never the session's activity, and
+    /// never left unread, which would hold every other client's message behind it.
     pub fn on_ingress<I: SessionIo>(
         &mut self,
         clock: Clock,
@@ -352,6 +367,11 @@ impl Sessions {
                 payload,
                 ..
             } => {
+                // No entry of one frame of the log holds it, whoever reads it: a
+                // sender with a longer MTU delivers it whole (ADR 0116).
+                if payload.len() > MAX_PAYLOAD_LENGTH {
+                    return Ok(Ingress::Rejected);
+                }
                 let Some(index) = self.acting(lead, leadership_term_id, cluster_session_id) else {
                     self.counts.ingress_ignored = self.counts.ingress_ignored.saturating_add(1);
                     return Ok(Ingress::Taken);
@@ -428,13 +448,14 @@ impl Sessions {
     ///
     /// On the leader that accepted the connect, the session open event is what the
     /// ok event waits for. The caller hands a member every entry below its term base
-    /// log position before it reports the member as leading, in leader replay
-    /// (`spec/cluster.md`, "Roles and the election", state 6): the commit position
-    /// reaches that base once a quorum has recorded the leader's term, and the
-    /// election closes after the replay. So a session open event of a term before the
-    /// leader's own opens its session as it does on a follower, and the member takes
-    /// the session up with the others when its election closes, with a publication
-    /// and the new leader event, and no ok event. While the member leads, every
+    /// log position before it reports the member as leading (`spec/cluster.md`,
+    /// "Sessions"; ADR 0116): the commit position reaches that base once a quorum has
+    /// recorded the leader's term, and the consensus module reports a member as
+    /// leading only once its read of its own committed log has reached it. So a
+    /// session open event of a term before the leader's own opens its session as it
+    /// does on a follower, and the member takes the session up with the others when
+    /// it begins to lead, with a publication and the new leader event, and no ok
+    /// event. While the member leads, every
     /// session open event it reads is of its own term and names an id it gave, so
     /// its own connecting session is found by that id. A session open event with
     /// the table full, or for an id that is open, and a session close event for a
@@ -474,9 +495,9 @@ impl Sessions {
                 let Some(session) = self.sessions.get_mut(index) else {
                     return Ok(false);
                 };
-                // A follower's entry, or one a leader replays before its election
-                // closes: no publication yet, and the election's close takes the
-                // session up (`take_up`).
+                // A follower's entry, or one a member that won its election reads
+                // before it is reported as leading: no publication yet, and `take_up`
+                // takes the session up when it is.
                 if connecting.is_none() {
                     *session = Session::FREE;
                     if !session.set_channel(response_channel) {

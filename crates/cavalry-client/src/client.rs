@@ -1460,7 +1460,40 @@ impl Cavalry {
     ///
     /// [`SERVICE_LOG_STREAM_ID`]: crate::SERVICE_LOG_STREAM_ID
     pub fn committed_log(&mut self, position: i64) -> Result<Option<CommittedLog>, ClientError> {
-        CommittedLog::open(self, position)
+        CommittedLog::open(self, crate::SERVICE_LOG_STREAM_ID, position)
+    }
+
+    /// [`committed_log`](Self::committed_log) on a stream the caller names: the
+    /// subscription and the replay are on `cavalry:ipc` and `stream_id`. A service
+    /// reads on the service log stream, which is what `committed_log` passes. A
+    /// member's consensus module reads its own log on the log replay stream,
+    /// [`LOG_REPLAY_STREAM_ID`](crate::LOG_REPLAY_STREAM_ID), for its sessions, so that
+    /// its replay and a service's never reach each other's subscription: a reader
+    /// that opens its log again then costs no other reader an image to open
+    /// (`spec/cluster.md`, "Members and streams"; ADR 0116).
+    ///
+    /// ```
+    /// use cavalry_client::{Cavalry, LOG_REPLAY_STREAM_ID};
+    ///
+    /// # fn main() -> Result<(), Box<dyn std::error::Error>> {
+    /// # let dir = std::env::temp_dir().join(format!("cavalry-doc-committed-on-{}", std::process::id()));
+    /// # let _ = std::fs::remove_dir_all(&dir);
+    /// # let driver = cavalry_driver::Driver::start(&dir, dir.join("log"))?;
+    /// let mut client = Cavalry::connect_to(&dir)?;
+    /// // A driver that hosts no cluster member has no committed log on any stream.
+    /// assert!(client.committed_log_on(LOG_REPLAY_STREAM_ID, 0)?.is_none());
+    /// # client.close()?;
+    /// # driver.close()?;
+    /// # let _ = std::fs::remove_dir_all(&dir);
+    /// # Ok(())
+    /// # }
+    /// ```
+    pub fn committed_log_on(
+        &mut self,
+        stream_id: i32,
+        position: i64,
+    ) -> Result<Option<CommittedLog>, ClientError> {
+        CommittedLog::open(self, stream_id, position)
     }
 
     /// Opens a session with the cluster that `members` names, the members string the
