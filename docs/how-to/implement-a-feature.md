@@ -39,9 +39,15 @@ feature that followed this page, commit by commit.
       commit message. A decision that still waits, on a prototype not yet measured,
       on another session or on the owner's own hand, is not written as a file. Put it
       on the Brigade Board as a work item tagged `decision` and `cavalry`, with the
-      question, the options and the evidence in the template's sections, ask for the
-      owner's ruling with `brigade decision --card <work item>` when the ruling is
-      the owner's, and stop here until it is ruled. `just lint-docs` refuses an ADR
+      question, the options and the evidence in the template's sections. When the
+      ruling is the owner's, ask for it with `brigade decision --to <the owner's
+      roster label> --card <work item>`, the question on stdin in a quoted heredoc
+      (`<<'EOF'`); Brigade refuses an ask without `--to`. Stop here until it is
+      ruled. The owner answers where they choose, on Slack, by mail or in a
+      conversation, and Brigade copies the answer nowhere: the session that receives
+      it records the ruling on the work item with `brigade work-item comment <work
+      item>`, the owner's words on stdin, then closes the ask with `brigade decision
+      --close <the ask's id>`. `just lint-docs` refuses an ADR
       whose Status is Proposed, and a change to `spec/` without an Accepted ADR in the
       same commit. Name the work item in the ADR's References (ADR 0119).
    2. Write the `spec/` page and its vectors as [`spec/README.md`](../../spec/README.md)

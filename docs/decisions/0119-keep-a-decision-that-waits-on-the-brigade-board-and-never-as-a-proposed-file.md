@@ -41,9 +41,15 @@ A decision that waits on someone, the owner's own hand, another session, or evid
 not yet measured, is a work item on the Brigade Board tagged `decision` beside
 `cavalry`. It holds the question, the options and the evidence in the template's
 sections, and its ruling is a comment on it. The ask for the owner's ruling is
-`brigade decision --card <work item>`. Once it is ruled, the ADR lands Accepted with
-the change it explains, its References name the work item, and the work item's
-landing comment names the ADR.
+`brigade decision --to <the owner's roster label> --card <work item>`, with the
+question on stdin in a quoted heredoc (`<<'EOF'`), so that the shell expands nothing
+in it. Brigade refuses an ask without `--to` and sends nothing. The owner answers
+where they choose, on Slack, by mail or in a conversation, and Brigade copies the
+answer nowhere. So the session that receives the answer records it on the work item
+with `brigade work-item comment <work item>`, the owner's words on stdin, and then
+closes the ask with `brigade decision --close <the ask's id>`. Once it is ruled, the
+ADR lands Accepted with the change it explains, its References name the work item,
+and the work item's landing comment names the ADR.
 
 A file is never Proposed. The statuses of an ADR file are Accepted, Superseded by
 NNNN and Rejected, and `just lint-docs` refuses a file whose Status is Proposed,
@@ -118,6 +124,9 @@ board.
 
 - The Brigade Board's work items 302, the rulings, and 307, Cavalry's part
 - ADR 0001, ADR 0004, ADR 0113
+- Brigade's `docs/developer/reference/commands.md`, for the usage of `brigade
+  decision`, `--to` required; Brigade's `docs/team-member/use/notes-and-decisions.md`,
+  for the answer, which Brigade does not carry back
 - `CLAUDE.md`, Working rules for agents and Documentation; `.claude/rules/docs.md`,
   "Decisions (ADRs)"; `docs/decisions/0000-template.md`;
   `docs/how-to/implement-a-feature.md`, step 2; `.claude/skills/next-task/SKILL.md`;
