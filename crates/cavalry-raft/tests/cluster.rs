@@ -1165,6 +1165,78 @@ fn offer(members: &mut [Member], running: &[usize], from: u32, count: u32) {
     }
 }
 
+/// Three members under `dir` with a service's client on each driver, and each
+/// service's log, opened at position 0 as soon as its member has one. A service that
+/// starts with its member asks until the member has its log: the members are in
+/// canvass, and a follower's recording starts after its election. A member names its
+/// recording before the leader's election closes, state 5 on the leader and 15 on a
+/// follower, so each handle is opened on a log that holds nothing yet. Returns once
+/// every election has closed, with the leader first in the three vectors.
+///
+/// As in [`start_led`], a start in which a follower joined late is closed and made
+/// again, five times at most: that follower names no recording until it has caught
+/// up, and its service's handle at 0 is then of the recording of its catch-up, which
+/// has stopped.
+fn start_led_with_services(dir: &Path) -> (Vec<Member>, Vec<Cavalry>, Vec<CommittedLog>) {
+    for attempt in 0..5 {
+        let mut members = start(&dir.join(format!("start-{attempt}")), &members_string());
+        let mut clients: Vec<Cavalry> = members
+            .iter()
+            .map(|member| Cavalry::connect_to(&member.dir).expect("the service's client connects"))
+            .collect();
+        let mut logs: Vec<Option<CommittedLog>> = (0..3).map(|_| None).collect();
+        let mut asked_early = 0;
+        run_until(&mut members, "every service opened its log", |_| {
+            for (log, client) in logs.iter_mut().zip(clients.iter_mut()) {
+                if log.is_none() {
+                    *log = client.committed_log(0).expect("the driver answers");
+                    asked_early += usize::from(log.is_none());
+                }
+            }
+            logs.iter().all(Option::is_some)
+        });
+        let mut logs: Vec<CommittedLog> = logs.into_iter().flatten().collect();
+        // What each handle is before its first poll, beside what its member names.
+        let opened: Vec<_> = logs
+            .iter()
+            .zip(&members)
+            .map(|(log, member)| {
+                (
+                    (log.member_id(), Some(log.recording_id())),
+                    (member.module.member_id(), member.module.log_recording_id()),
+                    (log.position(), log.commit_position(), log.is_ended()),
+                )
+            })
+            .collect();
+        // The leader refuses an offer until its election has closed: a test's offers
+        // wait for every election to close.
+        let led_from = run_until_led(&mut members);
+        clients.swap(0, led_from);
+        logs.swap(0, led_from);
+        if members.iter().all(in_one_recording) {
+            assert!(
+                asked_early > 0,
+                "no service asked before its member had a log"
+            );
+            for (handle, member, at) in opened {
+                assert_eq!(handle, member);
+                assert_eq!(at, (0, 0, false));
+            }
+            return (members, clients, logs);
+        }
+        println!(
+            "cluster: a follower joined late in start {attempt}, which is made again: {:?}",
+            members.iter().map(log_recordings).collect::<Vec<_>>()
+        );
+        for (log, mut client) in logs.into_iter().zip(clients) {
+            log.close(&mut client).expect("the handle closes");
+            client.close().expect("the service's client closes");
+        }
+        close(members);
+    }
+    panic!("a follower joined late in each of five starts");
+}
+
 /// A service beside each member reads the committed log through its member's driver
 /// (`spec/cluster.md`, "The service"; ADR 0066): the same entries at the same positions
 /// on the leader and on both followers, none past the commit position even when the
@@ -1173,46 +1245,7 @@ fn offer(members: &mut [Member], running: &[usize], from: u32, count: u32) {
 #[test]
 fn a_service_reads_the_committed_log_on_every_member_and_nothing_past_the_commit_position() {
     let dir = TestDir::new("service");
-    let members_string = members_string();
-    let mut members = start(dir.path(), &members_string);
-    let mut clients: Vec<Cavalry> = members
-        .iter()
-        .map(|member| Cavalry::connect_to(&member.dir).expect("the service's client connects"))
-        .collect();
-
-    // A service that starts with its member asks until the member has its log: the
-    // members are in canvass, and a follower's recording starts after its election.
-    let mut logs: Vec<Option<CommittedLog>> = (0..3).map(|_| None).collect();
-    let mut asked_early = 0;
-    run_until(&mut members, "every service opened its log", |_| {
-        for (log, client) in logs.iter_mut().zip(clients.iter_mut()) {
-            if log.is_none() {
-                *log = client.committed_log(0).expect("the driver answers");
-                asked_early += usize::from(log.is_none());
-            }
-        }
-        logs.iter().all(Option::is_some)
-    });
-    assert!(
-        asked_early > 0,
-        "no service asked before its member had a log"
-    );
-    let mut logs: Vec<CommittedLog> = logs.into_iter().flatten().collect();
-    for (index, log) in logs.iter().enumerate() {
-        assert_eq!(log.member_id(), members[index].module.member_id());
-        assert_eq!(
-            Some(log.recording_id()),
-            members[index].module.log_recording_id()
-        );
-        assert_eq!((log.position(), log.commit_position()), (0, 0));
-        assert!(!log.is_ended());
-    }
-    // A member names its recording before the leader's election closes, state 5 on
-    // the leader and 15 on a follower, and the leader refuses an offer until it has
-    // closed: the offers below wait for every election to close.
-    let led_from = run_until_led(&mut members);
-    clients.swap(0, led_from);
-    logs.swap(0, led_from);
+    let (mut members, mut clients, mut logs) = start_led_with_services(dir.path());
     let leader_id = members[0].module.member_id();
     let mut reads: Vec<Read> = vec![Vec::new(); 3];
 
@@ -1793,11 +1826,14 @@ fn a_service_reads_across_the_recordings_of_a_member_that_joined_the_log_again()
         log.position() == first
     });
 
-    // The leader's module stands still: each follower leaves the log, and the
-    // service's handle comes to its end at the position it had read.
+    // The leader's module stands still, and the second follower's with it: the
+    // service's member leaves the log, and the service's handle comes to its end at
+    // the position it had read. One follower alone runs here, so that no quorum is
+    // left without a leader to hold a ballot of its own before the leader answers.
+    let term = members[0].module.leadership_term_id();
     run_until(
-        &mut members[1..],
-        "each follower timed out its silent leader and the service's log ended",
+        &mut members[1..2],
+        "the follower timed out its silent leader and the service's log ended",
         |members| {
             poll_log(&mut log, &mut read);
             log.is_ended()
@@ -1811,22 +1847,31 @@ fn a_service_reads_across_the_recordings_of_a_member_that_joined_the_log_again()
     assert_eq!(read.len(), usize::try_from(ENTRIES).expect("a count") + 1);
     log.close(&mut client).expect("the handle closes");
 
-    // The leader runs again, the follower joins the log on a new recording, and the
-    // leader appends more.
+    // The leader runs again, the follower joins the log on a new recording, the
+    // second follower runs again, and the leader, which leads the term it led,
+    // appends more.
     run_until(
-        &mut members,
-        "each follower joined the log again",
+        &mut members[..2],
+        "the follower joined the log again",
         |members| {
             members
                 .iter()
                 .all(|m| m.module.election_state() == ElectionState::Closed)
-                && members[1..].iter().all(|m| {
-                    m.module
-                        .log_recording_id()
-                        .is_some_and(|id| id != first_recording)
-                })
+                && members[1]
+                    .module
+                    .log_recording_id()
+                    .is_some_and(|id| id != first_recording)
         },
     );
+    run_until(&mut members, "every member follows the leader", |members| {
+        members
+            .iter()
+            .all(|m| m.module.election_state() == ElectionState::Closed)
+    });
+    assert_eq!(members[0].module.role(), Role::Leader);
+    for member in &members {
+        assert_eq!(member.module.leadership_term_id(), term);
+    }
     offer_entries(&mut members, ENTRIES);
     let second = first + ENTRIES * 96;
     run_until(
