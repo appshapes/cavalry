@@ -914,11 +914,16 @@ event when it begins to serve, and no ok event. The next session id is one more 
 the highest the member has given or has read in a session open event, so that a new
 leader gives no id twice (ADR 0115, ADR 0116). A message of the ingress stream is one
 frame in this version, as an entry of the log is: a session message carries at most
-1,344 bytes of payload after its header. No member reassembles: a fragment of a longer
-message is counted in `cluster.messages_rejected` and nothing of the message is acted
-on. A member reads its ingress stream so that a message it cannot take yet stays
-unread (`spec/log-buffer.md`, "Reading", the controlled read), and until that message
-is taken it reads no message of another client's image. Every refusal is
+1,344 bytes of payload after its header. No member reassembles, and no leader
+appends an entry of more than one frame: a session message whose payload is longer
+than 1,344 bytes, whether it arrives whole, from a sender whose MTU length is above
+1,408 bytes, or as a fragment, is counted in `cluster.messages_rejected`, is taken
+from the ingress image, and nothing of it is acted on, by a leader or by any other
+member: it is not appended, and it is its session's activity no more than a message
+that was ignored. A member reads its ingress stream so that a message it cannot
+take yet stays unread (`spec/log-buffer.md`, "Reading", the controlled read), and
+until that message is taken it reads no message of another client's image. Every
+refusal is
 counted in `cluster.sessions_refused`. A redirect or a refusal is answered on an egress
 publication to the connect's response channel on stream 102, the one egress stream of
 this version, whatever response stream id the connect named; the member holds the
@@ -1188,7 +1193,7 @@ that a reader of a counters file knows which transition it saw.
 | `cluster.join_position_mismatches` | an image of a replay or of the live log that joined somewhere other than where the member's log ends, so the member failed its election: in states 12 and 15 at a position other than its append position, in state 9 at a position other than the one it asked from (ADR 0086, ADR 0092) |
 | `cluster.sessions_timed_out` | a session closed for the session timeout |
 | `cluster.catchups` | a catch-up begun: on the follower, a catch-up position sent; on the leader, a replay started |
-| `cluster.messages_rejected` | a message of this page a reader rejected, for any reason of "What a reader rejects"; and, on a member's ingress stream and in its read of its own committed log, a fragment of a message longer than one frame, and a session open or close event its table of sessions cannot hold ("Sessions") |
+| `cluster.messages_rejected` | a message of this page a reader rejected, for any reason of "What a reader rejects"; and, on a member's ingress stream and in its read of its own committed log, a fragment of a message longer than one frame, a session message whose payload is longer than 1,344 bytes, and a session open or close event its table of sessions cannot hold ("Sessions") |
 | `cluster.log_recordings_listed` | a list of the recordings of the member's log written to its log recordings file and synced: the list a creation writes, and each list after it, at the four moments of `spec/durable-log.md`, "The driver" ("The log"; ADR 0108) |
 | `cluster.log_recordings_unsynced` | a duty cycle in which the member could not write or sync its log recordings file, so that the recording it had to list stayed out of its log and its append position did not count it; the next cycle writes again ("The log"; ADR 0108) |
 | `cluster.log_recordings_forgotten` | a recording of its log that the member forgot, its table holding 1,024 stopped ones already: the member replays nothing below its oldest kept recording to a member or a service from then on, and does not start again on its log directory ("A member's start"; ADR 0091, ADR 0108) |

@@ -91,9 +91,14 @@ says. An image that goes while its message is held holds nothing any more.
 
 A message of the ingress stream is one frame, as an entry of the log is (ADR 0066):
 a session message carries at most 1,344 bytes of payload. The module reassembles
-nothing, and counts a fragment in `cluster.messages_rejected`. An entry of its own
-log that is a fragment, that does not parse, or that the table cannot hold is
-counted there too.
+nothing, and counts a fragment in `cluster.messages_rejected`. A session message
+with a longer payload that arrives whole, in one frame of a sender whose MTU is
+longer, is rejected there too, on every member and before anything else is done
+with it: it is never appended, never its session's activity, and never left unread,
+where it would hold every other client's message behind it. The log's append
+refuses an entry longer than one frame as a fault, and never as back pressure,
+which waiting would not end. An entry of its own log that is a fragment, that does
+not parse, or that the table cannot hold is counted there too.
 
 An egress publication is an exclusive publication on the client's response channel,
 one for each of the 20 slots `Sessions` names. The driver's refusal of the channel
@@ -168,6 +173,16 @@ each cycle.
   and now each member's own read of its log, twenty thousand cycles with an entry
   offered in each, no allocation; 25 of 25 runs on a macOS laptop with the module on
   the log replay stream, and 16 of 25 with it on the service log stream.
+- `crates/cavalry-raft/tests/sessions.rs` and the module's own tests, added on the
+  review of pull request 278: a session message of 1,345 bytes of payload is
+  rejected on a leader and on two members that do not lead, with the log
+  back-pressured or not, and does not keep its session from its timeout; one of
+  1,344 bytes is appended as one entry of 1,376 bytes; a rejected message of one
+  image holds back no message of another image in the same poll; an entry of 1,377
+  bytes is a fault of the append, `too-long`. A members string whose ingress
+  endpoints are listed in 1,320 bytes passes the check and one of 1,321 bytes is
+  refused, and a redirect with a detail of 1,320 bytes encodes to one frame of
+  1,376 bytes.
 - The pull request's body has the runs: how many times each test ran, on the laptop
   and on both runners, and with a follower forced to join late.
 - Aeron's source named in Context.
