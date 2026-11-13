@@ -17,7 +17,7 @@ mod subscription;
 pub use cavalry_proto::client_protocol::{
     FOLLOW_LENGTH, NULL_LENGTH, NULL_POSITION, ReplayStopReason,
 };
-pub use cavalry_proto::cluster::SERVICE_LOG_STREAM_ID;
+pub use cavalry_proto::cluster::{LOG_REPLAY_STREAM_ID, SERVICE_LOG_STREAM_ID};
 pub use cavalry_proto::frame::{DataFrameHeader, Flags, FrameType};
 pub use cavalry_shm::log::{Action, BufferClaim, Positions};
 pub use client::{Cavalry, DIR_ENV};

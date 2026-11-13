@@ -1303,8 +1303,8 @@ id = 125
 name = "cluster.messages_rejected"
 kind = "counter"
 scope = "client"
-doc = "Messages of the consensus stream one cluster member rejected, for any reason of spec/cluster.md, What a reader rejects; key: member id (i32), little-endian; label text: the member id in decimal."
-doctor = "A member sends consensus messages this member cannot read: check that every member runs the same version."
+doc = "Messages one cluster member rejected: of the consensus stream, for any reason of spec/cluster.md, What a reader rejects; of the ingress stream, a fragment, and a session message longer than 1,344 bytes of payload that arrived in one frame; and of its read of its own committed log, a fragment, and a session open or close event its table of sessions cannot hold (spec/cluster.md, Sessions; ADR 0116). Nothing of a rejected message is acted on; key: member id (i32), little-endian; label text: the member id in decimal."
+doctor = "Another member sends consensus messages this member cannot read, or a client sends session messages no entry of the log holds: check that every member and every cluster client runs the same version, and that a client sends at most 1,344 bytes in a message."
 
 [[counter]]
 id = 126

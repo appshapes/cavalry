@@ -290,7 +290,8 @@ pub trait Io {
     fn append_position(&mut self) -> i64;
 
     /// Appends `entry` to the leader's log. `Ok(false)` when the publication is
-    /// back-pressured and nothing was written.
+    /// back-pressured and nothing was written; an entry longer than one frame of the
+    /// log is the fault, since waiting never makes it fit.
     fn append(&mut self, entry: &Message<'_>) -> Result<bool, Self::Fault>;
 
     /// The two lowest terms in the member's record of terms above `term`, each with its
@@ -1113,6 +1114,12 @@ impl Consensus {
     /// The term this member leads or follows, −1 before the first.
     pub fn leadership_term_id(&self) -> i64 {
         self.term
+    }
+
+    /// The term base log position of the term this member leads or follows: where
+    /// that term's first entry begins, and 0 before the first term.
+    pub fn term_base_log_position(&self) -> i64 {
+        self.term_base
     }
 
     /// This member's append position as of its last duty cycle.

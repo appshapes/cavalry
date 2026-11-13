@@ -377,7 +377,7 @@ pub const CLUSTER_LEADERSHIP_TERM_ID: CounterId = CounterId(123);
 /// `cluster.append_position`, a client gauge: One cluster member's append position: the end of the contiguous span its recordings of the log hold, as a sync has made it durable (spec/cluster.md, The log; ADR 0060); key: member id (i32), little-endian; label text: the member id in decimal.
 pub const CLUSTER_APPEND_POSITION: CounterId = CounterId(124);
 
-/// `cluster.messages_rejected`, a client counter: Messages of the consensus stream one cluster member rejected, for any reason of spec/cluster.md, What a reader rejects; key: member id (i32), little-endian; label text: the member id in decimal.
+/// `cluster.messages_rejected`, a client counter: Messages one cluster member rejected: of the consensus stream, for any reason of spec/cluster.md, What a reader rejects; of the ingress stream, a fragment, and a session message longer than 1,344 bytes of payload that arrived in one frame; and of its read of its own committed log, a fragment, and a session open or close event its table of sessions cannot hold (spec/cluster.md, Sessions; ADR 0116). Nothing of a rejected message is acted on; key: member id (i32), little-endian; label text: the member id in decimal.
 pub const CLUSTER_MESSAGES_REJECTED: CounterId = CounterId(125);
 
 /// `cluster.log_recording_id`, a client gauge: The id of the recording one cluster member records the live log into, -1 while it records none: the leader's recording of its log publication, or a follower's recording of the leader's image it joined last; the recording its service replays, or reads below through the member's file of its log's recordings (spec/cluster.md, The service and The log's recordings; ADR 0066, ADR 0103). The member's consensus module adds the counter and stores -1 in it before it adds cluster.commit_position, stores a new value in it before it stores a commit position the recording does not hold, and writes the file of its log's recordings before it stores a recording's id in it; key: member id (i32), little-endian; label text: the member id in decimal.
@@ -1475,8 +1475,8 @@ pub const COUNTERS: &[CounterDef] = &[
         name: "cluster.messages_rejected",
         kind: Kind::Counter,
         scope: Scope::Client,
-        doc: "Messages of the consensus stream one cluster member rejected, for any reason of spec/cluster.md, What a reader rejects; key: member id (i32), little-endian; label text: the member id in decimal.",
-        doctor: "A member sends consensus messages this member cannot read: check that every member runs the same version.",
+        doc: "Messages one cluster member rejected: of the consensus stream, for any reason of spec/cluster.md, What a reader rejects; of the ingress stream, a fragment, and a session message longer than 1,344 bytes of payload that arrived in one frame; and of its read of its own committed log, a fragment, and a session open or close event its table of sessions cannot hold (spec/cluster.md, Sessions; ADR 0116). Nothing of a rejected message is acted on; key: member id (i32), little-endian; label text: the member id in decimal.",
+        doctor: "Another member sends consensus messages this member cannot read, or a client sends session messages no entry of the log holds: check that every member and every cluster client runs the same version, and that a client sends at most 1,344 bytes in a message.",
     },
     CounterDef {
         id: CLUSTER_LOG_RECORDING_ID,

@@ -13,7 +13,9 @@ use cavalry_proto::cluster::{
     INVALID_RESPONSE_CHANNEL, MAX_PENDING_ANSWERS, MAX_SESSIONS, Message, Stream,
 };
 use cavalry_raft::sessions::{EGRESS_SLOTS, MAX_RESPONSE_CHANNEL_LENGTH, TIMEOUT_DETAIL};
-use cavalry_raft::{Clock, Ingress, Leadership, SessionCounts, SessionIo, Sessions};
+use cavalry_raft::{
+    Clock, Ingress, Leadership, MAX_PAYLOAD_LENGTH, SessionCounts, SessionIo, Sessions,
+};
 
 const ENDPOINTS: &[u8] = b"0=10.0.0.1:9010,1=10.0.0.2:9010,2=10.0.0.3:9010";
 const TIME: i64 = 1_700_000_000_000;
@@ -720,6 +722,83 @@ fn a_session_message_is_appended_or_left_unread_and_never_kept() {
     }
     assert_eq!(world.log.len(), 2);
     assert_eq!(sessions.counts().ingress_ignored, 4);
+}
+
+/// The bound of a session message first: a payload longer than 1,344 bytes, what one
+/// entry of one frame of the log holds, is rejected before anything else, on the
+/// leader and on a member that does not lead, whatever the log can take. It is never
+/// appended, never the session's activity and never left unread, so a back-pressured
+/// log does not hold it, and every other client's message behind it, until the
+/// session times out. The reader counts it in `cluster.messages_rejected`; the
+/// sessions count nothing. A payload of 1,344 bytes, the longest, is appended as an
+/// entry of 1,376 bytes, one frame of the log at the 1,408-byte MTU
+/// (`spec/cluster.md`, "Sessions"; ADR 0116).
+#[test]
+fn a_session_message_longer_than_an_entry_is_rejected_and_never_left_unread() {
+    let (mut sessions, mut world) = leading(1);
+    let longest = vec![b'a'; MAX_PAYLOAD_LENGTH];
+    let over = vec![b'a'; MAX_PAYLOAD_LENGTH + 1];
+    let message = |payload: &[u8]| {
+        encode(&Message::SessionMessage {
+            leadership_term_id: 1,
+            cluster_session_id: 0,
+            timestamp: 0,
+            payload,
+        })
+    };
+    let (longest, over) = (message(&longest), message(&over));
+    fn parsed(bytes: &[u8]) -> Message<'_> {
+        Message::parse(Stream::Ingress, bytes).expect("parses")
+    }
+    let counts = sessions.counts();
+
+    world.back_pressured = true;
+    for lead in [leader(1), follower(1, 0), follower(1, -1)] {
+        assert_eq!(
+            ingress(&mut sessions, &mut world, 10, lead, &parsed(&over)),
+            Ingress::Rejected
+        );
+    }
+    // A message the log can hold, at the bound, is left unread while it is
+    // back-pressured, as any other is.
+    assert_eq!(
+        ingress(&mut sessions, &mut world, 10, leader(1), &parsed(&longest)),
+        Ingress::Unread
+    );
+    world.back_pressured = false;
+    assert_eq!(
+        ingress(&mut sessions, &mut world, 10, leader(1), &parsed(&over)),
+        Ingress::Rejected
+    );
+    assert_eq!(world.log.len(), 1, "the session open event alone");
+    assert_eq!(
+        ingress(&mut sessions, &mut world, 20, leader(1), &parsed(&longest)),
+        Ingress::Taken
+    );
+    assert_eq!(world.log.len(), 2);
+    assert_eq!(world.log[1].len(), 1408 - 32, "one frame of the log");
+    assert!(matches!(
+        Message::parse(Stream::Log, &world.log[1]),
+        Ok(Message::SessionMessage { payload, .. }) if payload.len() == MAX_PAYLOAD_LENGTH
+    ));
+    assert_eq!(
+        sessions.counts(),
+        counts,
+        "the sessions count nothing of it"
+    );
+
+    // Not the session's activity: the session's last message is the one at 20 ms, and
+    // it times out 10 s after it.
+    assert_eq!(
+        ingress(&mut sessions, &mut world, 10_019, leader(1), &parsed(&over)),
+        Ingress::Rejected
+    );
+    work(&mut sessions, &mut world, 10_020, leader(1));
+    assert_eq!(sessions.counts().timed_out, 1);
+    assert_eq!(
+        world.entries(2),
+        ["close session 0 term 1 at 10020 Timeout"]
+    );
 }
 
 /// A session with nothing from its client for the session timeout, 10 s, is closed:

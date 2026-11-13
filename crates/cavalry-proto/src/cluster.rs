@@ -88,6 +88,13 @@ pub const EGRESS_STREAM_ID: i32 = 102;
 /// ADR 0066).
 pub const SERVICE_LOG_STREAM_ID: i32 = 104;
 
+/// The log replay stream's id: the `cavalry:ipc` stream a member's consensus module
+/// reads the member's own log on, a replay of its recordings, for its sessions
+/// (`spec/cluster.md`, "Sessions"; ADR 0116). A stream of the module's own, so that
+/// a service's replay on the service log stream and the module's never reach each
+/// other's subscription. In Aeron, 103 is the cluster's replay stream.
+pub const LOG_REPLAY_STREAM_ID: i32 = 103;
+
 /// The consensus stream's id.
 pub const CONSENSUS_STREAM_ID: i32 = 108;
 
