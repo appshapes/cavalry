@@ -74,8 +74,11 @@ that.
   ruling is `brigade decision --to <the owner's roster label> --card <work item>`,
   with the question on stdin in a quoted heredoc. The session that receives the
   answer, wherever the owner gave it, records it with `brigade work-item comment
-  <work item>` and closes the ask with `brigade decision --close <id>`. Once it is
-  ruled, the ADR lands with the change it explains, its References name the work
+  <work item>`, the owner's words on stdin. The asking session, or another session
+  of the member who asked, then closes the ask with `brigade decision --close <the
+  ask's id>`, the ruling as its outcome on stdin in a quoted heredoc; a session of
+  another member that receives the answer records it and tells the asker. Once it
+  is ruled, the ADR lands with the change it explains, its References name the work
   item, and the work item's landing comment names the ADR (ADR 0119).
 - A decision a session makes on its own inside a work item needs no work item of
   its own: its ADR lands in that work item's change and names it. In Cavalry that is

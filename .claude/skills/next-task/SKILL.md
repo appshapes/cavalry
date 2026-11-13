@@ -106,8 +106,11 @@ Highest first. Within one rule, the slice ADR's order, then the work item's list
    ruling is the owner's and has not been asked for, asking is: `brigade decision
    --to <the owner's roster label> --card <work item>`, with the question on stdin
    in a quoted heredoc. The session that receives the answer records it with
-   `brigade work-item comment <work item>` and closes the ask with `brigade decision
-   --close <id>`, so that the ruling is the comment this rule reads.
+   `brigade work-item comment <work item>`, the owner's words on stdin, so that the
+   ruling is the comment this rule reads. The asking session, or another session of
+   the member who asked, closes the ask with `brigade decision --close <the ask's
+   id>`, the ruling as its outcome on stdin in a quoted heredoc; a session of
+   another member that receives the answer records it and tells the asker.
 5. **A fired Revisit clause.** The trigger has happened on `master`, the action it names
    has not, and no open work item lists it. Cite the trigger and the evidence that it
    fired. The first move is the work item that carries it, tagged `decision` and
