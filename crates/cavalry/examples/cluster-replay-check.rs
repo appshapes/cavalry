@@ -159,6 +159,13 @@ struct Service {
     /// Cycles since the service last asked for the log: it asks once in 64, since
     /// each ask reads the counters file's records.
     asked: u32,
+    /// Where the service opens the log next: 0, then the position each handle ended
+    /// at. A handle is one recording's, and a member that joined its leader late
+    /// holds its log in two: the replay it caught up by, and the live one.
+    next: i64,
+    /// Each handle the service opened, as the recording it replays and the position
+    /// it was opened at: what `scripts/replay-check.sh` replays for this member.
+    chain: Vec<(i64, i64)>,
 }
 
 impl Service {
@@ -169,7 +176,10 @@ impl Service {
         let Some(log) = self.log.as_mut() else {
             self.asked += 1;
             if self.asked % 64 == 1 {
-                self.log = self.client.committed_log(0)?;
+                self.log = self.client.committed_log(self.next)?;
+                if let Some(log) = &self.log {
+                    self.chain.push((log.recording_id(), self.next));
+                }
             }
             return Ok(0);
         };
@@ -188,10 +198,35 @@ impl Service {
             },
             256,
         )?;
-        match failed {
-            Some(error) => Err(error.into()),
-            None => Ok(entries),
+        if let Some(error) = failed {
+            return Err(error.into());
         }
+        // A handle that has ended whole has read its recording to its stop: the log
+        // goes on in the member's next recording, opened at the handle's position.
+        if log.is_ended() {
+            if let Some(position) = log.failed_at().or(log.withdrawn_at()) {
+                return Err(format!(
+                    "a service's read of recording {} stopped at position {position} \
+                     before its end: {log:?}; run `just replay-check` again, and report \
+                     it with this line if it repeats",
+                    log.recording_id()
+                )
+                .into());
+            }
+            if let Some(fault) = log.faulted() {
+                return Err(format!(
+                    "a service's read of recording {} faulted: {fault}",
+                    log.recording_id()
+                )
+                .into());
+            }
+            self.next = log.position();
+            if let Some(ended) = self.log.take() {
+                ended.close(&mut self.client)?;
+            }
+            self.asked = 0;
+        }
+        Ok(entries)
     }
 }
 
@@ -239,6 +274,8 @@ fn run(messages: u64, dir: &Path) -> Result<(), Box<dyn std::error::Error>> {
             path,
             read: 0,
             asked: 0,
+            next: 0,
+            chain: Vec::with_capacity(4),
         };
         members.push(Member {
             driver,
@@ -365,24 +402,31 @@ fn run(messages: u64, dir: &Path) -> Result<(), Box<dyn std::error::Error>> {
     // of it, and then the drivers, each of which stops what it still records. Every
     // member's recording is whole on its disk before either: its append position, what
     // its recorder has synced, is the end.
-    let mut recordings = Vec::with_capacity(3);
     for member in &mut members {
         if let Some(module) = member.module.take() {
-            recordings.push(
-                module
-                    .log_recording_id()
-                    .ok_or("a member has no recording of the log")?,
-            );
+            module
+                .log_recording_id()
+                .ok_or("a member has no recording of the log")?;
             module.close()?;
         }
     }
+    // Each member's log from position 0, as its service read it: one recording, or
+    // for a member that joined its leader late, the replay it caught up by and then
+    // the live one. Each is `<recording>@<the position it is read from>`.
     let mut lines = Vec::with_capacity(3);
-    for (id, (member, recording)) in members.into_iter().zip(&recordings).enumerate() {
+    for (id, member) in members.into_iter().enumerate() {
+        let recordings: Vec<String> = member
+            .service
+            .chain
+            .iter()
+            .map(|(recording, from)| format!("{recording}@{from}"))
+            .collect();
         lines.push(format!(
-            "member={id} dir={} log_dir={} service={} recording={recording}",
+            "member={id} dir={} log_dir={} service={} recordings={}",
             member.dir.display(),
             member.log_dir.display(),
-            member.service.path.display()
+            member.service.path.display(),
+            recordings.join(",")
         ));
         member.service.client.close()?;
         member.driver.close()?;

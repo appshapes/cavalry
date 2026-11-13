@@ -1,16 +1,14 @@
 //! The core of a cluster member: the state machine of `spec/cluster.md`, "Roles and the
-//! election". A member made with [`Consensus::new`] takes the appointed leader's path
-//! ("The appointed leader"; ADR 0063), which is what a member over a driver runs. One
-//! made with [`Consensus::with_election`] canvasses, nominates itself, wins or loses a
-//! ballot, and as the leader holds an election when it loses its quorum or reads a
-//! higher term and serves a member that replicates a term it missed with replays of its
-//! own recordings, and as a member below its leader's term base replicates such a term
-//! (ADR 0077, ADR 0081, ADR 0082, ADR 0085, ADR 0086); the rest of the election is
-//! built on that path first, in memory, and the module moves to it when its I/O can
-//! follow. The core does no I/O of its own. It is given the time and the consensus
-//! messages, and reaches everything else through [`Io`]: the module gives it those
-//! operations over the client and the `terms` file, and [`crate::memory`] gives it the
-//! same operations in memory.
+//! election". A member, made with [`Consensus::with_election`], canvasses, nominates
+//! itself, and wins or loses a ballot. As the leader it holds an election when it loses
+//! its quorum or reads a higher term, and serves a member that is behind with replays
+//! of its own recordings. As a member behind its leader it replicates a term it missed,
+//! or catches up within its leader's term (ADR 0077, ADR 0082, ADR 0085, ADR 0086, ADR
+//! 0087, ADR 0088). It is the one path a member has: the consensus module builds its
+//! core with it (ADR 0100). The core does no I/O of its own. It is given the time and
+//! the consensus messages, and reaches everything else through [`Io`]: the module
+//! gives it those operations over the client and the `terms` file, and
+//! [`crate::memory`] gives it the same operations in memory.
 //!
 //! One member is one [`Consensus`], driven by one thread: [`Consensus::do_work`] once
 //! per duty cycle and [`Consensus::on_message`] for each message of the consensus
@@ -22,14 +20,13 @@ use cavalry_proto::cluster::{
     ELECTION_TIMEOUT_NS, LEADER_HEARTBEAT_INTERVAL_NS, LEADER_HEARTBEAT_TIMEOUT_NS,
     LIVE_ADD_MAX_WINDOW, LogReport, MAX_MEMBERS, MemberPosition, Message, PROTOCOL_VERSION,
     STARTUP_CANVASS_TIMEOUT_NS, TermAction, TermFields, TermSpan, TimeUnit, Vote, VoteRequest,
-    appointed_canvass, appointed_leader, ballot, candidate, canvass_position_action,
-    commit_position, leader_ready, log_at_least, new_leadership_term_action, next_fields, quorum,
-    request_vote,
+    ballot, candidate, canvass_position_action, commit_position, new_leadership_term_action,
+    next_fields, quorum, request_vote,
 };
 use cavalry_shm::counters::CounterId;
 use cavalry_shm::counters::generated::{
-    CLUSTER_APPOINTED_LEADER_BEHIND, CLUSTER_BALLOTS_LOST, CLUSTER_CANDIDACIES, CLUSTER_CATCHUPS,
-    CLUSTER_ELECTION_STEPS, CLUSTER_ELECTIONS, CLUSTER_ELECTIONS_CLOSED, CLUSTER_ELECTIONS_FAILED,
+    CLUSTER_BALLOTS_LOST, CLUSTER_CANDIDACIES, CLUSTER_CATCHUPS, CLUSTER_ELECTION_STEPS,
+    CLUSTER_ELECTIONS, CLUSTER_ELECTIONS_CLOSED, CLUSTER_ELECTIONS_FAILED,
     CLUSTER_HIGHER_TERMS_SEEN, CLUSTER_JOIN_POSITION_MISMATCHES, CLUSTER_LEADER_HEARTBEAT_TIMEOUTS,
     CLUSTER_LEADER_QUORUM_LOSSES, CLUSTER_LEADER_STEP_DOWNS, CLUSTER_LEADERSHIP_TERMS_IGNORED,
     CLUSTER_LOG_IMAGES_LOST, CLUSTER_LOG_REPLICATIONS, CLUSTER_LOG_REPLICATIONS_UNAVAILABLE,
@@ -38,7 +35,7 @@ use cavalry_shm::counters::generated::{
 };
 
 /// The cluster session id of a session message of no session: one the leader's own
-/// process appended (`spec/cluster.md`, "The appointed leader").
+/// process appended (`spec/cluster.md`, "Session message header, template 1").
 pub const NO_SESSION: i64 = -1;
 
 // state machine: cluster_role
@@ -49,9 +46,8 @@ pub const NO_SESSION: i64 = -1;
 pub enum Role {
     /// Records the leader's log and reports its append position.
     Follower = 0,
-    /// A follower asking for votes: a member that elects, from its nomination until it
-    /// leads, loses its ballot or votes for another. A member whose leader is
-    /// appointed is never one.
+    /// A follower asking for votes: from its nomination until it leads, loses its
+    /// ballot or votes for another.
     Candidate = 1,
     /// Writes the log and commits it.
     Leader = 2,
@@ -61,22 +57,21 @@ pub enum Role {
 /// The states of the election a member of this version enters, each with the code
 /// `spec/cluster.md` gives it, the value of the `cluster.election_state` gauge. Every
 /// move from one to another adds one to a count of [`Counts`], the counter
-/// `counters.toml` registers for it as the machine `cluster_election` (ADR 0067). A
-/// member whose leader is appointed never enters nominate, a ballot or follower log
-/// replication.
+/// `counters.toml` registers for it as the machine `cluster_election` (ADR 0067).
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 #[repr(u8)]
 pub enum ElectionState {
     /// Takes its candidate term, leaves the live log when it had joined one, gives up
     /// the log of a term it led, stops the replays it served, and canvasses.
     Init = 0,
-    /// Reports its log to every other member. The appointed leader leads once canvass
-    /// makes it a candidate, every member having reported with no log ahead of its own,
-    /// or a quorum at the startup canvass timeout; every other member waits for the
-    /// leader's new leadership term.
+    /// Reports its log to every other member. It goes to nominate at once when every
+    /// member has reported and none holds a log ahead of its own, or at the canvass
+    /// deadline when the members that reported a log not ahead of its own, itself
+    /// among them, make a quorum. A request vote or a leader's new leadership term
+    /// moves it on too.
     Canvass = 1,
-    /// A member that elects waits a random delay of up to half the election timeout,
-    /// canvassing still, then stores candidate term + 1 and votes for itself.
+    /// Waits a random delay of up to half the election timeout, canvassing still, then
+    /// stores candidate term + 1 and votes for itself.
     Nominate = 2,
     /// A candidate asks every other member for its vote, and leads the term at once
     /// when a quorum has voted for it and every member it has heard is among them, or
@@ -93,9 +88,9 @@ pub enum ElectionState {
     LeaderReplay = 6,
     /// The leader joins its log for the term.
     LeaderInit = 7,
-    /// The leader announces its term until a quorum counts for it, then appends the
-    /// term's first entry. The appointed leader waits for every member it has heard,
-    /// or for a quorum once the leader heartbeat timeout has passed in this state.
+    /// The leader announces its term until a quorum of members, itself among them,
+    /// has joined its log at its log position, then appends the term's first entry.
+    /// It waits for no other member: one that joins later catches up.
     LeaderReady = 8,
     /// A member below its leader's term base replicates one term it lacks from the
     /// leader's recordings, to that term's end, and canvasses again (ADR 0086).
@@ -121,8 +116,10 @@ pub enum ElectionState {
     /// A follower sends its append position to the leader.
     FollowerReady = 16,
     /// No election runs: the leader leads its term, a follower follows it. A member
-    /// that elects holds an election from here, beginning at init, when it reads a term
-    /// above its own, and its leader when its active members fall below a quorum.
+    /// holds an election from here, beginning at init, when it reads a term above its
+    /// own. So does a leader whose active members fall below a quorum, and a follower
+    /// whose leader says nothing for the leader heartbeat timeout or whose image of
+    /// the log is no longer available.
     Closed = 17,
 }
 
@@ -135,9 +132,7 @@ impl ElectionState {
 
 /// Why a member's last election began, with the value of the `cluster.election_cause`
 /// gauge (`spec/cluster.md`, "Counters"; ADR 0077, ADR 0102): the election the member
-/// is in, or the one that closed last. A member whose leader is appointed never has
-/// [`ElectionCause::QuorumLost`] or [`ElectionCause::HigherTerm`]: its leader stays
-/// the leader below a quorum, and it holds no election on a term above its own.
+/// is in, or the one that closed last.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 #[repr(u8)]
 pub enum ElectionCause {
@@ -220,9 +215,9 @@ pub trait Io {
 
     /// The candidate term the member's log directory holds, −1 when none was stored:
     /// what [`Io::store_candidate_term`] wrote last, before this start or since. A
-    /// member that elects reads it once, in its first init, so that it votes once in a
-    /// term across a restart (`spec/cluster.md`, "The log"; ADR 0089). Read from
-    /// memory: it returns at once and cannot fail.
+    /// member reads it once, in its first init, so that it votes once in a term
+    /// across a restart (`spec/cluster.md`, "The log"; ADR 0089). Read from memory:
+    /// it returns at once and cannot fail.
     fn candidate_term(&mut self) -> i64;
 
     /// The highest term in the member's record of terms, its log leadership term id,
@@ -387,9 +382,9 @@ pub trait Io {
     fn remove_catchup(&mut self) -> Result<(), Self::Fault>;
 }
 
-/// Why [`Consensus::new`] refused its members. The members are checked in the order of
-/// `spec/cluster.md`, "What a reader rejects", each check over every member, and each
-/// variant is one check, named by [`MembersRefused::reason`].
+/// Why [`Consensus::with_election`] refused its members. The members are checked in
+/// the order of `spec/cluster.md`, "What a reader rejects", each check over every
+/// member, and each variant is one check, named by [`MembersRefused::reason`].
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum MembersRefused {
     /// `members-grammar`: no member was given, as an empty members string is.
@@ -484,12 +479,13 @@ impl core::fmt::Display for Refused {
             Refused::NotLeader => (
                 "not-leader",
                 "this member does not lead; offer to the leader, the member whose role is \
-                 leader: the member with the lowest id where the leader is appointed",
+                 leader, which `cluster.leader_member_id` names on each member that \
+                 follows it",
             ),
             Refused::Election => (
                 "election",
-                "the leader's election has not closed; offer again once every member has \
-                 joined its log, which a member that never comes delays by 70 s",
+                "the leader's election has not closed; offer again once a quorum of \
+                 members, the leader among them, has joined its log",
             ),
             Refused::BackPressured => (
                 "back-pressured",
@@ -524,13 +520,9 @@ pub struct Counts {
     /// `cluster.terms_led`: a term the member began to lead.
     pub terms_led: u64,
     /// `cluster.leader_quorum_losses`: a leader whose active members fell below a
-    /// quorum. A leader that elects holds an election; the appointed leader stays the
-    /// leader, and its commit position stops.
+    /// quorum, once each time they fall. The leader holds an election, which in leader
+    /// log replication and leader ready is its election failed (ADR 0082).
     pub leader_quorum_losses: u64,
-    /// `cluster.appointed_leader_behind`: a member the appointed leader found holding a
-    /// log ahead of its own, in canvass or in leader ready, once for each such member
-    /// in an election.
-    pub appointed_leader_behind: u64,
     /// `cluster.leader_heartbeat_timeouts`: a follower that began again at init for
     /// want of its leader's heartbeat.
     pub leader_heartbeat_timeouts: u64,
@@ -602,7 +594,7 @@ pub struct Counts {
 
 impl Counts {
     /// How many counts a member keeps: one counter of `counters.toml` each.
-    pub const LEN: usize = 23;
+    pub const LEN: usize = 22;
 
     /// Each count with the id of its counter in `counters.toml`, the constant
     /// `cavalry-shm` generates from it: what the consensus module stores, each as a
@@ -628,10 +620,6 @@ impl Counts {
             (CLUSTER_ELECTION_STEPS, self.election_steps),
             (CLUSTER_TERMS_LED, self.terms_led),
             (CLUSTER_LEADER_QUORUM_LOSSES, self.leader_quorum_losses),
-            (
-                CLUSTER_APPOINTED_LEADER_BEHIND,
-                self.appointed_leader_behind,
-            ),
             (
                 CLUSTER_LEADER_HEARTBEAT_TIMEOUTS,
                 self.leader_heartbeat_timeouts,
@@ -797,8 +785,6 @@ struct Peer {
     /// Whether the last report was an append position, which a member sends once it
     /// has joined its leader's log, and not a canvass position.
     appended: bool,
-    /// Whether this election has counted the member as ahead of the appointed leader.
-    ahead_counted: bool,
 }
 
 /// What a leader holds of one member that is behind: the replays of its own recordings
@@ -895,18 +881,17 @@ pub struct Consensus {
     count: usize,
     /// This member's place in `peers`.
     own: usize,
-    /// The member this member leads as or follows. Where the leader is appointed, the
-    /// appointed leader's id from the start; where it is elected, −1 from init until
-    /// the member leads a term or takes a leader's new leadership term.
+    /// The member this member leads as or follows: −1 from init until the member
+    /// leads a term or takes a leader's new leadership term.
     leader_id: i32,
-    /// `Some` for a member that elects: the state of the generator it draws its
-    /// nomination delays from, never 0. `None` where the leader is appointed.
-    election: Option<u64>,
+    /// The state of the generator the member draws its nomination delays from, never
+    /// 0.
+    election: u64,
     /// Whether the member's first election since it started has yet to close: until it
     /// has, the canvass deadline is the startup canvass timeout.
     startup: bool,
-    /// Whether a member that elects has read what its log directory held when it
-    /// started: its candidate term and the highest term of its record (ADR 0089).
+    /// Whether the member has read what its log directory held when it started: its
+    /// candidate term and the highest term of its record (ADR 0089).
     read_back: bool,
     /// Whether the term this member leads is the term of its first election since it
     /// started: what its new leadership term carries as `is startup`.
@@ -962,10 +947,30 @@ pub struct Consensus {
 }
 
 impl Consensus {
-    /// A member with id `member_id` among the members with `member_ids`, in init, with
-    /// no term and no vote: a member of this version starts on a log that holds
-    /// neither (`spec/cluster.md`, "The appointed leader"), which its caller checks.
-    pub fn new(member_ids: &[i32], member_id: i32) -> Result<Self, MembersRefused> {
+    /// A member with id `member_id` among the members with `member_ids`, in init: one
+    /// that elects its leader (`spec/cluster.md`, "Roles and the election"; ADR 0077).
+    /// Its first duty cycle reads what its log directory holds, through
+    /// [`Io::candidate_term`] and [`Io::log_leadership_term_id`]: none on a new
+    /// directory, and on one the member kept the term it canvasses with and the term
+    /// it will not vote in a second time (ADR 0089). `seed` is where its nomination
+    /// delays come from: two members with different seeds draw different delays, and
+    /// one seed draws the same delays at every run. Members that
+    /// `spec/cluster.md`, "What a reader rejects", refuses are refused here, and
+    /// [`MembersRefused`] says by which check.
+    ///
+    /// The member has nominate, the two ballots, the elections a leader holds, on the
+    /// loss of its quorum and on a higher term (ADR 0082), the truncation (ADR 0083),
+    /// the replication of a term a member missed (ADR 0085, ADR 0086) and the catch-up
+    /// within a leader's term (ADR 0087, ADR 0088), the leader's side of each and the
+    /// member's, and a member's start on the log it kept (ADR 0089). It is the one
+    /// constructor: the consensus module builds its core with it (ADR 0100). The
+    /// module refuses a log directory that holds a term, which this core would start
+    /// on: see the crate's README.
+    pub fn with_election(
+        member_ids: &[i32],
+        member_id: i32,
+        seed: u64,
+    ) -> Result<Self, MembersRefused> {
         // `spec/cluster.md`, "What a reader rejects": grammar, duplicate, count and self,
         // in that order, each over every member.
         if member_ids.is_empty() {
@@ -990,7 +995,6 @@ impl Consensus {
             term: -1,
             at_ns: 0,
             appended: false,
-            ahead_counted: false,
         }; MAX_MEMBERS];
         let mut own = None;
         for (index, (&id, peer)) in member_ids.iter().zip(peers.iter_mut()).enumerate() {
@@ -1006,8 +1010,14 @@ impl Consensus {
             peers,
             count,
             own,
-            leader_id: appointed_leader(member_ids),
-            election: None,
+            leader_id: -1,
+            // A xorshift generator holds at 0, so a seed of 0 is given a state of
+            // its own.
+            election: if seed == 0 {
+                0x9E37_79B9_7F4A_7C15
+            } else {
+                seed
+            },
             startup: true,
             read_back: false,
             led_from_start: false,
@@ -1044,58 +1054,24 @@ impl Consensus {
         })
     }
 
-    /// A member with id `member_id` among the members with `member_ids` that elects its
-    /// leader (`spec/cluster.md`, "Roles and the election"; ADR 0077), in init. Its
-    /// first duty cycle reads what its log directory holds, through
-    /// [`Io::candidate_term`] and [`Io::log_leadership_term_id`]: none on a new
-    /// directory, and on one the member kept the term it canvasses with and the term
-    /// it will not vote in a second time (ADR 0089). `seed` is where its nomination
-    /// delays come from: two members with different seeds draw different delays, and
-    /// one seed draws the same delays at every run. Refused as [`Consensus::new`]
-    /// refuses.
-    ///
-    /// This path has nominate, the two ballots, the elections a leader holds, on the
-    /// loss of its quorum and on a higher term (ADR 0082), the truncation (ADR 0083),
-    /// the replication of a term a member missed (ADR 0085, ADR 0086) and the catch-up
-    /// within a leader's term (ADR 0087, ADR 0088), the leader's side of each and the
-    /// member's, and a member's start on the log it kept (ADR 0089). The consensus
-    /// module does not use it yet: see the crate's README for
-    /// what a member on it does where the election would do more, and for what the
-    /// module's `Io` refuses.
-    pub fn with_election(
-        member_ids: &[i32],
-        member_id: i32,
-        seed: u64,
-    ) -> Result<Self, MembersRefused> {
-        let mut member = Self::new(member_ids, member_id)?;
-        // A xorshift generator holds at 0, so a seed of 0 is given a state of its own.
-        member.election = Some(if seed == 0 {
-            0x9E37_79B9_7F4A_7C15
-        } else {
-            seed
-        });
-        member.leader_id = -1;
-        Ok(member)
-    }
-
     /// This member's id.
     pub fn member_id(&self) -> i32 {
         self.peer(self.own).id
     }
 
-    /// The id of the member this member leads as or follows. Where the leader is
-    /// appointed, the appointed leader's from the start: the lowest among the
-    /// members. Where it is elected, −1 from the start of an election until this
-    /// member leads a term or takes a leader's new leadership term.
+    /// The id of the member this member leads as or follows: −1 from the first duty
+    /// cycle of an election until this member leads a term or takes a leader's new
+    /// leadership term.
     pub fn leader_member_id(&self) -> i32 {
         self.leader_id
     }
 
     /// What the `cluster.leader_member_id` gauge holds (`spec/cluster.md`,
     /// "Counters"; ADR 0102): the id of the member this member leads as or follows,
-    /// and −1 while it has none, in init, canvass, nominate and the two ballots.
-    /// Where the leader is appointed its id is known from the start, and a member
-    /// that has neither led nor taken its new leadership term still has no leader.
+    /// and −1 while it has none, in init, canvass, nominate and the two ballots. The
+    /// state decides, and not the id held: a member keeps the id of the leader it had
+    /// until its first duty cycle in init, and one that canvasses again after a
+    /// replication keeps its leader's, and neither has a leader.
     pub fn leader_gauge(&self) -> i64 {
         match self.state {
             ElectionState::Init
@@ -1146,14 +1122,14 @@ impl Consensus {
 
     /// One duty cycle: what the member's state asks of it at `clock`. Returns how much
     /// it did, 0 for nothing, so that the caller's idle strategy can back off. A
-    /// leader that elects looks after the replays it serves after its state's own
-    /// work, so a fault of the state's work is returned before one of a replay, and
-    /// a replay's fault is returned once the state's work has run.
+    /// leader looks after the replays it serves after its state's own work, so a
+    /// fault of the state's work is returned before one of a replay, and a replay's
+    /// fault is returned once the state's work has run.
     pub fn do_work<I: Io>(&mut self, clock: Clock, io: &mut I) -> Result<usize, I::Fault> {
         self.append_position = self.append_position.max(io.append_position());
         let stepped = match self.state {
             ElectionState::Init => self.init(clock, io),
-            ElectionState::Canvass => self.canvass(clock, io),
+            ElectionState::Canvass => Ok(self.canvass(clock, io)),
             ElectionState::Nominate => self.nominate(clock, io),
             ElectionState::CandidateBallot => self.candidate_ballot(clock, io),
             ElectionState::FollowerBallot => Ok(self.follower_ballot(clock)),
@@ -1174,12 +1150,12 @@ impl Consensus {
                 Role::Follower | Role::Candidate => self.follow(clock, io),
             },
         };
-        // A leader that elects looks after the replays it serves, in whichever of its
-        // states it is: one that ended, one it stopped, one that is due. It does so
+        // A leader looks after the replays it serves, in whichever of its states it
+        // is: one that ended, one it stopped, one that is due. It does so
         // after its state's own work, so that a fault of a replay costs the cycle no
         // heartbeat, no commit position and no watch of the quorum: the fault is
         // returned once both have run, the state's own first.
-        let served = if self.role == Role::Leader && self.election.is_some() {
+        let served = if self.role == Role::Leader {
             self.serve_replays(io)
         } else {
             Ok(0)
@@ -1189,23 +1165,21 @@ impl Consensus {
     }
 
     /// One message of the consensus stream, read at `clock`. A member in init reads
-    /// nothing. A member whose leader is appointed ignores request vote and vote, which
-    /// no such member sends, catch-up position and stop catch-up (`spec/cluster.md`,
-    /// "The appointed leader"). A leader that elects answers a catch-up position at or
-    /// below its log position with a replay of its own recordings, stops the replay it
-    /// runs to a member that canvasses again, and stops a catch-up, with stop
-    /// catch-up, when the member it serves reports with the catch-up flag, on the live
-    /// log ("Messages outside an election"; ADR 0085, ADR 0087, ADR 0088). A member
-    /// that elects, in follower catch-up, takes its leader's stop catch-up once it has
-    /// reported with that flag, and removes its catch-up subscription (ADR 0088). A
-    /// member that elects and reads a new leadership term
-    /// which leaves it below its leader's term base goes to follower log replication
-    /// (ADR 0086). A member that elects notes the sender of whatever it reads
-    /// as heard, for its ballot (ADR 0077). Once its election has closed it holds an
-    /// election, beginning at init, on a request vote or a commit position of a term
-    /// above its own from another member, and its leader on a canvass position with
-    /// either term above its own too (`spec/cluster.md`, "Messages outside an
-    /// election"; ADR 0082).
+    /// nothing. In every other state it notes the sender of whatever it reads as
+    /// heard, for its ballot (ADR 0077), and answers a request vote, for or against
+    /// (`spec/cluster.md`, "Messages during an election"). A leader answers a
+    /// catch-up position at or below its log position with a replay of its own
+    /// recordings, stops the replay it runs to a member that canvasses again, and
+    /// stops a catch-up, with stop catch-up, when the member it serves reports with
+    /// the catch-up flag, on the live log ("Messages outside an election"; ADR 0085,
+    /// ADR 0087, ADR 0088). A member in follower catch-up takes its leader's stop
+    /// catch-up once it has reported with that flag, and removes its catch-up
+    /// subscription (ADR 0088). A member that reads a new leadership term which
+    /// leaves it below its leader's term base goes to follower log replication (ADR
+    /// 0086). Once its election has closed a member holds an election, beginning at
+    /// init, on a request vote or a commit position of a term above its own from
+    /// another member, and a leader on a canvass position with either term above its
+    /// own too (`spec/cluster.md`, "Messages outside an election"; ADR 0082).
     pub fn on_message<I: Io>(
         &mut self,
         clock: Clock,
@@ -1215,8 +1189,7 @@ impl Consensus {
         if self.state == ElectionState::Init {
             return Ok(());
         }
-        if self.election.is_some()
-            && let Some(index) = sender(message).and_then(|id| self.other(id))
+        if let Some(index) = sender(message).and_then(|id| self.other(id))
             && let Some(heard) = self.heard.get_mut(index)
         {
             *heard = true;
@@ -1228,7 +1201,7 @@ impl Consensus {
                 candidate_term_id,
                 candidate_member_id,
                 ..
-            } if self.election.is_some() => self.on_request_vote(
+            } => self.on_request_vote(
                 clock,
                 VoteRequest {
                     candidate_term_id,
@@ -1276,9 +1249,7 @@ impl Consensus {
                 // A member that canvasses is in no replication: first the replay this
                 // leader runs to it is stopped and the next it owed it dropped, so
                 // that the member joins no stale replay when it asks again.
-                if self.election.is_some() {
-                    self.end_serving(index, io)?;
-                }
+                self.end_serving(index, io)?;
                 let action = canvass_position_action(
                     self.term,
                     self.state.code(),
@@ -1289,20 +1260,17 @@ impl Consensus {
                 );
                 match action {
                     CanvassAction::Answer => self.announce_to(index, clock, io),
-                    // Either term is above this leader's own. A leader that elects
-                    // holds an election: its election closed, that is the step-down;
-                    // in leader log replication or leader ready, its election fails.
-                    CanvassAction::Election if self.election.is_some() => {
+                    // Either term is above this leader's own, and the leader holds an
+                    // election: its election closed, that is the step-down; in leader
+                    // log replication or leader ready, its election fails.
+                    CanvassAction::Election => {
                         if self.state == ElectionState::Closed {
                             self.hold_election_on_higher_term(clock);
                         } else {
                             self.fail(clock);
                         }
                     }
-                    // An election on a term above its own is not the appointed
-                    // leader's to hold: no election can replace it, and no member
-                    // beside an appointed leader holds such a term.
-                    CanvassAction::Election | CanvassAction::Table => {}
+                    CanvassAction::Table => {}
                 }
                 Ok(())
             }
@@ -1321,9 +1289,7 @@ impl Consensus {
                     // its live image joined, so the replay brings it nothing more,
                     // and the catch-up is over at whatever position it reports (ADR
                     // 0088).
-                    if self.election.is_some()
-                        && flags & APPEND_POSITION_FLAG_CATCHUP != 0
-                        && leadership_term_id == self.term
+                    if flags & APPEND_POSITION_FLAG_CATCHUP != 0 && leadership_term_id == self.term
                     {
                         self.stop_catchup(index, io)?;
                     }
@@ -1345,17 +1311,11 @@ impl Consensus {
             } => {
                 // A leader reads none: it learns of a later term by a canvass position,
                 // a request vote or a commit position, and holds its election on those
-                // ("Messages outside an election"). Where the leader is appointed, no
-                // other member's is read. A member that elects reads one
-                // from another member alone, as it reads no consensus message from an
-                // id that is no other member's: it records no term that a host started
+                // ("Messages outside an election"). Any other member reads one from
+                // another member alone, as it reads no consensus message from an id
+                // that is no other member's: it records no term that a host started
                 // with another members string announces, nor one in its own name.
-                let sender_read = if self.election.is_some() {
-                    self.other(leader_member_id).is_some()
-                } else {
-                    leader_member_id == self.leader_id
-                };
-                if self.role == Role::Leader || !sender_read {
+                if self.role == Role::Leader || self.other(leader_member_id).is_none() {
                     return Ok(());
                 }
                 let voting = matches!(
@@ -1405,12 +1365,8 @@ impl Consensus {
                 // The message is for this member's log term, and names a next term
                 // whose base is below this member's append position: the member holds
                 // a tail of its term that the leader's log does not, and truncates it
-                // first. Then it reads the message with what it holds. A member whose
-                // leader is appointed has no truncation, and fails below.
-                if action.truncate_to >= 0
-                    && self.election.is_some()
-                    && !self.truncate(action.truncate_to, clock, io)?
-                {
+                // first. Then it reads the message with what it holds.
+                if action.truncate_to >= 0 && !self.truncate(action.truncate_to, clock, io)? {
                     return Ok(());
                 }
                 match action.action {
@@ -1440,7 +1396,7 @@ impl Consensus {
                     // or all of them, with `log_term` as it was: the member reports
                     // it again, the leader answers again, and the drop, which changes
                     // nothing already dropped, runs again.
-                    TermAction::Drop if self.election.is_some() => {
+                    TermAction::Drop => {
                         self.log_term = io.drop_terms_above(log_leadership_term_id)?;
                         count(&mut self.counts.terms_dropped);
                         // A record that still holds a term above the one named was
@@ -1452,7 +1408,7 @@ impl Consensus {
                         }
                         self.on_message(clock, message, io)
                     }
-                    TermAction::Replay if action.truncate_to < 0 || self.election.is_some() => {
+                    TermAction::Replay => {
                         // The term at its base, recorded before any position is
                         // reported for it; a term already in the record stays as it is.
                         if let Some((term, base)) = action.records
@@ -1486,7 +1442,7 @@ impl Consensus {
                     // state 9 records that term at that base before it asks for
                     // anything (ADR 0086). The sender is its leader from here, as in
                     // the step to follower replay.
-                    TermAction::Replicate if self.election.is_some() => {
+                    TermAction::Replicate => {
                         let begins = (self.append_position == next_term_base_log_position)
                             .then_some((next_leadership_term_id, next_term_base_log_position));
                         self.candidate_term = self.candidate_term.max(leadership_term_id);
@@ -1517,15 +1473,10 @@ impl Consensus {
                     // for a later new leadership term, where it is. No leader of this
                     // version sends it: a next term that is not the leader's own ends
                     // at a base the leader's record holds.
-                    TermAction::Wait if self.election.is_some() => Ok(()),
-                    // A log the leader's does not reach, and where the leader is
-                    // appointed a truncation, a replication or a wait: nothing the
-                    // member can join with.
-                    TermAction::Drop
-                    | TermAction::Replay
-                    | TermAction::Replicate
-                    | TermAction::Wait
-                    | TermAction::Fail => {
+                    TermAction::Wait => Ok(()),
+                    // A log the leader's does not reach: nothing the member can join
+                    // with.
+                    TermAction::Fail => {
                         self.fail(clock);
                         Ok(())
                     }
@@ -1537,12 +1488,10 @@ impl Consensus {
                 follower_member_id,
                 ..
             } => {
-                // A leader that elects reads it, for its own term, from another
-                // member. The endpoint the message carries is the one the members
-                // string gives that member, which is where the replay goes
-                // (ADR 0085).
+                // A leader reads it, for its own term, from another member. The
+                // endpoint the message carries is the one the members string gives
+                // that member, which is where the replay goes (ADR 0085).
                 if self.role == Role::Leader
-                    && self.election.is_some()
                     && leadership_term_id == self.term
                     && let Some(index) = self.other(follower_member_id)
                 {
@@ -1557,9 +1506,8 @@ impl Consensus {
             } => {
                 // A commit position of a term above this member's own, from another
                 // member, is a leader the cluster elected without it: its election
-                // closed, a member that elects holds an election.
-                if self.election.is_some()
-                    && self.state == ElectionState::Closed
+                // closed, the member holds an election.
+                if self.state == ElectionState::Closed
                     && leadership_term_id > self.term
                     && self.other(leader_member_id).is_some()
                 {
@@ -1609,8 +1557,8 @@ impl Consensus {
 
     /// Appends a session message of no session with `payload` to the log, for the
     /// leader's own process, at the cluster's time `clock` gives (`spec/cluster.md`,
-    /// "The appointed leader"). The entry is committed once a quorum has recorded it,
-    /// which [`Consensus::commit_position`] says.
+    /// "Session message header, template 1"; ADR 0100). The entry is committed once a
+    /// quorum has recorded it, which [`Consensus::commit_position`] says.
     pub fn offer<I: Io>(
         &mut self,
         clock: Clock,
@@ -1644,7 +1592,6 @@ impl Consensus {
             term: -1,
             at_ns: 0,
             appended: false,
-            ahead_counted: false,
         })
     }
 
@@ -1719,13 +1666,12 @@ impl Consensus {
     /// An election that failed in its state: counted, and begun again at init. A
     /// candidate's fails when it reads the new leadership term of its candidate term
     /// from a leader whose log does not reach its position. A member's fails in
-    /// follower log replication, as that state says. A leader's,
-    /// where it elects, fails in leader log replication or leader ready, on a canvass
-    /// position with a term above its own or when its active members fall below a
-    /// quorum; init gives its log up. Either is a follower from here, the moves
-    /// `candidate -> follower` and `leader -> follower` that `cluster.elections_failed`
-    /// counts, so that the role never reads candidate or leader while the election
-    /// reads init. The appointed leader fails no election.
+    /// follower log replication, as that state says. A leader's fails in leader log
+    /// replication or leader ready, on a canvass position with a term above its own
+    /// or when its active members fall below a quorum; init gives its log up. Either
+    /// is a follower from here, the moves `candidate -> follower` and
+    /// `leader -> follower` that `cluster.elections_failed` counts, so that the role
+    /// never reads candidate or leader while the election reads init.
     fn fail(&mut self, clock: Clock) {
         count(&mut self.counts.elections_failed);
         self.role = Role::Follower;
@@ -1765,8 +1711,8 @@ impl Consensus {
         Ok(true)
     }
 
-    /// A member that elects and whose election had closed holds an election on a term
-    /// above its own, beginning at init (`spec/cluster.md`, "Messages outside an
+    /// A member whose election had closed holds an election on a term above its own,
+    /// beginning at init (`spec/cluster.md`, "Messages outside an
     /// election"): counted in `cluster.leader_step_downs` when it led, Raft's
     /// step-down, and in `cluster.higher_terms_seen` when it followed (ADR 0082). A
     /// leader is a follower from this call on, and init gives its log up.
@@ -1794,24 +1740,21 @@ impl Consensus {
     }
 
     /// The next value of the member's generator, a xorshift: what a nomination delay is
-    /// drawn from. 0 for a member whose leader is appointed, which draws none.
+    /// drawn from.
     fn next_random(&mut self) -> u64 {
-        let Some(mut state) = self.election else {
-            return 0;
-        };
+        let mut state = self.election;
         state ^= state << 13;
         state ^= state >> 7;
         state ^= state << 17;
-        self.election = Some(state);
+        self.election = state;
         state
     }
 
-    /// A request vote, read by a member that elects (`spec/cluster.md`, "Messages
-    /// during an election" and, for a member whose election has closed, "Messages
-    /// outside an election"). The candidate term the request raises is stored before
-    /// the vote is sent, so that a restart between the two loses the vote and never
-    /// the term; a vote for that is sent moves the member to follower ballot, to wait
-    /// for that candidate.
+    /// A request vote (`spec/cluster.md`, "Messages during an election" and, for a
+    /// member whose election has closed, "Messages outside an election"). The
+    /// candidate term the request raises is stored before the vote is sent, so that a
+    /// restart between the two loses the vote and never the term; a vote for that is
+    /// sent moves the member to follower ballot, to wait for that candidate.
     fn on_request_vote<I: Io>(
         &mut self,
         clock: Clock,
@@ -1887,7 +1830,7 @@ impl Consensus {
         }
     }
 
-    /// A catch-up position from the member at `index`, read by a leader that elects
+    /// A catch-up position from the member at `index`, read by a leader
     /// (`spec/cluster.md`, "Messages outside an election"). The position tells the
     /// two requests apart. One below this leader's term base log position is a
     /// replication (state 9): the leader replays its recordings from the position to
@@ -2074,12 +2017,12 @@ impl Consensus {
     /// leads at once. A fault at any step leaves it in init, and the next cycle tries
     /// the step again.
     fn init<I: Io>(&mut self, clock: Clock, io: &mut I) -> Result<usize, I::Fault> {
-        // A member that elects starts on what its log directory holds (ADR 0089): the
-        // candidate term it stored, so that it votes once in a term across a restart,
-        // and the highest term of its record, the term it canvasses with. It reads
-        // them here, once, and no message before: a member in init reads none. Its
-        // append position it reads every cycle, as it always has.
-        if self.election.is_some() && !self.read_back {
+        // A member starts on what its log directory holds (ADR 0089): the candidate
+        // term it stored, so that it votes once in a term across a restart, and the
+        // highest term of its record, the term it canvasses with. It reads them here,
+        // once, and no message before: a member in init reads none. Its append
+        // position it reads every cycle.
+        if !self.read_back {
             self.candidate_term = self.candidate_term.max(io.candidate_term());
             self.log_term = self.log_term.max(io.log_leadership_term_id());
             self.read_back = true;
@@ -2117,16 +2060,12 @@ impl Consensus {
         self.candidate_term = self.candidate_term.max(self.log_term);
         for peer in self.peers.iter_mut().take(self.count) {
             peer.reported = false;
-            peer.ahead_counted = false;
         }
-        // A member that elects begins with no member heard, no vote held and no
-        // leader taken.
-        if self.election.is_some() {
-            self.heard = [false; MAX_MEMBERS];
-            self.votes = [None; MAX_MEMBERS];
-            self.requested = [false; MAX_MEMBERS];
-            self.leader_id = -1;
-        }
+        // The election begins with no member heard, no vote held and no leader taken.
+        self.heard = [false; MAX_MEMBERS];
+        self.votes = [None; MAX_MEMBERS];
+        self.requested = [false; MAX_MEMBERS];
+        self.leader_id = -1;
         // A cluster of one member leads from init, with nobody to canvass. A fault
         // at its writes leaves it in init with nothing counted.
         if self.count == 1 {
@@ -2135,38 +2074,22 @@ impl Consensus {
             return Ok(work);
         }
         // The canvass interval runs on from the last election: a member whose
-        // elections fail one after another, one that cannot join without the
-        // catch-up, still sends at most one round every election status interval.
+        // elections fail one after another still sends at most one round every
+        // election status interval.
         count(&mut self.counts.elections);
         self.role = Role::Follower;
         Ok(self.enter(ElectionState::Canvass, clock))
     }
 
     /// State 1. Canvass position to every other member, every election status
-    /// interval. The appointed leader leads once canvass's rule makes it a candidate,
-    /// every member having reported, or a quorum at the startup canvass timeout, and
-    /// no member that has reported holds a log ahead of its own, whatever the deadline.
-    /// So an appointed leader whose log is behind a member's, one that lost its log
-    /// directory, never leads, and each member ahead of it is counted.
-    fn canvass<I: Io>(&mut self, clock: Clock, io: &mut I) -> Result<usize, I::Fault> {
+    /// interval, and the move to nominate once canvass's rule makes the member a
+    /// candidate, which [`Consensus::nominate_when_a_candidate`] decides. The rule
+    /// counts the logs not ahead of the member's own, its own among them. So a member
+    /// that lost its log directory is no candidate, at any deadline, while fewer than
+    /// a quorum of the members hold as little as it does.
+    fn canvass<I: Io>(&mut self, clock: Clock, io: &mut I) -> usize {
         let work = self.send_canvass_position(clock, io);
-        if self.election.is_some() {
-            return Ok(work.max(self.nominate_when_a_candidate(clock)));
-        }
-        if self.member_id() != self.leader_id {
-            return Ok(work);
-        }
-        let own = self.own_report();
-        let reports = self.reports(own);
-        // The appointed leader leads once, in its first election since it started, so
-        // its canvass deadline is the startup canvass timeout after the state began.
-        let deadline_passed =
-            clock.now_ns.saturating_sub(self.state_since_ns) >= STARTUP_CANVASS_TIMEOUT_NS;
-        self.count_ahead(own);
-        if !appointed_canvass(self.count, &reports, own, deadline_passed).leads {
-            return Ok(work);
-        }
-        self.lead(clock, io)
+        work.max(self.nominate_when_a_candidate(clock))
     }
 
     /// Canvass position to every other member, once every election status interval:
@@ -2216,7 +2139,7 @@ impl Consensus {
         reports
     }
 
-    /// State 1 for a member that elects: it goes to nominate at once when every member
+    /// State 1's rule: the member goes to nominate at once when every member
     /// has reported and none holds a log ahead of its own, or once the canvass
     /// deadline has passed when the members that have reported with a log not ahead
     /// of its own, itself among them, make a quorum. The deadline is the startup
@@ -2364,10 +2287,11 @@ impl Consensus {
         0
     }
 
-    /// Leads candidate term + 1, where an elected member would nominate itself and
-    /// win: the term it proposes is stored, and recorded at its append position, before
-    /// anything in memory moves. A fault at either write leaves the member in the
-    /// state it was in, and the next cycle proposes the same term again.
+    /// A cluster of one member leads candidate term + 1 from init, with nobody to
+    /// canvass and no ballot to win (`spec/cluster.md`, state 0): the term it proposes
+    /// is stored, and recorded at its append position, before anything in memory
+    /// moves. A fault at either write leaves the member in init, and the next cycle
+    /// proposes the same term again.
     fn lead<I: Io>(&mut self, clock: Clock, io: &mut I) -> Result<usize, I::Fault> {
         let term = self.candidate_term.saturating_add(1);
         io.store_candidate_term(term)?;
@@ -2378,38 +2302,12 @@ impl Consensus {
         self.term_base = self.append_position;
         self.leader_id = self.member_id();
         self.led_from_start = self.startup;
-        // No log is held here, as in `lead_elected`: an appointed leader leads once,
-        // from canvass or, alone, from init, and has added none before.
+        // No log is held here, as in `lead_elected`: init gave up the log of any term
+        // this member led before.
         count(&mut self.counts.terms_led);
         self.role = Role::Leader;
         self.quorate = true;
         Ok(self.enter(ElectionState::LeaderLogReplication, clock))
-    }
-
-    /// Counts each member whose last report holds a log ahead of `own`, the appointed
-    /// leader's, once in an election, and returns how many there are now: such a member
-    /// holds a history the leader lost, and the leader neither leads nor closes its
-    /// election while one reports so.
-    fn count_ahead(&mut self, own: LogReport) -> usize {
-        let mut ahead = 0;
-        let mut newly = 0;
-        for (index, peer) in self.peers.iter_mut().take(self.count).enumerate() {
-            if index == self.own
-                || !peer.reported
-                || log_at_least(own.term, own.position, peer.term, peer.position)
-            {
-                continue;
-            }
-            ahead += 1;
-            if !peer.ahead_counted {
-                peer.ahead_counted = true;
-                newly += 1;
-            }
-        }
-        for _ in 0..newly {
-            count(&mut self.counts.appointed_leader_behind);
-        }
-        ahead
     }
 
     /// Counts the leader's loss of its quorum, once each time its active members, those
@@ -2435,12 +2333,11 @@ impl Consensus {
     }
 
     /// The leader's own place in its table, set on every cycle, and its quorum
-    /// watched. Returns whether a leader that elects lost its quorum on this cycle, and
-    /// so holds an election (`spec/cluster.md`, "The commit position"); the appointed
-    /// leader stays the leader whatever it lost, and this is `false` for it.
+    /// watched. Returns whether the leader lost its quorum on this cycle, and so
+    /// holds an election (`spec/cluster.md`, "The commit position").
     fn report_own(&mut self, clock: Clock) -> bool {
         self.report(self.own, self.append_position, self.term, true, clock);
-        self.watch_quorum(clock) && self.election.is_some()
+        self.watch_quorum(clock)
     }
 
     /// The members' positions as the commit position counts them: one for each member,
@@ -2474,9 +2371,7 @@ impl Consensus {
         // reports, with its base and its end, the base of the term after it. The
         // member truncates what it holds above that base, so the term named must be
         // the next one the record holds and never a later one: a member told a later
-        // term keeps a tail of its own between the two bases and joins on it. An
-        // appointed leader's record holds its own term alone, which is then the next
-        // of any other, with no end.
+        // term keeps a tail of its own between the two bases and joins on it.
         let [next, after] = io.terms_after(peer.term);
         let span = next.map(|(term, base)| TermSpan {
             term,
@@ -2504,10 +2399,9 @@ impl Consensus {
                 leader_member_id: self.member_id(),
                 log_session_id: log.session_id,
                 app_version: 0,
-                // The appointed leader leads once, from its start. A leader that
-                // elects says whether this term is of its first election since it
+                // Whether this term is of the leader's first election since it
                 // started, as Aeron's leader sends its own node startup (ADR 0089).
-                is_startup: self.election.is_none() || self.led_from_start,
+                is_startup: self.led_from_start,
                 commit_position: self.commit_position,
             },
         );
@@ -2544,8 +2438,8 @@ impl Consensus {
     }
 
     /// State 5. The log publication at the term's base, then the heartbeat, until the
-    /// quorum position has reached the append position. A leader that elects fails its
-    /// election when its active members fall below a quorum.
+    /// quorum position has reached the append position. The leader fails its election
+    /// when its active members fall below a quorum.
     fn leader_log_replication<I: Io>(
         &mut self,
         clock: Clock,
@@ -2574,25 +2468,23 @@ impl Consensus {
         Ok(work)
     }
 
-    /// State 8. The heartbeat until enough members count for the term at the leader's
-    /// log position; then the term's first entry, the new leadership term event. A
-    /// member counts by an append position alone, which it sends once it has joined the
-    /// log. A leader that elects closes on a quorum at once: a member that joins after
-    /// the term's first entry catches up with it, states 11 to 13. It fails its
-    /// election when its active members fall below a quorum, as in state 5. The
-    /// appointed leader's members have no catch-up, so it waits for every member it has
-    /// heard, or for a quorum once the leader heartbeat timeout has passed in this
-    /// state, and never while a member's last report holds a log ahead of its own. A
-    /// member is heard once it has reported since the canvass began, in a canvass
-    /// position or an append position.
+    /// State 8. The heartbeat until a quorum of members, the leader among them,
+    /// counts for the term at the leader's log position; then the term's first entry,
+    /// the new leadership term event. A member counts by an append position alone,
+    /// which it sends once it has joined the log. The leader closes on a quorum at
+    /// once and waits for no other member: one that joins after the term's first
+    /// entry catches up with it, states 11 to 13. It fails its election when its
+    /// active members fall below a quorum, as in state 5.
     fn leader_ready<I: Io>(&mut self, clock: Clock, io: &mut I) -> Result<usize, I::Fault> {
         if self.report_own(clock) {
             self.fail(clock);
             return Ok(1);
         }
         let work = self.announce(clock, io);
-        let members = || self.peers.iter().take(self.count);
-        let counted = members()
+        let counted = self
+            .peers
+            .iter()
+            .take(self.count)
             .filter(|peer| {
                 // At the leader's log position and no other: a position past it is of
                 // entries this leader's log does not hold.
@@ -2603,21 +2495,9 @@ impl Consensus {
                     && clock.now_ns.saturating_sub(peer.at_ns) < LEADER_HEARTBEAT_TIMEOUT_NS
             })
             .count();
-        let ready = if self.election.is_some() {
-            // Row 8 of the page. No member's log is ahead of an elected leader's: a
-            // report of a term above its own has already failed this election.
-            counted >= quorum(self.count)
-        } else {
-            let heard = members().filter(|peer| peer.reported).count();
-            let deadline_passed =
-                clock.now_ns.saturating_sub(self.state_since_ns) >= LEADER_HEARTBEAT_TIMEOUT_NS;
-            let ahead = self.count_ahead(LogReport {
-                term: self.term,
-                position: self.append_position,
-            });
-            leader_ready(self.count, heard, counted, ahead, deadline_passed)
-        };
-        if !ready {
+        // Row 8 of the page. No member's log is ahead of this leader's: a report of a
+        // term above its own has already failed this election.
+        if counted < quorum(self.count) {
             return Ok(work);
         }
         let Some(log) = self.log else {
@@ -2640,10 +2520,9 @@ impl Consensus {
     }
 
     /// The leader, its election closed: the commit position from the members' append
-    /// positions, sent when it rises and every leader heartbeat interval. A leader that
-    /// elects and whose active members fall below a quorum holds an election, beginning
-    /// at init, a follower from that cycle on; the appointed leader stays the leader,
-    /// its commit position where it was.
+    /// positions, sent when it rises and every leader heartbeat interval. A leader
+    /// whose active members fall below a quorum holds an election, beginning at init,
+    /// a follower from that cycle on.
     fn commit<I: Io>(&mut self, clock: Clock, io: &mut I) -> usize {
         if self.report_own(clock) {
             // Counted in `cluster.leader_quorum_losses` by the quorum's watch.
@@ -2839,14 +2718,9 @@ impl Consensus {
     }
 
     /// State 10. Nothing to replay in a log with no term before the leader's. A member
-    /// behind the leader's log position catches up, when it elects; one whose leader
-    /// is appointed has no catch-up and fails.
+    /// behind the leader's log position catches up.
     fn follower_replay<F>(&mut self, clock: Clock) -> Result<usize, F> {
         if self.append_position < self.leader_log_position {
-            if self.election.is_none() {
-                self.fail(clock);
-                return Ok(1);
-            }
             return Ok(self.step(ElectionState::FollowerCatchupInit, clock));
         }
         Ok(self.step(ElectionState::FollowerLogInit, clock))

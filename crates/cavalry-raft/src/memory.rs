@@ -665,19 +665,11 @@ impl Io for MemberIo<'_> {
 pub struct Cluster {
     cores: Vec<Consensus>,
     world: World,
-    /// `Some` for a cluster whose members elect their leader: the seed each member's
-    /// own is made from.
-    election: Option<u64>,
+    /// The seed each member's own is made from.
+    seed: u64,
 }
 
 impl Cluster {
-    /// A cluster of the members with `member_ids`, every member started, at time 0.
-    /// Its leader is appointed: the member with the lowest id (`spec/cluster.md`, "The
-    /// appointed leader"), as in a cluster over drivers.
-    pub fn new(member_ids: &[i32]) -> Result<Self, MembersRefused> {
-        Self::start(member_ids, None)
-    }
-
     /// A cluster of the members with `member_ids` that elect their leader
     /// ([`Consensus::with_election`]; ADR 0077), every member started, at time 0.
     /// Each member's nomination delays come from `seed` and its place among the
@@ -685,37 +677,13 @@ impl Cluster {
     /// elections at every run. Which member leads depends on the seed:
     /// [`Cluster::leader`] says.
     pub fn with_election(member_ids: &[i32], seed: u64) -> Result<Self, MembersRefused> {
-        Self::start(member_ids, Some(seed))
-    }
-
-    /// The core of the member at `index` among `member_ids`, appointed or electing.
-    fn core(
-        member_ids: &[i32],
-        index: usize,
-        election: Option<u64>,
-    ) -> Result<Consensus, MembersRefused> {
-        let id = member_ids.get(index).copied().unwrap_or(-1);
-        match election {
-            None => Consensus::new(member_ids, id),
-            // One seed for each member: the cluster's, moved on by the member's place.
-            Some(seed) => Consensus::with_election(
-                member_ids,
-                id,
-                seed.wrapping_add(1)
-                    .wrapping_mul(0x9E37_79B9_7F4A_7C15)
-                    .wrapping_add((index as u64).wrapping_mul(0xD1B5_4A32_D192_ED03)),
-            ),
-        }
-    }
-
-    fn start(member_ids: &[i32], election: Option<u64>) -> Result<Self, MembersRefused> {
         let cores = (0..member_ids.len())
-            .map(|index| Self::core(member_ids, index, election))
+            .map(|index| Self::core(member_ids, index, seed))
             .collect::<Result<Vec<_>, _>>()?;
         let disks = member_ids.iter().map(|&id| Disk::empty(id)).collect();
         Ok(Self {
             cores,
-            election,
+            seed,
             world: World {
                 clock: Clock {
                     now_ns: 0,
@@ -733,6 +701,19 @@ impl Cluster {
                 random: 0x9E37_79B9_7F4A_7C15,
             },
         })
+    }
+
+    /// The core of the member at `index` among `member_ids`.
+    fn core(member_ids: &[i32], index: usize, seed: u64) -> Result<Consensus, MembersRefused> {
+        let id = member_ids.get(index).copied().unwrap_or(-1);
+        // One seed for each member: the cluster's, moved on by the member's place.
+        Consensus::with_election(
+            member_ids,
+            id,
+            seed.wrapping_add(1)
+                .wrapping_mul(0x9E37_79B9_7F4A_7C15)
+                .wrapping_add((index as u64).wrapping_mul(0xD1B5_4A32_D192_ED03)),
+        )
     }
 
     fn index(&self, member: i32) -> Option<usize> {
@@ -783,8 +764,8 @@ impl Cluster {
                 // that received past what it synced and then joined a publication whose
                 // entries end elsewhere, is skipped too, and the next is taken after a
                 // gap: the member's log is then not the publication's, which is what
-                // the safety check of a test finds. The election's truncation, when a
-                // member has it, cuts the member's log to where it joins.
+                // the safety check of a test finds. The election's truncation cuts the
+                // member's log to where it joins.
                 for entry in publication.entries.iter().skip(image.next) {
                     if entry.position >= disk.received {
                         disk.received = entry.position_after;
@@ -1081,15 +1062,11 @@ impl Cluster {
     }
 
     /// Offers `payload` to the leader as its own process does, and returns the
-    /// position after the entry ([`Consensus::offer`]). The leader is the appointed
-    /// one, the member with the lowest id, in a cluster made with [`Cluster::new`],
-    /// and [`Cluster::leader`] in one that elects, where an offer made while no member
-    /// leads is refused as not the leader's.
+    /// position after the entry ([`Consensus::offer`]). The leader is
+    /// [`Cluster::leader`]: an offer made while no member leads is refused as not the
+    /// leader's.
     pub fn offer(&mut self, payload: &[u8]) -> Result<i64, Refused> {
-        let leader = match self.election {
-            None => self.cores.first().map_or(-1, Consensus::leader_member_id),
-            Some(_) => self.leader().unwrap_or(-1),
-        };
+        let leader = self.leader().unwrap_or(-1);
         let Some(own) = self.index(leader) else {
             return Err(Refused::NotLeader);
         };
@@ -1206,10 +1183,8 @@ impl Cluster {
     /// Starts the member again on an empty log directory, as a container whose volume
     /// was not kept does: its core is new and its terms, its vote and its recordings
     /// are gone. When it led, its log publication is gone with it, and every
-    /// follower's image of it. A member whose leader is appointed does not start
-    /// again on the log it had (`spec/cluster.md`, "The appointed leader"); this is
-    /// the start it can make, and what the cluster does about it is the test. A
-    /// member that elects starts on the log it kept with [`Cluster::restart`].
+    /// follower's image of it. What the cluster does about it is the test. A member
+    /// starts on the log it kept with [`Cluster::restart`].
     pub fn wipe(&mut self, member: i32) {
         let Some(index) = self.index(member) else {
             return;
@@ -1221,7 +1196,7 @@ impl Cluster {
             .is_some_and(|core| core.role() == Role::Leader);
         if let (Some(core), Ok(new)) = (
             self.cores.get_mut(index),
-            Self::core(&ids, index, self.election),
+            Self::core(&ids, index, self.seed),
         ) {
             *core = new;
         }
@@ -1252,14 +1227,7 @@ impl Cluster {
     /// subscriptions, its image of the log and every replay it ran or received. When
     /// it led, its log publication is gone with it, and every follower's image of it.
     /// A member that was halted or stalled runs again, and its counts begin at 0.
-    ///
-    /// In a cluster made with [`Cluster::new`] this does nothing: a member whose
-    /// leader is appointed does not start again on the log it had (`spec/cluster.md`,
-    /// "The appointed leader"), and [`Cluster::wipe`] is the start it can make.
     pub fn restart(&mut self, member: i32) {
-        if self.election.is_none() {
-            return;
-        }
         let Some(index) = self.index(member) else {
             return;
         };
@@ -1270,7 +1238,7 @@ impl Cluster {
             .is_some_and(|core| core.role() == Role::Leader);
         if let (Some(core), Ok(new)) = (
             self.cores.get_mut(index),
-            Self::core(&ids, index, self.election),
+            Self::core(&ids, index, self.seed),
         ) {
             *core = new;
         }
@@ -1338,11 +1306,8 @@ impl Cluster {
     /// [`IN_FLIGHT_CAPACITY`], and one sent while that many are in flight is lost and
     /// counted, as any is.
     ///
-    /// In a cluster made with [`Cluster::new`], [`Cluster::offer`] goes to the
-    /// appointed leader's core whether its module runs or not, as it does to a halted
-    /// one: a test that stalls or halts an appointed leader offers it nothing until
-    /// it runs again. In a cluster that elects, an offer goes to [`Cluster::leader`],
-    /// which is never a stalled or a halted member.
+    /// [`Cluster::offer`] goes to [`Cluster::leader`], which is never a stalled or a
+    /// halted member.
     pub fn stall(&mut self, member: i32) {
         if let Some(disk) = self.disk_mut(member) {
             disk.stalled = true;

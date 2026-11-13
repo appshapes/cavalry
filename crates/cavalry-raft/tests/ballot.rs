@@ -487,8 +487,8 @@ fn a_member_that_elects_takes_no_term_from_an_id_that_is_no_other_members() {
     }
 }
 
-/// A member that elects takes the new leadership term of whichever member sends it,
-/// where a member whose leader is appointed reads the appointed leader's alone.
+/// A member takes the new leadership term of whichever other member sends it, and
+/// that member is its leader.
 #[test]
 fn a_member_that_elects_follows_the_member_whose_term_it_reads() {
     let mut io = Stub::new();
@@ -501,13 +501,4 @@ fn a_member_that_elects_follows_the_member_whose_term_it_reads() {
     assert_eq!(member.election_state(), ElectionState::FollowerReplay);
     assert_eq!(member.leader_member_id(), 2);
     assert_eq!(member.leadership_term_id(), 0);
-
-    let mut io = Stub::new();
-    let mut appointed = Consensus::new(&[0, 1, 2], 1).expect("a member");
-    appointed.do_work(at(1), &mut io).expect("no fault");
-    appointed
-        .on_message(at(2), &new_leadership_term(2, 0), &mut io)
-        .expect("no fault");
-    assert_eq!(appointed.election_state(), ElectionState::Canvass);
-    assert_eq!(appointed.leader_member_id(), 0);
 }

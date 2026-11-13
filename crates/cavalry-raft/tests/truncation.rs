@@ -199,21 +199,3 @@ fn a_truncation_takes_the_terms_recorded_above_it_out_of_the_log_term() {
         .expect("the term recorded");
     assert!(truncated < recorded, "{:?}", io.calls);
 }
-
-/// A member whose leader is appointed has no truncation: it fails its election where
-/// the election's member truncates, as before.
-#[test]
-fn a_member_whose_leader_is_appointed_truncates_nothing() {
-    let mut io = Stub::new();
-    io.append_position = 64;
-    let mut member = Consensus::new(&[0, 1, 2], 1).expect("a member");
-    member.do_work(at(1), &mut io).expect("no fault");
-    member
-        .on_message(at(2), &new_leadership_term(0, 0), &mut io)
-        .expect("no fault");
-    assert_eq!(member.election_state(), ElectionState::Init);
-    assert_eq!(member.counts().elections_failed, 1);
-    assert_eq!(member.counts().log_truncations, 0);
-    assert_eq!(io.count(|call| matches!(call, Call::TruncateLog(_))), 0);
-    assert_eq!(member.append_position(), 64);
-}

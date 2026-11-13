@@ -665,28 +665,3 @@ fn a_member_told_to_wait_stays_where_it_is() {
     assert_eq!(member.counts(), counts);
     assert_eq!(io.made, 0);
 }
-
-/// A member whose leader is appointed has no replication: it fails where a member
-/// that elects replicates, and calls nothing.
-#[test]
-fn an_appointed_member_fails_where_one_that_elects_replicates() {
-    let mut io = Stub::new();
-    let mut member = Consensus::new(&[0, 1, 2], 1).expect("a member");
-    work(&mut member, &mut io, 1);
-    assert_eq!(member.election_state(), ElectionState::Canvass);
-    io.clear();
-    let mut term = new_leadership_term(0, 64);
-    if let Message::NewLeadershipTerm {
-        next_term_base_log_position,
-        term_base_log_position,
-        ..
-    } = &mut term
-    {
-        *next_term_base_log_position = 64;
-        *term_base_log_position = 64;
-    }
-    read(&mut member, &mut io, 2, &term);
-    assert_eq!(member.election_state(), ElectionState::Init);
-    assert_eq!(member.counts().elections_failed, 1);
-    assert_eq!(io.made, 0);
-}

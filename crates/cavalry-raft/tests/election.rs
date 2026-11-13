@@ -9,9 +9,9 @@
 //! leader committed is in the log of every leader after it, and that no two members
 //! lead one term.
 //!
-//! A member on this path truncates a tail no quorum recorded, replicates a term it
-//! missed and catches up within its leader's term (ADR 0083, ADR 0086, ADR 0088), so
-//! a member that comes back behind its leader ends each test on the leader's log.
+//! A member truncates a tail no quorum recorded, replicates a term it missed and
+//! catches up within its leader's term (ADR 0083, ADR 0086, ADR 0088), so a member
+//! that comes back behind its leader ends each test on the leader's log.
 
 mod elected_cluster;
 

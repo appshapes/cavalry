@@ -82,12 +82,20 @@ pub enum RaftError {
     /// The member id is not one of the string's.
     Member(MembersRefused),
     /// The member's log directory holds a term or a vote: a member of this version
-    /// does not start again on its log (`spec/cluster.md`, "The appointed leader").
+    /// does not start again on its log (`spec/cluster.md`, "A member's start").
     Restart {
         /// The highest term in the record, −1 for none.
         log_leadership_term_id: i64,
         /// The candidate term stored, −1 for none.
         candidate_term: i64,
+    },
+    /// The member's log directory holds a recording of a cluster's log and no `terms`
+    /// file: the record of the member's terms and of the votes it cast is gone, and a
+    /// member that started here would vote with no record of them (`spec/cluster.md`,
+    /// "A member's start"; ADR 0104).
+    TermsLost {
+        /// The first recording of the log's stream that the directory's catalog holds.
+        recording_id: i64,
     },
     /// The `terms` file could not be read or written.
     Terms(TermsError),
@@ -136,14 +144,15 @@ pub enum RaftError {
 }
 
 impl RaftError {
-    /// The reason's name: `members`, `member`, `restart`, `terms`, `catalog`, `client`,
-    /// `poll`, `unsupported`, `payload-too-long`, `offer`, `stop-timeout` or
-    /// `log-recordings`.
+    /// The reason's name: `members`, `member`, `restart`, `terms-lost`, `terms`,
+    /// `catalog`, `client`, `poll`, `unsupported`, `payload-too-long`, `offer`,
+    /// `stop-timeout` or `log-recordings`.
     pub const fn reason(&self) -> &'static str {
         match self {
             RaftError::Members(_) => "members",
             RaftError::Member(_) => "member",
             RaftError::Restart { .. } => "restart",
+            RaftError::TermsLost { .. } => "terms-lost",
             RaftError::Terms(_) => "terms",
             RaftError::Catalog(_) => "catalog",
             RaftError::Client(_) => "client",
@@ -172,10 +181,26 @@ impl core::fmt::Display for RaftError {
                 f,
                 "member refused ({reason}): the log directory holds term \
                  {log_leadership_term_id} and candidate term {candidate_term}, and a member \
-                 of this version does not start again on its log: that needs the election \
-                 and the catch-up, which are not built yet. Start the cluster again as a new \
-                 cluster, every member on a new log directory; a new log directory on one \
-                 member alone joins nothing; see {DOC}"
+                 of this version does not start again on its log: the consensus module does \
+                 not yet read back which recordings hold it. The cluster goes on without \
+                 this member while a quorum of the others runs. To have every member again, \
+                 start the cluster again as a new cluster, every member on a new log \
+                 directory. Do not start this member alone on a new log directory: it would \
+                 join with no record of its votes or its log, and can then help elect a \
+                 leader that lacks a committed entry; see {DOC}"
+            ),
+            RaftError::TermsLost { recording_id } => write!(
+                f,
+                "member refused ({reason}): the log directory holds recording \
+                 {recording_id} of a cluster's log and no `terms` file, so this member's \
+                 record of the terms of its log and of the votes it cast is gone, and the \
+                 member does not start without it. Leave the member stopped: the cluster \
+                 goes on while a quorum of the others runs. To have every member again, \
+                 start the cluster again as a new cluster, every member on a new log \
+                 directory. Do not start this member alone on a new log directory, and do \
+                 not put an older copy of the file in its place: either way the member \
+                 would vote with no record of the votes it cast, and can then help elect a \
+                 leader that lacks a committed entry; see {DOC}"
             ),
             RaftError::Terms(error) => write!(f, "member stopped ({reason}): {error}"),
             RaftError::Catalog(error) => write!(
@@ -513,6 +538,23 @@ fn stop_recording(client: &mut Cavalry, recording: &Recording) -> Result<i64, Ra
     }
 }
 
+/// The first recording of the cluster's log stream that `catalog` holds, `None` when
+/// it holds none. A member records its log, and the replays it replicates and catches
+/// up by, on that stream alone, and records a term before it records an entry: so a
+/// log directory whose catalog holds such a recording has been a member's. Read once,
+/// at the member's start.
+fn log_recording_in(catalog: &CatalogReader) -> Result<Option<i64>, RaftError> {
+    let slots = i64::try_from(catalog.slots()?).unwrap_or(i64::MAX);
+    for recording_id in 0..slots {
+        if let Some(descriptor) = catalog.get(recording_id)?
+            && descriptor.stream_id() == LOG_STREAM_ID
+        {
+            return Ok(Some(recording_id));
+        }
+    }
+    Ok(None)
+}
+
 /// Takes the recording the driver has started for an armed `start recording`, and
 /// reads where it begins. That is the catalog's word, never the image's: an image
 /// that arrived between this member's `add subscription` and its `start recording`
@@ -835,7 +877,8 @@ impl Io for ClientIo {
     }
 
     /// The `terms` file's stored candidate term as the module holds it in memory. The
-    /// module's member is appointed and its core never asks (ADR 0081, ADR 0089).
+    /// core reads it once, in its first init (ADR 0089), and reads −1: the module
+    /// refuses a log directory that holds one ([`RaftError::Restart`]).
     fn candidate_term(&mut self) -> i64 {
         self.terms.candidate_term()
     }
@@ -997,8 +1040,9 @@ impl Io for ClientIo {
     /// base. What the leader appended and its recorder had not written is not in its
     /// log: it never reported it. The recording stays held until its stop has been
     /// read, so a stop the driver refused or did not answer in time returns with
-    /// nothing else changed, and init calls again on the next cycle. The module's own
-    /// core is appointed and never asks (ADR 0081).
+    /// nothing else changed, and init calls again on the next cycle. The core asks
+    /// it of a member that led and holds an election, in init, and not again once it
+    /// returned `Ok`.
     fn remove_log(&mut self) -> Result<(), Self::Fault> {
         if let Some(recording) = self.log_recording.as_ref() {
             let stop = stop_recording(&mut self.client, recording)?;
@@ -1043,7 +1087,8 @@ impl Io for ClientIo {
     /// that faults returns with what was cut so far cut in the table too, and the
     /// leader's next new leadership term asks again: a purge of a recording already
     /// purged, or a truncation to where a recording already stops, changes nothing.
-    /// The module's own core is appointed and never asks (ADR 0081).
+    /// The core asks it of a member that is out of the log, with a position below its
+    /// append position and at or above the commit position it knows (ADR 0083).
     fn truncate_log(&mut self, position: i64) -> Result<Option<i64>, Self::Fault> {
         if self.log_recording.is_some()
             || self.held.is_some()
@@ -1139,8 +1184,9 @@ impl Io for ClientIo {
     }
 
     /// Deletes every term above `term` from the `terms` file, each write synced
-    /// (`spec/durable-log.md`; ADR 0096). The module's own core is appointed and never
-    /// asks (ADR 0081).
+    /// (`spec/durable-log.md`; ADR 0096). The core asks it of a member that is out of
+    /// the log, after it has truncated what it held above the base of the lowest of
+    /// those terms.
     fn drop_terms_above(&mut self, term: i64) -> Result<i64, Self::Fault> {
         Ok(self.terms.drop_above_term(term)?)
     }
@@ -1170,8 +1216,8 @@ impl Io for ClientIo {
     /// driver answers `stop replay` once its replayer has written the replay's last
     /// frame (`spec/client-protocol.md`, "Commands"), and this waits for that answer,
     /// as the commands of [`Io::add_log`] wait for theirs. How the earlier replay
-    /// ended is forgotten. The module's own core is appointed and never asks
-    /// (ADR 0081).
+    /// ended is forgotten. The core asks it of a leader that has read a member's
+    /// catch-up position, and holds at most one replay a member (ADR 0085).
     fn start_replay(
         &mut self,
         member: i32,
@@ -1266,8 +1312,8 @@ impl Io for ClientIo {
     /// subscription held and before it asks its leader for a replay (ADR 0092), so
     /// the stream has no image when the recording is armed, and the replay's image
     /// is recorded from its join position. A call that failed at its second command
-    /// is tried again and sends that one alone. The module's own core is appointed
-    /// and never asks (ADR 0081).
+    /// is tried again and sends that one alone. The core asks it of a member behind
+    /// its leader: once for each replay of a replication, and once for a catch-up.
     fn add_catchup(&mut self) -> Result<(), Self::Fault> {
         if self.catchup_subscription.is_none() {
             self.catchup_subscription = Some(
@@ -1603,7 +1649,16 @@ impl ConsensusModule {
         for (slot, member) in ids.iter_mut().zip(parsed) {
             *slot = member.id;
         }
-        let core = Consensus::new(ids.get(..count).unwrap_or(&[]), member_id)
+        // The seed of the member's nomination delays: the operating system's, through
+        // the standard library's `RandomState`, mixed with the member id, so that two
+        // members never draw one sequence (ADR 0077).
+        let seed = {
+            use std::hash::{BuildHasher, Hasher};
+            let mut hasher = std::collections::hash_map::RandomState::new().build_hasher();
+            hasher.write_i32(member_id);
+            hasher.finish()
+        };
+        let core = Consensus::with_election(ids.get(..count).unwrap_or(&[]), member_id, seed)
             .map_err(RaftError::Member)?;
         let Some(own) = parsed.iter().find(|member| member.id == member_id) else {
             return Err(RaftError::Member(MembersRefused::NotAMember {
@@ -1616,6 +1671,16 @@ impl ConsensusModule {
         // the `terms` file, which is created when it is not there, so that a
         // directory the module refuses is left as it was.
         let catalog = CatalogReader::open(log_dir.as_ref())?;
+        // A `terms` file that is not there is created, for a member on a new log
+        // directory. A directory that holds a recording of the log is not new: its
+        // member recorded a term before it recorded an entry, so its `terms` file was
+        // removed, and with it the votes the member cast. It is refused before the
+        // file is created, so that the directory is left as it was.
+        if !TermsFile::path_in(log_dir.as_ref()).exists()
+            && let Some(recording_id) = log_recording_in(&catalog)?
+        {
+            return Err(RaftError::TermsLost { recording_id });
+        }
         let terms = TermsFile::open(log_dir.as_ref())?;
         if terms.log_leadership_term_id() != -1 || terms.candidate_term() != -1 {
             return Err(RaftError::Restart {
@@ -1784,8 +1849,8 @@ impl ConsensusModule {
     }
 
     /// Appends `payload` to the cluster's log as a session message of no session, for
-    /// the leader's own process (`spec/cluster.md`, "The appointed leader"). It is
-    /// committed once a quorum has recorded it, which
+    /// the leader's own process (`spec/cluster.md`, "Session message header, template
+    /// 1"). It is committed once a quorum has recorded it, which
     /// [`ConsensusModule::commit_position`] says. The entry carries the cluster's time
     /// of the last duty cycle. A follower, a leader whose election
     /// has not closed and a back-pressured log are [`RaftError::Offer`], each with what

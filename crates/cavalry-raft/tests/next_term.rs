@@ -9,8 +9,8 @@
 mod common;
 
 use cavalry_proto::cluster::Message;
-use cavalry_raft::{Consensus, ElectionState};
-use common::{Stub, append_position, at, canvass_position, leader_of_term_two};
+use cavalry_raft::Consensus;
+use common::{Stub, at, canvass_position, leader_of_term_two};
 
 fn work(member: &mut Consensus, io: &mut Stub, ms: u64) {
     member.do_work(at(ms), io).expect("no fault");
@@ -64,24 +64,4 @@ fn a_leader_names_the_term_its_record_holds_next_after_the_members_own() {
     );
     work(&mut member, &mut io, ms + 495);
     assert_eq!(io.last_term, Some((2, 2, [-1, -1, -1])));
-}
-
-/// The appointed leader's record holds its own term alone, so that term is the next
-/// of any member's, at its base with no end, as before.
-#[test]
-fn the_appointed_leader_names_its_own_term() {
-    let mut io = Stub::new();
-    let mut leader = Consensus::new(&[0, 1, 2], 0).expect("a member");
-    work(&mut leader, &mut io, 1);
-    for other in [1, 2] {
-        read(&mut leader, &mut io, 2, &reports(other, -1, 0));
-    }
-    work(&mut leader, &mut io, 3);
-    work(&mut leader, &mut io, 4);
-    assert_eq!(leader.election_state(), ElectionState::LeaderLogReplication);
-    io.last_term = None;
-    read(&mut leader, &mut io, 5, &reports(2, -1, 0));
-    assert_eq!(io.last_term, Some((2, -1, [0, 0, -1])));
-    // Keep the helper used by both paths of the crate's tests in use here.
-    read(&mut leader, &mut io, 6, &append_position(1, 0));
 }

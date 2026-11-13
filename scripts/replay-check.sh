@@ -11,7 +11,7 @@
 #
 # Then the same for a cluster (ADR 0052, feature 3; ADR 0063): three members on the
 # loopback, each a driver with its consensus module, replicate 100,000 hash-chained
-# entries from the leader, appointed by the lowest member id, and commit them at a
+# entries from the leader they elect, and commit them at a
 # quorum; a driver started again on each member's directories replays that member's
 # recording of the log; the three members' lines must hash the same, positions and
 # bodies, and the payloads in them must be the payloads the leader was offered, in
@@ -121,7 +121,8 @@ for member in 0 1 2; do
     line=$(grep "^member=$member " "$work/cluster.txt")
     dir=$(printf '%s\n' "$line" | sed -n 's/.* dir=\([^ ]*\) .*/\1/p')
     log_dir=$(printf '%s\n' "$line" | sed -n 's/.* log_dir=\([^ ]*\) .*/\1/p')
-    recording=$(printf '%s\n' "$line" | sed -n 's/.* recording=\([0-9]*\)$/\1/p')
+    recordings=$(printf '%s\n' "$line" | sed -n 's/.* recordings=\([0-9@,]*\)$/\1/p')
+    [ -n "$recordings" ] || { echo "replay-check: member $member's line names no recording: $line" >&2; exit 1; }
     printf '%s\n' "$line" | sed -n 's/.* service=\([^ ]*\) .*/\1/p' > "$work/service$member.path"
     "$cavalry" run --dir "$dir" --log-dir "$log_dir" &
     driver_pid=$!
@@ -131,11 +132,26 @@ for member in 0 1 2; do
     done
     "$cavalry" doctor --dir "$dir" --log-dir "$log_dir" | grep -q 'is running' || {
         echo "replay-check: member $member's driver did not report running" >&2; exit 1; }
-    "$cavalry" replay --dir "$dir" --log-dir "$log_dir" --recording "$recording" --from 0 > "$work/member$member.txt"
-    tail -1 "$work/member$member.txt"
-    grep -q "ended at position $cluster_end: $entries messages from position 0" "$work/member$member.txt" || {
-        echo "replay-check: member $member's replay did not end at $cluster_end with $entries messages" >&2; exit 1; }
-    sed '$d' "$work/member$member.txt" > "$work/member$member.body"
+    # A member's log is one recording, or two for a member that joined its leader
+    # late: the replay it caught up by, then the live one. Each is replayed from the
+    # position the member's service read it from, and the parts are joined.
+    : > "$work/member$member.body"
+    replayed=0
+    ended=0
+    for part in $(printf '%s' "$recordings" | tr ',' ' '); do
+        recording=${part%@*}
+        from=${part#*@}
+        "$cavalry" replay --dir "$dir" --log-dir "$log_dir" --recording "$recording" --from "$from" > "$work/member$member.txt"
+        tail -1 "$work/member$member.txt"
+        ended=$(tail -1 "$work/member$member.txt" | sed -n 's/.*ended at position \([0-9]*\): [0-9]* messages from position [0-9]*.*/\1/p')
+        count=$(tail -1 "$work/member$member.txt" | sed -n 's/.*ended at position [0-9]*: \([0-9]*\) messages from position [0-9]*.*/\1/p')
+        [ -n "$ended" ] && [ -n "$count" ] || {
+            echo "replay-check: member $member's replay of recording $recording from $from did not say where it ended" >&2; exit 1; }
+        replayed=$((replayed + count))
+        sed '$d' "$work/member$member.txt" >> "$work/member$member.body"
+    done
+    [ "$ended" = "$cluster_end" ] && [ "$replayed" = "$entries" ] || {
+        echo "replay-check: member $member's replays ended at $ended with $replayed messages, not at $cluster_end with $entries" >&2; exit 1; }
     kill -TERM "$driver_pid"
     wait "$driver_pid"
     driver_pid=""

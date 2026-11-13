@@ -17,6 +17,7 @@ use std::time::{Duration, Instant};
 
 use cavalry_driver::Driver;
 use cavalry_ffi::*;
+use cavalry_proto::cluster::{LOG_RECORDINGS_FILE_PREFIX, LogRecordings};
 use cavalry_raft::{ConsensusModule, ElectionState, Role};
 use stats_alloc::{INSTRUMENTED_SYSTEM, Region, StatsAlloc};
 
@@ -67,7 +68,8 @@ use ports::free_ports;
 /// Three cluster members over three drivers on the loopback, their elections closed,
 /// the member that leads first and its followers after it, whichever member the
 /// cluster has for a leader (ADR 0100, change 3). They start in the order 1, 2, 0,
-/// so that no member's place is its id, before the leader is put first or after.
+/// so that no member's place is its id, before the leader is put first or after. The
+/// follower in place 1 joined the leader's log on time, and its log is one recording.
 fn cluster(dir: &Path) -> Vec<(Driver, ConsensusModule)> {
     let ports = free_ports(15);
     let members_string = (0..3)
@@ -104,6 +106,37 @@ fn cluster(dir: &Path) -> Vec<(Driver, ConsensusModule)> {
         .position(|(_, module)| module.role() == Role::Leader)
         .expect("one member leads");
     members.swap(0, leader);
+    // The service reads beside `members[1]` from 0 through one handle, so that is a
+    // follower whose log is one recording, from 0. A follower that joined the leader's
+    // log late holds what lies below its live image in its recording of the replay it
+    // caught up by (ADR 0103; ADR 0104), and a handle opened at 0 beside it replays
+    // that recording and ends where it stops, after the term's first entry. The leader
+    // closes its election on a quorum of members that joined its log at its position,
+    // so one follower at least did. Each member writes its file before it names its
+    // recording.
+    while !members
+        .iter()
+        .all(|(_, module)| module.log_recording_id().is_some())
+    {
+        assert!(
+            Instant::now() < deadline,
+            "every member named its recording"
+        );
+        work(&mut members);
+    }
+    let on_time = (1..3)
+        .find(|&place| {
+            let member_id = members[place].1.member_id();
+            let bytes = std::fs::read(
+                dir.join(format!("member-{member_id}"))
+                    .join(format!("{LOG_RECORDINGS_FILE_PREFIX}{member_id}")),
+            )
+            .expect("the member's file of its log's recordings");
+            let file = LogRecordings::read(&bytes, member_id).expect("the file passes its checks");
+            file.is_empty() && file.live_start_position() == 0
+        })
+        .expect("a follower that joined the log on time");
+    members.swap(1, on_time);
     members
 }
 

@@ -1,9 +1,8 @@
 //! The module's own tests: what `ConsensusModule` cannot be asked for from outside.
 //! A member leads a term whose base is not position 0, gives its log up, or replays
-//! its recordings to a member that is behind only after an election, which this
-//! version's appointed leader never holds in one process (`spec/cluster.md`, "The
-//! appointed leader"), so the tests here drive the module's [`Io`] itself, over a
-//! driver (ADR 0091).
+//! its recordings to a member that is behind only after an election. The tests here
+//! wait for none: they drive the module's [`Io`] itself, over a driver, each call
+//! where the test puts it (ADR 0091).
 
 use std::path::PathBuf;
 
