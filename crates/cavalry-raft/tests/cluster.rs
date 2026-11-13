@@ -9,7 +9,7 @@
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
-use cavalry_client::{Cavalry, ClientError, CommittedLog, Fault};
+use cavalry_client::{Cavalry, CommittedLog, Fault};
 use cavalry_driver::Driver;
 use cavalry_log::catalog::CatalogReader;
 use cavalry_proto::cluster::{
@@ -1279,14 +1279,14 @@ fn log_recordings(member: &Member) -> (i64, i64, Vec<(i64, i64, i64)>) {
 }
 
 /// A service beside a follower that left the log and joined it again
-/// (`spec/cluster.md`, "The service"). The member names a new recording, which begins
-/// where it joined, its append position, and its file of its log's recordings lists
-/// the recording it left below that one (ADR 0103). A service that had read to that
-/// position opens the log there and reads on. A service whose position is below it
-/// is still refused the replay with code 23: the service's read of the recordings
-/// the file lists is the change after this one.
+/// (`spec/cluster.md`, "The service"; ADR 0103). The member names a new recording,
+/// which begins where it joined, its append position, and lists the recording it left
+/// below it in its file. A service that had read to that position opens the log there
+/// and reads on. A service that starts at 0 reads the recording the member left to
+/// its stop, is ended there with nothing reported, opens the log again and reads on
+/// in the new recording: every entry once, in order, across both.
 #[test]
-fn a_service_reads_on_where_the_recording_its_member_joined_again_on_begins() {
+fn a_service_reads_across_the_recordings_of_a_member_that_joined_the_log_again() {
     let dir = TestDir::new("service-joins-again");
     let members_string = members_string();
     let mut members = start(dir.path(), &members_string);
@@ -1379,25 +1379,13 @@ fn a_service_reads_on_where_the_recording_its_member_joined_again_on_begins() {
         second_recording
     );
 
-    // Below the start of the recording the member names now: refused, and said so.
-    let refused = client
-        .committed_log(0)
-        .expect_err("position 0 is below the start of the member's new recording");
-    assert!(
-        matches!(refused, ClientError::Refused { raw_code: 23, .. }),
-        "{refused}"
-    );
-    // At its start, the position the service had read to: the service reads on, the
-    // ten entries appended after the join and nothing before them.
+    // At the new recording's start, the position the service had read to: the service
+    // reads on, the ten entries appended after the join and nothing before them.
     let mut log = client
         .committed_log(first)
         .expect("the driver answers")
         .expect("the member has its log");
-    assert_ne!(log.recording_id(), first_recording);
-    assert_eq!(
-        Some(log.recording_id()),
-        members[1].module.log_recording_id()
-    );
+    assert_eq!(log.recording_id(), second_recording);
     let mut after = Read::new();
     run_until(&mut members, "the service read what came after", |_| {
         poll_log(&mut log, &mut after);
@@ -1405,6 +1393,51 @@ fn a_service_reads_on_where_the_recording_its_member_joined_again_on_begins() {
     });
     assert_eq!(after.len(), usize::try_from(ENTRIES).expect("a count"));
     assert_eq!(after[0].0, first);
+    log.close(&mut client).expect("the handle closes");
+
+    // A service that starts at 0: the recording the member left, to its stop.
+    let mut log = client
+        .committed_log(0)
+        .expect("the driver answers")
+        .expect("the member has its log");
+    assert_eq!(log.recording_id(), first_recording);
+    let mut all = Read::new();
+    run_until(
+        &mut members,
+        "the service read the recording its member left",
+        |_| {
+            poll_log(&mut log, &mut all);
+            log.is_ended()
+        },
+    );
+    assert_eq!(log.position(), first, "it is ended at the recording's stop");
+    assert_eq!(
+        (log.failed_at(), log.withdrawn_at(), log.faulted()),
+        (None, None, None),
+        "and whole: every entry the recording holds was delivered"
+    );
+    assert_eq!(all.len(), usize::try_from(ENTRIES).expect("a count") + 1);
+    let ended_at = log.position();
+    log.close(&mut client).expect("the handle closes");
+    // It opens the log again where the handle ended, and that is the live recording.
+    let mut log = client
+        .committed_log(ended_at)
+        .expect("the driver answers")
+        .expect("the member has its log");
+    assert_eq!(log.recording_id(), second_recording);
+    run_until(
+        &mut members,
+        "the service read on in the live recording",
+        |_| {
+            poll_log(&mut log, &mut all);
+            log.position() == second
+        },
+    );
+    // Every entry once, in order: what the two services read before, end to end.
+    let mut expected = read;
+    expected.extend(after);
+    assert_eq!(all, expected);
+    assert!(!log.is_ended(), "the live recording is followed");
     log.close(&mut client).expect("the handle closes");
     client.close().expect("the service's client closes");
 

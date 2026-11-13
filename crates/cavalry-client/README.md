@@ -92,14 +92,16 @@ The client API implementation, re-exported by the `cavalry` crate. Data plane.
   holds, in order, each once, with its position. The log is read from the member's
   own recording through a replay that follows it, on the leader and on a follower
   alike, and no further than the member's commit position, which is taken only while
-  the member's counters say the log is still that recording (ADR 0066). The read
-  below that recording, of a member whose log is in several, which `spec/cluster.md`,
-  "The service", describes, is not built yet: a position below the recording the
-  member names is refused with error code 23 (ADR 0103). Not built with it: the
-  answer of no log while the member's file names another live recording than its
-  counter does, the second load of the counter when there is no file, the handle's
-  end at the stop of a recording below the live one, and
-  the error for a file that fails a check or cannot be read. A service may
+  the member's counter still names the live recording it named when the log was
+  opened (ADR 0066, ADR 0103). A member's
+  log is one recording or several in a row, which the member lists in a file in its
+  driver directory: a handle replays the one that holds the position it was opened
+  at, is ended at that recording's stop, and the log opened again at
+  `CommittedLog::position()` is the next, so a service reads every entry once, in
+  order, across them. With no file the call loads the member's counter again, and
+  opens the live recording only when the counter still names it: a member that
+  writes no file is of an earlier version, and one that has closed has stored −1
+  there before it removed its file (ADR 0103). A service may
   start before its member, with it or after it, at position 0 or where it stopped.
   It reads until `CommittedLog::is_ended()`, and then three calls say whether it was
   given every entry below its bound: it was when all three return `None`. If the

@@ -12,6 +12,13 @@
 //!
 //! The program may start before its member, with it or after it: while the driver
 //! hosts no member that has a log it asks again ten times a second.
+//!
+//! A member's log is one recording or several in a row, and a handle reads one (ADR
+//! 0103). When a handle has delivered all its recording holds, the program opens the
+//! log again where the handle ended: that is the member's next recording, at once, or
+//! nothing, when the member closed or left its log, and then the program ends. It is
+//! the same recording again while the member names a live recording that has stopped
+//! and has not yet left its log; the program then asks again ten times a second.
 
 use std::path::PathBuf;
 use std::process::ExitCode;
@@ -187,10 +194,14 @@ fn run(args: &Args) -> Result<(), Box<dyn std::error::Error>> {
                 // read, and the next run starts where this one stopped.
                 return Err(format!(
                     "the driver withdrew the replay of member {}'s recording {} before \
-                     this program read the entries from position {position}: it did not \
-                     read them within 5 s of its member closing or leaving its log; start \
-                     it again with --from {} once the member runs; see \
-                     docs/how-to/read-the-committed-log.md#when-it-does-not-work",
+                     this program read the entries from position {position}: the \
+                     recording had stopped and this program did not read the rest of it \
+                     within 5 s. Either its member closed or left its log and this \
+                     program did not poll in that time, or the recording is one below \
+                     the member's live one and the member's commit position stayed below \
+                     its end. Run `cavalry doctor` on the member's directory to see \
+                     which, and start this program again with --from {} once the member \
+                     runs; see docs/how-to/read-the-committed-log.md#when-it-does-not-work",
                     log.member_id(),
                     log.recording_id(),
                     log.position()
@@ -228,8 +239,35 @@ fn run(args: &Args) -> Result<(), Box<dyn std::error::Error>> {
                 )
                 .into());
             }
-            // The member left its log or closed, and every entry below the last commit
-            // position the handle took has been read: the next run starts here.
+            // Every entry this handle's recording holds below the last commit position
+            // the handle took has been read. The member's log goes on in its next
+            // recording when this one lies below its live one: the log opened again at
+            // the handle's position is that recording, at once.
+            if let Some(next) = client.committed_log(log.position())? {
+                let same = next.recording_id() == log.recording_id();
+                let ended = std::mem::replace(&mut log, next);
+                ended.close(&mut client)?;
+                if same {
+                    // The same recording again. Either its member stopped it and still
+                    // names it, as for a moment when the member loses its leader or a
+                    // write fails, and the handle is ended at once at the recording's
+                    // stop; or the member has since named another live recording and
+                    // this one lies below it, with entries left to read. Either way ask
+                    // again after a pause, as while no member has a log, and not in a
+                    // loop that spins until the member names its next recording.
+                    std::thread::sleep(Duration::from_millis(100));
+                } else {
+                    eprintln!(
+                        "cluster-service: reading member {}'s log, recording {}, from position {}",
+                        log.member_id(),
+                        log.recording_id(),
+                        log.position()
+                    );
+                }
+                continue;
+            }
+            // No member names a recording: the member left its log, closed, or is
+            // between two recordings, and the next run starts here.
             eprintln!(
                 "cluster-service: the member's log ended; read to position {}",
                 log.position()

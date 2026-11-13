@@ -1294,30 +1294,54 @@ impl Cavalry {
     /// Opens the committed log of the cluster member on this client's driver at
     /// `position`, for a service to read (`spec/cluster.md`, "The service"; ADR 0066):
     /// it adds a subscription on `cavalry:ipc` and stream [`SERVICE_LOG_STREAM_ID`] and
-    /// starts a replay that follows the member's recording of the log from `position`.
+    /// starts a replay, from `position`, that follows the recording of the member's
+    /// log that holds it.
     /// `position` is where an entry begins: 0, or [`CommittedLog::position`] of an
     /// earlier handle.
     ///
     /// Returns `None` while the driver hosts no member that has a recording of its
-    /// log: the member has not started, its election has not given it a log yet, or
-    /// it has closed. A service that starts before its member calls again, with a
+    /// log: the member has not started, its election has not given it a log yet, it
+    /// has closed, or it named another recording, or closed and removed its file,
+    /// while this call read its file of recordings: with no file the call loads the
+    /// member's counter again, and opens the live recording only when the counter
+    /// still names it. A service that starts before its member calls again, with a
     /// pause between two calls: each reads the counters file's records to find the
     /// member, which is not a call for a loop that spins. Nothing is sent to the
     /// driver until a member is found.
     ///
     /// The refusals are those of [`Cavalry::add_subscription`] and
     /// [`Cavalry::start_replay`]: a position that is not a multiple of 32, is past
-    /// what the member has recorded, or is below where the recording the member names
-    /// begins is [`ClientError::Refused`] with code 23, and a driver whose replays
-    /// registry is full, 64 replays, is code 10.
+    /// what the member has recorded, or is below every recording of its log the
+    /// member keeps is [`ClientError::Refused`] with code 23, and a driver whose
+    /// replays registry is full, 64 replays, is code 10. The member's file of its
+    /// log's recordings that cannot be read, or that fails a check of its page, is
+    /// [`ClientError::Io`], which names the file and the check.
     ///
-    /// The recording the member names begins at 0 on a member that has not left the
-    /// log. A member that left the log and joined it again records into a new
-    /// recording, which begins where it joined, and the entries below that are in the
-    /// recording it left. The member's file of its log's recordings names that
-    /// recording to a service (`spec/cluster.md`, "The log's recordings"; ADR 0103),
-    /// and the read of it is not built yet: until it is, a service whose position is
-    /// below the new recording's start is refused here, with code 23.
+    /// A member's log is one recording, which begins at 0, until the member leaves
+    /// the log and joins it again, a later term begins, or the member catches up
+    /// through a replay; then it is several, in a row. The member lists them in a
+    /// file in its driver directory, and this call replays the one that holds
+    /// `position`: the first the file lists that does, and the recording the member
+    /// records the live log into when none does (`spec/cluster.md`, "The service" and
+    /// "The log's recordings"; ADR 0103). A handle is one recording's. On a recording
+    /// below the live one it is ended at that recording's stop, with no report set,
+    /// and the next call, at [`CommittedLog::position`], replays the next. So a
+    /// service that starts at 0 beside a member whose log is in three recordings
+    /// opens the log three times, and reads every entry once, in order. A member
+    /// keeps the last 1,024 recordings it stopped: a position below them is refused
+    /// with code 23.
+    ///
+    /// The call at the position where a handle ended whole has a third answer, beside
+    /// the next recording and `None`: a handle on the same recording,
+    /// [`CommittedLog::recording_id`] unchanged. When the member still names that
+    /// recording as its live one, the recording has stopped there and the member has
+    /// not yet left its log, as for the seconds a follower takes to leave a leader it
+    /// lost once its driver has retired the leader's image, or after a write to the
+    /// recording's segment file failed: the handle is ended at once, with no report
+    /// set and no entry. When the member has named a later recording since, the same
+    /// recording lies below it, and the handle reads on in it. A service asks again
+    /// after a pause in both cases, as it does after `None`, and not in a loop that
+    /// spins.
     ///
     /// A service reads a handle until [`CommittedLog::is_ended`] says that no poll will
     /// deliver another entry, and not until a poll returns 0: when its member closes or
@@ -1404,9 +1428,10 @@ impl Cavalry {
     ///                 )
     ///                 .into());
     ///             }
-    ///             // None of the three: the member closed or left its log, and every
-    ///             // entry below the last commit position the handle took has been
-    ///             // delivered.
+    ///             // None of the three: every entry the handle's recording holds
+    ///             // below the last commit position the handle took has been
+    ///             // delivered. The caller opens the log again from `next`, after a
+    ///             // pause when that is the same recording or `None`.
     ///             return Ok(next);
     ///         }
     ///         if entries == 0 {

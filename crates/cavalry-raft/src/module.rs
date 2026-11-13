@@ -1705,7 +1705,11 @@ impl ConsensusModule {
     /// moved. Returns how much it did, 0 for nothing, for the caller's idle strategy.
     /// An error is a step the member cannot go on without; the member stays in the
     /// state it was in, and a later call tries the step again. An error of the core's
-    /// own cycle is returned after the counters are stored (ADR 0091).
+    /// own cycle is returned after the counters are stored (ADR 0091). One error is
+    /// not of that kind: [`RaftError::LogRecordings`], a file of the log's recordings
+    /// that could not be written, is returned after the core's cycle has run, so the
+    /// member has moved on, records and replicates, and names no recording to a
+    /// service until a later call writes the file (ADR 0103).
     pub fn do_work(&mut self) -> Result<usize, RaftError> {
         self.clock = read_clock(self.started);
         let clock = self.clock;

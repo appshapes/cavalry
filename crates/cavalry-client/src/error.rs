@@ -171,7 +171,9 @@ pub enum ClientError {
         /// What it said.
         what: String,
     },
-    /// The operating system refused a step.
+    /// The operating system refused a step, or a file this client reads whole, a
+    /// cluster member's file of its log's recordings, failed a check of its page: the
+    /// source is then that check, under the kind `InvalidData`.
     Io {
         /// The step that failed.
         what: &'static str,
