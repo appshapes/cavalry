@@ -65,7 +65,7 @@ use crate::sessions::{EGRESS_SLOTS, Ingress, Leadership, SessionCounts, SessionI
 /// carries after the frame header and the session message header, at the UDP
 /// transport's MTU length of 1,408 bytes. An entry is one frame in this version, so
 /// that no entry lies across the commit position. It is a client's session message's
-/// bound too: a longer one is [`Ingress::Rejected`](crate::Ingress::Rejected).
+/// bound too: a longer one is [`Ingress::Rejected`].
 pub const MAX_PAYLOAD_LENGTH: usize = 1408 - 32 - 32;
 
 /// How many consensus messages one duty cycle reads.
