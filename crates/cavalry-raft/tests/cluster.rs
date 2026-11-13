@@ -8,7 +8,11 @@
 //! where the recording it held stopped. A follower that is slow at the start joins the
 //! log after the term's first entry and catches up by a replay (ADR 0104, Evidence);
 //! the three tests where the leader is lost or stands still make one follower do so on
-//! every run.
+//! every run. So do the tests of a service but one, the test of a member whose file of
+//! its log's recordings cannot be written, which picks that member before the election
+//! and holds whether it joined late or not. A service reads beside the late follower
+//! across its recordings, or beside the follower that joined on time, whose log is one
+//! recording.
 
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
@@ -126,57 +130,17 @@ fn run_until_led(members: &mut [Member]) -> usize {
             .iter()
             .all(|m| m.module.election_state() == ElectionState::Closed)
     });
+    lead_first(members)
+}
+
+/// Puts the member that leads first, and returns the place it was in.
+fn lead_first(members: &mut [Member]) -> usize {
     let leader = members
         .iter()
         .position(|m| m.module.role() == Role::Leader)
         .expect("one member leads");
     members.swap(0, leader);
     leader
-}
-
-/// Whether `member` holds its log in one recording that begins at position 0: its
-/// file of its log's recordings lists none below the live one. A follower that joined
-/// its leader's log late does not (ADR 0103).
-fn in_one_recording(member: &Member) -> bool {
-    let (_, live_start, below) = log_recordings(member);
-    live_start == 0 && below.is_empty()
-}
-
-/// Closes every member and its driver.
-fn close(members: Vec<Member>) {
-    for member in members {
-        member.module.close().expect("the member closes");
-        member.driver.close().expect("the driver closes");
-    }
-}
-
-/// Starts three members under `dir` and runs them until every election has closed,
-/// with the leader first (`run_until_led`) and every member's log in one recording.
-///
-/// The leader closes its election on a quorum (ADR 0104). So now and then a follower
-/// that was slow meets the log after the term's first entry: its election fails
-/// once, it catches up through a replay, and from then on it has counted two
-/// elections and holds its log in two recordings, the first of which has stopped. A
-/// test that begins here is about what comes after a start, and counts, recordings
-/// and a service's handle from a start in which every member joined on time. A start
-/// in which a follower joined late is closed and made again, in a directory of its
-/// own, five times at most. The late join is not left to chance either:
-/// [`run_until_led_with_a_late_follower`] makes one on every run of the tests that
-/// begin with it.
-fn start_led(dir: &Path) -> Vec<Member> {
-    for attempt in 0..5 {
-        let mut members = start(&dir.join(format!("start-{attempt}")), &members_string());
-        run_until_led(&mut members);
-        if members.iter().all(in_one_recording) {
-            return members;
-        }
-        println!(
-            "cluster: a follower joined late in start {attempt}, which is made again: {:?}",
-            members.iter().map(log_recordings).collect::<Vec<_>>()
-        );
-        close(members);
-    }
-    panic!("a follower joined late in each of five starts");
 }
 
 /// As [`run_until_led`], with one follower made to join the log late. A follower that
@@ -187,10 +151,21 @@ fn start_led(dir: &Path) -> Vec<Member> {
 /// entry: the leader closed on a quorum without it. Its image of the log then joins
 /// past its append position. It counts the mismatch, fails its election, and catches
 /// up in the next. Returns the late follower's member id, once it has been seen to do
-/// so.
-fn run_until_led_with_a_late_follower(members: &mut [Member]) -> i32 {
+/// so, and the place the leader was in, as [`run_until_led`] does.
+fn run_until_led_with_a_late_follower(members: &mut [Member]) -> (i32, usize) {
+    run_until_led_with_a_late_follower_beside(members, |_| {})
+}
+
+/// [`run_until_led_with_a_late_follower`], with `beside` called after each round of
+/// duty cycles, while the late member stands still too: what a test runs beside the
+/// members as they elect, its services asking for their logs.
+fn run_until_led_with_a_late_follower_beside(
+    members: &mut [Member],
+    mut beside: impl FnMut(&[Member]),
+) -> (i32, usize) {
     let mut late = None;
     run_until(members, "a member took a leader's term", |members| {
+        beside(members);
         late = members
             .iter()
             .position(|m| m.module.election_state() == ElectionState::FollowerLogInit);
@@ -215,11 +190,18 @@ fn run_until_led_with_a_late_follower(members: &mut [Member]) -> i32 {
                 work += member.module.do_work().expect("the member's duty cycle");
             }
         }
+        beside(members);
         if work == 0 {
             std::thread::sleep(Duration::from_micros(200));
         }
     }
-    run_until_led(members);
+    run_until(members, "every election closed", |members| {
+        beside(members);
+        members
+            .iter()
+            .all(|m| m.module.election_state() == ElectionState::Closed)
+    });
+    let led_from = lead_first(members);
     let member = members
         .iter()
         .find(|m| m.module.member_id() == late_id)
@@ -235,7 +217,21 @@ fn run_until_led_with_a_late_follower(members: &mut [Member]) -> i32 {
         (1, 1, 2),
         "member {late_id} joined late: {counts:?}"
     );
-    late_id
+    (late_id, led_from)
+}
+
+/// Puts the follower that joined the log on time, the one whose id is not `late`, in
+/// `place`, 1 or 2, and the late one in the other. Its log is one recording from 0, so
+/// a service beside it that opens the log at 0 reads the live recording.
+fn put_on_time_follower(members: &mut [Member], late: i32, place: usize) {
+    let on_time = if members[1].module.member_id() == late {
+        2
+    } else {
+        1
+    };
+    members.swap(on_time, place);
+    assert_ne!(members[place].module.member_id(), late);
+    assert_eq!(members[place].module.role(), Role::Follower);
 }
 
 fn states(members: &[Member]) -> Vec<String> {
@@ -1109,7 +1105,10 @@ fn a_follower_that_leaves_the_log_joins_it_again_where_its_recording_stopped() {
         );
     }
 
-    close(members);
+    for member in members {
+        member.module.close().expect("the member closes");
+        member.driver.close().expect("the driver closes");
+    }
 }
 
 /// What a service read: each entry's position and its bytes.
@@ -1145,6 +1144,46 @@ fn poll_log_at_most(log: &mut CommittedLog, read: &mut Read, fragment_limit: usi
     delivered
 }
 
+/// [`poll_log`], and once the handle has ended, the log opened again where it ended,
+/// as a service does (`CommittedLog`; ADR 0103). A follower that joined its leader's
+/// log late holds what lies below its live image in its recording of the replay it
+/// caught up by, and a handle opened there ends at that recording's stop, with every
+/// entry it held delivered. The next handle reads on in the recording that follows.
+/// A replay that failed or an image that faulted is the test's failure, not an end to
+/// read past.
+fn poll_across(client: &mut Cavalry, log: &mut CommittedLog, read: &mut Read) -> usize {
+    let delivered = poll_log(log, read);
+    if log.is_ended() {
+        assert_eq!(
+            (log.failed_at(), log.faulted()),
+            (None, None),
+            "the handle ended on a failure: {log:?}"
+        );
+        let next = client
+            .committed_log(log.position())
+            .expect("the driver answers")
+            .expect("the member has its log");
+        std::mem::replace(log, next)
+            .close(client)
+            .expect("the ended handle closes");
+    }
+    delivered
+}
+
+/// Opens at 0 each service's log that is not open yet, one service beside each member,
+/// in the members' order. Returns how many of them were told that their member has no
+/// log yet.
+fn open_at_0(logs: &mut [Option<CommittedLog>], clients: &mut [Cavalry]) -> usize {
+    let mut not_yet = 0;
+    for (log, client) in logs.iter_mut().zip(clients.iter_mut()) {
+        if log.is_none() {
+            *log = client.committed_log(0).expect("the driver answers");
+            not_yet += usize::from(log.is_none());
+        }
+    }
+    not_yet
+}
+
 /// The leader appends `count` entries numbered from `from`, a back-pressured offer made
 /// again once the members that run have run.
 fn offer(members: &mut [Member], running: &[usize], from: u32, count: u32) {
@@ -1167,87 +1206,72 @@ fn offer(members: &mut [Member], running: &[usize], from: u32, count: u32) {
     }
 }
 
-/// Three members under `dir` with a service's client on each driver, and each
-/// service's log, opened at position 0 as soon as its member has one. A service that
-/// starts with its member asks until the member has its log: the members are in
-/// canvass, and a follower's recording starts after its election. A member names its
-/// recording before the leader's election closes, state 5 on the leader and 15 on a
-/// follower, so each handle is opened on a log that holds nothing yet. Returns once
-/// every election has closed, with the leader first in the three vectors.
-///
-/// As in [`start_led`], a start in which a follower joined late is closed and made
-/// again, five times at most: that follower names no recording until it has caught
-/// up, and its service's handle at 0 is then of the recording of its catch-up, which
-/// has stopped.
-fn start_led_with_services(dir: &Path) -> (Vec<Member>, Vec<Cavalry>, Vec<CommittedLog>) {
-    for attempt in 0..5 {
-        let mut members = start(&dir.join(format!("start-{attempt}")), &members_string());
-        let mut clients: Vec<Cavalry> = members
-            .iter()
-            .map(|member| Cavalry::connect_to(&member.dir).expect("the service's client connects"))
-            .collect();
-        let mut logs: Vec<Option<CommittedLog>> = (0..3).map(|_| None).collect();
-        let mut asked_early = 0;
-        run_until(&mut members, "every service opened its log", |_| {
-            for (log, client) in logs.iter_mut().zip(clients.iter_mut()) {
-                if log.is_none() {
-                    *log = client.committed_log(0).expect("the driver answers");
-                    asked_early += usize::from(log.is_none());
-                }
-            }
-            logs.iter().all(Option::is_some)
-        });
-        let mut logs: Vec<CommittedLog> = logs.into_iter().flatten().collect();
-        // What each handle is before its first poll, beside what its member names.
-        let opened: Vec<_> = logs
-            .iter()
-            .zip(&members)
-            .map(|(log, member)| {
-                (
-                    (log.member_id(), Some(log.recording_id())),
-                    (member.module.member_id(), member.module.log_recording_id()),
-                    (log.position(), log.commit_position(), log.is_ended()),
-                )
-            })
-            .collect();
-        // The leader refuses an offer until its election has closed: a test's offers
-        // wait for every election to close.
-        let led_from = run_until_led(&mut members);
-        clients.swap(0, led_from);
-        logs.swap(0, led_from);
-        if members.iter().all(in_one_recording) {
-            assert!(
-                asked_early > 0,
-                "no service asked before its member had a log"
-            );
-            for (handle, member, at) in opened {
-                assert_eq!(handle, member);
-                assert_eq!(at, (0, 0, false));
-            }
-            return (members, clients, logs);
-        }
-        println!(
-            "cluster: a follower joined late in start {attempt}, which is made again: {:?}",
-            members.iter().map(log_recordings).collect::<Vec<_>>()
-        );
-        for (log, mut client) in logs.into_iter().zip(clients) {
-            log.close(&mut client).expect("the handle closes");
-            client.close().expect("the service's client closes");
-        }
-        close(members);
-    }
-    panic!("a follower joined late in each of five starts");
-}
-
 /// A service beside each member reads the committed log through its member's driver
 /// (`spec/cluster.md`, "The service"; ADR 0066): the same entries at the same positions
 /// on the leader and on both followers, none past the commit position even when the
 /// member's own recording holds more, from any position and at any time, and to the
-/// bound it last took once its member is gone.
+/// bound it last took once its member is gone. One follower joins the log late
+/// (`run_until_led_with_a_late_follower_beside`), and the services beside it read
+/// across its recordings as a service does (`poll_across`): the replay's it caught up
+/// by, then its live one.
 #[test]
 fn a_service_reads_the_committed_log_on_every_member_and_nothing_past_the_commit_position() {
     let dir = TestDir::new("service");
-    let (mut members, mut clients, mut logs) = start_led_with_services(dir.path());
+    let members_string = members_string();
+    let mut members = start(dir.path(), &members_string);
+    let mut clients: Vec<Cavalry> = members
+        .iter()
+        .map(|member| Cavalry::connect_to(&member.dir).expect("the service's client connects"))
+        .collect();
+
+    // A service that starts with its member asks until the member has its log: the
+    // members are in canvass, and a follower's recording starts after its election.
+    // The late follower names none until it has caught up.
+    let mut logs: Vec<Option<CommittedLog>> = (0..3).map(|_| None).collect();
+    let mut asked_early = 0;
+    let (late_id, led_from) = run_until_led_with_a_late_follower_beside(&mut members, |_| {
+        asked_early += open_at_0(&mut logs, &mut clients);
+    });
+    run_until(&mut members, "every service opened its log", |_| {
+        open_at_0(&mut logs, &mut clients);
+        logs.iter().all(Option::is_some)
+    });
+    assert!(
+        asked_early > 0,
+        "no service asked before its member had a log"
+    );
+    let mut logs: Vec<CommittedLog> = logs.into_iter().flatten().collect();
+    // A member names its recording before the leader's election closes, state 5 on
+    // the leader and 15 on a follower, and the leader refuses an offer until it has
+    // closed: the offers below waited for every election to close. The leader is put
+    // first, and the follower that joined late second.
+    clients.swap(0, led_from);
+    logs.swap(0, led_from);
+    if members[2].module.member_id() == late_id {
+        members.swap(1, 2);
+        clients.swap(1, 2);
+        logs.swap(1, 2);
+    }
+    for (index, log) in logs.iter().enumerate() {
+        let member = &members[index].module;
+        assert_eq!(log.member_id(), member.member_id());
+        // The recording that holds position 0: the member's live one, but beside the
+        // follower that joined late, whose file names the recording of its catch-up's
+        // replay below the live one, from 0.
+        let (live, start, below) = log_recordings(&members[index]);
+        assert_eq!(Some(live), member.log_recording_id());
+        if index == 1 {
+            assert!(
+                matches!(below[..], [(replayed, 0, stop)]
+                    if replayed == log.recording_id() && stop == start && replayed != live),
+                "member {late_id}: live {live} from {start}, below {below:?}, opened {log:?}"
+            );
+        } else {
+            assert_eq!((log.recording_id(), start), (live, 0));
+        }
+        assert_eq!((log.position(), log.commit_position()), (0, 0));
+        assert!(!log.is_ended());
+    }
     let leader_id = members[0].module.member_id();
     let mut reads: Vec<Read> = vec![Vec::new(); 3];
 
@@ -1257,8 +1281,8 @@ fn a_service_reads_the_committed_log_on_every_member_and_nothing_past_the_commit
     offer(&mut members, &[0, 1, 2], 0, FIRST);
     let first_end = 96 + i64::from(FIRST) * 96;
     run_until(&mut members, "every service read the first entries", |_| {
-        for (log, read) in logs.iter_mut().zip(reads.iter_mut()) {
-            poll_log(log, read);
+        for ((log, read), client) in logs.iter_mut().zip(reads.iter_mut()).zip(&mut clients) {
+            poll_across(client, log, read);
         }
         reads.iter().all(|read| read.len() == FIRST as usize + 1)
     });
@@ -1270,6 +1294,11 @@ fn a_service_reads_the_committed_log_on_every_member_and_nothing_past_the_commit
             "member {member}'s service, in place {index}"
         );
         assert_eq!(logs[index].position(), first_end);
+        // Every service reads the live recording now, the late follower's too.
+        assert_eq!(
+            Some(logs[index].recording_id()),
+            members[index].module.log_recording_id()
+        );
     }
     for (index, (position, entry)) in reads[0].iter().enumerate() {
         assert_eq!(*position, 96 * i64::try_from(index).expect("an index"));
@@ -1332,8 +1361,8 @@ fn a_service_reads_the_committed_log_on_every_member_and_nothing_past_the_commit
         &mut members,
         "every service read the second entries",
         |_| {
-            for (log, read) in logs.iter_mut().zip(reads.iter_mut()) {
-                poll_log(log, read);
+            for ((log, read), client) in logs.iter_mut().zip(reads.iter_mut()).zip(&mut clients) {
+                poll_across(client, log, read);
             }
             reads
                 .iter()
@@ -1345,12 +1374,17 @@ fn a_service_reads_the_committed_log_on_every_member_and_nothing_past_the_commit
 
     // A service that starts late reads the log from its first entry, and one that
     // returns reads from the position it had, beside the service already on that
-    // driver: two replays on one stream, neither holding the other.
+    // driver: two replays on one stream, neither holding the other. The driver is the
+    // late follower's, so the service from 0 reads across its two recordings.
     let mut late_client = Cavalry::connect_to(&members[1].dir).expect("a second client");
     let mut late = late_client
         .committed_log(0)
         .expect("the driver answers")
         .expect("the member has its log");
+    assert_ne!(
+        Some(late.recording_id()),
+        members[1].module.log_recording_id()
+    );
     let (middle, _) = reads[0][250];
     let mut returned = late_client
         .committed_log(middle)
@@ -1358,9 +1392,9 @@ fn a_service_reads_the_committed_log_on_every_member_and_nothing_past_the_commit
         .expect("the member has its log");
     let (mut late_read, mut returned_read) = (Read::new(), Read::new());
     run_until(&mut members, "the late services read the log", |_| {
-        poll_log(&mut late, &mut late_read);
-        poll_log(&mut returned, &mut returned_read);
-        poll_log(&mut logs[1], &mut reads[1]);
+        poll_across(&mut late_client, &mut late, &mut late_read);
+        poll_across(&mut late_client, &mut returned, &mut returned_read);
+        poll_across(&mut clients[1], &mut logs[1], &mut reads[1]);
         late_read.len() == reads[0].len() && returned_read.len() == reads[0].len() - 250
     });
     assert_eq!(late_read, reads[0]);
@@ -1406,9 +1440,9 @@ fn a_service_reads_the_committed_log_on_every_member_and_nothing_past_the_commit
         // stream they share, so each is polled, as a service polls: a subscription
         // that is not polled while a queue's worth of images is announced closes its
         // client as `overrun` (ADR 0021).
-        poll_log(&mut late, &mut late_read);
-        poll_log(&mut returned, &mut returned_read);
-        poll_log(&mut logs[1], &mut reads[1]);
+        poll_across(&mut late_client, &mut late, &mut late_read);
+        poll_across(&mut late_client, &mut returned, &mut returned_read);
+        poll_across(&mut clients[1], &mut logs[1], &mut reads[1]);
     }
     assert_eq!(reads[1], reads[0], "the first service read nothing twice");
     late.close(&mut late_client).expect("the log closes");
@@ -1482,9 +1516,13 @@ fn has_member_counter(counters: &CountersReader, member_id: i32, type_id: i32) -
     })
 }
 
-/// A service on follower 2 whose handle has taken its bound, the commit position of
-/// [`BEHIND_ENTRIES`] entries and the term's first, and has read at most one entry
-/// under it: where the two tests below begin.
+/// A service beside the follower in place 2 whose handle has taken its bound, the
+/// commit position of [`BEHIND_ENTRIES`] entries and the term's first, and has read at
+/// most one entry under it: where the two tests below begin. The other follower joined
+/// the log late (`run_until_led_with_a_late_follower`), and the service is beside the
+/// one that joined on time, whose log is one recording: a handle opened at 0 beside the
+/// late one would replay its catch-up's recording and end at that recording's stop,
+/// after the term's first entry, and these tests are of a bound, not of that end.
 struct BehindItsBound {
     members: Vec<Member>,
     client: Cavalry,
@@ -1499,7 +1537,10 @@ const BEHIND_ENTRIES: i64 = 1000;
 
 impl BehindItsBound {
     fn start(dir: &Path) -> Self {
-        let mut members = start_led(dir);
+        let members_string = members_string();
+        let mut members = start(dir, &members_string);
+        let (late, _) = run_until_led_with_a_late_follower(&mut members);
+        put_on_time_follower(&mut members, late, 2);
         let mut client =
             Cavalry::connect_to(&members[2].dir).expect("the service's client connects");
         let mut opened = None;
@@ -1510,6 +1551,10 @@ impl BehindItsBound {
             opened.is_some()
         });
         let mut log = opened.expect("the member has its log");
+        assert_eq!(
+            Some(log.recording_id()),
+            members[2].module.log_recording_id()
+        );
 
         // The entries, committed on every member, before the service reads any.
         // Every member's append position is the end too, so the follower's recording
@@ -1550,7 +1595,8 @@ impl BehindItsBound {
         }
     }
 
-    /// Follower 2's consensus module closes, and the driver frees its counters.
+    /// The consensus module of the follower in place 2 closes, and the driver frees
+    /// its counters.
     /// Returns its driver, still running, and the driver's directory.
     fn close_follower(&mut self) -> (Driver, PathBuf) {
         let Member {
@@ -1796,11 +1842,18 @@ fn log_recordings(member: &Member) -> (i64, i64, Vec<(i64, i64, i64)>) {
 /// below it in its file. A service that had read to that position opens the log there
 /// and reads on. A service that starts at 0 reads the recording the member left to
 /// its stop, is ended there with nothing reported, opens the log again and reads on
-/// in the new recording: every entry once, in order, across both.
+/// in the new recording: every entry once, in order, across both. The other follower
+/// joined the log late at the start (`run_until_led_with_a_late_follower`), so once it
+/// has joined again its log is three recordings, the first its catch-up's replay, and
+/// a service from 0 beside it reads across the three.
 #[test]
 fn a_service_reads_across_the_recordings_of_a_member_that_joined_the_log_again() {
     let dir = TestDir::new("service-joins-again");
-    let mut members = start_led(dir.path());
+    let members_string = members_string();
+    let mut members = start(dir.path(), &members_string);
+    let (late, _) = run_until_led_with_a_late_follower(&mut members);
+    // The follower in place 1 joined on time, and the one in place 2 late.
+    put_on_time_follower(&mut members, late, 1);
     const ENTRIES: i64 = 10;
     offer_entries(&mut members, ENTRIES);
     let first = 96 + ENTRIES * 96;
@@ -1809,6 +1862,11 @@ fn a_service_reads_across_the_recordings_of_a_member_that_joined_the_log_again()
             .iter()
             .all(|m| m.module.commit_position() == first && m.module.append_position() == first)
     });
+    // The recording each follower records the live log into, before it leaves.
+    let held: Vec<i64> = members[1..]
+        .iter()
+        .map(|m| m.module.log_recording_id().expect("a follower's recording"))
+        .collect();
 
     // A service on follower 1 reads every entry committed so far.
     let mut client = Cavalry::connect_to(&members[1].dir).expect("the service's client connects");
@@ -1828,11 +1886,20 @@ fn a_service_reads_across_the_recordings_of_a_member_that_joined_the_log_again()
         log.position() == first
     });
 
-    // The leader's module stands still, and the second follower's with it: the
-    // service's member leaves the log, and the service's handle comes to its end at
-    // the position it had read. One follower alone runs here, so that no quorum is
-    // left without a leader to hold a ballot of its own before the leader answers.
+    // One follower at a time leaves the log and joins it again, while the leader's
+    // module stands still and the other follower's with it. Two followers that had
+    // both timed out would be a quorum with no leader, and would hold a ballot of
+    // their own if the leader's answer came later than a nomination delay; one alone
+    // can only canvass. A member whose module stood still reads its leader's word
+    // first when it runs again, so it counts no timeout for a silence it did not see.
     let term = members[0].module.leadership_term_id();
+    let timeouts: Vec<u64> = members[1..]
+        .iter()
+        .map(|m| m.module.counts().leader_heartbeat_timeouts)
+        .collect();
+
+    // First the follower the service is beside: it leaves the log, and the service's
+    // handle comes to its end at the position it had read.
     run_until(
         &mut members[1..2],
         "the follower timed out its silent leader and the service's log ended",
@@ -1840,7 +1907,7 @@ fn a_service_reads_across_the_recordings_of_a_member_that_joined_the_log_again()
             poll_log(&mut log, &mut read);
             log.is_ended()
                 && members.iter().all(|m| {
-                    m.module.counts().leader_heartbeat_timeouts == 1
+                    m.module.counts().leader_heartbeat_timeouts == timeouts[0] + 1
                         && m.module.election_state() == ElectionState::Canvass
                 })
         },
@@ -1848,10 +1915,7 @@ fn a_service_reads_across_the_recordings_of_a_member_that_joined_the_log_again()
     assert_eq!(log.position(), first);
     assert_eq!(read.len(), usize::try_from(ENTRIES).expect("a count") + 1);
     log.close(&mut client).expect("the handle closes");
-
-    // The leader runs again, the follower joins the log on a new recording, the
-    // second follower runs again, and the leader, which leads the term it led,
-    // appends more.
+    // The leader runs again, and the follower joins the log on a new recording.
     run_until(
         &mut members[..2],
         "the follower joined the log again",
@@ -1862,9 +1926,40 @@ fn a_service_reads_across_the_recordings_of_a_member_that_joined_the_log_again()
                 && members[1]
                     .module
                     .log_recording_id()
-                    .is_some_and(|id| id != first_recording)
+                    .is_some_and(|id| id != held[0])
         },
     );
+
+    // Then the follower that joined late at the start, the same way: it reads the
+    // leader's word of a moment ago, counts the silence that follows, and leaves.
+    run_until(
+        &mut members[2..],
+        "the late follower timed out its silent leader",
+        |members| {
+            members.iter().all(|m| {
+                m.module.counts().leader_heartbeat_timeouts == timeouts[1] + 1
+                    && m.module.election_state() == ElectionState::Canvass
+            })
+        },
+    );
+    // The leader runs again beside it, and it joins the log on a new recording.
+    members.swap(1, 2);
+    run_until(
+        &mut members[..2],
+        "the late follower joined the log again",
+        |members| {
+            members
+                .iter()
+                .all(|m| m.module.election_state() == ElectionState::Closed)
+                && members[1]
+                    .module
+                    .log_recording_id()
+                    .is_some_and(|id| id != held[1])
+        },
+    );
+    members.swap(1, 2);
+    // Every member runs again, behind the leader it had, in the term it led, and
+    // the leader appends more.
     run_until(&mut members, "every member follows the leader", |members| {
         members
             .iter()
@@ -1963,6 +2058,48 @@ fn a_service_reads_across_the_recordings_of_a_member_that_joined_the_log_again()
     log.close(&mut client).expect("the handle closes");
     client.close().expect("the service's client closes");
 
+    // The follower that joined late at the start: its file names the recording of its
+    // catch-up's replay, from 0, the live recording it left, and the one it names now,
+    // each beginning where the one before it stopped.
+    let (live, start, below) = log_recordings(&members[2]);
+    assert_eq!(Some(live), members[2].module.log_recording_id());
+    assert!(
+        matches!(below[..], [(_, 0, caught_up), (left, from, stop)]
+            if from == caught_up && left == held[1] && stop == first && start == first),
+        "member {late}: live {live} from {start}, below {below:?}"
+    );
+    // A service from 0 beside it reads across the three, handle after handle, and
+    // reads what the service beside the other follower read.
+    let mut client = Cavalry::connect_to(&members[2].dir).expect("the service's client connects");
+    let mut log = client
+        .committed_log(0)
+        .expect("the driver answers")
+        .expect("the member has its log");
+    let mut across = Read::new();
+    let mut recordings = vec![log.recording_id()];
+    run_until(
+        &mut members,
+        "the service read across the late follower's recordings",
+        |_| {
+            poll_across(&mut client, &mut log, &mut across);
+            if recordings.last() != Some(&log.recording_id()) {
+                recordings.push(log.recording_id());
+            }
+            log.position() == second
+        },
+    );
+    assert_eq!(across, expected);
+    assert_eq!(
+        recordings,
+        below
+            .iter()
+            .map(|(id, ..)| *id)
+            .chain([live])
+            .collect::<Vec<_>>()
+    );
+    log.close(&mut client).expect("the handle closes");
+    client.close().expect("the service's client closes");
+
     // A member that closes takes its file with it.
     let file = members[1].dir.join(format!(
         "{LOG_RECORDINGS_FILE_PREFIX}{}",
@@ -1979,17 +2116,22 @@ fn a_service_reads_across_the_recordings_of_a_member_that_joined_the_log_again()
 
 /// The third rule of order (`spec/cluster.md`, "The service"; ADR 0103): a member
 /// writes the file of its log's recordings before it stores a recording's id in
-/// `cluster.log_recording_id`. A follower whose file cannot be written, a directory
-/// in the place of the name it is written under, records the log and counts toward
-/// its commits as before, says what could not be written and what to do each duty
-/// cycle, and names no recording, so no service opens its log; once the file can be
-/// written the next cycle writes it and the counter names the recording.
+/// `cluster.log_recording_id`. A member whose file cannot be written, a directory in
+/// the place of the name it is written under, records the log and counts toward its
+/// commits as before, says what could not be written and what to do each duty cycle,
+/// and names no recording, so no service opens its log; once the file can be written
+/// the next cycle writes it and the counter names the recording. The member is the one
+/// with id 2, whichever role the election gives it, and its file is blocked before its
+/// first duty cycle. It may be a follower that joined the log late, which this test
+/// does not make happen: its file then lists its catch-up's recording below the live
+/// one, and the service beside it reads across the two.
 #[test]
 fn a_member_names_no_recording_until_it_has_written_the_file_of_its_logs_recordings() {
     let dir = TestDir::new("file-before-counter");
     let members_string = members_string();
     let mut members = start(dir.path(), &members_string);
-    // The follower with id 2 is last in the vector; the leader, id 0, is not first.
+    // Member 2 is in place 1 (`start`), and stays there: nothing here puts the leader
+    // first.
     let blocked = members
         .iter()
         .position(|m| m.module.member_id() == 2)
@@ -2119,7 +2261,22 @@ fn a_member_names_no_recording_until_it_has_written_the_file_of_its_logs_recordi
         counter(&members[blocked], CLUSTER_LOG_RECORDING_ID.0),
         named
     );
-    assert_eq!(log_recordings(&members[blocked]), (named, 0, Vec::new()));
+    // The file names the recording the counter names. The member's log is that one
+    // recording, from 0, unless it was a follower that joined the log late and caught
+    // up through a replay: the file then names the replay's recording below it, from 0
+    // to where the live one begins (ADR 0103).
+    let (live, start, below) = log_recordings(&members[blocked]);
+    assert_eq!(live, named);
+    let counts = members[blocked].module.counts();
+    if counts.catchups == 0 {
+        assert_eq!((start, below), (0, Vec::new()), "{counts:?}");
+    } else {
+        assert!(
+            matches!(below[..], [(replayed, 0, stop)]
+                if replayed != named && stop == start && start > 0),
+            "live {live} from {start}, below {below:?}, {counts:?}"
+        );
+    }
     assert!(!tmp.exists(), "the file was renamed from its other name");
     // The count stands where the last failed cycle left it.
     let counted = counter(&members[blocked], CLUSTER_LOG_RECORDINGS_UNWRITTEN.0);
@@ -2138,7 +2295,7 @@ fn a_member_names_no_recording_until_it_has_written_the_file_of_its_logs_recordi
         .expect("the member has its log");
     let mut read = Read::new();
     run(&mut members, "the service read the log", &mut |_| {
-        poll_log(&mut log, &mut read);
+        poll_across(&mut client, &mut log, &mut read);
         log.position() == end
     });
     assert_eq!(read.len(), 11);
@@ -2175,6 +2332,11 @@ fn publication_logs(dir: &Path) -> Vec<PathBuf> {
 /// reader reports under the reason `frame`. The frame is below the service's bound, so
 /// the next poll reads it, fails the check and retires the image. The member's
 /// recording is as it was, so a log opened again where the handle ended reads on.
+///
+/// The other follower joined the log late (`run_until_led_with_a_late_follower`), and
+/// the service is beside the one that joined on time: a handle opened at 0 beside the
+/// late one would replay its catch-up's recording, which ends after the term's first
+/// entry, and the eleven are read here through one handle.
 #[test]
 fn a_service_whose_image_faulted_reads_the_fault_for_the_life_of_its_handle() {
     use std::os::unix::fs::FileExt;
@@ -2182,7 +2344,10 @@ fn a_service_whose_image_faulted_reads_the_fault_for_the_life_of_its_handle() {
     const ENTRIES: u32 = 10;
     const READ_FIRST: usize = 5;
     let dir = TestDir::new("service-faulted");
-    let mut members = start_led(dir.path());
+    let members_string = members_string();
+    let mut members = start(dir.path(), &members_string);
+    let (late, _) = run_until_led_with_a_late_follower(&mut members);
+    put_on_time_follower(&mut members, late, 1);
     let member_dir = members[1].dir.clone();
     let mut client = Cavalry::connect_to(&member_dir).expect("the service's client connects");
     let before = publication_logs(&member_dir);
@@ -2194,6 +2359,10 @@ fn a_service_whose_image_faulted_reads_the_fault_for_the_life_of_its_handle() {
         opened.is_some()
     });
     let mut log = opened.expect("the member has its log");
+    assert_eq!(
+        Some(log.recording_id()),
+        members[1].module.log_recording_id()
+    );
     let replayed: Vec<PathBuf> = publication_logs(&member_dir)
         .into_iter()
         .filter(|path| !before.contains(path))
