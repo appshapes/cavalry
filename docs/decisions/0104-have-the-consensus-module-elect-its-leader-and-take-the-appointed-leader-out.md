@@ -90,12 +90,18 @@ were taken before that ADR, on the scratch branch. The test that stops a leader,
 on this change's own branch, prints its election's time and asserts no bound on
 it; Evidence says how often it passed.
 
-**No test over drivers assumes a term, one ballot or a step count.** Each reads
-the leader's term, and takes a count of steps as exact only where the term says
-the first ballot was won. A new test stops the leader and its driver: the two
-that remain elect one, an entry is committed by both, the first term's log is
-the same on both from the later of their recordings' starts, and the election's
-time and each member's ballot counters are printed.
+**No test over drivers assumes a term, one ballot, a step count, a follower that
+joined on time, or followers that wait for a silent leader.** Each reads the
+leader's term, and takes a count of steps as exact only where the term says the
+first ballot was won and the member lost no ballot and caught up by no replay.
+Most make one follower join the log late on every run, and hold to the election
+it failed, the recordings it then holds and what a service reads across them. A
+test that holds the leader's module still lets one follower at a time run, since
+two that had both timed out would hold a ballot of their own. A new test stops
+the leader and its driver: the two that remain elect one, an entry is committed
+by both, the first term's log is the same on both from position 0 across each
+member's recordings, and the election's time and each member's ballot counters
+are printed.
 
 **`cluster.appointed_leader_behind` stays registered for one change more.**
 `cavalry doctor` reads its constant, and `cavalry-control` is the control plane,
@@ -164,16 +170,28 @@ directory: there is no rolling upgrade across this change.
   loopback, thirteen tests, run thirty times in a row on this change's branch on a
   laptop, macOS: thirty passed. A later run of twenty there failed once, in a test
   of a service that opened the log at 0 beside a follower that had joined late, and
-  read one recording where the follower's log was two. Since then, the tests of a
-  lost or silent leader and all but one of the tests of a service make one
-  follower join late on every run. The one that does not is the test of a member
-  whose file of its log's recordings cannot be written: it picks its member before
-  the election, and it holds whether that member joined late or not. The binary
-  then passed ten runs in a row on a Linux runner. Among them:
+  read one recording where the follower's log was two. Twenty runs on each of CI's
+  runners failed as well, at the ninth and at the fourteenth, and one of those
+  failures was of a second kind: a test held the leader's module still for longer
+  than the leader heartbeat timeout and had the leader answer both followers'
+  canvass when it ran again. Two followers that have both timed out are a quorum,
+  and hold a ballot of their own when that answer comes later than a nomination
+  delay, which an appointed leader's followers never did. Since then, the tests of
+  a lost or silent leader and all but one of the tests of a service make one
+  follower join late on every run, and where a test holds the leader still, one
+  follower at a time runs, so that no quorum is left without a leader. The test
+  that makes no follower join late is the test of a member whose file of its log's
+  recordings cannot be written: it picks its member before the election, and it
+  holds whether that member joined late or not. The binary then passed ten runs
+  in a row on a Linux runner, and with one follower at a time beside a silent
+  leader, twenty in a row on the laptop; the pull request's body has the runs on
+  CI's runners. Among them:
   - `a_lost_leader_is_replaced_by_the_two_that_remain_and_they_commit`: the leader
     and its driver stop with a hundred entries committed; the two that remain
     elect one; an entry offered to it is committed by both; and the first term's
-    log is the same on both from the later of their recordings' starts.
+    log is the same on both from position 0, read across each member's
+    recordings, the session id in each frame's header apart (`spec/cluster.md`,
+    "The log").
   - The first test reads the term the cluster elected in, and takes the count of
     election steps as exact only in term 0: four on the leader, four or five on a
     follower.
@@ -239,6 +257,14 @@ appointed leader it led at once when the appointed member was one of the two. A
 member still does not start on the log directory it kept, so a member that stops
 is replaced by starting the cluster again, as before.
 
+A leader whose consensus module stops while its driver runs on was not replaced,
+in three runs of three on a laptop. Its log publication stays alive with nobody
+behind it. The two members that remain timed it out and held ballot after ballot,
+terms 1 to 6 in 60 s in one run, and in two runs a member's driver refused a
+channel's endpoint, "Address already in use". Under the appointed leader that
+cluster stopped as well, so nothing is lost; it is a loss of a leader that the
+election does not recover from yet. It is not diagnosed, and card 280 holds it.
+
 A truncation is now something a member over a driver does. One that faults part
 way, a purge that succeeded and a later `truncate recording` that did not, leaves
 the member's record of where its log ends, and its record of terms, as they were:
@@ -248,8 +274,9 @@ of pull request 246 named it). The fault-injection tests of ADR 0100's seventh
 change are where it is shown or closed.
 
 To maintain. The tests over drivers must not assume which member leads, which
-term is first, or how many ballots an election takes. `cavalry doctor` still has
-texts for an appointed leader until the change that follows.
+term is first, how many ballots an election takes, that every follower joined on
+time, or that followers left without a leader hold no ballot. `cavalry doctor`
+still has texts for an appointed leader until the change that follows.
 
 Revisit when the lost-leader test's election times are known on Linux: `just
 test` shows a passing test's output nowhere, so this record has the laptop's
