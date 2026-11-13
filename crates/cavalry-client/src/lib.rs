@@ -2,6 +2,7 @@
 #![deny(missing_docs, rustdoc::broken_intra_doc_links)]
 
 mod client;
+mod cluster;
 mod committed_log;
 mod conductor;
 mod counter;
@@ -19,6 +20,7 @@ pub use cavalry_proto::cluster::SERVICE_LOG_STREAM_ID;
 pub use cavalry_proto::frame::{DataFrameHeader, Flags, FrameType};
 pub use cavalry_shm::log::{Action, BufferClaim, Positions};
 pub use client::{Cavalry, DIR_ENV};
+pub use cluster::{ClusterError, ClusterSession};
 pub use committed_log::CommittedLog;
 pub use counter::Counter;
 pub use error::{ClientError, Closed};

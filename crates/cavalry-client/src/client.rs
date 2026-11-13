@@ -17,6 +17,7 @@ use cavalry_shm::counters::{CounterValue, CountersError, CountersReader, Counter
 use cavalry_shm::log::LogBuffers;
 use cavalry_shm::spsc;
 
+use crate::cluster::{ClusterError, ClusterSession};
 use crate::committed_log::CommittedLog;
 use crate::conductor::{
     COMMAND_SCRATCH, Conductor, DRIVER_TIMEOUT, MAX_REPLAYS, MAX_SUBSCRIPTIONS, NO_PENDING,
@@ -1460,6 +1461,56 @@ impl Cavalry {
     /// [`SERVICE_LOG_STREAM_ID`]: crate::SERVICE_LOG_STREAM_ID
     pub fn committed_log(&mut self, position: i64) -> Result<Option<CommittedLog>, ClientError> {
         CommittedLog::open(self, position)
+    }
+
+    /// Opens a session with the cluster that `members` names, the members string the
+    /// cluster's members were started with (`spec/cluster.md`, "Members and streams"
+    /// and "Sessions"; ADR 0117). The cluster answers the session on
+    /// `response_channel`, `cavalry:udp?endpoint=<host:port>`, a host and port of this
+    /// client's host that every member can reach.
+    ///
+    /// The call subscribes to the response channel, adds a publication to every
+    /// member's `ingress` endpoint, and sends a session connect to one member after
+    /// another, the first in the string first. A member that is not the leader
+    /// redirects, and the next connect goes to the leader it names; a connect with no
+    /// answer in the session connect timeout, 5 s, was lost, and the next goes to the
+    /// next member. The call returns the [`ClusterSession`] once the leader has
+    /// opened it, which is once a quorum holds the session's first entry.
+    ///
+    /// It gives up after 20 s, [`ClusterError::ConnectTimeout`]: long enough for a
+    /// cluster that has just lost its leader to elect another. The leader's refusal
+    /// is [`ClusterError::Refused`] with its reason, a members string that fails a
+    /// check [`ClusterError::Members`], and a cluster of another protocol version
+    /// [`ClusterError::Version`].
+    ///
+    /// ```no_run
+    /// use cavalry_client::{Cavalry, ClusterError};
+    ///
+    /// # fn main() -> Result<(), Box<dyn std::error::Error>> {
+    /// let mut client = Cavalry::connect()?;
+    /// let members = "0,10.0.0.1:9010,10.0.0.1:9020,10.0.0.1:9030,10.0.0.1:9040,10.0.0.1:9050\
+    ///                |1,10.0.0.2:9010,10.0.0.2:9020,10.0.0.2:9030,10.0.0.2:9040,10.0.0.2:9050\
+    ///                |2,10.0.0.3:9010,10.0.0.3:9020,10.0.0.3:9030,10.0.0.3:9040,10.0.0.3:9050";
+    /// let mut session = client.connect_cluster(members, "cavalry:udp?endpoint=10.0.0.9:9100")?;
+    /// session.offer(b"hello")?;
+    /// // The session's duty cycle: the cluster's replies, and a keepalive when due.
+    /// while session.closed().is_none() {
+    ///     session.poll(|reply, time_ms| println!("{time_ms}: {} bytes", reply.len()), 10)?;
+    /// #   break;
+    /// }
+    /// session.close()?;
+    /// # Ok(())
+    /// # }
+    /// ```
+    ///
+    /// The block is compiled and not run: it needs a cluster of three members on
+    /// three hosts. `docs/tutorials/run-a-cluster.md` runs one on a laptop.
+    pub fn connect_cluster(
+        &mut self,
+        members: &str,
+        response_channel: &str,
+    ) -> Result<ClusterSession, ClusterError> {
+        ClusterSession::connect(self, members, response_channel)
     }
 
     /// Sends `client close`, so the driver removes this client's publications and
