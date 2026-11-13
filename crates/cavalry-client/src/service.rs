@@ -98,7 +98,10 @@ pub struct Committed<'a> {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 #[must_use = "a reply that was not taken is worth Action::Abort: see Reply::Retry"]
 pub enum Reply {
-    /// The reply is on its way to the session.
+    /// The reply is on its way to the session. It is the answer too for a reply that
+    /// an earlier handling of the same entry sent: an entry that is handed over again
+    /// makes its replies again, and the service does not offer a session one it has
+    /// taken already.
     Sent,
     /// This service does not answer the entry, and nothing is lost by it: its member
     /// did not lead the entry's term, so the service beside the member that did
@@ -108,16 +111,23 @@ pub enum Reply {
     /// The session's response channel did not take the reply now: the client's
     /// stream is not connected yet, or it is back-pressured. Return
     /// [`Action::Abort`] and the entry is handed over again at the next poll, with
-    /// everything the handler does for it, so reply before changing any state. A
-    /// service never waits here for longer than the keepalive interval, 500 ms, for
-    /// one session: after that the answer is [`Reply::Dropped`].
+    /// everything the handler does for it, so reply before changing any state. The
+    /// handler then makes the same replies in the same order, as it does on every
+    /// member: those the earlier handling settled are not offered again, so no
+    /// session is sent a reply twice, and a reply to this session that comes after
+    /// the refused one in the same handling is `Retry` too and is not offered, so
+    /// that a session's replies keep their order. A service never waits here for
+    /// longer than the keepalive interval, 500 ms, for one session: after that the
+    /// answer is [`Reply::Dropped`]. A handler that goes on past a `Retry` gives the
+    /// reply up, and the wait ends with the entry.
     Retry,
     /// The reply is lost, and counted in `cluster.replies_dropped`: the session's
     /// response channel has taken nothing for the keepalive interval, 500 ms, since
     /// it first refused a reply, or the driver refused the channel, or the stream to
     /// the client has ended. Go on with the log: the client learns of it by its own
     /// wait for a reply. Each reply to that session is dropped at once until its
-    /// channel takes one again.
+    /// channel takes one again. A reply dropped by one handling of an entry is
+    /// `Dropped` again, and counted no more, when the entry is handed over again.
     Dropped,
     /// No session with that id is open in the log at this entry.
     NoSession,
@@ -145,6 +155,20 @@ struct Session {
     refusing_since_ns: i64,
     /// The publication refused for the reply timeout: a reply to it is offered once.
     unresponsive: bool,
+    /// The position of the entry the four fields below are about: the entry being
+    /// handed over, or the one handed over last.
+    entry_position: i64,
+    /// How many replies to this session the handlings of that entry have settled,
+    /// sent or dropped. They are the first replies its handler makes the session,
+    /// and a handling that comes after does not offer them again.
+    settled: u32,
+    /// Which of the first 64 of those were dropped, the first reply as bit 0.
+    dropped: u64,
+    /// How many replies the present handling has made to this session.
+    made: u32,
+    /// The present handling was refused a reply to this session. The replies it
+    /// makes the session after that one wait behind it.
+    held: bool,
 }
 
 impl Session {
@@ -158,7 +182,42 @@ impl Session {
             refused: false,
             refusing_since_ns: 0,
             unresponsive: false,
+            entry_position: -1,
+            settled: 0,
+            dropped: 0,
+            made: 0,
+            held: false,
         }
+    }
+
+    /// Begins a handling of the entry at `position`: what the entry's earlier
+    /// handlings settled is kept, and what an earlier entry's did is forgotten.
+    fn begin(&mut self, position: i64) {
+        if self.entry_position != position {
+            self.entry_position = position;
+            self.settled = 0;
+            self.dropped = 0;
+        }
+        self.made = 0;
+        self.held = false;
+    }
+
+    /// Ends a handling whose entry was taken. A reply that handling was refused and
+    /// went on past is given up, and the session's wait with it, unless the wait
+    /// had already run out.
+    fn taken(&mut self) {
+        if self.held && !self.unresponsive {
+            self.refusing_since_ns = 0;
+        }
+        self.held = false;
+    }
+
+    /// Settles the reply the present handling has just made: sent, or dropped.
+    fn settle(&mut self, dropped: bool) {
+        if dropped && let Some(bit) = 1u64.checked_shl(self.made.saturating_sub(1)) {
+            self.dropped |= bit;
+        }
+        self.settled = self.made;
     }
 
     /// Adds the session's egress publication, when it has none: a command to the
@@ -265,6 +324,13 @@ impl Replies<'_> {
     /// asks something of the handler. Nothing here allocates, and nothing waits. A
     /// reply that is sent reads no clock; one that is refused reads it once, to
     /// measure the keepalive interval.
+    ///
+    /// A reply is offered to its session once, however often its entry is handed
+    /// over. The service counts, for each session, the replies that the handlings of
+    /// the entry have settled, sent or dropped, and answers them as they were
+    /// without offering them again. It relies on what the replay check asks of every
+    /// handler: the same replies, in the same order, each time an entry is handed
+    /// over.
     pub fn reply(&mut self, session_id: i64, payload: &[u8]) -> Reply {
         if !self.answering {
             return Reply::NotAnswering;
@@ -276,8 +342,26 @@ impl Replies<'_> {
         else {
             return Reply::NoSession;
         };
+        session.made = session.made.saturating_add(1);
+        if session.made <= session.settled {
+            // An earlier handling of this entry settled this reply: it is not
+            // offered again, and it is answered as it was then.
+            let was_dropped = 1u64
+                .checked_shl(session.made.saturating_sub(1))
+                .is_some_and(|bit| session.dropped & bit != 0);
+            return if was_dropped {
+                Reply::Dropped
+            } else {
+                Reply::Sent
+            };
+        }
+        if session.held {
+            // Behind a reply to this session that this handling was refused.
+            return Reply::Retry;
+        }
         let Some(publication) = session.publication.as_mut() else {
             // The driver refused the session's channel.
+            session.settle(true);
             let _ = self.dropped.increment();
             return Reply::Dropped;
         };
@@ -298,12 +382,18 @@ impl Replies<'_> {
             Ok(_) => {
                 session.refusing_since_ns = 0;
                 session.unresponsive = false;
+                session.settle(false);
                 Reply::Sent
             }
-            Err(Offer::TooLong { found, limit }) => Reply::TooLong {
-                found: found.saturating_sub(SESSION_MESSAGE_HEADER_LENGTH),
-                limit: limit.saturating_sub(SESSION_MESSAGE_HEADER_LENGTH),
-            },
+            Err(Offer::TooLong { found, limit }) => {
+                // Not one of the session's replies: nothing was offered, and the
+                // handler is told the same each time the entry is handed over.
+                session.made = session.made.saturating_sub(1);
+                Reply::TooLong {
+                    found: found.saturating_sub(SESSION_MESSAGE_HEADER_LENGTH),
+                    limit: limit.saturating_sub(SESSION_MESSAGE_HEADER_LENGTH),
+                }
+            }
             Err(Offer::NotConnected | Offer::BackPressured | Offer::AdminAction) => {
                 // The one clock read, and only for a reply that was refused: a reply
                 // that is sent reads none.
@@ -314,13 +404,16 @@ impl Replies<'_> {
                 if !session.unresponsive
                     && now_ns.saturating_sub(session.refusing_since_ns) < REPLY_TIMEOUT_NS
                 {
+                    session.held = true;
                     return Reply::Retry;
                 }
                 session.unresponsive = true;
+                session.settle(true);
                 let _ = self.dropped.increment();
                 Reply::Dropped
             }
             Err(Offer::MaxPositionExceeded | Offer::Closed) => {
+                session.settle(true);
                 let _ = self.dropped.increment();
                 Reply::Dropped
             }
@@ -552,6 +645,11 @@ impl ClusterService {
                     failure = Some(error.into());
                     return Action::Abort;
                 }
+                // What the entry's earlier handlings settled for each session is kept,
+                // so that a reply is offered once however often the entry is read.
+                for session in sessions.iter_mut().filter(|session| session.open) {
+                    session.begin(position);
+                }
                 let action = handler(
                     &Committed {
                         entry,
@@ -567,6 +665,11 @@ impl ClusterService {
                         timestamp,
                     },
                 );
+                if action != Action::Abort {
+                    for session in sessions.iter_mut().filter(|session| session.open) {
+                        session.taken();
+                    }
+                }
                 // A session is closed once its close event is taken, and its
                 // publication goes with it.
                 if action != Action::Abort

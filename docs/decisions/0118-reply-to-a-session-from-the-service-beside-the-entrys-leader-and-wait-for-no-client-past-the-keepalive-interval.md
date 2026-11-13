@@ -98,7 +98,17 @@ Once a session's publication has taken nothing for 500 ms since it first refused
 reply, the answer is `Reply::Dropped`, counted in `cluster.replies_dropped`, and
 each later reply to that session is offered once and dropped at once until the
 publication takes one. The service reads its clock for a reply that was refused,
-and for no other: a reply that is sent reads none. 500 ms is how often a client reads its session at the least
+and for no other: a reply that is sent reads none.
+
+**A reply is offered to its session once, however often its entry is handed over.**
+A handler may answer an entry with several replies, to one session or to many, and
+an entry handed over again makes them all again. For each session the service
+counts the replies that the handlings of the entry have settled, sent or dropped,
+and answers them as they were without offering them again. Once a reply to a
+session is refused, the replies the same handling makes that session after it are
+`Retry` too and are not offered, so the settled replies are always the first ones
+and a session's replies keep their order. It rests on what the replay check already
+asks of a handler: the same replies in the same order each time. 500 ms is how often a client reads its session at the least
 (ADR 0117), so a client that keeps its own rule loses no reply to this one.
 
 The service holds its sessions' publications from the first entry it answers and
@@ -159,6 +169,15 @@ allocated, for a session message or its reply.
   snapshot, which carries them.
 - **Reassemble a longer reply.** Lost with ADR 0116's reason: a message of the
   session protocol is one frame in this version.
+- **Leave it to the handler to reply before it changes its state.** The first form
+  of this change, which the review of pull request 280 refused. Lost: a reply to
+  one session is itself what a handler has done when the next reply, to another
+  session, is refused. The entry was handed over again and the first session was
+  sent its reply at each handling: 420 times in the test that now guards it.
+- **Count only the replies a publication took.** Lost: a reply that was dropped
+  between two that were sent would shift the count, and the second would be sent
+  again. Every settled reply counts, and the first 64 keep whether they were
+  dropped, so that a handling after is answered as the first was.
 
 ## Evidence
 
@@ -180,7 +199,14 @@ allocated, for a session message or its reply.
   `TooLong` and one of 1,344 is sent, and neither refusal is counted as a drop; a
   timer event is handed over as `Other`; an entry that is not of the page stops the
   service at its position, three polls running. A service holds 10 sessions: an
-  eleventh open event opens nothing, and a close gives its place to the next.
+  eleventh open event opens nothing, and a close gives its place to the next. An
+  entry answered with four replies, to a session whose client reads, twice to one
+  with no client, and to the first again, is handed over again for the 500 ms the
+  second session is waited for: the first session's client reads its two replies
+  once each and in order, the reply behind a refused one is not offered, and the
+  second session's two are dropped, with `cluster.replies_dropped` at 2. With the
+  count switched off the same test reads the first session's replies again at
+  every handling and fails.
 - `crates/cavalry-client/tests/cluster_service_allocations.rs`: 4,800 session
   messages read, handed over and answered, and every answer read by the session's
   client, under the counting allocator, with the driver's threads in the process.
@@ -224,7 +250,8 @@ when the client took nothing for 500 ms, and of the three the client sees only i
 own wait. A program that must have an answer sends again, and its service must
 then treat a message it has applied before as it chooses. A handler that returns
 `Abort` is handed the entry again with everything it did for it, so it replies
-before it changes its state. A service's first reply to a session can hold the
+before it changes its state, and it must make the same replies in the same order
+each time, which the service counts on. A service's first reply to a session can hold the
 entry for a few milliseconds, until the publication connects. The leader's service
 holds a log buffer for each open session, 10 at most.
 

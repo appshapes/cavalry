@@ -160,7 +160,10 @@ The client API implementation, re-exported by the `cavalry` crate. Data plane.
   service for the entries its member held before the service first read its log, so
   that a service that starts again answers no client twice. A reply the client's
   channel does not take is `Reply::Retry`: the handler returns `Action::Abort` and
-  is handed the entry again, so it replies before it changes its state. A service
+  is handed the entry again, so it replies before it changes its state. An entry
+  handed over again makes its replies again, in the same order, and the service
+  offers each to its session once: what an earlier handling sent or dropped it
+  does not offer again, so no client reads a reply twice. A service
   waits so for one client no longer than 500 ms, the keepalive interval. After that
   the reply is `Reply::Dropped`, counted in `cluster.replies_dropped`, and each
   reply to that client is dropped at once until its channel takes one. Nothing in

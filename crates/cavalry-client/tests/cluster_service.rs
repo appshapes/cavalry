@@ -777,3 +777,119 @@ fn a_service_holds_ten_sessions_and_no_more() {
     client.close().expect("the service's client closes");
     member.close();
 }
+
+/// An entry that is handed over again offers no session a reply it has taken. Two
+/// sessions are open, the first with a client that reads and the second with none.
+/// The handler answers one message with four replies, to the first session, twice
+/// to the second, and to the first again, and has the entry handed over again while
+/// any of them is to be tried again. The first session's client reads its two
+/// replies once each and in their order, however many times the entry was handed
+/// over; a reply behind one that was refused is not offered; and the second
+/// session's two replies are dropped once the keepalive interval has passed.
+#[test]
+fn an_entry_handed_over_again_sends_no_session_a_reply_twice() {
+    let mut member = Member::start("again");
+    let mut client = Cavalry::connect_to(&member.dir).expect("the service's client");
+    let mut service = client.cluster_service();
+    member.name();
+    open_log(&mut service, &mut client, &mut Seen::default());
+
+    let (reading, absent) = (response_channel(), response_channel());
+    let mut session = Cavalry::connect_to(&member.dir).expect("the session's client");
+    let mut egress = session
+        .add_subscription(&reading, EGRESS_STREAM_ID)
+        .expect("the response channel");
+    member.term(0, MEMBER);
+    member.open(0, 0, &reading);
+    member.open(0, 1, &absent);
+    let asked = member.message(0, 0, b"ask");
+    member.commit();
+
+    // What each handling of the message was answered for its four replies.
+    let mut handlings: Vec<[Reply; 4]> = Vec::new();
+    let began = Instant::now();
+    wait("the message is taken", || {
+        service
+            .poll(
+                &mut client,
+                |committed, replies| {
+                    if let Entry::SessionMessage { .. } = committed.entry {
+                        let answered = [
+                            replies.reply(0, b"first"),
+                            replies.reply(1, b"second"),
+                            replies.reply(1, b"third"),
+                            replies.reply(0, b"fourth"),
+                        ];
+                        handlings.push(answered);
+                        if answered.contains(&Reply::Retry) {
+                            return Action::Abort;
+                        }
+                    }
+                    Action::Continue
+                },
+                16,
+            )
+            .expect("the service polls");
+        service.position() == member.end
+    });
+    assert!(
+        began.elapsed() >= Duration::from_millis(500),
+        "the entry was held for the keepalive interval"
+    );
+    assert!(
+        handlings.len() > 2,
+        "the entry was handed over again: {} handlings",
+        handlings.len()
+    );
+    let (last, earlier) = handlings.split_last().expect("a handling");
+    assert_eq!(
+        *last,
+        [Reply::Sent, Reply::Dropped, Reply::Dropped, Reply::Sent]
+    );
+    for answered in earlier {
+        // The second session takes nothing, and its second reply waits behind its
+        // first; the first session's second reply waits behind its first too, while
+        // its publication connects.
+        assert_eq!(answered[1..3], [Reply::Retry, Reply::Retry], "{answered:?}");
+        assert_eq!(answered[0], answered[3], "{answered:?}");
+        assert!(
+            matches!(answered[0], Reply::Sent | Reply::Retry),
+            "{answered:?}"
+        );
+    }
+    assert!(
+        earlier
+            .iter()
+            .filter(|answered| answered[0] == Reply::Sent)
+            .count()
+            > 1,
+        "the first session's replies were answered as sent by more than one handling"
+    );
+    assert_eq!(dropped(&client), Some(2));
+
+    // The first session's client reads each of its replies once, in their order.
+    let mut replies = Read::new();
+    wait("the client reads its two replies", || {
+        read(&mut egress, &mut replies);
+        replies.len() >= 2
+    });
+    let quiet = Instant::now() + Duration::from_millis(200);
+    while Instant::now() < quiet {
+        read(&mut egress, &mut replies);
+    }
+    assert_eq!(
+        replies,
+        [
+            (0, 0, asked.1, b"first".to_vec()),
+            (0, 0, asked.1, b"fourth".to_vec())
+        ],
+        "each reply once, after {} handlings",
+        handlings.len()
+    );
+
+    service.close(&mut client).expect("the service closes");
+    egress.close().expect("the subscription closes");
+    session.close().expect("the session's client closes");
+    client.close().expect("the service's client closes");
+    member.close();
+}

@@ -1154,6 +1154,16 @@ response channel, or the stream to the client has ended. So a client that does n
 read its replies delays the replies to the other sessions by the keepalive interval,
 once, and never the log: a member appends and commits whatever its service does.
 
+An entry that is read again is answered again, from its first reply. A service
+offers a reply to its session once, however often it reads the entry. For each
+session it counts the replies that its readings of the entry have settled, sent or
+dropped, which are the first replies the entry makes that session, and it does not
+offer those again. When a reply to a session is refused, the replies that the same
+reading makes that session after it are not offered either, so that a session's
+replies keep their order. So no session is sent a reply twice. The rule rests on
+what the replay check asks of every service: the same replies, in the same order,
+each time an entry is read.
+
 ## The log's recordings
 
 A member's consensus module writes one file in its driver's directory
