@@ -258,6 +258,148 @@ fn a_bounded_poll_reads_one_image_and_no_frame_at_or_past_its_limit() {
     driver.close().expect("the driver closes");
 }
 
+/// The bounded controlled poll (`spec/log-buffer.md`, "Reading"; ADR 0114, ADR 0118):
+/// one image, no frame that begins at or past the limit, and the handler's word on
+/// each fragment. A fragment it aborts stays at the image's position and is handed
+/// over again; a break takes its fragment and ends the read; the other image is not
+/// read; and a session the subscription holds no image of reads nothing.
+#[test]
+fn a_bounded_controlled_poll_reads_one_image_below_its_limit_as_its_handler_says() {
+    let dir = TestDir::new("bounded-controlled");
+    let driver = Driver::start(dir.path(), dir.path().join("log")).expect("the driver starts");
+    let mut client = Cavalry::connect_to(dir.path()).expect("connects");
+    let mut subscription = client
+        .add_subscription("cavalry:ipc", 2007)
+        .expect("a subscription");
+    let mut first = client
+        .add_exclusive_publication("cavalry:ipc", 2007)
+        .expect("a publication");
+    let mut second = client
+        .add_exclusive_publication("cavalry:ipc", 2007)
+        .expect("a second publication");
+    assert!(
+        wait_until(Duration::from_secs(5), || {
+            subscription.poll(|_, _| {}, 0).expect("polls");
+            subscription.image_count() == 2
+        }),
+        "both images joined"
+    );
+    let (a, b) = (first.session_id(), second.session_id());
+    let position = |subscription: &cavalry_client::Subscription, session: i32| {
+        subscription
+            .images()
+            .iter()
+            .find(|image| image.session_id() == session)
+            .expect("the image")
+            .position()
+    };
+    // Five frames of 64 bytes on the first, at 0, 64, 128, 192 and 256, and three on
+    // the second.
+    for i in 0..5u64 {
+        publish(&mut first, &i.to_le_bytes());
+    }
+    for i in 100..103u64 {
+        publish(&mut second, &i.to_le_bytes());
+    }
+    // One call on the image of `session`, with what the handler answers for each
+    // value it is handed; returns the count the call returned and every value handed
+    // over, taken or not.
+    let read = |subscription: &mut cavalry_client::Subscription,
+                session: i32,
+                answer: &dyn Fn(u64) -> Action,
+                limit: i64,
+                fragments: usize| {
+        let mut handed: Vec<u64> = Vec::new();
+        let taken = subscription
+            .bounded_controlled_poll(
+                session,
+                |body, header| {
+                    assert_eq!(header.session_id(), session, "one image is read");
+                    let value = u64::from_le_bytes(body.try_into().expect("8 bytes"));
+                    handed.push(value);
+                    answer(value)
+                },
+                limit,
+                fragments,
+            )
+            .expect("the bounded controlled poll reads");
+        (taken, handed)
+    };
+
+    // Aborted at once: the first fragment is handed over and left where it is.
+    assert_eq!(
+        read(&mut subscription, a, &|_| Action::Abort, i64::MAX, 10),
+        (0, vec![0])
+    );
+    assert_eq!(position(&subscription, a), 0);
+    // A limit at the third frame's first byte: the two frames below it, and that
+    // frame not handed over at all.
+    assert_eq!(
+        read(&mut subscription, a, &|_| Action::Continue, 128, 10),
+        (2, vec![0, 1])
+    );
+    assert_eq!(position(&subscription, a), 128);
+    // The limit raised: the third is taken, the fourth aborted and left.
+    let until_three = |value| {
+        if value == 3 {
+            Action::Abort
+        } else {
+            Action::Continue
+        }
+    };
+    assert_eq!(
+        read(&mut subscription, a, &until_three, i64::MAX, 10),
+        (1, vec![2, 3])
+    );
+    assert_eq!(position(&subscription, a), 192);
+    // A break takes its fragment and ends the read.
+    assert_eq!(
+        read(&mut subscription, a, &|_| Action::Break, i64::MAX, 10),
+        (1, vec![3])
+    );
+    assert_eq!(position(&subscription, a), 256);
+    // The other image was not read by any of these, and a session the subscription
+    // holds no image of reads nothing.
+    assert_eq!(position(&subscription, b), 0);
+    let neither = (0..3).find(|id| *id != a && *id != b).expect("a third id");
+    assert_eq!(
+        read(
+            &mut subscription,
+            neither,
+            &|_| Action::Continue,
+            i64::MAX,
+            10
+        ),
+        (0, vec![])
+    );
+
+    // A plain poll reads what is left of both: the first's last frame and the
+    // second's three.
+    let mut rest: Vec<(i32, u64)> = Vec::new();
+    assert!(wait_until(Duration::from_secs(5), || {
+        subscription
+            .poll(
+                |body, header| {
+                    let value = u64::from_le_bytes(body.try_into().expect("8 bytes"));
+                    rest.push((header.session_id(), value));
+                },
+                10,
+            )
+            .expect("polls");
+        rest.len() == 4
+    }));
+    rest.sort_unstable();
+    let mut expected = vec![(a, 4), (b, 100), (b, 101), (b, 102)];
+    expected.sort_unstable();
+    assert_eq!(rest, expected);
+
+    drop(first);
+    drop(second);
+    drop(subscription);
+    client.close().expect("closes");
+    driver.close().expect("the driver closes");
+}
+
 /// The controlled poll (`spec/log-buffer.md`, "Reading"; ADR 0114): the handler says
 /// for each fragment whether the read takes it. A fragment it aborts stays at the
 /// image's position, which is stored, and is handed over again by the next read; a

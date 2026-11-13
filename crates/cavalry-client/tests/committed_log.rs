@@ -9,7 +9,7 @@
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
-use cavalry_client::{Cavalry, ClientError, CommittedLog, Counter, Publication, Recording};
+use cavalry_client::{Action, Cavalry, ClientError, CommittedLog, Counter, Publication, Recording};
 use cavalry_driver::Driver;
 use cavalry_proto::cluster::{
     LOG_RECORDINGS_FILE_PREFIX, LogRecording, MAX_LOG_RECORDINGS, MAX_LOG_RECORDINGS_LENGTH,
@@ -349,6 +349,84 @@ fn a_service_takes_no_commit_position_stored_after_its_member_named_another_reco
     assert_eq!(log.recording_id(), next.recording.recording_id());
     log.close(&mut service).expect("the handle closes");
     service.close().expect("the service's client closes");
+    member.close();
+}
+
+/// The committed log's controlled poll (ADR 0114, ADR 0118): the handler says for each
+/// entry whether the read takes it. An entry it aborts is left, with the log's
+/// position before it, and is handed over again; a break takes its entry and ends
+/// the read; and the bound is the poll's, so no entry above the member's commit
+/// position is handed over at all.
+#[test]
+fn a_controlled_poll_of_the_log_leaves_an_aborted_entry_and_reads_no_further_than_the_bound() {
+    let mut member = Member::start("controlled");
+    let live = member.record(73, 5);
+    let live_id = live.recording.recording_id();
+    // Three of the five entries are committed.
+    member.name(live_id, 0, &[], 3 * ENTRY);
+    let mut service = Cavalry::connect_to(&member.dir).expect("the service's client connects");
+    let mut log = open(&mut service, 0);
+
+    // One call, with what the handler answers for each entry's number; returns the
+    // count the call returned and each entry handed over, its position and number.
+    let read = |log: &mut CommittedLog, answer: &dyn Fn(i64) -> Action| {
+        let mut handed: Vec<(i64, i64)> = Vec::new();
+        let taken = log
+            .controlled_poll(
+                |body, _, position| {
+                    let number = i64::from_le_bytes(body[..8].try_into().expect("eight bytes"));
+                    handed.push((position, number));
+                    answer(number)
+                },
+                64,
+            )
+            .expect("the controlled poll");
+        (taken, handed)
+    };
+
+    // Aborted at once: the first entry is handed over and left, call after call. The
+    // calls before the replay has brought it read nothing.
+    let mut aborted = 0;
+    wait("the first entry is handed over and left", || {
+        let (taken, handed) = read(&mut log, &|_| Action::Abort);
+        assert_eq!((taken, log.position()), (0, 0));
+        if !handed.is_empty() {
+            assert_eq!(handed, [(0, 0)]);
+            aborted += 1;
+        }
+        aborted == 3
+    });
+    // Taken up to the bound: the three committed entries, and neither of the two
+    // above the commit position.
+    let mut taken_so_far = Vec::new();
+    wait("the committed entries are taken", || {
+        let (taken, handed) = read(&mut log, &|_| Action::Continue);
+        assert_eq!(taken, handed.len());
+        taken_so_far.extend(handed);
+        log.position() == 3 * ENTRY
+    });
+    assert_eq!(taken_so_far, [(0, 0), (ENTRY, 1), (2 * ENTRY, 2)]);
+    assert_eq!(read(&mut log, &|_| Action::Continue), (0, vec![]));
+
+    // The commit position covers all five: a break takes the fourth and ends the
+    // read, and the fifth is handed over by the next call.
+    member.name(live_id, 0, &[], 5 * ENTRY);
+    wait("a break takes one entry", || {
+        let (taken, handed) = read(&mut log, &|_| Action::Break);
+        if taken == 1 {
+            assert_eq!(handed, [(3 * ENTRY, 3)]);
+        }
+        taken == 1
+    });
+    assert_eq!(log.position(), 4 * ENTRY);
+    wait("the last entry is taken", || {
+        read(&mut log, &|_| Action::Continue) == (1, vec![(4 * ENTRY, 4)])
+    });
+    assert_eq!(log.position(), 5 * ENTRY);
+
+    log.close(&mut service).expect("the handle closes");
+    service.close().expect("the service's client closes");
+    drop(live);
     member.close();
 }
 
