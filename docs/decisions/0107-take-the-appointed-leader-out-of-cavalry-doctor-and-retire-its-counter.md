@@ -108,7 +108,7 @@ is one.
   is never reused. A counters file written by a build before this change may hold
   a record of type 113 with the old meaning, and a reader of a later version would
   read the new counter's meaning into it. An id is an i32, and the registry holds
-  140 entries.
+  143 entries once this one has left.
 - **Name the retired id in a key of `counters.toml` that `just lint-counters`
   checks.** Lost for this change. `scripts/gen-counters.py` accepts `schema` and
   three tables at the top of the file and refuses any other key, so a list of
