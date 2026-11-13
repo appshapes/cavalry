@@ -274,10 +274,10 @@ commit path runs per message.
   session open event and closed by its committed session close event, on every
   member, so a follower holds the sessions its leader opened and takes them up when
   it leads: a publication for each, the term's new leader event, and the session
-  timeout counted from its election's close. A member that wins an election reads
-  every entry of the terms before its own in leader replay, before its election
-  closes, so it has every session they opened before it accepts a connect and gives
-  no session id twice. The leader appends a session's messages
+  timeout counted from when it begins to serve. A member that wins an election reads
+  every entry of the terms before its own before it serves sessions (ADR 0116), so
+  it has every session they opened before it accepts a connect and gives no session
+  id twice. The leader appends a session's messages
   with its own term and the cluster's time, leaves one unread while the log is
   back-pressured (`Ingress::Unread`), and closes a session it has heard nothing from
   for 10 s: the session close event goes to the log first, and the closed event

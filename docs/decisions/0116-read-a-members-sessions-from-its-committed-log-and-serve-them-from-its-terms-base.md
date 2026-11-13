@@ -9,8 +9,14 @@
   each election; "Sessions", which says how a member reads its log for its sessions,
   when a leader serves them, and that a message of the ingress stream is one frame;
   "Members and streams", for the module as one more reader of the service log stream
-  and for the length of the ingress endpoints; and "Counters". It is the third
-  change of work item 229, the cluster client (ADR 0052, feature 5).
+  and for the length of the ingress endpoints; and "Counters". Amends ADR 0115 in
+  one clause, where a member reads the entries of the terms before its own: ADR 0115
+  has it read them "in leader replay", before its election closes, as the page then
+  said, and this ADR has it read them in the read that runs all the time, before it
+  serves sessions. What ADR 0115 needs of that read is kept: a leader accepts no
+  connect before it has read every session open and close event below its term's
+  base. It is the third change of work item 229, the cluster client (ADR 0052,
+  feature 5).
 
 ## Context
 
@@ -115,9 +121,16 @@ each cycle.
   second constant, a second call and a second row of the page for one reader. On
   stream 104 the module is one more replay each service reads past, 64 fragments a
   poll at most (ADR 0066). The Revisit clause names when that cost is measured.
-- **Serve sessions as soon as the election closes.** Lost: the leader would give a
-  session id that an uncommitted session open event of the term before already
-  holds, and two sessions with one id are in the log for good.
+- **Serve sessions as soon as the election closes.** Lost: the leader's read may
+  not have reached its term's base yet, and it would give a session id that a
+  session open event of the term before already holds; two sessions with one id are
+  then in the log for good, and a leader that reads the earlier entry late takes it
+  for its own connect (ADR 0115, the alternative that lost there).
+- **Hold the election in state 6 until the module's read has reached the term's
+  base,** which is the page's order and ADR 0115's words. Lost: the read is a round
+  through the driver's replayer, and an election that waits for it is an election
+  whose length depends on the log's length at a member's start. The election's own
+  work needs nothing of the sessions. What needs them is serving, so serving waits.
 - **Reassemble a fragmented session message.** Lost: a buffer for the longest
   message of each of ten ingress images, to allocate and to bound, for a log whose
   entries are one frame. The client refuses a longer message before it sends it.
