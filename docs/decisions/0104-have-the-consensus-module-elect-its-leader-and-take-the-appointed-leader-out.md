@@ -162,7 +162,14 @@ directory: there is no rolling upgrade across this change.
 
 - `crates/cavalry-raft/tests/cluster.rs`, three members over three drivers on the
   loopback, thirteen tests, run thirty times in a row on this change's branch on a
-  laptop, macOS: thirty passed. Among them:
+  laptop, macOS: thirty passed. A later run of twenty there failed once, in a test
+  of a service that opened the log at 0 beside a follower that had joined late, and
+  read one recording where the follower's log was two. Since then, the tests of a
+  lost or silent leader and all but one of the tests of a service make one
+  follower join late on every run. The one that does not is the test of a member
+  whose file of its log's recordings cannot be written: it picks its member before
+  the election, and it holds whether that member joined late or not. The binary
+  then passed ten runs in a row on a Linux runner. Among them:
   - `a_lost_leader_is_replaced_by_the_two_that_remain_and_they_commit`: the leader
     and its driver stop with a hundred entries committed; the two that remain
     elect one; an entry offered to it is committed by both; and the first term's
@@ -170,8 +177,10 @@ directory: there is no rolling upgrade across this change.
   - The first test reads the term the cluster elected in, and takes the count of
     election steps as exact only in term 0: four on the leader, four or five on a
     follower.
-  - The services' tests read each member's log from position 0, across its
-    recordings where it has more than one (ADR 0103).
+  - A service beside a follower that joined late reads its log from position 0
+    across its recordings (ADR 0103), three of them once that follower has left
+    the log and joined it again. The tests of a service's bound and of a fault read
+    beside the follower that joined on time, whose log is one recording.
 - Three `cavalry run` processes on the laptop, each a driver and a member. Member 2
   was elected within about a second: `cavalry doctor` said `the leader in term 0,
   election closed: append position 96, commit position 96; its last election
