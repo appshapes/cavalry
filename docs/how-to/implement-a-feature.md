@@ -46,8 +46,11 @@ feature that followed this page, commit by commit.
       ruled. The owner answers where they choose, on Slack, by mail or in a
       conversation, and Brigade copies the answer nowhere: the session that receives
       it records the ruling on the work item with `brigade work-item comment <work
-      item>`, the owner's words on stdin, then closes the ask with `brigade decision
-      --close <the ask's id>`. `just lint-docs` refuses an ADR
+      item>`, the owner's words on stdin. The asking session, or another session of
+      the member who asked, then closes the ask with `brigade decision --close <the
+      ask's id>`, the ruling as its outcome on stdin in a quoted heredoc; a session
+      of another member that receives the answer records it and tells the asker.
+      `just lint-docs` refuses an ADR
       whose Status is Proposed, and a change to `spec/` without an Accepted ADR in the
       same commit. Name the work item in the ADR's References (ADR 0119).
    2. Write the `spec/` page and its vectors as [`spec/README.md`](../../spec/README.md)

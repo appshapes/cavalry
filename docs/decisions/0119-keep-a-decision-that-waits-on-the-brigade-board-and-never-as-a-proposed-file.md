@@ -46,10 +46,14 @@ question on stdin in a quoted heredoc (`<<'EOF'`), so that the shell expands not
 in it. Brigade refuses an ask without `--to` and sends nothing. The owner answers
 where they choose, on Slack, by mail or in a conversation, and Brigade copies the
 answer nowhere. So the session that receives the answer records it on the work item
-with `brigade work-item comment <work item>`, the owner's words on stdin, and then
-closes the ask with `brigade decision --close <the ask's id>`. Once it is ruled, the
-ADR lands Accepted with the change it explains, its References name the work item,
-and the work item's landing comment names the ADR.
+with `brigade work-item comment <work item>`, the owner's words on stdin. The asking
+session, or another session of the member who asked, then closes the ask with
+`brigade decision --close <the ask's id>`, the ruling as its outcome on stdin in a
+quoted heredoc: Brigade refuses a close with no outcome, and a close by a session
+of another member. A session of another member that receives the answer records it
+and tells the asker. Once it is ruled, the ADR lands Accepted with the change it
+explains, its References name the work item, and the work item's landing comment
+names the ADR.
 
 A file is never Proposed. The statuses of an ADR file are Accepted, Superseded by
 NNNN and Rejected, and `just lint-docs` refuses a file whose Status is Proposed,
