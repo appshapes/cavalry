@@ -157,4 +157,6 @@ under `docs/` is listed here; `just lint-docs` fails on one that is not.
 - [0106. Canvass with no reports after a replication](decisions/0106-canvass-with-no-reports-after-a-replication.md)
 - [0103. List the recordings of a member's log in its driver directory, for a service to read in order](decisions/0103-list-the-recordings-of-a-members-log-in-its-driver-directory-for-a-service-to-read-in-order.md)
 - [0104. Have the consensus module elect its leader, and take the appointed leader out](decisions/0104-have-the-consensus-module-elect-its-leader-and-take-the-appointed-leader-out.md)
+- [0111. Cut a cluster member off through a relay in the test, and throttle one as a process](decisions/0111-cut-a-cluster-member-off-through-a-relay-in-the-test-and-throttle-one-as-a-process.md)
+- [0107. Take the appointed leader out of cavalry doctor, and retire its counter](decisions/0107-take-the-appointed-leader-out-of-cavalry-doctor-and-retire-its-counter.md)
 - [0108. List the recordings of a member's log in its log directory, and start a member on the log it kept](decisions/0108-list-the-recordings-of-a-members-log-in-its-log-directory-and-start-a-member-on-the-log-it-kept.md)

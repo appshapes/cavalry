@@ -1194,18 +1194,15 @@ scope = "client"
 doc = "Times the active members of one cluster leader fell below a quorum, a member being active while its last report is younger than the leader heartbeat timeout, 10 s; the leader holds an election, beginning at init, a failed election when it was in leader log replication or leader ready (spec/cluster.md, The commit position; ADR 0082); key and label as cluster.elections."
 doctor = "The leader cannot commit while fewer than a quorum of members report to it: check that a majority of the members in the members string are running and that each reaches the leader's consensus endpoint."
 
-# No member of this version counts the next one: a member elects its leader, and
-# `cavalry_raft::Counts::by_counter` does not name it (ADR 0100). It stays registered
-# while `cavalry doctor` reads its constant, and leaves with that check. Its id is
-# never used again.
-
-[[counter]]
-id = 113
-name = "cluster.appointed_leader_behind"
-kind = "counter"
-scope = "client"
-doc = "Members an appointed leader found holding a log ahead of its own, in canvass or in leader ready, once for each such member in an election. No member of this version counts it or adds it: a member elects its leader. It stays registered while cavalry doctor reads it, and leaves with that check (ADR 0104); key and label as cluster.elections."
-doctor = "No member of this version has this counter: it counted a member that an appointed leader found holding more of the log than itself, before a cluster elected its leader. A member that has it is of an earlier version: run every member of a cluster at one version."
+# Id 113 is retired and is never used again (ADR 0107). It was
+# `cluster.appointed_leader_behind`, which counted a member that an appointed leader
+# found holding a log ahead of its own. No member has counted it since a cluster
+# elects its leader (ADR 0104), and `cavalry doctor` no longer reads it. An entry that
+# took 113 would give a new meaning to a record that a counters file written before
+# this change may hold. `just lint-counters` checks only that the ids in this file
+# are unique, so nothing but this comment and one test keeps 113 free: the test
+# `a_record_of_the_retired_type_113_changes_no_finding` in `cavalry-control` fails
+# when an entry has the id.
 
 [[counter]]
 id = 114

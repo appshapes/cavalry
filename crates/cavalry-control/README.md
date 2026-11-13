@@ -29,26 +29,23 @@ is allowed here.
   driver runs: who the member is and what it knows, its role, term, election state,
   append position and commit position, and from its two gauges who it follows and why
   its last election began (`cluster-member`, a note; ADR 0102); a member that follows
-  no leader, told by the members string `examine_config` has whether it is the appointed
-  leader the others wait for (`cluster-no-leader`); a member that has taken its leader
-  and joins its log, with what is still to come in its election's state and the path
-  that needs (`cluster-joining`, a note); a member whose elections fail, because its
-  leader's log never reached it, a network path the message names first with its two
-  endpoints, or because the log left it behind, which this version cannot bring back
-  (`cluster-joined-late`); an appointed leader that does not lead, or leads and does not
-  close its election, because its log is behind a member's (`cluster-leader-behind`); a
-  leader that lost its quorum (`cluster-quorum-lost`); a commit position behind the
-  leader's own append position (`cluster-commit-waits`); and, with each counter's own
-  doctor sentence from `counters.toml`, consensus messages the member rejected, as from
-  a member of another version (`cluster.messages_rejected`), a leader it stopped hearing
+  no leader, with the state its election is in, why it began, and that a quorum of
+  the members elects a leader, the quorum by its size when `examine_config` has the
+  members string (`cluster-no-leader`); a member that has taken its leader and joins
+  its log, with what its election's state waits for, an image of the leader's log, a
+  replication or a catch-up, and the path that needs with its endpoints
+  (`cluster-joining`, a note); a leader that lost its quorum (`cluster-quorum-lost`); a
+  commit position behind the leader's own append position (`cluster-commit-waits`);
+  and, with each counter's own doctor sentence from `counters.toml`, consensus messages
+  the member rejected, as from a member of another version
+  (`cluster.messages_rejected`), a leader it stopped hearing
   (`cluster.leader_heartbeat_timeouts`) and a leader's log stream it lost
-  (`cluster.log_images_lost`). A member that elects its leader, one whose counters
-  hold `cluster.leader_member_id` and no `cluster.appointed_leader_behind`, is told
-  what such a member does instead: why its election began and that a quorum elects a
-  leader (`cluster-no-leader`), and what a replication or a catch-up waits for
-  (`cluster-joining`), with the elections it has failed, the counters of three rules
-  that fail one, and how many failed on none of the three;
-  it is never told to start the cluster again (ADR 0100). [Run a cluster of three
+  (`cluster.log_images_lost`). `cluster-no-leader` and `cluster-joining` end with the
+  elections the member has failed, the counters of three rules that fail one, and
+  how many failed on none of the three. A member begins its election again after one
+  that fails, so no finding tells an operator to start the cluster again (ADR 0100).
+  Every member elects its leader, and `doctor` has one set of findings for it (ADR
+  0107). [Run a cluster of three
   members](../../docs/how-to/run-a-cluster.md#when-it-does-not-work) says what an
   operator does about each.
 - May use `async` and an executor: nothing a message passes through lives here.

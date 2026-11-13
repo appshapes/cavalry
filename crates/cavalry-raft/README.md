@@ -207,6 +207,25 @@ commit path runs per message.
   recordings. The counter's own sentence, with what to do, is in
   `docs/reference/counters.md`, and `cavalry run` prints the member's error and gives
   the member up after 10 s of such cycles, so the failure is not silent.
+- Is held to gate 3's faults over real drivers, by three tests beside the ones in
+  memory (ADR 0111). `tests/cluster.rs` stops the leader's driver: the two that remain elect
+  another and commit. `tests/partition.rs` sends every datagram between the members
+  through a relay that loses one data frame in 23 and holds back one in 7, and cuts a
+  member off: a follower cut off joins again and holds what was committed without
+  it, and a leader cut off is replaced, gives up the lead, truncates what no quorum
+  held and joins as a follower. `tests/throttle.rs` runs each member as a process
+  and gives one follower a twentieth of a processor for five seconds, by its cgroup
+  where the runner allows it and by stop and continue elsewhere. In each, a service
+  beside every member reads the same entries. Two costs these tests print, measured
+  on a laptop: a member cut off for 10 s or more joins again about 10 s after the
+  cut is mended, the driver's image cool-down (`spec/udp.md`, "The receiver"); and a
+  throttled follower paces the cluster, since the leader's log is sent under
+  `fc=min`: offered 30,000 entries of 96 bytes a second, the cluster committed
+  about 12,000 a second while one follower was throttled, there by a stop of 95 ms
+  in every 100 ms, one receiver window each 100 ms, though the other two members
+  were a quorum (ADR 0052, "Harder"). Under a cgroup's quota of a twentieth of a
+  processor, on CI's Linux runner, it committed 13,000 to 18,000 a second: the
+  member runs a part of every period (ADR 0111, "Evidence").
 - To come, each with its card: the C ABI's calls for a service, so that a service is
   a program in any of the five client languages (card 227), a member's start on the
   log directory it kept and mixed versions in a rolling upgrade (card 228), the
