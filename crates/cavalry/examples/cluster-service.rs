@@ -16,7 +16,9 @@
 //! A member's log is one recording or several in a row, and a handle reads one (ADR
 //! 0103). When a handle has delivered all its recording holds, the program opens the
 //! log again where the handle ended: that is the member's next recording, at once, or
-//! nothing, when the member closed or left its log, and then the program ends.
+//! nothing, when the member closed or left its log, and then the program ends. It is
+//! the same recording again while the member names a live recording that has stopped
+//! and has not yet left its log; the program then asks again ten times a second.
 
 use std::path::PathBuf;
 use std::process::ExitCode;
@@ -242,14 +244,26 @@ fn run(args: &Args) -> Result<(), Box<dyn std::error::Error>> {
             // recording when this one lies below its live one: the log opened again at
             // the handle's position is that recording, at once.
             if let Some(next) = client.committed_log(log.position())? {
+                let same = next.recording_id() == log.recording_id();
                 let ended = std::mem::replace(&mut log, next);
                 ended.close(&mut client)?;
-                eprintln!(
-                    "cluster-service: reading member {}'s log, recording {}, from position {}",
-                    log.member_id(),
-                    log.recording_id(),
-                    log.position()
-                );
+                if same {
+                    // The same recording again. Either its member stopped it and still
+                    // names it, as for a moment when the member loses its leader or a
+                    // write fails, and the handle is ended at once at the recording's
+                    // stop; or the member has since named another live recording and
+                    // this one lies below it, with entries left to read. Either way ask
+                    // again after a pause, as while no member has a log, and not in a
+                    // loop that spins until the member names its next recording.
+                    std::thread::sleep(Duration::from_millis(100));
+                } else {
+                    eprintln!(
+                        "cluster-service: reading member {}'s log, recording {}, from position {}",
+                        log.member_id(),
+                        log.recording_id(),
+                        log.position()
+                    );
+                }
                 continue;
             }
             // No member names a recording: the member left its log, closed, or is

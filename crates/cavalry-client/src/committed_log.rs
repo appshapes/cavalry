@@ -555,14 +555,14 @@ impl CommittedLog {
 
     /// Where the entries this handle was not given begin, when the driver withdrew the
     /// replay's image before the polls had read it to its end, or to the bound once the
-    /// member stopped naming the recording, whichever is lower; `None` otherwise. The
-    /// driver keeps a replay's image for the publication linger, 5 s, after the replay
-    /// ends, and then withdraws it whether or not its subscriber has read it
-    /// (`spec/client-protocol.md`, "Events"): a service that did not poll for that long
-    /// after its member closed or left the log, or whose handler took that long, ends
-    /// so. [`is_ended`](Self::is_ended) is true by then, and the position is
-    /// [`position`](Self::position), or past it by a padding frame, which holds no
-    /// entry.
+    /// member stopped naming the live recording it named when the handle was opened,
+    /// whichever is lower; `None` otherwise. The driver keeps a replay's image for the
+    /// publication linger, 5 s, after the replay ends, and then withdraws it whether or
+    /// not its subscriber has read it (`spec/client-protocol.md`, "Events"): a service
+    /// that did not poll for that long after its member closed or left the log, or
+    /// whose handler took that long, ends so. [`is_ended`](Self::is_ended) is true by
+    /// then, and the position is [`position`](Self::position), or past it by a padding
+    /// frame, which holds no entry.
     ///
     /// The entries from there on were played and not delivered, and nothing else
     /// delivers them. Open the log again from [`position`](Self::position): the new
@@ -589,12 +589,13 @@ impl CommittedLog {
     /// Where the driver's replay of the member's recording failed, when it did: a
     /// segment file could not be read or a frame failed a check, after the frame that
     /// ends at this position (`spec/client-protocol.md`, "Events", `replay stopped`,
-    /// reason 3). `None` for a log that is live or that ended because its member
-    /// closed or left the recording. A log opened at a position where no entry begins
-    /// ends so at once, at that position, with nothing delivered, since the bytes
-    /// there are no frame; a log that read entries before it failed is a recording
-    /// whose files are damaged, which `cavalry doctor` names. Either way no entry from
-    /// the position on is delivered. The entries below it may still be on their way
+    /// reason 3). `None` for a log that is live, that ended because its member closed
+    /// or left the recording, or that ended whole at the stop of a recording below the
+    /// member's live one. A log opened at a position where no entry begins ends so at
+    /// once, at that position, with nothing delivered, since the bytes there are no
+    /// frame; a log that read entries before it failed is a recording whose files are
+    /// damaged, which `cavalry doctor` names. Either way no entry from the position on
+    /// is delivered. The entries below it may still be on their way
     /// when this first says so: read it once [`is_ended`](Self::is_ended) does. They
     /// have all been delivered by then unless the driver withdrew the replay's image
     /// first, which it does 5 s after a replay ends, one that failed included:
