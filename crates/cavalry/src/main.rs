@@ -862,7 +862,7 @@ impl Drop for StopOnPanic {
             let _ = self.0.send(Stop::Member(
                 "its thread panicked, which is a bug in Cavalry: the panic's message is \
                  above; report it with that message, then start `cavalry run` again with the \
-                 same directories"
+                 same directories; see docs/how-to/run-a-cluster.md#when-it-does-not-work"
                     .to_string(),
             ));
         }
@@ -2020,6 +2020,12 @@ mod tests {
             Ok(Stop::Member(error)) => {
                 assert!(error.contains("its thread panicked"), "{error}");
                 assert!(error.contains("start `cavalry run` again"), "{error}");
+                // Every error message names the docs anchor that explains it (CLAUDE.md,
+                // Documentation): the how-to's entry for this line.
+                assert!(
+                    error.ends_with("; see docs/how-to/run-a-cluster.md#when-it-does-not-work"),
+                    "{error}"
+                );
             }
             Ok(Stop::Signal) => panic!("a signal, and none was sent"),
             Err(error) => panic!(
