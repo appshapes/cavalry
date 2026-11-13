@@ -168,7 +168,12 @@ session's opening and a new leader's serving each wait for the member's own read
 an entry it has committed, a round through its driver's replayer; a leader does not
 serve sessions between the close of its election and the cycle its read reaches its
 term's base; a member that starts reads its whole log before its table is whole, and
-serves no session until then.
+serves no session until then; and a client that was told its session is closed can
+be sent a new leader event for it. The closed event of a timeout follows the close
+event's append on the leader, not its commit (ADR 0115), so a leader lost between
+the two leaves the session open in the log, and the next leader, which has the
+session from that log, takes it up and closes it again by the timeout, 10 s later.
+Aeron has the same window. The page now says so.
 
 Revisit: when a service's reads are measured beside a member whose module reads the
 same stream, for a stream of the module's own; when a snapshot is taken, for where

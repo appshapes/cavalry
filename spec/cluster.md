@@ -962,7 +962,12 @@ with the detail `TIMEOUT`, as Aeron's `SessionManager.checkSessions` does. That 
 event is owed as an ok event is: tried on each duty cycle until the session's egress
 publication takes it, and sent once. The debt ends when the session close event is
 committed, which frees the session, or when the leader stops leading; a client that is
-never told finds its leader silent for the leader heartbeat timeout. A client closes
+never told finds its leader silent for the leader heartbeat timeout. The log's taking
+of the session close event is its append on the leader, not its commit: a leader that
+appends the event, sends the closed event and stops leading before a quorum holds the
+entry leaves the session open in the log, and the member that leads next takes it up,
+sends it a new leader event, and closes it again by the session timeout, since a
+client that was told its session is closed sends nothing more (ADR 0116). A client closes
 its session with session close; the leader appends a session close event with the
 reason client action and sends nothing. From when the leader has decided a session's
 close, by the client's session close or by the timeout, it sends the session nothing
