@@ -20,7 +20,8 @@ commit path runs per message.
   asks for none in the raised term and does not lead it. A candidate that cannot win
   its ballot, one that has read a vote against its term or holds no vote of its own
   for it, canvasses again on its next cycle and does not wait out the election
-  timeout, so a split vote costs a second delay of at most 500 ms and not a second
+  timeout, so a split vote costs a second delay of at most 500 ms and not a second.
+  It reads its ballot before it sends, so on that cycle it asks no member for a vote
   (ADR 0105). A member that replicated a term it lacked canvasses again with no
   member's report, so that it waits for its leader's answer and does not nominate
   itself against a leader it has caught up with (ADR 0106). A leader tells a member whose
