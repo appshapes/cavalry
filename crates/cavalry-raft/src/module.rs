@@ -32,8 +32,9 @@ use cavalry_log::terms::{NO_RECORDING, TermsError, TermsFile};
 use cavalry_proto::client_protocol::{ErrorCode, FOLLOW_LENGTH, ReplayStopReason};
 use cavalry_proto::cluster::{
     CONSENSUS_STREAM_ID, EMPTY_MEMBER, Endpoint, LOG_RECORDINGS_FILE_PREFIX,
-    LOG_RECORDINGS_TMP_SUFFIX, LOG_STREAM_ID, LogRecording, MAX_LOG_RECORDINGS_LENGTH, MAX_MEMBERS,
-    MembersError, Message, Stream, parse_members, write_log_recordings,
+    LOG_RECORDINGS_TMP_SUFFIX, LOG_STREAM_ID, LogRecording, LogRecordingsError,
+    MAX_LOG_RECORDINGS_LENGTH, MAX_MEMBERS, MembersError, Message, Stream, parse_members,
+    write_log_recordings,
 };
 use cavalry_proto::udp::UDP_TERM_LENGTH;
 use cavalry_shm::counters::CounterId;
@@ -234,6 +235,28 @@ impl core::fmt::Display for RaftError {
         }
     }
 }
+
+/// A list of its log's recordings that the module made and the file's writer refused
+/// ([`write_log_recordings`]). The writer's error is the reader's, and a reader's
+/// advice, to stop whatever else writes in the driver directory, is wrong here: no
+/// other process made this list. So the member says what the check found and no
+/// more, and [`RaftError::LogRecordings`] adds that the fault is the module's own.
+#[derive(Debug)]
+struct RefusedList(LogRecordingsError);
+
+impl std::fmt::Display for RefusedList {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "the list the member made of its log's recordings is one the file's format \
+             refuses ({}): {}",
+            self.0.reason(),
+            self.0.found()
+        )
+    }
+}
+
+impl std::error::Error for RefusedList {}
 
 impl std::error::Error for RaftError {
     fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
@@ -688,7 +711,7 @@ impl ClientIo {
         )
         .map_err(|error| RaftError::LogRecordings {
             path: self.recordings_path.clone(),
-            source: std::io::Error::new(std::io::ErrorKind::InvalidData, error),
+            source: std::io::Error::new(std::io::ErrorKind::InvalidData, RefusedList(error)),
         })?;
         let bytes = self.recordings_file.get(..length).unwrap_or(&[]);
         std::fs::write(&self.recordings_tmp_path, bytes).map_err(|source| {

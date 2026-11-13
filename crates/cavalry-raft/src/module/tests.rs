@@ -2432,3 +2432,52 @@ fn a_truncation_waits_until_the_counter_names_no_recording() {
     assert_eq!(pair.member.io.append_position(), one);
     assert_eq!(pair.stop_of(first), Some(one));
 }
+
+/// A list of recordings that the module's own writer refuses is the module's fault,
+/// and the member says so: what the check found, that it is a fault to report, and
+/// none of the advice a reader of the file is given, since no other process wrote
+/// the list. A file the operating system would not write keeps its own remedy.
+#[test]
+fn a_list_the_writer_refuses_is_said_to_be_the_modules_fault_and_not_the_directorys() {
+    let refused = RaftError::LogRecordings {
+        path: PathBuf::from("/driver/log-recordings-2"),
+        source: std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            RefusedList(LogRecordingsError::Entry { index: 3 }),
+        ),
+    };
+    let text = refused.to_string();
+    assert!(
+        text.starts_with(
+            "member stopped (log-recordings): /driver/log-recordings-2 could not be written: \
+             the list the member made of its log's recordings is one the file's format \
+             refuses (recordings-entry): entry 3 has an id below 0,"
+        ),
+        "{text}"
+    );
+    assert!(
+        text.contains(
+            "This is a fault of the consensus module and not of the directory: report it \
+             with this message"
+        ),
+        "{text}"
+    );
+    for absent in [
+        "whatever else writes in the driver directory",
+        "open the log again",
+        "Make the driver directory writable",
+    ] {
+        assert!(!text.contains(absent), "{absent}: {text}");
+    }
+
+    let unwritable = RaftError::LogRecordings {
+        path: PathBuf::from("/driver/log-recordings-2.tmp"),
+        source: std::io::Error::from(std::io::ErrorKind::PermissionDenied),
+    };
+    let text = unwritable.to_string();
+    assert!(
+        text.contains("Make the driver directory writable by the member's user"),
+        "{text}"
+    );
+    assert!(!text.contains("fault of the consensus module"), "{text}");
+}
