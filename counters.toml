@@ -1482,6 +1482,21 @@ scope = "client"
 doc = "Times one cluster member finished, at its start, a truncation that its stop had cut short: the last recordings its log recordings file named were gone from the driver's catalog, purged before the member stopped, or its record of terms held a term based above the end of its log, and the start wrote the list of the recordings that were left and deleted those terms, before the member read a message. At most one for a start (spec/cluster.md, A member's start, and Counters; ADR 0108); key: member id (i32), little-endian; label text: the member id in decimal."
 doctor = "The member was stopped while it truncated its log on a new leader's word, and its start brought its recordings, its list of them and its record of terms into agreement. What it cut no quorum had recorded, as cluster.log_truncations says of every truncation, so nothing committed was lost, and there is nothing to act on. What that truncation had not yet cut the member's next leader has it cut, counted in cluster.log_truncations."
 
+# What `cavalry run` did with the cluster member it runs beside its driver (ADR 0060,
+# ADR 0063; card 257). The counter is the driver's own, static, so that it stays in the
+# counters file once the member and the driver have closed: a member's counters are a
+# client's, and are freed when it closes. `cavalry run`, the process that holds the
+# driver, adds to it on its main thread, through `cavalry_control::run`; no thread of
+# the driver does, and a driver a program embeds leaves it at 0.
+
+[[counter]]
+id = 148
+name = "run.member_given_up"
+kind = "counter"
+scope = "static"
+doc = "Times `cavalry run` gave up the cluster member it ran beside this driver, and then closed the driver: the member's duty cycle had failed for 10 s on end, or its thread had panicked. `cavalry run` adds one before it closes the driver, so the count is in the directory a closed driver leaves."
+doctor = "`cavalry run` stopped this driver because its cluster member could not go on: the member's duty cycle failed for 10 s on end, or its thread panicked. The line that process printed beginning `cavalry run: the cluster member stopped` says why, and what to do. Correct what it names, then start `cavalry run` again with the same directories: the member starts on the log directory it kept, and the other members elect a leader meanwhile."
+
 # A cluster member's role (spec/cluster.md, "Roles and the election"; ADR 0052, feature
 # 3). A member is a candidate (ADR 0077, ADR 0081) from its nomination until it
 # leads, loses its ballot, votes for another, follows another member that won its

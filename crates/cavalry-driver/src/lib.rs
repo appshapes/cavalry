@@ -24,7 +24,7 @@ use cavalry_shm::counters::generated::{
 use cavalry_shm::spsc;
 
 pub use error::DriverError;
-pub use idle::IdleStrategy;
+pub use idle::{IdleStrategy, Idler};
 
 /// A thread of the driver, as [`Driver::start_with_threads`] names it to the hook each
 /// thread runs first.

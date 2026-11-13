@@ -22,9 +22,19 @@ is allowed here.
   and under the log directory (`log-directory-backing`), the idle strategy the running
   conductor recorded in its counter against the host's isolated CPUs
   (`conductor-idle-strategy`), and the two cluster keys, checked together and against
-  the members string (`cluster-members`, `cluster-member-id`). `doctor::examine_config`
+  the members string (`cluster-members`, `cluster-member-id`): each host name of the
+  string is looked up once, and one that resolves to no address is one finding that
+  names every endpoint it is the host of. `doctor::examine_config`
   runs every check with the configuration the keys give, and the `cavalry doctor`
   command is that call behind a `main`.
+- Records what `cavalry run` did, for `doctor` to read once the driver has closed:
+  `run::member_given_up` adds one to `run.member_given_up` in the driver's counters
+  file when `cavalry run` gives up the cluster member it runs beside its driver. The
+  counter is static, the driver's own, so it is in the directory a closed driver
+  leaves, and `doctor` reports it there with its sentence from `counters.toml`; what
+  the member counted is freed with its client. `doctor` reads a static counter only
+  from a record of that counter's type: in the file of a driver older than the
+  counter the record may hold another, and that is the note `older than doctor`.
 - Explains a cluster member from the counters its consensus module stores, while its
   driver runs: who the member is and what it knows, its role, term, election state,
   append position and commit position, and from its two gauges who it follows and why

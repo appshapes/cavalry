@@ -446,6 +446,9 @@ pub const CLUSTER_LOG_RECORDINGS_FORGOTTEN: CounterId = CounterId(146);
 /// `cluster.truncations_finished`, a client counter: Times one cluster member finished, at its start, a truncation that its stop had cut short: the last recordings its log recordings file named were gone from the driver's catalog, purged before the member stopped, or its record of terms held a term based above the end of its log, and the start wrote the list of the recordings that were left and deleted those terms, before the member read a message. At most one for a start (spec/cluster.md, A member's start, and Counters; ADR 0108); key: member id (i32), little-endian; label text: the member id in decimal.
 pub const CLUSTER_TRUNCATIONS_FINISHED: CounterId = CounterId(147);
 
+/// `run.member_given_up`, a static counter: Times `cavalry run` gave up the cluster member it ran beside this driver, and then closed the driver: the member's duty cycle had failed for 10 s on end, or its thread had panicked. `cavalry run` adds one before it closes the driver, so the count is in the directory a closed driver leaves.
+pub const RUN_MEMBER_GIVEN_UP: CounterId = CounterId(148);
+
 /// Every entry of `counters.toml`, in the file's order.
 pub const COUNTERS: &[CounterDef] = &[
     CounterDef {
@@ -1623,5 +1626,13 @@ pub const COUNTERS: &[CounterDef] = &[
         scope: Scope::Client,
         doc: "Times one cluster member finished, at its start, a truncation that its stop had cut short: the last recordings its log recordings file named were gone from the driver's catalog, purged before the member stopped, or its record of terms held a term based above the end of its log, and the start wrote the list of the recordings that were left and deleted those terms, before the member read a message. At most one for a start (spec/cluster.md, A member's start, and Counters; ADR 0108); key: member id (i32), little-endian; label text: the member id in decimal.",
         doctor: "The member was stopped while it truncated its log on a new leader's word, and its start brought its recordings, its list of them and its record of terms into agreement. What it cut no quorum had recorded, as cluster.log_truncations says of every truncation, so nothing committed was lost, and there is nothing to act on. What that truncation had not yet cut the member's next leader has it cut, counted in cluster.log_truncations.",
+    },
+    CounterDef {
+        id: RUN_MEMBER_GIVEN_UP,
+        name: "run.member_given_up",
+        kind: Kind::Counter,
+        scope: Scope::Static,
+        doc: "Times `cavalry run` gave up the cluster member it ran beside this driver, and then closed the driver: the member's duty cycle had failed for 10 s on end, or its thread had panicked. `cavalry run` adds one before it closes the driver, so the count is in the directory a closed driver leaves.",
+        doctor: "`cavalry run` stopped this driver because its cluster member could not go on: the member's duty cycle failed for 10 s on end, or its thread panicked. The line that process printed beginning `cavalry run: the cluster member stopped` says why, and what to do. Correct what it names, then start `cavalry run` again with the same directories: the member starts on the log directory it kept, and the other members elect a leader meanwhile.",
     },
 ];

@@ -1,5 +1,7 @@
-//! What the conductor does on a duty cycle that found no work (CLAUDE.md, "Data
-//! plane": busy-spin, yield and backoff, backoff the default).
+//! What a thread does on a duty cycle that found no work (CLAUDE.md, "Data plane":
+//! busy-spin, yield and backoff, backoff the default): [`IdleStrategy`] names the three,
+//! and [`Idler`] is one of them with its state, which each of the driver's threads
+//! holds and a program's own duty cycle beside the driver can.
 
 use std::time::Duration;
 
@@ -75,9 +77,44 @@ const MAX_YIELDS: u32 = 20;
 const MIN_PARK: Duration = Duration::from_micros(1);
 const MAX_PARK: Duration = Duration::from_millis(1);
 
-/// The strategy with its state: how far into the backoff an idle streak has gone.
+/// An [`IdleStrategy`] with its state: how far into the backoff an idle streak has gone.
+/// A thread that runs a duty cycle holds one, calls [`Idler::idle`] after a cycle that
+/// found no work and [`Idler::reset`] after one that did. Each thread of the driver
+/// holds one, and a program that runs a duty cycle of its own beside the driver holds
+/// one too, so that it idles as the driver does and the backoff's figures are written
+/// once: `cavalry run` holds one for the thread of its cluster member. In Aeron, this
+/// is an instance of an `IdleStrategy`, with its `idle()` and `reset()`
+/// (`docs/glossary.md`, idle strategy).
+///
+/// The backoff spins 10 times, then yields 20 times, then sleeps from 1 µs to 1 ms,
+/// doubling, until a reset: Aeron's `BackoffIdleStrategy` figures.
+///
+/// ```
+/// use cavalry_driver::{IdleStrategy, Idler};
+///
+/// // A duty cycle that finds work on its fortieth turn, and says how much it did.
+/// let mut turns = 0;
+/// let mut duty_cycle = || {
+///     turns += 1;
+///     usize::from(turns == 40)
+/// };
+///
+/// let mut idler = Idler::new(IdleStrategy::Backoff);
+/// let mut idled = 0;
+/// loop {
+///     if duty_cycle() > 0 {
+///         // Work: the next idle streak starts from spinning again.
+///         idler.reset();
+///         break;
+///     }
+///     // No work: spin, then yield, then sleep for longer and longer.
+///     idler.idle();
+///     idled += 1;
+/// }
+/// assert_eq!(idled, 39);
+/// ```
 #[derive(Debug)]
-pub(crate) struct Idler {
+pub struct Idler {
     strategy: IdleStrategy,
     spins: u32,
     yields: u32,
@@ -85,7 +122,8 @@ pub(crate) struct Idler {
 }
 
 impl Idler {
-    pub(crate) const fn new(strategy: IdleStrategy) -> Self {
+    /// An idler of `strategy`, at the start of an idle streak.
+    pub const fn new(strategy: IdleStrategy) -> Self {
         Self {
             strategy,
             spins: 0,
@@ -94,8 +132,10 @@ impl Idler {
         }
     }
 
-    /// Called after a duty cycle with no work.
-    pub(crate) fn idle(&mut self) {
+    /// Called after a duty cycle with no work: busy-spin spins once and yield yields
+    /// once, and backoff takes the next step of its streak, which is a sleep of at most
+    /// 1 ms once the spins and the yields are spent.
+    pub fn idle(&mut self) {
         match self.strategy {
             IdleStrategy::BusySpin => std::hint::spin_loop(),
             IdleStrategy::Yield => std::thread::yield_now(),
@@ -115,7 +155,7 @@ impl Idler {
     }
 
     /// Called after a duty cycle that did work: the next idle streak starts from spinning.
-    pub(crate) fn reset(&mut self) {
+    pub fn reset(&mut self) {
         self.spins = 0;
         self.yields = 0;
         self.park = MIN_PARK;

@@ -36,6 +36,11 @@ The daemon: conductor, sender, receiver and idle strategies. Data plane.
   is at the limit, and once for a claim whose two loads straddle a raise
   (ADR 0048; card 187). The strategy it runs is stored once in the
   `conductor.idle_strategy` counter, so that `doctor` can name it from the counters file.
+  `Idler` is a strategy with its state, how far into the backoff an idle streak has
+  gone: each thread of the driver holds one, and it is public so that a program's own
+  duty cycle beside the driver idles the same way with the same figures, as the thread
+  of `cavalry run`'s cluster member does. Call `idle()` after a cycle with no work and
+  `reset()` after one that did.
   `Driver::start_with_threads` takes a hook each thread runs first, named the thread it
   is on, where a caller that owns the host's CPUs pins the conductor to a CPU of its own
   and leaves the recorder, the replayer, the sender and the receiver on the housekeeping

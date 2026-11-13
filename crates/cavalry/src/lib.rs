@@ -7,7 +7,9 @@ pub use cavalry_client::{
     NULL_POSITION, Offer, Positions, Publication, Recording, Replay, ReplayStopReason,
     SERVICE_LOG_STREAM_ID, Subscription,
 };
-pub use cavalry_driver::{Driver, DriverError, DriverThread, IdleStrategy, ThreadStart, spec};
+pub use cavalry_driver::{
+    Driver, DriverError, DriverThread, IdleStrategy, Idler, ThreadStart, spec,
+};
 pub use cavalry_log::index;
 
 /// A cluster member: `cavalry-raft`, whose `ConsensusModule` replicates the cluster's

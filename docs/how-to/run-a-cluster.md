@@ -190,9 +190,10 @@ committed once a quorum, two of three, has it on disk.
   or the other way round: a member needs both. Set the one that is missing. Nothing
   was started.
 - `FAIL cluster-members` in `doctor`: the members string is one the cluster protocol
-  refuses, the message says why, or an endpoint's host name resolves to no address on
-  this host, and the message names the member and the endpoint. Correct the string on
-  every member.
+  refuses, and the message says why. Or a host name in it resolves to no address on
+  this host: `doctor` looks each host name up once, and one finding names the host
+  and every member's endpoints that it is the host of. Correct the string on every
+  member.
 - `FAIL cluster-member-id` in `doctor`: the id is not one of the string's, and the
   message lists the ids it holds; or the string is set and the id is not.
 - `cavalry run: member stopped (recordings): the log directory holds a term in its
@@ -277,6 +278,26 @@ committed once a quorum, two of three, has it on disk.
   starts on them can hand them to the others
   ([ADR 0108](../decisions/0108-list-the-recordings-of-a-members-log-in-its-log-directory-and-start-a-member-on-the-log-it-kept.md),
   "What a start does not hold").
+- `cavalry run: the cluster member stopped, so the driver stops`, and the process
+  exits with 1. The member could not go on, so `cavalry run` gave it up and closed
+  its driver: a driver that runs on with the cluster's keys set and no member is
+  not the member you started. The rest of the line says why. Either the member's
+  duty cycle failed for 10 s on end, and the line ends with the last error, which
+  an entry above explains. Or the member's thread panicked, which is a fault of
+  Cavalry: report it with the panic's message, which the process printed before
+  that line. Correct what the line names, then start `cavalry run` again with the
+  same directories. The other two members elect a leader meanwhile. The line
+  `cavalry run: the cluster member's thread panicked as the member stopped` is the
+  same fault, met while `cavalry run` was already stopping the member: for a signal,
+  or after it gave the member up for duty cycles that failed. In the second case the
+  process printed the line this entry begins with first. The driver closes all the
+  same, the exit is 1, and the report is the same.
+- `WARN run.member_given_up` in `doctor`, beside `FAIL driver-heartbeat`: the driver
+  that made this directory closed because `cavalry run` gave its cluster member up,
+  as the entry above says. The count is in the directory the closed driver left, so
+  `doctor` says it after the process has gone, until the next `cavalry run` remakes
+  the directory. Read the line the process printed that begins `cavalry run: the
+  cluster member stopped`.
 - `WARN cluster-no-leader`: the member is in an election and has no leader to follow.
   The message says which state its election is in and why it began, from
   `cluster.election_cause`. A leader needs the votes of two of three members. At a

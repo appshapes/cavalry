@@ -76,13 +76,36 @@ fn wait_until_running(run: &mut Child, doctor: impl Fn() -> Command) -> String {
     }
 }
 
+/// How long a test waits for `cavalry run` to exit after SIGTERM. The close of a driver
+/// and of a cluster member takes well under a second, so a process that is still there
+/// after this is stuck, and the test fails with what the process printed, where a wait
+/// with no deadline would hold the test, and the job, until something outside ended it.
+const EXITS_WITHIN: Duration = Duration::from_secs(30);
+
+/// Stops `run` with SIGTERM, waits for it within [`EXITS_WITHIN`], and returns its
+/// standard error; a `run` that does not exit 0 fails the test.
 fn terminate(mut run: Child) -> String {
     let status = Command::new("kill")
         .args(["-TERM", &run.id().to_string()])
         .status()
         .expect("kill runs");
     assert!(status.success());
-    let exit = run.wait().expect("run exits");
+    let deadline = Instant::now() + EXITS_WITHIN;
+    let exit = loop {
+        if let Some(exit) = run.try_wait().expect("try_wait") {
+            break exit;
+        }
+        if Instant::now() >= deadline {
+            let _ = run.kill();
+            let _ = run.wait();
+            panic!(
+                "run did not exit within {} s of SIGTERM: {}",
+                EXITS_WITHIN.as_secs(),
+                stderr_of(&mut run)
+            );
+        }
+        std::thread::sleep(Duration::from_millis(10));
+    };
     let stderr = stderr_of(&mut run);
     assert!(exit.success(), "run exited with {exit}: {stderr}");
     stderr

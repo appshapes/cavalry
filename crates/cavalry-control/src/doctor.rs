@@ -2431,13 +2431,22 @@ fn route_interface(routes: &str, destination: Ipv4Addr) -> Option<String> {
 /// A static counter's value, or a finding: a counter that cannot be read is never a
 /// silent zero, since the file is the one instrument, so a reader that rejects it reports
 /// it (spec/counters-file.md); one the file does not hold is a driver older than doctor.
+/// A record of this id that holds a counter of another type is such a driver's too: it
+/// never allocated the record for this counter, so it gave the record to an instance or
+/// to a client, and that counter's value is never read as this one's.
 fn read_static(
     reader: &CountersReader,
     name: &'static str,
     id: CounterId,
     findings: &mut Vec<Finding>,
 ) -> Option<i64> {
-    match reader.read(id.record()) {
+    let record = id.record();
+    let value = match reader.record(record) {
+        Ok(Some(fields)) if fields.type_id() == id.0 => reader.read(record),
+        Ok(_) => Err(CountersError::Unallocated { id: record }),
+        Err(error) => Err(error),
+    };
+    match value {
         Ok(value) => Some(value),
         Err(CountersError::Unallocated { .. } | CountersError::Id { .. }) => {
             findings.push(Finding {
@@ -3075,6 +3084,10 @@ fn cluster_key_checks(
             doc: MEMBER_ID_KEY.anchor,
         });
     }
+    // One lookup for each host name, however many endpoints name it: a lookup blocks,
+    // and a name that does not resolve is one thing to correct. At most five endpoints
+    // for each of `MAX_MEMBERS` members, so the list is bounded by the string.
+    let mut hosts: Vec<NamedHost> = Vec::new();
     for member in parsed {
         for (name, endpoint) in [
             ("ingress", member.ingress),
@@ -3084,25 +3097,86 @@ fn cluster_key_checks(
             ("archive", member.archive),
         ] {
             let host = String::from_utf8_lossy(endpoint.host);
-            let resolved = (host.as_ref(), endpoint.port)
-                .to_socket_addrs()
-                .map(|mut addresses| addresses.next().is_some());
-            if !matches!(resolved, Ok(true)) {
-                findings.push(Finding {
-                    check: "cluster-members",
-                    level: Level::Fail,
-                    message: format!(
-                        "member {}'s {name} endpoint in {}, {host}:{}, resolves to no address \
-                         on this host: no member can reach it there; correct the host name in \
-                         the string on every member, or make the name resolve",
-                        member.id, MEMBERS_KEY.env, endpoint.port
-                    ),
-                    doc: MEMBERS_KEY.anchor,
-                });
+            match hosts.iter_mut().find(|known| known.host == host) {
+                Some(known) => known.named_by.push((member.id, name)),
+                None => hosts.push(NamedHost {
+                    host: host.into_owned(),
+                    port: endpoint.port,
+                    named_by: vec![(member.id, name)],
+                }),
             }
         }
     }
+    for NamedHost {
+        host,
+        port,
+        named_by,
+    } in &hosts
+    {
+        let resolved = (host.as_str(), *port)
+            .to_socket_addrs()
+            .map(|mut addresses| addresses.next().is_some());
+        if matches!(resolved, Ok(true)) {
+            continue;
+        }
+        findings.push(Finding {
+            check: "cluster-members",
+            level: Level::Fail,
+            message: format!(
+                "the host name {host} resolves to no address on this host: it is the host \
+                 of {} in {}, which no member can reach by that name; correct the host \
+                 name in the string on every member, or make the name resolve",
+                endpoints_named(named_by),
+                MEMBERS_KEY.env
+            ),
+            doc: MEMBERS_KEY.anchor,
+        });
+    }
     2
+}
+
+/// One host name of the members string: the name, the port of the first endpoint that
+/// names it, which a lookup takes with the name, and every endpoint that names it, by
+/// its member and its part.
+struct NamedHost {
+    host: String,
+    port: u16,
+    named_by: Vec<(i32, &'static str)>,
+}
+
+/// The endpoints that name one host, as a finding says them: each member once, with its
+/// endpoints in the order of the members string, such as `member 1's ingress and log
+/// endpoints and member 2's archive endpoint`.
+fn endpoints_named(named_by: &[(i32, &'static str)]) -> String {
+    let mut members: Vec<(i32, Vec<&'static str>)> = Vec::new();
+    for &(id, name) in named_by {
+        match members.iter_mut().find(|(known, _)| *known == id) {
+            Some((_, names)) => names.push(name),
+            None => members.push((id, vec![name])),
+        }
+    }
+    let said: Vec<String> = members
+        .iter()
+        .map(|(id, names)| {
+            let word = if names.len() == 1 {
+                "endpoint"
+            } else {
+                "endpoints"
+            };
+            format!("member {id}'s {} {word}", list_of(names))
+        })
+        .collect();
+    let said: Vec<&str> = said.iter().map(String::as_str).collect();
+    list_of(&said)
+}
+
+/// `a`, `a and b`, or `a, b and c`.
+fn list_of(items: &[&str]) -> String {
+    match items {
+        [] => String::new(),
+        [one] => (*one).to_string(),
+        [first @ .., last] => format!("{} and {last}", first.join(", ")),
+    }
 }
 
 fn finish(dir: &Path, mut findings: Vec<Finding>, checks: usize) -> Report {
@@ -3126,7 +3200,7 @@ mod tests {
     use cavalry_log::layout::{CatalogHeader, Recording};
     use cavalry_shm::command_ring::CommandRing;
     use cavalry_shm::counters::CountersFile;
-    use cavalry_shm::counters::generated::CLIENT_TIMED_OUT;
+    use cavalry_shm::counters::generated::{CLIENT_TIMED_OUT, RUN_MEMBER_GIVEN_UP};
 
     struct TestDir(PathBuf);
 
@@ -3168,7 +3242,7 @@ mod tests {
     #[test]
     fn a_udp_publication_no_receiver_answered_and_a_capped_socket_buffer_are_warnings() {
         let dir = TestDir::new("udp");
-        let mut counters = CountersFile::create(&dir.0, 128).expect("counters");
+        let mut counters = CountersFile::create(&dir.0, 256).expect("counters");
         let ring = CommandRing::create(&dir.0, 4096).expect("ring");
         let _consumer = ring.consumer(Duration::from_secs(10)).expect("consumer");
         let endpoint_id = 9i64;
@@ -3304,7 +3378,7 @@ mod tests {
     #[test]
     fn a_publication_connected_by_its_recording_alone_is_a_note_and_the_warning_names_ssc() {
         let dir = TestDir::new("udp-ssc");
-        let mut counters = CountersFile::create(&dir.0, 128).expect("counters");
+        let mut counters = CountersFile::create(&dir.0, 256).expect("counters");
         let ring = CommandRing::create(&dir.0, 4096).expect("ring");
         let _consumer = ring.consumer(Duration::from_secs(10)).expect("consumer");
         let channel = "cavalry:udp?control=10.0.0.1:40456|control-mode=manual";
@@ -3456,7 +3530,7 @@ mod tests {
     #[test]
     fn a_control_channel_without_destinations_and_a_min_publication_short_of_receivers_warn() {
         let dir = TestDir::new("udp-mdc");
-        let mut counters = CountersFile::create(&dir.0, 128).expect("counters");
+        let mut counters = CountersFile::create(&dir.0, 256).expect("counters");
         let ring = CommandRing::create(&dir.0, 4096).expect("ring");
         let _consumer = ring.consumer(Duration::from_secs(10)).expect("consumer");
         let endpoint_id = 9i64;
@@ -3668,7 +3742,7 @@ mod tests {
     #[test]
     fn a_max_publication_on_a_control_channel_is_not_read_as_short_of_receivers() {
         let dir = TestDir::new("udp-mdc-max");
-        let mut counters = CountersFile::create(&dir.0, 128).expect("counters");
+        let mut counters = CountersFile::create(&dir.0, 256).expect("counters");
         let ring = CommandRing::create(&dir.0, 4096).expect("ring");
         let _consumer = ring.consumer(Duration::from_secs(10)).expect("consumer");
         control_endpoint(&mut counters, 9, 2);
@@ -3709,7 +3783,7 @@ mod tests {
     #[test]
     fn a_min_publication_lingering_after_a_clean_close_leaves_doctor_with_no_warning() {
         let dir = TestDir::new("udp-mdc-min-linger");
-        let mut counters = CountersFile::create(&dir.0, 128).expect("counters");
+        let mut counters = CountersFile::create(&dir.0, 256).expect("counters");
         let ring = CommandRing::create(&dir.0, 4096).expect("ring");
         let _consumer = ring.consumer(Duration::from_secs(10)).expect("consumer");
         control_endpoint(&mut counters, 9, 2);
@@ -3750,7 +3824,7 @@ mod tests {
     #[test]
     fn a_clean_close_of_a_min_publication_leaves_doctor_with_no_warning() {
         let dir = TestDir::new("udp-mdc-min-close");
-        let mut counters = CountersFile::create(&dir.0, 128).expect("counters");
+        let mut counters = CountersFile::create(&dir.0, 256).expect("counters");
         let ring = CommandRing::create(&dir.0, 4096).expect("ring");
         let _consumer = ring.consumer(Duration::from_secs(10)).expect("consumer");
         control_endpoint(&mut counters, 9, 1);
@@ -3795,7 +3869,7 @@ mod tests {
     #[test]
     fn a_receive_endpoint_with_no_image_and_an_image_with_a_gap_are_warnings() {
         let dir = TestDir::new("udp-receive");
-        let mut counters = CountersFile::create(&dir.0, 128).expect("counters");
+        let mut counters = CountersFile::create(&dir.0, 256).expect("counters");
         let ring = CommandRing::create(&dir.0, 4096).expect("ring");
         let _consumer = ring.consumer(Duration::from_secs(10)).expect("consumer");
         let endpoint_id = 11i64;
@@ -4003,7 +4077,7 @@ mod tests {
     #[test]
     fn a_closed_and_a_stopped_driver_are_told_apart() {
         let dir = TestDir::new("stopped");
-        let counters = CountersFile::create(&dir.0, 128).expect("counters");
+        let counters = CountersFile::create(&dir.0, 256).expect("counters");
         let ring = CommandRing::create(&dir.0, 4096).expect("ring");
         let consumer = ring.consumer(Duration::from_secs(10)).expect("consumer");
 
@@ -4259,7 +4333,7 @@ mod tests {
     #[test]
     fn recordings_are_listed_and_a_recorder_that_holds_its_publisher_warns() {
         let dir = TestDir::new("recordings");
-        let mut counters = CountersFile::create(&dir.0, 128).expect("counters");
+        let mut counters = CountersFile::create(&dir.0, 256).expect("counters");
         let ring = CommandRing::create(&dir.0, 4096).expect("ring");
         let _consumer = ring.consumer(Duration::from_secs(10)).expect("consumer");
         let publication = recorded(&mut counters, 7, -5, 1001, 3);
@@ -4329,7 +4403,7 @@ mod tests {
     #[test]
     fn a_held_publisher_is_read_from_its_limit_and_its_slowest_reader() {
         let dir = TestDir::new("recordings-held");
-        let mut counters = CountersFile::create(&dir.0, 128).expect("counters");
+        let mut counters = CountersFile::create(&dir.0, 256).expect("counters");
         let ring = CommandRing::create(&dir.0, 4096).expect("ring");
         let _consumer = ring.consumer(Duration::from_secs(10)).expect("consumer");
         let mib = 1024 * 1024;
@@ -4416,7 +4490,7 @@ mod tests {
     #[test]
     fn a_limit_the_recorder_has_reached_is_not_its_hold() {
         let dir = TestDir::new("recordings-limit-reached");
-        let mut counters = CountersFile::create(&dir.0, 128).expect("counters");
+        let mut counters = CountersFile::create(&dir.0, 256).expect("counters");
         let ring = CommandRing::create(&dir.0, 4096).expect("ring");
         let _consumer = ring.consumer(Duration::from_secs(10)).expect("consumer");
         let mib = 1024 * 1024;
@@ -4449,7 +4523,7 @@ mod tests {
     #[test]
     fn a_recording_that_cannot_be_placed_is_not_judged() {
         let dir = TestDir::new("recordings-unplaced");
-        let mut counters = CountersFile::create(&dir.0, 128).expect("counters");
+        let mut counters = CountersFile::create(&dir.0, 256).expect("counters");
         let ring = CommandRing::create(&dir.0, 4096).expect("ring");
         let _consumer = ring.consumer(Duration::from_secs(10)).expect("consumer");
         let mib = 1024 * 1024;
@@ -4486,7 +4560,7 @@ mod tests {
     fn failed_writes_and_invalid_slots_are_findings_that_name_the_slots() {
         use std::os::unix::fs::FileExt;
         let dir = TestDir::new("recording-failures");
-        let counters = CountersFile::create(&dir.0, 128).expect("counters");
+        let counters = CountersFile::create(&dir.0, 256).expect("counters");
         let ring = CommandRing::create(&dir.0, 4096).expect("ring");
         let _consumer = ring.consumer(Duration::from_secs(10)).expect("consumer");
         counters
@@ -4567,7 +4641,7 @@ mod tests {
     #[test]
     fn a_counter_above_zero_brings_its_doctor_text() {
         let dir = TestDir::new("counter");
-        let counters = CountersFile::create(&dir.0, 128).expect("counters");
+        let counters = CountersFile::create(&dir.0, 256).expect("counters");
         let ring = CommandRing::create(&dir.0, 4096).expect("ring");
         let _consumer = ring.consumer(Duration::from_secs(10)).expect("consumer");
         counters
@@ -4634,7 +4708,7 @@ mod tests {
             .map(|def| def.id.record())
             .max()
             .expect("a static counter");
-        let _counters = CountersFile::create(&dir.0, 128).expect("counters");
+        let _counters = CountersFile::create(&dir.0, 256).expect("counters");
         let ring = CommandRing::create(&dir.0, 4096).expect("ring");
         let _consumer = ring.consumer(Duration::from_secs(10)).expect("consumer");
         {
@@ -4707,10 +4781,88 @@ mod tests {
         );
     }
 
+    /// The record a static counter would have, holding a counter of another type: the
+    /// file of a driver older than that counter, which gave the record to a client. What
+    /// that counter counted is never reported as the static counter's.
+    #[test]
+    fn a_record_of_another_type_is_an_older_drivers_and_its_value_is_not_read() {
+        let dir = TestDir::new("another-type");
+        let counters = CountersFile::create(&dir.0, 256).expect("counters");
+        let ring = CommandRing::create(&dir.0, 4096).expect("ring");
+        let _consumer = ring.consumer(Duration::from_secs(10)).expect("consumer");
+        let record = RUN_MEMBER_GIVEN_UP.record();
+        counters.counter(record).expect("static").add(7);
+        {
+            use std::os::unix::fs::FileExt;
+            let header = CountersReader::open(&dir.0).expect("opens").header();
+            let offset = header.record_offset(record).expect("a record");
+            let file = std::fs::OpenOptions::new()
+                .write(true)
+                .open(dir.0.join("counters"))
+                .expect("writable");
+            // The type id, four bytes after the state: one a client gave its own counter
+            // (`spec/client-protocol.md`, "Commands"), no entry of counters.toml.
+            file.write_at(&1000i32.to_le_bytes(), offset as u64 + 4)
+                .expect("written");
+        }
+        let report = examine(&dir.0);
+        let found = finding(&report, "run.member_given_up");
+        assert_eq!(found.level, Level::Note, "{}", found.message);
+        assert!(
+            found.message.contains("older than doctor"),
+            "{}",
+            found.message
+        );
+        assert!(!report.to_string().contains("is 7"), "{report}");
+        assert!(report.ok(), "{report}");
+    }
+
+    /// `cavalry run` gave its cluster member up and closed the driver: the count is the
+    /// driver's own, so it is in the file the closed driver left, and doctor says what
+    /// happened and what to do beside the finding that the driver closed.
+    #[test]
+    fn a_member_given_up_is_reported_from_the_file_a_closed_driver_left() {
+        let dir = TestDir::new("member-given-up");
+        let counters = CountersFile::create(&dir.0, 256).expect("counters");
+        let ring = CommandRing::create(&dir.0, 4096).expect("ring");
+        let consumer = ring.consumer(Duration::from_secs(10)).expect("consumer");
+        let report = examine(&dir.0);
+        assert!(
+            !report
+                .findings
+                .iter()
+                .any(|found| found.check == "run.member_given_up"),
+            "nothing to say of a member that was not given up: {report}"
+        );
+        counters
+            .counter(RUN_MEMBER_GIVEN_UP.record())
+            .expect("static")
+            .increment();
+        consumer.store_heartbeat(DRIVER_CLOSED);
+        drop(counters);
+        let report = examine(&dir.0);
+        assert_eq!(finding(&report, "driver-heartbeat").level, Level::Fail);
+        let found = finding(&report, "run.member_given_up");
+        assert_eq!(found.level, Level::Warn, "{}", found.message);
+        assert!(
+            found
+                .message
+                .starts_with("run.member_given_up is 1: `cavalry run` stopped this driver"),
+            "{}",
+            found.message
+        );
+        assert!(
+            found.message.contains("start `cavalry run` again"),
+            "what to do next: {}",
+            found.message
+        );
+        assert_eq!(found.doc, DOC_COUNTERS);
+    }
+
     #[test]
     fn the_command_ring_fill_warns_at_half() {
         let dir = TestDir::new("fill");
-        let _counters = CountersFile::create(&dir.0, 128).expect("counters");
+        let _counters = CountersFile::create(&dir.0, 256).expect("counters");
         let ring = CommandRing::create(&dir.0, 4096).expect("ring");
         let _consumer = ring.consumer(Duration::from_secs(10)).expect("consumer");
         let opened = CommandRing::open(&dir.0, true).expect("opens");
@@ -4741,15 +4893,15 @@ mod tests {
     #[test]
     fn the_counters_file_warns_at_nine_tenths() {
         let dir = TestDir::new("nine-tenths");
-        let mut counters = CountersFile::create(&dir.0, 128).expect("counters");
+        let mut counters = CountersFile::create(&dir.0, 256).expect("counters");
         let ring = CommandRing::create(&dir.0, 4096).expect("ring");
         let _consumer = ring.consumer(Duration::from_secs(10)).expect("consumer");
         let statics = COUNTERS
             .iter()
             .filter(|def| def.scope == Scope::Static)
             .count();
-        // Up to 115 of 128 allocated is under nine tenths; 116 is over.
-        for _ in statics..115 {
+        // Up to 230 of 256 allocated is under nine tenths; 231 is over.
+        for _ in statics..230 {
             counters
                 .allocate(CLIENT_TIMED_OUT, &[], "filler")
                 .expect("room");
@@ -4765,14 +4917,14 @@ mod tests {
         let report = examine(&dir.0);
         let found = finding(&report, "counters-file");
         assert_eq!(found.level, Level::Warn);
-        assert!(found.message.contains("116 of 128"), "{}", found.message);
+        assert!(found.message.contains("231 of 256"), "{}", found.message);
         assert!(report.ok());
     }
 
     #[test]
     fn failures_come_first_in_the_report() {
         let dir = TestDir::new("order");
-        let counters = CountersFile::create(&dir.0, 128).expect("counters");
+        let counters = CountersFile::create(&dir.0, 256).expect("counters");
         let ring = CommandRing::create(&dir.0, 4096).expect("ring");
         let consumer = ring.consumer(Duration::from_secs(10)).expect("consumer");
         counters
@@ -4802,7 +4954,7 @@ mod tests {
     #[test]
     fn a_ring_not_yet_ready_warns_and_a_wrong_one_fails() {
         let dir = TestDir::new("ring-state");
-        let _counters = CountersFile::create(&dir.0, 128).expect("counters");
+        let _counters = CountersFile::create(&dir.0, 256).expect("counters");
         // A zero-filled ring of a plausible length: a creator at work.
         std::fs::write(dir.0.join("command-ring"), vec![0u8; 4096 + 768]).expect("written");
         let report = examine(&dir.0);
@@ -4825,7 +4977,7 @@ mod tests {
     #[test]
     fn a_counters_file_not_yet_ready_warns() {
         let dir = TestDir::new("counters-not-ready");
-        let _counters = CountersFile::create(&dir.0, 128).expect("counters");
+        let _counters = CountersFile::create(&dir.0, 256).expect("counters");
         let ring = CommandRing::create(&dir.0, 4096).expect("ring");
         let _consumer = ring.consumer(Duration::from_secs(10)).expect("consumer");
         // A zero magic in a file of the right length: a creator at work.
@@ -4965,7 +5117,7 @@ mod tests {
     #[test]
     fn the_idle_strategy_is_judged_against_the_isolated_cpus() {
         let dir = TestDir::new("idle");
-        let counters = CountersFile::create(&dir.0, 128).expect("counters");
+        let counters = CountersFile::create(&dir.0, 256).expect("counters");
         let ring = CommandRing::create(&dir.0, 4096).expect("ring");
         let consumer = ring.consumer(Duration::from_secs(10)).expect("consumer");
         let strategy = counters
@@ -5032,13 +5184,13 @@ mod tests {
     #[test]
     fn a_full_counters_file_fails() {
         let dir = TestDir::new("full");
-        let mut counters = CountersFile::create(&dir.0, 128).expect("counters");
+        let mut counters = CountersFile::create(&dir.0, 256).expect("counters");
         let ring = CommandRing::create(&dir.0, 4096).expect("ring");
         let _consumer = ring.consumer(Duration::from_secs(10)).expect("consumer");
         let mut n = 0;
         while counters.allocate(CLIENT_TIMED_OUT, &[], "filler").is_ok() {
             n += 1;
-            assert!(n < 128);
+            assert!(n < 256);
         }
         let report = examine(&dir.0);
         let found = finding(&report, "counters-file");
@@ -5440,7 +5592,37 @@ mod tests {
         assert_eq!(findings[0].check, "cluster-members");
         assert!(
             findings[0].message.contains(
-                "member 1's log endpoint in CAVALRY_CLUSTER_MEMBERS, no-such-host.invalid:9012"
+                "the host name no-such-host.invalid resolves to no address on this host: it \
+                 is the host of member 1's log endpoint in CAVALRY_CLUSTER_MEMBERS"
+            ),
+            "{}",
+            findings[0].message
+        );
+        // One host that every endpoint of a member names is one finding, not five: the
+        // name is one thing to correct, and it is looked up once.
+        let unresolved = members.replace("localhost", "no-such-host.invalid");
+        let (checks, findings) = checked(Some(&unresolved), Some(0));
+        assert_eq!(checks, 2);
+        assert_eq!(findings.len(), 1, "{findings:?}");
+        assert_eq!(findings[0].level, Level::Fail);
+        assert!(
+            findings[0].message.contains(
+                "it is the host of member 1's ingress, consensus, log, catchup and archive \
+                 endpoints in CAVALRY_CLUSTER_MEMBERS"
+            ),
+            "{}",
+            findings[0].message
+        );
+        // Two members on one such host are said in that one finding, each once.
+        let unresolved = members
+            .replace("localhost", "no-such-host.invalid")
+            .replace("127.0.0.1:9004", "no-such-host.invalid:9004");
+        let (_, findings) = checked(Some(&unresolved), Some(0));
+        assert_eq!(findings.len(), 1, "{findings:?}");
+        assert!(
+            findings[0].message.contains(
+                "it is the host of member 0's archive endpoint and member 1's ingress, \
+                 consensus, log, catchup and archive endpoints in CAVALRY_CLUSTER_MEMBERS"
             ),
             "{}",
             findings[0].message
