@@ -9,6 +9,9 @@ use cavalry_log::layout::{
     CatalogHeader, DESCRIPTOR_LENGTH, Descriptor, ENTRY_LENGTH, HEADER_LENGTH, IndexEntry,
     IndexHeader, Recording, State, locate,
 };
+use cavalry_log::recordings::{
+    self, ListedRecording, RecordingsHeader, SLOT_LENGTH as RECORDINGS_SLOT_LENGTH, SlotFields,
+};
 use cavalry_log::terms::{
     self, ENTRY_LENGTH as TERMS_ENTRY_LENGTH, HEADER_LENGTH as TERMS_HEADER_LENGTH, TermsEntry,
     TermsHeader,
@@ -69,13 +72,30 @@ fn descriptor_from(fields: &Value) -> Descriptor {
     formed.with_state(state)
 }
 
+/// Holds a slot of the log recordings file to a vector's `fields`: its sequence, its
+/// floor position and its entries, each a recording id and a start position.
+fn assert_listed(name: &str, fields: &Value, slot: SlotFields, entries: &[ListedRecording]) {
+    assert_eq!(slot.sequence, int(fields, "sequence"), "{name}");
+    assert_eq!(slot.floor_position, int(fields, "floor_position"), "{name}");
+    let expected: Vec<ListedRecording> = fields["entries"]
+        .as_array()
+        .expect("a list of entries")
+        .iter()
+        .map(|entry| ListedRecording {
+            recording_id: entry[0].as_i64().expect("a recording id"),
+            start_position: entry[1].as_i64().expect("a start position"),
+        })
+        .collect();
+    assert_eq!(entries, &expected[..], "{name}");
+}
+
 #[test]
 fn every_vector_agrees_with_the_layout_layer() {
     let doc: Value = serde_json::from_str(VECTORS).expect("the vectors are JSON");
     assert_eq!(doc["spec"], "durable-log");
     assert_eq!(
-        doc["version"], 2,
-        "the vectors are for the page's version 2"
+        doc["version"], 3,
+        "the vectors are for the page's version 3"
     );
     let mut count = 0;
     for vector in doc["vectors"].as_array().expect("a vector list") {
@@ -229,6 +249,62 @@ fn every_vector_agrees_with_the_layout_layer() {
                             assert_eq!(entry.recording_id, int(fields, "recording_id"), "{name}");
                             assert_eq!(&entry.encode()[..], &bytes[..TERMS_ENTRY_LENGTH], "{name}");
                         }
+                    }
+                    (Err(found), Some(expected)) => assert_eq!(found.reason(), expected, "{name}"),
+                    (outcome, expected) => panic!("{name}: {outcome:?} against {expected:?}"),
+                }
+            }
+            "recordings-header" => {
+                let bytes = hex(vector["bytes"].as_str().expect("bytes"));
+                let file_length = vector["file_length"].as_u64().expect("a file length");
+                match (RecordingsHeader::parse(&bytes, file_length), error) {
+                    (Ok(header), None) => {
+                        assert_eq!(
+                            i64::from(header.member_id),
+                            int(&vector["fields"], "member_id"),
+                            "{name}"
+                        );
+                        assert_eq!(&header.encode()[..], &bytes[..], "{name}");
+                    }
+                    (Err(found), Some(expected)) => assert_eq!(found.reason(), expected, "{name}"),
+                    (outcome, expected) => panic!("{name}: {outcome:?} against {expected:?}"),
+                }
+            }
+            "recordings-slot" => {
+                let bytes = hex(vector["bytes"].as_str().expect("bytes"));
+                let mut entries = Vec::new();
+                match (recordings::parse_slot(&bytes, &mut entries), error) {
+                    (Ok(fields), None) => {
+                        assert_listed(name, &vector["fields"], fields, &entries);
+                        // The fields and the entries encode to the vector's bytes.
+                        let mut slot = Box::new([0u8; RECORDINGS_SLOT_LENGTH]);
+                        let length =
+                            recordings::encode_slot(fields, entries.iter().copied(), &mut slot)
+                                .expect("a slot a reader takes is one a writer writes");
+                        assert_eq!(&slot[..length], &bytes[..], "{name}");
+                    }
+                    (Err(found), Some(expected)) => assert_eq!(found.reason(), expected, "{name}"),
+                    (outcome, expected) => panic!("{name}: {outcome:?} against {expected:?}"),
+                }
+            }
+            "recordings-file" => {
+                let slots = vector["slots"].as_array().expect("two slots");
+                assert_eq!(slots.len(), 2, "{name}");
+                let mut lists = [Vec::new(), Vec::new()];
+                let [list_0, list_1] = &mut lists;
+                let slot_0 = recordings::parse_slot(&hex(slots[0].as_str().expect("hex")), list_0);
+                let slot_1 = recordings::parse_slot(&hex(slots[1].as_str().expect("hex")), list_1);
+                let read = [slot_0.as_ref().ok().copied(), slot_1.as_ref().ok().copied()];
+                match (recordings::choose(slot_0, slot_1), error) {
+                    (Ok(slot), None) => {
+                        let fields = &vector["fields"];
+                        assert_eq!(
+                            i64::try_from(slot).expect("0 or 1"),
+                            int(fields, "slot"),
+                            "{name}"
+                        );
+                        let chosen = read[slot].expect("the slot chosen passed its checks");
+                        assert_listed(name, fields, chosen, &lists[slot]);
                     }
                     (Err(found), Some(expected)) => assert_eq!(found.reason(), expected, "{name}"),
                     (outcome, expected) => panic!("{name}: {outcome:?} against {expected:?}"),

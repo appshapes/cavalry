@@ -1,4 +1,4 @@
-# The durable log, version 2
+# The durable log, version 3
 
 The on-disk record of a stream: what the driver writes when it records a publication,
 and what `cavalry replay` and `just replay-check` read back. A directory, the driver's
@@ -13,7 +13,11 @@ a cluster member's record of the terms it has recorded and the candidate term it
 stored, which `spec/cluster.md`, "The log", names and which the consensus module of
 `cavalry-raft` writes and reads (ADR 0060); a directory with no cluster member has no
 terms file, and a reader of version 1 ignores one, as it ignores every file it does
-not name.
+not name. Version 3 adds the log recordings file, a cluster member's record of which
+recordings in the directory hold its log, which the consensus module writes before
+the member reports a position a recording holds and reads when the member starts on
+the directory again (ADR 0108); a directory with no cluster member has none, and a
+reader of version 2 ignores one.
 
 Integers are little-endian; offsets and lengths are in bytes; signed fields are two's
 complement; a timestamp is nanoseconds since the Unix epoch as an i64. A position is
@@ -28,6 +32,7 @@ from the start of the stream, a multiple of 32.
 | `<recording id>-<segment base position>.rec` | A segment of the recording: the log buffer's raw term bytes from the segment base position, frame headers and padding included. |
 | `<recording id>.idx` | The time index: one (timestamp, position) entry at the start of the recording and then at most once per millisecond while the position moves. |
 | `terms` | A cluster member's record of recorded terms and its candidate term ("Terms"); absent on a driver that is no member. |
+| `log-recordings` | A cluster member's record of the recordings that hold its log ("Log recordings"); absent on a driver that is no member. |
 
 A recording id and a segment base position are written in decimal with no sign and no
 leading zeros. Nothing else lives in the directory; a reader ignores files it does not
@@ -252,6 +257,78 @@ with `state`. The member's candidate term
 at its start is the higher of the stored candidate term and its log leadership term
 id, as "Roles and the election" of `spec/cluster.md` has init take it.
 
+## Log recordings
+
+A cluster member's record of which recordings in this directory hold its log, in the
+order they carry it on (`spec/cluster.md`, "The log"). A member's log is in more than
+one recording: one for each time the member joined a leader's log, one for each
+replay it replicated or caught up by, and one for each term it led. The catalog holds
+those. It also holds recordings the member made and never took into its log, and
+their bytes can be of a history the cluster cut. This file tells the two apart when
+the member starts on the directory again (ADR 0108). In Aeron, a member's log is one
+recording that the member extends, so no such list exists
+([glossary](../docs/glossary.md)). The file is `log-recordings` in the log directory:
+a 64-byte header and two slots of 16440 bytes, 32944 bytes in all, a length that
+never changes. It is not the file `log-recordings-<member id>` in the driver
+directory, which a member writes for its service and which is gone when the driver
+starts (`spec/cluster.md`, "The log's recordings"; ADR 0103).
+
+| Offset | Size | Field | Type | Bound |
+| --- | --- | --- | --- | --- |
+| 0 | 8 | magic | bytes | the bytes `43 56 4C 59 4C 4F 47 52` (`CVLYLOGR`), written last when the file is created; eight zero bytes until then |
+| 8 | 4 | version | i32 | 0 |
+| 12 | 4 | slot length | i32 | 16440 |
+| 16 | 4 | member id | i32 | 0 or more: the member whose log the file lists |
+| 20 | 44 | reserved | bytes | written as 0, never read |
+
+Slot s, 0 or 1, is at 64 + s × 16440. A slot holds one whole list:
+
+| Offset | Size | Field | Type | Bound |
+| --- | --- | --- | --- | --- |
+| 0 | 4 | checksum | u32 | the zlib CRC32 of the slot's bytes 4 to 24 + 16 × entry count |
+| 4 | 4 | entry count | i32 | 0 to 1026 |
+| 8 | 8 | sequence | i64 | 0 or more: 0 in the list a creation writes, and in every list after it one above the sequence of the list before |
+| 16 | 8 | floor position | i64 | 0 or more, a multiple of 32: where the first entry's recording begins; with no entry, where the member's log ends |
+| 24 | 16 × entry count | entries | | the recordings, in the order they carry the log on |
+
+The bytes of a slot after its last entry are not read. Entry i is at 24 + i × 16 of
+its slot:
+
+| Offset | Size | Field | Type | Bound |
+| --- | --- | --- | --- | --- |
+| 0 | 8 | recording id | i64 | 0 or more: a recording of the cluster's log stream in this directory's catalog |
+| 8 | 8 | start position | i64 | 0 or more, a multiple of 32, at least the start position of the entry before it; the first entry's is the floor position |
+
+The list is kept in two slots, as the candidate term of the terms file is, so that a
+write a crash tears reads as the list before it. The list is the one in the slot
+whose checksum matches, and of two such slots the one with the higher sequence. A
+write puts the whole list into the other slot, the one the list is not read from,
+under a sequence one above the list it replaces, and syncs once. A slot whose
+checksum does not match is the write a crash tore, or the slot no write has reached
+yet, whose bytes are zero, and it is not read. A crash tears at most one slot, so a
+file in which neither checksum matches is damaged, and the reader refuses it with
+`slots`. A slot whose checksum matches holds what a writer wrote, so one that fails
+another check is damage too, as are two slots of one sequence, and the reader
+refuses the file with that check's name.
+
+A recording is part of the member's log from the write that names it, once that
+write is synced, and never before ("The driver"). The recordings a list names carry
+the log on from the floor position: each begins at or below the furthest end of the
+ones before it, and two can overlap, a replay's recording and the recording of the
+live log a catch-up joined, so that the log ends at the furthest end of them all and
+not always at the last one's (`spec/cluster.md`, "The log"). A recording's end is not in the
+file: it is the stop position the catalog holds for the recording, which the driver
+writes at a stop and rebuilds from the files at its start. A list names at most 1026
+recordings, the newest: the 1024 a member keeps once it has stopped them and the two
+it can be making, its recording of a replay and its recording of the live log or of
+the log it leads (`spec/cluster.md`, "Roles and the election", state 0). A member
+whose log is in more recordings than it keeps forgets the oldest, which stay in the
+catalog, and the floor position is where the oldest one it still names begins. A
+list with no entry is a log that holds nothing, with a floor position of 0, or a log
+wholly in recordings the member has forgotten, which a truncation below every
+recording it kept leaves: the floor position is then where the log ends, the
+position the member truncated to.
+
 ## The driver
 
 The driver is the directory's only writer; how it keeps a second driver out is its own
@@ -399,6 +476,68 @@ is `length` whatever its header holds, and every other file gets the checks of "
 a reader rejects" in their order. The recovery pass of this section leaves the file
 alone: it names files by recording id, and `terms` is none.
 
+The consensus module is the log recordings file's only writer too, from the same
+thread (ADR 0108). At the start of a member whose terms file holds no term, the
+module creates the file when there is none, as it creates the terms file: every
+field after the magic, slot 0 as the list of no entry with sequence 0 and floor
+position 0 under its checksum, the file extended to its length, and a sync, then the
+magic and a sync, then a sync of the log directory, so that a power loss does not
+take the file's name from a directory in which the member has since recorded a
+term. A file shorter than its header, or whose magic is zero while each slot either
+fails its checksum or is the list a creation writes, with no entry, sequence 0 and
+floor position 0, was torn while the module created it, and the module writes it
+again; a zero magic over any other slot whose checksum matches, one that holds a
+list a write made or one that fails a later check, is damage, since creation writes
+none, and the member refuses to start with `not-ready`. A creation, the first or one
+written again, is counted in `cluster.log_recordings_listed` once the member has
+its counters, as each list written after it is. At the start of a member whose terms file holds a
+term, the module creates nothing and writes nothing before it has read the file: a
+member that has recorded a term holds a log, and a list created for it would say
+that it holds none. Such a member with no file refuses to start with `absent`,
+which is the state of a directory a version before this one wrote, and one whose
+file was torn while it was created refuses with `too-short` or `not-ready`, since
+creation ends before a member records its first term.
+
+The module writes the list, whole and synced, at four moments, and a recording
+counts toward the member's append position only once a synced list names it
+(`spec/cluster.md`, "The log"). First, at the end of the duty cycle in which the
+member's recording of a replay or of the live log has come to carry its log on: the
+election was told the recording's image, and the recording begins where the log
+ends, or, for the live recording in a catch-up, at or below where the replay's
+recording has synced to. Second, before a leader appends to the log of a term: the
+list names its recording of that log, which begins at the term's base. Third, in a
+truncation, after the last `purge recording` and `truncate recording` has been
+answered and before the terms file's entries are deleted: the list names the
+recordings that are left, and when none is left its floor position is the position
+truncated to. Fourth, at a member's start, when the recordings the start took are
+not the ones the list names, one being gone from the catalog or holding nothing:
+the list then names the recordings the start took ("A member's start" of
+`spec/cluster.md` says which those are, and that a start which cannot write the
+list ends before it deletes a term). Each list written is counted in
+`cluster.log_recordings_listed`. A list that
+cannot be written or synced leaves the recording out of the member's log, the duty
+cycle reports the error with what to do and counts it in
+`cluster.log_recordings_unsynced`, and the next cycle writes again; a sync
+that failed is not tried again on the same bytes, since the next write is the whole
+list into the same slot. The retry is one write for each duty cycle and no more,
+and a member started with `cavalry run` is given up after 10 s of cycles that fail.
+A member that stops a recording, at a step back to an
+election or at its close, writes nothing: the list already names the recording, and
+its stop position is the catalog's. A recording the member forgets, its table
+holding 1,024 stopped ones already, is counted in `cluster.log_recordings_forgotten`
+and leaves the list at the next write, whose floor position is where the oldest
+recording left begins; a list at a member's start that still names it, or whose
+floor position is above 0, is a log the member does not start on
+(`spec/cluster.md`, "A member's start"). The recovery pass of this section leaves the
+file alone, as it leaves the terms file.
+
+What the order of a truncation leaves after a crash: before the list is written,
+recordings the list names are gone from the catalog, the last ones it names, since
+the module purges from the last recording back and cuts no recording before it has
+purged them all; after the list and before the terms file, a term whose base is
+above the end of the log. A member's start reads both as that truncation and
+finishes it, counted in `cluster.truncations_finished`.
+
 ## What a reader rejects
 
 A reader checks each file in the order its table gives and reports the first failure by
@@ -478,6 +617,46 @@ An entry, with its index and the entry before it:
 | `position` | The term base log position is below 0, not a multiple of 32, or below the valid entry's before it. |
 | `recording` | The recording id is below −1. |
 
+The log recordings file, with the file's length:
+
+| Check | Reported when |
+| --- | --- |
+| `too-short` | The file is shorter than 32944 bytes. |
+| `length` | The file is longer than 32944 bytes. |
+| `not-ready` | The magic is eight zero bytes: the creator has not finished. |
+| `magic` | The magic is any other value than `CVLYLOGR`. |
+| `version` | The version is not 0. |
+| `slot-length` | The slot length is not 16440. |
+| `member` | The member id is below 0; or, for the member that opens the file, it is not that member's id: the directory is another member's. A header vector pins the first half alone. |
+
+A slot of it, its fields and then its entries in order:
+
+| Check | Reported when |
+| --- | --- |
+| `checksum` | The entry count is not 0 to 1026, fewer bytes were given than the count needs, or the checksum is not the zlib CRC32 of bytes 4 to 24 + 16 × entry count. For one slot of the two this is not a failure of the file's: that slot is the write a crash tore or the slot never written, and the list is the other slot's. |
+| `sequence` | The sequence is below 0. |
+| `position` | The floor position is below 0 or not a multiple of 32. |
+| `recording` | An entry's recording id is below 0. |
+| `position` | An entry's start position is below 0, not a multiple of 32, or below the start position of the entry before it; or the first entry's start position is not the floor position. |
+
+The two slots together, slot 0's checks and then slot 1's:
+
+| Check | Reported when |
+| --- | --- |
+| `slots` | Neither slot passes `checksum`: the file is damaged, since a crash tears one slot at most. |
+| a slot's check | A slot passes `checksum` and fails `sequence`, `position` or `recording`: the file is damaged, since a writer writes no such slot. Slot 0's failure is reported before slot 1's. |
+| `sequence` | Both slots pass every check and hold the same sequence. |
+
+A member that opens its file reports four more, which no vector pins since none
+is a property of the bytes a reader is given: `absent`, when the terms file holds a
+term and there is no log recordings file ("The driver"); `log-recordings-full`, when
+a list of more than 1026 recordings is given to a write, which writes nothing;
+`list`, when a write is given a list that a reader would refuse with `recording` or
+`position`, which writes nothing either and is the writer's fault, where those two
+checks are damage to a file; and `sequence`, when a write is asked of a file whose
+list holds the sequence 9223372036854775807, which no count of writes reaches and
+above which there is none, and that write writes nothing either.
+
 ## Vectors
 
 `spec/vectors/durable-log.json`, written by `spec/vectors/durable-log.py`: catalog header
@@ -488,6 +667,11 @@ index header and entry vectors, an entry vector with the entry before it; terms
 header vectors with the file length, a valid vector's `fields` naming the candidate
 term each slot holds, `null` for a slot whose checksum does not match, and the stored
 candidate term, and terms entry vectors with the entry's index and
-the valid entry before it, under version 2; and position
+the valid entry before it, under version 2; log recordings header vectors with the
+file length, slot vectors that carry a slot's fields and its entries and no byte
+after them, a valid vector's `fields` naming the sequence, the floor position and
+each entry as its recording id and its start position, and file vectors that carry
+both slots as `slots` and name in `fields` the slot that holds the list, 0 or 1,
+beside that list, under version 3; and position
 vectors, arithmetic, from a descriptor's fields and a position to the segment file name,
 the segment base position, the offset in the segment, the term id and the term offset.

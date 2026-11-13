@@ -164,10 +164,15 @@ that record and written before the vote or the request vote that raises it is se
 Aeron's node state file, so that a member votes once in a term across a restart; a
 raise on following a leader is kept in memory alone, since a member counts toward a
 term only once it has recorded that term, after which init takes the term from its
-record ("Messages during an election"). A member reads both when it
+record ("Messages during an election"). Which recordings hold a member's log is
+kept there too, in the log recordings file of `spec/durable-log.md`, and a member
+reports no position a recording holds before a list that names the recording is
+synced, so that a member that starts again finds every recording it reported a
+position from (ADR 0108). A member reads all three when it
 starts, in its first init and before it reads any message: its candidate term is the
 higher of the stored one and the highest term in its record, its log leadership term
-id is that highest term, and its append position is what its recordings hold. It
+id is that highest term, and its append position is where the recordings that file
+names end ("A member's start"). It
 keeps nothing else across a restart: it follows no term and no leader, and knows a
 commit position of 0, until a leader tells it (state 0; ADR 0089). A member's
 append position is the end
@@ -642,8 +647,14 @@ recording that begins at or below the position and ends above it, which are two 
 overlap after a catch-up (state 13; ADR 0095), and `purge
 recording` on every recording that begins above it, every recorded term whose base is
 above the position leaving its record of terms with them, so that it votes as a
-member of no term it no longer holds, and a message whose next term base log
-position is −1 truncates nothing. A member truncates only once
+member of no term it no longer holds; it sends every `purge recording`, from the
+last recording back, before any `truncate recording`, and between the recordings and
+the terms, after the last command is answered and before the first term is deleted,
+it writes its log recordings file with the recordings that are left, so that a
+member that stops inside a truncation starts again with one it can finish, and never
+with a recording that begins past the end of the one before it ("A member's start";
+ADR 0108); and a message whose
+next term base log position is −1 truncates nothing. A member truncates only once
 `cluster.log_recording_id` holds −1, which the duty cycle that left the log stores:
 told to truncate before then, it cuts nothing, and the leader's next new
 leadership term tells it again ("The service"; ADR 0103). A truncation is counted in
@@ -746,25 +757,109 @@ event and of neither by a message of its own, so a client treats a message with 
 reply from the service as possibly lost and sends it again when its service's rule
 allows, as Aeron's clients do.
 
-**A member's start.** A member starts with a record that holds no term and a candidate
-term of −1; one whose record holds either does not start, and says why and what to do.
-Nor does one whose log directory holds a recording of the log's stream and no record
-of terms: a member records a term before it records an entry, so the record was
-removed, and the votes the member cast with it (ADR 0104).
-A member can take up the log it kept ("The log"; ADR 0089), but over a
-driver its consensus module does not yet read back which recordings hold that log (ADR
-0100). Until it does, a member that stopped stays out, the cluster goes on with the
-members that remain while they are a quorum, and a cluster is brought back to its full
-count by starting it again as a new cluster, every member on a new log directory. One
-member is never started alone on a new log directory beside the others. It would
-join and replicate the log, with no record of the votes it cast and none of the log it
-held, and with a member whose log is behind it is a quorum that can elect a leader
-without an entry the cluster committed (ADR 0104). The members of a cluster are all of
-a version that elects. A member of a version before ADR 0104, whose leader is the
-member with the lowest id, casts no vote and follows no leader a ballot made, and no
-message tells the two apart: since no member starts again on its log, a cluster of
-that version comes to this one as a new cluster, every member on this version and on
-a new log directory.
+**A member's start.** A member starts on a new log directory or on the one it kept
+("The log"; ADR 0089, ADR 0108). On a new one its record holds no term, its candidate
+term is −1 and its log holds nothing. On the one it kept it takes up its candidate
+term, its record of terms and its log, which it reads back before it reads a
+message, from the log recordings file of `spec/durable-log.md`, "Log recordings",
+and the driver's catalog beside it. Its log is the recordings that file names, in the
+file's order, from the file's floor position. A recording ends at the stop position
+the catalog holds for it, and one that is still being made, the driver having run on
+while the member was away, is stopped first, so that its stop is read once. Each
+recording begins at or below the furthest end of the ones before it, the floor
+position for the first, and the log ends at the furthest end of them all: the end
+of the contiguous span, as "The log" defines the append position, which is not the
+last recording's end when that recording ends inside one before it. The catalog may
+lack the last recordings the file names, and no others: a truncation purges a
+member's recordings from the last one back, before it cuts any, and writes the file
+after them ("Messages during an election"), so those are a truncation the member's
+stop cut short, and the log ends at the furthest end of the recordings that are
+left. The member then writes the file with the recordings it took, when they are not
+the ones it read, one being gone or holding nothing, and deletes from its record of
+terms each term whose base is above the end of its log, as that truncation would
+have; a start that found a recording gone or deleted a term is counted, once, in
+`cluster.truncations_finished`. What
+that truncation had not yet cut stays in the member's log, uncommitted, and the
+leader's next new leadership term has the member cut it. Nothing else shortens the
+log a member starts with.
+
+A start that cannot finish leaves what a later start needs. A `stop recording` that
+is refused, or whose stop the catalog does not show within the stop timeout, 1 s,
+ends the start with its error; the recordings stopped before it stay stopped, and
+the file still names them. A file the start cannot write or sync ends the start
+before any term is deleted. A recording of the log's stream that the file does not
+name is left as it is, stopped or still being made: it is no part of the member's
+log, the driver ends it with its stream, and the member's next join of a log makes a
+new recording.
+
+A member that starts holds none of its consensus module's own state, and its log
+position, where the replay of state 6 or 10 begins in its first election, is 0:
+this version takes no snapshot for a member to begin from ("Out of this version").
+So a member starts only on a log it holds whole from position 0. One whose file's
+floor position is above 0 has forgotten the recordings below it, and one whose file
+names more recordings that hold bytes than a member keeps, 1,024 (state 0), would
+forget the oldest as it started: neither starts. A member that forgets a recording
+while it runs goes on, its state in memory, counts it in
+`cluster.log_recordings_forgotten`, and does not start again on that log directory.
+A log directory therefore lasts a member for 1,024 recordings of its log: one for
+each log it joins, each replay it replicates or catches up by, and each term it
+leads.
+
+A member does not start, and says why and what to do, in each of these cases. Its
+record of terms holds a term and its log directory holds no log recordings file:
+the directory is one a version before ADR 0108 wrote, or the file was removed, and
+the member cannot tell its log from the other recordings in the catalog. Its log
+directory holds a log, one that ends above 0, and its record of terms holds no
+term: the `terms` file was removed or replaced, and the terms of the log and the
+votes the member cast went with it. Its log directory holds no `terms` file at all and
+the catalog holds a recording of the log's stream: a member records a term before it
+records an entry, so the record was removed, whatever else the directory holds (ADR
+0104). The file
+fails a check of `spec/durable-log.md`, "What a reader rejects", or names another
+member. Its log does not begin at 0, or is in more recordings than a member keeps,
+as above. Or the catalog holds, in place of a recording the file names: no recording,
+before one that it does hold; a recording the driver found damaged; a recording that
+begins elsewhere or is of another stream; or a recording that begins past the
+furthest end of the ones before it. In every one of them a start would give the
+member a log shorter than the one it reported, or a module that does not know its
+sessions, and with a member whose log is behind it is a quorum that can elect a
+leader without an entry the cluster committed. For the same
+reason one member is never started alone on a new log directory beside the others:
+it would join and replicate the log, with no record of the votes it cast and none of
+the log it held (ADR 0104). A cluster that has lost a member's log directory goes on
+with the members that remain while they are a quorum, and is brought back to its
+full count by starting it again as a new cluster, every member on a new log
+directory. A member that does not start counts nothing: it adds its counters once
+it has read its log, and its error says which case it met.
+
+The members of a cluster are all of a version that elects. A member of a version
+before ADR 0104, whose leader is the member with the lowest id, casts no vote and
+follows no leader a ballot made, and no message tells the two apart. A log directory
+that version wrote holds a record of terms and no log recordings file, so its member
+is refused here. A cluster of that version comes to this one as a new cluster, every
+member on this version and on a new log directory.
+
+What a start does not hold. After a power loss or a crash of the operating system,
+the stop position of a recording that was being made is what the driver's recovery
+found in the recording's files, which can be above what the recording had synced.
+The member's log then holds, past the last append position it reported, frames it
+had received and not synced, and the durable log cannot tell one of those whose
+body the crash took from a whole one (`spec/durable-log.md`, "The driver"). Such a
+member has the longest log and is the likeliest to be elected; as leader it
+replicates those frames, a quorum records them, and every service reads an entry
+whose body no publisher sent, with no absence reported. As a follower it keeps them
+in its own copy of entries the other members hold whole, and its service reads
+them. No start can tell that crash from a crash of the member's process alone, after
+which every byte its recorder wrote is in the files and the frames past the last
+sync are whole. So a member whose host lost power, or whose operating system
+crashed, while it ran is not started on that log directory again: it stays out, as
+a member whose log directory was lost does. `recording.recovered` on its driver,
+above 0, says that the driver rebuilt a recording's stop from its files, which it
+does after either crash. When a quorum's hosts lost power together, a cluster
+started on their directories can commit such an entry, and nothing refuses it: this
+version does not hold invariant 1 across that loss, and the check that will, a
+checksum beside the frames or a synced position that the loss leaves, is a change
+to the durable log that is not made yet (ADR 0108, "What a start does not hold").
 
 **The leader's own entries.** Before the sessions of "Sessions" exist, the leader's own
 process appends for itself: once its election has closed it may append a session
@@ -1036,6 +1131,10 @@ that a reader of a counters file knows which transition it saw.
 | `cluster.sessions_timed_out` | a session closed for the session timeout |
 | `cluster.catchups` | a catch-up begun: on the follower, a catch-up position sent; on the leader, a replay started |
 | `cluster.messages_rejected` | a message of this page a reader rejected, for any reason of "What a reader rejects" |
+| `cluster.log_recordings_listed` | a list of the recordings of the member's log written to its log recordings file and synced: the list a creation writes, and each list after it, at the four moments of `spec/durable-log.md`, "The driver" ("The log"; ADR 0108) |
+| `cluster.log_recordings_unsynced` | a duty cycle in which the member could not write or sync its log recordings file, so that the recording it had to list stayed out of its log and its append position did not count it; the next cycle writes again ("The log"; ADR 0108) |
+| `cluster.log_recordings_forgotten` | a recording of its log that the member forgot, its table holding 1,024 stopped ones already: the member replays nothing below its oldest kept recording to a member or a service from then on, and does not start again on its log directory ("A member's start"; ADR 0091, ADR 0108) |
+| `cluster.truncations_finished` | a start that finished a truncation the member's stop had cut short: the last recordings its file names were gone from the catalog, or its record of terms held a term based above the end of its log ("A member's start"; ADR 0108) |
 
 ## Values
 
