@@ -98,7 +98,10 @@ The client API implementation, re-exported by the `cavalry` crate. Data plane.
   driver directory: a handle replays the one that holds the position it was opened
   at, is ended at that recording's stop, and the log opened again at
   `CommittedLog::position()` is the next, so a service reads every entry once, in
-  order, across them (ADR 0103). A service may
+  order, across them. With no file the call loads the member's counter again, and
+  opens the live recording only when the counter still names it: a member that
+  writes no file is of an earlier version, and one that has closed has stored −1
+  there before it removed its file (ADR 0103). A service may
   start before its member, with it or after it, at position 0 or where it stopped.
   It reads until `CommittedLog::is_ended()`, and then three calls say whether it was
   given every entry below its bound: it was when all three return `None`. If the
