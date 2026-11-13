@@ -75,13 +75,13 @@ public static class CommittedLogRound
 
     public static int Main(string[] args)
     {
-        if (args.Length != 2)
+        if (args.Length != 3)
         {
-            Fail("usage: CommittedLog <the member's driver directory> <the member's id>");
+            Fail("usage: CommittedLog <the member's driver directory> <the member's id> <its recording's id>");
         }
         try
         {
-            Round(args[0], int.Parse(args[1]));
+            Round(args[0], int.Parse(args[1]), long.Parse(args[2]));
         }
         catch (CavalryException error)
         {
@@ -99,7 +99,10 @@ public static class CommittedLogRound
         return 0;
     }
 
-    static void Round(string memberDir, int memberId)
+    // The round beside the member in memberDir, whose log is one recording that begins
+    // at 0: recordingId, which conformance/log-member.sh read from the member's file of
+    // its log's recordings.
+    static void Round(string memberDir, int memberId, long recordingId)
     {
         var client = new Client(memberDir);
         // A closed log, for the refusals below: its Position() hands the ABI a null handle,
@@ -122,9 +125,9 @@ public static class CommittedLogRound
         }
         Say("twenty logs opened and closed with no poll between left the client open");
         CommittedLog log = OpenLog(client, 0);
-        if (log.MemberId != memberId || log.RecordingId != 0)
+        if (log.MemberId != memberId || log.RecordingId != recordingId)
         {
-            Fail($"the log is member {log.MemberId}'s recording {log.RecordingId}, not member {memberId}'s recording 0");
+            Fail($"the log is member {log.MemberId}'s recording {log.RecordingId}, not member {memberId}'s recording {recordingId}");
         }
         if (log.Position() != 0 || log.CommitPosition() != 0)
         {

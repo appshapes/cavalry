@@ -76,11 +76,11 @@ public final class CommittedLogRound {
     }
 
     public static void main(String[] args) throws Exception {
-        if (args.length != 2) {
-            fail("usage: CommittedLogRound <the member's driver directory> <the member's id>");
+        if (args.length != 3) {
+            fail("usage: CommittedLogRound <the member's driver directory> <the member's id> <its recording's id>");
         }
         try {
-            round(args[0], Integer.parseInt(args[1]));
+            round(args[0], Integer.parseInt(args[1]), Long.parseLong(args[2]));
         } catch (CavalryException error) {
             fail(error.function() + " failed with error " + error.code() + ": " + error.abiMessage());
         } catch (HandlerException error) {
@@ -97,7 +97,10 @@ public final class CommittedLogRound {
         }
     }
 
-    static void round(String memberDir, int memberId) throws Exception {
+    /** The round beside the member in {@code memberDir}, whose log is one recording that
+     * begins at 0: {@code recordingId}, which conformance/log-member.sh read from the
+     * member's file of its log's recordings. */
+    static void round(String memberDir, int memberId, long recordingId) throws Exception {
         Client client = new Client(memberDir);
         // A closed log, for the refusals below: its position() hands the ABI a null handle,
         // which answers -1 with ERR_NULL. The package's bindings of the ABI are not public,
@@ -117,9 +120,9 @@ public final class CommittedLogRound {
         }
         say("twenty logs opened and closed with no poll between left the client open");
         CommittedLog log = openLog(client, 0);
-        if (log.memberId() != memberId || log.recordingId() != 0) {
+        if (log.memberId() != memberId || log.recordingId() != recordingId) {
             fail("the log is member " + log.memberId() + "'s recording " + log.recordingId() + ", not member " + memberId
-                + "'s recording 0");
+                + "'s recording " + recordingId);
         }
         if (log.position() != 0 || log.commitPosition() != 0) {
             fail("a log opened at 0 began at " + log.position() + " with bound " + log.commitPosition());

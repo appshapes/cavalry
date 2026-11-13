@@ -79,13 +79,18 @@ function same(a, b) {
 }
 
 function main() {
-  if (process.argv.length !== 4) fail("usage: committed_log.js <the member's driver directory> <the member's id>");
+  if (process.argv.length !== 5) {
+    fail("usage: committed_log.js <the member's driver directory> <the member's id> <its recording's id>");
+  }
   const memberDir = process.argv[2];
   const memberId = Number(process.argv[3]);
+  // The recording that holds the member's log, one that begins at 0, which
+  // conformance/log-member.sh read from the member's file of its log's recordings.
+  const recordingId = Number(process.argv[4]);
   const client = new cavalry.Client(memberDir);
   const log = openLog(client, 0);
-  if (log.memberId !== memberId || log.recordingId !== 0) {
-    fail(`the log is member ${log.memberId}'s recording ${log.recordingId}, not member ${memberId}'s recording 0`);
+  if (log.memberId !== memberId || log.recordingId !== recordingId) {
+    fail(`the log is member ${log.memberId}'s recording ${log.recordingId}, not member ${memberId}'s recording ${recordingId}`);
   }
   if (log.position() !== 0 || log.commitPosition() !== 0) {
     fail(`a log opened at 0 began at ${log.position()} with bound ${log.commitPosition()}`);
