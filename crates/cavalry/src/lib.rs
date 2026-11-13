@@ -2,7 +2,7 @@
 #![deny(missing_docs, rustdoc::broken_intra_doc_links)]
 
 pub use cavalry_client::{
-    ArmedRecording, BufferClaim, Cavalry, ClientError, Closed, CommittedLog, Counter,
+    Action, ArmedRecording, BufferClaim, Cavalry, ClientError, Closed, CommittedLog, Counter,
     DataFrameHeader, FOLLOW_LENGTH, Fault, Flags, FrameType, Image, MAX_IMAGES, NULL_LENGTH,
     NULL_POSITION, Offer, Positions, Publication, Recording, Replay, ReplayStopReason,
     SERVICE_LOG_STREAM_ID, Subscription,

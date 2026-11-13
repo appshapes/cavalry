@@ -14,7 +14,7 @@ use cavalry_proto::client_protocol::{Command, NULL_POSITION};
 use cavalry_proto::frame::DataFrameHeader;
 use cavalry_shm::command_ring::Producer;
 use cavalry_shm::counters::Counter;
-use cavalry_shm::log::{LogBuffers, LogError, Positions, TermReader};
+use cavalry_shm::log::{Action, LogBuffers, LogError, Positions, TermReader};
 use cavalry_shm::spsc;
 
 use crate::conductor::{Shared, epoch_time};
@@ -392,6 +392,86 @@ impl Subscription {
             return Ok(0);
         };
         self.bounded_poll_at(index, limit_position, fragment_limit, &mut handler)
+    }
+
+    /// Reads up to `fragment_limit` fragments across the images, as [`poll`](Self::poll)
+    /// does, with a handler that says for each fragment whether the read takes it
+    /// (`spec/log-buffer.md`, "Reading"; ADR 0114). [`Action::Continue`] takes the
+    /// fragment and goes on. [`Action::Break`] takes it and ends the read of that image.
+    /// [`Action::Abort`] does not take it: the read of that image ends with the image's
+    /// position at the fragment's first byte, the fragment is not counted, and the next
+    /// read of the image hands the same fragment over again. In Aeron, this is
+    /// `Subscription.controlledPoll` with a `ControlledFragmentHandler`.
+    ///
+    /// The call is for a reader that learns from a fragment whether it can take it: one
+    /// it must offer on a publication that is back-pressured now, or one after which
+    /// the rest of the batch must wait. A handler given a fragment by `poll` cannot hand
+    /// it back, since the image's position is past it. A fragment that is not taken
+    /// holds its publisher as any unread fragment does: the publication's limit follows
+    /// its slowest subscriber, so the publisher's `offer` returns back pressure once its
+    /// window is full, and nothing is buffered between the two.
+    ///
+    /// An action ends the read of the image it was given a fragment of, and the call
+    /// goes on to the next image, in turn as in `poll`, until `fragment_limit`
+    /// fragments are taken or every image was read once. A handler that must take
+    /// nothing more in this call returns [`Action::Abort`] for each fragment it is
+    /// handed after that. Each image's position is stored after its share, so an
+    /// aborted fragment is never behind the position the driver reads.
+    ///
+    /// Returns how many fragments were taken, or the [`Fault`] that stopped the call,
+    /// as `poll` does. Nothing here allocates, locks, opens or unmaps, on the fault path
+    /// either.
+    pub fn controlled_poll<F>(
+        &mut self,
+        mut handler: F,
+        fragment_limit: usize,
+    ) -> Result<usize, Fault>
+    where
+        F: FnMut(&[u8], &DataFrameHeader) -> Action,
+    {
+        if self.shared.closed().is_some() {
+            return Err(Fault::Closed);
+        }
+        self.apply_events()?;
+        let count = self.images.len();
+        if count == 0 {
+            return Ok(0);
+        }
+        let start = self.next % count;
+        self.next = (start + 1) % count;
+        let mut taken = 0;
+        let mut faulted: Option<(usize, LogError)> = None;
+        for step in 0..count {
+            if taken >= fragment_limit {
+                break;
+            }
+            let index = (start + step) % count;
+            let image = &mut self.images[index];
+            match image
+                .reader
+                .controlled_poll(i64::MAX, fragment_limit - taken, &mut handler)
+            {
+                Ok(poll) => {
+                    taken += poll.fragments;
+                    image.position.store_release(poll.position);
+                }
+                Err(error) => {
+                    faulted = Some((index, error));
+                    break;
+                }
+            }
+        }
+        if let Some((index, error)) = faulted {
+            let image = self.images.swap_remove(index);
+            let fault = Fault::Image {
+                session_id: image.session_id,
+                position: image.position(),
+                reason: error.reason(),
+            };
+            self.retire(image);
+            return Err(fault);
+        }
+        Ok(taken)
     }
 
     /// Reads every image but the first of `session_id` with no bound, up to

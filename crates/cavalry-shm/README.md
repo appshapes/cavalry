@@ -12,6 +12,9 @@ the two crates where `unsafe` is permitted.
   committed frames where its position says, to the end of what is committed or, with
   `bounded_poll`, no further than a limit position
   ([ADR 0066](../../docs/decisions/0066-feed-the-committed-log-to-a-service-through-a-replay-of-the-members-recording.md)),
+  or, with `controlled_poll`, no further than a frame its handler does not take, which
+  stays at the reader's position for the next read
+  ([ADR 0114](../../docs/decisions/0114-give-a-subscription-a-controlled-poll-whose-handler-can-leave-a-fragment-unread.md)),
   or scans a `Block` of them with their
   headers for the recorder to write in one go
   ([ADR 0025](../../docs/decisions/0025-record-a-stream-in-the-driver.md)) or, from any

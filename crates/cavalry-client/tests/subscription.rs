@@ -6,7 +6,7 @@
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
-use cavalry_client::{Cavalry, Fault, Offer};
+use cavalry_client::{Action, Cavalry, Fault, Offer};
 use cavalry_driver::{Driver, spec};
 
 /// A directory of its own per test, removed when the guard drops.
@@ -252,6 +252,163 @@ fn a_bounded_poll_reads_one_image_and_no_frame_at_or_past_its_limit() {
     client.close().expect("closes");
     assert!(matches!(
         subscription.bounded_poll(a, |_, _| {}, i64::MAX, 1),
+        Err(Fault::Closed)
+    ));
+    drop(subscription);
+    driver.close().expect("the driver closes");
+}
+
+/// The controlled poll (`spec/log-buffer.md`, "Reading"; ADR 0114): the handler says
+/// for each fragment whether the read takes it. A fragment it aborts stays at the
+/// image's position, which is stored, and is handed over again by the next read; a
+/// break ends the read of that image alone; and a publisher whose subscriber takes
+/// nothing is back-pressured at its window, with nothing buffered between them.
+#[test]
+fn a_controlled_poll_hands_an_aborted_fragment_over_again_and_holds_its_publisher() {
+    let dir = TestDir::new("controlled");
+    let driver = Driver::start(dir.path(), dir.path().join("log")).expect("the driver starts");
+    let mut client = Cavalry::connect_to(dir.path()).expect("connects");
+    let mut subscription = client
+        .add_subscription("cavalry:ipc", 2006)
+        .expect("a subscription");
+    let mut first = client
+        .add_exclusive_publication("cavalry:ipc", 2006)
+        .expect("a publication");
+    let mut second = client
+        .add_exclusive_publication("cavalry:ipc", 2006)
+        .expect("a second publication");
+    assert!(
+        wait_until(Duration::from_secs(5), || {
+            subscription
+                .controlled_poll(|_, _| Action::Continue, 0)
+                .expect("polls");
+            subscription.image_count() == 2
+        }),
+        "both images joined, by a controlled poll as by a poll"
+    );
+    let (a, b) = (first.session_id(), second.session_id());
+    let position = |subscription: &cavalry_client::Subscription, session: i32| {
+        subscription
+            .images()
+            .iter()
+            .find(|image| image.session_id() == session)
+            .expect("the image")
+            .position()
+    };
+    // Three frames of 64 bytes on each, at 0, 64 and 128.
+    for i in 0..3u64 {
+        publish(&mut first, &i.to_le_bytes());
+    }
+    for i in 100..103u64 {
+        publish(&mut second, &i.to_le_bytes());
+    }
+    // One call, with what the handler answers for each value it is handed; returns
+    // the count the call returned and every value handed over, taken or not.
+    let read = |subscription: &mut cavalry_client::Subscription,
+                answer: &dyn Fn(i32, u64) -> Action,
+                fragments: usize| {
+        let mut handed: Vec<(i32, u64)> = Vec::new();
+        let taken = subscription
+            .controlled_poll(
+                |body, header| {
+                    let value = u64::from_le_bytes(body.try_into().expect("8 bytes"));
+                    handed.push((header.session_id(), value));
+                    answer(header.session_id(), value)
+                },
+                fragments,
+            )
+            .expect("the controlled poll reads");
+        handed.sort_unstable();
+        (taken, handed)
+    };
+    let sorted = |mut values: Vec<(i32, u64)>| {
+        values.sort_unstable();
+        values
+    };
+
+    // Every fragment aborted: each image hands over its first and keeps it.
+    let (taken, handed) = read(&mut subscription, &|_, _| Action::Abort, 10);
+    assert_eq!((taken, handed), (0, sorted(vec![(a, 0), (b, 100)])));
+    assert_eq!(
+        (position(&subscription, a), position(&subscription, b)),
+        (0, 0)
+    );
+    // The same two are handed over again. A break on the first image's ends that
+    // image's read after it; the second image's read goes on to its abort.
+    let (taken, handed) = read(
+        &mut subscription,
+        &|session, value| match (session == a, value) {
+            (true, _) => Action::Break,
+            (false, 101) => Action::Abort,
+            (false, _) => Action::Continue,
+        },
+        10,
+    );
+    assert_eq!(
+        (taken, handed),
+        (2, sorted(vec![(a, 0), (b, 100), (b, 101)]))
+    );
+    assert_eq!(
+        (position(&subscription, a), position(&subscription, b)),
+        (64, 64),
+        "each image's position is stored at the fragment it did not take"
+    );
+    // The fragment limit counts what was taken, across the images.
+    let (taken, handed) = read(&mut subscription, &|_, _| Action::Continue, 3);
+    assert_eq!(taken, 3);
+    assert_eq!(handed.len(), 3);
+    let (taken, rest) = read(&mut subscription, &|_, _| Action::Continue, 10);
+    assert_eq!(taken, 1);
+    assert_eq!(
+        sorted([handed, rest].concat()),
+        sorted(vec![(a, 1), (a, 2), (b, 101), (b, 102)]),
+        "every fragment was taken once, the aborted one among them"
+    );
+    assert_eq!(
+        (position(&subscription, a), position(&subscription, b)),
+        (192, 192)
+    );
+
+    // A subscriber that takes nothing holds its publisher: the offers are refused
+    // with back pressure once the publication's window is full, and every message
+    // that was accepted is delivered when the handler takes them, in order.
+    second.close().expect("closes");
+    let message = [7u8; 1024];
+    let mut accepted = 0u64;
+    let refused = loop {
+        match first.offer(&message) {
+            Ok(_) => accepted += 1,
+            Err(Offer::AdminAction) => {}
+            Err(refused) => break refused,
+        }
+        subscription
+            .controlled_poll(|_, _| Action::Abort, 10)
+            .expect("polls");
+        assert!(accepted < 1_000_000, "the publication was never held");
+    };
+    assert_eq!(refused, Offer::BackPressured);
+    assert!(accepted > 0);
+    assert_eq!(position(&subscription, a), 192, "nothing was taken");
+    let mut delivered = 0u64;
+    assert!(wait_until(Duration::from_secs(5), || {
+        subscription
+            .controlled_poll(
+                |body, _| {
+                    assert_eq!(body, message);
+                    delivered += 1;
+                    Action::Continue
+                },
+                64,
+            )
+            .expect("polls");
+        delivered == accepted
+    }));
+
+    // A closed client's subscription refuses the controlled poll as it refuses a poll.
+    first.close().expect("closes");
+    client.close().expect("closes");
+    assert!(matches!(
+        subscription.controlled_poll(|_, _| Action::Continue, 1),
         Err(Fault::Closed)
     ));
     drop(subscription);
