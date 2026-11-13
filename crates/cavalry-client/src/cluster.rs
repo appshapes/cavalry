@@ -209,9 +209,12 @@ pub struct ClusterSession {
     leader: usize,
     session_id: i64,
     leadership_term_id: i64,
-    /// The session's nano clock when it last sent anything, or 0 to send a keepalive
-    /// at the next poll.
+    /// The session's nano clock when it last sent anything, as the poll that came
+    /// next read it, or 0 to send a keepalive at the next poll.
     last_sent_ns: i64,
+    /// Whether [`offer`](Self::offer) has sent a message since the last poll. `offer`
+    /// reads no clock: the next poll counts the message as sent at its own time.
+    sent: bool,
     /// The session id of the leader's image on the response channel: the image the ok
     /// event came on, or the last new leader event.
     leader_image: i32,
@@ -336,6 +339,7 @@ impl ClusterSession {
                         session_id,
                         leadership_term_id,
                         last_sent_ns: nano_time(),
+                        sent: false,
                         leader_image: image,
                         new_leader_wait_ns: if leader_heartbeat_timeout_ns > 0 {
                             leader_heartbeat_timeout_ns.saturating_mul(2)
@@ -433,7 +437,12 @@ impl ClusterSession {
     /// An accepted message is on its way to the leader, not committed: the leader
     /// ignores one that carries an older term, and a leader lost before a quorum held
     /// the message loses it with no word. A caller that must know sends again when
-    /// its service's reply does not come. Nothing here allocates.
+    /// its service's reply does not come.
+    ///
+    /// A message sent puts off the session's keepalive. `offer` reads no clock for
+    /// that: it marks the message sent, and the next [`poll`](Self::poll) counts it
+    /// as sent at the time that poll reads. Nothing here allocates, and nothing reads
+    /// a clock.
     pub fn offer(&mut self, message: &[u8]) -> Result<i64, Offer> {
         if self.closed {
             return Err(Offer::Closed);
@@ -450,7 +459,7 @@ impl ClusterSession {
                 payload: message,
             },
         )?;
-        self.last_sent_ns = nano_time();
+        self.sent = true;
         Ok(position)
     }
 
@@ -475,9 +484,15 @@ impl ClusterSession {
     /// session knows its leader is lost by the leader's image going from the response
     /// channel. It then waits for a new leader event for twice the leader heartbeat
     /// timeout the leader gave it, 20 s, offering its keepalive meanwhile, and after
-    /// that closes itself: `closed()` gives `NO LEADER`. When the keepalive interval, 500 ms, has passed
-    /// since the session last sent anything, a keepalive is sent. Nothing here
-    /// allocates: the publication to each member was added by the connect.
+    /// that closes itself: `closed()` gives `NO LEADER`.
+    ///
+    /// When the keepalive interval, 500 ms, has passed since the session last sent
+    /// anything, a keepalive is sent. A message [`offer`](Self::offer) sent counts
+    /// from the first poll after it, since `offer` reads no clock. So the keepalive
+    /// never goes sooner than 500 ms after the last message, and at most one poll
+    /// interval later than that, which the session timeout, 10 s, absorbs. A poll
+    /// reads the clock once. Nothing here allocates: the publication to each member
+    /// was added by the connect.
     pub fn poll<F>(&mut self, mut handler: F, fragment_limit: usize) -> Result<usize, Fault>
     where
         F: FnMut(&[u8], i64),
@@ -490,6 +505,7 @@ impl ClusterSession {
             session_id,
             leadership_term_id,
             last_sent_ns,
+            sent,
             leader_image,
             new_leader_wait_ns,
             leaderless_since_ns,
@@ -528,8 +544,11 @@ impl ClusterSession {
                         // The new leader's events come on its own publication.
                         *leader_image = header.session_id();
                         *leaderless_since_ns = 0;
-                        // The next thing sent is a keepalive, with the new term.
+                        // The next thing sent is a keepalive, with the new term. A
+                        // message offered before this event went with the old term,
+                        // so it does not put the keepalive off.
                         *last_sent_ns = 0;
+                        *sent = false;
                     }
                     Ok(Message::SessionEvent {
                         cluster_session_id,
@@ -551,42 +570,47 @@ impl ClusterSession {
             },
             fragment_limit,
         )?;
-        if !*closed {
-            let now = nano_time();
-            // A leader sends an idle session nothing, so its silence says nothing. Its
-            // image going from the response channel does: the leader is lost, and
-            // the session waits for the member that leads next to say so.
-            let present = egress
-                .images()
-                .iter()
-                .any(|image| image.session_id() == *leader_image);
-            if present {
-                *leaderless_since_ns = 0;
-            } else if *leaderless_since_ns == 0 {
-                *leaderless_since_ns = now.max(1);
-            } else if now.saturating_sub(*leaderless_since_ns) >= *new_leader_wait_ns {
-                *closed = true;
-                if let Some(held) = closed_detail.get_mut(..NO_LEADER_DETAIL.len()) {
-                    held.copy_from_slice(NO_LEADER_DETAIL);
-                    *closed_detail_length = NO_LEADER_DETAIL.len();
-                }
-            }
+        if *closed {
+            return Ok(delivered);
         }
-        if !*closed {
-            let now = nano_time();
-            if now.saturating_sub(*last_sent_ns) >= KEEPALIVE_INTERVAL_NS as i64
-                && let Some(publication) = ingress.get_mut(*leader)
-                && send(
-                    publication,
-                    &Message::SessionKeepalive {
-                        leadership_term_id: *leadership_term_id,
-                        cluster_session_id: *session_id,
-                    },
-                )
-                .is_ok()
-            {
-                *last_sent_ns = now;
+        // The poll's one clock read, for the leader's loss and the keepalive both.
+        let now = nano_time();
+        // A message offered since the last poll was sent no later than now.
+        if *sent {
+            *last_sent_ns = now;
+            *sent = false;
+        }
+        // A leader sends an idle session nothing, so its silence says nothing. Its
+        // image going from the response channel does: the leader is lost, and the
+        // session waits for the member that leads next to say so.
+        let present = egress
+            .images()
+            .iter()
+            .any(|image| image.session_id() == *leader_image);
+        if present {
+            *leaderless_since_ns = 0;
+        } else if *leaderless_since_ns == 0 {
+            *leaderless_since_ns = now.max(1);
+        } else if now.saturating_sub(*leaderless_since_ns) >= *new_leader_wait_ns {
+            *closed = true;
+            if let Some(held) = closed_detail.get_mut(..NO_LEADER_DETAIL.len()) {
+                held.copy_from_slice(NO_LEADER_DETAIL);
+                *closed_detail_length = NO_LEADER_DETAIL.len();
             }
+            return Ok(delivered);
+        }
+        if now.saturating_sub(*last_sent_ns) >= KEEPALIVE_INTERVAL_NS as i64
+            && let Some(publication) = ingress.get_mut(*leader)
+            && send(
+                publication,
+                &Message::SessionKeepalive {
+                    leadership_term_id: *leadership_term_id,
+                    cluster_session_id: *session_id,
+                },
+            )
+            .is_ok()
+        {
+            *last_sent_ns = now;
         }
         Ok(delivered)
     }

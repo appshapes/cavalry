@@ -461,6 +461,63 @@ fn a_session_opens_sends_reads_keeps_alive_and_closes() {
     world.close();
 }
 
+/// A message offered puts off the keepalive, though `offer` reads no clock: a message
+/// about every 200 ms for 1.5 s while the session polls, and the played leader reads
+/// no keepalive in that time. Once the messages stop, the keepalive comes, no sooner
+/// than the keepalive interval after the last one.
+#[test]
+fn a_message_offered_puts_off_the_keepalive() {
+    let mut world = World::start("busy", [Reply::Ok, Reply::Silent, Reply::Silent]);
+    let mut session = world.connect().expect("the session opens");
+    let mut read = Vec::new();
+    let busy = Instant::now();
+    let mut offered = 0u32;
+    while busy.elapsed() < Duration::from_millis(1500) {
+        if busy.elapsed() >= Duration::from_millis(200) * offered {
+            session
+                .offer(&offered.to_le_bytes())
+                .expect("the leader takes the message");
+            offered += 1;
+        }
+        session
+            .poll(|payload, time| read.push((payload.to_vec(), time)), 10)
+            .expect("the session polls");
+        std::thread::sleep(Duration::from_millis(1));
+    }
+    // One message more after the window: what the session sent in the window reaches
+    // the leader before it, on the one ordered stream.
+    session
+        .offer(b"last")
+        .expect("the leader takes the message");
+    let last = Instant::now();
+    assert!(wait_until(Duration::from_secs(5), || {
+        world
+            .played
+            .seen(|seen| seen.messages.last().is_some_and(|m| m.4 == b"last"))
+    }));
+    assert_eq!(offered, 8, "a message at 0, 200, ..., 1,400 ms");
+    assert_eq!(
+        world
+            .played
+            .seen(|seen| (seen.messages.len(), seen.keepalives.clone())),
+        (offered as usize + 1, Vec::new()),
+        "no keepalive while a message went every 200 ms"
+    );
+
+    // The messages have stopped: the keepalive counts from the last of them.
+    assert!(poll_until(&mut session, &mut read, |_, _| {
+        world.played.seen(|seen| !seen.keepalives.is_empty())
+    }));
+    assert!(
+        last.elapsed() >= Duration::from_millis(450),
+        "a keepalive {:?} after the last message",
+        last.elapsed()
+    );
+    assert_eq!(world.played.seen(|seen| seen.keepalives[0]), (0, TERM));
+    session.close().expect("the session closes");
+    world.close();
+}
+
 /// A member that knows no leader is passed, and a redirect is followed to the member
 /// it names: the connects go to the first member, the second and the third, and the
 /// session is with the third.
