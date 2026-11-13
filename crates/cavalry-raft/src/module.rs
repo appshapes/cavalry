@@ -24,8 +24,8 @@ use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use cavalry_client::{
-    ArmedRecording, Cavalry, ClientError, Counter, Fault, Flags, Offer, Publication, Recording,
-    Replay, Subscription,
+    Action, ArmedRecording, Cavalry, ClientError, CommittedLog, Counter, Fault, Flags, Offer,
+    Publication, Recording, Replay, Subscription,
 };
 use cavalry_log::catalog::{CatalogError, CatalogReader};
 use cavalry_log::layout::State;
@@ -33,10 +33,10 @@ use cavalry_log::recordings::{ListedRecording, RecordingsError, RecordingsFile};
 use cavalry_log::terms::{NO_RECORDING, TermsError, TermsFile};
 use cavalry_proto::client_protocol::{ErrorCode, FOLLOW_LENGTH, ReplayStopReason};
 use cavalry_proto::cluster::{
-    CONSENSUS_STREAM_ID, EMPTY_MEMBER, Endpoint, LOG_RECORDINGS_FILE_PREFIX,
-    LOG_RECORDINGS_TMP_SUFFIX, LOG_STREAM_ID, LogRecording, LogRecordingsError,
-    MAX_LOG_RECORDINGS_LENGTH, MAX_MEMBERS, MembersError, Message, Stream, parse_members,
-    write_log_recordings,
+    CONSENSUS_STREAM_ID, EGRESS_STREAM_ID, EMPTY_MEMBER, Endpoint, INGRESS_STREAM_ID,
+    LOG_RECORDINGS_FILE_PREFIX, LOG_RECORDINGS_TMP_SUFFIX, LOG_STREAM_ID, LogRecording,
+    LogRecordingsError, MAX_LOG_RECORDINGS_LENGTH, MAX_MEMBERS, MembersError, Message, Stream,
+    parse_members, write_log_recordings,
 };
 use cavalry_proto::udp::UDP_TERM_LENGTH;
 use cavalry_shm::counters::CounterId;
@@ -45,13 +45,14 @@ use cavalry_shm::counters::generated::{
     CLUSTER_ELECTION_STATE, CLUSTER_LEADER_MEMBER_ID, CLUSTER_LEADERSHIP_TERM_ID,
     CLUSTER_LOG_RECORDING_ID, CLUSTER_LOG_RECORDINGS_FORGOTTEN, CLUSTER_LOG_RECORDINGS_LISTED,
     CLUSTER_LOG_RECORDINGS_UNSYNCED, CLUSTER_LOG_RECORDINGS_UNWRITTEN, CLUSTER_MESSAGES_REJECTED,
-    CLUSTER_ROLE, CLUSTER_TRUNCATIONS_FINISHED, COUNTERS,
+    CLUSTER_ROLE, CLUSTER_SESSIONS, CLUSTER_TRUNCATIONS_FINISHED, COUNTERS,
 };
 
 use crate::consensus::{
     Clock, Consensus, Counts, ElectionState, Io, Log, MembersRefused, Refused, ReplayStopped, Role,
     base_above, term_at_or_below, terms_above,
 };
+use crate::sessions::{EGRESS_SLOTS, Ingress, Leadership, SessionCounts, SessionIo, Sessions};
 
 /// The longest payload [`ConsensusModule::offer`] takes: what one frame of the log
 /// carries after the frame header and the session message header, at the UDP
@@ -64,6 +65,20 @@ const CONSENSUS_POLL_LIMIT: usize = 16;
 
 /// How many fragments of the log one duty cycle of a follower's module reads past.
 const LOG_POLL_LIMIT: usize = 64;
+
+/// How many messages of the ingress stream one duty cycle takes.
+const INGRESS_POLL_LIMIT: usize = 16;
+
+/// How many entries of its own committed log one duty cycle hands to the member's
+/// sessions.
+const SESSION_LOG_POLL_LIMIT: usize = 64;
+
+/// The longest list of the members' ingress endpoints, `<id>=<host:port>` for each
+/// member separated by `,`, that a redirect carries in one frame of the egress
+/// stream: the MTU length of 1,408 bytes less the frame header, the message header,
+/// the session event's fields and the length of its detail. A members string that
+/// lists more is [`RaftError::IngressEndpoints`].
+pub const MAX_INGRESS_ENDPOINTS_LENGTH: usize = 1408 - 32 - 8 - 44 - 4;
 
 /// How long a member leaving the log waits for its recording's stop position.
 const STOP_TIMEOUT: Duration = Duration::from_secs(1);
@@ -155,6 +170,13 @@ pub enum RaftError {
         /// Its length.
         length: usize,
     },
+    /// The members' ingress endpoints, as a redirect lists them, are longer than one
+    /// frame of the egress stream carries ([`MAX_INGRESS_ENDPOINTS_LENGTH`]): the
+    /// member does not start.
+    IngressEndpoints {
+        /// Their length as a redirect lists them.
+        length: usize,
+    },
     /// The offer was refused by the member's state; offer again as the reason says.
     Offer(Refused),
     /// The leader's log publication refused an entry for a reason that waiting does
@@ -228,8 +250,8 @@ pub enum ListedFound {
 impl RaftError {
     /// The reason's name: `members`, `member`, `recordings`, `terms-lost`,
     /// `log-forgotten`, `listed-recording`, `terms`, `catalog`, `client`, `poll`,
-    /// `unsupported`, `payload-too-long`, `offer`, `append`, `stop-timeout`,
-    /// `start-stop-timeout` or `log-recordings`.
+    /// `unsupported`, `payload-too-long`, `ingress-endpoints`, `offer`, `append`,
+    /// `stop-timeout`, `start-stop-timeout` or `log-recordings`.
     pub const fn reason(&self) -> &'static str {
         match self {
             RaftError::Members(_) => "members",
@@ -244,6 +266,7 @@ impl RaftError {
             RaftError::Poll(_) => "poll",
             RaftError::Unsupported { .. } => "unsupported",
             RaftError::PayloadTooLong { .. } => "payload-too-long",
+            RaftError::IngressEndpoints { .. } => "ingress-endpoints",
             RaftError::Offer(_) => "offer",
             RaftError::Append { .. } => "append",
             RaftError::StopTimeout { .. } => "stop-timeout",
@@ -397,6 +420,14 @@ impl core::fmt::Display for RaftError {
                 f,
                 "offer refused ({reason}): the payload is {length} bytes and an entry carries \
                  at most {MAX_PAYLOAD_LENGTH}; send it in parts of that length; see {DOC}"
+            ),
+            RaftError::IngressEndpoints { length } => write!(
+                f,
+                "member refused ({reason}): the members' ingress endpoints are {length} \
+                 bytes as a redirect lists them, `<id>=<host:port>` for each member, and \
+                 one frame of the egress stream carries {MAX_INGRESS_ENDPOINTS_LENGTH}; \
+                 name the members' hosts by address or by shorter names in the members \
+                 string; see {DOC_MEMBERS}"
             ),
             RaftError::Offer(refused) => write!(f, "{refused}"),
             RaftError::Append { refusal } => {
@@ -757,6 +788,9 @@ struct ClientIo {
     /// The id `cluster.log_recording_id` holds, as the last duty cycle left it: −1
     /// while the member names no recording. A truncation waits for −1 (ADR 0103).
     named: i64,
+    /// The egress publications of the member's sessions and pending answers, each in
+    /// the slot [`Sessions`] names it by (ADR 0115).
+    egress: [Option<Publication>; EGRESS_SLOTS],
 }
 
 /// Asks the driver to sync `recording`, this member's recording of the log, when the
@@ -2025,6 +2059,16 @@ impl Io for ClientIo {
     }
 
     fn append(&mut self, entry: &Message<'_>) -> Result<bool, Self::Fault> {
+        ClientIo::append(self, entry)
+    }
+}
+
+impl ClientIo {
+    /// Appends `entry` to the leader's log: what the election's [`Io::append`] and
+    /// the sessions' [`SessionIo::append`] both are. `Ok(false)` when the publication
+    /// is back-pressured, not yet connected or rotating a term, and nothing was
+    /// written.
+    fn append(&mut self, entry: &Message<'_>) -> Result<bool, RaftError> {
         let Some(publication) = self.log_publication.as_mut() else {
             return Ok(false);
         };
@@ -2039,6 +2083,178 @@ impl Io for ClientIo {
             Err(refusal) => log_refusal(refusal),
         }
     }
+}
+
+impl SessionIo for ClientIo {
+    type Fault = RaftError;
+
+    /// An exclusive publication on the egress stream to `channel`. The driver's
+    /// refusal of the channel, one that is malformed or names a host that does not
+    /// resolve, is `Ok(false)`; any other failure is the client's.
+    fn add_egress(&mut self, slot: usize, channel: &[u8]) -> Result<bool, Self::Fault> {
+        let Some(held) = self.egress.get_mut(slot) else {
+            return Ok(false);
+        };
+        let Ok(channel) = core::str::from_utf8(channel) else {
+            return Ok(false);
+        };
+        match self
+            .client
+            .add_exclusive_publication(channel, EGRESS_STREAM_ID)
+        {
+            Ok(publication) => {
+                *held = Some(publication);
+                Ok(true)
+            }
+            Err(ClientError::Refused { .. }) => Ok(false),
+            Err(error) => Err(error.into()),
+        }
+    }
+
+    fn send_egress(&mut self, slot: usize, message: &Message<'_>) -> bool {
+        let Some(Some(publication)) = self.egress.get_mut(slot) else {
+            return false;
+        };
+        let Ok(length) = message.write(self.scratch.as_mut_slice()) else {
+            return false;
+        };
+        let Some(bytes) = self.scratch.get(..length) else {
+            return false;
+        };
+        publication.offer(bytes).is_ok()
+    }
+
+    fn remove_egress(&mut self, slot: usize) -> Result<(), Self::Fault> {
+        if let Some(publication) = self.egress.get_mut(slot).and_then(Option::take) {
+            publication.close()?;
+        }
+        Ok(())
+    }
+
+    fn append(&mut self, entry: &Message<'_>) -> Result<bool, Self::Fault> {
+        ClientIo::append(self, entry)
+    }
+}
+
+/// One duty cycle of the member's sessions (`spec/cluster.md`, "Sessions"; ADR 0115,
+/// ADR 0116), after the election's own. First the member's own committed log: the
+/// read a service makes of it, opened where the last one stopped, whose session open
+/// and close events open and close the member's sessions. Then the ingress stream, by
+/// a controlled poll: a message the sessions leave unread stays at its image's
+/// position, and until it is taken no fragment of another image is. Then what the
+/// sessions owe. An entry or a message that is not one frame, does not parse, or is an
+/// entry the table cannot hold is counted in `rejected`. Returns how much it did.
+#[allow(clippy::too_many_arguments)]
+fn work_sessions(
+    core: &Consensus,
+    io: &mut ClientIo,
+    sessions: &mut Sessions,
+    ingress: &mut Subscription,
+    held: &mut Option<i32>,
+    log: &mut Option<CommittedLog>,
+    position: &mut i64,
+    rejected: &mut u64,
+    clock: Clock,
+) -> Result<usize, RaftError> {
+    let mut work = 0;
+    let mut fault: Option<RaftError> = None;
+    if log.is_none() {
+        *log = io.client.committed_log(*position)?;
+    }
+    if let Some(reader) = log.as_mut() {
+        let polled = reader.poll(
+            |bytes, header, _| {
+                if !header.flags().contains(Flags::UNFRAGMENTED) {
+                    *rejected = rejected.saturating_add(1);
+                    return;
+                }
+                match Message::parse(Stream::Log, bytes) {
+                    Ok(entry) => match sessions.on_entry(clock, &entry, io) {
+                        Ok(true) => {}
+                        Ok(false) => *rejected = rejected.saturating_add(1),
+                        Err(error) => {
+                            if fault.is_none() {
+                                fault = Some(error);
+                            }
+                        }
+                    },
+                    Err(_) => *rejected = rejected.saturating_add(1),
+                }
+            },
+            SESSION_LOG_POLL_LIMIT,
+        );
+        *position = reader.position();
+        // A handle that has ended, at its recording's stop or on a fault, is closed:
+        // the next cycle opens the log again where this one stopped.
+        let ended = polled.is_err() || reader.is_ended();
+        if ended && let Some(reader) = log.take() {
+            reader.close(&mut io.client)?;
+        }
+        work += polled.map_err(RaftError::Poll)?;
+    }
+    // The member serves sessions once it leads, its election has closed, and it has
+    // read its log to its term's base: every session the terms before opened, and
+    // every id they gave, is then in its table.
+    let lead = Leadership {
+        leads: core.role() == Role::Leader
+            && core.election_state() == ElectionState::Closed
+            && *position >= core.term_base_log_position(),
+        leadership_term_id: core.leadership_term_id(),
+        leader_member_id: i32::try_from(core.leader_gauge()).unwrap_or(-1),
+    };
+    let mut unread = false;
+    let taken = ingress
+        .controlled_poll(
+            |body, header| {
+                let session_id = header.session_id();
+                if unread || (*held).is_some_and(|image| image != session_id) {
+                    return Action::Abort;
+                }
+                if !header.flags().contains(Flags::UNFRAGMENTED) {
+                    *rejected = rejected.saturating_add(1);
+                    return Action::Continue;
+                }
+                let Ok(message) = Message::parse(Stream::Ingress, body) else {
+                    *rejected = rejected.saturating_add(1);
+                    return Action::Continue;
+                };
+                match sessions.on_ingress(clock, lead, &message, io) {
+                    Ok(Ingress::Taken) => {
+                        *held = None;
+                        Action::Continue
+                    }
+                    Ok(Ingress::Unread) => {
+                        *held = Some(session_id);
+                        unread = true;
+                        Action::Abort
+                    }
+                    Err(error) => {
+                        if fault.is_none() {
+                            fault = Some(error);
+                        }
+                        unread = true;
+                        Action::Abort
+                    }
+                }
+            },
+            INGRESS_POLL_LIMIT,
+        )
+        .map_err(RaftError::Poll)?;
+    work += taken;
+    // An image that went while its message was held holds nothing any more.
+    if let Some(image) = *held
+        && !ingress
+            .images()
+            .iter()
+            .any(|held| held.session_id() == image)
+    {
+        *held = None;
+    }
+    if let Some(error) = fault {
+        return Err(error);
+    }
+    work += sessions.do_work(clock, lead, io)?;
+    Ok(work)
 }
 
 /// What a refusal of the leader's log publication is to the election: `Ok(false)`,
@@ -2151,6 +2367,10 @@ struct Counters {
     /// The four counts of the record of the log's recordings in the log directory,
     /// in the order of [`ListCounts`]'s fields (ADR 0108).
     lists: [Stored; 4],
+    /// `cluster.sessions`, and the sessions' counts, one counter each, in the order
+    /// of [`SessionCounts::by_counter`] (ADR 0115).
+    sessions: Stored,
+    session_counts: Vec<Stored>,
 }
 
 impl Counters {
@@ -2248,6 +2468,20 @@ impl Counters {
                     count_value(lists.truncations_finished),
                 )?,
             ],
+            sessions: add(CLUSTER_SESSIONS, "cluster.sessions", 0)?,
+            session_counts: {
+                // As the election's counts above: each under the name `counters.toml`
+                // gives its id (ADR 0115).
+                let mut counts = Vec::with_capacity(SessionCounts::LEN);
+                for (id, value) in SessionCounts::default().by_counter() {
+                    let name = COUNTERS
+                        .iter()
+                        .find(|entry| entry.id == id)
+                        .map_or("cluster.count", |entry| entry.name);
+                    counts.push(add(id, name, count_value(value))?);
+                }
+                counts
+            },
         })
     }
 
@@ -2266,6 +2500,7 @@ impl Counters {
         module: [u64; 2],
         lists: ListCounts,
         log_recording_id: i64,
+        sessions: &Sessions,
     ) -> i64 {
         let [messages_rejected, log_recordings_unwritten] = module;
         let counts: Counts = core.counts();
@@ -2295,6 +2530,15 @@ impl Counters {
         for (stored, value) in self.lists.iter_mut().zip(values) {
             stored.store(count_value(value));
         }
+        self.sessions
+            .store(i64::try_from(sessions.open()).unwrap_or(i64::MAX));
+        for (stored, (_, value)) in self
+            .session_counts
+            .iter_mut()
+            .zip(sessions.counts().by_counter())
+        {
+            stored.store(count_value(value));
+        }
         self.log_recording_id.last
     }
 }
@@ -2303,6 +2547,17 @@ impl Counters {
 pub struct ConsensusModule {
     core: Consensus,
     consensus: Subscription,
+    /// The member's sessions, and its subscription on its `ingress` endpoint (ADR
+    /// 0115, ADR 0116).
+    sessions: Sessions,
+    ingress: Subscription,
+    /// The session id of the ingress image whose message the sessions left unread:
+    /// until that message is taken, nothing of another image is read.
+    held_ingress: Option<i32>,
+    /// The member's read of its own committed log, for its sessions, and the position
+    /// after the last entry it handed them.
+    session_log: Option<CommittedLog>,
+    session_log_position: i64,
     io: ClientIo,
     counters: Counters,
     messages_rejected: u64,
@@ -2370,6 +2625,19 @@ impl ConsensusModule {
                 id: member_id,
             }));
         };
+        // What a redirect and a new leader event carry: every member's ingress
+        // endpoint, in the string's order (`spec/cluster.md`, "Session event,
+        // template 2"). It must fit one frame of the egress stream.
+        let ingress_endpoints = parsed
+            .iter()
+            .map(|member| format!("{}={}", member.id, host_port(&member.ingress)))
+            .collect::<Vec<_>>()
+            .join(",");
+        if ingress_endpoints.len() > MAX_INGRESS_ENDPOINTS_LENGTH {
+            return Err(RaftError::IngressEndpoints {
+                length: ingress_endpoints.len(),
+            });
+        }
 
         // The driver's catalog, which the driver created when it started on this
         // directory: a directory without one is not the driver's. It is opened before
@@ -2458,6 +2726,8 @@ impl ConsensusModule {
         }
         let consensus =
             client.add_subscription(&endpoint_channel(&own.consensus), CONSENSUS_STREAM_ID)?;
+        let ingress =
+            client.add_subscription(&endpoint_channel(&own.ingress), INGRESS_STREAM_ID)?;
         let mut peers = Vec::with_capacity(MAX_MEMBERS);
         for member in parsed.iter().filter(|member| member.id != member_id) {
             peers.push(Peer {
@@ -2478,6 +2748,11 @@ impl ConsensusModule {
         Ok(Self {
             core,
             consensus,
+            sessions: Sessions::new(member_id, ingress_endpoints.as_bytes()),
+            ingress,
+            held_ingress: None,
+            session_log: None,
+            session_log_position: 0,
             io: ClientIo {
                 client,
                 terms,
@@ -2520,6 +2795,7 @@ impl ConsensusModule {
                 recordings_tmp_path,
                 recordings_file: vec![0; MAX_LOG_RECORDINGS_LENGTH],
                 named: NO_RECORDING,
+                egress: [const { None }; EGRESS_SLOTS],
             },
             counters,
             messages_rejected: 0,
@@ -2549,6 +2825,11 @@ impl ConsensusModule {
         let Self {
             core,
             consensus,
+            sessions,
+            ingress,
+            held_ingress,
+            session_log,
+            session_log_position,
             io,
             messages_rejected,
             ..
@@ -2607,6 +2888,20 @@ impl ConsensusModule {
         // the record that names it synced; the next cycle reports what it holds (ADR
         // 0108). Its error is returned after the core's own.
         let listed = io.list_counted();
+        // The member's sessions, after the election's cycle and with what it left.
+        // Their error is returned after the core's own, and after the counters are
+        // stored, as the core's is.
+        let session_work = work_sessions(
+            core,
+            io,
+            sessions,
+            ingress,
+            held_ingress,
+            session_log,
+            session_log_position,
+            messages_rejected,
+            clock,
+        );
         // The file of the log's recordings is written before the counter names a
         // recording it did not name (`spec/cluster.md`, "The service"; ADR 0103). A
         // file that could not be written leaves the counter at −1, and the next
@@ -2634,11 +2929,12 @@ impl ConsensusModule {
             [self.messages_rejected, self.log_recordings_unwritten],
             self.io.list_counts,
             log_recording_id,
+            &self.sessions,
         );
         let work = read + stepped?;
         listed?;
         written?;
-        Ok(work)
+        Ok(work + session_work?)
     }
 
     /// Appends `payload` to the cluster's log as a session message of no session, for
@@ -2726,6 +3022,8 @@ impl ConsensusModule {
     fn close_observed(self, stored: impl FnOnce()) -> Result<(), RaftError> {
         let Self {
             consensus,
+            ingress,
+            session_log,
             io,
             mut counters,
             ..
@@ -2734,11 +3032,13 @@ impl ConsensusModule {
         stored();
         drop(counters);
         drop(consensus);
+        drop(ingress);
         let ClientIo {
-            client,
+            mut client,
             peers,
             log_publication,
             log_subscription,
+            egress,
             recordings_path,
             recordings_tmp_path,
             ..
@@ -2746,6 +3046,12 @@ impl ConsensusModule {
         drop(peers);
         drop(log_publication);
         drop(log_subscription);
+        drop(egress);
+        // The replay of the member's own log ends with its handle; one the driver
+        // has ended already refuses the stop, which is the state asked for.
+        if let Some(log) = session_log {
+            let _ = log.close(&mut client);
+        }
         let closed = client.close();
         // The file, and what a write that failed left under its other name. A file
         // that is not there was never written: the member named no recording. Any

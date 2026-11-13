@@ -1115,6 +1115,12 @@ impl Consensus {
         self.term
     }
 
+    /// The term base log position of the term this member leads or follows: where
+    /// that term's first entry begins, and 0 before the first term.
+    pub fn term_base_log_position(&self) -> i64 {
+        self.term_base
+    }
+
     /// This member's append position as of its last duty cycle.
     pub fn append_position(&self) -> i64 {
         self.append_position
