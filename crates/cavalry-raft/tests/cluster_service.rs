@@ -20,7 +20,10 @@ use cavalry_client::{Action, Cavalry, ClusterService, ClusterSession, Entry, Rep
 use cavalry_driver::Driver;
 use cavalry_raft::{ConsensusModule, ElectionState, Role};
 use cavalry_shm::counters::CountersReader;
-use cavalry_shm::counters::generated::CLUSTER_REPLIES_DROPPED;
+use cavalry_shm::counters::generated::{
+    CLUSTER_APPEND_POSITION, CLUSTER_LEADERSHIP_TERM_ID, CLUSTER_LOG_RECORDING_ID,
+    CLUSTER_REPLIES_DROPPED,
+};
 
 struct TestDir(PathBuf);
 
@@ -374,19 +377,28 @@ fn converse(
     (replies, took)
 }
 
-/// The value of `cluster.replies_dropped` beside the member with `id`, which the
-/// member's service added.
-fn dropped(dir: &Path, id: i32) -> i64 {
+/// The record and the value of the counter of `type_id` that is keyed by the member
+/// with `id`, in that member's counters file.
+fn counter(dir: &Path, id: i32, type_id: i32) -> (u32, i64) {
     let reader = CountersReader::open(&member_dir(dir, id)).expect("the counters file opens");
     for record_id in 0..reader.capacity() {
         if let Some(record) = reader.record(record_id).expect("a record")
-            && record.type_id() == CLUSTER_REPLIES_DROPPED.0
+            && record.type_id() == type_id
             && record.key().starts_with(&id.to_le_bytes())
         {
-            return reader.read_acquire(record_id).expect("the counter is read");
+            return (
+                record_id,
+                reader.read_acquire(record_id).expect("the counter is read"),
+            );
         }
     }
-    panic!("the service beside member {id} added no cluster.replies_dropped");
+    panic!("member {id} has no counter of type {type_id}");
+}
+
+/// The value of `cluster.replies_dropped` beside the member with `id`, which the
+/// member's service added.
+fn dropped(dir: &Path, id: i32) -> i64 {
+    counter(dir, id, CLUSTER_REPLIES_DROPPED.0).1
 }
 
 /// What each of `took` was answered, by its member.
@@ -415,6 +427,21 @@ fn a_message_is_answered_by_the_service_beside_its_terms_leader_alone() {
         std::thread::sleep(Duration::from_millis(1));
     }
     let (first_leader, first_term) = cluster.led.expect("a leader");
+
+    // The fourth rule of order a member keeps for its service (`spec/cluster.md`,
+    // "The service"): its term and its append position are added before its
+    // recording's id, which a service finds the member by. A member adds its
+    // counters one after another to a driver that has freed none, so a counter added
+    // earlier has the lower record.
+    for id in 0..3 {
+        let recording = counter(dir.path(), id, CLUSTER_LOG_RECORDING_ID.0).0;
+        let term = counter(dir.path(), id, CLUSTER_LEADERSHIP_TERM_ID.0).0;
+        let append = counter(dir.path(), id, CLUSTER_APPEND_POSITION.0).0;
+        assert!(
+            term < recording && append < recording,
+            "member {id}: term {term}, append position {append}, recording id {recording}"
+        );
+    }
 
     // The client, on a driver of its own.
     let client_dir = dir.path().join("client");
