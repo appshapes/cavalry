@@ -22,6 +22,7 @@ use crate::client::Cavalry;
 use crate::error::ClientError;
 use crate::replay::Replay;
 use crate::subscription::{Fault, Image, Subscription};
+use cavalry_shm::log::Action;
 
 /// The channel of that stream: the service and its member's driver are on one host.
 const CHANNEL: &str = "cavalry:ipc";
@@ -409,6 +410,70 @@ impl CommittedLog {
     where
         F: FnMut(&[u8], &DataFrameHeader, i64),
     {
+        let Some(positions) = self.before_read()? else {
+            return Ok(0);
+        };
+        let bound = self.bound.load();
+        let mut next = self.position;
+        let polled = self.subscription.bounded_poll(
+            self.session_id,
+            |body, header| {
+                let position = positions.position(header.term_id(), header.term_offset() as u32);
+                handler(body, header, position);
+                // The frame's length is the header's 32 bytes and the body, and the next
+                // frame begins at the next multiple of 32 (`spec/frame.md`).
+                let aligned = (i64::from(header.frame_length()) + 31) & !31;
+                next = position.saturating_add(aligned);
+            },
+            bound,
+            fragment_limit,
+        );
+        self.position = next;
+        self.after_read(polled)
+    }
+
+    /// [`poll`](Self::poll) with a handler that says for each entry whether the read
+    /// takes it (ADR 0114, ADR 0118): [`Action::Continue`] takes the entry and goes on,
+    /// [`Action::Break`] takes it and ends the read, and [`Action::Abort`] leaves it,
+    /// so that the next call hands the same entry over again and
+    /// [`position`](Self::position) stays before it. For a service that cannot take
+    /// an entry yet: the reply it owes a session is back-pressured. The bound, the
+    /// checks and the cost are `poll`'s; `poll`'s own read is not this one.
+    pub fn controlled_poll<F>(
+        &mut self,
+        mut handler: F,
+        fragment_limit: usize,
+    ) -> Result<usize, Fault>
+    where
+        F: FnMut(&[u8], &DataFrameHeader, i64) -> Action,
+    {
+        let Some(positions) = self.before_read()? else {
+            return Ok(0);
+        };
+        let bound = self.bound.load();
+        let mut next = self.position;
+        let polled = self.subscription.bounded_controlled_poll(
+            self.session_id,
+            |body, header| {
+                let position = positions.position(header.term_id(), header.term_offset() as u32);
+                let action = handler(body, header, position);
+                if action != Action::Abort {
+                    let aligned = (i64::from(header.frame_length()) + 31) & !31;
+                    next = position.saturating_add(aligned);
+                }
+                action
+            },
+            bound,
+            fragment_limit,
+        );
+        self.position = next;
+        self.after_read(polled)
+    }
+
+    /// What a poll does before it reads: the other sessions on the stream are read
+    /// past, and this log's image is found once it has joined. Returns the image's
+    /// positions, or `None` when there is nothing to read yet, or ever.
+    fn before_read(&mut self) -> Result<Option<Positions>, Fault> {
         // Before the image has joined: whether the replay had ended before this poll
         // applies the driver's events. The driver announces a replay's image before the
         // replay can end, and the client's conductor hands the two over in that order,
@@ -447,28 +512,18 @@ impl CommittedLog {
                     if ended_before_join && applied {
                         self.gone = true;
                     }
-                    return Ok(0);
+                    return Ok(None);
                 };
                 self.positions = Some(positions);
                 positions
             }
         };
-        let bound = self.bound.load();
-        let mut next = self.position;
-        let polled = self.subscription.bounded_poll(
-            self.session_id,
-            |body, header| {
-                let position = positions.position(header.term_id(), header.term_offset() as u32);
-                handler(body, header, position);
-                // The frame's length is the header's 32 bytes and the body, and the next
-                // frame begins at the next multiple of 32 (`spec/frame.md`).
-                let aligned = (i64::from(header.frame_length()) + 31) & !31;
-                next = position.saturating_add(aligned);
-            },
-            bound,
-            fragment_limit,
-        );
-        self.position = next;
+        Ok(Some(positions))
+    }
+
+    /// What a poll does after its read: where the image stands, whether it has gone,
+    /// and which fault is this log's own.
+    fn after_read(&mut self, polled: Result<usize, Fault>) -> Result<usize, Fault> {
         // The image's position after the read, which `is_ended` and `withdrawn_at`
         // compare. An image that joined and is no longer held has gone: the driver
         // withdrew it, at its end or at the linger's, or a frame of it failed a check.
