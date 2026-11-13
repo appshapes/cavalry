@@ -65,8 +65,12 @@ member in follower ballot waits it for its candidate's new leadership term.
 **Nothing else of the ballot changes.** Who can win, the one vote a member casts
 in a term, and the terms stored before a vote or a request are as ADR 0077 has
 them. The step is the one a candidate took at the timeout, taken earlier: it
-sends nothing and stores nothing. The next candidacy stores candidate term + 1
-before it asks, as every candidacy does. The member that voted for a candidate
+sends nothing and stores nothing. The candidate reads its ballot before it sends
+its request votes, so the duty cycle in which it goes back to canvass sends no
+request vote either. A request its publication had refused before stays unsent:
+sent then, it would ask a member for its one vote in the term for a candidate
+that has already lost. The next candidacy stores candidate term + 1 before it
+asks, as every candidacy does. The member that voted for a candidate
 that lost stays in follower ballot, and votes for a request of a higher term from
 there, as it did.
 
@@ -102,13 +106,18 @@ there, as it did.
 - `crates/cavalry-raft/tests/ballot.rs`, one core through an `Io` that remembers
   what it was asked. A candidate with one vote for it stays in its ballot; the
   cycle after a vote against, it is in canvass, a follower, with one ballot lost
-  and no term recorded, 4 ms into a ballot it used to leave at 1,000 ms. A
-  candidate whose term rose is in canvass on its next cycle and has sent no
-  request vote for the raised term; in a cluster of five, votes for the raised
-  term from a quorum of the others do not make it the leader.
+  and no term recorded, 4 ms into a ballot it used to leave at 1,000 ms.
+  `a_candidate_that_lost_its_ballot_asks_no_member_for_a_vote`: a candidate whose
+  two requests were refused reads a vote against, and the cycle that loses the
+  ballot sends neither; with the ballot read after the requests, the test counts
+  two sent. A candidate whose term rose is in canvass on its next cycle and has
+  sent no request vote for the raised term; in a cluster of five, votes for the
+  raised term from a quorum of the others do not make it the leader.
 - `crates/cavalry-raft/tests/election.rs`, three members in memory at seed 12,
   where two delays end within a round trip: the election closed 132 ms after the
-  cluster's start, and 1,129 ms before this change. The two candidates count one
+  cluster's start, and 1,129 ms before this change. The test prints the time and
+  asserts that it is below the election timeout, 1,000 ms, which an election with
+  a ballot waited out cannot be. The two candidates count one
   ballot lost each and the third member none; no member records term 0, and all
   three follow term 1. The check that no committed entry is lost runs after every
   step.

@@ -2264,14 +2264,15 @@ impl Consensus {
         Ok(self.enter(ElectionState::CandidateBallot, clock))
     }
 
-    /// State 3. Request vote for the term the candidate nominated itself for to every
-    /// member not yet sent one, then the ballot: the candidate leads its candidate term
-    /// at once when the votes for that term, its own among them, make a quorum and every
-    /// member it has heard has cast one of them, or at the election timeout with a
-    /// quorum for and none against (ADR 0077). It canvasses again at once when it
-    /// cannot win: a vote against its candidate term has been cast, or it no longer
-    /// holds its own vote for that term (ADR 0105). At the election timeout with no
-    /// leader it canvasses again, short of a quorum.
+    /// State 3. The ballot is read first, and a candidate that can still win sends
+    /// request vote for the term it nominated itself for to every member not yet sent
+    /// one. The candidate leads its candidate term at once when the votes for that
+    /// term, its own among them, make a quorum and every member it has heard has cast
+    /// one of them, or at the election timeout with a quorum for and none against (ADR
+    /// 0077). It canvasses again at once when it cannot win: a vote against its
+    /// candidate term has been cast, or it no longer holds its own vote for that term,
+    /// and on that cycle it asks no member for a vote (ADR 0105). At the election
+    /// timeout with no leader it canvasses again, short of a quorum.
     fn candidate_ballot<I: Io>(&mut self, clock: Clock, io: &mut I) -> Result<usize, I::Fault> {
         let mut work = 0;
         // A candidate whose term rose during its ballot, by a request vote for a
@@ -2280,22 +2281,6 @@ impl Consensus {
         // which would spend that member's one vote in the term on a candidate that
         // cannot win it, and no votes cast in it make it the leader.
         let own_vote = self.holds_own_vote();
-        let request = Message::RequestVote {
-            log_leadership_term_id: self.log_term,
-            log_position: self.append_position,
-            candidate_term_id: self.candidate_term,
-            candidate_member_id: self.member_id(),
-            protocol_version: PROTOCOL_VERSION,
-        };
-        for index in 0..self.count {
-            let unsent = self.requested.get(index).is_some_and(|sent| !sent);
-            if own_vote && index != self.own && unsent && io.send(self.peer(index).id, &request) {
-                if let Some(sent) = self.requested.get_mut(index) {
-                    *sent = true;
-                }
-                work = 1;
-            }
-        }
         let timeout_passed =
             clock.now_ns.saturating_sub(self.state_since_ns) >= ELECTION_TIMEOUT_NS;
         // `decided_at_once` is the vectors' `unanimous`: every member heard voted for.
@@ -2306,6 +2291,27 @@ impl Consensus {
             &self.heard,
             timeout_passed,
         );
+        // The ballot is read before any request is sent. A candidate that has read a
+        // vote against goes back to canvass on this cycle, and a request it had not
+        // yet sent, one its publication refused before, would ask a member for its
+        // one vote in the term for a candidate that has already lost (ADR 0105).
+        let can_win = own_vote && !outcome.lost;
+        let request = Message::RequestVote {
+            log_leadership_term_id: self.log_term,
+            log_position: self.append_position,
+            candidate_term_id: self.candidate_term,
+            candidate_member_id: self.member_id(),
+            protocol_version: PROTOCOL_VERSION,
+        };
+        for index in 0..self.count {
+            let unsent = self.requested.get(index).is_some_and(|sent| !sent);
+            if can_win && index != self.own && unsent && io.send(self.peer(index).id, &request) {
+                if let Some(sent) = self.requested.get_mut(index) {
+                    *sent = true;
+                }
+                work = 1;
+            }
+        }
         if outcome.leader && own_vote {
             return self.lead_elected(clock, io);
         }
