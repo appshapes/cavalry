@@ -1496,9 +1496,6 @@ fn a_service_whose_image_was_withdrawn_unread_is_told_where_its_entries_stop() {
     service.close(driver);
 }
 
-/// The member's file of its log's recordings, read as a service reads it
-/// (`spec/cluster.md`, "The log's recordings"): the live recording's id and start, and
-/// the recordings below it, each as its id, its start and its stop.
 /// The member's log from position 0 to `end`, as a service reads it: from the
 /// recordings its file names, in their order, each from where the one before it left
 /// off, and then from its live recording (`spec/cluster.md`, "The log's recordings").
@@ -1527,6 +1524,9 @@ fn log_bytes(member: &Member, end: i64) -> Vec<u8> {
     bytes
 }
 
+/// The member's file of its log's recordings, read as a service reads it
+/// (`spec/cluster.md`, "The log's recordings"): the live recording's id and start, and
+/// the recordings below it, each as its id, its start and its stop.
 fn log_recordings(member: &Member) -> (i64, i64, Vec<(i64, i64, i64)>) {
     let id = member.module.member_id();
     let bytes = std::fs::read(member.dir.join(format!("{LOG_RECORDINGS_FILE_PREFIX}{id}")))
