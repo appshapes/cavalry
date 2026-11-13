@@ -363,7 +363,7 @@ def check_change() -> tuple[str, int]:
                  "LINT_DOCS_RANGE=origin/master...HEAD (changelog.d/README.md, \"When it does not work\")")
         if appended:
             find(f"change: CHANGELOG.md gained {appended} entry line(s) that are neither a fold's nor a "
-                 "correction's; a change's entry is a file of its own, changelog.d/<card>-<a few words>.md "
+                 "correction's; a change's entry is a file of its own, changelog.d/<work item>-<a few words>.md "
                  "(changelog.d/README.md, \"When it does not work\"; ADR 0075, ADR 0076)")
     for f in files:
         if not (f.startswith("docs/decisions/") and ADR_NAME.match(Path(f).name)):

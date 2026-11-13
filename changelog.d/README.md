@@ -7,9 +7,9 @@ it, whatever else they changed.
 
 ## To add an entry
 
-1. Create `changelog.d/<number>-<a few words>.md`. The number is the card's, or the
-   pull request's when the change has no card, so that two changes do not choose one
-   name; the words are lower-case letters, digits and hyphens:
+1. Create `changelog.d/<number>-<a few words>.md`. The number is the work item's, or
+   the pull request's when the change has no work item, so that two changes do not
+   choose one name; the words are lower-case letters, digits and hyphens:
    `255-changelog-entries-as-files.md`.
 2. Write in it what you would have appended under Unreleased, in the reader's words:
    a line that begins `- `, its continuation lines indented two spaces, and a link to
@@ -76,6 +76,6 @@ correct a line the fold has moved, land the fold, then correct the line in
   the entry reached this branch some other way than a commit or a merge on it. Fold
   on `master`, where the entry landed.
 - Two pull requests gave their files one name: the second to land conflicts. Rename
-  yours; the card's number or the pull request's makes the name its own.
+  yours; the work item's number or the pull request's makes the name its own.
 - A file whose name begins with a dot or ends with `~` is not read: an editor or a file
   manager left it.

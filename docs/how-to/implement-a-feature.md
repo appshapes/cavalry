@@ -1,16 +1,21 @@
-# Implement a feature, from card to commit
+# Implement a feature, from work item to commit
 
-A how-to page: one task, a feature from a Trello card to its commits on `master`, for a
-person with write access or for the agent. The rules are in `CLAUDE.md` and the gates
-enforce them; this page is the order of work. Why the first features are the ones they
+A how-to page: one task, a feature from a work item on the Brigade Board to its commits
+on `master`, for a person with write access or for the agent. The rules are in
+`CLAUDE.md` and the gates enforce them; this page is the order of work. Why the first features are the ones they
 are is [ADR 0007](../decisions/0007-build-ipc-pub-sub-first.md). The last section is a
 feature that followed this page, commit by commit.
 
 ## Prerequisites
 
-- A card on the Cavalry list of the AppShapes Trello board, one per feature.
-  `/next-task` says which feature is next and whether it has a card, and
-  `/trello-create` makes one. Its number prefixes every commit of the feature.
+- A work item on the team's Brigade Board, tagged `cavalry`, one per feature. A work
+  item is the board's unit of work, with a number, a title, a description and a list.
+  Cavalry's work moved there from Trello on 2026-11-13
+  ([ADR 0113](../decisions/0113-track-cavalrys-work-on-the-brigade-board-and-map-the-trello-cards-it-carried.md)).
+  `/next-task` says which feature is next and whether it has a work item.
+  `brigade work-item add --tag cavalry`, with the title, a blank line and the
+  description on stdin, makes one. Its number prefixes every commit of the feature.
+  `/work-item-start <number>` takes a work item through every step below.
 - The four gates pass on a clean `master`: `just lint`, `just test`, `just docs` and
   `just lint-docs`. `just docs` needs `mdbook` 0.5.4 (`brew install mdbook`), and the
   scripts need Python 3. The last line of `just lint-docs` ends with `ok`.
@@ -19,7 +24,7 @@ feature that followed this page, commit by commit.
 
 ## Steps
 
-1. **Write the card as the brief.** The title is the commit subject: imperative, under
+1. **Write the work item as the brief.** The title is the commit subject: imperative, under
    72 characters. The body says what changes, what done looks like, and which invariant
    it serves, by number. When the agent will do the work, the same text is the issue
    body of [Ask the agent to make a change](ask-the-agent.md); the agent reads nothing
@@ -90,21 +95,23 @@ feature that followed this page, commit by commit.
      well, `cargo check -p <crate> --target x86_64-unknown-freebsd`, since on Linux and
      macOS exactly one arm is live and an arm that is dead or doubled there shows only
      elsewhere.
-   - A person: `/commit <card>` runs the four gates, then `git add`, `git commit`,
+   - A person: `/commit <work item>` runs the four gates, then `git add`, `git commit`,
      `git pull --no-edit` and `git push` to `master`. The message is the review record.
-     Subject: `<card>: <Imperative subject>`. Body: what changed, which invariant by
+     Subject: `<work item>: <Imperative subject>`. Body: what changed, which invariant by
      number, and the evidence: the gate output, the ADR number, both histograms or the
      words `just bench` is not built yet. Merges only, never a rebase.
-   - The agent: open an issue with the card's title and body and label it `claude`;
+   - The agent: open an issue with the work item's title and body and label it `claude`;
      [Ask the agent to make a change](ask-the-agent.md) says what happens next.
-   - A Claude Code session on a branch: `/pr <card>` runs the four gates one command
+   - A Claude Code session on a branch: `/pr <work item>` runs the four gates one command
      at a time, commits, merges `master` in, pushes and opens the pull request with the
      review record as its body and the `auto-merge` label, then follows the review
      loop from the author's side; `/pr watch <number>` follows one that is open. The
      pull request's title and body become the commit on `master`.
    - When the feature's last commit is on `master`, comment the commit hashes on the
-     card and archive it, and run `just tidy`: it retires every branch whose pull
-     request merged, locally and on origin, with its worktree; `just tidy <branch>`
+     work item (`brigade work-item comment <number>`, the text on stdin) and move it to
+     Done (`brigade work-item move <number> done`). Do not close it: a finished work
+     item stays in Done, and closing it is the owner's word. Then run `just tidy`: it
+     retires every branch whose pull request merged, locally and on origin, with its worktree; `just tidy <branch>`
      retires a working branch that never needed a pull request. It matches a merged
      pull request to what is here by the head's name, and by the upstream of a local
      branch that was pushed under another name, `git push -u origin <local>:<head>`.
@@ -120,7 +127,7 @@ feature that followed this page, commit by commit.
 
 ## How to verify it worked
 
-- `git log --oneline --grep '^<card>:' origin/master` lists the feature's commits,
+- `git log --oneline --grep '^<work item>:' origin/master` lists the feature's commits,
   each with the prefix.
 - `gh run list --branch master --workflow ci --commit <full sha>` shows the `ci` run
   green, with `gates (linux)` and `gates (macos)` both passed. `gates (macos)` runs for
@@ -134,12 +141,13 @@ feature that followed this page, commit by commit.
   --workflow ci --limit 5` it is the oldest run newer than yours that does not read
   `cancelled`. Its commit is later on `master`, so its tree holds yours. When it is
   green with both gates passed, `master` is green with your change in it, and that is
-  the proof for this step. Name that run on the card with the commits it covers,
+  the proof for this step. Name that run on the work item with the commits it covers,
   because a run that did not happen has no link.
 - `just docs`, then open `target/book/index.html`: the new ADR and pages are in the
   book.
-- The card is archived with the commit hashes in its last comment, and, for a commit
-  whose own run was replaced, the run that covered it.
+- `brigade work-item show <number>` shows the work item in Done, with the commit hashes
+  in its last comment and, for a commit whose own run was replaced, the run that
+  covered it.
 
 ## When it does not work
 
@@ -159,11 +167,12 @@ feature that followed this page, commit by commit.
 
 ## The worked example
 
-Card 80, "Adopt Aeron's data frame header", is the first feature that followed this
-page. It was chosen because it is the smallest spec-first change in the first slice
-(ADR 0007). `git log --oneline --grep '^80:'` lists its commits.
+Trello card 80, "Adopt Aeron's data frame header", is the first feature that followed
+this page. A feature was a Trello card then; it is a work item now (ADR 0113). It was
+chosen because it is the smallest spec-first change in the first slice (ADR 0007).
+`git log --oneline --grep '^80:'` lists its commits.
 
-| Step | What card 80 produced | Commit |
+| Step | What Trello card 80 produced | Commit |
 | --- | --- | --- |
 | 1 | The card: the title as the commit subject, what changes, what done looks like, invariants 1, 2 and 6. | |
 | 2 | [`spec/frame.md`](../../spec/frame.md), [`spec/vectors/frame.py`](../../spec/vectors/frame.py) and the 18 vectors it writes, [`docs/reference/frame.md`](../reference/frame.md) and its line in the summary, four glossary rows, [ADR 0008](../decisions/0008-adopt-aeron-data-frame-header.md) for the layout, [ADR 0009](../decisions/0009-read-wire-structs-with-zerocopy.md) for the dependency, two changelog lines. The first spec page also wrote [`spec/README.md`](../../spec/README.md), once. | `d3651ec` |

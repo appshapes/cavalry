@@ -290,9 +290,9 @@ condition of ADR 0061.
 
 ## How this page stays true
 
-The card that closes an item of "The roadmap" marks the item done on this page in the
-same commit, with the date and what was found, as the card that lands a slice's last
-feature edits the README's status paragraph. The sections above "The roadmap" stay the
+The work item that closes an item of "The roadmap" marks the item done on this page in
+the same commit, with the date and what was found, as the work item that lands a slice's
+last feature edits the README's status paragraph. The sections above "The roadmap" stay the
 reading at the commit the first paragraph names; they are read again, and the date and
 the commit moved, when a slice ends. When 0.1.0 is published and the six conditions
 hold, ADR 0061's Revisit fires, and this page becomes the survey for the slice after

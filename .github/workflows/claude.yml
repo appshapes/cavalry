@@ -403,11 +403,12 @@ jobs:
             echo "::error::Branch existence check failed (not a 404); leaving the issue open for retry: $resp"
             exit 1
           fi
-          # The title is the issue's title, as written: `<card>: <Imperative subject>` when the
-          # issue names its Trello card, an imperative subject otherwise (the commit rule in
-          # CLAUDE.md and .claude/skills/commit). The squash merge takes its subject from this
-          # title because squash_merge_commit_title=PR_TITLE is set on the repository (ADR
-          # 0004). No prefix is invented here: a card the issue did not name is not known.
+          # The title is the issue's title, as written: `<work item>: <Imperative subject>`
+          # when the issue names its work item of the Brigade Board (ADR 0113), an imperative
+          # subject otherwise (the commit rule in CLAUDE.md and .claude/skills/commit). The
+          # squash merge takes its subject from this title because
+          # squash_merge_commit_title=PR_TITLE is set on the repository (ADR 0004). No prefix
+          # is invented here: a work item the issue did not name is not known.
           #
           # The body is the review record, built from the branch's commit messages, because
           # squash_merge_commit_message=PR_BODY makes it the commit message on master. One
