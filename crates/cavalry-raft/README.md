@@ -226,11 +226,6 @@ commit path runs per message.
   double and allocates; its consensus stream holds at most 4,096 messages in flight and
   loses, and counts, one sent while it is full, and a leader's log publication and each
   member's log hold every entry appended or received for the cluster's life.
-- Not built yet: `cavalry doctor` has no finding for `cluster.log_recordings_unwritten`,
-  the count of a member's duty cycles that could not write its file of the log's
-  recordings. The counter's own sentence, with what to do, is in
-  `docs/reference/counters.md`, and `cavalry run` prints the member's error and gives
-  the member up after 10 s of such cycles, so the failure is not silent.
 - Is held to gate 3's faults over real drivers, by three tests beside the ones in
   memory (ADR 0111). `tests/cluster.rs` stops the leader's driver: the two that remain elect
   another and commit. `tests/partition.rs` sends every datagram between the members
