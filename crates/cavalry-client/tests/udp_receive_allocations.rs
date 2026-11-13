@@ -13,7 +13,7 @@ use std::alloc::System;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
-use cavalry_client::{Cavalry, DataFrameHeader, Offer, Publication, Subscription};
+use cavalry_client::{Action, Cavalry, DataFrameHeader, Offer, Publication, Subscription};
 use cavalry_driver::Driver;
 use stats_alloc::{INSTRUMENTED_SYSTEM, Region, StatsAlloc};
 
@@ -87,26 +87,64 @@ fn offer(publication: &mut Publication, message: &[u8]) {
     }
 }
 
-/// Polls until `count` messages of this round have arrived, in order from `first`:
-/// with `Subscription::poll`, or, when `session` names the image, with the bounded
-/// poll of that image under the largest limit (ADR 0066). Nothing here allocates.
-fn drain(subscription: &mut Subscription, first: u64, count: u64, session: Option<i32>) {
+/// How a round is read.
+#[derive(Clone, Copy)]
+enum Read {
+    /// `Subscription::poll`.
+    Plain,
+    /// The bounded poll of the image of this session, under the largest limit (ADR
+    /// 0066).
+    Bounded(i32),
+    /// The controlled poll, whose handler aborts every message the first time it is
+    /// handed it and takes it the second, breaking after every other one (ADR 0114).
+    Controlled,
+}
+
+/// Polls until `count` messages of this round have arrived, in order from `first`, as
+/// `read` says. Nothing here allocates.
+fn drain(subscription: &mut Subscription, first: u64, count: u64, read: Read) {
     let deadline = Instant::now() + DEADLINE;
     let mut next = first;
     let end = first + count;
+    // The message the controlled handler aborted last: handed over again, it is taken.
+    let mut aborted = None;
     while next < end {
-        let handler = |body: &[u8], _: &DataFrameHeader| {
+        let mut take = |body: &[u8]| {
             let mut sequence = [0u8; 8];
             sequence.copy_from_slice(&body[..8]);
             assert_eq!(u64::from_le_bytes(sequence), next);
             next += 1;
         };
-        let delivered = match session {
-            None => subscription.poll(handler, 64),
-            Some(session) => subscription.bounded_poll(session, handler, i64::MAX, 64),
+        let delivered = match read {
+            Read::Plain => subscription.poll(|body: &[u8], _: &DataFrameHeader| take(body), 64),
+            Read::Bounded(session) => subscription.bounded_poll(
+                session,
+                |body: &[u8], _: &DataFrameHeader| take(body),
+                i64::MAX,
+                64,
+            ),
+            Read::Controlled => subscription.controlled_poll(
+                |body: &[u8], _: &DataFrameHeader| {
+                    let mut sequence = [0u8; 8];
+                    sequence.copy_from_slice(&body[..8]);
+                    let sequence = u64::from_le_bytes(sequence);
+                    if aborted != Some(sequence) {
+                        aborted = Some(sequence);
+                        return Action::Abort;
+                    }
+                    take(body);
+                    if sequence % 2 == 0 {
+                        Action::Break
+                    } else {
+                        Action::Continue
+                    }
+                },
+                64,
+            ),
         }
         .expect("the poll reads");
         if delivered == 0 {
+            // Nothing had arrived, or the controlled handler aborted what had.
             assert!(
                 Instant::now() < deadline,
                 "the stream stopped at {next} of {end}"
@@ -143,14 +181,15 @@ fn the_receive_path_allocates_nothing_per_message() {
         message[..8].copy_from_slice(&i.to_le_bytes());
         offer(&mut publication, &message);
     }
-    drain(&mut subscription, 0, MESSAGES_PER_ROUND, None);
+    drain(&mut subscription, 0, MESSAGES_PER_ROUND, Read::Plain);
     let session = subscription.images()[0].session_id();
     std::thread::sleep(Duration::from_millis(1200));
 
     // Ten rounds of a thousand, each drained before the next; nothing in the region
     // allocates or grows a buffer: not the publisher, not the conductor, not the
     // sender's bursts, not the receiver's polls, inserts, scans and status messages,
-    // and not the subscriber, which reads every other round with the bounded poll.
+    // and not the subscriber, which reads the rounds in turn with the plain poll, the
+    // bounded poll and the controlled poll.
     let region = Region::new(GLOBAL);
     let mut sequence = MESSAGES_PER_ROUND;
     for round in 0..ROUNDS {
@@ -164,7 +203,11 @@ fn the_receive_path_allocates_nothing_per_message() {
             &mut subscription,
             sequence - MESSAGES_PER_ROUND,
             MESSAGES_PER_ROUND,
-            (round % 2 == 1).then_some(session),
+            match round % 3 {
+                0 => Read::Plain,
+                1 => Read::Bounded(session),
+                _ => Read::Controlled,
+            },
         );
     }
     std::thread::sleep(Duration::from_millis(250));

@@ -17,7 +17,7 @@ pub use cavalry_proto::client_protocol::{
 };
 pub use cavalry_proto::cluster::SERVICE_LOG_STREAM_ID;
 pub use cavalry_proto::frame::{DataFrameHeader, Flags, FrameType};
-pub use cavalry_shm::log::{BufferClaim, Positions};
+pub use cavalry_shm::log::{Action, BufferClaim, Positions};
 pub use client::{Cavalry, DIR_ENV};
 pub use committed_log::CommittedLog;
 pub use counter::Counter;

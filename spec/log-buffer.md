@@ -192,6 +192,21 @@ limit never moves the position back. In Aeron, this is `Image.boundedPoll`. The 
 service reads its log so, bounded by the commit position (`spec/cluster.md`, "The
 service"; ADR 0066).
 
+A read may be controlled by its handler, which answers for each data frame it is
+given: continue, break or abort. After continue the read goes on. After break the
+frame is taken and the read ends, with the position after the frame. After abort the
+frame is not taken: the read ends with the position at the frame's first byte, and
+the next read gives the same frame to its handler, so a handler acts on a frame only
+once it has decided to take it. A padding frame below a frame that is not taken is
+passed, and a limit position bounds a controlled read as it bounds any other. The
+position is stored after the read, as after a batch, and never moves back. A
+subscriber that reads several images ends the read of one image at a break or an
+abort and goes on to the next. In Aeron, this is `Image.controlledPoll` with a
+`ControlledFragmentHandler`, whose `COMMIT` action is not in this version. The
+leader of a cluster reads its ingress stream so, and leaves a session message it
+cannot append yet unread, so that the log's back pressure reaches the client
+(`spec/cluster.md`, "Sessions"; ADR 0114).
+
 ## The receiver
 
 An image, type 2, is the log the driver's receiver rebuilds from a stream that arrives
