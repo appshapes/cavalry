@@ -8,3 +8,11 @@
   `max-position-exceeded` or `too-long`, and the next step for each, where the
   message was a driver error with none
   ([Run a cluster of three members](docs/how-to/run-a-cluster.md#when-it-does-not-work)).
+- A cluster member no longer holds its duty cycle's thread while it waits for a
+  recording to stop, which it did for up to 1 s each time it left the log, gave up
+  the lead or ended a catch-up. The cycle that asks the stop returns at once, the
+  member stays where it is, and a later cycle reads where the recording stopped. A
+  member in init now leaves the consensus messages that arrive on the stream and
+  acts on them once it has left init, where before it read and dropped them with no
+  count. `Io::leave_log`, `Io::remove_log` and `Io::remove_catchup` return whether
+  they are done ([`cavalry-raft`'s README](crates/cavalry-raft/README.md)).
