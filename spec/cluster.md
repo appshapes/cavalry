@@ -916,14 +916,14 @@ leader gives no id twice (ADR 0115, ADR 0116). A message of the ingress stream i
 frame in this version, as an entry of the log is: a session message carries at most
 1,344 bytes of payload after its header. No member reassembles, and no leader
 appends an entry of more than one frame: a session message whose payload is longer
-than 1,344 bytes, whether it arrives whole, from a sender whose MTU length is above
-1,408 bytes, or as a fragment, is counted in `cluster.messages_rejected`, is taken
-from the ingress image, and nothing of it is acted on, by a leader or by any other
-member: it is not appended, and it is its session's activity no more than a message
-that was ignored. A member reads its ingress stream so that a message it cannot
-take yet stays unread (`spec/log-buffer.md`, "Reading", the controlled read), and
-until that message is taken it reads no message of another client's image. Every
-refusal is
+than 1,344 bytes, whether it arrives whole in one frame, which a sender whose MTU
+length is above 1,408 bytes delivers, or as a fragment, is counted in
+`cluster.messages_rejected`. Every member takes it from its ingress image, so that
+it holds back no other client's message, and acts on nothing of it: it is not
+appended, and it is its session's activity no more than a message that was ignored.
+A member reads its ingress stream so that a message it cannot take yet stays unread
+(`spec/log-buffer.md`, "Reading", the controlled read), and until that message is
+taken it reads no message of another client's image. Every refusal is
 counted in `cluster.sessions_refused`. A redirect or a refusal is answered on an egress
 publication to the connect's response channel on stream 102, the one egress stream of
 this version, whatever response stream id the connect named; the member holds the

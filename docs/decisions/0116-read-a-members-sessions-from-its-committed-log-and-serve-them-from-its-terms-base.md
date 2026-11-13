@@ -91,14 +91,15 @@ says. An image that goes while its message is held holds nothing any more.
 
 A message of the ingress stream is one frame, as an entry of the log is (ADR 0066):
 a session message carries at most 1,344 bytes of payload. The module reassembles
-nothing, and counts a fragment in `cluster.messages_rejected`. A session message
-with a longer payload that arrives whole, in one frame of a sender whose MTU is
-longer, is rejected there too, on every member and before anything else is done
-with it: it is never appended, never its session's activity, and never left unread,
-where it would hold every other client's message behind it. The log's append
-refuses an entry longer than one frame as a fault, and never as back pressure,
-which waiting would not end. An entry of its own log that is a fragment, that does
-not parse, or that the table cannot hold is counted there too.
+nothing. It counts in `cluster.messages_rejected` a fragment, and a session message
+whose payload is longer than 1,344 bytes and that arrives whole in one frame, which
+a sender with a longer MTU delivers. Every member checks that length before it acts
+on the message in any other way. It takes such a message from its ingress image, so
+that the message holds no other client's message, and appends nothing of it: the
+message is never its session's activity. The log's append refuses an entry longer
+than one frame as a fault, and never as back pressure, which waiting would not end.
+An entry of its own log that is a fragment, that does not parse, or that the table
+cannot hold is counted there too.
 
 An egress publication is an exclusive publication on the client's response channel,
 one for each of the 20 slots `Sessions` names. The driver's refusal of the channel
