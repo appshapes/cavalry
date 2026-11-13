@@ -1038,7 +1038,12 @@ fn a_service_reads_the_committed_log_on_every_member_and_nothing_past_the_commit
         reads.iter().all(|read| read.len() == FIRST as usize + 1)
     });
     for (index, read) in reads.iter().enumerate() {
-        assert_eq!(read, &reads[0], "member {index}'s service");
+        // A place is not an id once the leader is put first: name the member.
+        let member = members[index].module.member_id();
+        assert_eq!(
+            read, &reads[0],
+            "member {member}'s service, in place {index}"
+        );
         assert_eq!(logs[index].position(), first_end);
     }
     for (index, (position, entry)) in reads[0].iter().enumerate() {

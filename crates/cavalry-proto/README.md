@@ -24,8 +24,10 @@ Wire types, zero-copy frames and version negotiation. Data plane.
   `cavalry:udp?control=<host>:<port>|control-mode=manual` of multi-destination cast,
   each with `fc=max|min` on a publication's channel (ADR 0053), the position keys
   `init-term-id`, `term-id` and `term-offset` that create one at a position (ADR
-  0059), and `ssc=true|false`, by which a live recording connects one that no receiver
-  answers (ADR 0098), in `channel`, borrowing from the string, with each refusal named
+  0059), `ssc=true|false`, by which a live recording connects one that no receiver
+  answers (ADR 0098), and `term-length=<length>`, the term length of its log, a power
+  of two from 65536 to 67108864 in bytes or with `k`, `m` or `g`, in which the position
+  keys count (ADR 0099), in `channel`, borrowing from the string, with each refusal named
   and every refusal error code 1;
   resolving the host is the driver's.
 - Is the one place bytes are shuffled by hand. Every other crate uses its types. A
@@ -61,7 +63,9 @@ Wire types, zero-copy frames and version negotiation. Data plane.
   log for its service, `spec/cluster.md`, "The log's recordings": `LogRecordings::read`
   with the spec's seven checks in the spec's order, `recording_at`, the recording a
   position is read from, and `write_log_recordings`, which writes nothing a reader
-  would refuse, into the caller's buffer, at most 1,025 entries (ADR 0103).
+  would refuse, into the caller's buffer, at most 1,025 entries (ADR 0103). A check
+  that fails says what a reader does next; `LogRecordingsError::found` is what it
+  found alone, for a writer, whose refused entries are its own.
 
 In Aeron, this is the transport protocol specification and its frame layouts
 ([glossary](../../docs/glossary.md)).
