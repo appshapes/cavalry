@@ -189,7 +189,22 @@ allocated, for a session message or its reply.
   `test::run_tests::get_timed_out_tests` and the line it prints when a test has run
   for 60 s, and none in Cavalry: the same 5,040 entries in 12 rounds counted none.
   The test now runs for less than 60 s, and says why.
-- CLUSTER_EVIDENCE
+- `crates/cavalry-raft/tests/cluster_service.rs`: three members over three drivers
+  on the loopback with a `ClusterService` beside each, in one thread, and a client's
+  `ClusterSession` on a fourth driver, in the test's. Nothing of the protocol is
+  written by hand. Every service answers a session message with its member's id
+  and the message, so a reply says which service sent it. Each member has added its
+  term and its append position before its recording's id. The client's first message
+  is taken by all three services at one position, with one term and one time; the
+  leader's service is answered `Sent` and the two others `NotAnswering`; the client
+  reads one reply, the leader's, with the entry's time, and no second in 300 ms. The
+  leader is lost, with its service and its driver. The session follows the member
+  that leads next, and its next message is answered by that member's service alone,
+  once. That service stops and another starts beside the same member: it takes both
+  messages again, from position 0, and is answered `NotAnswering` for each, the first
+  being of an older term and the second below the member's append position when the
+  service opened; the client reads nothing. The third message it answers, once.
+  `cluster.replies_dropped` reads 0 beside both members. SERIES
 - Aeron's source named in Context.
 
 ## Consequences
