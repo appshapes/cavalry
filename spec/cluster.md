@@ -909,9 +909,9 @@ position 0 when it starts. A leader serves sessions, which is to accept a connec
 append a session's message and send the new leader event, from when its election
 has closed and that read has reached its term base log position: every session the
 terms before it opened, and every session id they gave, is then in its table, and it
-gives no id twice. A session open event of the term before that it reads after
-that, committed with its own term's first entry, it takes up as a leader that did
-not write it (ADR 0116). A message of the ingress stream is one frame in this
+gives no id twice, and it reads no entry of a term before its own from then on,
+since each is below its term base log position (ADR 0116). A message of the ingress
+stream is one frame in this
 version, as an entry of the log is: a session message carries at most 1,344 bytes of
 payload after its header. No member reassembles: a fragment of a longer message is
 counted in `cluster.messages_rejected` and nothing of the message is acted on. A

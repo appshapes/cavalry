@@ -62,9 +62,12 @@ commit position is ever in it.
 A leader serves sessions from when its election has closed and its read has reached
 its term base log position. To serve is to accept a connect, append a session's
 message and send the new leader event. Before that the member's table may lack a
-session, or a session id, that the terms before it gave: the span of its log between
-the last commit position it knew and its term's base is committed only with its own
-term's first entry, which is after its election closes. Until it serves, a connect
+session, or a session id, that the terms before it gave. The span of its log between
+the last commit position it knew and its term's base is committed once a quorum has
+recorded its term, when its election closes (`spec/cluster.md`, "The commit
+position"), and its read of that span, through its driver's replayer, ends some duty
+cycles later. From then on it reads no entry of a term before its own: every one is
+below its term's base. Until it serves, a connect
 stays unread on its ingress image, as ADR 0115 says of a member whose election runs,
 and what a client sends for a session is ignored: a client sends with the new term
 only once it has the new leader event.
@@ -150,8 +153,8 @@ Harder: each member holds one replay of its own log for as long as it runs, of t
 driver's 64, and each service on that driver reads past it; the ok event, a
 session's opening and a new leader's serving each wait for the member's own read of
 an entry it has committed, a round through its driver's replayer; a leader does not
-serve sessions between the close of its election and the commit of its term's first
-entry; a member that starts reads its whole log before its table is whole, and
+serve sessions between the close of its election and the cycle its read reaches its
+term's base; a member that starts reads its whole log before its table is whole, and
 serves no session until then.
 
 Revisit: when a service's reads are measured beside a member whose module reads the
