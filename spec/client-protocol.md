@@ -80,6 +80,7 @@ otherwise, where `<tmp>` is the system's temporary directory (`/tmp` on macOS) a
 | `broadcast-buffer` | `spec/broadcast-buffer.md` | when the driver starts, last |
 | `publications/<registration id>.logbuffer` | `spec/log-buffer.md` | when a publication is added, named by the publication's registration id; when a replay starts, named by the replay session id |
 | `images/<registration id>.logbuffer` | `spec/log-buffer.md`, type 2 | when a setup frame creates an image over UDP (`spec/udp.md`, "The receiver"), named by the image's own registration id, taken from the correlation id counter as a publication's is |
+| `log-recordings-<member id>` | `spec/cluster.md`, "The log's recordings" | by a cluster member's consensus module, a client of the driver and not the driver, each time the member names a recording of its log, written as `log-recordings-<member id>.tmp` and renamed; the driver neither reads nor writes it, and removes it with the rest when it starts (ADR 0103) |
 
 A driver holds the directory by an exclusive advisory lock of the operating system on
 the directory itself, from before it reads or changes anything in it until it stops.
@@ -109,7 +110,10 @@ then treats the file as a dead driver's.
 
 The starter then writes its pid in `pid`, removes everything else in the directory and
 creates its files, each with create-new semantics. A driver of this version never
-removes a file whose creator is alive: a creator that is alive holds the lock. A
+removes a file whose creator is alive: a creator that is alive holds the lock. The
+one file a client creates in the directory, a cluster member's
+`log-recordings-<member id>`, is removed with the rest: its member is a client of
+the driver that is gone, and writes the file again beside the next. A
 driver that stops stores −1 in the consumer heartbeat, lets go of the lock and leaves
 the directory in place, so that `doctor` can read the counters of a driver that has
 gone; the next driver removes them. A driver of an earlier version that starts in the

@@ -61,6 +61,11 @@ Wire types, zero-copy frames and version negotiation. Data plane.
   id given to any of them is the highest term in the member's record of recorded
   terms, not the term of its last entry. What a member does with a message is
   `cavalry-raft`'s.
+- Reads and writes the file in which a cluster member lists the recordings of its
+  log for its service, `spec/cluster.md`, "The log's recordings": `LogRecordings::read`
+  with the spec's seven checks in the spec's order, `recording_at`, the recording a
+  position is read from, and `write_log_recordings`, which writes nothing a reader
+  would refuse, into the caller's buffer, at most 1,025 entries (ADR 0103).
 
 In Aeron, this is the transport protocol specification and its frame layouts
 ([glossary](../../docs/glossary.md)).

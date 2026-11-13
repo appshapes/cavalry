@@ -197,6 +197,17 @@ commit path runs per message.
   double and allocates; its consensus stream holds at most 4,096 messages in flight and
   loses, and counts, one sent while it is full, and a leader's log publication and each
   member's log hold every entry appended or received for the cluster's life.
+- Not built yet, the two changes that follow ADR 0103's file: the member's write of
+  `log-recordings-<member id>` in its driver directory, and the service's read below
+  the member's live recording. `spec/cluster.md`, "The service" and "The log's
+  recordings", say what both do. Until they land a member writes no such file, and a
+  service whose position is below the recording its member names is refused with
+  error code 23, as before. Four more sentences of the page wait for the member's
+  write: a member does not yet wait for `cluster.log_recording_id` to hold −1
+  before it truncates ("Messages during an election"); it does not store −1 there
+  when the file cannot be written; `cluster.log_recordings_unwritten`, the count
+  of such a cycle, is not registered yet; and no member removes a file at its
+  close, after it has stored −1 there.
 - To come, each with its card: the C ABI's calls for a service, so that a service is
   a program in any of the five client languages (card 227), the election and mixed
   versions in a rolling upgrade (card 228), the cluster client (card 229), snapshots

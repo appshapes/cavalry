@@ -155,3 +155,4 @@ under `docs/` is listed here; `just lint-docs` fails on one that is not.
 - [0099. Let a cavalry:udp publication's channel name its term length](decisions/0099-let-a-cavalry-udp-publications-channel-name-its-term-length.md)
 - [0105. Lose a ballot at its first vote against](decisions/0105-lose-a-ballot-at-its-first-vote-against.md)
 - [0106. Canvass with no reports after a replication](decisions/0106-canvass-with-no-reports-after-a-replication.md)
+- [0103. List the recordings of a member's log in its driver directory, for a service to read in order](decisions/0103-list-the-recordings-of-a-members-log-in-its-driver-directory-for-a-service-to-read-in-order.md)

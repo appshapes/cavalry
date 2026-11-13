@@ -4592,6 +4592,422 @@
       "fields": {
         "closes": false
       }
+    },
+    {
+      "kind": "log recordings",
+      "name": "log-recordings-none-below",
+      "member": 1,
+      "bytes": "43564c594c5245430000000001000000000000000000000000000000000000000000000000000000",
+      "fields": {
+        "member_id": 1,
+        "live_recording_id": 0,
+        "live_start_position": 0,
+        "entries": []
+      },
+      "reads": [
+        {
+          "position": 0,
+          "recording_id": 0
+        },
+        {
+          "position": 96,
+          "recording_id": 0
+        }
+      ]
+    },
+    {
+      "kind": "log recordings",
+      "name": "log-recordings-joined-again",
+      "member": 1,
+      "bytes": "43564c594c5245430000000001000000030000000000000020040000000000000100000000000000000000000000000000000000000000002004000000000000",
+      "fields": {
+        "member_id": 1,
+        "live_recording_id": 3,
+        "live_start_position": 1056,
+        "entries": [
+          {
+            "recording_id": 0,
+            "start_position": 0,
+            "stop_position": 1056
+          }
+        ]
+      },
+      "reads": [
+        {
+          "position": 0,
+          "recording_id": 0
+        },
+        {
+          "position": 1024,
+          "recording_id": 0
+        },
+        {
+          "position": 1056,
+          "recording_id": 3
+        },
+        {
+          "position": 4096,
+          "recording_id": 3
+        }
+      ]
+    },
+    {
+      "kind": "log recordings",
+      "name": "log-recordings-catch-up-overlaps-the-live-recording",
+      "member": 2,
+      "bytes": "43564c594c52454300000000020000000500000000000000c0000000000000000200000000000000020000000000000000000000000000006000000000000000040000000000000060000000000000002001000000000000",
+      "fields": {
+        "member_id": 2,
+        "live_recording_id": 5,
+        "live_start_position": 192,
+        "entries": [
+          {
+            "recording_id": 2,
+            "start_position": 0,
+            "stop_position": 96
+          },
+          {
+            "recording_id": 4,
+            "start_position": 96,
+            "stop_position": 288
+          }
+        ]
+      },
+      "reads": [
+        {
+          "position": 0,
+          "recording_id": 2
+        },
+        {
+          "position": 64,
+          "recording_id": 2
+        },
+        {
+          "position": 96,
+          "recording_id": 4
+        },
+        {
+          "position": 192,
+          "recording_id": 4
+        },
+        {
+          "position": 256,
+          "recording_id": 4
+        },
+        {
+          "position": 288,
+          "recording_id": 5
+        },
+        {
+          "position": 320,
+          "recording_id": 5
+        }
+      ]
+    },
+    {
+      "kind": "log recordings",
+      "name": "log-recordings-one-inside-another",
+      "member": 0,
+      "bytes": "43564c594c524543000000000000000003000000000000004001000000000000020000000000000001000000000000000000000000000000400100000000000002000000000000006000000000000000c000000000000000",
+      "fields": {
+        "member_id": 0,
+        "live_recording_id": 3,
+        "live_start_position": 320,
+        "entries": [
+          {
+            "recording_id": 1,
+            "start_position": 0,
+            "stop_position": 320
+          },
+          {
+            "recording_id": 2,
+            "start_position": 96,
+            "stop_position": 192
+          }
+        ]
+      },
+      "reads": [
+        {
+          "position": 0,
+          "recording_id": 1
+        },
+        {
+          "position": 96,
+          "recording_id": 1
+        },
+        {
+          "position": 160,
+          "recording_id": 1
+        },
+        {
+          "position": 192,
+          "recording_id": 1
+        },
+        {
+          "position": 320,
+          "recording_id": 3
+        }
+      ]
+    },
+    {
+      "kind": "log recordings",
+      "name": "log-recordings-two-begin-together",
+      "member": 0,
+      "bytes": "43564c594c5245430000000000000000060000000000000000010000000000000200000000000000040000000000000000000000000000006000000000000000050000000000000000000000000000000001000000000000",
+      "fields": {
+        "member_id": 0,
+        "live_recording_id": 6,
+        "live_start_position": 256,
+        "entries": [
+          {
+            "recording_id": 4,
+            "start_position": 0,
+            "stop_position": 96
+          },
+          {
+            "recording_id": 5,
+            "start_position": 0,
+            "stop_position": 256
+          }
+        ]
+      },
+      "reads": [
+        {
+          "position": 0,
+          "recording_id": 4
+        },
+        {
+          "position": 64,
+          "recording_id": 4
+        },
+        {
+          "position": 96,
+          "recording_id": 5
+        },
+        {
+          "position": 224,
+          "recording_id": 5
+        },
+        {
+          "position": 256,
+          "recording_id": 6
+        }
+      ]
+    },
+    {
+      "kind": "log recordings",
+      "name": "log-recordings-forgotten-below",
+      "member": 0,
+      "bytes": "43564c594c5245430000000000000000090000000000000000200000000000000100000000000000070000000000000000100000000000000020000000000000",
+      "fields": {
+        "member_id": 0,
+        "live_recording_id": 9,
+        "live_start_position": 8192,
+        "entries": [
+          {
+            "recording_id": 7,
+            "start_position": 4096,
+            "stop_position": 8192
+          }
+        ]
+      },
+      "reads": [
+        {
+          "position": 0,
+          "recording_id": 9
+        },
+        {
+          "position": 4064,
+          "recording_id": 9
+        },
+        {
+          "position": 4096,
+          "recording_id": 7
+        },
+        {
+          "position": 8160,
+          "recording_id": 7
+        },
+        {
+          "position": 8192,
+          "recording_id": 9
+        }
+      ]
+    },
+    {
+      "kind": "log recordings",
+      "name": "log-recordings-too-short",
+      "member": 1,
+      "bytes": "43564c594c52454300000000010000000000000000000000000000000000000000000000000000",
+      "error": "recordings-too-short"
+    },
+    {
+      "kind": "log recordings",
+      "name": "log-recordings-empty",
+      "member": 1,
+      "bytes": "",
+      "error": "recordings-too-short"
+    },
+    {
+      "kind": "log recordings",
+      "name": "log-recordings-magic",
+      "member": 1,
+      "bytes": "43564c595445524d0000000001000000000000000000000000000000000000000000000000000000",
+      "error": "recordings-magic"
+    },
+    {
+      "kind": "log recordings",
+      "name": "log-recordings-magic-before-version",
+      "member": 1,
+      "bytes": "00000000000000000100000001000000000000000000000000000000000000000000000000000000",
+      "error": "recordings-magic"
+    },
+    {
+      "kind": "log recordings",
+      "name": "log-recordings-version",
+      "member": 1,
+      "bytes": "43564c594c5245430100000001000000000000000000000000000000000000000000000000000000",
+      "error": "recordings-version"
+    },
+    {
+      "kind": "log recordings",
+      "name": "log-recordings-version-before-member",
+      "member": 1,
+      "bytes": "43564c594c524543ffffffff02000000000000000000000000000000000000000000000000000000",
+      "error": "recordings-version"
+    },
+    {
+      "kind": "log recordings",
+      "name": "log-recordings-member-of-another-name",
+      "member": 1,
+      "bytes": "43564c594c5245430000000002000000000000000000000000000000000000000000000000000000",
+      "error": "recordings-member"
+    },
+    {
+      "kind": "log recordings",
+      "name": "log-recordings-member-below-zero",
+      "member": -1,
+      "bytes": "43564c594c52454300000000ffffffff000000000000000000000000000000000000000000000000",
+      "error": "recordings-member"
+    },
+    {
+      "kind": "log recordings",
+      "name": "log-recordings-member-before-length",
+      "member": 1,
+      "bytes": "43564c594c5245430000000002000000000000000000000000000000000000000700000000000000",
+      "error": "recordings-member"
+    },
+    {
+      "kind": "log recordings",
+      "name": "log-recordings-count-below-zero",
+      "member": 1,
+      "bytes": "43564c594c524543000000000100000000000000000000000000000000000000ffffffff00000000",
+      "error": "recordings-length"
+    },
+    {
+      "kind": "log recordings",
+      "name": "log-recordings-count-above-the-most",
+      "member": 1,
+      "bytes": "43564c594c5245430000000001000000000000000000000000000000000000000204000000000000",
+      "error": "recordings-length"
+    },
+    {
+      "kind": "log recordings",
+      "name": "log-recordings-fewer-entries-than-counted",
+      "member": 1,
+      "bytes": "43564c594c5245430000000001000000030000000000000060000000000000000200000000000000000000000000000000000000000000006000000000000000",
+      "error": "recordings-length"
+    },
+    {
+      "kind": "log recordings",
+      "name": "log-recordings-bytes-after-the-last-entry",
+      "member": 1,
+      "bytes": "43564c594c524543000000000100000003000000000000006000000000000000010000000000000000000000000000000000000000000000600000000000000000",
+      "error": "recordings-length"
+    },
+    {
+      "kind": "log recordings",
+      "name": "log-recordings-length-before-live",
+      "member": 1,
+      "bytes": "43564c594c5245430000000001000000ffffffffffffffff00000000000000000100000000000000",
+      "error": "recordings-length"
+    },
+    {
+      "kind": "log recordings",
+      "name": "log-recordings-live-id-below-zero",
+      "member": 1,
+      "bytes": "43564c594c5245430000000001000000ffffffffffffffff00000000000000000000000000000000",
+      "error": "recordings-live"
+    },
+    {
+      "kind": "log recordings",
+      "name": "log-recordings-live-start-below-zero",
+      "member": 1,
+      "bytes": "43564c594c52454300000000010000000000000000000000e0ffffffffffffff0000000000000000",
+      "error": "recordings-live"
+    },
+    {
+      "kind": "log recordings",
+      "name": "log-recordings-live-start-not-a-multiple-of-32",
+      "member": 1,
+      "bytes": "43564c594c5245430000000001000000000000000000000030000000000000000000000000000000",
+      "error": "recordings-live"
+    },
+    {
+      "kind": "log recordings",
+      "name": "log-recordings-live-before-entry",
+      "member": 1,
+      "bytes": "43564c594c5245430000000001000000000000000000000030000000000000000100000000000000000000000000000000000000000000000000000000000000",
+      "error": "recordings-live"
+    },
+    {
+      "kind": "log recordings",
+      "name": "log-recordings-entry-id-below-zero",
+      "member": 1,
+      "bytes": "43564c594c5245430000000001000000030000000000000060000000000000000100000000000000ffffffffffffffff00000000000000006000000000000000",
+      "error": "recordings-entry"
+    },
+    {
+      "kind": "log recordings",
+      "name": "log-recordings-entry-start-below-zero",
+      "member": 1,
+      "bytes": "43564c594c52454300000000010000000300000000000000600000000000000001000000000000000000000000000000e0ffffffffffffff6000000000000000",
+      "error": "recordings-entry"
+    },
+    {
+      "kind": "log recordings",
+      "name": "log-recordings-entry-start-not-a-multiple-of-32",
+      "member": 1,
+      "bytes": "43564c594c5245430000000001000000030000000000000060000000000000000100000000000000000000000000000010000000000000006000000000000000",
+      "error": "recordings-entry"
+    },
+    {
+      "kind": "log recordings",
+      "name": "log-recordings-entry-start-below-the-one-before",
+      "member": 1,
+      "bytes": "43564c594c52454300000000010000000300000000000000c000000000000000020000000000000000000000000000006000000000000000c00000000000000001000000000000004000000000000000c000000000000000",
+      "error": "recordings-entry"
+    },
+    {
+      "kind": "log recordings",
+      "name": "log-recordings-entry-stop-not-a-multiple-of-32",
+      "member": 1,
+      "bytes": "43564c594c5245430000000001000000030000000000000060000000000000000100000000000000000000000000000000000000000000005000000000000000",
+      "error": "recordings-entry"
+    },
+    {
+      "kind": "log recordings",
+      "name": "log-recordings-entry-stop-at-its-start",
+      "member": 1,
+      "bytes": "43564c594c5245430000000001000000030000000000000060000000000000000100000000000000000000000000000040000000000000004000000000000000",
+      "error": "recordings-entry"
+    },
+    {
+      "kind": "log recordings",
+      "name": "log-recordings-entry-stop-below-its-start",
+      "member": 1,
+      "bytes": "43564c594c5245430000000001000000030000000000000060000000000000000100000000000000000000000000000040000000000000002000000000000000",
+      "error": "recordings-entry"
     }
   ]
 }
