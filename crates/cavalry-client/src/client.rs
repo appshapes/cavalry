@@ -1537,7 +1537,8 @@ impl Cavalry {
     /// ```
     ///
     /// The block is compiled and not run: it needs a cluster of three members on
-    /// three hosts. `docs/tutorials/run-a-cluster.md` runs one on a laptop.
+    /// three hosts. `docs/how-to/run-a-cluster.md`, "Run a cluster of three members",
+    /// runs one on one host, on the loopback.
     pub fn connect_cluster(
         &mut self,
         members: &str,
