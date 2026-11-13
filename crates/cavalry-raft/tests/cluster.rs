@@ -130,6 +130,50 @@ fn run_until_led(members: &mut [Member]) -> usize {
     leader
 }
 
+/// Whether `member` holds its log in one recording that begins at position 0: its
+/// file of its log's recordings lists none below the live one. A follower that joined
+/// its leader's log late does not (ADR 0103).
+fn in_one_recording(member: &Member) -> bool {
+    let (_, live_start, below) = log_recordings(member);
+    live_start == 0 && below.is_empty()
+}
+
+/// Closes every member and its driver.
+fn close(members: Vec<Member>) {
+    for member in members {
+        member.module.close().expect("the member closes");
+        member.driver.close().expect("the driver closes");
+    }
+}
+
+/// Starts three members under `dir` and runs them until every election has closed,
+/// with the leader first (`run_until_led`) and every member's log in one recording.
+///
+/// The leader closes its election on a quorum (ADR 0104). So now and then a follower
+/// that was slow meets the log after the term's first entry: its election fails
+/// once, it catches up through a replay, and from then on it has counted two
+/// elections and holds its log in two recordings, the first of which has stopped. A
+/// test that begins here is about what comes after a start, and counts, recordings
+/// and a service's handle from a start in which every member joined on time. A start
+/// in which a follower joined late is closed and made again, in a directory of its
+/// own, five times at most. The late join is not left to chance either:
+/// `three_members_replicate_with_a_follower_that_joined_late` makes one.
+fn start_led(dir: &Path) -> Vec<Member> {
+    for attempt in 0..5 {
+        let mut members = start(&dir.join(format!("start-{attempt}")), &members_string());
+        run_until_led(&mut members);
+        if members.iter().all(in_one_recording) {
+            return members;
+        }
+        println!(
+            "cluster: a follower joined late in start {attempt}, which is made again: {:?}",
+            members.iter().map(log_recordings).collect::<Vec<_>>()
+        );
+        close(members);
+    }
+    panic!("a follower joined late in each of five starts");
+}
+
 fn states(members: &[Member]) -> Vec<String> {
     members.iter().map(|m| format!("{:?}", m.module)).collect()
 }
@@ -436,9 +480,7 @@ fn three_members_replicate_a_hundred_thousand_entries_and_their_recordings_are_e
 #[test]
 fn ten_entries_each_appended_once_the_last_was_committed_do_not_wait_a_second_each() {
     let dir = TestDir::new("commit-on-sync");
-    let members_string = members_string();
-    let mut members = start(dir.path(), &members_string);
-    run_until_led(&mut members);
+    let mut members = start_led(dir.path());
     // The term event, 56 bytes in a frame of 96, then each entry in a frame of 96.
     let mut end = 96;
     run_until(
@@ -482,9 +524,7 @@ fn ten_entries_each_appended_once_the_last_was_committed_do_not_wait_a_second_ea
 #[test]
 fn a_follower_lost_leaves_a_quorum_that_goes_on_committing() {
     let dir = TestDir::new("follower-lost");
-    let members_string = members_string();
-    let mut members = start(dir.path(), &members_string);
-    run_until_led(&mut members);
+    let mut members = start_led(dir.path());
     members[0]
         .module
         .offer(b"three of three")
@@ -544,9 +584,7 @@ fn a_follower_lost_leaves_a_quorum_that_goes_on_committing() {
 #[test]
 fn a_leader_lost_leaves_each_follower_at_the_end_its_recording_stopped() {
     let dir = TestDir::new("leader-lost");
-    let members_string = members_string();
-    let mut members = start(dir.path(), &members_string);
-    run_until_led(&mut members);
+    let mut members = start_led(dir.path());
     const ENTRIES: i64 = 100;
     offer_entries(&mut members, ENTRIES);
     // The term's event and a hundred entries, each in a frame of 96.
@@ -660,9 +698,7 @@ fn a_stop_timeout_says_what_to_do_next() {
 #[test]
 fn a_lost_leader_is_replaced_by_the_two_that_remain_and_they_commit() {
     let dir = TestDir::new("leader-replaced");
-    let members_string = members_string();
-    let mut members = start(dir.path(), &members_string);
-    run_until_led(&mut members);
+    let mut members = start_led(dir.path());
     const ENTRIES: i64 = 100;
     offer_entries(&mut members, ENTRIES);
     let end = 96 + ENTRIES * 96;
@@ -822,19 +858,23 @@ fn offer_entries(members: &mut [Member], count: i64) {
 }
 
 /// The leader's module stands still for longer than the leader heartbeat timeout while
-/// its driver runs on, so that each follower's image of the log stays available and the
-/// stop of the recording it holds is its own `leave_log`'s alone. Each follower counts
+/// its driver runs on, so that a follower's image of the log stays available and the
+/// stop of the recording it holds is its own `leave_log`'s alone. The follower counts
 /// the timeout, leaves the log at the end its recording stopped at, and canvasses; the
-/// leader, running again, answers, and each follower joins the log again on a new
+/// leader, running again, answers, and the follower joins the log again on a new
 /// recording whose image joins at that end. What the leader appends after is committed
-/// on all three: a follower's append position goes on from the stop of its first
+/// on all three: the follower's append position goes on from the stop of its first
 /// recording through its second, which begins where the member's log ends.
+///
+/// One follower alone runs while the leader stands still. Two that had both timed out
+/// would be a quorum with no leader, and would hold a ballot of their own if the
+/// leader's answer came later than a nomination delay: this test is of the member
+/// that leaves and joins again, so it leaves no quorum to elect. The second follower
+/// stands still with the leader and runs again once the first has joined.
 #[test]
 fn a_follower_that_leaves_the_log_joins_it_again_where_its_recording_stopped() {
     let dir = TestDir::new("join-again");
-    let members_string = members_string();
-    let mut members = start(dir.path(), &members_string);
-    run_until_led(&mut members);
+    let mut members = start_led(dir.path());
     const ENTRIES: i64 = 10;
     offer_entries(&mut members, ENTRIES);
     let first = 96 + ENTRIES * 96;
@@ -843,24 +883,28 @@ fn a_follower_that_leaves_the_log_joins_it_again_where_its_recording_stopped() {
             .iter()
             .all(|m| m.module.commit_position() == first && m.module.append_position() == first)
     });
-    let held: Vec<i64> = members[1..]
-        .iter()
-        .map(|m| m.module.log_recording_id().expect("a follower's recording"))
-        .collect();
+    let term = members[0].module.leadership_term_id();
+    let held = members[1]
+        .module
+        .log_recording_id()
+        .expect("a follower's recording");
+    let before = members[1].module.counts();
 
-    // The leader's module stands still; its driver, and so its log's image on each
-    // follower, runs on.
+    // The leader's module stands still, and the second follower's with it; the
+    // leader's driver, and so its log's image on the first follower, runs on.
     run_until(
-        &mut members[1..],
-        "each follower timed out its silent leader and canvasses",
+        &mut members[1..2],
+        "the follower timed out its silent leader and canvasses",
         |members| {
             members.iter().all(|m| {
-                m.module.counts().leader_heartbeat_timeouts == 1
+                m.module.counts().leader_heartbeat_timeouts == before.leader_heartbeat_timeouts + 1
                     && m.module.election_state() == ElectionState::Canvass
             })
         },
     );
-    for (member, recording_id) in members[1..].iter().zip(&held) {
+    {
+        let member = &members[1];
+        let recording_id = &held;
         assert_eq!(member.module.counts().log_images_lost, 0);
         assert_eq!(member.module.log_recording_id(), None);
         assert_eq!(counter(member, CLUSTER_LOG_RECORDING_ID.0), -1);
@@ -876,21 +920,33 @@ fn a_follower_that_leaves_the_log_joins_it_again_where_its_recording_stopped() {
         );
     }
 
-    // The leader runs again and answers the followers' canvass; each joins the log on
-    // a new recording.
+    // The leader runs again and answers the follower's canvass, and the follower
+    // joins the log on a new recording. The leader leads the term it led.
     run_until(
-        &mut members,
-        "each follower joined the log again",
+        &mut members[..2],
+        "the follower joined the log again",
         |members| {
             members
                 .iter()
                 .all(|m| m.module.election_state() == ElectionState::Closed)
-                && members[1..]
-                    .iter()
-                    .zip(&held)
-                    .all(|(m, first)| m.module.log_recording_id().is_some_and(|id| id != *first))
+                && members[1]
+                    .module
+                    .log_recording_id()
+                    .is_some_and(|id| id != held)
         },
     );
+    // The second follower runs again. Whether it had counted the silence too by the
+    // time it read the leader's word again is its own clock's matter: it follows the
+    // same leader in the same term either way.
+    run_until(&mut members, "every member follows the leader", |members| {
+        members
+            .iter()
+            .all(|m| m.module.election_state() == ElectionState::Closed)
+    });
+    assert_eq!(members[0].module.role(), Role::Leader);
+    for member in &members {
+        assert_eq!(member.module.leadership_term_id(), term);
+    }
     offer_entries(&mut members, ENTRIES);
     let second = first + ENTRIES * 96;
     run_until(
@@ -902,11 +958,22 @@ fn a_follower_that_leaves_the_log_joins_it_again_where_its_recording_stopped() {
             })
         },
     );
+    // The follower held one election more, which closed, and its new recording
+    // begins where the one it left stopped.
+    let counts = members[1].module.counts();
+    assert_eq!(counts.elections, before.elections + 1);
+    assert_eq!(counts.elections_closed, before.elections_closed + 1);
+    assert_eq!(counts.elections_failed, before.elections_failed);
+    assert_eq!(counts.join_position_mismatches, 0);
+    let rejoined = members[1]
+        .module
+        .log_recording_id()
+        .expect("the follower's new recording");
+    assert_eq!(
+        log_recordings(&members[1]),
+        (rejoined, first, vec![(held, 0, first)])
+    );
     for member in &members[1..] {
-        let counts = member.module.counts();
-        assert_eq!(counts.elections, 2);
-        assert_eq!(counts.elections_closed, 2);
-        assert_eq!(counts.join_position_mismatches, 0);
         assert_eq!(counter(member, CLUSTER_APPEND_POSITION.0), second);
         assert_eq!(
             Some(counter(member, CLUSTER_LOG_RECORDING_ID.0)),
@@ -914,10 +981,7 @@ fn a_follower_that_leaves_the_log_joins_it_again_where_its_recording_stopped() {
         );
     }
 
-    for member in members {
-        member.module.close().expect("the member closes");
-        member.driver.close().expect("the driver closes");
-    }
+    close(members);
 }
 
 /// What a service read: each entry's position and its bytes.
@@ -1274,9 +1338,7 @@ const BEHIND_ENTRIES: i64 = 1000;
 
 impl BehindItsBound {
     fn start(dir: &Path) -> Self {
-        let members_string = members_string();
-        let mut members = start(dir, &members_string);
-        run_until_led(&mut members);
+        let mut members = start_led(dir);
         let mut client =
             Cavalry::connect_to(&members[2].dir).expect("the service's client connects");
         let mut opened = None;
@@ -1557,9 +1619,7 @@ fn log_recordings(member: &Member) -> (i64, i64, Vec<(i64, i64, i64)>) {
 #[test]
 fn a_service_reads_across_the_recordings_of_a_member_that_joined_the_log_again() {
     let dir = TestDir::new("service-joins-again");
-    let members_string = members_string();
-    let mut members = start(dir.path(), &members_string);
-    run_until_led(&mut members);
+    let mut members = start_led(dir.path());
     const ENTRIES: i64 = 10;
     offer_entries(&mut members, ENTRIES);
     let first = 96 + ENTRIES * 96;
@@ -1929,9 +1989,7 @@ fn a_service_whose_image_faulted_reads_the_fault_for_the_life_of_its_handle() {
     const ENTRIES: u32 = 10;
     const READ_FIRST: usize = 5;
     let dir = TestDir::new("service-faulted");
-    let members_string = members_string();
-    let mut members = start(dir.path(), &members_string);
-    run_until_led(&mut members);
+    let mut members = start_led(dir.path());
     let member_dir = members[1].dir.clone();
     let mut client = Cavalry::connect_to(&member_dir).expect("the service's client connects");
     let before = publication_logs(&member_dir);
