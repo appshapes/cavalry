@@ -190,8 +190,8 @@ commit path runs per message.
   replicates, and it names no recording until a later call has written the file;
   `cavalry run` makes that call again every 100 ms and gives the member up after
   10 s of calls that fail, as for any error of a duty cycle. It truncates no
-  recording of its log while the counter
-  names one, and removes the file when it closes (`spec/cluster.md`, "The log's
+  recording of its log while the counter names one, and removes the file when it
+  closes, after it has stored −1 in the counter (`spec/cluster.md`, "The log's
   recordings"; ADR 0103).
 - Runs the same core in memory: `memory::Cluster` is one to eight members in one process
   on a clock the caller steps, with loss, delay, a member cut from every other, two
@@ -213,6 +213,11 @@ commit path runs per message.
   double and allocates; its consensus stream holds at most 4,096 messages in flight and
   loses, and counts, one sent while it is full, and a leader's log publication and each
   member's log hold every entry appended or received for the cluster's life.
+- Not built yet: `cavalry doctor` has no finding for `cluster.log_recordings_unwritten`,
+  the count of a member's duty cycles that could not write its file of the log's
+  recordings. The counter's own sentence, with what to do, is in
+  `docs/reference/counters.md`, and `cavalry run` prints the member's error and gives
+  the member up after 10 s of such cycles, so the failure is not silent.
 - To come, each with its card: the C ABI's calls for a service, so that a service is
   a program in any of the five client languages (card 227), the election and mixed
   versions in a rolling upgrade (card 228), the cluster client (card 229), snapshots
