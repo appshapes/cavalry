@@ -6,10 +6,11 @@
 //! members' own side, which opens a session by an entry of the log, is `cavalry-raft`'s
 //! to test, over three drivers.
 
+use std::cell::RefCell;
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{Receiver, Sender, channel};
-use std::sync::{Arc, Mutex};
 use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
 
@@ -95,7 +96,9 @@ struct Seen {
 struct Played {
     members: String,
     endpoints: String,
-    seen: Arc<Mutex<Seen>>,
+    /// What the thread read, as it sends it, and all of it so far.
+    observed: Receiver<Seen>,
+    seen: RefCell<Seen>,
     /// Bytes for the thread to send on the response channel.
     send: Sender<Vec<u8>>,
     stop: Arc<AtomicBool>,
@@ -127,24 +130,20 @@ impl Played {
             .map(|id| format!("{id}=127.0.0.1:{}", ports[id]))
             .collect::<Vec<_>>()
             .join(",");
-        let seen = Arc::new(Mutex::new(Seen::default()));
+        let (observe, observed) = channel();
         let stop = Arc::new(AtomicBool::new(false));
         let (send, receive) = channel();
         let thread = {
-            let (dir, seen, stop, endpoints) = (
-                dir.to_path_buf(),
-                Arc::clone(&seen),
-                Arc::clone(&stop),
-                endpoints.clone(),
-            );
+            let (dir, stop, endpoints) = (dir.to_path_buf(), Arc::clone(&stop), endpoints.clone());
             std::thread::spawn(move || {
-                play(&dir, &ports, &script, &endpoints, &seen, &receive, &stop)
+                play(&dir, &ports, &script, &endpoints, &observe, &receive, &stop)
             })
         };
         Self {
             members,
             endpoints,
-            seen,
+            observed,
+            seen: RefCell::new(Seen::default()),
             send,
             stop,
             thread: Some(thread),
@@ -152,7 +151,14 @@ impl Played {
     }
 
     fn seen<T>(&self, read: impl FnOnce(&Seen) -> T) -> T {
-        read(&self.seen.lock().expect("the lock"))
+        let mut seen = self.seen.borrow_mut();
+        while let Ok(more) = self.observed.try_recv() {
+            seen.connects.extend(more.connects);
+            seen.messages.extend(more.messages);
+            seen.keepalives.extend(more.keepalives);
+            seen.closes.extend(more.closes);
+        }
+        read(&seen)
     }
 
     fn stop(mut self) {
@@ -172,7 +178,7 @@ fn play(
     ports: &[u16],
     script: &[Reply; 3],
     endpoints: &str,
-    seen: &Mutex<Seen>,
+    observe: &Sender<Seen>,
     receive: &Receiver<Vec<u8>>,
     stop: &AtomicBool,
 ) {
@@ -199,7 +205,7 @@ fn play(
                 .expect("the ingress polls");
         }
         for (member, bytes) in read {
-            let mut seen = seen.lock().expect("the lock");
+            let mut seen = Seen::default();
             match Message::parse(Stream::Ingress, &bytes).expect("an ingress message") {
                 Message::SessionConnect {
                     correlation_id,
@@ -285,6 +291,8 @@ fn play(
                     .push((member, leadership_term_id, cluster_session_id)),
                 other => panic!("not an ingress message: {other:?}"),
             }
+            // The test may have ended its read: what was seen then goes nowhere.
+            let _ = observe.send(seen);
         }
         while let Ok(bytes) = receive.try_recv() {
             owed.push(bytes);
