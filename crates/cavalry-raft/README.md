@@ -223,7 +223,9 @@ commit path runs per message.
   `fc=min`: offered 30,000 entries of 96 bytes a second, the cluster committed
   about 12,000 a second while one follower was throttled, there by a stop of 95 ms
   in every 100 ms, one receiver window each 100 ms, though the other two members
-  were a quorum (ADR 0052, "Harder").
+  were a quorum (ADR 0052, "Harder"). Under a cgroup's quota of a twentieth of a
+  processor, on CI's Linux runner, it committed 13,000 to 18,000 a second: the
+  member runs a part of every period (ADR 0111, "Evidence").
 - To come, each with its card: the C ABI's calls for a service, so that a service is
   a program in any of the five client languages (card 227), a member's start on the
   log directory it kept and mixed versions in a rolling upgrade (card 228), the

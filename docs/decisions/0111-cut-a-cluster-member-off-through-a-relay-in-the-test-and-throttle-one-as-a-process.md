@@ -125,26 +125,38 @@ guess at a runner's speed.
 ## Evidence
 
 On an Apple M5 Pro laptop, macOS 26.6, twenty runs in a row of `tests/partition.rs`
-and `tests/throttle.rs`, all passed.
+and `tests/throttle.rs`, all passed; and twenty of each on each of CI's two
+runners, all passed. The figures of the first three entries are the laptop's.
 
-- A leader cut off: the two that remained had a leader 10.18 s to 10.53 s after
-  the cut, in term 1 or 2, which is the leader heartbeat timeout of 10 s and an
-  election.
+- A leader cut off: the two that remained had a leader 10.18 s to 10.85 s after
+  the cut, one term later or two, which is the leader heartbeat timeout of 10 s
+  and an election.
 - A member cut off and mended, 40 values: it held the log the others had
-  committed 9.78 s to 10.39 s after the mend. A member cut off for the image
+  committed 9.47 s to 10.40 s after the mend. A member cut off for the image
   liveness timeout has lost its images of the others' streams, and a driver
   makes no second image of a session whose image it retired until the image
   cool-down of 10 s has passed (`spec/udp.md`, "The receiver", step 5). The
   tests mend the cut at the start of that cool-down, the longest the wait can
   be.
 - A follower given a twentieth of a processor for 5 s, by stop and continue: the
-  cluster committed 29,664 to 30,200 entries of 96 bytes a second before it,
-  11,668 to 13,012 under it and 35,717 to 39,997 after it, with no election. The
+  cluster committed 29,818 to 30,218 entries of 96 bytes a second before it,
+  11,339 to 12,173 under it and 37,278 to 40,961 after it, with no election. The
   leader's log is sent under `fc=min`, so it goes no further than one receiver
   window of 128 KiB past the slower follower's position, about one window for
   each 100 ms the throttled member runs in (ADR 0052, "Harder").
-- Not shown here: the cgroup's path, which a macOS laptop cannot run. The line
-  the test prints in the Linux runner's log says which path ran there.
+- The same by the kernel, `CPUQuota=5%` on a transient scope, which a macOS
+  laptop cannot run. It ran first on CI's Linux runner, in `gates (linux)` of this
+  change's pull request, where the test printed: "member 1, a follower of member
+  0, was throttled by its cgroup, CPUQuota=5%, throttled in 50 of 50 periods for
+  5s; the cluster committed 29923 entries/s before, 16584 under it and 32298
+  after; the member was 66532 entries behind when it ended and held them
+  212.390365ms later; the three logs hold the same 277055 entries". In twenty runs
+  in a row on that runner the member was throttled in 50 of 50 periods each time,
+  and the cluster committed 13,385 to 18,400 entries a second under the quota,
+  with no election. On the macOS runner, by stop and continue, it committed 9,920
+  to 11,465. A quota lets the member run a part of every period, so the leader
+  goes a window further in each, where a member that is stopped outright holds
+  it for the whole of the stop.
 
 ## Consequences
 
