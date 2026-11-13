@@ -1633,6 +1633,6 @@ pub const COUNTERS: &[CounterDef] = &[
         kind: Kind::Counter,
         scope: Scope::Static,
         doc: "Times `cavalry run` gave up the cluster member it ran beside this driver, and then closed the driver: the member's duty cycle had failed for 10 s on end, or its thread had panicked. `cavalry run` adds one before it closes the driver, so the count is in the directory a closed driver leaves.",
-        doctor: "`cavalry run` stopped this driver because its cluster member could not go on: the member's duty cycle failed for 10 s on end, or its thread panicked. The last line that process printed beginning `cavalry run: cluster member` says why, and what to do. Correct what it names, then start `cavalry run` again with the same directories: the member starts on the log directory it kept, and the other members elect a leader meanwhile.",
+        doctor: "`cavalry run` stopped this driver because its cluster member could not go on: the member's duty cycle failed for 10 s on end, or its thread panicked. The line that process printed beginning `cavalry run: the cluster member stopped` says why, and what to do. Correct what it names, then start `cavalry run` again with the same directories: the member starts on the log directory it kept, and the other members elect a leader meanwhile.",
     },
 ];
