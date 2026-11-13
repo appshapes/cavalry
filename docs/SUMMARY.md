@@ -160,3 +160,4 @@ under `docs/` is listed here; `just lint-docs` fails on one that is not.
 - [0111. Cut a cluster member off through a relay in the test, and throttle one as a process](decisions/0111-cut-a-cluster-member-off-through-a-relay-in-the-test-and-throttle-one-as-a-process.md)
 - [0107. Take the appointed leader out of cavalry doctor, and retire its counter](decisions/0107-take-the-appointed-leader-out-of-cavalry-doctor-and-retire-its-counter.md)
 - [0108. List the recordings of a member's log in its log directory, and start a member on the log it kept](decisions/0108-list-the-recordings-of-a-members-log-in-its-log-directory-and-start-a-member-on-the-log-it-kept.md)
+- [0113. Track Cavalry's work on the Brigade Board, and map the Trello cards it carried](decisions/0113-track-cavalrys-work-on-the-brigade-board-and-map-the-trello-cards-it-carried.md)
