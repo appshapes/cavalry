@@ -152,6 +152,13 @@ caller's to bound, as a subscriber that never polls is; an aborted fragment is
 handed over twice, so a handler must not act on a fragment before it decides to
 take it.
 
+No counter counts an abort. It is not a state transition: the fragment is delivered
+by a later read, and nothing is lost or dropped by it. What a handler that keeps
+aborting leaves behind is in the counters a stranger already reads, a
+`subscription.position` that does not move and a `publication.position` that stands
+at its `publication.limit`; a reader that aborts for a reason of its own counts that
+reason, as the consensus module will count what its ingress path refuses.
+
 Revisit: when a reader needs flow control to see its progress inside one batch, for
 `Action::Commit`; when a reader needs a controlled poll of one image under a limit
 position, a service that cannot take a committed entry yet, for
