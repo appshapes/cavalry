@@ -143,9 +143,10 @@ The client API implementation, re-exported by the `cavalry` crate. Data plane.
   `NO LEADER`. A program calls `poll` at least
   every 500 ms: the leader closes a session it has heard nothing from for 10 s. The
   session holds a publication to every member from the connect on, so nothing in
-  `offer` or `poll` allocates or sends the driver a command. A message `offer`
-  accepted is on its way, not committed: a program that must know asks its service
-  to reply (ADR 0117).
+  `offer` or `poll` allocates or sends the driver a command. `offer` reads no clock:
+  the next `poll` counts the message as sent, for the keepalive, and a poll reads the
+  clock once. A message `offer` accepted is on its way, not committed: a program that
+  must know asks its service to reply (ADR 0117).
 - Holds a recording the driver arms: `Cavalry::arm_recording(channel, stream_id)`, on a
   `cavalry:udp` stream with a subscription and no publication or image yet, returns
   an `ArmedRecording`, and `ArmedRecording::poll()` returns the `Recording` once the
