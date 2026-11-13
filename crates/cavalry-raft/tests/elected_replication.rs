@@ -611,3 +611,71 @@ fn a_cut_leaders_log_reaches_no_follower_until_the_cut_ends() {
         assert_eq!(counts.log_images_lost, 0, "member {id} kept its image");
     }
 }
+
+/// A member that replicated canvasses again with no member's report (ADR 0106). The
+/// leader loses its log directory and starts again on an empty one. The two that
+/// kept their logs elect one of them, and the member with no log replicates the term
+/// it lost and goes back to canvass. The reports it held were read with no log of
+/// its own, of logs that were then ahead of it; with the log replicated they are of
+/// logs no longer ahead, so it was a unanimous candidate the moment it had the log,
+/// nominated itself, and the leader the two had elected gave up the lead on its
+/// request vote. With no report it is no candidate: its canvass position is
+/// answered by its leader, and it follows. At every seed the leader the two elected
+/// still leads once the three hold one log, has given up the lead to nobody, and
+/// the member that replicated was never a candidate.
+#[test]
+fn a_member_that_replicated_canvasses_with_no_reports_and_unseats_no_leader() {
+    let ids = [0, 1, 2];
+    for seed in 1..=20 {
+        let mut safety = Safety::new(&ids);
+        let (mut cluster, first) = elected(seed, &mut safety);
+        let mut committed = 0;
+        for i in 0..10u32 {
+            committed = cluster.offer(&i.to_le_bytes()).expect("the leader appends");
+            safety.run(&mut cluster, 1);
+        }
+        safety.run(&mut cluster, 1_000);
+        let others = followers(&ids, first);
+
+        safety.wipe(&mut cluster, first);
+        safety.run_until(
+            &mut cluster,
+            30_000,
+            "the member with no log holds what was committed",
+            |cluster| cluster.append_position(first) >= Some(committed),
+        );
+        let second = cluster.leader().expect("a leader");
+        assert!(
+            others.contains(&second),
+            "seed {seed}: member {second} leads"
+        );
+        let term = cluster
+            .member(second)
+            .expect("a member")
+            .leadership_term_id();
+        // Term 1, or a later one where the two split their first vote (seed 12).
+        assert!(term >= 1, "seed {seed}: the two elected in term {term}");
+
+        // Long enough for a member that nominated itself to have unseated the leader
+        // and for the three to have settled again.
+        safety.run(&mut cluster, 5_000);
+        assert!(settled(&cluster, &ids), "seed {seed}");
+        assert_eq!(
+            cluster.leader(),
+            Some(second),
+            "seed {seed}: the same leader"
+        );
+        for id in ids {
+            assert_eq!(
+                cluster.member(id).expect("a member").leadership_term_id(),
+                term,
+                "seed {seed}: member {id} follows the term the two elected in"
+            );
+        }
+        let replicated = cluster.counts(first).expect("a member");
+        assert_eq!(replicated.candidacies, 0, "seed {seed}: {replicated:?}");
+        let leads = cluster.counts(second).expect("the leader");
+        assert_eq!(leads.leader_step_downs, 0, "seed {seed}: {leads:?}");
+        assert_eq!(cluster.log(first), cluster.log(second), "seed {seed}");
+    }
+}

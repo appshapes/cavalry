@@ -80,7 +80,8 @@ pub enum ElectionState {
     Nominate = 2,
     /// A candidate asks every other member for its vote, and leads the term at once
     /// when a quorum has voted for it and every member it has heard is among them, or
-    /// at the election timeout with a quorum and no vote against (ADR 0077).
+    /// at the election timeout with a quorum and no vote against (ADR 0077). It
+    /// canvasses again at once on a vote against, which no ballot survives (ADR 0105).
     CandidateBallot = 3,
     /// A member that voted for a candidate waits for that candidate's new leadership
     /// term, for the election timeout at most.
@@ -549,11 +550,13 @@ pub struct Counts {
     /// `cluster.candidacies`: a ballot the member began as a candidate (ADR 0081).
     pub candidacies: u64,
     /// `cluster.ballots_lost`: a ballot that ended with no leader for the member, which
-    /// canvasses again: a candidate at the election timeout short of a quorum or with
-    /// a vote against, a member in follower ballot whose candidate's new leadership
-    /// term did not come within the election timeout, or either that reads a new
-    /// leadership term for a log term that is not its own, once it has dropped any
-    /// terms the message says its leader's record lacks (ADR 0096). A candidate that follows another member's new leadership term
+    /// canvasses again: a candidate on a vote against its candidate term or once it
+    /// holds no vote of its own for that term, at once (ADR 0105), or at the election
+    /// timeout short of a quorum, a member in follower ballot whose candidate's new
+    /// leadership term did not come within the election timeout, or either that reads
+    /// a new leadership term for a log term that is not its own, once it has dropped
+    /// any terms the message says its leader's record lacks (ADR 0096). A candidate
+    /// that follows another member's new leadership term
     /// for its own candidate term has a leader and counts none (ADR 0081).
     pub ballots_lost: u64,
     /// `cluster.votes_for`: a vote the member sent for a candidate.
@@ -1778,11 +1781,12 @@ impl Consensus {
         self.enter(ElectionState::Init, clock);
     }
 
-    /// A ballot that ended with no leader, this member's own or its candidate's, at the
-    /// election timeout or on a new leadership term for a log term that is not its own,
-    /// once any terms the message says its leader's record lacks are dropped: counted,
-    /// and the member canvasses again as a follower, with the reports and the members
-    /// heard that it has.
+    /// A ballot that ended with no leader, this member's own or its candidate's: its
+    /// own on a vote against its candidate term or once it holds no vote of its own
+    /// for that term (ADR 0105), either at the election timeout, or on a new leadership
+    /// term for a log term that is not its own, once any terms the message says its
+    /// leader's record lacks are dropped (ADR 0096). Counted, and the member canvasses
+    /// again as a follower, with the reports and the members heard that it has.
     fn lose_ballot(&mut self, clock: Clock) -> usize {
         count(&mut self.counts.ballots_lost);
         self.role = Role::Follower;
@@ -2260,12 +2264,15 @@ impl Consensus {
         Ok(self.enter(ElectionState::CandidateBallot, clock))
     }
 
-    /// State 3. Request vote for the term the candidate nominated itself for to every
-    /// member not yet sent one, then the ballot: the candidate leads its candidate term
-    /// at once when the votes for that term, its own among them, make a quorum and every
-    /// member it has heard has cast one of them, or at the election timeout with a
-    /// quorum for and none against (ADR 0077). At the election timeout with no such
-    /// ballot it canvasses again.
+    /// State 3. The ballot is read first, and a candidate that can still win sends
+    /// request vote for the term it nominated itself for to every member not yet sent
+    /// one. The candidate leads its candidate term at once when the votes for that
+    /// term, its own among them, make a quorum and every member it has heard has cast
+    /// one of them, or at the election timeout with a quorum for and none against (ADR
+    /// 0077). It canvasses again at once when it cannot win: a vote against its
+    /// candidate term has been cast, or it no longer holds its own vote for that term,
+    /// and on that cycle it asks no member for a vote (ADR 0105). At the election
+    /// timeout with no leader it canvasses again, short of a quorum.
     fn candidate_ballot<I: Io>(&mut self, clock: Clock, io: &mut I) -> Result<usize, I::Fault> {
         let mut work = 0;
         // A candidate whose term rose during its ballot, by a request vote for a
@@ -2274,22 +2281,6 @@ impl Consensus {
         // which would spend that member's one vote in the term on a candidate that
         // cannot win it, and no votes cast in it make it the leader.
         let own_vote = self.holds_own_vote();
-        let request = Message::RequestVote {
-            log_leadership_term_id: self.log_term,
-            log_position: self.append_position,
-            candidate_term_id: self.candidate_term,
-            candidate_member_id: self.member_id(),
-            protocol_version: PROTOCOL_VERSION,
-        };
-        for index in 0..self.count {
-            let unsent = self.requested.get(index).is_some_and(|sent| !sent);
-            if own_vote && index != self.own && unsent && io.send(self.peer(index).id, &request) {
-                if let Some(sent) = self.requested.get_mut(index) {
-                    *sent = true;
-                }
-                work = 1;
-            }
-        }
         let timeout_passed =
             clock.now_ns.saturating_sub(self.state_since_ns) >= ELECTION_TIMEOUT_NS;
         // `decided_at_once` is the vectors' `unanimous`: every member heard voted for.
@@ -2300,10 +2291,34 @@ impl Consensus {
             &self.heard,
             timeout_passed,
         );
+        // The ballot is read before any request is sent. A candidate that has read a
+        // vote against goes back to canvass on this cycle, and a request it had not
+        // yet sent, one its publication refused before, would ask a member for its
+        // one vote in the term for a candidate that has already lost (ADR 0105).
+        let can_win = own_vote && !outcome.lost;
+        let request = Message::RequestVote {
+            log_leadership_term_id: self.log_term,
+            log_position: self.append_position,
+            candidate_term_id: self.candidate_term,
+            candidate_member_id: self.member_id(),
+            protocol_version: PROTOCOL_VERSION,
+        };
+        for index in 0..self.count {
+            let unsent = self.requested.get(index).is_some_and(|sent| !sent);
+            if can_win && index != self.own && unsent && io.send(self.peer(index).id, &request) {
+                if let Some(sent) = self.requested.get_mut(index) {
+                    *sent = true;
+                }
+                work = 1;
+            }
+        }
         if outcome.leader && own_vote {
             return self.lead_elected(clock, io);
         }
-        if timeout_passed {
+        // A ballot with a vote against makes no leader, at once or at the election
+        // timeout, and a candidate without its own vote for its term leads nothing:
+        // waiting out the timeout would change neither (ADR 0105).
+        if timeout_passed || outcome.lost || !own_vote {
             return Ok(self.lose_ballot(clock));
         }
         Ok(work)
@@ -2798,6 +2813,15 @@ impl Consensus {
             self.catchup = false;
         }
         self.replication = None;
+        // The reports this member holds were read against the log it had before it
+        // replicated. Against the log it has now, a report that was ahead of it may
+        // no longer be, and canvass would make it a candidate at once, to ask for
+        // votes in a term above its leader's. It canvasses with no report, as a
+        // member does from init, and its leader answers its canvass position (ADR
+        // 0106).
+        for peer in self.peers.iter_mut().take(self.count) {
+            peer.reported = false;
+        }
         Ok(self.step(ElectionState::Canvass, clock))
     }
 

@@ -402,14 +402,18 @@ fn arithmetic_vector(name: &str, vector: &Value) {
                     usize::try_from(member.as_i64().expect("heard member")).expect("heard member");
                 heard[member] = true;
             }
-            let Ballot { leader, unanimous } = ballot(
+            let Ballot {
+                leader,
+                unanimous,
+                lost,
+            } = ballot(
                 members,
                 int(inputs, "candidate_term"),
                 &votes,
                 &heard,
                 inputs["timeout_passed"].as_bool().expect("timeout_passed"),
             );
-            json!({"leader": leader, "unanimous": unanimous})
+            json!({"leader": leader, "unanimous": unanimous, "lost": lost})
         }
         "candidate" => {
             let members = usize::try_from(int(inputs, "members")).expect("members");
