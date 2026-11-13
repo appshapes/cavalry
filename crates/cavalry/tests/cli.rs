@@ -844,6 +844,10 @@ fn run_with_the_cluster_keys_starts_a_member_and_three_of_them_elect_a_leader() 
     let term = cluster_counter(&dirs[follower].0, CLUSTER_LEADERSHIP_TERM_ID)
         .expect("the follower's term");
     assert!(term >= 0, "term {term}");
+    let leader = roles
+        .iter()
+        .position(|role| *role == Some(2))
+        .expect("a leader");
 
     // Doctor with the keys set as the members have them finds nothing wrong with them,
     // and explains the member.
@@ -855,13 +859,35 @@ fn run_with_the_cluster_keys_starts_a_member_and_three_of_them_elect_a_leader() 
         .expect("doctor runs");
     let text = String::from_utf8_lossy(&output.stdout);
     assert!(!text.contains("FAIL cluster-member"), "{text}");
-    // And says what the member is, from its counters.
+    // And says what the member is, who it follows and why its last election began,
+    // from its own counters (ADR 0102; `docs/how-to/run-a-cluster.md`, step 4).
     assert!(
         text.contains("note cluster-member")
             && text.contains(&format!(
                 "this driver is cluster member {follower}, a follower in term {term}, election \
                  closed"
+            ))
+            && text.contains(&format!(
+                "; it follows member {leader}; its last election began because "
             )),
+        "{text}"
+    );
+    // The leader follows no member, so after its positions its line says the cause alone.
+    let output = cavalry()
+        .args(["doctor", "--dir", &dirs[leader].arg()])
+        .env("CAVALRY_CLUSTER_MEMBERS", &members)
+        .env("CAVALRY_CLUSTER_MEMBER_ID", leader.to_string())
+        .output()
+        .expect("doctor runs");
+    let text = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        text.contains("note cluster-member")
+            && text.contains(&format!(
+                "this driver is cluster member {leader}, the leader in term {term}, election \
+                 closed"
+            ))
+            && text.contains("; its last election began because ")
+            && !text.contains("it follows member"),
         "{text}"
     );
 

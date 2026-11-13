@@ -1,7 +1,9 @@
 - A cluster started with `cavalry run` elects its leader. The members canvass, one
   nominates itself and wins the others' votes, and when the leader is lost the two
   that remain elect another after the leader heartbeat timeout, 10 s, in an election
-  of some tenths of a second. Which member leads is no
+  of some tenths of a second. A leader whose member stops running while its driver
+  runs on is replaced too, after one election or several, each 10 s after the last:
+  10 s to 52 s in the runs measured. Which member leads is no
   longer the one with the lowest id; `cavalry doctor` names the leader on every
   member and says why its last election began. A member that starts late, or that
   is behind its leader, catches up and joins where it was left out before

@@ -348,10 +348,12 @@ fn an_offer_is_refused_with_no_leader_before_its_election_closes_and_under_back_
                 .offer(b"too early")
                 .expect_err("its election has not closed");
             assert_eq!(refused, Refused::Election);
+            let text = refused.to_string();
             assert!(
-                refused
-                    .to_string()
-                    .contains("docs/reference/cluster.md#roles-and-the-election"),
+                text.contains(
+                    "offer again once a quorum of members, the leader among them, has \
+                     joined its log"
+                ) && text.contains("docs/reference/cluster.md#roles-and-the-election"),
                 "{refused}"
             );
             refused_for_its_election += 1;
@@ -369,10 +371,11 @@ fn an_offer_is_refused_with_no_leader_before_its_election_closes_and_under_back_
     cluster.back_pressure(true);
     let refused = cluster.offer(b"not now").expect_err("back-pressured");
     assert_eq!(refused, Refused::BackPressured);
+    let text = refused.to_string();
     assert!(
-        refused
-            .to_string()
-            .contains("docs/reference/cluster.md#roles-and-the-election")
+        text.contains("offer again")
+            && text.contains("docs/reference/cluster.md#roles-and-the-election"),
+        "{refused}"
     );
     let before = cluster.log(leader);
     safety.run(&mut cluster, 100);
@@ -549,8 +552,9 @@ fn eight_members_elect_and_replicate_and_a_ninth_is_refused() {
 /// more than the queue holds: it holds `IN_FLIGHT_CAPACITY` and never more, and what
 /// is sent while it is full is lost and counted. Every consensus message is sent
 /// again at its interval, so once delivery is prompt again the cluster has one leader
-/// and every member learns its commit position. A delay past `MAX_DELAY_MS` is held
-/// to it.
+/// and every member learns its commit position; and once the late messages are
+/// delivered, two seconds on, the queue has room and nothing more is lost. A delay
+/// past `MAX_DELAY_MS` is held to it.
 #[test]
 fn the_consensus_stream_in_memory_holds_its_bound_and_loses_what_it_cannot_hold() {
     let ids: Vec<i32> = (0..8).collect();
@@ -578,10 +582,20 @@ fn the_consensus_stream_in_memory_holds_its_bound_and_loses_what_it_cannot_hold(
     safety.run_until(&mut cluster, 30_000, "one leader again", |cluster| {
         settled(cluster, &ids)
     });
+    // The queue still holds what was sent up to two seconds late, and what is sent
+    // while it is full is still lost. Two seconds on every late message is delivered.
+    safety.run(&mut cluster, 2_000);
+    assert!(cluster.in_flight() < IN_FLIGHT_CAPACITY);
+    let lost = cluster.full_queue_losses();
     let leader = cluster.leader().expect("a leader");
     let last = cluster.offer(b"the last").expect("the leader appends");
     safety.run(&mut cluster, 3_000);
     assert!(cluster.in_flight() < IN_FLIGHT_CAPACITY);
+    assert_eq!(
+        cluster.full_queue_losses(),
+        lost,
+        "a queue with room loses nothing"
+    );
     for &id in &ids {
         assert_eq!(cluster.commit_position(id), Some(last), "member {id}");
         assert_eq!(cluster.log(id), cluster.log(leader), "member {id}");

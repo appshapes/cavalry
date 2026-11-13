@@ -94,7 +94,8 @@ committed once a quorum, two of three, has it on disk.
    which each member asks its recorder for as soon as an entry is written, and name
    the leader: `; it follows member 2; its last election began because the member
    started`. The term is 1 or more where two members asked for votes at the same
-   moment and another ballot was taken.
+   moment and another ballot was taken. Each line ends with `; see` and the page that
+   explains it, as every finding does.
 
 5. Stop a follower with Ctrl-C or SIGTERM. It prints `cavalry run: stopping` and
    `cavalry run: closed`. The other two are a quorum and go on.
@@ -280,10 +281,14 @@ committed once a quorum, two of three, has it on disk.
   the state the member is in waits for: an image of the leader's log on the member's
   `log` endpoint, the fourth field of its entry in `CAVALRY_CLUSTER_MEMBERS`, or the
   leader's replay on its `catchup` endpoint, the fifth, when the member replicates a
-  term it missed, or both when it is behind the leader's log and catches up. The
-  check at the end of the message names the endpoints of that state. Each must
-  arrive, and the member's append position
-  must then reach the leader, within 10 s. Once they have, the election closes, and
+  term it missed or begins a catch-up, or both in `follower catch-up`, the last
+  state of a catch-up. The two states of a catch-up before it wait on the `catchup`
+  endpoint alone: the member subscribes to the live log only when the replay has
+  brought its log near the leader's position. The check at the end of the message
+  names the endpoints of that state. In `follower ready` the image has arrived, and
+  the message names the append position alone and the leader's `consensus` endpoint
+  as the one to check. Each must arrive, and the member's append position must then
+  reach the leader, within 10 s. Once they have, the election closes, and
   the next `doctor` shows `election closed` and no `cluster-joining`. An election
   that fails begins again by itself, so the message never says to start the cluster
   again; it ends with how many elections have failed, as `cluster-no-leader`

@@ -3044,36 +3044,43 @@ impl LogRecordingsError {
             LogRecordingsError::Entry { .. } => "recordings-entry",
         }
     }
+
+    /// What the check found, in words and with no advice. [`Display`](fmt::Display)
+    /// adds what a reader of the file does next, and that is not what a writer does:
+    /// when [`write_log_recordings`] refuses, the entries are the writer's own and no
+    /// other process wrote them, so a writer says this and its own remedy.
+    pub const fn found(self) -> LogRecordingsFound {
+        LogRecordingsFound(self)
+    }
 }
 
-impl fmt::Display for LogRecordingsError {
+/// What a check of a file of a member's log's recordings found, in words
+/// ([`LogRecordingsError::found`]).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct LogRecordingsFound(LogRecordingsError);
+
+impl fmt::Display for LogRecordingsFound {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        let reason = self.reason();
-        write!(
-            f,
-            "the file of a cluster member's log's recordings was rejected ({reason}): "
-        )?;
-        match *self {
+        match self.0 {
             LogRecordingsError::TooShort { length } => write!(
                 f,
                 "it is {length} bytes, fewer than its header's {LOG_RECORDINGS_HEADER_LENGTH}"
-            )?,
-            LogRecordingsError::Magic => write!(f, "its first eight bytes are not `CVLYLREC`")?,
+            ),
+            LogRecordingsError::Magic => write!(f, "its first eight bytes are not `CVLYLREC`"),
             LogRecordingsError::Version { found } => write!(
                 f,
-                "its version is {found} and this reader knows {LOG_RECORDINGS_VERSION}; run \
-                 the service and the member at versions that share one"
-            )?,
+                "its version is {found} and this reader knows {LOG_RECORDINGS_VERSION}"
+            ),
             LogRecordingsError::Member { found, expected } => write!(
                 f,
                 "it names member {found} and its name gives member {expected}"
-            )?,
+            ),
             LogRecordingsError::Length { count, length } => write!(
                 f,
                 "it counts {count} entries, of at most {MAX_LOG_RECORDINGS}, in {length} bytes, \
                  which is not {LOG_RECORDINGS_HEADER_LENGTH} and {LOG_RECORDING_ENTRY_LENGTH} \
                  for each"
-            )?,
+            ),
             LogRecordingsError::Live {
                 recording_id,
                 start_position,
@@ -3081,15 +3088,32 @@ impl fmt::Display for LogRecordingsError {
                 f,
                 "its live recording is {recording_id} from position {start_position}, and an \
                  id is 0 or more and a position 0 or more and a multiple of 32"
-            )?,
+            ),
             LogRecordingsError::Entry { index } => write!(
                 f,
                 "entry {index} has an id below 0, a position that is not a multiple of 32, a \
                  start below the entry before it, or a stop that is not above its start"
-            )?,
+            ),
         }
-        // Every reason but the version's is a file no member of this version writes.
-        if !matches!(self, LogRecordingsError::Version { .. }) {
+    }
+}
+
+impl fmt::Display for LogRecordingsError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(
+            f,
+            "the file of a cluster member's log's recordings was rejected ({}): {}",
+            self.reason(),
+            self.found()
+        )?;
+        // What a reader does next. Every reason but the version's is a file no member
+        // of this version writes.
+        if matches!(self, LogRecordingsError::Version { .. }) {
+            write!(
+                f,
+                "; run the service and the member at versions that share one"
+            )?;
+        } else {
             write!(
                 f,
                 "; the member writes the file again when it next names a recording, so stop \
