@@ -44,6 +44,11 @@ const CONNECT_POLL_LIMIT: usize = 16;
 /// keeps for [`ClusterSession::closed`]: `TIMEOUT` is 7 bytes.
 const CLOSED_DETAIL_LENGTH: usize = 32;
 
+/// What [`ClusterSession::closed`] gives for a session the client closed itself: its
+/// leader was lost, and no member sent the new leader event in the time the session
+/// waits for one.
+const NO_LEADER_DETAIL: &[u8] = b"NO LEADER";
+
 /// Why a session with a cluster could not be opened or closed.
 #[derive(Debug)]
 pub enum ClusterError {
@@ -154,6 +159,10 @@ enum Answer {
         session_id: i64,
         leadership_term_id: i64,
         leader_member_id: i32,
+        /// The session id of the image the event came on: the leader's egress
+        /// publication for this session.
+        image: i32,
+        leader_heartbeat_timeout_ns: i64,
     },
     Redirect {
         leader_member_id: i32,
@@ -185,6 +194,15 @@ pub struct ClusterSession {
     /// The session's nano clock when it last sent anything, or 0 to send a keepalive
     /// at the next poll.
     last_sent_ns: i64,
+    /// The session id of the leader's image on the response channel: the image the ok
+    /// event came on, or the last new leader event.
+    leader_image: i32,
+    /// How long the session waits for a new leader event once that image is gone:
+    /// twice the leader heartbeat timeout the leader's ok event gave.
+    new_leader_wait_ns: i64,
+    /// The session's nano clock when it first found the leader's image gone, or 0
+    /// while the image is there.
+    leaderless_since_ns: i64,
     closed: bool,
     closed_detail: [u8; CLOSED_DETAIL_LENGTH],
     closed_detail_length: usize,
@@ -283,6 +301,8 @@ impl ClusterSession {
                     session_id,
                     leadership_term_id,
                     leader_member_id,
+                    image,
+                    leader_heartbeat_timeout_ns,
                 }) => {
                     // The member that answered ok is the leader, whatever id it
                     // names: a leader names itself.
@@ -298,6 +318,13 @@ impl ClusterSession {
                         session_id,
                         leadership_term_id,
                         last_sent_ns: nano_time(),
+                        leader_image: image,
+                        new_leader_wait_ns: if leader_heartbeat_timeout_ns > 0 {
+                            leader_heartbeat_timeout_ns.saturating_mul(2)
+                        } else {
+                            (LEADER_HEARTBEAT_TIMEOUT_NS as i64).saturating_mul(2)
+                        },
+                        leaderless_since_ns: 0,
                         closed: false,
                         closed_detail: [0; CLOSED_DETAIL_LENGTH],
                         closed_detail_length: 0,
@@ -342,8 +369,8 @@ impl ClusterSession {
                         leader_member_id,
                         code,
                         version,
+                        leader_heartbeat_timeout_ns,
                         detail,
-                        ..
                     }) = Message::parse(Stream::Egress, body)
                     else {
                         return;
@@ -359,6 +386,8 @@ impl ClusterSession {
                                 session_id: cluster_session_id,
                                 leadership_term_id,
                                 leader_member_id,
+                                image: header.session_id(),
+                                leader_heartbeat_timeout_ns,
                             },
                             EventCode::Redirect => Answer::Redirect { leader_member_id },
                             _ => Answer::Refused {
@@ -424,7 +453,11 @@ impl ClusterSession {
     /// This is the session's duty cycle too. A new leader event turns the session to
     /// the new leader with its term, and the next thing sent is a keepalive. A session
     /// event of code closed closes the session, and [`closed`](Self::closed) then
-    /// gives the cluster's reason. When the keepalive interval, 500 ms, has passed
+    /// gives the cluster's reason. A leader sends an idle session nothing, so the
+    /// session knows its leader is lost by the leader's image going from the response
+    /// channel. It then waits for a new leader event for twice the leader heartbeat
+    /// timeout the leader gave it, 20 s, offering its keepalive meanwhile, and after
+    /// that closes itself: `closed()` gives `NO LEADER`. When the keepalive interval, 500 ms, has passed
     /// since the session last sent anything, a keepalive is sent. Nothing here
     /// allocates: the publication to each member was added by the connect.
     pub fn poll<F>(&mut self, mut handler: F, fragment_limit: usize) -> Result<usize, Fault>
@@ -439,6 +472,9 @@ impl ClusterSession {
             session_id,
             leadership_term_id,
             last_sent_ns,
+            leader_image,
+            new_leader_wait_ns,
+            leaderless_since_ns,
             closed,
             closed_detail,
             closed_detail_length,
@@ -471,6 +507,9 @@ impl ClusterSession {
                         {
                             *leader = place;
                         }
+                        // The new leader's events come on its own publication.
+                        *leader_image = header.session_id();
+                        *leaderless_since_ns = 0;
                         // The next thing sent is a keepalive, with the new term.
                         *last_sent_ns = 0;
                     }
@@ -494,6 +533,27 @@ impl ClusterSession {
             },
             fragment_limit,
         )?;
+        if !*closed {
+            let now = nano_time();
+            // A leader sends an idle session nothing, so its silence says nothing. Its
+            // image going from the response channel does: the leader is lost, and
+            // the session waits for the member that leads next to say so.
+            let present = egress
+                .images()
+                .iter()
+                .any(|image| image.session_id() == *leader_image);
+            if present {
+                *leaderless_since_ns = 0;
+            } else if *leaderless_since_ns == 0 {
+                *leaderless_since_ns = now.max(1);
+            } else if now.saturating_sub(*leaderless_since_ns) >= *new_leader_wait_ns {
+                *closed = true;
+                if let Some(held) = closed_detail.get_mut(..NO_LEADER_DETAIL.len()) {
+                    held.copy_from_slice(NO_LEADER_DETAIL);
+                    *closed_detail_length = NO_LEADER_DETAIL.len();
+                }
+            }
+        }
         if !*closed {
             let now = nano_time();
             if now.saturating_sub(*last_sent_ns) >= KEEPALIVE_INTERVAL_NS as i64
@@ -530,9 +590,10 @@ impl ClusterSession {
         self.member_ids.get(self.leader).copied().unwrap_or(-1)
     }
 
-    /// Whether the cluster closed the session, and its reason when it did: `TIMEOUT`
-    /// for a session the leader heard nothing from for the session timeout. `None`
-    /// while the session is open.
+    /// Whether the session is closed, and why: `TIMEOUT` when the leader closed it for
+    /// hearing nothing from it for the session timeout, and `NO LEADER` when its leader
+    /// was lost and no member sent the new leader event in twice the leader heartbeat
+    /// timeout. `None` while the session is open.
     pub fn closed(&self) -> Option<&str> {
         self.closed.then(|| {
             core::str::from_utf8(

@@ -132,7 +132,10 @@ The client API implementation, re-exported by the `cavalry` crate. Data plane.
   replies, each with the cluster's time, and is the session's duty cycle: it sends a
   keepalive when 500 ms have passed since the session last sent anything, turns the
   session to a new leader when the cluster elects one, and closes it when the cluster
-  says so, after which `closed()` gives the reason. A program calls it at least
+  says so, after which `closed()` gives the reason. A session whose leader is lost,
+  which it knows by the leader's image going from its response channel, waits 20 s
+  for the member that leads next to say so, and then closes itself with the reason
+  `NO LEADER`. A program calls `poll` at least
   every 500 ms: the leader closes a session it has heard nothing from for 10 s. The
   session holds a publication to every member from the connect on, so nothing in
   `offer` or `poll` allocates or sends the driver a command. A message `offer`

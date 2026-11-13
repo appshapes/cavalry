@@ -4,8 +4,11 @@
 - **Date:** 2026-11-13
 - **Invariants affected:** 1, 2, 3, 5, 6
 - **Supersedes:** none. It is the client's part of work item 229, the cluster client
-  (ADR 0052, feature 5). `spec/cluster.md` is not changed: the page says what a
-  client sends and reads, and this decides the call a program makes.
+  (ADR 0052, feature 5). Amends `spec/cluster.md`, whose version stays 0, since no
+  field of a message changes: "Sessions" says what a leader sends an idle session,
+  which is nothing, and what a client does when its leader is lost. The rest of the
+  page already says what a client sends and reads, and this decides the call a
+  program makes.
 
 ## Context
 
@@ -71,6 +74,18 @@ session's term and id, written into a claim with the message. Its refusals are
 `max_message_length()` is 1,344 bytes on the default MTU, and a longer one is
 `Offer::TooLong`.
 
+A leader sends an idle session nothing, and the page has no heartbeat from a leader
+to a session, so the session cannot tell an idle leader from a lost one by what it
+reads. It knows by the image of the leader's egress publication, the one the ok event
+or the last new leader event came on: when that image is gone from the response
+channel, the leader is lost. The session then keeps offering its keepalive and waits
+for a new leader event for twice the leader heartbeat timeout the ok event gave it,
+20 s, which is Aeron's new leader timeout and its default. A new leader event in
+that time turns the session as any does. With none, the session closes itself,
+`closed()` gives `NO LEADER`, and the program may connect again. The page's field
+"so that a client knows how long a silent leader may be" is that timeout, and until
+now nothing read it.
+
 `ClusterSession::close()` sends a session close and closes the publications and the
 subscription.
 
@@ -105,6 +120,14 @@ work item, with its own ADR, since the ABI's version moves.
   one case a program cannot see, a leader just lost, and a caller that wants less
   time calls again or not at all. A parameter with a default is a knob (`CLAUDE.md`,
   Configuration and defaults).
+- **A session that never closes for its leader's loss.** The first form of this
+  change. Lost: a program whose cluster has gone would hold a session that reads
+  nothing and whose `offer` returns `NotConnected` for ever, with no word that says
+  why; the review of pull request 277 asked the client's side to say what a client
+  does when its leader is silent.
+- **A heartbeat from the leader to each idle session.** Lost: a new message or a new
+  use of one is a change to the protocol for what the image's loss already says,
+  and Aeron's cluster sends none.
 - **`ClientError` for the session's errors.** Lost: `cavalry-ffi` gives every
   variant of `ClientError` a code of the C ABI, so a variant added here is a change
   to the ABI in a change that is not the ABI's. The session's errors get their codes
@@ -126,8 +149,11 @@ work item, with its own ADR, since the ABI's version moves.
   keepalive to the new leader inside 400 ms and the new term on the next message,
   and events of another session or an older term change nothing; a closed event
   closes the session with `TIMEOUT`, after which an offer is `Offer::Closed` and
-  nothing more is sent; and a cluster that does not answer is given up after 20 s,
-  four connects sent, to the first, second and third member and the first again.
+  nothing more is sent; a session whose leader's image is lost is turned by a new
+  leader event that comes inside the wait, and with none is closed with `NO LEADER`
+  no sooner than twice the leader heartbeat timeout its leader gave; and a cluster
+  that does not answer is given up after 20 s, four connects sent, to the first,
+  second and third member and the first again.
 - `crates/cavalry-client/tests/cluster_session_allocations.rs`: 5,000 messages
   offered and their replies read, two new leader events followed and a keepalive
   sent, under the counting allocator. No allocation and no reallocation.
@@ -147,6 +173,8 @@ default term length, most of it never touched; a program must poll at least ever
 when it is: a program that must know asks its service to reply.
 
 Revisit: when a program cannot block for a connect, for a stepped connect; when a
+program must hold one session across a cluster's loss of quorum, for a session that
+connects again by itself; when a
 session's log buffers are too much for a client of many clusters, for a term length
 on the ingress publications (ADR 0099) or one publication replaced on an event
 from the conductor; when a service's reply is longer than a frame, for reassembly;

@@ -64,6 +64,20 @@ const SESSION: i64 = 7;
 const TERM: i64 = 3;
 /// The cluster's time the played leader stamps its replies with.
 const TIME: i64 = 1_700_000_000_123;
+/// The leader heartbeat timeout the played leader gives in its ok event: a session
+/// waits twice this for a new leader once its leader's image is gone. A real
+/// cluster's is 10 s; a second keeps these tests short.
+const HEARTBEAT_NS: i64 = 1_000_000_000;
+
+/// What a test asks of the played members.
+enum Ask {
+    /// Send these bytes on the response channel.
+    Send(Vec<u8>),
+    /// The leader is lost: its egress publication is closed.
+    DropEgress,
+    /// Another member leads: an egress publication of its own.
+    NewEgress,
+}
 
 /// What a played member answers a session connect with.
 #[derive(Clone)]
@@ -100,7 +114,7 @@ struct Played {
     observed: Receiver<Seen>,
     seen: RefCell<Seen>,
     /// Bytes for the thread to send on the response channel.
-    send: Sender<Vec<u8>>,
+    send: Sender<Ask>,
     stop: Arc<AtomicBool>,
     thread: Option<JoinHandle<()>>,
 }
@@ -179,7 +193,7 @@ fn play(
     script: &[Reply; 3],
     endpoints: &str,
     observe: &Sender<Seen>,
-    receive: &Receiver<Vec<u8>>,
+    receive: &Receiver<Ask>,
     stop: &AtomicBool,
 ) {
     let mut client = Cavalry::connect_to(dir).expect("the played members connect");
@@ -195,6 +209,8 @@ fn play(
         })
         .collect();
     let mut egress: Option<Publication> = None;
+    // The response channel of the session that connected, for the next leader.
+    let mut response: Option<String> = None;
     // What is yet to go out on the response channel, oldest first.
     let mut owed: Vec<Vec<u8>> = Vec::new();
     while !stop.load(Ordering::Acquire) {
@@ -217,6 +233,7 @@ fn play(
                     assert_eq!(response_stream_id, EGRESS_STREAM_ID);
                     if egress.is_none() {
                         let channel = std::str::from_utf8(response_channel).expect("a channel");
+                        response = Some(channel.to_owned());
                         egress = Some(
                             client
                                 .add_exclusive_publication(channel, EGRESS_STREAM_ID)
@@ -231,7 +248,7 @@ fn play(
                             leader_member_id: leader,
                             code,
                             version,
-                            leader_heartbeat_timeout_ns: 10_000_000_000,
+                            leader_heartbeat_timeout_ns: HEARTBEAT_NS,
                             detail,
                         })
                     };
@@ -294,8 +311,22 @@ fn play(
             // The test may have ended its read: what was seen then goes nowhere.
             let _ = observe.send(seen);
         }
-        while let Ok(bytes) = receive.try_recv() {
-            owed.push(bytes);
+        while let Ok(ask) = receive.try_recv() {
+            match ask {
+                Ask::Send(bytes) => owed.push(bytes),
+                Ask::DropEgress => {
+                    assert!(owed.is_empty(), "the leader went with events unsent");
+                    egress = None;
+                }
+                Ask::NewEgress => {
+                    let channel = response.as_deref().expect("a session connected");
+                    egress = Some(
+                        client
+                            .add_exclusive_publication(channel, EGRESS_STREAM_ID)
+                            .expect("the next leader's egress publication"),
+                    );
+                }
+            }
         }
         if let Some(publication) = egress.as_mut() {
             while let Some(bytes) = owed.first() {
@@ -524,17 +555,17 @@ fn a_new_leader_event_turns_the_session_and_a_closed_event_closes_it() {
     world
         .played
         .send
-        .send(new_leader(TERM + 5, SESSION + 1, 1, &endpoints))
+        .send(Ask::Send(new_leader(TERM + 5, SESSION + 1, 1, &endpoints)))
         .expect("sent");
     world
         .played
         .send
-        .send(new_leader(TERM - 1, SESSION, 1, &endpoints))
+        .send(Ask::Send(new_leader(TERM - 1, SESSION, 1, &endpoints)))
         .expect("sent");
     world
         .played
         .send
-        .send(new_leader(TERM + 1, SESSION, 2, &endpoints))
+        .send(Ask::Send(new_leader(TERM + 1, SESSION, 2, &endpoints)))
         .expect("sent");
     assert!(poll_until(&mut session, &mut read, |session, _| {
         session.leader_member_id() == 2
@@ -569,8 +600,16 @@ fn a_new_leader_event_turns_the_session_and_a_closed_event_closes_it() {
             detail: b"TIMEOUT",
         })
     };
-    world.played.send.send(closed(SESSION + 1)).expect("sent");
-    world.played.send.send(closed(SESSION)).expect("sent");
+    world
+        .played
+        .send
+        .send(Ask::Send(closed(SESSION + 1)))
+        .expect("sent");
+    world
+        .played
+        .send
+        .send(Ask::Send(closed(SESSION)))
+        .expect("sent");
     assert!(poll_until(&mut session, &mut read, |session, _| {
         session.closed().is_some()
     }));
@@ -622,6 +661,89 @@ fn a_cluster_that_does_not_answer_is_given_up_after_twenty_seconds() {
     assert_eq!(
         world.played.seen(|seen| seen.connects.clone()),
         [0, 1, 2, 0]
+    );
+    world.close();
+}
+
+/// A session whose leader is lost keeps its session and waits for the member that
+/// leads next: the new leader event, on that member's own publication, turns it, and
+/// the old leader's image going from the response channel then closes nothing.
+#[test]
+fn a_session_whose_leader_is_lost_is_turned_by_the_member_that_leads_next() {
+    let mut world = World::start("leader-lost", [Reply::Ok, Reply::Silent, Reply::Silent]);
+    let mut session = world.connect().expect("the session opens");
+    let mut read = Vec::new();
+    world.played.send.send(Ask::DropEgress).expect("sent");
+    world.played.send.send(Ask::NewEgress).expect("sent");
+    world
+        .played
+        .send
+        .send(Ask::Send(encode(&Message::NewLeaderEvent {
+            leadership_term_id: TERM + 1,
+            cluster_session_id: SESSION,
+            leader_member_id: 1,
+            ingress_endpoints: world.played.endpoints.as_bytes(),
+        })))
+        .expect("sent");
+    assert!(poll_until(&mut session, &mut read, |session, _| {
+        session.leader_member_id() == 1
+    }));
+    // Twice over the session's wait for a new leader, 2 s here: still open.
+    let turned = Instant::now();
+    while turned.elapsed() < Duration::from_secs(4) {
+        session.poll(|_, _| {}, 10).expect("polls");
+        std::thread::sleep(Duration::from_millis(1));
+    }
+    assert_eq!(session.closed(), None);
+    session.offer(b"to the next leader").expect("taken");
+    assert!(wait_until(Duration::from_secs(5), || {
+        world.played.seen(|seen| seen.messages.len() == 1)
+    }));
+    assert_eq!(
+        world.played.seen(|seen| seen.messages[0].clone()),
+        (1, TERM + 1, SESSION, 0, b"to the next leader".to_vec())
+    );
+    session.close().expect("the session closes");
+    world.close();
+}
+
+/// A session whose leader is lost and not replaced closes itself: once the leader's
+/// image has gone from the response channel it waits twice the leader heartbeat
+/// timeout its leader gave for a new leader event, and with none it is closed with
+/// `NO LEADER`, refuses an offer and sends nothing more.
+#[test]
+fn a_session_whose_leader_is_lost_and_not_replaced_closes_itself() {
+    let mut world = World::start("no-leader", [Reply::Ok, Reply::Silent, Reply::Silent]);
+    let mut session = world.connect().expect("the session opens");
+    let lost = Instant::now();
+    world.played.send.send(Ask::DropEgress).expect("sent");
+    assert!(
+        wait_until(Duration::from_secs(60), || {
+            session.poll(|_, _| {}, 10).expect("polls");
+            session.closed().is_some()
+        }),
+        "the session was not closed in 60 s"
+    );
+    assert_eq!(session.closed(), Some("NO LEADER"));
+    assert!(
+        lost.elapsed() >= Duration::from_nanos(2 * HEARTBEAT_NS as u64),
+        "closed {:?} after its leader went",
+        lost.elapsed()
+    );
+    assert_eq!(session.offer(b"too late"), Err(Offer::Closed));
+    let keepalives = world.played.seen(|seen| seen.keepalives.len());
+    let quiet = Instant::now();
+    while quiet.elapsed() < Duration::from_millis(700) {
+        session.poll(|_, _| {}, 10).expect("polls");
+        std::thread::sleep(Duration::from_millis(1));
+    }
+    session.close().expect("the session closes");
+    std::thread::sleep(Duration::from_millis(100));
+    assert_eq!(
+        world
+            .played
+            .seen(|seen| (seen.keepalives.len(), seen.closes.len())),
+        (keepalives, 0)
     );
     world.close();
 }
