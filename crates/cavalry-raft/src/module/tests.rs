@@ -2431,3 +2431,107 @@ fn a_truncation_waits_until_the_counter_names_no_recording() {
     assert_eq!(pair.member.io.append_position(), one);
     assert_eq!(pair.stop_of(first), Some(one));
 }
+
+/// A member that closes stores −1 in `cluster.log_recording_id` before it removes its
+/// file of the log's recordings (`spec/cluster.md`, "The log's recordings"; ADR 0103).
+/// A service that finds no file loads the counter again, and must not find there the
+/// id of the recording the file was for. Closing the member's client would not do it:
+/// the driver removes a client's counters when it reads the command, some time after
+/// the close has returned, and the store is done when it returns. So once the store
+/// is made, and before the client is closed, the counter holds −1 and the file is
+/// there; when the close returns the file is gone.
+#[test]
+fn a_member_that_closes_names_no_recording_before_it_removes_its_file() {
+    let Leader {
+        mut module,
+        log,
+        catchup,
+        _follower,
+        _driver,
+        _dir,
+    } = leader("close-order");
+    // The member names recording 7 from position 0: the file first, then the id.
+    module
+        .io
+        .write_log_recordings(7, 0)
+        .expect("the file is written");
+    module.counters.log_recording_id.store(7);
+    let file = module.io.recordings_path.clone();
+    assert!(file.exists());
+    let reader = cavalry_shm::counters::CountersReader::open(&_dir.0.join("driver"))
+        .expect("the counters file opens");
+    let key = module.io.member_id.to_le_bytes();
+    let named = || {
+        (0..reader.capacity()).find_map(|id| match reader.record(id) {
+            Ok(Some(record))
+                if record.type_id() == CLUSTER_LOG_RECORDING_ID.0
+                    && record.key().starts_with(&key) =>
+            {
+                Some(reader.read_acquire(id).expect("the counter is read"))
+            }
+            _ => None,
+        })
+    };
+    assert_eq!(named(), Some(7));
+
+    let mut seen = false;
+    module
+        .close_observed(|| {
+            assert_eq!(named(), Some(NO_RECORDING), "the counter names a recording");
+            assert!(file.exists(), "the file is removed only after the store");
+            seen = true;
+        })
+        .expect("the member closes");
+    assert!(seen);
+    assert!(!file.exists(), "the member removed its file when it closed");
+    drop((log, catchup));
+}
+
+/// A list of recordings that the module's own writer refuses is the module's fault,
+/// and the member says so: what the check found, that it is a fault to report, and
+/// none of the advice a reader of the file is given, since no other process wrote
+/// the list. A file the operating system would not write keeps its own remedy.
+#[test]
+fn a_list_the_writer_refuses_is_said_to_be_the_modules_fault_and_not_the_directorys() {
+    let refused = RaftError::LogRecordings {
+        path: PathBuf::from("/driver/log-recordings-2"),
+        source: std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            RefusedList(LogRecordingsError::Entry { index: 3 }),
+        ),
+    };
+    let text = refused.to_string();
+    assert!(
+        text.starts_with(
+            "member stopped (log-recordings): /driver/log-recordings-2 could not be written: \
+             the list the member made of its log's recordings is one the file's format \
+             refuses (recordings-entry): entry 3 has an id below 0,"
+        ),
+        "{text}"
+    );
+    assert!(
+        text.contains(
+            "This is a fault of the consensus module and not of the directory: report it \
+             with this message"
+        ),
+        "{text}"
+    );
+    for absent in [
+        "whatever else writes in the driver directory",
+        "open the log again",
+        "Make the driver directory writable",
+    ] {
+        assert!(!text.contains(absent), "{absent}: {text}");
+    }
+
+    let unwritable = RaftError::LogRecordings {
+        path: PathBuf::from("/driver/log-recordings-2.tmp"),
+        source: std::io::Error::from(std::io::ErrorKind::PermissionDenied),
+    };
+    let text = unwritable.to_string();
+    assert!(
+        text.contains("Make the driver directory writable by the member's user"),
+        "{text}"
+    );
+    assert!(!text.contains("fault of the consensus module"), "{text}");
+}

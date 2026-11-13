@@ -1301,8 +1301,10 @@ impl Cavalry {
     ///
     /// Returns `None` while the driver hosts no member that has a recording of its
     /// log: the member has not started, its election has not given it a log yet, it
-    /// has closed, or it named another recording while this call read its file of
-    /// recordings. A service that starts before its member calls again, with a
+    /// has closed, or it named another recording, or closed and removed its file,
+    /// while this call read its file of recordings: with no file the call loads the
+    /// member's counter again, and opens the live recording only when the counter
+    /// still names it. A service that starts before its member calls again, with a
     /// pause between two calls: each reads the counters file's records to find the
     /// member, which is not a call for a loop that spins. Nothing is sent to the
     /// driver until a member is found.
