@@ -461,8 +461,10 @@ fn three_members_replicate_a_hundred_thousand_entries_and_their_recordings_are_e
         // its own.
         let steps = counter(member, CLUSTER_ELECTION_STEPS.0);
         // A count of steps is exact only for a member whose one election closed with
-        // no catch-up: one that joined late took the steps of a catch-up too.
-        if term == 0 && counts.elections == 1 && counts.catchups == 0 {
+        // no catch-up and no ballot lost: one that joined late took the steps of a
+        // catch-up too, and a voter whose candidate's term came later than the
+        // election timeout went back to canvass and took the term from there.
+        if term == 0 && counts.elections == 1 && counts.catchups == 0 && counts.ballots_lost == 0 {
             assert_eq!(counts.candidacies, u64::from(index == 0));
             assert!(
                 if index == 0 {
