@@ -445,12 +445,12 @@ fn a_message_is_answered_by_the_service_beside_its_terms_leader_alone() {
     }
     let (first_leader, first_term) = cluster.led.expect("a leader");
 
-    // The fourth rule of order a member keeps for its service (`spec/cluster.md`,
-    // "The service"): its term, the id of the member it leads as or follows and its
-    // append position are added before its recording's id, which a service finds
-    // the member by, and the term before that id. A member adds its counters one
-    // after another to a driver that has freed none, so a counter added earlier has
-    // the lower record.
+    // The fourth and fifth rules of order a member keeps for its service
+    // (`spec/cluster.md`, "The service"): its term, the id of the member it leads as
+    // or follows and its append position are added before its recording's id, which
+    // a service finds the member by, and the term before that id. A member adds its
+    // counters one after another to a driver that has freed none, so a counter added
+    // earlier has the lower record.
     for id in 0..3 {
         let recording = counter(dir.path(), id, CLUSTER_LOG_RECORDING_ID.0).0;
         let term = counter(dir.path(), id, CLUSTER_LEADERSHIP_TERM_ID.0).0;
