@@ -19,7 +19,8 @@
 //
 // The client's own edges: what offer refuses, and that it takes a message over a byte
 // array; the calls the ABI refuses from inside a service's handler, on the service and on
-// the client its poll holds, and from inside the session's, each made after the thread's
+// the client its poll holds, the client's own close among them, which must leave the
+// client open, and from inside the session's, each made after the thread's
 // error was set to another code, so that a refusal that answers what an open handle answers
 // is told from an answer; the one object of values a handler is handed, and the body of no
 // bytes of an entry that is no session's message; a service's handler that throws after it
@@ -219,8 +220,17 @@ public final class ClusterRound {
                 refusals.add(thrown("fault", service::fault));
                 refusals.add(thrown("close", service::close));
                 refusals.add(asked("Client.isClosed", () -> client.isClosed() ? 1 : 0));
+                refusals.add(asked("Client.closed", client::closed));
                 refusals.add(thrown("Client.clusterService", client::clusterService));
                 refusals.add(thrown("Client.addSubscription", () -> client.addSubscription("cavalry:ipc", 1229)));
+                // The client's own close, last: the ABI refuses it and frees nothing
+                // (spec/c-abi.md, "Calls during a claim or a poll"), so the client must
+                // stay open and still reach the ABI after it: isClosed is refused again,
+                // false with ERR_POLLING. Were the handle forgotten, isClosed would answer
+                // true with no call, the thread's error would stay the other code, and the
+                // poll after this one would hand the ABI a null client.
+                refusals.add(thrown("Client.close", client::close));
+                refusals.add(asked("Client.isClosed after its close", () -> client.isClosed() ? 1 : 0));
             }
             codes.computeIfAbsent(payload, key -> new ArrayList<>()).add(code);
             messages.computeIfAbsent(payload, key -> new ArrayList<>()).add(read);
@@ -455,7 +465,9 @@ public final class ClusterRound {
             List<Refusal> expected = List.of(new Refusal("poll", -1, polling), new Refusal("position", -1, polling),
                 new Refusal("answers", 0, polling), new Refusal("sessions", -1, polling), new Refusal("fault", -1, polling),
                 new Refusal("close", -1, polling), new Refusal("Client.isClosed", 0, polling),
-                new Refusal("Client.clusterService", -1, polling), new Refusal("Client.addSubscription", -1, polling));
+                new Refusal("Client.closed", -1, polling),
+                new Refusal("Client.clusterService", -1, polling), new Refusal("Client.addSubscription", -1, polling),
+                new Refusal("Client.close", -1, polling), new Refusal("Client.isClosed after its close", 0, polling));
             if (!expected.equals(s.refusals)) {
                 fail("the calls from inside the handler of the service beside member " + s.member + " answered "
                     + s.refusals + ", not " + expected);
@@ -504,7 +516,8 @@ public final class ClusterRound {
         }
         say("session " + session.sessionId() + "'s message, the entry at position " + first.position() + " of term "
             + first.term() + ", taken by three services and answered once, by the service beside member " + led.member
-            + "; nine calls from inside a service's handler and eight from inside the session's refused with ERR_POLLING");
+            + "; twelve calls from inside a service's handler, the client's close among them, and eight from inside the "
+            + "session's refused with ERR_POLLING");
 
         // 6. A handler that replies and then throws: its entry is aborted, so the poll ends at
         // it with the entry not taken, poll throws, and the next poll hands the entry over

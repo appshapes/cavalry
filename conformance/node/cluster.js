@@ -26,7 +26,8 @@
  * that answers what an open handle answers is told from an answer; the one object of values a
  * handler is handed, which reads undefined once the call has returned, as its body reads
  * empty; a service's handler that throws after it replied, one that returns what the ABI
- * refuses as no action, and one that returns a promise, as an `async` handler does, whose
+ * refuses as no action, one that returns `true`, as a call-back that says "handled" does,
+ * and one that returns a promise, as an `async` handler does, whose
  * entry is aborted, handed over again by the next poll and answered once; a reply too long for
  * a frame and a reply to a session that is not open; a handler that returns BREAK with two
  * entries waiting; a session's handler that throws, whose reply is not handed over again; the
@@ -120,6 +121,7 @@ class Served {
     this.throwOn = null; // a payload whose first handling replies and then throws
     this.noActionOn = null; // a payload whose first handling returns what the ABI refuses as no action
     this.promiseOn = null; // a payload whose first handling returns a promise, as an `async` handler does
+    this.trueOn = null; // a payload whose first handling returns true, as a call-back that says "handled" does
     this.edgesOn = null; // a payload before whose reply a reply too long and one to no session are made
     this.edges = null;
     this.breakOn = []; // payloads whose entries are taken with BREAK
@@ -149,6 +151,7 @@ class Served {
     handed.push(entry.position);
     if (this.noActionOn === payload && handed.length === 1) return 3; // Aeron's COMMIT, which Cavalry has no action for
     if (this.promiseOn === payload && handed.length === 1) return Promise.resolve(cavalry.CONTINUE);
+    if (this.trueOn === payload && handed.length === 1) return true;
     if (this.edgesOn === payload && this.edges === null) {
       const tooLong = service.reply(entry.sessionId, Buffer.alloc(1345));
       this.edges = [[tooLong, addon.cavalry_errcode()], [service.reply(entry.sessionId + 1000, Buffer.from("x")), null]];
@@ -474,7 +477,9 @@ function main() {
   // the ABI's code, and handed over again. First 3, a number the ABI refuses; on its second
   // handling, before the reply, a reply too long for a frame and a reply to a session that is
   // not open. Then a promise, what an `async` handler returns, which the addon refuses without
-  // a call: the handler has not finished with its entry.
+  // a call: the handler has not finished with its entry. Then `true`, which a call-back
+  // returns to say that it handled its entry: a boolean is no action, and the addon makes no
+  // call with it, where 1, the number it would be as an integer, is CAVALRY_ACTION_ABORT.
   leader.noActionOn = leader.edgesOn = "no action";
   noAction(leader, served, answered, session, "no action", "3");
   const edges = [[constants.CAVALRY_CLUSTER_REPLY_TOO_LONG, constants.CAVALRY_ERR_TOO_LONG],
@@ -485,6 +490,8 @@ function main() {
   }
   leader.promiseOn = "promise";
   noAction(leader, served, answered, session, "promise", "[object Promise]");
+  leader.trueOn = "true";
+  noAction(leader, served, answered, session, "true", "true");
 
   // 8. BREAK: with two entries waiting, a poll takes one and ends. The leader's service is
   // not polled until the two others have taken both entries and a moment more, so that its
@@ -538,7 +545,7 @@ function main() {
     fail(`the reply whose handler threw was read ${answered.to("reply throws").length} times, and the session passed ` +
       `over ${session.staleReplies()} stale replies`);
   }
-  say("a handler that threw, one that returned 3 and one that returned a promise had their entries aborted, handed " +
+  say("a handler that threw, one that returned 3, one that returned a promise and one that returned true had their entries aborted, handed " +
     "over again and answered once; a reply of 1,345 bytes and a reply to no session refused; BREAK took one of two " +
     "entries; a reply whose handler threw is not handed over again");
 

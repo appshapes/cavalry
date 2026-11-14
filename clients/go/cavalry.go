@@ -291,14 +291,15 @@ func CheckABIVersion(expected int32) error {
 			"docs/reference/c-abi.md#versions-and-what-a-reader-rejects", found, expected)}
 }
 
-// The table the trampoline reads subscriptions and committed logs from: C must not hold a
-// Go pointer, so the ABI is given a 1-based index into it as the poll's clientd. An open
-// subscription holds one slot, and so does an open committed log, an open cluster session
-// and an open cluster service. The table is bounded
-// (CLAUDE.md, invariant 3): a process holds at most maxSubscriptions of the two together
-// through this package, and AddSubscription and CommittedLog return an *Error with
-// ErrSubscriptionsFull above that. Slots are taken and freed under registryMu, on the
-// control plane; the trampoline reads a slot with one atomic load.
+// The table the trampolines read subscriptions, committed logs, cluster sessions and
+// cluster services from: C must not hold a Go pointer, so the ABI is given a 1-based index
+// into it as the poll's clientd, or, for a cluster service, a C struct that holds the
+// index. An open subscription holds one slot, and so does an open committed log, an open
+// cluster session and an open cluster service. The table is bounded (CLAUDE.md, invariant
+// 3): a process holds at most maxSubscriptions of the four together through this package,
+// and AddSubscription, CommittedLog, ConnectCluster and ClusterService return an *Error
+// with ErrSubscriptionsFull above that. Slots are taken and freed under registryMu, on the
+// control plane; a trampoline reads a slot with one atomic load.
 const maxSubscriptions = 4096
 
 var subscriptions [maxSubscriptions]atomic.Pointer[Subscription]
@@ -412,12 +413,17 @@ func (c *Client) Closed() int32 {
 }
 
 // Close closes the client, cavalry_close, and none of the handles it made: each
-// Publication, Subscription, Recording, Replay and CommittedLog is freed by its own Close
-// and by nothing else, and a publication or a subscription answers as closed until then
-// (spec/c-abi.md, "Lifetimes"). An unclosed Subscription or CommittedLog keeps its slot in
-// the table of 4096, so a program that closes only its clients fills the
-// table, and AddSubscription and CommittedLog return ErrSubscriptionsFull. Idempotent;
-// the handle is forgotten whatever the ABI returns.
+// Publication, Subscription, Recording, Replay, CommittedLog, ClusterSession and
+// ClusterService is freed by its own Close and by nothing else, and a publication or a
+// subscription answers as closed until then (spec/c-abi.md, "Lifetimes"). An unclosed
+// Subscription, CommittedLog, ClusterSession or ClusterService keeps its slot in the table
+// of 4096, so a program that closes only its clients fills the table, and
+// AddSubscription, CommittedLog, ConnectCluster and ClusterService return
+// ErrSubscriptionsFull. Idempotent. The handle is forgotten whatever the ABI returns, but
+// for one close: a close from inside the handler of a cluster service whose poll holds
+// this client, which the ABI refuses (spec/c-abi.md, "Calls during a claim or a poll").
+// Close then returns the *Error with ErrPolling and keeps the handle, the client stays
+// open, and the service's next poll and a Close after the poll has returned use it.
 func (c *Client) Close() error {
 	c.mu.Lock()
 	defer c.mu.Unlock()
@@ -426,9 +432,16 @@ func (c *Client) Close() error {
 	}
 	runtime.LockOSThread()
 	defer runtime.UnlockOSThread()
-	err := check("cavalry_close", C.cavalry_close(c.handle))
+	if result := C.cavalry_close(c.handle); result != 0 {
+		err := lastError("cavalry_close")
+		if err.Code == ErrPolling {
+			return err
+		}
+		c.handle = nil
+		return err
+	}
 	c.handle = nil
-	return err
+	return nil
 }
 
 // AddPublication adds a publication on channel and streamID, waiting on the driver for

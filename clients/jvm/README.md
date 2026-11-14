@@ -234,14 +234,16 @@ that runs three services and a session through every call above.
   ends there, and `poll` throws. The entry is handed over again; it is never skipped.
 - Never lose a handle the ABI keeps open. Every close frees its handle, whatever it
   returns, so `close()` forgets the handle once the ABI's close has returned. The one
-  exception is the close of a subscription, of a committed log, of a cluster session
-  or of a cluster service from inside a handler of its
-  own poll, which the ABI refuses with `Abi.ERR_POLLING`, leaving it open
-  (`spec/c-abi.md`, "Calls during a claim or a poll"); a cluster service's close is
-  refused in the same way from inside the handler of another service whose poll holds
-  its client. `close()` then throws
-  `CavalryException` and keeps the handle, so it can be polled and closed after the
-  poll. A call after a close hands the ABI a null handle, as the Python and Go clients
+  exception is a close that the ABI refuses with `Abi.ERR_POLLING`, which frees
+  nothing and leaves the handle open (`spec/c-abi.md`, "Calls during a claim or a
+  poll"). The ABI refuses three kinds of close. The first is the close of a
+  subscription, of a committed log, of a cluster session or of a cluster service from
+  inside a handler of its own poll. The second is a cluster service's close from
+  inside the handler of another service whose poll holds its client. The third is a
+  `Client`'s close from inside the handler of a cluster service whose poll holds that
+  client. `close()` then throws `CavalryException` and keeps the handle, so that the
+  program can still use the handle, and close it, after the poll has returned. A call
+  after a close hands the ABI a null handle, as the Python and Go clients
   do, and the ABI refuses it with `Abi.ERR_NULL`: a poll answers -1, a claim
   `PUBLICATION_ERROR`, never a delivery and never a frame.
 - Never read a refusal as an answer. A `poll` from inside a handler of the same
@@ -262,10 +264,11 @@ that runs three services and a session through every call above.
   the same service, `position()` and `sessions()` return −1, `answers()` is `false`, a
   refusal there, and `fault()` and `close()` throw `CavalryException`. The service's
   poll holds its client too, so every call on that client from inside the handler is
-  refused the same way: `client.isClosed()` is `false`, a refusal, and an add, a
-  command, `client.committedLog`, `client.connectCluster` and `client.clusterService`
-  throw `CavalryException` with `Abi.ERR_POLLING`. Make them after the poll has
-  returned.
+  refused the same way: `client.isClosed()` is `false`, a refusal, `client.closed()`
+  is −1, and an add, a command, `client.committedLog`, `client.connectCluster`,
+  `client.clusterService` and `client.close()` throw `CavalryException` with
+  `Abi.ERR_POLLING`. A refused `client.close()` frees nothing, and the client stays
+  open. Make these calls after the poll has returned.
 - Never hand the ABI a claim struct that names a freed publication. The one
   `cavalry_buffer_claim_t` a publication keeps names its handle in its `publication`
   field, and the ABI reads that field on a commit, an abort and a reserved value. So
