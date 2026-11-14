@@ -44,7 +44,11 @@ The `extern "C"` ABI and its cbindgen header. Data plane, and the other crate wh
   buffer. From inside the handler `cavalry_cluster_service_reply` answers a session
   and returns what became of the reply, and `cavalry_cluster_service_action` says
   whether the entry is taken: `CAVALRY_ACTION_ABORT` leaves it for the next poll,
-  which is what the reply code `CAVALRY_CLUSTER_REPLY_RETRY` asks for. The service
+  which is what the reply code `CAVALRY_CLUSTER_REPLY_RETRY` asks for. Both check
+  in one order and stop at the first refusal: a null argument,
+  `CAVALRY_ERR_NULL`; then a call from outside the handler,
+  `CAVALRY_ERR_CLUSTER_NO_ENTRY`, whatever its other arguments; and only then an
+  action that is none of the three, `CAVALRY_ERR_CLUSTER_ACTION`. The service
   beside every member runs the same handler on the same entries, and the one beside
   the entry's leader answers. The poll holds the client it was called with: a
   function that takes that client is refused from inside the handler

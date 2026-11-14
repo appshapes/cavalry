@@ -58,7 +58,8 @@ service object, and then the client's own edges (ADR 0124), of which the Python 
 is the shape. What `offer` refuses. The calls `spec/c-abi.md` refuses from inside a
 service's handler, on the service and on the client its poll holds, and from inside a
 session's, each made after the thread's error was set to another code. A service's
-handler that replies and then raises, and one that returns what is no action: each
+handler that replies and then raises, and one that returns what is no action, in
+Python `True` and then 3: each
 entry is aborted, handed over again at the same position, and answered once. A reply
 too long for a frame and a reply to a session that is not open. A handler that returns
 break with two entries waiting, whose poll takes one. A session's handler that raises,

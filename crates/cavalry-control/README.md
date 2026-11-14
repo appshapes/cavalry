@@ -55,7 +55,11 @@ is allowed here.
   its log directory that it could not write or sync
   (`cluster.log_recordings_unsynced`), and a recording of its log that it forgot,
   after which it does not start again on its log directory
-  (`cluster.log_recordings_forgotten`). `cluster-no-leader` and `cluster-joining` end with the
+  (`cluster.log_recordings_forgotten`). A client's session with a cluster keeps its
+  counter on the client's own driver, keyed by the session's id and not by a member's
+  (ADR 0121): `doctor` takes it for no member, and reports the stale replies a
+  session passed over, above 0, by the session's id with the counter's sentence
+  (`cluster.replies_stale`). `cluster-no-leader` and `cluster-joining` end with the
   elections the member has failed, the counters of three rules that fail one, and
   how many failed on none of the three. A member begins its election again after one
   that fails, so no finding tells an operator to start the cluster again (ADR 0100).
