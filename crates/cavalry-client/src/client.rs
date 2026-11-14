@@ -1511,6 +1511,11 @@ impl Cavalry {
     /// next member. The call returns the [`ClusterSession`] once the leader has
     /// opened it, which is once a quorum holds the session's first entry.
     ///
+    /// The call takes no session message from the response channel. A service may
+    /// reply to the session from its open event on, and that reply can arrive before
+    /// the leader's answer does: it stays on the response channel, and the session's
+    /// first [`ClusterSession::poll`] hands it over (ADR 0118).
+    ///
     /// It gives up after 20 s, [`ClusterError::ConnectTimeout`]: long enough for a
     /// cluster that has just lost its leader to elect another. The leader's refusal
     /// is [`ClusterError::Refused`] with its reason, a members string that fails a

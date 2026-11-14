@@ -48,7 +48,7 @@ constants in this version:
 | log | 100 | the leader's, `cavalry:udp?control=<its log endpoint>\|control-mode=manual\|fc=min`, every other member's `log` endpoint added as a destination (`spec/client-protocol.md`, "Commands", add destination), created at the term base log position for every term after the first, by the channel's position keys, `init-term-id`, `term-id` and `term-offset` (`spec/udp.md`, "The sender"; ADR 0059); a member's recording of an image of this stream begins at the image's join position, so it is armed on the subscription before the image arrives, a `start recording` on a channel the driver has a subscription on and no image of yet (`spec/client-protocol.md`, "Commands", start recording; ADR 0059), since a recording started once the image is there begins at the image's rebuild position and the data that arrived before it lands in no recording; a member's two commands, `add subscription` and then `start recording`, leave a gap an image can arrive in, so a member takes where a recording begins from the recording's start position in the catalog (`spec/durable-log.md`, "Descriptor") and never from its image, and tells its election that position as the image's join position: a recording that began past the image's join is then an image that joined past the member's append position, which state 15 fails on, and it is no part of the member's log (ADR 0093) | each other member's, `cavalry:udp?endpoint=<its log endpoint>`, recorded into its durable log; a member catching up, `cavalry:udp?endpoint=<its catchup endpoint>` |
 | consensus | 108 | one per member per peer, `cavalry:udp?endpoint=<the peer's consensus endpoint>` | each member's, `cavalry:udp?endpoint=<its consensus endpoint>` |
 | ingress | 101 | a client's, `cavalry:udp?endpoint=<a member's ingress endpoint>` | each member's, `cavalry:udp?endpoint=<its ingress endpoint>` |
-| egress | 102 | the leader's, one per open session, and any member's, one per connect it answers with a redirect or a refusal, at most the pending answers of "Values" at a time, each on the client's response channel | the client's, on its response channel |
+| egress | 102 | the leader's, one per open session; the service's that answers the term's entries, the one beside the member that led the term, one per open session, for its replies ("Replies"); and any member's, one per connect it answers with a redirect or a refusal, at most the pending answers of "Values" at a time; each on the client's response channel | the client's, on its response channel |
 | service log | 104 | the member's driver's, one for each service: a replay of the member's recording of the log that follows it, on `cavalry:ipc` ("The service") | the service's, on `cavalry:ipc` |
 | log replay | 103 | the member's driver's, one: a replay of the member's recordings of the log that follows them, on `cavalry:ipc`, which the member's own consensus module reads as a service reads the service log, for its sessions ("Sessions"; ADR 0116). A stream of its own, so that this replay and a service's never reach each other's subscription | the consensus module's, on `cavalry:ipc` |
 
@@ -893,7 +893,14 @@ than 280 bytes, the prefix, a host name of 253 bytes, `:` and five digits, is no
 limit` when its sessions, open and connecting, are at the bound ("Values"); otherwise it
 gives the session the next session id, appends a session open event, and once that
 entry is committed sends the session event of code ok with the session id, the
-correlation id and an empty detail. The session is open from then. A session is
+correlation id and an empty detail. The session is open from then. A service may
+reply to the session from its session open event on ("Replies"), on a publication of
+its own, so a session message can reach the client before the ok event does. A
+client keeps a session message it reads before its session event, for the session
+it opens: while it waits for the answer to its connect it takes no session message
+and nothing behind one on the same image, and nothing that follows its answer, and
+the session it opens reads them first and hands over each session message that
+carries its session id (ADR 0118). A session is
 opened by its committed session open event and closed by its committed session close
 event, on every member that reads them in its own log ("Roles and the election",
 states 6 and 10), the leader among them: the leader that accepted a connect holds the
@@ -980,8 +987,10 @@ close, by the client's session close or by the timeout, it sends the session not
 it still owed, an ok event or a new leader event, but the closed event of a timeout;
 it ignores what the client sends for that session, each counted in
 `cluster.ingress_ignored`; and the session stays open on every member until the
-session close event is committed (ADR 0115). The service's replies to a session are session messages on the egress stream, from the
-leader alone ("The service"). When a term begins, its leader sends a new leader event
+session close event is committed (ADR 0115). A service's replies to a session are
+session messages on the egress stream, on a publication of the service's own, from
+the service beside the member that led the term of the entry it answers and from no
+other ("Replies"). When a term begins, its leader sends a new leader event
 to every open session with the ingress endpoints, whether or not the leader changed,
 since the clients' messages carry the term and the leader ignores one for another
 term; the client sends its next message, a keepalive first, with the new term to the
@@ -1112,7 +1121,9 @@ the two versions.
 A service replies to a session with a session message on the egress stream ("The
 session protocol"), with the leadership term id and the timestamp of the entry it is
 reading and the id of the session, which is any session open at that entry: one that
-a session open event below it opened and no session close event below it closed. It
+a session open event at or below it opened and no session close event below it
+closed. So a service may reply to a session at the session's own open event, and at
+its close event. It
 sends the reply on an exclusive publication of its own to the session's response
 channel, one for each open session, at most the sessions of "Values". A reply is one
 frame, a payload of 1,344 bytes at most, and a longer one is refused to the service's

@@ -131,7 +131,10 @@ The client API implementation, re-exported by the `cavalry` crate. Data plane.
   returns a `ClusterSession` once the leader has opened the session, or a
   `ClusterError` that says what to do: the leader's refusal with its reason, a
   cluster of another protocol version, a members string that fails a check, or no
-  answer in 20 s. `ClusterSession::offer(message)` sends the leader a message of one
+  answer in 20 s. The connect takes no session message from the response channel: a
+  reply that a service sent the session before the leader's answer arrived stays
+  there, and the session's first `poll` hands it over (ADR 0118).
+  `ClusterSession::offer(message)` sends the leader a message of one
   frame, 1,344 bytes at most on the default MTU, with back pressure returned as
   `Offer`. `ClusterSession::poll(handler, fragment_limit)` hands over the cluster's
   replies, each with the cluster's time, and is the session's duty cycle: it sends a
@@ -154,7 +157,8 @@ The client API implementation, re-exported by the `cavalry` crate. Data plane.
   message, a session's open or close, or a term's first entry, with its position, its
   term and the cluster's time, which is the one clock a service reads. The handler
   answers a session with `Replies::reply(session_id, payload)`, one frame, 1,344
-  bytes at most. Every member's service runs the same handler on the same entries
+  bytes at most: any session that is open at the entry, which a session is from its
+  own open event to its own close event, both included. Every member's service runs the same handler on the same entries
   and one of them sends: the service beside the member that led the entry's term,
   which the log names. The others are answered `Reply::NotAnswering`, and so is a
   service for the entries its member held before the service first read its log, so

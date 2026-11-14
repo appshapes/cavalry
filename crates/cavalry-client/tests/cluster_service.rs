@@ -594,7 +594,8 @@ fn a_reply_no_client_takes_is_tried_for_the_keepalive_interval_and_then_dropped(
 
 /// What a reply is refused for besides a client that does not take it: a session
 /// that is not open, before its open event and after its close event, and a payload
-/// longer than one frame carries. A payload of the longest length is sent. An entry
+/// longer than one frame carries. A session is open at its own open event and at its
+/// own close event: a reply at each is sent. A payload of the longest length is sent. An entry
 /// no leader of this version appends is handed over as such, and an entry that is not
 /// of the page stops the service at its position.
 #[test]
@@ -623,8 +624,9 @@ fn a_reply_names_a_session_the_log_holds_open_and_fits_one_frame() {
     member.message(0, 0, b"late");
     member.commit();
 
-    // For "ask": a reply to a session that never opened, one too long by a byte, and
-    // one of the longest length. For "late": a reply to the session, now closed.
+    // At the session's open event and at its close event: a reply to it. For "ask":
+    // a reply to a session that never opened, one too long by a byte, and one of the
+    // longest length. For "late": a reply to the session, now closed.
     let (full, long) = (vec![7u8; 1_344], vec![7u8; 1_345]);
     let mut outcomes = Vec::new();
     let mut kinds = Vec::new();
@@ -633,21 +635,37 @@ fn a_reply_names_a_session_the_log_holds_open_and_fits_one_frame() {
             .poll(
                 &mut client,
                 |committed, replies| {
-                    if let Entry::SessionMessage {
-                        session_id,
-                        payload,
-                    } = committed.entry
-                    {
-                        if payload == b"ask" {
+                    match committed.entry {
+                        Entry::SessionOpen { session_id } => {
+                            let reply = replies.reply(session_id, b"welcome");
+                            if reply == Reply::Retry {
+                                return Action::Abort;
+                            }
+                            outcomes.push(reply);
+                        }
+                        Entry::SessionClose { session_id, .. } => {
+                            let reply = replies.reply(session_id, b"goodbye");
+                            if reply == Reply::Retry {
+                                return Action::Abort;
+                            }
+                            outcomes.push(reply);
+                        }
+                        Entry::SessionMessage {
+                            session_id,
+                            payload,
+                        } if payload == b"ask" => {
                             if replies.reply(session_id, &full) == Reply::Retry {
                                 return Action::Abort;
                             }
                             outcomes.push(Reply::Sent);
                             outcomes.push(replies.reply(9, b"nobody"));
                             outcomes.push(replies.reply(session_id, &long));
-                        } else {
-                            outcomes.push(replies.reply(session_id, payload));
                         }
+                        Entry::SessionMessage {
+                            session_id,
+                            payload,
+                        } => outcomes.push(replies.reply(session_id, payload)),
+                        _ => {}
                     }
                     kinds.push((committed.position, kind(&committed.entry)));
                     Action::Continue
@@ -661,11 +679,13 @@ fn a_reply_names_a_session_the_log_holds_open_and_fits_one_frame() {
         outcomes,
         [
             Reply::Sent,
+            Reply::Sent,
             Reply::NoSession,
             Reply::TooLong {
                 found: 1_345,
                 limit: 1_344
             },
+            Reply::Sent,
             Reply::NoSession,
         ]
     );
@@ -673,11 +693,21 @@ fn a_reply_names_a_session_the_log_holds_open_and_fits_one_frame() {
     assert_eq!(kinds[4].1, Kind::Close(0, false));
     assert_eq!(service.sessions(), 0);
     let mut replies = Read::new();
-    wait("the client reads the longest reply", || {
+    wait("the client reads the three replies", || {
         read(&mut egress, &mut replies);
-        !replies.is_empty()
+        replies.len() >= 3
     });
-    assert_eq!(replies[0].3, full);
+    assert_eq!(
+        replies
+            .iter()
+            .map(|reply| reply.3.as_slice())
+            .collect::<Vec<_>>(),
+        [
+            b"welcome".as_slice(),
+            full.as_slice(),
+            b"goodbye".as_slice()
+        ]
+    );
     assert_eq!(
         dropped(&client),
         Some(0),

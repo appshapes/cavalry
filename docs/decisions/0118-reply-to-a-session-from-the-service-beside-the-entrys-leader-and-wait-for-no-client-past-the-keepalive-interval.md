@@ -114,6 +114,20 @@ the replay check already asks of a handler: the same replies in the same order e
 time. 500 ms is how often a client reads its session at the least
 (ADR 0117), so a client that keeps its own rule loses no reply to this one.
 
+**A session is open at its own open event, and a client's connect takes no session
+message.** A handler may reply to a session at the session's open event, a welcome,
+and at any entry from there to the session's close event, that event included. The
+leader's module sends the ok event and the leader's service sends that reply when
+each reads the same committed entry, so the reply can reach the client's response
+channel before the ok event does, or beside it, while the client is still in
+`Cavalry::connect_cluster`. The connect reads the response channel with a
+controlled poll (ADR 0114). It ends an image's read at its answer, and it leaves
+where it is a session message, everything behind one on the same image, and
+everything that follows the answer. The session's first poll then hands over each
+session message that carries its session id, as it does every other. A service
+replies on a publication of its own and never on the member's, so a reply the
+connect leaves holds no session event behind it.
+
 The service holds its sessions' publications from the first entry it answers and
 gives them back at the first it does not. Adding one is a command to the driver: at
 a session's open event, at the first entry of a term the member leads, and where
@@ -189,6 +203,19 @@ allocated, for a session message or its reply.
   handler was told `Sent` for a reply that was never sent. The length is checked
   first now, against the 1,344 bytes the page gives a reply, as a member checks a
   payload before it offers one.
+- **Hold in the session what its connect reads.** The connect would copy each
+  session message it meets into a buffer of the session's, and the first poll would
+  hand them over. Lost: a second place for a message to be, with a bound of its own
+  and a rule for when it is full, where the image already holds the message and its
+  publication's window already bounds what a service can send ahead (invariant 3).
+- **No session at its own open event,** `Reply::NoSession` there. Lost: a welcome is
+  what a service most often sends unasked, and Aeron's service may offer to a
+  session in `onSessionOpen`. It would also not have closed the gap: a reply to
+  every open session at a later entry can reach a client in its connect as well.
+- **Let the connect take what it reads,** as its first form did, and say that a
+  reply before the connect returns is lost. Lost: the service is told `Sent`, no
+  counter moves, and the client has no wait that tells it a reply is missing
+  (invariants 1 and 4). The fourth review of this change found it.
 
 ## Evidence
 
@@ -208,6 +235,8 @@ allocated, for a session message or its reply.
   and the counter reads 2; when the client subscribes, a reply reaches it. A reply
   to a session that never opened or has closed is `NoSession`, one of 1,345 bytes is
   `TooLong` and one of 1,344 is sent, and neither refusal is counted as a drop; a
+  reply to a session at its own open event and one at its own close event are each
+  `Sent`, and the client reads them before and after the reply to its message; a
   timer event is handed over as `Other`; an entry that is not of the page stops the
   service at its position, three polls running. A service holds 10 sessions: an
   eleventh open event opens nothing, and a close gives its place to the next. An
@@ -252,6 +281,20 @@ allocated, for a session message or its reply.
   `cluster.replies_dropped` reads 0 beside both members. The pull request's body
   has the runs: how many times the test ran in a row, on a laptop and on both of
   CI's runners.
+  A second test has every service reply `welcome` at a session's open event: three
+  sessions, each on a response channel of its own, are each handed `welcome` once,
+  with the cluster's time, then the one answer to a message of their own, and
+  `cluster.replies_dropped` reads 0 beside every member.
+- `crates/cavalry-client/tests/cluster_session.rs`, where one thread plays the three
+  members: the played service sends a session message on a publication of its own,
+  and the played leader sends its ok event 50 ms after that message was taken. The
+  connect returns the session, and the session's polls hand the message over once,
+  with nothing more in 200 ms. With the connect's first form, which read the
+  response channel with `poll`, the same test fails: the session is handed nothing
+  in 5 s. The end-to-end test above does not tell the two forms apart on a laptop,
+  six runs of six passed with the first form: there the service's publication
+  connects after the ok event is sent. So the played test is the one that holds
+  the rule.
 - Aeron's source named in Context.
 
 ## Consequences
@@ -265,13 +308,16 @@ reply from two members.
 Harder: a reply is not a delivery. It is lost when no service ran beside the
 entry's leader, when the leader was lost before its service read the entry, and
 when the client took nothing for 500 ms, and of the three the client sees only its
-own wait. A program that must have an answer sends again, and its service must
+own wait. A reply that reaches a client before its connect returns is not a fourth:
+the connect leaves it for the session. A program that must have an answer sends again, and its service must
 then treat a message it has applied before as it chooses. A handler that returns
 `Abort` is handed the entry again with everything it did for it, so it replies
 before it changes its state, and it must make the same replies in the same order
 each time, which the service counts on. A service's first reply to a session can hold the
 entry for a few milliseconds, until the publication connects. The leader's service
-holds a log buffer for each open session, 10 at most.
+holds a log buffer for each open session, 10 at most. A session message a connect
+leaves unread holds its publication's window as any unread fragment does, for as
+long as the connect lasts, 20 s at most.
 
 Revisit: when a snapshot is built, for a service that starts from one and for the
 sessions a snapshot carries; when a service must close a session, for a message from

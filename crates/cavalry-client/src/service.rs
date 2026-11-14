@@ -333,7 +333,9 @@ impl Replies<'_> {
     /// egress stream with the term and the cluster's time of the entry being handled
     /// (`spec/cluster.md`, "The service"). The session need not be the one whose
     /// message is being handled: any session open at this entry can be sent to, and
-    /// more than one.
+    /// more than one. A session is open from its own open event to its own close
+    /// event, both included, so a handler may send it a welcome at
+    /// [`Entry::SessionOpen`].
     ///
     /// [`Reply`] says what became of it, and [`Reply::Retry`] is the one answer that
     /// asks something of the handler. Nothing here allocates, and nothing waits. A

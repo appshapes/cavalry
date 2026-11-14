@@ -18,6 +18,7 @@ use cavalry_proto::cluster::{
     SESSION_CONNECT_TIMEOUT_NS, Stream, parse_members,
 };
 use cavalry_proto::frame::{DataFrameHeader, Flags};
+use cavalry_shm::log::Action;
 
 use crate::client::Cavalry;
 use crate::conductor::nano_time;
@@ -379,27 +380,55 @@ impl ClusterSession {
         correlation_id: i64,
     ) -> Result<Option<Answer>, ClusterError> {
         let mut answer = None;
+        // A controlled poll (ADR 0114), so that the connect takes nothing that is the
+        // session's. A service may answer a session from its open event on, on a
+        // publication of its own, and its reply can reach the response channel
+        // before the leader's ok event does or beside it: a session message is left
+        // where it is, and so is everything that follows the answer. The session's
+        // first poll hands them over (`spec/cluster.md`, "Sessions"; ADR 0118).
         egress
-            .poll(
+            .controlled_poll(
                 |body: &[u8], header: &DataFrameHeader| {
-                    if answer.is_some() || !header.flags().contains(Flags::UNFRAGMENTED) {
-                        return;
+                    if answer.is_some() {
+                        return Action::Abort;
                     }
-                    let Ok(Message::SessionEvent {
+                    if !header.flags().contains(Flags::UNFRAGMENTED) {
+                        return Action::Continue;
+                    }
+                    let (
                         cluster_session_id,
-                        correlation_id: answered,
+                        answered,
                         leadership_term_id,
                         leader_member_id,
                         code,
                         version,
                         leader_heartbeat_timeout_ns,
                         detail,
-                    }) = Message::parse(Stream::Egress, body)
-                    else {
-                        return;
+                    ) = match Message::parse(Stream::Egress, body) {
+                        Ok(Message::SessionEvent {
+                            cluster_session_id,
+                            correlation_id,
+                            leadership_term_id,
+                            leader_member_id,
+                            code,
+                            version,
+                            leader_heartbeat_timeout_ns,
+                            detail,
+                        }) => (
+                            cluster_session_id,
+                            correlation_id,
+                            leadership_term_id,
+                            leader_member_id,
+                            code,
+                            version,
+                            leader_heartbeat_timeout_ns,
+                            detail,
+                        ),
+                        Ok(Message::SessionMessage { .. }) => return Action::Abort,
+                        _ => return Action::Continue,
                     };
                     if answered != correlation_id {
-                        return;
+                        return Action::Continue;
                     }
                     answer = Some(if version >> 16 != PROTOCOL_VERSION >> 16 {
                         Answer::Version { version }
@@ -418,6 +447,7 @@ impl ClusterSession {
                             },
                         }
                     });
+                    Action::Break
                 },
                 CONNECT_POLL_LIMIT,
             )
