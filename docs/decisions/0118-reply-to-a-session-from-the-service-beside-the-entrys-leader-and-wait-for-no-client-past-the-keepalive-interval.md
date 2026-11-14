@@ -107,8 +107,11 @@ counts the replies that the handlings of the entry have settled, sent or dropped
 and answers them as they were without offering them again. Once a reply to a
 session is refused, the replies the same handling makes that session after it are
 `Retry` too and are not offered, so the settled replies are always the first ones
-and a session's replies keep their order. It rests on what the replay check already
-asks of a handler: the same replies in the same order each time. 500 ms is how often a client reads its session at the least
+and a session's replies keep their order. A reply longer than one frame carries is
+not one of them: it is `Reply::TooLong`, refused before it is counted in every
+handling alike, so it moves no other reply's place in the count. It rests on what
+the replay check already asks of a handler: the same replies in the same order each
+time. 500 ms is how often a client reads its session at the least
 (ADR 0117), so a client that keeps its own rule loses no reply to this one.
 
 The service holds its sessions' publications from the first entry it answers and
@@ -178,6 +181,14 @@ allocated, for a session message or its reply.
   between two that were sent would shift the count, and the second would be sent
   again. Every settled reply counts, and the first 64 keep whether they were
   dropped, so that a handling after is answered as the first was.
+- **Refuse a too-long reply where the publication refuses it.** The fix for the
+  first review had this form, and the review of c1e68230 refused it. Lost: the
+  reply was counted in a handling that answered it from the count, or held it
+  behind a refused reply, and not in a handling that offered it, so the count
+  shifted, as in the alternative above. The reply after it was sent again, and the
+  handler was told `Sent` for a reply that was never sent. The length is checked
+  first now, against the 1,344 bytes the page gives a reply, as a member checks a
+  payload before it offers one.
 
 ## Evidence
 
@@ -206,7 +217,14 @@ allocated, for a session message or its reply.
   once each and in order, the reply behind a refused one is not offered, and the
   second session's two are dropped, with `cluster.replies_dropped` at 2. With the
   count switched off the same test reads the first session's replies again at
-  every handling and fails.
+  every handling and fails. A reply of 1,345 bytes is `TooLong` at every handling
+  of its entry, both before a reply to a session whose client reads and behind a
+  refused reply to a session whose client subscribes after the first handling; each
+  client reads each of its replies once, in order. With the length checked where
+  the publication refuses it, as the first fix had it, the first case reads
+  `[Sent, Sent, Dropped]` at its last handling, not `[TooLong, Sent, Dropped]`. In a
+  probe of the second case alone, outside the tree, the client reads `one`, `two`
+  and `two` again over 472 handlings.
 - `crates/cavalry-client/tests/cluster_service_allocations.rs`: 4,800 session
   messages read, handed over and answered, and every answer read by the session's
   client, under the counting allocator, with the driver's threads in the process.

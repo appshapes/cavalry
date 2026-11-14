@@ -15,7 +15,8 @@
 use cavalry_proto::cluster::{
     CloseReason, EGRESS_STREAM_ID, KEEPALIVE_INTERVAL_NS, MAX_SESSIONS, Message, Stream,
 };
-use cavalry_proto::frame::{DataFrameHeader, Flags};
+use cavalry_proto::frame::{self, DataFrameHeader, Flags};
+use cavalry_proto::udp::MTU_LENGTH_DEFAULT;
 use cavalry_shm::counters::generated::{
     CLUSTER_APPEND_POSITION, CLUSTER_LEADERSHIP_TERM_ID, CLUSTER_REPLIES_DROPPED,
 };
@@ -32,6 +33,14 @@ use crate::publication::{Offer, Publication};
 /// The longest response channel a session has: `cavalry:udp?endpoint=`, a host name
 /// of 253 bytes, `:` and a port of five digits (`spec/cluster.md`, "Sessions").
 const MAX_RESPONSE_CHANNEL_LENGTH: usize = 21 + 253 + 1 + 5;
+
+/// The longest payload a reply carries: what one frame of a session's egress stream
+/// carries after the frame header and the session message header, 1,344 bytes
+/// (`spec/cluster.md`, "Replies"). A member accepts a response channel that names an
+/// endpoint and nothing else, so the stream's MTU length is always the UDP
+/// transport's, 1,408 bytes.
+const MAX_REPLY_LENGTH: usize =
+    MTU_LENGTH_DEFAULT as usize - frame::HEADER_LENGTH - SESSION_MESSAGE_HEADER_LENGTH;
 
 /// How long a service goes on offering a reply to a session whose response channel
 /// does not take it: the keepalive interval, 500 ms, which is how often a client
@@ -127,11 +136,17 @@ pub enum Reply {
     /// the client has ended. Go on with the log: the client learns of it by its own
     /// wait for a reply. Each reply to that session is dropped at once until its
     /// channel takes one again. A reply dropped by one handling of an entry is
-    /// `Dropped` again, and counted no more, when the entry is handed over again.
+    /// `Dropped` again, and counted no more, when the entry is handed over again, if
+    /// it is among the first 64 replies the entry makes its session; one after
+    /// those is `Sent` then, and is not offered either.
     Dropped,
     /// No session with that id is open in the log at this entry.
     NoSession,
-    /// The reply is longer than one frame carries after the session message header.
+    /// The reply is longer than one frame carries after the session message header,
+    /// 1,344 bytes. It is refused before the service counts or offers it, so it is
+    /// `TooLong` each time its entry is handed over, and it is not one of the
+    /// session's replies that the service counts: the reply after it is the next
+    /// one, in every handling alike, and is offered once.
     TooLong {
         /// The payload's length.
         found: usize,
@@ -328,9 +343,10 @@ impl Replies<'_> {
     /// A reply is offered to its session once, however often its entry is handed
     /// over. The service counts, for each session, the replies that the handlings of
     /// the entry have settled, sent or dropped, and answers them as they were
-    /// without offering them again. It relies on what the replay check asks of every
-    /// handler: the same replies, in the same order, each time an entry is handed
-    /// over.
+    /// without offering them again. A reply that is [`Reply::TooLong`] is refused
+    /// before it is counted, so it moves no other reply's place in that count. It
+    /// relies on what the replay check asks of every handler: the same replies, in
+    /// the same order, each time an entry is handed over.
     pub fn reply(&mut self, session_id: i64, payload: &[u8]) -> Reply {
         if !self.answering {
             return Reply::NotAnswering;
@@ -342,6 +358,15 @@ impl Replies<'_> {
         else {
             return Reply::NoSession;
         };
+        if payload.len() > MAX_REPLY_LENGTH {
+            // Refused before it is counted, in every handling alike: it is not one
+            // of the session's replies, so it takes no place among those that the
+            // handlings of the entry settle.
+            return Reply::TooLong {
+                found: payload.len(),
+                limit: MAX_REPLY_LENGTH,
+            };
+        }
         session.made = session.made.saturating_add(1);
         if session.made <= session.settled {
             // An earlier handling of this entry settled this reply: it is not
@@ -385,15 +410,6 @@ impl Replies<'_> {
                 session.settle(false);
                 Reply::Sent
             }
-            Err(Offer::TooLong { found, limit }) => {
-                // Not one of the session's replies: nothing was offered, and the
-                // handler is told the same each time the entry is handed over.
-                session.made = session.made.saturating_sub(1);
-                Reply::TooLong {
-                    found: found.saturating_sub(SESSION_MESSAGE_HEADER_LENGTH),
-                    limit: limit.saturating_sub(SESSION_MESSAGE_HEADER_LENGTH),
-                }
-            }
             Err(Offer::NotConnected | Offer::BackPressured | Offer::AdminAction) => {
                 // The one clock read, and only for a reply that was refused: a reply
                 // that is sent reads none.
@@ -412,7 +428,12 @@ impl Replies<'_> {
                 let _ = self.dropped.increment();
                 Reply::Dropped
             }
-            Err(Offer::MaxPositionExceeded | Offer::Closed) => {
+            // `TooLong` here is a publication whose frame carries less than
+            // `MAX_REPLY_LENGTH` bytes, which no session has: a member refuses a
+            // response channel that sets its own MTU length. Were one to, the reply
+            // would be lost for good, so it is dropped and counted, and keeps its
+            // place among the session's settled replies.
+            Err(Offer::MaxPositionExceeded | Offer::Closed | Offer::TooLong { .. }) => {
                 session.settle(true);
                 let _ = self.dropped.increment();
                 Reply::Dropped

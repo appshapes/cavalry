@@ -893,3 +893,209 @@ fn an_entry_handed_over_again_sends_no_session_a_reply_twice() {
     client.close().expect("the service's client closes");
     member.close();
 }
+
+/// A reply too long for one frame is refused before the service counts it, in every
+/// handling of its entry alike, so it moves no other reply's place among those the
+/// handlings of the entry settle. Each of two messages has a session that takes
+/// nothing, so its entry is handed over again for the keepalive interval. For the
+/// first, a too-long reply comes before a reply to a session whose client reads. For
+/// the second, it comes behind a reply to a session whose client subscribes only
+/// after the first handling, so that the reply before it is refused at first and it
+/// waits behind that one. Every handling is told `TooLong`, and each client reads each
+/// of its replies once and in their order.
+#[test]
+fn a_reply_too_long_for_a_frame_takes_no_place_among_its_sessions_replies() {
+    let mut member = Member::start("too-long");
+    let mut client = Cavalry::connect_to(&member.dir).expect("the service's client");
+    let mut service = client.cluster_service();
+    member.name();
+    open_log(&mut service, &mut client, &mut Seen::default());
+
+    let long = vec![7u8; 1_345];
+    let too_long = Reply::TooLong {
+        found: 1_345,
+        limit: 1_344,
+    };
+
+    // A too-long reply before a reply the client takes.
+    let (reading, absent) = (response_channel(), response_channel());
+    let mut session = Cavalry::connect_to(&member.dir).expect("the sessions' client");
+    let mut egress = session
+        .add_subscription(&reading, EGRESS_STREAM_ID)
+        .expect("the response channel");
+    member.term(0, MEMBER);
+    member.open(0, 0, &reading);
+    member.open(0, 1, &absent);
+    let asked = member.message(0, 0, b"ask");
+    member.commit();
+    let mut handlings: Vec<[Reply; 3]> = Vec::new();
+    let began = Instant::now();
+    wait("the first message is taken", || {
+        service
+            .poll(
+                &mut client,
+                |committed, replies| {
+                    if let Entry::SessionMessage { .. } = committed.entry {
+                        let answered = [
+                            replies.reply(0, &long),
+                            replies.reply(0, b"after"),
+                            replies.reply(1, b"wait"),
+                        ];
+                        handlings.push(answered);
+                        if answered.contains(&Reply::Retry) {
+                            return Action::Abort;
+                        }
+                    }
+                    Action::Continue
+                },
+                16,
+            )
+            .expect("the service polls");
+        service.position() == member.end
+    });
+    assert!(
+        began.elapsed() >= Duration::from_millis(500),
+        "the entry was held for the keepalive interval"
+    );
+    assert!(
+        handlings.len() > 2,
+        "the entry was handed over again: {} handlings",
+        handlings.len()
+    );
+    let (last, earlier) = handlings.split_last().expect("a handling");
+    assert_eq!(*last, [too_long, Reply::Sent, Reply::Dropped]);
+    for answered in earlier {
+        assert_eq!(answered[0], too_long, "{answered:?}");
+        assert!(
+            matches!(answered[1], Reply::Sent | Reply::Retry),
+            "{answered:?}"
+        );
+        assert_eq!(answered[2], Reply::Retry, "{answered:?}");
+    }
+    assert!(
+        earlier
+            .iter()
+            .filter(|answered| answered[1] == Reply::Sent)
+            .count()
+            > 1,
+        "the reply after the too-long one was answered as sent by more than one handling"
+    );
+    assert_eq!(dropped(&client), Some(1));
+    let mut replies = Read::new();
+    wait("the client reads its reply", || {
+        read(&mut egress, &mut replies);
+        !replies.is_empty()
+    });
+    let quiet = Instant::now() + Duration::from_millis(200);
+    while Instant::now() < quiet {
+        read(&mut egress, &mut replies);
+    }
+    assert_eq!(
+        replies,
+        [(0, 0, asked.1, b"after".to_vec())],
+        "the reply once, after {} handlings",
+        handlings.len()
+    );
+
+    // A too-long reply behind a refused reply to the same session: the session's
+    // client subscribes once the first handling has been refused.
+    let (late, absent) = (response_channel(), response_channel());
+    member.open(0, 2, &late);
+    member.open(0, 3, &absent);
+    let again = member.message(0, 2, b"again");
+    member.commit();
+    let mut handlings: Vec<[Reply; 4]> = Vec::new();
+    let mut subscribed: Option<Subscription> = None;
+    let began = Instant::now();
+    wait("the second message is taken", || {
+        service
+            .poll(
+                &mut client,
+                |committed, replies| {
+                    if let Entry::SessionMessage { .. } = committed.entry {
+                        let answered = [
+                            replies.reply(2, b"one"),
+                            replies.reply(2, &long),
+                            replies.reply(2, b"two"),
+                            replies.reply(3, b"wait"),
+                        ];
+                        handlings.push(answered);
+                        if answered.contains(&Reply::Retry) {
+                            return Action::Abort;
+                        }
+                    }
+                    Action::Continue
+                },
+                16,
+            )
+            .expect("the service polls");
+        if subscribed.is_none() && !handlings.is_empty() {
+            subscribed = Some(
+                session
+                    .add_subscription(&late, EGRESS_STREAM_ID)
+                    .expect("the late response channel"),
+            );
+        }
+        service.position() == member.end
+    });
+    assert!(
+        began.elapsed() >= Duration::from_millis(500),
+        "the entry was held for the keepalive interval"
+    );
+    assert!(
+        handlings.len() > 2,
+        "the entry was handed over again: {} handlings",
+        handlings.len()
+    );
+    assert_eq!(
+        handlings[0],
+        [Reply::Retry, too_long, Reply::Retry, Reply::Retry],
+        "with no client yet, the first reply is refused and the third waits behind it"
+    );
+    let (last, earlier) = handlings.split_last().expect("a handling");
+    assert_eq!(*last, [Reply::Sent, too_long, Reply::Sent, Reply::Dropped]);
+    for answered in earlier {
+        assert_eq!(answered[1], too_long, "{answered:?}");
+        assert_eq!(answered[0], answered[2], "{answered:?}");
+        assert!(
+            matches!(answered[0], Reply::Sent | Reply::Retry),
+            "{answered:?}"
+        );
+        assert_eq!(answered[3], Reply::Retry, "{answered:?}");
+    }
+    assert!(
+        earlier
+            .iter()
+            .filter(|answered| answered[0] == Reply::Sent)
+            .count()
+            > 1,
+        "the replies around the too-long one were answered as sent by more than one handling"
+    );
+    assert_eq!(dropped(&client), Some(2));
+    let mut late_egress = subscribed.expect("the client subscribed");
+    let mut replies = Read::new();
+    wait("the client reads its two replies", || {
+        read(&mut late_egress, &mut replies);
+        replies.len() >= 2
+    });
+    let quiet = Instant::now() + Duration::from_millis(200);
+    while Instant::now() < quiet {
+        read(&mut late_egress, &mut replies);
+    }
+    assert_eq!(
+        replies,
+        [
+            (0, 2, again.1, b"one".to_vec()),
+            (0, 2, again.1, b"two".to_vec())
+        ],
+        "each reply once, after {} handlings",
+        handlings.len()
+    );
+
+    service.close(&mut client).expect("the service closes");
+    egress.close().expect("the subscription closes");
+    late_egress.close().expect("the late subscription closes");
+    session.close().expect("the sessions' client closes");
+    client.close().expect("the service's client closes");
+    member.close();
+}

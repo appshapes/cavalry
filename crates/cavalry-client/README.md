@@ -163,7 +163,8 @@ The client API implementation, re-exported by the `cavalry` crate. Data plane.
   is handed the entry again, so it replies before it changes its state. An entry
   handed over again makes its replies again, in the same order, and the service
   offers each to its session once: what an earlier handling sent or dropped it
-  does not offer again, so no client reads a reply twice. A service
+  does not offer again, so no client reads a reply twice. A reply over 1,344 bytes
+  is `Reply::TooLong` at every handling and takes no place among those. A service
   waits so for one client no longer than 500 ms, the keepalive interval. After that
   the reply is `Reply::Dropped`, counted in `cluster.replies_dropped`, and each
   reply to that client is dropped at once until its channel takes one. Nothing in
