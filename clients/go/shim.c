@@ -104,3 +104,96 @@ int cavalry_go_committed_log_poll(cavalry_committed_log_t *log, uintptr_t index,
   }
   return count;
 }
+
+int64_t cavalry_go_cluster_session_offer(cavalry_cluster_session_t *session, const uint8_t *buffer, size_t length,
+                                         cavalry_go_error_t *error) {
+  int64_t position = cavalry_cluster_session_offer(session, buffer, length);
+  if (position == CAVALRY_PUBLICATION_ERROR) {
+    cavalry_go_keep(error, "cavalry_cluster_session_offer");
+  }
+  return position;
+}
+
+/* The ABI's fragment handler for a cluster session's poll: one call into Go per reply, as
+ * cavalry_go_trampoline makes for a fragment, with the reply's values in the header's
+ * place. They are read here, a C call inside the ABI's call-back, so that the Go side
+ * makes no cgo call of its own for them (ADR 0124). The ABI gives them for the header its
+ * own poll handed over; were it to refuse, the reply is handed over with both at -1. */
+static void cavalry_go_reply_trampoline(void *clientd, const uint8_t *buffer, size_t length,
+                                        const cavalry_header_t *header) {
+  cavalry_cluster_reply_values_t values = { -1, -1 };
+  cavalry_cluster_reply_values(header, &values);
+  cavalryGoReply((uintptr_t) clientd, (uint8_t *) buffer, length, values.leadership_term_id, values.timestamp);
+}
+
+int cavalry_go_cluster_session_poll(cavalry_cluster_session_t *session, uintptr_t index, size_t fragment_limit,
+                                    cavalry_go_error_t *error) {
+  int count = cavalry_cluster_session_poll(session, cavalry_go_reply_trampoline, (void *) index, fragment_limit);
+  if (count < 0) {
+    cavalry_go_keep(error, "cavalry_cluster_session_poll");
+  }
+  return count;
+}
+
+int cavalry_go_cluster_service_reply(cavalry_cluster_service_t *service, int64_t session_id, const uint8_t *buffer,
+                                     size_t length, cavalry_go_error_t *error) {
+  int code = cavalry_cluster_service_reply(service, session_id, buffer, length);
+  if (code < 0 || code == CAVALRY_CLUSTER_REPLY_TOO_LONG) {
+    cavalry_go_keep(error, "cavalry_cluster_service_reply");
+  }
+  return code;
+}
+
+/* What a cluster service's poll hands its trampoline as clientd: the service's slot in the
+ * table, for the Go side, the service's handle, for the entry's action, and where an
+ * aborted entry is told. It is C memory, on the stack of the poll that made it, valid for
+ * that poll, and it holds no Go pointer. */
+typedef struct {
+  uintptr_t index;
+  cavalry_cluster_service_t *service;
+  cavalry_go_error_t *error;
+  int aborted;
+} cavalry_go_service_poll_t;
+
+/* The ABI's fragment handler for a cluster service's poll: one call into Go per entry,
+ * with the entry's values, read here as a reply's are, and the action that call returns
+ * passed to the ABI, unless it is CAVALRY_ACTION_CONTINUE, which is what the ABI does with
+ * no call. The Go side returns CAVALRY_ACTION_ABORT for a handler that panicked. An action
+ * the ABI refuses, and an entry whose values it does not give, which on the header its own
+ * poll handed over it cannot, abort the entry too: the ABI's error is kept, in this call,
+ * for the poll to return, and the entry is not taken, so that a service never passes an
+ * entry its handler did not finish (ADR 0124). */
+static void cavalry_go_service_trampoline(void *clientd, const uint8_t *buffer, size_t length,
+                                          const cavalry_header_t *header) {
+  cavalry_go_service_poll_t *poll = clientd;
+  cavalry_cluster_entry_values_t values;
+  int32_t action;
+  if (cavalry_cluster_entry_values(header, &values) != 0) {
+    cavalry_go_keep(poll->error, "cavalry_cluster_entry_values");
+    poll->aborted = 1;
+    cavalry_cluster_service_action(poll->service, CAVALRY_ACTION_ABORT);
+    return;
+  }
+  action = cavalryGoClusterEntry(poll->index, (uint8_t *) buffer, length, values.position, values.leadership_term_id,
+                                 values.timestamp, values.session_id, values.type, values.leader_member_id,
+                                 values.timed_out ? 1 : 0);
+  if (action == CAVALRY_ACTION_CONTINUE) {
+    return;
+  }
+  if (cavalry_cluster_service_action(poll->service, action) != 0) {
+    cavalry_go_keep(poll->error, "cavalry_cluster_service_action");
+    poll->aborted = 1;
+    cavalry_cluster_service_action(poll->service, CAVALRY_ACTION_ABORT);
+  }
+}
+
+int cavalry_go_cluster_service_poll(cavalry_cluster_service_t *service, cavalry_t *client, uintptr_t index,
+                                    size_t fragment_limit, int *aborted, cavalry_go_error_t *error) {
+  cavalry_go_service_poll_t poll = { index, service, error, 0 };
+  int count = cavalry_cluster_service_poll(service, client, cavalry_go_service_trampoline, &poll, fragment_limit);
+  *aborted = poll.aborted;
+  if (count < 0) {
+    cavalry_go_keep(error, "cavalry_cluster_service_poll");
+  }
+  return count;
+}

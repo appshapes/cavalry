@@ -5,9 +5,10 @@ of the ABI's per-message functions that the client wraps (`crates/cavalry-ffi/RE
 the claim, the
 reserved value, the commit and abort, the offer, the poll and the header's values, and
 the committed log's poll and an entry's position, ADR 0070, in every client; and in the
-Python client and the Node client the seven of a cluster session and a cluster service
-too, the session's offer, its poll and a reply's values, and the service's poll, an
-entry's values, its reply and its action, ADR 0124) and each trampoline that
+Python client, the Node client and the Go client the seven of a cluster session and a
+cluster service too, the session's offer, its poll and a reply's values, and the
+service's poll, an entry's values, its reply and its action, ADR 0124) and each
+trampoline that
 calls the user's handler, hold no lock, no `await` and no raise, in the language's
 forms, and so does every function of the package they call. For Python those
 forms are `threading`'s locks and anything else of `threading`, `async def`, `await`,
@@ -31,7 +32,8 @@ parameter cannot take, before the ABI is called. A call reaches the package's ow
 module function, a class's `__init__` or `constructor`, a method of the same class
 through `self` or `this`, and any other method by its name in any class of the package.
 The one raise allowed is in `poll`, a subscription's or a committed log's, and in the
-Python client and the Node client a cluster session's or a cluster service's,
+Python client, the Node client and the Go client a cluster session's or a cluster
+service's,
 after the last line that calls the ABI, where the
 user's handler's exception is raised once the poll has returned
 (clients/python/README.md; clients/node/README.md); a raise between two of its calls,
@@ -229,9 +231,24 @@ RULES = {
             "Header.Values",
             "cavalryGoFragment",
             "cavalryGoEntry",
+            # A cluster session and a cluster service (ADR 0124): the session's offer and
+            # its poll, the service's poll and its reply, the two functions that call the
+            # handlers and recover their panics, and the two exported functions the C
+            # trampolines call, which write the values those trampolines read into the one
+            # struct the session or the service keeps.
+            "ClusterSession.Offer",
+            "ClusterSession.Poll",
+            "ClusterService.Poll",
+            "ClusterService.Reply",
+            "Subscription.deliverReply",
+            "Subscription.deliverClusterEntry",
+            "cavalryGoReply",
+            "cavalryGoClusterEntry",
         ],
         "raise_after": [("Subscription.Poll", "C.cavalry_go_poll"),
-                        ("CommittedLog.Poll", "C.cavalry_go_committed_log_poll")],
+                        ("CommittedLog.Poll", "C.cavalry_go_committed_log_poll"),
+                        ("ClusterSession.Poll", "C.cavalry_go_cluster_session_poll"),
+                        ("ClusterService.Poll", "C.cavalry_go_cluster_service_poll")],
         # The C of shim.c: the trampoline the ABI calls, the poll that installs it, and the
         # per-message calls that copy the thread's error into the handle when they fail.
         "shim": {
@@ -239,7 +256,14 @@ RULES = {
             "functions": ["cavalry_go_trampoline", "cavalry_go_entry_trampoline", "cavalry_go_poll",
                           "cavalry_go_committed_log_poll", "cavalry_go_try_claim",
                           "cavalry_go_set_reserved_value", "cavalry_go_commit", "cavalry_go_abort",
-                          "cavalry_go_offer"],
+                          "cavalry_go_offer",
+                          # A cluster session's and a cluster service's (ADR 0124): the two
+                          # trampolines, which read a reply's values and an entry's, the
+                          # second passing the ABI the action the Go handler returned, the
+                          # two polls, and the session's offer and the service's reply.
+                          "cavalry_go_reply_trampoline", "cavalry_go_service_trampoline",
+                          "cavalry_go_cluster_session_poll", "cavalry_go_cluster_service_poll",
+                          "cavalry_go_cluster_session_offer", "cavalry_go_cluster_service_reply"],
             "readers": [],
         },
         # The functions that read the calling OS thread's error (spec/c-abi.md, "Error

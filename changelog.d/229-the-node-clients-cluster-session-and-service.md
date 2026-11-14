@@ -9,7 +9,6 @@
   aborted: the poll ends at it, throws `HandlerError`, and the next poll hands the
   entry over again. An `async` handler returns a promise, which is no action, so write
   the handler as a plain function. `just conformance` runs the cluster round through
-  the Node client. The Go, JVM and .NET clients bind the same functions and have no
-  session object or service object yet
+  the Node client
   ([ADR 0124](docs/decisions/0124-give-each-client-a-session-object-and-a-service-object-whose-handlers-failure-aborts-its-entry.md);
   [the Node client](clients/node/README.md); work item 229).

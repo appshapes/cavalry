@@ -1789,6 +1789,237 @@ class NodePackage(unittest.TestCase):
                 gen.ROOT, gen.HEADER = root, header
 
 
+# The Go client's shim.c, whole, compiled with the runner's `cc` against a stand-in for the
+# ABI's functions it calls and for the Go functions cgo exports, which a header of this
+# name declares in a cgo build. The stand-in for `cavalry_cluster_service_poll` hands the
+# trampoline three entries as the ABI does: an abort leaves its entry and ends the poll, a
+# break takes its entry and ends the poll, and a value that is no action is refused and
+# leaves the action as it was. `main` gives the Go side's stand-in the answers of each
+# case, and checks the count, the action calls made, what the shim wrote for the Go side
+# and the error it kept.
+GO_SHIM_EXPORTS = r"""
+#include <stddef.h>
+#include <stdint.h>
+#include "cavalry.h"
+void cavalryGoFragment(uintptr_t slot, uint8_t *buffer, size_t length, cavalry_header_t *header);
+void cavalryGoEntry(uintptr_t slot, uint8_t *buffer, size_t length, cavalry_header_t *header, int64_t position);
+void cavalryGoReply(uintptr_t slot, uint8_t *buffer, size_t length, int64_t leadership_term_id, int64_t timestamp);
+int32_t cavalryGoClusterEntry(uintptr_t slot, uint8_t *buffer, size_t length, int64_t position, int64_t leadership_term_id,
+                              int64_t timestamp, int64_t session_id, int32_t type, int32_t leader_member_id,
+                              int32_t timed_out);
+"""
+
+GO_SHIM_HARNESS = r"""
+#include <stdbool.h>
+#include <stdio.h>
+#include <string.h>
+#include "shim.h"
+#include "_cgo_export.h"
+
+static int failures;
+#define EXPECT(cond, ...) do { if (!(cond)) { failures++; printf(__VA_ARGS__); printf("\n"); } } while (0)
+
+/* The thread's error, as the ABI keeps it. */
+static int errcode;
+static char errmsg[128];
+int cavalry_errcode(void) { return errcode; }
+const char *cavalry_errmsg(void) { return errmsg; }
+
+/* The ABI's functions shim.c calls and this harness does not drive. */
+int64_t cavalry_publication_try_claim(cavalry_publication_t *p, size_t n, cavalry_buffer_claim_t *c) { (void) p; (void) n; (void) c; return 0; }
+int cavalry_buffer_claim_set_reserved_value(cavalry_buffer_claim_t *c, int64_t v) { (void) c; (void) v; return 0; }
+int64_t cavalry_buffer_claim_commit(cavalry_buffer_claim_t *c) { (void) c; return 0; }
+int64_t cavalry_buffer_claim_abort(cavalry_buffer_claim_t *c) { (void) c; return 0; }
+int64_t cavalry_publication_offer(cavalry_publication_t *p, const uint8_t *b, size_t n) { (void) p; (void) b; (void) n; return 0; }
+int cavalry_subscription_poll(cavalry_subscription_t *s, cavalry_fragment_handler_t h, void *d, size_t n) { (void) s; (void) h; (void) d; (void) n; return 0; }
+int cavalry_committed_log_poll(cavalry_committed_log_t *l, cavalry_fragment_handler_t h, void *d, size_t n) { (void) l; (void) h; (void) d; (void) n; return 0; }
+int64_t cavalry_committed_log_entry_position(const cavalry_header_t *h) { (void) h; return 0; }
+void cavalryGoFragment(uintptr_t s, uint8_t *b, size_t n, cavalry_header_t *h) { (void) s; (void) b; (void) n; (void) h; }
+void cavalryGoEntry(uintptr_t s, uint8_t *b, size_t n, cavalry_header_t *h, int64_t p) { (void) s; (void) b; (void) n; (void) h; (void) p; }
+
+/* A session: its offer answers what the test set, with the thread's error; its poll hands
+ * over two replies, of terms 5 and 6. */
+static int64_t offer_answer;
+int64_t cavalry_cluster_session_offer(cavalry_cluster_session_t *s, const uint8_t *b, size_t n) {
+  (void) s; (void) b; (void) n;
+  if (offer_answer == CAVALRY_PUBLICATION_ERROR) { errcode = CAVALRY_ERR_TOO_LONG; snprintf(errmsg, sizeof errmsg, "too long"); }
+  return offer_answer;
+}
+static bool values_refused;
+static int reply_at;
+int cavalry_cluster_reply_values(const cavalry_header_t *header, cavalry_cluster_reply_values_t *values) {
+  (void) header;
+  if (values_refused) return -1;
+  values->leadership_term_id = 5 + reply_at;
+  values->timestamp = 1700000000000 + reply_at;
+  return 0;
+}
+static int session_poll_answer;
+int cavalry_cluster_session_poll(cavalry_cluster_session_t *s, cavalry_fragment_handler_t handler, void *clientd, size_t n) {
+  (void) s; (void) n;
+  if (session_poll_answer < 0) { errcode = CAVALRY_ERR_POLLING; snprintf(errmsg, sizeof errmsg, "polling"); return -1; }
+  for (reply_at = 0; reply_at < 2; reply_at++) handler(clientd, (const uint8_t *) "body", 4, NULL);
+  return 2;
+}
+static int replies_seen;
+static uintptr_t reply_slot;
+static int64_t reply_terms[2], reply_times[2];
+void cavalryGoReply(uintptr_t slot, uint8_t *buffer, size_t length, int64_t term, int64_t timestamp) {
+  (void) buffer; (void) length;
+  reply_slot = slot;
+  if (replies_seen < 2) { reply_terms[replies_seen] = term; reply_times[replies_seen] = timestamp; }
+  replies_seen++;
+}
+
+/* A service: its reply answers what the test set; its poll hands over up to three entries,
+ * at positions 100, 200 and 300, and its action is the ABI's. */
+static int reply_answer;
+int cavalry_cluster_service_reply(cavalry_cluster_service_t *s, int64_t id, const uint8_t *b, size_t n) {
+  (void) s; (void) id; (void) b; (void) n;
+  if (reply_answer == CAVALRY_CLUSTER_REPLY_TOO_LONG) { errcode = CAVALRY_ERR_TOO_LONG; snprintf(errmsg, sizeof errmsg, "too long"); }
+  if (reply_answer < 0) { errcode = CAVALRY_ERR_CLUSTER_NO_ENTRY; snprintf(errmsg, sizeof errmsg, "no entry"); }
+  return reply_answer;
+}
+static int entry_at;
+int cavalry_cluster_entry_values(const cavalry_header_t *header, cavalry_cluster_entry_values_t *values) {
+  (void) header;
+  if (values_refused) { errcode = CAVALRY_ERR_WRONG_HEADER; snprintf(errmsg, sizeof errmsg, "wrong header"); return -1; }
+  memset(values, 0, sizeof *values);
+  values->position = 100 * (entry_at + 1);
+  values->leadership_term_id = 5;
+  values->timestamp = 1700000000000;
+  values->session_id = 7;
+  values->type = CAVALRY_CLUSTER_ENTRY_SESSION_CLOSE;
+  values->leader_member_id = -1;
+  values->timed_out = true;
+  return 0;
+}
+static int32_t actions[8], action;
+static int nactions;
+static cavalry_cluster_service_t *action_service;
+int cavalry_cluster_service_action(cavalry_cluster_service_t *service, int32_t value) {
+  action_service = service;
+  if (nactions < 8) actions[nactions++] = value;
+  if (value != CAVALRY_ACTION_ABORT && value != CAVALRY_ACTION_BREAK && value != CAVALRY_ACTION_CONTINUE) {
+    errcode = CAVALRY_ERR_CLUSTER_ACTION;
+    snprintf(errmsg, sizeof errmsg, "%d is no action", (int) value);
+    return -1;
+  }
+  action = value;
+  return 0;
+}
+static cavalry_t *poll_client;
+int cavalry_cluster_service_poll(cavalry_cluster_service_t *s, cavalry_t *client, cavalry_fragment_handler_t handler,
+                                 void *clientd, size_t n) {
+  (void) s; (void) n;
+  poll_client = client;
+  int taken = 0;
+  for (entry_at = 0; entry_at < 3; entry_at++) {
+    action = CAVALRY_ACTION_CONTINUE;
+    handler(clientd, (const uint8_t *) "body", 4, NULL);
+    if (action == CAVALRY_ACTION_ABORT) break;
+    taken++;
+    if (action == CAVALRY_ACTION_BREAK) break;
+  }
+  return taken;
+}
+static int32_t answers[3];
+static int entries_seen;
+static uintptr_t entry_slot;
+static int64_t entry_values[3][4];
+static int32_t entry_small[3][3];
+int32_t cavalryGoClusterEntry(uintptr_t slot, uint8_t *buffer, size_t length, int64_t position, int64_t term,
+                              int64_t timestamp, int64_t session_id, int32_t type, int32_t leader_member_id,
+                              int32_t timed_out) {
+  (void) buffer; (void) length;
+  entry_slot = slot;
+  int at = entries_seen < 3 ? entries_seen : 2;
+  entry_values[at][0] = position; entry_values[at][1] = term; entry_values[at][2] = timestamp; entry_values[at][3] = session_id;
+  entry_small[at][0] = type; entry_small[at][1] = leader_member_id; entry_small[at][2] = timed_out;
+  return answers[entries_seen++ < 3 ? at : 2];
+}
+
+/* One poll of a service whose Go side answers a, b and c for the entries it is handed:
+ * the count, the entries the Go side saw, the action calls, and whether the shim says an
+ * entry was aborted for the ABI's own reason, with the function whose error it kept. */
+static void service(const char *what, int32_t a, int32_t b, int32_t c, int count, int seen, const int32_t *calls,
+                    int ncalls, int aborted, const char *kept) {
+  cavalry_go_error_t error;
+  memset(&error, 0, sizeof error);
+  answers[0] = a; answers[1] = b; answers[2] = c;
+  entries_seen = 0; nactions = 0; errcode = 0; action_service = NULL; poll_client = NULL;
+  int flag = -1;
+  int got = cavalry_go_cluster_service_poll((cavalry_cluster_service_t *) &answers, (cavalry_t *) &actions, 41, 16, &flag,
+                                            &error);
+  EXPECT(got == count && entries_seen == seen, "%s: the poll returned %d after %d entries, not %d after %d", what, got,
+         entries_seen, count, seen);
+  bool same = nactions == ncalls;
+  for (int i = 0; same && i < ncalls; i++) same = actions[i] == calls[i];
+  EXPECT(same, "%s: %d action call(s), the first %d and the last %d; expected %d", what, nactions,
+         nactions ? (int) actions[0] : 0, nactions ? (int) actions[nactions - 1] : 0, ncalls);
+  EXPECT(flag == aborted, "%s: the shim wrote aborted %d, not %d", what, flag, aborted);
+  EXPECT(strcmp(error.function, kept) == 0 && (kept[0] == '\0') == (error.code == 0),
+         "%s: the shim kept the error of \"%s\", code %d; expected \"%s\"", what, error.function, (int) error.code, kept);
+  if (seen > 0) EXPECT(entry_slot == 41, "%s: the Go side was handed slot %lu, not the poll's 41", what, (unsigned long) entry_slot);
+  if (nactions > 0) EXPECT(action_service == (cavalry_cluster_service_t *) &answers, "%s: the action went to another service", what);
+  EXPECT(poll_client == (cavalry_t *) &actions, "%s: the poll was not given the client", what);
+}
+
+int main(void) {
+  const int32_t go_on = CAVALRY_ACTION_CONTINUE, stop = CAVALRY_ACTION_BREAK, leave = CAVALRY_ACTION_ABORT;
+  const int32_t stops[] = { stop }, leaves[] = { leave }, refused[] = { 3, leave };
+  /* CONTINUE makes no call; BREAK and ABORT are passed on, and an ABORT the Go side chose,
+   * its handler's own or its answer for a handler that panicked, is no failure of the
+   * shim's; 3 is passed, refused, kept as the ABI's error, and the entry aborted. */
+  service("three entries taken", go_on, go_on, go_on, 3, 3, NULL, 0, 0, "");
+  service("a break at the second entry", go_on, stop, go_on, 2, 2, stops, 1, 0, "");
+  service("an abort at the first entry", leave, go_on, go_on, 0, 1, leaves, 1, 0, "");
+  service("a value that is no action at the second entry", go_on, 3, go_on, 1, 2, refused, 2, 1,
+          "cavalry_cluster_service_action");
+  EXPECT(entry_values[1][0] == 200 && entry_values[1][1] == 5 && entry_values[1][2] == 1700000000000 &&
+         entry_values[1][3] == 7 && entry_small[1][0] == CAVALRY_CLUSTER_ENTRY_SESSION_CLOSE && entry_small[1][1] == -1 &&
+         entry_small[1][2] == 1, "the second entry's seven values did not reach the Go side as the ABI gave them");
+  /* An entry whose values the ABI does not give is aborted unseen, with the ABI's error. */
+  values_refused = true;
+  service("an entry whose values the ABI refused", go_on, go_on, go_on, 0, 0, leaves, 1, 1, "cavalry_cluster_entry_values");
+  values_refused = false;
+
+  /* The session: each reply's two values reach the Go side, and a poll, an offer and a
+   * reply that failed keep the thread's error. */
+  cavalry_go_error_t error;
+  memset(&error, 0, sizeof error);
+  int got = cavalry_go_cluster_session_poll(NULL, 42, 16, &error);
+  EXPECT(got == 2 && replies_seen == 2 && reply_slot == 42 && reply_terms[0] == 5 && reply_terms[1] == 6 &&
+         reply_times[0] == 1700000000000 && reply_times[1] == 1700000000001 && error.code == 0,
+         "a session's poll returned %d after %d replies, of terms %lld and %lld", got, replies_seen,
+         (long long) reply_terms[0], (long long) reply_terms[1]);
+  session_poll_answer = -1;
+  got = cavalry_go_cluster_session_poll(NULL, 42, 16, &error);
+  EXPECT(got == -1 && error.code == CAVALRY_ERR_POLLING && strcmp(error.function, "cavalry_cluster_session_poll") == 0,
+         "a session's poll that failed kept the error of \"%s\", code %d", error.function, (int) error.code);
+  memset(&error, 0, sizeof error);
+  offer_answer = 64;
+  EXPECT(cavalry_go_cluster_session_offer(NULL, NULL, 0, &error) == 64 && error.code == 0, "an offer that was taken kept an error");
+  offer_answer = CAVALRY_PUBLICATION_ERROR;
+  EXPECT(cavalry_go_cluster_session_offer(NULL, NULL, 0, &error) == CAVALRY_PUBLICATION_ERROR &&
+         error.code == CAVALRY_ERR_TOO_LONG && strcmp(error.function, "cavalry_cluster_session_offer") == 0,
+         "an offer that failed kept the error of \"%s\", code %d", error.function, (int) error.code);
+  memset(&error, 0, sizeof error);
+  reply_answer = CAVALRY_CLUSTER_REPLY_SENT;
+  EXPECT(cavalry_go_cluster_service_reply(NULL, 7, NULL, 0, &error) == CAVALRY_CLUSTER_REPLY_SENT && error.code == 0,
+         "a reply that was sent kept an error");
+  reply_answer = CAVALRY_CLUSTER_REPLY_TOO_LONG;
+  EXPECT(cavalry_go_cluster_service_reply(NULL, 7, NULL, 0, &error) == CAVALRY_CLUSTER_REPLY_TOO_LONG &&
+         error.code == CAVALRY_ERR_TOO_LONG, "a reply too long kept code %d", (int) error.code);
+  reply_answer = -1;
+  EXPECT(cavalry_go_cluster_service_reply(NULL, 7, NULL, 0, &error) == -1 && error.code == CAVALRY_ERR_CLUSTER_NO_ENTRY,
+         "a reply from outside the handler kept code %d", (int) error.code);
+  printf("%d failure(s)\n", failures);
+  return failures != 0;
+}
+"""
+
+
 class GoPackage(unittest.TestCase):
     """The Go module, `clients/go` (clients/go/README.md; ADR 0046, card 207)."""
 
@@ -1948,6 +2179,176 @@ class GoPackage(unittest.TestCase):
             self.assertNotIn("cavalry_errcode", body, method)
             self.assertNotIn("Errcode", body, method)
             self.assertIn(f"&{receiver[0].lower()}.err)", body, method)
+        # A cluster session's offer and poll, and a cluster service's reply and poll, in the
+        # same way (ADR 0124): the session and the service keep the error in their state.
+        cluster = {"cavalry_go_cluster_session_offer": ("cavalry_cluster_session_offer",
+                                                        "position == CAVALRY_PUBLICATION_ERROR"),
+                   "cavalry_go_cluster_session_poll": ("cavalry_cluster_session_poll", "count < 0"),
+                   "cavalry_go_cluster_service_reply": ("cavalry_cluster_service_reply",
+                                                        "code < 0 || code == CAVALRY_CLUSTER_REPLY_TOO_LONG"),
+                   "cavalry_go_cluster_service_poll": ("cavalry_cluster_service_poll", "count < 0")}
+        for shim_call, (abi, failed) in cluster.items():
+            body = shim.split(f" {shim_call}(", 1)[1].split("\n}\n", 1)[0]
+            self.assertEqual(body.count(f"{abi}("), 1, shim_call)
+            self.assertIn(f"if ({failed}) {{\n    cavalry_go_keep(error, \"{abi}\");\n  }}", body)
+            self.assertIn(f"C.{shim_call}(", code)
+            self.assertNotIn(f"C.{abi}(", code)
+            self.assertIn(f"{shim_call}(", files["shim.h"])
+        for signature, kept in (("func (n *ClusterSession) Offer(", "&n.state.err)"),
+                                ("func (n *ClusterSession) Poll(", "&s.err)"),
+                                ("func (v *ClusterService) Reply(", "&v.state.err)"),
+                                ("func (v *ClusterService) Poll(", "&s.err)")):
+            body = code.split(signature, 1)[1].split("\n}\n", 1)[0]
+            self.assertNotIn("cavalry_errcode", body, signature)
+            self.assertNotIn("Errcode", body, signature)
+            self.assertIn(kept, body, signature)
+
+    def test_a_cluster_services_trampoline_passes_the_action_on_and_aborts_what_the_abi_refuses(self):
+        """Invariant 1, for a cluster service in the Go client (ADR 0124). shim.c is compiled
+        with the runner's `cc` against GO_SHIM_HARNESS, a stand-in for the ABI and for the
+        Go side. The service's trampoline reads the entry's seven values in C and hands
+        them to the Go side, and passes the ABI the action the Go side returned:
+        CAVALRY_ACTION_CONTINUE makes no call, CAVALRY_ACTION_BREAK takes the entry and ends
+        the poll, and CAVALRY_ACTION_ABORT, the handler's own or the Go side's answer for a
+        handler that panicked, leaves it. A value the ABI refuses, and an entry whose
+        values the ABI does not give, abort the entry: the shim keeps the ABI's error in
+        the call that failed and says so through `aborted`, so that the Go Poll returns a
+        *HandlerError and the entry is handed over again. The session's trampoline hands
+        each reply's two values on."""
+        cc = shutil.which("cc")
+        if cc is None:
+            self.skipTest("no C compiler on PATH; cgo needs one, and both CI runners have it")
+        files = gen_go.write_go(self.header)
+        with tempfile.TemporaryDirectory() as tmp:
+            for name, content in (("shim.c", files["shim.c"]), ("shim.h", files["shim.h"]),
+                                  ("_cgo_export.h", GO_SHIM_EXPORTS), ("harness.c", GO_SHIM_HARNESS)):
+                with open(os.path.join(tmp, name), "w", encoding="utf-8") as f:
+                    f.write(content)
+            binary = os.path.join(tmp, "harness")
+            include = os.path.join(gen.ROOT, "crates", "cavalry-ffi", "include")
+            built = subprocess.run([cc, "-std=c11", "-Wall", "-Wextra", "-I", include, "-I", tmp,
+                                    os.path.join(tmp, "shim.c"), os.path.join(tmp, "harness.c"), "-o", binary],
+                                   capture_output=True, text=True)
+            self.assertEqual(built.returncode, 0, built.stderr)
+            self.assertEqual(built.stderr, "", built.stderr)  # the shim compiles with no warning
+            ran = subprocess.run([binary], capture_output=True, text=True)
+        self.assertEqual(ran.returncode, 0, ran.stdout + ran.stderr)
+        self.assertIn("0 failure(s)", ran.stdout)
+
+    def test_the_cluster_session_and_the_cluster_service_have_the_shape_adr_0124_gives(self):
+        """The Go cluster session and cluster service (ADR 0124), read from the generated
+        source; the package's own test and the runner's cluster round run them. The client
+        makes each from the ABI's handle and gives it a slot of the table, and closes a
+        handle it cannot return. Each Poll is one call of the shim's and builds its
+        *HandlerError after it alone. The function that calls a service's handler answers
+        ActionAbort unless the handler returned, so a panic aborts the entry. Neither
+        exported function makes a slice of a body of no bytes, since the ABI's address for
+        one is 1, which Go's stack copier ends the process on. A close the ABI refuses
+        from inside a handler keeps the handle and the slot."""
+        files = gen_go.write_go(self.header)
+        code, trampoline, shim = files["cavalry.go"], files["trampoline.go"], files["shim.c"]
+        opened = code.split("func (c *Client) ConnectCluster(members string, responseChannel string) "
+                            "(*ClusterSession, error) {\n", 1)[1].split("\n}\n", 1)[0]
+        constants = opened.index('check("cavalry_cluster_session_constants", C.cavalry_cluster_session_constants(handle, &k))')
+        table = opened.index("if err := register(state); err != nil {")
+        closes = [at for at in range(len(opened)) if opened.startswith("C.cavalry_cluster_session_close(handle)", at)]
+        self.assertEqual(len(closes), 2)
+        self.assertLess(constants, closes[0])
+        self.assertLess(closes[0], table)
+        self.assertLess(table, closes[1])
+        self.assertIn('full.Fn = "cavalry_connect_cluster"', opened)
+        made = code.split("func (c *Client) ClusterService() (*ClusterService, error) {\n", 1)[1].split("\n}\n", 1)[0]
+        self.assertLess(made.index("if err := register(state); err != nil {"),
+                        made.index("C.cavalry_cluster_service_close(handle, c.handle)"))
+        self.assertIn('full.Fn = "cavalry_cluster_service"', made)
+        self.assertIn("service := &ClusterService{handle: handle, client: c, state: state}\n\tstate.owner = service", made)
+        session = code.split("func (n *ClusterSession) Poll(", 1)[1].split("\n}\n", 1)[0]
+        self.assertEqual(session.count("C.cavalry_go_cluster_session_poll("), 2)  # the nested refusal and the poll itself
+        self.assertIn('&HandlerError{Fragments: count, Raised: s.raised, Cause: first, Cluster: "session"}', session)
+        service = code.split("func (v *ClusterService) Poll(", 1)[1].split("\n}\n", 1)[0]
+        # The nested refusal and the poll itself, each with the client's handle, the slot and
+        # where the shim writes that it aborted an entry.
+        self.assertEqual(service.count("C.cavalry_go_cluster_service_poll(v.handle, v.client.handle, C.uintptr_t(s.slot),\n"), 2)
+        self.assertEqual(service.count("C.size_t(fragmentLimit), &s.aborted, &s.err))"), 2)
+        self.assertIn("if s.raised == 0 && s.aborted == 0 {\n\t\treturn count, nil\n\t}", service)
+        self.assertIn("\tif s.raised == 0 {\n", service)
+        self.assertIn("\t\tcause = keptError(&s.err)\n", service)
+        self.assertIn('&HandlerError{Fragments: count, Raised: 1, Cause: cause, Cluster: "service"}', service)
+        delivered = code.split("func (s *Subscription) deliverClusterEntry(body []byte) (action int32) {\n", 1)[1]
+        self.assertEqual(delivered.split("\n}\n", 1)[0],
+                         "\taction = ActionAbort\n\tdefer s.recovered()\n\treturn s.service(body, &s.entryValues, s.owner)")
+        replied = code.split("func (s *Subscription) deliverReply(body []byte) {\n", 1)[1].split("\n}\n", 1)[0]
+        self.assertEqual(replied, "\tdefer s.recovered()\n\ts.reply(body, &s.replyValues)")
+        for exported, call in (("cavalryGoReply", "s.deliverReply(body)"),
+                               ("cavalryGoClusterEntry", "return C.int32_t(s.deliverClusterEntry(body))")):
+            self.assertIn(f"//export {exported}\n", trampoline)
+            body = trampoline.split(f"func {exported}(", 1)[1].split("\n}\n", 1)[0]
+            self.assertIn("\tvar body []byte\n\tif length != 0 {\n\t\tbody = unsafe.Slice((*byte)(unsafe.Pointer(buffer)), "
+                          "int(length))\n\t}\n", body)
+            self.assertIn(call, body)
+            self.assertNotRegex(body, r"C\.cavalry_\w+\(")   # no call back into C: types alone
+        entry = trampoline.split("func cavalryGoClusterEntry(", 1)[1].split("\n}\n", 1)[0]
+        self.assertIn("\tif s == nil {\n\t\treturn ActionAbort\n\t}\n", entry)
+        for field, value in (("Position", "int64(position)"), ("LeadershipTermID", "int64(leadershipTermID)"),
+                             ("Timestamp", "int64(timestamp)"), ("SessionID", "int64(sessionID)"),
+                             ("Type", "int32(entryType)"), ("LeaderMemberID", "int32(leaderMemberID)"),
+                             ("TimedOut", "timedOut != 0")):
+            self.assertIn(f"\te.{field} = {value}\n", entry)
+        # Every field of the two structs of the header is a field of the Go struct: a field
+        # the header gains is one to hand on.
+        structs = {s.name: [f.name for f in s.fields] for s in self.header.structs}
+        self.assertEqual(structs["cavalry_cluster_reply_values_t"], ["leadership_term_id", "timestamp"])
+        self.assertEqual(structs["cavalry_cluster_entry_values_t"],
+                         ["position", "leadership_term_id", "timestamp", "session_id", "type", "leader_member_id",
+                          "timed_out"])
+        # The values are read in C, once for each reply and each entry, and nowhere else.
+        self.assertEqual(shim.count("cavalry_cluster_reply_values("), 1)
+        self.assertEqual(shim.count("cavalry_cluster_entry_values("), 1)
+        self.assertNotIn("C.cavalry_cluster_reply_values(", code)
+        self.assertNotIn("C.cavalry_cluster_entry_values(", code)
+        self.assertNotIn("C.cavalry_cluster_service_action(", code)
+        for owner, receiver, close in (("ClusterSession", "n", "C.cavalry_cluster_session_close(n.handle)"),
+                                       ("ClusterService", "v", "C.cavalry_cluster_service_close(v.handle, v.client.handle)")):
+            body = code.split(f"func ({receiver} *{owner}) Close() error {{\n", 1)[1].split("\n}\n", 1)[0]
+            refused = body.index("if err.Code == ErrPolling {\n\t\t\treturn err\n\t\t}")
+            self.assertLess(body.index(close), refused)
+            self.assertLess(refused, body.index(f"{receiver}.handle = nil\n\t\tunregister({receiver}.state)"))
+        test = files["cavalry_test.go"]
+        self.assertIn("func TestTheClusterTrampolinesHandTheValuesOnAndAbortAnEntryNoHandlerTook(t *testing.T) {", test)
+        for name in ("ClusterSession.Offer", "ClusterSession.Poll", "ClusterService.Poll", "ClusterService.Reply",
+                     "Subscription.deliverReply", "Subscription.deliverClusterEntry", "cavalryGoReply",
+                     "cavalryGoClusterEntry"):
+            self.assertIn(name, gen_go.PER_MESSAGE_GO)
+        self.assertEqual(sorted(gen_go.PER_MESSAGE_GO), sorted(lint.RULES["go"]["functions"]))
+
+    def test_a_client_close_the_abi_refuses_keeps_the_client_open(self):
+        """A cluster service's poll holds its client, so the ABI refuses the client's close
+        from inside the service's handler with ErrPolling and frees nothing (spec/c-abi.md,
+        "Calls during a claim or a poll"). Client.Close then returns the *Error and keeps
+        the handle, as the closes of a subscription, a committed log, a cluster session and
+        a cluster service do, so the Go client never forgets a client the ABI keeps open
+        (clients/go/README.md, "What it must never do"). Every other failure still forgets
+        the handle, since the ABI's close frees it whatever it returns."""
+        code = gen_go.write_go(self.header)["cavalry.go"]
+        body = code.split("func (c *Client) Close() error {\n", 1)[1].split("\n}\n", 1)[0]
+        close = body.index("if result := C.cavalry_close(c.handle); result != 0 {\n")
+        read = body.index('err := lastError("cavalry_close")\n')
+        refused = body.index("if err.Code == ErrPolling {\n\t\t\treturn err\n\t\t}\n")
+        forgotten = body.index("\t\tc.handle = nil\n\t\treturn err\n\t}\n")
+        self.assertLess(close, read)
+        self.assertLess(read, refused)
+        self.assertLess(refused, forgotten)
+        self.assertTrue(body.endswith("\tc.handle = nil\n\treturn nil"), body)
+        self.assertEqual(body.count("c.handle = nil"), 2)
+        doc = code.split("func (c *Client) Close() error {\n", 1)[0].rsplit("\n\n", 1)[1]
+        for said in ("Publication, Subscription, Recording, Replay, CommittedLog, ClusterSession and\n// ClusterService",
+                     "Subscription, CommittedLog, ClusterSession or ClusterService keeps its slot",
+                     "AddSubscription, CommittedLog, ConnectCluster and ClusterService return",
+                     "Close then returns the *Error with ErrPolling and keeps the handle"):
+            self.assertIn(said, doc)
+        with open(os.path.join(gen.ROOT, "clients", "go", "README.md"), encoding="utf-8") as f:
+            readme = f.read()
+        self.assertIn("`client.Close()`", readme.split("## Example", 1)[0].split("- Never read a refusal as an answer.", 1)[1])
 
     def test_the_package_tests_the_table_at_its_bound_and_run_sh_runs_them(self):
         """The subscription table is bounded (CLAUDE.md, invariant 3; gate 3: a test at
@@ -1984,13 +2385,26 @@ class GoPackage(unittest.TestCase):
             ["Client.IsClosed", "Client.Closed", "Client.Close", "Client.AddPublication", "Client.AddExclusivePublication",
              "Client.AddSubscription", "Client.StartRecording", "Client.StopRecording", "Client.TruncateRecording",
              "Client.PurgeSegments", "Client.PurgeRecording", "Client.StartReplay", "Client.StopReplay",
-             "Client.AddDestination", "Client.RemoveDestination", "Client.CommittedLog"]))
+             "Client.AddDestination", "Client.RemoveDestination", "Client.CommittedLog", "Client.ConnectCluster",
+             "Client.ClusterService"]))
         for label in methods:
             body = module.functions[label][2]
             self.assertTrue(body.startswith("{\n\tc.mu.Lock()\n\tdefer c.mu.Unlock()\n"), label)
         self.assertIn("\tmu       sync.Mutex\n\thandle   *C.cavalry_t\n", code)
         for label in lint.RULES["go"]["functions"]:
             self.assertNotIn(".mu.", module.functions[label][2], label)
+        # Three functions outside Client reach the client's handle. The closes of a committed
+        # log and of a cluster service take the client's mutex. A cluster service's Poll takes
+        # none: it is on every entry's path, and a handler that calls its client must reach
+        # the ABI, which refuses the call, where a mutex its own poll held would stop the
+        # goroutine for ever (ADR 0124, Alternatives). So that client is one goroutine's
+        # from ClusterService to the service's Close (clients/go/README.md, "Threads").
+        outside = sorted(label for label, (_, _, body, _, _) in module.functions.items()
+                         if not label.startswith("Client.") and re.search(r"\bclient\.handle\b", body))
+        self.assertEqual(outside, ["ClusterService.Close", "ClusterService.Poll", "CommittedLog.Close"])
+        for label in ("ClusterService.Close", "CommittedLog.Close"):
+            self.assertRegex(module.functions[label][2], r"\t\w\.client\.mu\.Lock\(\)\n\tdefer \w\.client\.mu\.Unlock\(\)\n")
+        self.assertIn("ClusterService.Poll", lint.RULES["go"]["functions"])
 
     def test_every_call_that_reads_the_threads_error_holds_its_os_thread(self):
         """The committed module passes lint.py's thread rule, and each function that reads
@@ -2022,10 +2436,20 @@ class GoPackage(unittest.TestCase):
         self.assertIn("&HandlerError{Fragments: count, Raised: s.raised, Cause: first, CommittedLog: true}", log)
         subscription = code.split("func (s *Subscription) Poll(", 1)[1].split("\n}\n", 1)[0]
         self.assertIn("&HandlerError{Fragments: count, Raised: s.raised, Cause: first}", subscription)
+        # A cluster session's poll speaks of replies and names its own Fault; a cluster
+        # service's says that the entry was aborted and comes again (ADR 0124).
+        self.assertIn('one, many = "reply", "replies"', body)
+        self.assertIn("which this ClusterSession's Fault \" +\n\t\t\t\"reads until its next poll and its Err until its "
+                      "next failure\"", body)
+        self.assertIn('if e.Cluster == "service" {', body)
+        self.assertIn("Its entry was aborted: \"+\n\t\t\t\"it is not taken, the poll ended at it, and the next poll "
+                      "hands it over again. Fix the handler: what it \"+\n\t\t\t\"did, %v, is this error's Cause;", body)
         with open(os.path.join(gen.ROOT, "clients", "go", "README.md"), encoding="utf-8") as f:
             slugs = {re.sub(r"[^a-z0-9 -]", "", line.lstrip("#").strip().lower()).replace(" ", "-")
                      for line in f if line.startswith("#")}
         self.assertIn("the-panic", slugs)
+        self.assertIn("the-cluster-session", slugs)
+        self.assertIn("the-cluster-service", slugs)
 
     def test_the_generated_go_is_gofmts_and_vets_clean_when_go_is_on_the_path(self):
         """gofmt's layout is the generator's own, so the committed files never need a

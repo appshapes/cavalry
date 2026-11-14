@@ -18,7 +18,7 @@ bounded at 10 s, and one that runs out says how far it got.
 | `c/` | C11, `quickstart.c` and then `cluster.c`, the cluster round, beside three cluster members that `run.sh` starts with `cavalry run`, through `run.sh` | the runner's `cc`, the static library | ADR 0051 (card 204); ADR 0122 and ADR 0123 (work item 229) |
 | `python/` | Python 3, `quickstart.py` and then `readme.py`, the example of `clients/python/README.md`, then `committed_log.py` beside one of three cluster members that `run.sh` starts with `cavalry run`, then `cluster.py`, the cluster round, beside all three, through `run.sh` over `clients/python` | the runner's `python3`, the shared library | ADR 0046 (card 205); ADR 0124 (work item 229) |
 | `node/` | Node, `quickstart.js` and then `readme.js`, the example of `clients/node/README.md`, then `committed_log.js` beside one of three cluster members that `run.sh` starts with `cavalry run`, then `cluster.js`, the cluster round, beside all three, through `run.sh` over `clients/node` | the runner's `node` and `npm`, whose own `node-gyp` builds the addon against the static library | ADR 0046 (card 206); ADR 0124 (work item 229) |
-| `go/` | Go, the client's own `go test` (its subscription table at the bound), then `quickstart` and then `readme`, the example of `clients/go/README.md`, then, beside one of three cluster members that `run.sh` starts with `cavalry run`, the client's one test that needs a member (a committed log's open with the table full) and `committed_log`, through `run.sh` over `clients/go` | the runner's `go`, whose cgo builds the client against the header and the static library | ADR 0046 (card 207) |
+| `go/` | Go, the client's own `go test` (its subscription table at the bound), then `quickstart` and then `readme`, the example of `clients/go/README.md`, then, beside one of three cluster members that `run.sh` starts with `cavalry run`, the client's one test that needs a member (a committed log's open with the table full) and `committed_log`, then `cluster`, the cluster round, beside all three, through `run.sh` over `clients/go` | the runner's `go`, whose cgo builds the client against the header and the static library | ADR 0046 (card 207); ADR 0124 (work item 229) |
 | `jvm/` | Java 25, `Quickstart.java` and then `Readme.java`, the example of `clients/jvm/README.md`, then `CommittedLogRound.java` beside one of three cluster members that `run.sh` starts with `cavalry run`, through `run.sh` over `clients/jvm` | the runner's `javac` and `java`, whose `java.lang.foreign` binds the shared library when the client loads | ADR 0046 (card 208) |
 | `dotnet/` | C#, `Quickstart` and then `Readme`, the example of `clients/dotnet/README.md`, then `CommittedLog` beside one of three cluster members that `run.sh` starts with `cavalry run`, through `run.sh` over `clients/dotnet` | the runner's `dotnet`, whose SDK builds the client and whose runtime binds the shared library when the client loads | ADR 0046 (card 209) |
 
@@ -40,7 +40,8 @@ otherwise.
 The cluster round is a runner's check of a cluster's service and of a session with a
 cluster (`spec/c-abi.md`, versions 4 and 5; `spec/cluster.md`, "Sessions", "The service"
 and "Replies"). The C runner has it, in `c/cluster.c`, the Python runner, in
-`python/cluster.py`, and the Node runner, in `node/cluster.js`. It runs a service beside each of
+`python/cluster.py`, the Node runner, in `node/cluster.js`, and the Go runner, in
+`go/cluster`. It runs a service beside each of
 the three members, each over a client on that member's driver, and polls each until it
 has read an entry, since a service answers no entry that its member held when the
 service first opened the member's log. Then it opens a session with the cluster on the
@@ -77,6 +78,16 @@ reads `undefined` once the call has returned, and a kept body reads as empty. An
 `Buffer`s the round's handlers were handed are all freed by one turn of the event
 loop, which the round checks after its report. The report is the Python round's:
 there the longest poll is how long a poll held the thread, and with it the event loop.
+
+The Go round is the Python round through `clients/go`, where a handler that fails
+panics, with three edges of its own. An entry that is no session's message reaches its
+handler with a `nil` body, since the client makes no slice at the address the ABI
+gives for no bytes. Each open session and each open service holds one slot of the
+client's table, which each close frees, so that the table holds what it held before
+the round. And the client's close from inside a service's handler, which the ABI
+refuses and which frees nothing, leaves the client open: it still reaches the ABI, and
+the service polls it again. Its report's longest poll is how long a poll held its
+goroutine.
 
 The Python runner is the shape the Node, Go, JVM and .NET runners copy (ADR 0046,
 cards 206 to 209): a package of another ABI version refused when it loads the library; the C

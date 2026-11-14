@@ -1,8 +1,9 @@
 #!/usr/bin/env bash
 # Builds the driver and cavalry-ffi's static library in release, vets, builds and tests the
 # Go client (cgo against the header and the library; nothing from a module proxy), its
-# tests being the subscription table at its bound and the trampoline's refusal of a slot
-# the table does not hold, which need no driver; checks that
+# tests being the subscription table at its bound, the trampolines' refusal of a slot
+# the table does not hold and what a cluster service's trampoline answers for its entry,
+# which need no driver; checks that
 # its generated files are gofmt's, starts a driver on a directory of its own, runs
 # conformance/go/quickstart through clients/go with the runner's Go, then
 # clients/go/README.md's example through conformance/go/readme; then starts three cluster
@@ -10,7 +11,9 @@
 # them, member 1 unless it joined late (conformance/log-member.sh), the package's one
 # test that needs a member, a committed log's open with the table
 # full, and then conformance/go/committed_log, the client's committed log against a
-# cluster (spec/c-abi.md, version 2; ADR 0070); and cleans up.
+# cluster (spec/c-abi.md, version 2; ADR 0070), and then conformance/go/cluster, the
+# cluster round: the client's service beside each member and its session on the first
+# driver (spec/c-abi.md, versions 4 and 5; ADR 0124); and cleans up.
 # `just conformance` runs this after conformance/node (clients/README.md; ADR 0046, card
 # 207).
 set -euo pipefail
@@ -88,6 +91,7 @@ for id in 0 1 2; do
     CAVALRY_CLUSTER_MEMBERS="${CAVALRY_CLUSTER_MEMBERS:+$CAVALRY_CLUSTER_MEMBERS|}$member"
 done
 export CAVALRY_CLUSTER_MEMBERS
+response="cavalry:udp?endpoint=127.0.0.1:$(( 10000 + (start + 15) % 10000 ))"
 for id in 0 1 2; do
     CAVALRY_CLUSTER_MEMBER_ID=$id target/release/cavalry run --dir "$cluster/member-$id" \
         --log-dir "$cluster/member-$id-log" >"$cluster/member-$id.out" 2>&1 &
@@ -137,6 +141,16 @@ grep -q '^--- PASS: TestACommittedLogAtTheTablesBound ' <<<"$bound" || {
 echo "conformance/go: run committed_log beside member $member"
 (cd conformance/go && go run ./committed_log "$cluster/member-$member" "$member" "$recording") || {
     echo "conformance/go: committed_log failed beside member $member; the members said:" >&2
+    cat "$cluster"/member-*.out >&2 || true
+    exit 1
+}
+
+# The cluster round, after the committed log's: a service beside each member and a
+# session on the runner's first driver. The committed log round left the cluster as it
+# found it, one entry, the term's first.
+echo "conformance/go: run cluster, a service beside each member and a session on $CAVALRY_DIR"
+(cd conformance/go && go run ./cluster "$cluster" "$CAVALRY_CLUSTER_MEMBERS" "$response") || {
+    echo "conformance/go: cluster failed; the members said:" >&2
     cat "$cluster"/member-*.out >&2 || true
     exit 1
 }
