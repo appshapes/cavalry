@@ -6,7 +6,9 @@
   reply. It reaches a client only around a change of leader, while the member that
   led before still answers. The session passes it over and counts it, in the new
   counter `cluster.replies_stale` on the client's driver and in
-  `ClusterSession::stale_replies()`. Once a program has read a reply of a term, it
+  `ClusterSession::stale_replies()`, and `cavalry doctor` on the client's host
+  reports the count above 0 with the session's id. Once a program has read a reply of
+  a term, it
   reads no reply to an entry of an earlier term: where its service answers each
   message at the message's own entry, a message it offered in an earlier term that
   has no answer yet has none coming, and it sends the message again
