@@ -1,6 +1,6 @@
 {
   "spec": "spec/c-abi.md",
-  "version": 4,
+  "version": 5,
   "generated_by": "spec/vectors/c-abi.py; do not edit by hand",
   "opaque_types": [
     "cavalry_context_t",
@@ -12,6 +12,7 @@
     "cavalry_replay_t",
     "cavalry_committed_log_t",
     "cavalry_cluster_session_t",
+    "cavalry_cluster_service_t",
     "cavalry_header_t"
   ],
   "structs": {
@@ -229,6 +230,36 @@
       [
         "int64_t",
         "timestamp"
+      ]
+    ],
+    "cavalry_cluster_entry_values_t": [
+      [
+        "int64_t",
+        "position"
+      ],
+      [
+        "int64_t",
+        "leadership_term_id"
+      ],
+      [
+        "int64_t",
+        "timestamp"
+      ],
+      [
+        "int64_t",
+        "session_id"
+      ],
+      [
+        "int32_t",
+        "type"
+      ],
+      [
+        "int32_t",
+        "leader_member_id"
+      ],
+      [
+        "bool",
+        "timed_out"
       ]
     ]
   },
@@ -1293,6 +1324,154 @@
       ]
     },
     {
+      "name": "cavalry_cluster_service",
+      "returns": "int",
+      "params": [
+        [
+          "cavalry_cluster_service_t **",
+          "service"
+        ],
+        [
+          "cavalry_t *",
+          "client"
+        ]
+      ]
+    },
+    {
+      "name": "cavalry_cluster_service_poll",
+      "returns": "int",
+      "params": [
+        [
+          "cavalry_cluster_service_t *",
+          "service"
+        ],
+        [
+          "cavalry_t *",
+          "client"
+        ],
+        [
+          "cavalry_fragment_handler_t",
+          "handler"
+        ],
+        [
+          "void *",
+          "clientd"
+        ],
+        [
+          "size_t",
+          "fragment_limit"
+        ]
+      ]
+    },
+    {
+      "name": "cavalry_cluster_entry_values",
+      "returns": "int",
+      "params": [
+        [
+          "const cavalry_header_t *",
+          "header"
+        ],
+        [
+          "cavalry_cluster_entry_values_t *",
+          "values"
+        ]
+      ]
+    },
+    {
+      "name": "cavalry_cluster_service_reply",
+      "returns": "int",
+      "params": [
+        [
+          "cavalry_cluster_service_t *",
+          "service"
+        ],
+        [
+          "int64_t",
+          "session_id"
+        ],
+        [
+          "const uint8_t *",
+          "buffer"
+        ],
+        [
+          "size_t",
+          "length"
+        ]
+      ]
+    },
+    {
+      "name": "cavalry_cluster_service_action",
+      "returns": "int",
+      "params": [
+        [
+          "cavalry_cluster_service_t *",
+          "service"
+        ],
+        [
+          "int32_t",
+          "action"
+        ]
+      ]
+    },
+    {
+      "name": "cavalry_cluster_service_fault",
+      "returns": "int",
+      "params": [
+        [
+          "const cavalry_cluster_service_t *",
+          "service"
+        ],
+        [
+          "cavalry_fault_t *",
+          "fault"
+        ]
+      ]
+    },
+    {
+      "name": "cavalry_cluster_service_position",
+      "returns": "int64_t",
+      "params": [
+        [
+          "const cavalry_cluster_service_t *",
+          "service"
+        ]
+      ]
+    },
+    {
+      "name": "cavalry_cluster_service_answers",
+      "returns": "bool",
+      "params": [
+        [
+          "const cavalry_cluster_service_t *",
+          "service"
+        ]
+      ]
+    },
+    {
+      "name": "cavalry_cluster_service_sessions",
+      "returns": "int",
+      "params": [
+        [
+          "const cavalry_cluster_service_t *",
+          "service"
+        ]
+      ]
+    },
+    {
+      "name": "cavalry_cluster_service_close",
+      "returns": "int",
+      "params": [
+        [
+          "cavalry_cluster_service_t *",
+          "service"
+        ],
+        [
+          "cavalry_t *",
+          "client"
+        ]
+      ]
+    },
+    {
       "name": "cavalry_errcode",
       "returns": "int",
       "params": []
@@ -1329,7 +1508,7 @@
     }
   ],
   "defines": {
-    "CAVALRY_ABI_VERSION": 4,
+    "CAVALRY_ABI_VERSION": 5,
     "CAVALRY_DIR_ENV": "CAVALRY_DIR",
     "CAVALRY_MAX_IMAGES": 256,
     "CAVALRY_SERVICE_LOG_STREAM_ID": 104,
@@ -1390,6 +1569,9 @@
     "CAVALRY_ERR_CLUSTER_REFUSED": 141,
     "CAVALRY_ERR_CLUSTER_VERSION": 142,
     "CAVALRY_ERR_CLUSTER_CONNECT_TIMEOUT": 143,
+    "CAVALRY_ERR_CLUSTER_ENTRY": 144,
+    "CAVALRY_ERR_CLUSTER_NO_ENTRY": 145,
+    "CAVALRY_ERR_CLUSTER_ACTION": 146,
     "CAVALRY_CLOSED_BY_USER": 1,
     "CAVALRY_CLOSED_DRIVER_CLOSED": 2,
     "CAVALRY_CLOSED_DRIVER_TIMEOUT": 3,
@@ -1401,6 +1583,20 @@
     "CAVALRY_REPLAY_STOP_STOPPED": 1,
     "CAVALRY_REPLAY_STOP_NOT_CONNECTED": 2,
     "CAVALRY_REPLAY_STOP_FAILED": 3,
+    "CAVALRY_CLUSTER_ENTRY_SESSION_MESSAGE": 1,
+    "CAVALRY_CLUSTER_ENTRY_SESSION_OPEN": 2,
+    "CAVALRY_CLUSTER_ENTRY_SESSION_CLOSE": 3,
+    "CAVALRY_CLUSTER_ENTRY_NEW_LEADERSHIP_TERM": 4,
+    "CAVALRY_CLUSTER_ENTRY_OTHER": 5,
+    "CAVALRY_CLUSTER_REPLY_SENT": 1,
+    "CAVALRY_CLUSTER_REPLY_NOT_ANSWERING": 2,
+    "CAVALRY_CLUSTER_REPLY_RETRY": 3,
+    "CAVALRY_CLUSTER_REPLY_DROPPED": 4,
+    "CAVALRY_CLUSTER_REPLY_NO_SESSION": 5,
+    "CAVALRY_CLUSTER_REPLY_TOO_LONG": 6,
+    "CAVALRY_ACTION_ABORT": 1,
+    "CAVALRY_ACTION_BREAK": 2,
+    "CAVALRY_ACTION_CONTINUE": 4,
     "CAVALRY_FLAGS_BEGIN": 128,
     "CAVALRY_FLAGS_END": 64,
     "CAVALRY_FLAGS_EOS": 32,

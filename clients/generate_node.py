@@ -130,10 +130,11 @@ def c_arg(param, header, index: int, lines: list, struct_names: set, opaque: set
 
 # The functions that take the C fragment handler: each has a poll of the addon's own,
 # `poll` and `committedLogPoll`, and no generic binding. A cluster session's poll has
-# neither yet: the addon's own poll for it comes with the client's session object, in
-# the change after the ABI's (ADR 0122), as the committed log's did (ADR 0070).
+# neither yet, and neither has a cluster service's: the addon's own poll for each comes
+# with the client's session object and its service object, in the changes after the
+# ABI's (ADR 0122, ADR 0123), as the committed log's did (ADR 0070).
 HANDLER_FUNCTIONS = ("cavalry_subscription_poll", "cavalry_committed_log_poll",
-                     "cavalry_cluster_session_poll")
+                     "cavalry_cluster_session_poll", "cavalry_cluster_service_poll")
 # The addon's own functions, registered beside the header's.
 OWN_FUNCTIONS = ("registerSubscription", "poll", "registerCommittedLog", "committedLogPoll", "headerField", "view",
                  "detach", "stringAt", "buffersHeld")

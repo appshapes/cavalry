@@ -23,7 +23,7 @@ public static unsafe partial class Abi
     internal const string Library = "cavalry_ffi";
 
     public const string DIR_ENV = "CAVALRY_DIR"; // CAVALRY_DIR_ENV
-    public const int ABI_VERSION = 4; // CAVALRY_ABI_VERSION
+    public const int ABI_VERSION = 5; // CAVALRY_ABI_VERSION
     public const int MAX_IMAGES = 256; // CAVALRY_MAX_IMAGES
     public const int SERVICE_LOG_STREAM_ID = 104; // CAVALRY_SERVICE_LOG_STREAM_ID
     public const int NULL_POSITION = -1; // CAVALRY_NULL_POSITION
@@ -83,6 +83,9 @@ public static unsafe partial class Abi
     public const int ERR_CLUSTER_REFUSED = 141; // CAVALRY_ERR_CLUSTER_REFUSED
     public const int ERR_CLUSTER_VERSION = 142; // CAVALRY_ERR_CLUSTER_VERSION
     public const int ERR_CLUSTER_CONNECT_TIMEOUT = 143; // CAVALRY_ERR_CLUSTER_CONNECT_TIMEOUT
+    public const int ERR_CLUSTER_ENTRY = 144; // CAVALRY_ERR_CLUSTER_ENTRY
+    public const int ERR_CLUSTER_NO_ENTRY = 145; // CAVALRY_ERR_CLUSTER_NO_ENTRY
+    public const int ERR_CLUSTER_ACTION = 146; // CAVALRY_ERR_CLUSTER_ACTION
     public const int CLOSED_BY_USER = 1; // CAVALRY_CLOSED_BY_USER
     public const int CLOSED_DRIVER_CLOSED = 2; // CAVALRY_CLOSED_DRIVER_CLOSED
     public const int CLOSED_DRIVER_TIMEOUT = 3; // CAVALRY_CLOSED_DRIVER_TIMEOUT
@@ -94,6 +97,20 @@ public static unsafe partial class Abi
     public const int REPLAY_STOP_STOPPED = 1; // CAVALRY_REPLAY_STOP_STOPPED
     public const int REPLAY_STOP_NOT_CONNECTED = 2; // CAVALRY_REPLAY_STOP_NOT_CONNECTED
     public const int REPLAY_STOP_FAILED = 3; // CAVALRY_REPLAY_STOP_FAILED
+    public const int CLUSTER_ENTRY_SESSION_MESSAGE = 1; // CAVALRY_CLUSTER_ENTRY_SESSION_MESSAGE
+    public const int CLUSTER_ENTRY_SESSION_OPEN = 2; // CAVALRY_CLUSTER_ENTRY_SESSION_OPEN
+    public const int CLUSTER_ENTRY_SESSION_CLOSE = 3; // CAVALRY_CLUSTER_ENTRY_SESSION_CLOSE
+    public const int CLUSTER_ENTRY_NEW_LEADERSHIP_TERM = 4; // CAVALRY_CLUSTER_ENTRY_NEW_LEADERSHIP_TERM
+    public const int CLUSTER_ENTRY_OTHER = 5; // CAVALRY_CLUSTER_ENTRY_OTHER
+    public const int CLUSTER_REPLY_SENT = 1; // CAVALRY_CLUSTER_REPLY_SENT
+    public const int CLUSTER_REPLY_NOT_ANSWERING = 2; // CAVALRY_CLUSTER_REPLY_NOT_ANSWERING
+    public const int CLUSTER_REPLY_RETRY = 3; // CAVALRY_CLUSTER_REPLY_RETRY
+    public const int CLUSTER_REPLY_DROPPED = 4; // CAVALRY_CLUSTER_REPLY_DROPPED
+    public const int CLUSTER_REPLY_NO_SESSION = 5; // CAVALRY_CLUSTER_REPLY_NO_SESSION
+    public const int CLUSTER_REPLY_TOO_LONG = 6; // CAVALRY_CLUSTER_REPLY_TOO_LONG
+    public const int ACTION_ABORT = 1; // CAVALRY_ACTION_ABORT
+    public const int ACTION_BREAK = 2; // CAVALRY_ACTION_BREAK
+    public const int ACTION_CONTINUE = 4; // CAVALRY_ACTION_CONTINUE
     public const int FLAGS_BEGIN = 128; // CAVALRY_FLAGS_BEGIN
     public const int FLAGS_END = 64; // CAVALRY_FLAGS_END
     public const int FLAGS_EOS = 32; // CAVALRY_FLAGS_EOS
@@ -101,12 +118,17 @@ public static unsafe partial class Abi
     public const int FRAME_TYPE_PAD = 0; // CAVALRY_FRAME_TYPE_PAD
     public const int FRAME_TYPE_DATA = 1; // CAVALRY_FRAME_TYPE_DATA
 
-    /// <summary>`cavalry_cluster_reply_values_t` of spec/c-abi.md, "Structs": the caller's copy the ABI fills, laid out as C lays it out.</summary>
+    /// <summary>`cavalry_cluster_entry_values_t` of spec/c-abi.md, "Structs": the caller's copy the ABI fills, laid out as C lays it out.</summary>
     [StructLayout(LayoutKind.Sequential)]
-    public struct cavalry_cluster_reply_values_t
+    public struct cavalry_cluster_entry_values_t
     {
+        public long position;
         public long leadership_term_id;
         public long timestamp;
+        public long session_id;
+        public int type;
+        public int leader_member_id;
+        public byte timed_out;
     }
 
     /// <summary>`cavalry_fault_t` of spec/c-abi.md, "Structs": the caller's copy the ABI fills, laid out as C lays it out.</summary>
@@ -116,6 +138,14 @@ public static unsafe partial class Abi
         public int code;
         public int session_id;
         public long position;
+    }
+
+    /// <summary>`cavalry_cluster_reply_values_t` of spec/c-abi.md, "Structs": the caller's copy the ABI fills, laid out as C lays it out.</summary>
+    [StructLayout(LayoutKind.Sequential)]
+    public struct cavalry_cluster_reply_values_t
+    {
+        public long leadership_term_id;
+        public long timestamp;
     }
 
     /// <summary>`cavalry_cluster_session_constants_t` of spec/c-abi.md, "Structs": the caller's copy the ABI fills, laid out as C lays it out.</summary>
@@ -275,6 +305,37 @@ public static unsafe partial class Abi
 
     [LibraryImport(Library)]
     internal static partial int cavalry_stop_replay(nint client, long replay_session_id);
+
+    [LibraryImport(Library)]
+    internal static partial int cavalry_cluster_service(out nint service, nint client);
+
+    [LibraryImport(Library)]
+    internal static partial int cavalry_cluster_service_poll(nint service, nint client, delegate* unmanaged[Cdecl]<void*, byte*, nuint, void*, void> handler, nint clientd, nuint fragment_limit);
+
+    [LibraryImport(Library)]
+    internal static partial int cavalry_cluster_entry_values(nint header, ref cavalry_cluster_entry_values_t values);
+
+    [LibraryImport(Library)]
+    internal static partial int cavalry_cluster_service_reply(nint service, long session_id, byte* buffer, nuint length);
+
+    [LibraryImport(Library)]
+    internal static partial int cavalry_cluster_service_action(nint service, int action);
+
+    [LibraryImport(Library)]
+    internal static partial int cavalry_cluster_service_fault(nint service, ref cavalry_fault_t fault);
+
+    [LibraryImport(Library)]
+    internal static partial long cavalry_cluster_service_position(nint service);
+
+    [LibraryImport(Library)]
+    [return: MarshalAs(UnmanagedType.U1)]
+    internal static partial bool cavalry_cluster_service_answers(nint service);
+
+    [LibraryImport(Library)]
+    internal static partial int cavalry_cluster_service_sessions(nint service);
+
+    [LibraryImport(Library)]
+    internal static partial int cavalry_cluster_service_close(nint service, nint client);
 
     [LibraryImport(Library, StringMarshalling = StringMarshalling.Utf8)]
     internal static partial int cavalry_connect_cluster(out nint session, nint client, string members, string response_channel);

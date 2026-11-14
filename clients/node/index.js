@@ -15,12 +15,12 @@
 const path = require("path");
 const addon = require(path.join(__dirname, "build", "Release", "cavalry_addon.node"));
 
-const ABI_VERSION = 4;
+const ABI_VERSION = 5;
 
 /** The header's constants, as the ABI names them (spec/c-abi.md). */
 const constants = {
   CAVALRY_DIR_ENV: "CAVALRY_DIR",
-  CAVALRY_ABI_VERSION: 4,
+  CAVALRY_ABI_VERSION: 5,
   CAVALRY_MAX_IMAGES: 256,
   CAVALRY_SERVICE_LOG_STREAM_ID: 104,
   CAVALRY_NULL_POSITION: -1,
@@ -80,6 +80,9 @@ const constants = {
   CAVALRY_ERR_CLUSTER_REFUSED: 141,
   CAVALRY_ERR_CLUSTER_VERSION: 142,
   CAVALRY_ERR_CLUSTER_CONNECT_TIMEOUT: 143,
+  CAVALRY_ERR_CLUSTER_ENTRY: 144,
+  CAVALRY_ERR_CLUSTER_NO_ENTRY: 145,
+  CAVALRY_ERR_CLUSTER_ACTION: 146,
   CAVALRY_CLOSED_BY_USER: 1,
   CAVALRY_CLOSED_DRIVER_CLOSED: 2,
   CAVALRY_CLOSED_DRIVER_TIMEOUT: 3,
@@ -91,6 +94,20 @@ const constants = {
   CAVALRY_REPLAY_STOP_STOPPED: 1,
   CAVALRY_REPLAY_STOP_NOT_CONNECTED: 2,
   CAVALRY_REPLAY_STOP_FAILED: 3,
+  CAVALRY_CLUSTER_ENTRY_SESSION_MESSAGE: 1,
+  CAVALRY_CLUSTER_ENTRY_SESSION_OPEN: 2,
+  CAVALRY_CLUSTER_ENTRY_SESSION_CLOSE: 3,
+  CAVALRY_CLUSTER_ENTRY_NEW_LEADERSHIP_TERM: 4,
+  CAVALRY_CLUSTER_ENTRY_OTHER: 5,
+  CAVALRY_CLUSTER_REPLY_SENT: 1,
+  CAVALRY_CLUSTER_REPLY_NOT_ANSWERING: 2,
+  CAVALRY_CLUSTER_REPLY_RETRY: 3,
+  CAVALRY_CLUSTER_REPLY_DROPPED: 4,
+  CAVALRY_CLUSTER_REPLY_NO_SESSION: 5,
+  CAVALRY_CLUSTER_REPLY_TOO_LONG: 6,
+  CAVALRY_ACTION_ABORT: 1,
+  CAVALRY_ACTION_BREAK: 2,
+  CAVALRY_ACTION_CONTINUE: 4,
   CAVALRY_FLAGS_BEGIN: 128,
   CAVALRY_FLAGS_END: 64,
   CAVALRY_FLAGS_EOS: 32,
@@ -111,16 +128,36 @@ const NULL_POSITION = constants.CAVALRY_NULL_POSITION;
 
 /** The structs' sizes and field offsets, as C lays them out on the 64-bit targets. */
 const LAYOUT = {
-  "cavalry_cluster_reply_values_t": {
-    "size": 16,
+  "cavalry_cluster_entry_values_t": {
+    "size": 48,
     "fields": {
-      "leadership_term_id": {
+      "position": {
         "offset": 0,
         "kind": "int64_t"
       },
-      "timestamp": {
+      "leadership_term_id": {
         "offset": 8,
         "kind": "int64_t"
+      },
+      "timestamp": {
+        "offset": 16,
+        "kind": "int64_t"
+      },
+      "session_id": {
+        "offset": 24,
+        "kind": "int64_t"
+      },
+      "type": {
+        "offset": 32,
+        "kind": "int32_t"
+      },
+      "leader_member_id": {
+        "offset": 36,
+        "kind": "int32_t"
+      },
+      "timed_out": {
+        "offset": 40,
+        "kind": "bool"
       }
     }
   },
@@ -136,6 +173,19 @@ const LAYOUT = {
         "kind": "int32_t"
       },
       "position": {
+        "offset": 8,
+        "kind": "int64_t"
+      }
+    }
+  },
+  "cavalry_cluster_reply_values_t": {
+    "size": 16,
+    "fields": {
+      "leadership_term_id": {
+        "offset": 0,
+        "kind": "int64_t"
+      },
+      "timestamp": {
         "offset": 8,
         "kind": "int64_t"
       }

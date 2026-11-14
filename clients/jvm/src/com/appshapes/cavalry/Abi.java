@@ -38,7 +38,7 @@ public final class Abi {
     }
 
     public static final String DIR_ENV = "CAVALRY_DIR"; // CAVALRY_DIR_ENV
-    public static final int ABI_VERSION = 4; // CAVALRY_ABI_VERSION
+    public static final int ABI_VERSION = 5; // CAVALRY_ABI_VERSION
     public static final int MAX_IMAGES = 256; // CAVALRY_MAX_IMAGES
     public static final int SERVICE_LOG_STREAM_ID = 104; // CAVALRY_SERVICE_LOG_STREAM_ID
     public static final int NULL_POSITION = -1; // CAVALRY_NULL_POSITION
@@ -98,6 +98,9 @@ public final class Abi {
     public static final int ERR_CLUSTER_REFUSED = 141; // CAVALRY_ERR_CLUSTER_REFUSED
     public static final int ERR_CLUSTER_VERSION = 142; // CAVALRY_ERR_CLUSTER_VERSION
     public static final int ERR_CLUSTER_CONNECT_TIMEOUT = 143; // CAVALRY_ERR_CLUSTER_CONNECT_TIMEOUT
+    public static final int ERR_CLUSTER_ENTRY = 144; // CAVALRY_ERR_CLUSTER_ENTRY
+    public static final int ERR_CLUSTER_NO_ENTRY = 145; // CAVALRY_ERR_CLUSTER_NO_ENTRY
+    public static final int ERR_CLUSTER_ACTION = 146; // CAVALRY_ERR_CLUSTER_ACTION
     public static final int CLOSED_BY_USER = 1; // CAVALRY_CLOSED_BY_USER
     public static final int CLOSED_DRIVER_CLOSED = 2; // CAVALRY_CLOSED_DRIVER_CLOSED
     public static final int CLOSED_DRIVER_TIMEOUT = 3; // CAVALRY_CLOSED_DRIVER_TIMEOUT
@@ -109,6 +112,20 @@ public final class Abi {
     public static final int REPLAY_STOP_STOPPED = 1; // CAVALRY_REPLAY_STOP_STOPPED
     public static final int REPLAY_STOP_NOT_CONNECTED = 2; // CAVALRY_REPLAY_STOP_NOT_CONNECTED
     public static final int REPLAY_STOP_FAILED = 3; // CAVALRY_REPLAY_STOP_FAILED
+    public static final int CLUSTER_ENTRY_SESSION_MESSAGE = 1; // CAVALRY_CLUSTER_ENTRY_SESSION_MESSAGE
+    public static final int CLUSTER_ENTRY_SESSION_OPEN = 2; // CAVALRY_CLUSTER_ENTRY_SESSION_OPEN
+    public static final int CLUSTER_ENTRY_SESSION_CLOSE = 3; // CAVALRY_CLUSTER_ENTRY_SESSION_CLOSE
+    public static final int CLUSTER_ENTRY_NEW_LEADERSHIP_TERM = 4; // CAVALRY_CLUSTER_ENTRY_NEW_LEADERSHIP_TERM
+    public static final int CLUSTER_ENTRY_OTHER = 5; // CAVALRY_CLUSTER_ENTRY_OTHER
+    public static final int CLUSTER_REPLY_SENT = 1; // CAVALRY_CLUSTER_REPLY_SENT
+    public static final int CLUSTER_REPLY_NOT_ANSWERING = 2; // CAVALRY_CLUSTER_REPLY_NOT_ANSWERING
+    public static final int CLUSTER_REPLY_RETRY = 3; // CAVALRY_CLUSTER_REPLY_RETRY
+    public static final int CLUSTER_REPLY_DROPPED = 4; // CAVALRY_CLUSTER_REPLY_DROPPED
+    public static final int CLUSTER_REPLY_NO_SESSION = 5; // CAVALRY_CLUSTER_REPLY_NO_SESSION
+    public static final int CLUSTER_REPLY_TOO_LONG = 6; // CAVALRY_CLUSTER_REPLY_TOO_LONG
+    public static final int ACTION_ABORT = 1; // CAVALRY_ACTION_ABORT
+    public static final int ACTION_BREAK = 2; // CAVALRY_ACTION_BREAK
+    public static final int ACTION_CONTINUE = 4; // CAVALRY_ACTION_CONTINUE
     public static final int FLAGS_BEGIN = 128; // CAVALRY_FLAGS_BEGIN
     public static final int FLAGS_END = 64; // CAVALRY_FLAGS_END
     public static final int FLAGS_EOS = 32; // CAVALRY_FLAGS_EOS
@@ -116,13 +133,22 @@ public final class Abi {
     public static final int FRAME_TYPE_PAD = 0; // CAVALRY_FRAME_TYPE_PAD
     public static final int FRAME_TYPE_DATA = 1; // CAVALRY_FRAME_TYPE_DATA
 
-    static final StructLayout cavalry_cluster_reply_values_t = MemoryLayout.structLayout(
+    static final StructLayout cavalry_cluster_entry_values_t = MemoryLayout.structLayout(
+        JAVA_LONG.withName("position"),
         JAVA_LONG.withName("leadership_term_id"),
-        JAVA_LONG.withName("timestamp"));
+        JAVA_LONG.withName("timestamp"),
+        JAVA_LONG.withName("session_id"),
+        JAVA_INT.withName("type"),
+        JAVA_INT.withName("leader_member_id"),
+        JAVA_BOOLEAN.withName("timed_out"),
+        MemoryLayout.paddingLayout(7));
     static final StructLayout cavalry_fault_t = MemoryLayout.structLayout(
         JAVA_INT.withName("code"),
         JAVA_INT.withName("session_id"),
         JAVA_LONG.withName("position"));
+    static final StructLayout cavalry_cluster_reply_values_t = MemoryLayout.structLayout(
+        JAVA_LONG.withName("leadership_term_id"),
+        JAVA_LONG.withName("timestamp"));
     static final StructLayout cavalry_cluster_session_constants_t = MemoryLayout.structLayout(
         JAVA_LONG.withName("session_id"),
         JAVA_LONG.withName("max_message_length"));
@@ -180,11 +206,18 @@ public final class Abi {
         JAVA_INT.withName("stream_id"),
         MemoryLayout.paddingLayout(4));
 
-    static final long cavalry_cluster_reply_values_t_leadership_term_id = 0;
-    static final long cavalry_cluster_reply_values_t_timestamp = 8;
+    static final long cavalry_cluster_entry_values_t_position = 0;
+    static final long cavalry_cluster_entry_values_t_leadership_term_id = 8;
+    static final long cavalry_cluster_entry_values_t_timestamp = 16;
+    static final long cavalry_cluster_entry_values_t_session_id = 24;
+    static final long cavalry_cluster_entry_values_t_type = 32;
+    static final long cavalry_cluster_entry_values_t_leader_member_id = 36;
+    static final long cavalry_cluster_entry_values_t_timed_out = 40;
     static final long cavalry_fault_t_code = 0;
     static final long cavalry_fault_t_session_id = 4;
     static final long cavalry_fault_t_position = 8;
+    static final long cavalry_cluster_reply_values_t_leadership_term_id = 0;
+    static final long cavalry_cluster_reply_values_t_timestamp = 8;
     static final long cavalry_cluster_session_constants_t_session_id = 0;
     static final long cavalry_cluster_session_constants_t_max_message_length = 8;
     static final long cavalry_committed_log_constants_t_recording_id = 0;
@@ -252,6 +285,16 @@ public final class Abi {
     static final MethodHandle cavalry_purge_recording;
     static final MethodHandle cavalry_start_replay;
     static final MethodHandle cavalry_stop_replay;
+    static final MethodHandle cavalry_cluster_service;
+    static final MethodHandle cavalry_cluster_service_poll;
+    static final MethodHandle cavalry_cluster_entry_values;
+    static final MethodHandle cavalry_cluster_service_reply;
+    static final MethodHandle cavalry_cluster_service_action;
+    static final MethodHandle cavalry_cluster_service_fault;
+    static final MethodHandle cavalry_cluster_service_position;
+    static final MethodHandle cavalry_cluster_service_answers;
+    static final MethodHandle cavalry_cluster_service_sessions;
+    static final MethodHandle cavalry_cluster_service_close;
     static final MethodHandle cavalry_connect_cluster;
     static final MethodHandle cavalry_cluster_session_offer;
     static final MethodHandle cavalry_cluster_session_poll;
@@ -351,6 +394,16 @@ public final class Abi {
         cavalry_purge_recording = LINKER.downcallHandle(LOOKUP.findOrThrow("cavalry_purge_recording"), FunctionDescriptor.of(JAVA_INT, ADDRESS, JAVA_LONG));
         cavalry_start_replay = LINKER.downcallHandle(LOOKUP.findOrThrow("cavalry_start_replay"), FunctionDescriptor.of(JAVA_INT, ADDRESS, ADDRESS, JAVA_LONG, JAVA_LONG, JAVA_LONG, JAVA_INT, ADDRESS));
         cavalry_stop_replay = LINKER.downcallHandle(LOOKUP.findOrThrow("cavalry_stop_replay"), FunctionDescriptor.of(JAVA_INT, ADDRESS, JAVA_LONG));
+        cavalry_cluster_service = LINKER.downcallHandle(LOOKUP.findOrThrow("cavalry_cluster_service"), FunctionDescriptor.of(JAVA_INT, ADDRESS, ADDRESS));
+        cavalry_cluster_service_poll = LINKER.downcallHandle(LOOKUP.findOrThrow("cavalry_cluster_service_poll"), FunctionDescriptor.of(JAVA_INT, ADDRESS, ADDRESS, ADDRESS, ADDRESS, JAVA_LONG));
+        cavalry_cluster_entry_values = LINKER.downcallHandle(LOOKUP.findOrThrow("cavalry_cluster_entry_values"), FunctionDescriptor.of(JAVA_INT, ADDRESS, ADDRESS));
+        cavalry_cluster_service_reply = LINKER.downcallHandle(LOOKUP.findOrThrow("cavalry_cluster_service_reply"), FunctionDescriptor.of(JAVA_INT, ADDRESS, JAVA_LONG, ADDRESS, JAVA_LONG));
+        cavalry_cluster_service_action = LINKER.downcallHandle(LOOKUP.findOrThrow("cavalry_cluster_service_action"), FunctionDescriptor.of(JAVA_INT, ADDRESS, JAVA_INT));
+        cavalry_cluster_service_fault = LINKER.downcallHandle(LOOKUP.findOrThrow("cavalry_cluster_service_fault"), FunctionDescriptor.of(JAVA_INT, ADDRESS, ADDRESS));
+        cavalry_cluster_service_position = LINKER.downcallHandle(LOOKUP.findOrThrow("cavalry_cluster_service_position"), FunctionDescriptor.of(JAVA_LONG, ADDRESS));
+        cavalry_cluster_service_answers = LINKER.downcallHandle(LOOKUP.findOrThrow("cavalry_cluster_service_answers"), FunctionDescriptor.of(JAVA_BOOLEAN, ADDRESS));
+        cavalry_cluster_service_sessions = LINKER.downcallHandle(LOOKUP.findOrThrow("cavalry_cluster_service_sessions"), FunctionDescriptor.of(JAVA_INT, ADDRESS));
+        cavalry_cluster_service_close = LINKER.downcallHandle(LOOKUP.findOrThrow("cavalry_cluster_service_close"), FunctionDescriptor.of(JAVA_INT, ADDRESS, ADDRESS));
         cavalry_connect_cluster = LINKER.downcallHandle(LOOKUP.findOrThrow("cavalry_connect_cluster"), FunctionDescriptor.of(JAVA_INT, ADDRESS, ADDRESS, ADDRESS, ADDRESS));
         cavalry_cluster_session_offer = LINKER.downcallHandle(LOOKUP.findOrThrow("cavalry_cluster_session_offer"), FunctionDescriptor.of(JAVA_LONG, ADDRESS, ADDRESS, JAVA_LONG));
         cavalry_cluster_session_poll = LINKER.downcallHandle(LOOKUP.findOrThrow("cavalry_cluster_session_poll"), FunctionDescriptor.of(JAVA_INT, ADDRESS, ADDRESS, ADDRESS, JAVA_LONG));
