@@ -397,7 +397,7 @@ public final class Abi {
         cavalry_cluster_service = LINKER.downcallHandle(LOOKUP.findOrThrow("cavalry_cluster_service"), FunctionDescriptor.of(JAVA_INT, ADDRESS, ADDRESS));
         cavalry_cluster_service_poll = LINKER.downcallHandle(LOOKUP.findOrThrow("cavalry_cluster_service_poll"), FunctionDescriptor.of(JAVA_INT, ADDRESS, ADDRESS, ADDRESS, ADDRESS, JAVA_LONG));
         cavalry_cluster_entry_values = LINKER.downcallHandle(LOOKUP.findOrThrow("cavalry_cluster_entry_values"), FunctionDescriptor.of(JAVA_INT, ADDRESS, ADDRESS));
-        cavalry_cluster_service_reply = LINKER.downcallHandle(LOOKUP.findOrThrow("cavalry_cluster_service_reply"), FunctionDescriptor.of(JAVA_INT, ADDRESS, JAVA_LONG, ADDRESS, JAVA_LONG));
+        cavalry_cluster_service_reply = LINKER.downcallHandle(LOOKUP.findOrThrow("cavalry_cluster_service_reply"), FunctionDescriptor.of(JAVA_INT, ADDRESS, JAVA_LONG, ADDRESS, JAVA_LONG), Linker.Option.critical(true));
         cavalry_cluster_service_action = LINKER.downcallHandle(LOOKUP.findOrThrow("cavalry_cluster_service_action"), FunctionDescriptor.of(JAVA_INT, ADDRESS, JAVA_INT));
         cavalry_cluster_service_fault = LINKER.downcallHandle(LOOKUP.findOrThrow("cavalry_cluster_service_fault"), FunctionDescriptor.of(JAVA_INT, ADDRESS, ADDRESS));
         cavalry_cluster_service_position = LINKER.downcallHandle(LOOKUP.findOrThrow("cavalry_cluster_service_position"), FunctionDescriptor.of(JAVA_LONG, ADDRESS));
@@ -405,7 +405,7 @@ public final class Abi {
         cavalry_cluster_service_sessions = LINKER.downcallHandle(LOOKUP.findOrThrow("cavalry_cluster_service_sessions"), FunctionDescriptor.of(JAVA_INT, ADDRESS));
         cavalry_cluster_service_close = LINKER.downcallHandle(LOOKUP.findOrThrow("cavalry_cluster_service_close"), FunctionDescriptor.of(JAVA_INT, ADDRESS, ADDRESS));
         cavalry_connect_cluster = LINKER.downcallHandle(LOOKUP.findOrThrow("cavalry_connect_cluster"), FunctionDescriptor.of(JAVA_INT, ADDRESS, ADDRESS, ADDRESS, ADDRESS));
-        cavalry_cluster_session_offer = LINKER.downcallHandle(LOOKUP.findOrThrow("cavalry_cluster_session_offer"), FunctionDescriptor.of(JAVA_LONG, ADDRESS, ADDRESS, JAVA_LONG));
+        cavalry_cluster_session_offer = LINKER.downcallHandle(LOOKUP.findOrThrow("cavalry_cluster_session_offer"), FunctionDescriptor.of(JAVA_LONG, ADDRESS, ADDRESS, JAVA_LONG), Linker.Option.critical(true));
         cavalry_cluster_session_poll = LINKER.downcallHandle(LOOKUP.findOrThrow("cavalry_cluster_session_poll"), FunctionDescriptor.of(JAVA_INT, ADDRESS, ADDRESS, ADDRESS, JAVA_LONG));
         cavalry_cluster_reply_values = LINKER.downcallHandle(LOOKUP.findOrThrow("cavalry_cluster_reply_values"), FunctionDescriptor.of(JAVA_INT, ADDRESS, ADDRESS));
         cavalry_cluster_session_fault = LINKER.downcallHandle(LOOKUP.findOrThrow("cavalry_cluster_session_fault"), FunctionDescriptor.of(JAVA_INT, ADDRESS, ADDRESS));

@@ -52,7 +52,12 @@ outside the compiler's `catch (Throwable)`, builds an exception, allocates with 
 calls the package's throwing `Abi.check` or `Abi.lastError`, fails naming the method and
 the form; a throw in the trampoline's catch, which holds no `invokeExact`, fails; building
 the `HandlerException` in `poll` before its ABI call fails; a header getter that throws
-fails while `Header.ensure`'s own throw, the guard, passes; a package with none of the
+fails while `Header.ensure`'s own throw, the guard, passes; a cluster session's `poll` and
+a cluster service's are held as the subscription's is, a `synchronized` service's `poll`
+or one that calls the client's `synchronized` method fails, and so does a throw in either
+cluster upcall's catch, an exception built where a service's upcall keeps the ABI's
+refusal, a throw in the session's `offer` or the service's `reply`, and an allocation in
+a getter of a reply's values or an entry's (ADR 0124); a package with none of the
 per-message methods fails, one method renamed fails, and a missing file says to generate. The same for
 the .NET client's package: a per-message member that uses `lock`, `Monitor` or
 `System.Threading.Lock`, is `async`, awaits, uses a task, blocks, starts a thread, throws,
@@ -1046,8 +1051,98 @@ class Clients(unittest.TestCase):
         self.assertIn("calls Abi.lastError", finding)
         self.assertIn("builds CavalryException", finding)
 
+    # A cluster session and a cluster service in the JVM client (ADR 0124).
+
+    def test_building_handler_exception_before_a_cluster_polls_call_in_jvm_fails(self):
+        """A cluster session's poll and a cluster service's are held as the subscription's
+        is: the exception each builds after its ABI call is the one it may build."""
+        self.assertEqual(lint.findings(self.tmp), [])
+        self.edit_jvm("        int count;\n        try {\n            count = (int) Abi.cavalry_cluster_session_poll.invokeExact(",
+                      "        int count;\n        RuntimeException early = new HandlerException(0, 0, first);\n        try {\n"
+                      "            count = (int) Abi.cavalry_cluster_session_poll.invokeExact(", file="ClusterSession.java")
+        self.edit_jvm("        int count;\n        try {\n            count = (int) Abi.cavalry_cluster_service_poll.invokeExact(",
+                      "        int count;\n        RuntimeException early = new CavalryException(\"x\", 0, \"y\");\n        try {\n"
+                      "            count = (int) Abi.cavalry_cluster_service_poll.invokeExact(", file="ClusterService.java")
+        found = lint.findings(self.tmp)
+        self.assertEqual(len(found), 2, found)
+        self.assertTrue(any("ClusterSession.poll" in f and "builds HandlerException" in f for f in found), found)
+        self.assertTrue(any("ClusterService.poll" in f and "builds CavalryException" in f for f in found), found)
+
+    def test_a_lock_in_a_jvm_cluster_services_poll_fails(self):
+        """A service's poll is a call on its client and is on every entry's path: it is
+        not `synchronized`, and it calls no `synchronized` method of the client, whose
+        handle it reads through the one accessor that takes no lock
+        (clients/jvm/README.md, "Threads")."""
+        self.edit_jvm("    public int poll(ServiceHandler handler, int fragmentLimit) {\n",
+                      "    public synchronized int poll(ServiceHandler handler, int fragmentLimit) {\n", file="ClusterService.java")
+        [finding] = lint.findings(self.tmp)
+        self.assertIn("ClusterService.poll", finding)
+        self.assertIn("is `synchronized`", finding)
+        self.setUp()
+        self.edit_jvm("        this.handler = handler;\n        polling = true;\n        raised = 0;\n        first = null;\n"
+                      "        refused = false;\n",
+                      "        boolean closed = client.isClosed();\n        this.handler = handler;\n        polling = true;\n"
+                      "        raised = 0;\n        first = null;\n        refused = false;\n", file="ClusterService.java")
+        [finding] = lint.findings(self.tmp)
+        self.assertIn("ClusterService.poll", finding)
+        self.assertIn("calls Client.isClosed", finding)
+        self.assertIn("is `synchronized`", finding)
+
+    def test_a_throw_in_a_jvm_cluster_upcalls_catch_fails(self):
+        """Each cluster upcall reads its values in a helper with a try of its own, so the
+        catch around the handler's call holds no invokeExact, and a throw there is a raise."""
+        self.assertEqual(lint.findings(self.tmp), [])
+        for file in ("ClusterSession.java", "ClusterService.java"):
+            self.edit_jvm("        } catch (Throwable t) {\n            raised++;\n",
+                          "        } catch (Throwable t) {\n            raised++;\n            throw t;\n", file=file)
+        found = lint.findings(self.tmp)
+        self.assertEqual(len(found), 2, found)
+        for upcall in ("ClusterSession.onReply", "ClusterService.onClusterEntry"):
+            self.assertTrue(any(f"jvm: {upcall} (" in f and "throws" in f for f in found), (upcall, found))
+
+    def test_an_exception_built_in_a_jvm_cluster_services_upcall_fails(self):
+        """An action the ABI refused is kept as its code and its message for `poll` to
+        throw: the upcall builds no exception for it."""
+        self.edit_jvm("            refusedMessage = Abi.errmsg();\n",
+                      "            first = Abi.lastError(\"cavalry_cluster_service_action\");\n", file="ClusterService.java")
+        [finding] = lint.findings(self.tmp)
+        self.assertIn("ClusterService.onClusterEntry", finding)
+        self.assertIn("calls Abi.lastError", finding)
+        self.assertIn("builds CavalryException", finding)
+
+    def test_a_throw_or_an_allocation_in_a_jvm_cluster_per_message_method_fails(self):
+        """The session's offer and the service's reply return a code, and the getters of a
+        reply's values and of an entry's read the one struct their object keeps."""
+        self.edit_jvm("    public long offer(MemorySegment message) {\n",
+                      "    public long offer(MemorySegment message) {\n        Abi.check(\"x\", -1);\n", file="ClusterSession.java")
+        self.edit_jvm("    public int reply(long sessionId, MemorySegment message) {\n",
+                      "    public int reply(long sessionId, MemorySegment message) {\n        Abi.check(\"x\", -1);\n",
+                      file="ClusterService.java")
+        self.edit_jvm("    public long timestamp() {\n", "    public long timestamp() {\n        byte[] copy = new byte[8];\n",
+                      file="ClusterReplyValues.java")
+        self.edit_jvm("    public boolean timedOut() {\n", "    public boolean timedOut() {\n        byte[] copy = new byte[8];\n",
+                      file="ClusterEntryValues.java")
+        found = lint.findings(self.tmp)
+        self.assertEqual(len(found), 4, found)
+        for name, form in (("ClusterSession.offer", "calls Abi.check"), ("ClusterService.reply", "calls Abi.check"),
+                           ("ClusterReplyValues.timestamp", "allocates byte with `new`"),
+                           ("ClusterEntryValues.timedOut", "allocates byte with `new`")):
+            self.assertTrue(any(f"jvm: {name} (" in f and form in f for f in found), (name, found))
+
+    def test_a_missing_jvm_cluster_method_fails(self):
+        """A cluster session's and a cluster service's per-message methods are held to the
+        rules by name, as the others are (ADR 0124)."""
+        self.edit_jvm("    public int reply(long sessionId, MemorySegment message) {\n",
+                      "    public int answer(long sessionId, MemorySegment message) {\n", file="ClusterService.java")
+        self.edit_jvm("    void onReply(MemorySegment clientd,", "    void onAnswer(MemorySegment clientd,", file="ClusterSession.java")
+        found = lint.findings(self.tmp)
+        self.assertEqual(len(found), 2, found)
+        for name in ("ClusterService.reply", "ClusterSession.onReply"):
+            self.assertTrue(any(f"{name} is not in" in f for f in found), (name, found))
+
     def test_a_jvm_package_without_the_per_message_methods_fails(self):
-        for name in ("Publication", "Subscription", "CommittedLog", "Header"):
+        for name in ("Publication", "Subscription", "CommittedLog", "Header", "ClusterSession", "ClusterService",
+                     "ClusterReplyValues", "ClusterEntryValues"):
             with open(os.path.join(self.jvm, name + ".java"), "w", encoding="utf-8") as f:
                 f.write(f"package com.appshapes.cavalry;\n\npublic final class {name} {{\n    int here() {{\n"
                         f"        return 1;\n    }}\n}}\n")
