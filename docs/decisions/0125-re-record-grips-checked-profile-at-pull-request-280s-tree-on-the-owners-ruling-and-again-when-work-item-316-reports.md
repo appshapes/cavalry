@@ -3,10 +3,13 @@
 - **Status:** Accepted
 - **Date:** 2026-11-14
 - **Invariants affected:** 2
-- **Supersedes:** none. Makes one re-record of `bench/baseline.json` that is none of
-  ADR 0110's three cases, on the owner's ruling. ADR 0033's rule for what an entry is
-  recorded from, ADR 0050's rule that a red at a pull request's own tree is a change,
-  and ADR 0110's three cases for a session's re-record all stand.
+- **Supersedes:** none. Makes one re-record of `bench/baseline.json`, on the owner's
+  ruling, that departs from two sentences. ADR 0033: "A run of a pull request that
+  changes the data plane is judged and never recorded"; this entry is recorded from
+  such runs alone. ADR 0110: "It is made only in three cases"; this is none of them.
+  The rest of ADR 0033, ADR 0050's rule that a red at a pull request's own tree is a
+  change, and ADR 0110's three cases for a session's own re-record stand. ADR 0110's
+  Revisit does not fire (Consequences).
 
 ## Context
 
@@ -64,6 +67,12 @@ for this, each by a re-run of the job `bench (grip)`. A person's session makes i
 the one the owner ruled in, after it told him the tree and the time on the host.
 The commit's message lists every gated row's slowest run before and after and names
 the cause of each row that loosens by more than 5 percent.
+
+ADR 0033 never records a run of a pull request that changes the data plane, since
+such a run is what the gate judges. This entry is recorded from eight of them. The
+owner ruled on what they read. And they are of the tree `master` has after the
+squash: the result files name cc827dcf, the merge of 8fafb561 with `master` at
+10985ab3, so the entry and the tree it was read at reach `master` in one commit.
 
 The whole profile is re-recorded and not two of its rows, since an entry is of one
 tree (ADR 0033). It is recorded from eight processes and not from the three the
@@ -200,6 +209,14 @@ method and the counts for each crate. The ruling: work item 317's comment of
   for it.
 - Work item 316 is in Doing from the day this lands. The owner has said which
   session runs on `grip` for it, and that is on work item 316.
+- ADR 0110's Revisit reads "if a session's re-record ... is made outside the three
+  cases: then a re-record goes back to a person's own commit". It does not fire.
+  The clause is for a session that decides by itself to go outside the cases. Here
+  the owner decided, on work item 317, with the evidence in front of him, and was
+  told before the commit which session would make it, at which tree and from which
+  processes. So this is his re-record, made by his session, and a session's own
+  re-record is still held to the three cases. A session that makes one outside
+  them with no such ruling fires the clause as it is written.
 - To undo this, revert the commit: the entry of eight processes at the tree of
   620a2e2 comes back.
 - **Revisit** if work item 316 is closed, or leaves Doing, with no report: the
