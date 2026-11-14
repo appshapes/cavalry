@@ -53,8 +53,8 @@ use cavalry_shm::counters::generated::{
     CLUSTER_LEADER_HEARTBEAT_TIMEOUTS, CLUSTER_LEADER_MEMBER_ID, CLUSTER_LEADER_QUORUM_LOSSES,
     CLUSTER_LEADERSHIP_TERM_ID, CLUSTER_LOG_IMAGES_LOST, CLUSTER_LOG_RECORDINGS_FORGOTTEN,
     CLUSTER_LOG_RECORDINGS_UNSYNCED, CLUSTER_LOG_RECORDINGS_UNWRITTEN,
-    CLUSTER_LOG_REPLICATIONS_UNAVAILABLE, CLUSTER_MESSAGES_REJECTED, CLUSTER_ROLE,
-    CLUSTER_TRUNCATIONS_REFUSED,
+    CLUSTER_LOG_REPLICATIONS_UNAVAILABLE, CLUSTER_MESSAGES_REJECTED, CLUSTER_REPLIES_STALE,
+    CLUSTER_ROLE, CLUSTER_TRUNCATIONS_REFUSED,
 };
 use cavalry_shm::counters::{CounterId, CountersError, CountersReader, Scope};
 
@@ -1019,6 +1019,20 @@ const MEMBER_COUNTS: [CounterId; 6] = [
     CLUSTER_LOG_RECORDINGS_FORGOTTEN,
 ];
 
+/// Where a cluster session's findings are explained.
+const DOC_SESSIONS: &str = "docs/reference/cluster.md#sessions";
+
+/// The cluster's counters whose key is a cluster session id, an `i64`, and not a
+/// member id (`spec/cluster.md`, "Counters"; ADR 0121). A client adds one for a session
+/// it holds, on its own driver, which need be no member's, so its record says nothing
+/// of a member. [`cluster_checks`] keeps these out of its grouping by member, where
+/// the low half of a session id would be read as a member that has no role and no
+/// leader, and reports each one above 0 by its name, with the session and the
+/// counter's doctor sentence, as it reports a member's counts. A new counter keyed by
+/// a session goes here, and a test holds the list to what `counters.toml` says of
+/// each counter's key.
+const SESSION_COUNTS: [CounterId; 1] = [CLUSTER_REPLIES_STALE];
+
 /// One cluster member as its counters show it (`spec/cluster.md`, "Counters"): what its
 /// consensus module stored, by the member id in each counter's key.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -1198,6 +1212,12 @@ fn election_state_name(code: i64) -> String {
 /// given, a quorum is named by its size and a check of a path between two members
 /// names their endpoints. A record whose type id `counters.toml` does not hold is not
 /// read: 113, the id of a counter that was retired, is one (ADR 0107).
+///
+/// A client's session with a cluster has counters of its own, [`SESSION_COUNTS`],
+/// keyed by the session's id on the client's driver. They are no member's: each above
+/// 0 is a finding by its counter's name that names the session, after the members'
+/// findings, and a driver that holds a session and no member gets no finding of a
+/// member.
 fn cluster_checks(
     reader: &CountersReader,
     running: bool,
@@ -1215,6 +1235,10 @@ fn cluster_checks(
         .map(|entry| entry.id.0)
         .collect();
     let mut members: Vec<MemberCounters> = Vec::new();
+    // The sessions' counts above 0, each with its session's id, and whether the file
+    // holds a session's record at all.
+    let mut stale: Vec<(i64, CounterId, i64)> = Vec::new();
+    let mut sessions = false;
     for id in 0..reader.capacity() {
         let Some(fields) = reader.record(id).ok().flatten() else {
             continue;
@@ -1226,6 +1250,18 @@ fn cluster_checks(
         let Ok(value) = reader.read_acquire(id) else {
             continue;
         };
+        if let Some(counter) = SESSION_COUNTS.iter().find(|counter| counter.0 == type_id) {
+            // Keyed by a session id, eight bytes, and no member's record.
+            sessions = true;
+            let mut key = [0u8; 8];
+            if let Some(head) = fields.key().get(..8) {
+                key.copy_from_slice(head);
+            }
+            if value > 0 {
+                stale.push((i64::from_le_bytes(key), *counter, value));
+            }
+            continue;
+        }
         let mut key = [0u8; 4];
         if let Some(head) = fields.key().get(..4) {
             key.copy_from_slice(head);
@@ -1276,15 +1312,35 @@ fn cluster_checks(
             *count = value;
         }
     }
-    if members.is_empty() {
-        return 0;
+    let mut checks = 0;
+    if !members.is_empty() {
+        members.sort_by_key(|member| member.id);
+        for member in &members {
+            member_findings(member, cluster, findings);
+        }
+        // The five of `member_findings`, and one for each of the member's counts.
+        checks += 5 + MEMBER_COUNTS.len();
     }
-    members.sort_by_key(|member| member.id);
-    for member in &members {
-        member_findings(member, cluster, findings);
+    if sessions {
+        stale.sort_by_key(|(session, counter, _)| (*session, counter.0));
+        for (session, counter, value) in stale {
+            let Some(def) = COUNTERS.iter().find(|def| def.id == counter) else {
+                continue;
+            };
+            findings.push(Finding {
+                check: def.name,
+                level: Level::Warn,
+                message: format!(
+                    "session {session}'s {} is {value}: {}",
+                    def.name, def.doctor
+                ),
+                doc: DOC_SESSIONS,
+            });
+        }
+        // One for each of a session's counts.
+        checks += SESSION_COUNTS.len();
     }
-    // The five of `member_findings`, and one for each of the member's counts.
-    5 + MEMBER_COUNTS.len()
+    checks
 }
 
 /// The path between a member and its leader that the member's election needs, as the
@@ -6738,5 +6794,146 @@ mod tests {
             findings[2].message
         );
         assert!(!findings[2].message.contains("syncs once a second"));
+    }
+
+    /// A counters file that holds one `cluster.replies_stale` record, keyed by
+    /// `session` as a client's session keys it (ADR 0121), beside the member's records
+    /// of `member` when there is one.
+    fn session_file(
+        dir: &TestDir,
+        session: i64,
+        stale: i64,
+        member: Option<(i32, &[(CounterId, i64)])>,
+    ) -> CountersReader {
+        let mut file = CountersFile::create(&dir.0, 1024).expect("the counters file");
+        if let Some((id, values)) = member {
+            for (type_id, value) in values {
+                let counter = file
+                    .allocate(*type_id, &id.to_le_bytes(), &format!("cluster {id}"))
+                    .expect("a counter");
+                counter.set(*value);
+            }
+        }
+        let counter = file
+            .allocate(
+                CLUSTER_REPLIES_STALE,
+                &session.to_le_bytes(),
+                &format!("cluster.replies_stale {session}"),
+            )
+            .expect("a counter");
+        counter.set(stale);
+        CountersReader::open(&dir.0).expect("opens")
+    }
+
+    /// A session's counter is no member's (ADR 0121). `cluster.replies_stale` is keyed
+    /// by a session id, and a client's driver holds one while a session is open: doctor
+    /// finds no member there and no election, and the count above 0 is one finding
+    /// that names the session, with the counter's sentence and where it is explained.
+    #[test]
+    fn a_sessions_stale_replies_are_no_members_and_are_reported_by_the_session() {
+        // An open session that passed over nothing: its one check ran, nothing found,
+        // where the low half of the session's id, 7, was once read as member 7 in init.
+        let dir = TestDir::new("cluster-session-none");
+        let reader = session_file(&dir, 7, 0, None);
+        let mut findings = Vec::new();
+        assert_eq!(cluster_checks(&reader, true, None, &mut findings), 1);
+        assert!(findings.is_empty(), "{findings:?}");
+
+        // Two stale replies: one finding, the session's.
+        let dir = TestDir::new("cluster-session-stale");
+        let reader = session_file(&dir, 7, 2, None);
+        let mut findings = Vec::new();
+        assert_eq!(cluster_checks(&reader, true, None, &mut findings), 1);
+        let found: Vec<&str> = findings.iter().map(|finding| finding.check).collect();
+        assert_eq!(found, ["cluster.replies_stale"], "{findings:?}");
+        assert_eq!(findings[0].level, Level::Warn);
+        assert!(
+            findings[0].message.starts_with(
+                "session 7's cluster.replies_stale is 2: A session passed over a reply that \
+                 came too late"
+            ),
+            "{}",
+            findings[0].message
+        );
+        assert!(
+            findings[0]
+                .message
+                .contains("check that every member's service is of the cluster's version"),
+            "{}",
+            findings[0].message
+        );
+        assert_eq!(findings[0].doc, "docs/reference/cluster.md#sessions");
+
+        // The session's id is read whole, all eight bytes of the key.
+        let session = (3_i64 << 32) + 5;
+        let dir = TestDir::new("cluster-session-wide");
+        let reader = session_file(&dir, session, 1, None);
+        let mut findings = Vec::new();
+        cluster_checks(&reader, true, None, &mut findings);
+        assert_eq!(findings.len(), 1, "{findings:?}");
+        assert!(
+            findings[0]
+                .message
+                .starts_with("session 12884901893's cluster.replies_stale is 1: "),
+            "{}",
+            findings[0].message
+        );
+
+        // On a member's driver that a client's session is on as well: the member is
+        // explained once, as itself, and the session's finding comes after it.
+        let follower = [
+            (CLUSTER_ROLE, 0),
+            (CLUSTER_ELECTION_STATE, 17),
+            (CLUSTER_LEADERSHIP_TERM_ID, 0),
+            (CLUSTER_APPEND_POSITION, 4096),
+            (CLUSTER_COMMIT_POSITION, 4096),
+        ];
+        let dir = TestDir::new("cluster-session-member");
+        let reader = session_file(&dir, 7, 2, Some((1, &follower)));
+        let mut findings = Vec::new();
+        assert_eq!(cluster_checks(&reader, true, None, &mut findings), 12);
+        let found: Vec<&str> = findings.iter().map(|finding| finding.check).collect();
+        assert_eq!(
+            found,
+            ["cluster-member", "cluster.replies_stale"],
+            "{findings:?}"
+        );
+        assert!(
+            findings[0].message.contains("cluster member 1, a follower"),
+            "{}",
+            findings[0].message
+        );
+
+        // A stopped driver's: nothing, as for a member.
+        let dir = TestDir::new("cluster-session-stopped");
+        let reader = session_file(&dir, 7, 2, None);
+        let mut findings = Vec::new();
+        assert_eq!(cluster_checks(&reader, false, None, &mut findings), 0);
+        assert!(findings.is_empty());
+    }
+
+    /// The list of the counters keyed by a session is what `counters.toml` says: each
+    /// `cluster.*` counter whose entry gives its key as a cluster session id is in
+    /// `SESSION_COUNTS`, and no other is. A counter keyed by a session that the list
+    /// lacked would be grouped with a member's, and doctor would explain a member that
+    /// does not exist.
+    #[test]
+    fn the_counters_keyed_by_a_session_are_the_ones_kept_from_the_members() {
+        let mut keyed_by_a_session = 0;
+        for def in COUNTERS
+            .iter()
+            .filter(|def| def.name.starts_with("cluster."))
+        {
+            let by_session = def.doc.contains("key: cluster session id");
+            assert_eq!(
+                by_session,
+                SESSION_COUNTS.contains(&def.id),
+                "{}: its entry in counters.toml and doctor's SESSION_COUNTS disagree on \
+                 whether its key is a cluster session id",
+                def.name
+            );
+            keyed_by_a_session += usize::from(by_session);
+        }
+        assert_eq!(keyed_by_a_session, SESSION_COUNTS.len());
     }
 }
