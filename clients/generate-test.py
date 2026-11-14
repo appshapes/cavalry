@@ -315,6 +315,23 @@ class Package(unittest.TestCase):
         self.assertTrue(error.__cause__.message.endswith("see docs/reference/c-abi.md#constants"))
         self.assertEqual(abi.calls, [3, cavalry.ABORT])
 
+        # A handler that returns True, as a call-back that says "handled" does: no
+        # action, though True equals 1, the value of ABORT, which ctypes would pass
+        # as that. The entry would be aborted at every poll and nothing raised. A
+        # value that is no int is not passed to the ABI: the entry is aborted once,
+        # and the poll raises with the ABI's code for a value that is no action.
+        for value, shown in ((True, "True"), (False, "False"), (2.0, "2.0"), ("continue", "'continue'")):
+            del abi.calls[:]
+            with self.assertRaises(cavalry.HandlerError) as raised:
+                service.poll(lambda body, entry, service_: value, 16)
+            error = raised.exception
+            self.assertEqual((error.fragments, error.raised, error.cluster), (0, 1, "service"), shown)
+            self.assertIsInstance(error.__cause__, cavalry.CavalryError)
+            self.assertEqual(error.__cause__.code, cavalry.CAVALRY_ERR_CLUSTER_ACTION)
+            self.assertIn(f"the entry handler returned {shown}, which is no action", error.__cause__.message)
+            self.assertEqual(abi.calls, [cavalry.ABORT], shown)
+        self.assertEqual(service.poll(taking, 16), 3)  # and the next poll takes the entries
+
         # An exception that is not an `Exception` aborts the entry too, and is raised as itself.
         del abi.calls[:]
 
@@ -2304,6 +2321,35 @@ class GoPackage(unittest.TestCase):
             self.assertIn(name, gen_go.PER_MESSAGE_GO)
         self.assertEqual(sorted(gen_go.PER_MESSAGE_GO), sorted(lint.RULES["go"]["functions"]))
 
+    def test_a_client_close_the_abi_refuses_keeps_the_client_open(self):
+        """A cluster service's poll holds its client, so the ABI refuses the client's close
+        from inside the service's handler with ErrPolling and frees nothing (spec/c-abi.md,
+        "Calls during a claim or a poll"). Client.Close then returns the *Error and keeps
+        the handle, as the closes of a subscription, a committed log, a cluster session and
+        a cluster service do, so the Go client never forgets a client the ABI keeps open
+        (clients/go/README.md, "What it must never do"). Every other failure still forgets
+        the handle, since the ABI's close frees it whatever it returns."""
+        code = gen_go.write_go(self.header)["cavalry.go"]
+        body = code.split("func (c *Client) Close() error {\n", 1)[1].split("\n}\n", 1)[0]
+        close = body.index("if result := C.cavalry_close(c.handle); result != 0 {\n")
+        read = body.index('err := lastError("cavalry_close")\n')
+        refused = body.index("if err.Code == ErrPolling {\n\t\t\treturn err\n\t\t}\n")
+        forgotten = body.index("\t\tc.handle = nil\n\t\treturn err\n\t}\n")
+        self.assertLess(close, read)
+        self.assertLess(read, refused)
+        self.assertLess(refused, forgotten)
+        self.assertTrue(body.endswith("\tc.handle = nil\n\treturn nil"), body)
+        self.assertEqual(body.count("c.handle = nil"), 2)
+        doc = code.split("func (c *Client) Close() error {\n", 1)[0].rsplit("\n\n", 1)[1]
+        for said in ("Publication, Subscription, Recording, Replay, CommittedLog, ClusterSession and\n// ClusterService",
+                     "Subscription, CommittedLog, ClusterSession or ClusterService keeps its slot",
+                     "AddSubscription, CommittedLog, ConnectCluster and ClusterService return",
+                     "Close then returns the *Error with ErrPolling and keeps the handle"):
+            self.assertIn(said, doc)
+        with open(os.path.join(gen.ROOT, "clients", "go", "README.md"), encoding="utf-8") as f:
+            readme = f.read()
+        self.assertIn("`client.Close()`", readme.split("## Example", 1)[0].split("- Never read a refusal as an answer.", 1)[1])
+
     def test_the_package_tests_the_table_at_its_bound_and_run_sh_runs_them(self):
         """The subscription table is bounded (CLAUDE.md, invariant 3; gate 3: a test at
         capacity), so the module carries a test that fills it and calls the trampoline with
@@ -2571,6 +2617,33 @@ class JvmPackage(unittest.TestCase):
         self.assertIn('findVirtual(Subscription.class, "onFragment"', subscription)
         self.assertIn(".bindTo(this)", subscription)
         self.assertEqual(subscription.count("Abi.cavalry_subscription_poll.invokeExact("), 2)  # the refused nested poll and the poll
+
+    def test_a_jvm_client_close_the_abi_refuses_keeps_the_client_open(self):
+        """A cluster service's poll holds its client, so the ABI refuses the client's close
+        from inside the service's handler with ERR_POLLING and frees nothing (spec/c-abi.md,
+        "Calls during a claim or a poll"). `Client.close()` then throws and keeps the
+        handle, as the closes of a subscription, a committed log, a cluster session and a
+        cluster service do, so the JVM client never forgets a client the ABI keeps open
+        (clients/jvm/README.md, "What it must never do"). Every other failure still
+        forgets the handle, since the ABI's close frees it whatever it returns."""
+        code = gen_jvm.write_jvm(self.header)[self.BASE + "Client.java"]
+        close = code.split("    public synchronized void close() {\n", 1)[1].split("\n    }\n", 1)[0]
+        called = close.index("result = (int) Abi.cavalry_close.invokeExact(handle);")
+        read = close.index('CavalryException error = Abi.lastError("cavalry_close");')
+        refused = close.index("if (error.code() == Abi.ERR_POLLING) {\n                throw error;\n            }\n")
+        forgotten = close.index("            handle = MemorySegment.NULL;\n            throw error;\n        }\n")
+        self.assertLess(called, read)
+        self.assertLess(read, refused)
+        self.assertLess(refused, forgotten)
+        self.assertTrue(close.endswith("        handle = MemorySegment.NULL;"), close)
+        self.assertEqual(close.count("handle = MemorySegment.NULL;"), 2)
+        # The handle is the one the ABI is called with: it is not forgotten before the call.
+        self.assertNotIn("closing", close)
+        doc = code.split("    public synchronized void close() {\n", 1)[0].rsplit("\n\n", 1)[1]
+        self.assertIn("It then throws the {@link CavalryException} and keeps the handle", doc)
+        with open(os.path.join(gen.ROOT, "clients", "jvm", "README.md"), encoding="utf-8") as f:
+            readme = f.read()
+        self.assertIn("`client.close()`", readme.split("- Never read a refusal as an answer.", 1)[1].split("- Never hand the ABI", 1)[0])
 
     def test_a_publications_close_zeroes_the_claim_struct_before_the_abi_frees_its_handle(self):
         """The claim struct's `publication` field names the handle the close frees, and the
@@ -2896,6 +2969,34 @@ class DotnetPackage(unittest.TestCase):
         self.assertNotIn("MarshalAs", abi.split("public struct", 1)[1].split("[LibraryImport", 1)[0])  # the structs are blittable
         self.assertEqual(subscription.count("[UnmanagedCallersOnly(CallConvs = new[] { typeof(CallConvCdecl) })]"), 1)
         self.assertEqual(subscription.count("Abi.cavalry_subscription_poll(handle, &OnFragment, GCHandle.ToIntPtr(self), (nuint) fragmentLimit)"), 2)
+
+    def test_a_dotnet_client_close_the_abi_refuses_keeps_the_client_open(self):
+        """A cluster service's poll holds its client, so the ABI refuses the client's close
+        from inside the service's handler with ERR_POLLING and frees nothing (spec/c-abi.md,
+        "Calls during a claim or a poll"). `Client.Close()` then throws and keeps the
+        handle, as the closes of a subscription, a committed log, a cluster session and a
+        cluster service do, so the .NET client never forgets a client the ABI keeps open
+        (clients/dotnet/README.md, "What it must never do"). Every other failure still
+        forgets the handle, since the ABI's close frees it whatever it returns."""
+        code = gen_dotnet.write_dotnet(self.header)["Client.cs"]
+        close = code.split("    public void Close()\n    {\n", 1)[1].split("\n    }\n", 1)[0]
+        called = close.index("int result = Abi.cavalry_close(handle);")
+        read = close.index('CavalryException error = Abi.LastError("cavalry_close");')
+        refused = close.index("if (error.Code == Abi.ERR_POLLING)\n                {\n                    throw error;\n"
+                              "                }\n")
+        forgotten = close.index("                handle = 0;\n                throw error;\n            }\n")
+        self.assertLess(called, read)
+        self.assertLess(read, refused)
+        self.assertLess(refused, forgotten)
+        self.assertTrue(close.endswith("            handle = 0;\n        }"), close)
+        self.assertEqual(close.count("handle = 0;"), 2)
+        # The handle is the one the ABI is called with: it is not forgotten before the call.
+        self.assertNotIn("closing", close)
+        doc = code.split("    public void Close()\n", 1)[0].rsplit("\n\n", 1)[1]
+        self.assertIn('It then throws the <see cref="CavalryException"/> and keeps the', doc)
+        with open(os.path.join(gen.ROOT, "clients", "dotnet", "README.md"), encoding="utf-8") as f:
+            readme = f.read()
+        self.assertIn("`client.Close()`", readme.split("- Never read a refusal as an answer.", 1)[1].split("- Never edit a generated", 1)[0])
 
     def test_the_publications_close_clears_the_claim_struct(self):
         """A close leaves no claim, so the struct's `publication` must not name the freed

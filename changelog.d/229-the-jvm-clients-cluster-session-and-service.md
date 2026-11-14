@@ -9,6 +9,9 @@
   aborted: the poll ends at it, throws `HandlerException`, and the next poll hands the
   entry over again. A service's `poll` is a call on its client and takes no lock, so
   that client is one thread's from `clusterService()` to the service's `close()`.
+  Every call on that client from inside the service's handler, `client.close()` among
+  them, is refused with `Abi.ERR_POLLING`, and a refused `client.close()` leaves the
+  client open.
   `just conformance` runs the cluster round through the JVM client
   ([ADR 0124](docs/decisions/0124-give-each-client-a-session-object-and-a-service-object-whose-handlers-failure-aborts-its-entry.md);
   [the JVM client](clients/jvm/README.md); work item 229).

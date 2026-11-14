@@ -75,8 +75,13 @@ public sealed class Client : IDisposable
         }
     }
 
-    /// <summary>Closes the client and every handle it made. Idempotent; the handle is forgotten
-    /// whatever the ABI returns, and a call after it hands the ABI a null handle, which it
+    /// <summary>Closes the client and every handle it made. Idempotent. The handle is
+    /// forgotten whatever the ABI returns, but for one close: a close from inside the handler
+    /// of a cluster service whose poll holds this client, which the ABI refuses with
+    /// <see cref="Abi.ERR_POLLING"/> and which frees nothing (spec/c-abi.md, "Calls during a
+    /// claim or a poll"). It then throws the <see cref="CavalryException"/> and keeps the
+    /// handle: the client stays open, and the service's next poll and a close after the poll
+    /// has returned use it. A call after a close hands the ABI a null handle, which it
     /// refuses with <see cref="Abi.ERR_NULL"/>.</summary>
     public void Close()
     {
@@ -86,9 +91,18 @@ public sealed class Client : IDisposable
             {
                 return;
             }
-            nint closing = handle;
+            int result = Abi.cavalry_close(handle);
+            if (result != 0)
+            {
+                CavalryException error = Abi.LastError("cavalry_close");
+                if (error.Code == Abi.ERR_POLLING)
+                {
+                    throw error;
+                }
+                handle = 0;
+                throw error;
+            }
             handle = 0;
-            Abi.Check("cavalry_close", Abi.cavalry_close(closing));
         }
     }
 

@@ -23,8 +23,9 @@ The client's own edges: what `offer` refuses; the calls the ABI refuses from ins
 service's handler, on the service and on the client its poll holds, and from inside the
 session's, each made after the thread's error was set to another code, so that a refusal
 that answers what an open handle answers is told from an answer; a service's handler that
-raises after it replied, and one that returns what is no action, whose entry is aborted,
-handed over again by the next poll and answered once; a reply too long for a frame and a
+raises after it replied, and one that returns what is no action, True and then 3, whose
+entry is aborted each time, handed over again by the next poll and answered once; a reply
+too long for a frame and a
 reply to a session that is not open; a handler that returns BREAK with two entries
 waiting; a session's handler that raises, whose reply is not handed over again; the
 session's close as an entry every service is handed; a session and a service closed
@@ -101,7 +102,7 @@ class Served:
         self.codes = {}        # a message's payload -> what each reply to it answered
         self.refusals = None   # what the calls from inside the handler answered
         self.raise_on = None   # a payload whose first handling replies and then raises
-        self.no_action_on = None   # a payload whose first handling returns what is no action
+        self.no_action_on = None   # a payload whose first two handlings return what is no action
         self.edges_on = None   # a payload before whose reply a reply too long and one to no session are made
         self.edges = None
         self.break_on = ()     # payloads whose entries are taken with BREAK
@@ -122,8 +123,11 @@ class Served:
         payload = bytes(body)
         handed = self.handed.setdefault(payload, [])
         handed.append(entry.position)
-        if self.no_action_on == payload and len(handed) == 1:
-            return 3   # Aeron's COMMIT, which Cavalry has no action for
+        if self.no_action_on == payload and len(handed) <= 2:
+            # First True, as a call-back that says "handled" returns, which equals 1,
+            # the value of ABORT, and is no action; then 3, Aeron's COMMIT, which
+            # Cavalry has no action for.
+            return True if len(handed) == 1 else 3
         if self.edges_on == payload and self.edges is None:
             too_long = service.reply(entry.session_id, bytes(1345))
             self.edges = [(too_long, self.abi.cavalry_errcode()), (service.reply(entry.session_id + 1000, b"x"), None)]
@@ -376,21 +380,24 @@ def main():
              f"{leader.codes[b'raise']}, and the session read {answered.to(b'raise')}")
 
     # 7. A handler that returns what is no action, as a raise: aborted, raised by `poll`
-    # with the ABI's code, and handed over again. On the second handling, before the
-    # reply: a reply too long for a frame, and a reply to a session that is not open.
+    # with the ABI's code, and handed over again. Twice: True first, which equals ABORT's
+    # 1 and would abort the entry at every poll with nothing raised if the client passed
+    # it on, and then 3. On the third handling, before the reply: a reply too long for a
+    # frame, and a reply to a session that is not open.
     leader.no_action_on = leader.edges_on = b"no action"
     offer(session, b"no action", served, answered)
-    raised = handler_error(leader, served, answered, "a handler that returns what is no action")
-    cause = raised.__cause__
-    if raised.cluster != "service" or not isinstance(cause, cavalry.CavalryError) \
-            or cause.code != _abi.CAVALRY_ERR_CLUSTER_ACTION or "returned 3" not in cause.message:
-        fail(f"a handler that returned 3 raised {raised!r} from {cause!r}")
+    for returned in ("True", "3"):
+        raised = handler_error(leader, served, answered, f"a handler that returns {returned}, which is no action")
+        cause = raised.__cause__
+        if raised.cluster != "service" or not isinstance(cause, cavalry.CavalryError) \
+                or cause.code != _abi.CAVALRY_ERR_CLUSTER_ACTION or f"returned {returned}," not in cause.message:
+            fail(f"a handler that returned {returned} raised {raised!r} from {cause!r}")
     wait("the entry with no action is handed over again and answered",
          lambda: answered.to(b"no action") and all(b"no action" in s.messages for s in served), served, answered)
     settle(served, answered)
     handed = leader.handed[b"no action"]
-    if len(handed) != 2 or handed[0] != handed[1] or len(answered.to(b"no action")) != 1:
-        fail(f"the entry whose handler returned no action was handed over at {handed} and the session read "
+    if len(handed) != 3 or len(set(handed)) != 1 or len(answered.to(b"no action")) != 1:
+        fail(f"the entry whose handler returned no action twice was handed over at {handed} and the session read "
              f"{answered.to(b'no action')}")
     expected = [(_abi.CAVALRY_CLUSTER_REPLY_TOO_LONG, _abi.CAVALRY_ERR_TOO_LONG),
                 (_abi.CAVALRY_CLUSTER_REPLY_NO_SESSION, None)]

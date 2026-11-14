@@ -663,20 +663,33 @@ public final class Client implements AutoCloseable {
         }
     }
 
-    /** Closes the client and every handle it made. Idempotent; the handle is forgotten whatever
-     * the ABI returns. */
+    /** Closes the client and every handle it made. Idempotent. The handle is forgotten
+     * whatever the ABI returns, but for one close: a close from inside the handler of a
+     * cluster service whose poll holds this client, which the ABI refuses with
+     * {@link Abi#ERR_POLLING} and which frees nothing (spec/c-abi.md, "Calls during a claim
+     * or a poll"). It then throws the {@link CavalryException} and keeps the handle: the
+     * client stays open, and the service's next poll and a close after the poll has
+     * returned use it. */
     @Override
     public synchronized void close() {
         if (handle.address() == 0) {
             return;
         }
-        MemorySegment closing = handle;
-        handle = MemorySegment.NULL;
+        int result;
         try {
-            Abi.check("cavalry_close", (int) Abi.cavalry_close.invokeExact(closing));
+            result = (int) Abi.cavalry_close.invokeExact(handle);
         } catch (Throwable t) {
             throw Abi.failed("cavalry_close", t);
         }
+        if (result != 0) {
+            CavalryException error = Abi.lastError("cavalry_close");
+            if (error.code() == Abi.ERR_POLLING) {
+                throw error;
+            }
+            handle = MemorySegment.NULL;
+            throw error;
+        }
+        handle = MemorySegment.NULL;
     }
 
     /** One add through the client's handle, under the lock of the public method that calls it. */

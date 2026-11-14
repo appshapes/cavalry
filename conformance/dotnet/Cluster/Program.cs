@@ -18,7 +18,8 @@
 // time; each service holds one session, and its position is past the entry.
 //
 // The client's own edges: what Offer refuses; the calls the ABI refuses from inside a
-// service's handler, on the service and on the client its poll holds, and from inside the
+// service's handler, on the service and on the client its poll holds, the client's own
+// close among them, which must leave the client open, and from inside the
 // session's, each made after the thread's error was set to another code, so that a refusal
 // that answers what an open handle answers is told from an answer; the one object of values
 // a handler is handed, and the empty body of an entry that is no session's message; a
@@ -245,8 +246,17 @@ public static class ClusterRound
                     Thrown("GetFault", () => service.GetFault()),
                     Thrown("Close", () => service.Close()),
                     Asked("Client.IsClosed", () => client.IsClosed() ? 1 : 0),
+                    Asked("Client.Closed", () => client.Closed()),
                     Thrown("Client.ClusterService", () => client.ClusterService()),
                     Thrown("Client.AddSubscription", () => client.AddSubscription("cavalry:ipc", 1229)),
+                    // The client's own close, last: the ABI refuses it and frees nothing
+                    // (spec/c-abi.md, "Calls during a claim or a poll"), so the client must
+                    // stay open and still reach the ABI after it: IsClosed is refused again,
+                    // false with ERR_POLLING. Were the handle forgotten, IsClosed would answer
+                    // true with no call, the thread's error would stay the other code, and the
+                    // poll after this one would hand the ABI a null client.
+                    Thrown("Client.Close", () => client.Close()),
+                    Asked("Client.IsClosed after its Close", () => client.IsClosed() ? 1 : 0),
                 };
             }
             At(Codes, payload).Add(code);
@@ -528,8 +538,9 @@ public static class ClusterRound
             {
                 new("Poll", -1, polling), new("Position", -1, polling), new("Answers", 0, polling),
                 new("Sessions", -1, polling), new("GetFault", -1, polling), new("Close", -1, polling),
-                new("Client.IsClosed", 0, polling), new("Client.ClusterService", -1, polling),
-                new("Client.AddSubscription", -1, polling),
+                new("Client.IsClosed", 0, polling), new("Client.Closed", -1, polling),
+                new("Client.ClusterService", -1, polling), new("Client.AddSubscription", -1, polling),
+                new("Client.Close", -1, polling), new("Client.IsClosed after its Close", 0, polling),
             };
             if (s.Refusals == null || !s.Refusals.SequenceEqual(expected))
             {
@@ -590,8 +601,9 @@ public static class ClusterRound
                 + $"{Show(opens)}; the leader is member {led.Member} and the session {session.SessionId}");
         }
         Say($"session {session.SessionId}'s message, the entry at position {first.Position} of term {first.Term}, taken by "
-            + $"three services and answered once, by the service beside member {led.Member}; nine calls from inside a "
-            + "service's handler and eight from inside the session's refused with ERR_POLLING");
+            + $"three services and answered once, by the service beside member {led.Member}; twelve calls from inside "
+            + "a service's handler, the client's close among them, and eight from inside the session's refused with "
+            + "ERR_POLLING");
 
         // 6. A handler that replies and then throws: its entry is aborted, so the poll ends at
         // it with the entry not taken, Poll throws, and the next poll hands the entry over
