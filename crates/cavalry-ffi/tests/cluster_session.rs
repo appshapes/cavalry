@@ -832,20 +832,26 @@ unsafe extern "C" fn ask_for_a_reply(
     _length: usize,
     header: *const cavalry_header_t,
 ) {
-    // SAFETY: the test passes a `Vec<(i32, i32, i64)>`; the header is valid for the
-    // call.
+    // SAFETY: the test passes a `Vec<(i32, i32, i64, String)>`; the header is valid for
+    // the call.
     unsafe {
-        let answers = &mut *clientd.cast::<Vec<(i32, i32, i64)>>();
+        let answers = &mut *clientd.cast::<Vec<(i32, i32, i64, String)>>();
         let mut values = std::mem::zeroed::<cavalry_cluster_reply_values_t>();
         values.leadership_term_id = 77;
         let returned = cavalry_cluster_reply_values(header, &mut values);
-        answers.push((returned, cavalry_errcode(), values.leadership_term_id));
+        answers.push((
+            returned,
+            cavalry_errcode(),
+            values.leadership_term_id,
+            errmsg(),
+        ));
     }
 }
 
 /// A subscription's header carries a frame and no reply's values:
 /// `cavalry_cluster_reply_values` refuses it with the code, fills nothing, and names
-/// the page's section. So does a null header or a null struct, as any null is.
+/// the reader that fits it and the page's section. A null header or a null struct is
+/// refused too, as any null is.
 #[test]
 fn a_subscriptions_header_carries_no_replys_values() {
     let dir = TestDir::new("header");
@@ -869,7 +875,7 @@ fn a_subscriptions_header_carries_no_replys_values() {
             cavalry_add_publication(&mut publication, client, channel.as_ptr(), 1001),
             0
         );
-        let mut answers: Vec<(i32, i32, i64)> = Vec::new();
+        let mut answers: Vec<(i32, i32, i64, String)> = Vec::new();
         assert!(wait_until(Duration::from_secs(5), || {
             let _ = cavalry_publication_offer(publication, b"x".as_ptr(), 1);
             assert!(
@@ -882,7 +888,19 @@ fn a_subscriptions_header_carries_no_replys_values() {
             );
             !answers.is_empty()
         }));
-        assert_eq!(answers[0], (-1, CAVALRY_ERR_WRONG_HEADER, 77));
+        let (returned, code, term, message) = &answers[0];
+        assert_eq!(
+            (*returned, *code, *term),
+            (-1, CAVALRY_ERR_WRONG_HEADER, 77)
+        );
+        // The refusal names the reader that fits a subscription's header.
+        assert!(
+            message.starts_with("cavalry_cluster_reply_values refused (wrong-header)")
+                && message.contains("came from cavalry_subscription_poll")
+                && message.contains("read it with cavalry_header_values;")
+                && message.ends_with("; see docs/reference/c-abi.md#what-a-header-carries"),
+            "{message}"
+        );
 
         let mut values = std::mem::zeroed::<cavalry_cluster_reply_values_t>();
         assert_eq!(cavalry_cluster_reply_values(ptr::null(), &mut values), -1);

@@ -93,8 +93,8 @@ struct Handed {
 
 /// One call made from inside the handler: its name, what it returned, and the
 /// thread's error code after it. Before each call the thread's error is set to
-/// `CAVALRY_ERR_NULL`, 131, by a call that fails so, so a 131 here says the call set
-/// no error.
+/// `CAVALRY_ERR_ABI_VERSION`, 135, by a call that fails so, a code no call of the
+/// probe sets, so a 135 here says the call set no error.
 type Probed = (&'static str, i64, i32);
 
 /// The other handles a probe calls from inside the handler, all made with the
@@ -129,13 +129,19 @@ struct Served {
     probed: Vec<Probed>,
     /// The message of the thread's error after the reply that was too long.
     too_long: String,
+    /// The message of the thread's error after `cavalry_cluster_reply_values` refused
+    /// the service's header.
+    wrong_header: String,
 }
 
-/// Sets the thread's error to `CAVALRY_ERR_NULL`, runs `call`, and gives what it
-/// returned with the thread's error code after it.
+/// Sets the thread's error to `CAVALRY_ERR_ABI_VERSION`, runs `call`, and gives what
+/// it returned with the thread's error code after it.
 fn probe(name: &'static str, call: impl FnOnce() -> i64) -> Probed {
-    // SAFETY: a null context is refused with `CAVALRY_ERR_NULL`, and nothing else.
-    assert_eq!(unsafe { cavalry_context_close(ptr::null_mut()) }, -1);
+    let mut context = ptr::null_mut();
+    // SAFETY: a version that is not the library's is refused with
+    // `CAVALRY_ERR_ABI_VERSION` before anything is made, and nothing else is done.
+    assert_eq!(unsafe { cavalry_context_init_v(&mut context, -1) }, -1);
+    assert!(context.is_null(), "a refused init makes no context");
     let returned = call();
     (name, returned, cavalry_errcode())
 }
@@ -172,6 +178,7 @@ unsafe fn probe_from_inside(served: &mut Served, header: *const cavalry_header_t
             let mut values = std::mem::zeroed::<cavalry_cluster_reply_values_t>();
             i64::from(cavalry_cluster_reply_values(header, &mut values))
         }));
+        served.wrong_header = errmsg();
         found.push(probe("cavalry_committed_log_entry_position", || {
             i64::from(cavalry_committed_log_entry_position(header) == position)
         }));
@@ -596,6 +603,7 @@ impl Cluster {
                         others: None,
                         probed: Vec::new(),
                         too_long: String::new(),
+                        wrong_header: String::new(),
                     }),
                     polled: true,
                 }
@@ -803,10 +811,19 @@ unsafe extern "C" fn on_reply(
         let replies = &mut *clientd.cast::<Vec<(Vec<u8>, i64, i64)>>();
         let mut values = std::mem::zeroed::<cavalry_cluster_reply_values_t>();
         assert_eq!(cavalry_cluster_reply_values(header, &mut values), 0);
-        // A reply's header carries no entry's values.
+        // A reply's header carries no entry's values, and the refusal names the
+        // reader that fits it.
         let mut entry = std::mem::zeroed::<cavalry_cluster_entry_values_t>();
         assert_eq!(cavalry_cluster_entry_values(header, &mut entry), -1);
         assert_eq!(cavalry_errcode(), CAVALRY_ERR_WRONG_HEADER);
+        let message = errmsg();
+        assert!(
+            message.starts_with("cavalry_cluster_entry_values refused (wrong-header)")
+                && message.contains("came from cavalry_cluster_session_poll")
+                && message.contains("read it with cavalry_cluster_reply_values;")
+                && message.ends_with("; see docs/reference/c-abi.md#what-a-header-carries"),
+            "{message}"
+        );
         replies.push((
             std::slice::from_raw_parts(buffer, length).to_vec(),
             values.leadership_term_id,
@@ -995,7 +1012,7 @@ fn a_service_takes_each_entry_answers_its_session_and_holds_its_client_while_it_
         session.replies.len() > before + 1
     });
     let polling = CAVALRY_ERR_POLLING;
-    let untouched = CAVALRY_ERR_NULL;
+    let untouched = CAVALRY_ERR_ABI_VERSION;
     let expected: Vec<Probed> = vec![
         ("cavalry_header_values", -1, CAVALRY_ERR_WRONG_HEADER),
         ("cavalry_cluster_reply_values", -1, CAVALRY_ERR_WRONG_HEADER),
@@ -1065,7 +1082,11 @@ fn a_service_takes_each_entry_answers_its_session_and_holds_its_client_while_it_
             i64::from(CAVALRY_CLUSTER_REPLY_NO_SESSION),
             untouched,
         ),
-        ("cavalry_cluster_service_reply, null buffer", -1, untouched),
+        (
+            "cavalry_cluster_service_reply, null buffer",
+            -1,
+            CAVALRY_ERR_NULL,
+        ),
         (
             "cavalry_cluster_service_action, 3",
             -1,
@@ -1084,6 +1105,17 @@ fn a_service_takes_each_entry_answers_its_session_and_holds_its_client_while_it_
         assert_eq!(found, expected);
     }
     assert_eq!(probed.len(), expected.len());
+    // The refusal of the reply's reader sends the handler to the reader of its own
+    // header, and not to `cavalry_header_values`, which refuses it too.
+    let wrong_header = &cluster.members[0].served.wrong_header;
+    assert!(
+        wrong_header.starts_with("cavalry_cluster_reply_values refused (wrong-header)")
+            && wrong_header.contains("came from cavalry_cluster_service_poll")
+            && wrong_header.contains("read it with cavalry_cluster_entry_values;")
+            && !wrong_header.contains("cavalry_header_values")
+            && wrong_header.ends_with("; see docs/reference/c-abi.md#what-a-header-carries"),
+        "{wrong_header}"
+    );
     let too_long = &cluster.members[0].served.too_long;
     assert!(
         too_long.contains("1345 bytes")
@@ -1246,6 +1278,7 @@ fn a_service_refuses_what_the_page_says_and_outlives_its_client() {
             others: None,
             probed: Vec::new(),
             too_long: String::new(),
+            wrong_header: String::new(),
         };
         let clientd: *mut Served = &mut served;
         for _ in 0..3 {
@@ -1414,6 +1447,8 @@ fn a_subscriptions_header_carries_no_entrys_values() {
     );
     assert!(
         message.starts_with("cavalry_cluster_entry_values refused (wrong-header)")
+            && message.contains("came from cavalry_subscription_poll")
+            && message.contains("read it with cavalry_header_values;")
             && message.ends_with("; see docs/reference/c-abi.md#what-a-header-carries"),
         "{message}"
     );

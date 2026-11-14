@@ -375,17 +375,47 @@ pub unsafe extern "C" fn cavalry_cluster_reply_values(
         return -1;
     }
     // SAFETY: the handler's header, valid for the call.
-    let Carries::Reply(reply) = (unsafe { (*header).carries }) else {
-        error::set(
-            CAVALRY_ERR_WRONG_HEADER,
-            format_args!(
-                "cavalry_cluster_reply_values refused (wrong-header): the header came from \
-                 another poll than cavalry_cluster_session_poll and carries no reply's \
-                 values; read a frame's fields with cavalry_header_values; see \
-                 {DOC}#what-a-header-carries"
-            ),
-        );
-        return -1;
+    let reply = match unsafe { (*header).carries } {
+        Carries::Reply(reply) => reply,
+        // Each refusal names the poll the header came from and the reader that fits
+        // it, so that the next call a message sends the caller to is not refused too.
+        Carries::Frame(_) => {
+            error::set(
+                CAVALRY_ERR_WRONG_HEADER,
+                format_args!(
+                    "cavalry_cluster_reply_values refused (wrong-header): the header came \
+                     from cavalry_subscription_poll, which hands over a frame's fields and no \
+                     reply's values; read it with cavalry_header_values; see \
+                     {DOC}#what-a-header-carries"
+                ),
+            );
+            return -1;
+        }
+        Carries::Entry(..) => {
+            error::set(
+                CAVALRY_ERR_WRONG_HEADER,
+                format_args!(
+                    "cavalry_cluster_reply_values refused (wrong-header): the header came \
+                     from cavalry_committed_log_poll, which hands over a frame's fields and \
+                     no reply's values; read it with cavalry_header_values, and the entry's \
+                     position with cavalry_committed_log_entry_position; see \
+                     {DOC}#what-a-header-carries"
+                ),
+            );
+            return -1;
+        }
+        Carries::Committed(_) => {
+            error::set(
+                CAVALRY_ERR_WRONG_HEADER,
+                format_args!(
+                    "cavalry_cluster_reply_values refused (wrong-header): the header came \
+                     from cavalry_cluster_service_poll, which hands over an entry's values and \
+                     no reply's; read it with cavalry_cluster_entry_values; see \
+                     {DOC}#what-a-header-carries"
+                ),
+            );
+            return -1;
+        }
     };
     // SAFETY: a writable struct, by the caller's convention.
     unsafe {
