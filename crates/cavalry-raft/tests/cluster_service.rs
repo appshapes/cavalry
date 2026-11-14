@@ -23,8 +23,8 @@ use cavalry_driver::Driver;
 use cavalry_raft::{ConsensusModule, ElectionState, Role};
 use cavalry_shm::counters::CountersReader;
 use cavalry_shm::counters::generated::{
-    CLUSTER_APPEND_POSITION, CLUSTER_LEADERSHIP_TERM_ID, CLUSTER_LOG_RECORDING_ID,
-    CLUSTER_REPLIES_DROPPED,
+    CLUSTER_APPEND_POSITION, CLUSTER_LEADER_MEMBER_ID, CLUSTER_LEADERSHIP_TERM_ID,
+    CLUSTER_LOG_RECORDING_ID, CLUSTER_REPLIES_DROPPED,
 };
 
 struct TestDir(PathBuf);
@@ -446,17 +446,20 @@ fn a_message_is_answered_by_the_service_beside_its_terms_leader_alone() {
     let (first_leader, first_term) = cluster.led.expect("a leader");
 
     // The fourth rule of order a member keeps for its service (`spec/cluster.md`,
-    // "The service"): its term and its append position are added before its
-    // recording's id, which a service finds the member by. A member adds its
-    // counters one after another to a driver that has freed none, so a counter added
-    // earlier has the lower record.
+    // "The service"): its term, the id of the member it leads as or follows and its
+    // append position are added before its recording's id, which a service finds
+    // the member by, and the term before that id. A member adds its counters one
+    // after another to a driver that has freed none, so a counter added earlier has
+    // the lower record.
     for id in 0..3 {
         let recording = counter(dir.path(), id, CLUSTER_LOG_RECORDING_ID.0).0;
         let term = counter(dir.path(), id, CLUSTER_LEADERSHIP_TERM_ID.0).0;
+        let leader = counter(dir.path(), id, CLUSTER_LEADER_MEMBER_ID.0).0;
         let append = counter(dir.path(), id, CLUSTER_APPEND_POSITION.0).0;
         assert!(
-            term < recording && append < recording,
-            "member {id}: term {term}, append position {append}, recording id {recording}"
+            term < leader && leader < recording && append < recording,
+            "member {id}: term {term}, leader {leader}, append position {append}, \
+             recording id {recording}"
         );
     }
 
