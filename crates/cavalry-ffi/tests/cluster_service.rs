@@ -1300,13 +1300,25 @@ fn a_service_refuses_what_the_page_says_and_outlives_its_client() {
             (0, 0, CAVALRY_NULL_POSITION)
         );
 
-        // The handler's two calls, from outside a handler: no entry to answer.
+        // The handler's two calls, from outside a handler: no entry to answer. The
+        // page's order: a null comes first, then the call from outside the handler,
+        // whatever its other arguments, then an action that is none.
         assert_eq!(
             cavalry_cluster_service_reply(service, 1, b"x".as_ptr(), 1),
             -1
         );
         refused(CAVALRY_ERR_CLUSTER_NO_ENTRY, "a reply outside the handler");
         assert!(errmsg().contains("cavalry_cluster_service_reply refused (cluster-no-entry)"));
+        let long = [7u8; 1_345];
+        assert_eq!(
+            cavalry_cluster_service_reply(service, 1, long.as_ptr(), long.len()),
+            -1,
+            "a reply too long for a frame is no reply code from outside the handler"
+        );
+        refused(
+            CAVALRY_ERR_CLUSTER_NO_ENTRY,
+            "a long reply outside the handler",
+        );
         assert_eq!(
             cavalry_cluster_service_action(service, CAVALRY_ACTION_ABORT),
             -1
