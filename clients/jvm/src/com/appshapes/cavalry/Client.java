@@ -239,4 +239,60 @@ public final class Client implements AutoCloseable {
             throw Abi.failed("cavalry_committed_log_close", t);
         }
     }
+
+    /** Opens a session with a cluster: {@code members} is the members string the cluster's
+     * members were started with, and {@code responseChannel} a channel of this host for the
+     * cluster's answers, {@code cavalry:udp?endpoint=<host>:<port>}. The call returns once
+     * the leader has opened the session, and waits for that for 20 s at most beyond its
+     * adds, holding the client's lock as an add does. Its {@link CavalryException} has
+     * {@link Abi#ERR_CLUSTER_MEMBERS}, {@link Abi#ERR_CLUSTER_REFUSED},
+     * {@link Abi#ERR_CLUSTER_VERSION} or {@link Abi#ERR_CLUSTER_CONNECT_TIMEOUT}, a fault's
+     * code, or the client's or the driver's (spec/cluster.md, "Sessions"; spec/c-abi.md,
+     * "Functions", cluster session; ADR 0122). */
+    public synchronized ClusterSession connectCluster(String members, String responseChannel) {
+        try (Arena arena = Arena.ofConfined()) {
+            MemorySegment out = arena.allocate(ADDRESS);
+            Abi.check("cavalry_connect_cluster", (int) Abi.cavalry_connect_cluster.invokeExact(out, handle,
+                arena.allocateFrom(members), arena.allocateFrom(responseChannel)));
+            return new ClusterSession(out.get(ADDRESS, 0));
+        } catch (Throwable t) {
+            throw Abi.failed("cavalry_connect_cluster", t);
+        }
+    }
+
+    /** Makes a cluster's service beside the member on this client's driver. It sends
+     * nothing: the service's first poll opens the member's log. The service's poll and its
+     * close are calls on this client. The poll is on every entry's path and takes no lock,
+     * so from here until the service's close this client is used by the thread that polls
+     * the service and by no other: give the program's other threads a {@code Client} of
+     * their own (spec/cluster.md, "The service"; spec/c-abi.md, "Functions", cluster
+     * service, and "Threads"; ADR 0123; ADR 0124). */
+    public synchronized ClusterService clusterService() {
+        try (Arena arena = Arena.ofConfined()) {
+            MemorySegment out = arena.allocate(ADDRESS);
+            Abi.check("cavalry_cluster_service", (int) Abi.cavalry_cluster_service.invokeExact(out, handle));
+            return new ClusterService(out.get(ADDRESS, 0), this);
+        } catch (Throwable t) {
+            throw Abi.failed("cavalry_cluster_service", t);
+        }
+    }
+
+    /** The client's handle, for a cluster service's poll, which is a call on the client as
+     * well as on the service and takes no lock: null after this client's own close, which
+     * the ABI's poll then refuses. */
+    MemorySegment handle() {
+        return handle;
+    }
+
+    /** A cluster service's close, under the client's lock, as a committed log's: the ABI's
+     * result, with the thread's error for the caller to read. After this client's own close
+     * the handle is null, and the ABI frees the service and leaves what it held to the
+     * driver. */
+    synchronized int closeClusterService(MemorySegment service) {
+        try {
+            return (int) Abi.cavalry_cluster_service_close.invokeExact(service, handle);
+        } catch (Throwable t) {
+            throw Abi.failed("cavalry_cluster_service_close", t);
+        }
+    }
 }

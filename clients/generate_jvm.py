@@ -12,11 +12,15 @@ constant per field offset, a downcall `MethodHandle` per function with its
 first reads `cavalry_abi_version` and refuses a library of another version, and the
 helpers the client's own code shares, `check`, `lastError`, `failed`, `string` and
 `findLibrary`. The other files are the client's own code: `CavalryException`,
-`HandlerException`, `FragmentHandler`, `Client`, `Publication`, `Subscription`, `Header`,
+`HandlerException`, `FragmentHandler`, `EntryHandler`, `ReplyHandler`, `ServiceHandler`,
+`Client`, `Publication`, `Subscription`, `CommittedLog`, `ClusterSession`,
+`ClusterReplyValues`, `ClusterService`, `ClusterEntryValues`, `Header`,
 `Image`, `Recording` and `Replay`, one public class per file as Java asks. The fragment
 handler is reached through an upcall stub each subscription makes once from a method
-handle bound to itself, so the ABI's `clientd` goes unused. Python 3.9 standard library
-only.
+handle bound to itself, so the ABI's `clientd` goes unused; a committed log, a cluster
+session and a cluster service each make theirs in the same way, and a cluster service's
+upcall passes the ABI the action its handler returned (ADR 0124). Python 3.9 standard
+library only.
 """
 
 from __future__ import annotations
@@ -36,12 +40,20 @@ C_LIMITS = {"INT64_MAX": ("long", "Long.MAX_VALUE"), "INT64_MIN": ("long", "Long
             "UINT8_MAX": ("int", "255"), "UINT16_MAX": ("int", "65535")}
 # The functions bound with Linker.Option.critical, which lets a heap segment, a byte[]'s,
 # cross the boundary while the call pins it: the ABI copies the bytes and returns at once,
-# calls nothing back and blocks on nothing.
-CRITICAL = ("cavalry_publication_offer",)
+# calls nothing back and blocks on nothing. A cluster session's offer and a cluster
+# service's reply are a publication's offer underneath, and take a message the same way.
+CRITICAL = ("cavalry_publication_offer", "cavalry_cluster_session_offer", "cavalry_cluster_service_reply")
 # The per-message methods of the generated Java, which clients/lint.py reads.
 PER_MESSAGE_JVM = ("Publication.tryClaim", "Publication.setReservedValue", "Publication.commit", "Publication.abort",
                    "Publication.offer", "Subscription.poll", "Subscription.onFragment", "CommittedLog.poll",
-                   "CommittedLog.onEntry", "Header.frameLength",
+                   "CommittedLog.onEntry",
+                   # A cluster session and a cluster service (ADR 0124).
+                   "ClusterSession.offer", "ClusterSession.poll", "ClusterSession.onReply", "ClusterService.poll",
+                   "ClusterService.reply", "ClusterService.onClusterEntry", "ClusterReplyValues.leadershipTermId",
+                   "ClusterReplyValues.timestamp", "ClusterEntryValues.position",
+                   "ClusterEntryValues.leadershipTermId", "ClusterEntryValues.timestamp",
+                   "ClusterEntryValues.sessionId", "ClusterEntryValues.type", "ClusterEntryValues.leaderMemberId",
+                   "ClusterEntryValues.timedOut", "Header.frameLength",
                    "Header.version", "Header.flags", "Header.type", "Header.termOffset", "Header.sessionId",
                    "Header.streamId", "Header.termId", "Header.reservedValue")
 
@@ -160,10 +172,16 @@ def write_jvm(header) -> dict[str, str]:
         base + "HandlerException.java": HANDLER_EXCEPTION,
         base + "FragmentHandler.java": FRAGMENT_HANDLER,
         base + "EntryHandler.java": ENTRY_HANDLER,
+        base + "ReplyHandler.java": REPLY_HANDLER,
+        base + "ServiceHandler.java": SERVICE_HANDLER,
         base + "Client.java": CLIENT,
         base + "Publication.java": PUBLICATION,
         base + "Subscription.java": SUBSCRIPTION,
         base + "CommittedLog.java": COMMITTED_LOG,
+        base + "ClusterSession.java": CLUSTER_SESSION,
+        base + "ClusterReplyValues.java": CLUSTER_REPLY_VALUES,
+        base + "ClusterService.java": CLUSTER_SERVICE,
+        base + "ClusterEntryValues.java": CLUSTER_ENTRY_VALUES,
         base + "Header.java": HEADER,
         base + "Image.java": IMAGE,
         base + "Recording.java": RECORDING,
@@ -394,42 +412,81 @@ public final class CavalryException extends RuntimeException {
 HANDLER_EXCEPTION = HEADING + r'''
 /**
  * The handler threw during a poll, a subscription's fragment handler or, when
- * {@link #committedLog()} is true, a committed log's entry handler: {@link #fragments()} is
- * the count the poll returned once the ABI was done, of fragments or of entries, or -1 when
+ * {@link #committedLog()} is true, a committed log's entry handler, or, when
+ * {@link #cluster()} is "session", a cluster session's reply handler: {@link #fragments()} is
+ * the count the poll returned once the ABI was done, of fragments, of entries or of replies,
+ * or -1 when
  * the poll also stopped on a fault, which the {@code fault()} of the object that was polled
  * reads until its next poll; {@link #raised()} how many handler calls threw, and
  * {@link #getCause()} the first throwable, kept as thrown.
+ *
+ * <p>A cluster service's entry handler, {@link #cluster()} "service", is the one whose
+ * failure stops its poll. The entry whose handler threw, or returned what is no action, was
+ * aborted: it is not taken, the poll ended at it, and the next poll hands it over again.
+ * {@link #fragments()} is then the count of entries the poll took before that entry,
+ * {@link #raised()} is 1, and {@link #getCause()} is what the handler threw, or a
+ * {@link CavalryException} with {@link Abi#ERR_CLUSTER_ACTION} and the ABI's message for
+ * the value the handler returned.
  */
 public final class HandlerException extends RuntimeException {
     private static final long serialVersionUID = 1L;
     private final int fragments;
     private final int raised;
     private final boolean committedLog;
+    private final String cluster;
 
     public HandlerException(int fragments, int raised, Throwable cause) {
-        this(fragments, raised, cause, false);
+        this(fragments, raised, cause, false, null);
     }
 
     public HandlerException(int fragments, int raised, Throwable cause, boolean committedLog) {
-        super(describe(fragments, raised, cause, committedLog), cause);
+        this(fragments, raised, cause, committedLog, null);
+    }
+
+    /** A cluster session's poll, {@code cluster} "session", or a cluster service's,
+     * "service". */
+    public HandlerException(int fragments, int raised, Throwable cause, String cluster) {
+        this(fragments, raised, cause, false, cluster);
+    }
+
+    private HandlerException(int fragments, int raised, Throwable cause, boolean committedLog, String cluster) {
+        super(describe(fragments, raised, cause, committedLog, cluster), cause);
         this.fragments = fragments;
         this.raised = raised;
         this.committedLog = committedLog;
+        this.cluster = cluster;
     }
 
-    /** The message: what the handler threw on, the fragments of a subscription's poll or the
-     * entries of a committed log's, and what to do. The fault of a committed log's own image
+    /** The message: what the handler threw on, the fragments of a subscription's poll, the
+     * entries of a committed log's or the replies of a cluster session's, and what to do. The
+     * fault of a committed log's own image
      * is reported by one poll (clients/jvm/README.md, "The committed log"), so its message
-     * names the log's own {@code fault()}. */
-    private static String describe(int fragments, int raised, Throwable cause, boolean committedLog) {
-        String one = committedLog ? "entry" : "fragment";
-        String many = committedLog ? "entries" : "fragments";
+     * names the log's own {@code fault()}. A cluster service's says that its entry was
+     * aborted and comes again (clients/jvm/README.md, "The cluster service"). */
+    private static String describe(int fragments, int raised, Throwable cause, boolean committedLog, String cluster) {
+        if ("service".equals(cluster)) {
+            String took = fragments < 0
+                ? "in a poll that also stopped on a fault, which this ClusterService's fault() reads until its next poll"
+                : "after the " + fragments + " " + (fragments == 1 ? "entry" : "entries") + " this poll took";
+            return "the entry handler threw, or returned what is no action, " + took + ". Its entry was aborted: it is"
+                + " not taken, the poll ended at it, and the next poll hands it over again. Fix the handler: what it"
+                + " did, " + cause + ", is this exception's cause; every poll hands the entry over, and throws this,"
+                + " until the handler takes it. See clients/jvm/README.md#the-exception";
+        }
+        boolean session = "session".equals(cluster);
+        String one = session ? "reply" : committedLog ? "entry" : "fragment";
+        String many = session ? "replies" : committedLog ? "entries" : "fragments";
         String delivered;
         if (fragments < 0) {
-            delivered = committedLog
+            delivered = session
+                ? "the replies this poll handed over before it stopped on a fault, which this ClusterSession's fault()"
+                    + " reads until its next poll"
+                : committedLog
                 ? "the entries this poll delivered before it stopped on a fault, which this CommittedLog's fault() reads"
                     + " until its next poll, and its faulted() from then on when the fault is the log's own image's"
                 : "the fragments this poll delivered before it stopped on a fault, which Subscription.fault() reads";
+        } else if (session) {
+            delivered = "the " + fragments + " " + (fragments == 1 ? one : many) + " this poll handed over";
         } else if (committedLog) {
             delivered = "the " + fragments + " " + (fragments == 1 ? one : many) + " this poll delivered";
         } else {
@@ -452,6 +509,13 @@ public final class HandlerException extends RuntimeException {
     /** Whether the poll was a committed log's, whose {@code fault()} then reads its fault. */
     public boolean committedLog() {
         return committedLog;
+    }
+
+    /** "session" when the poll was a cluster session's, "service" when it was a cluster
+     * service's, whose entry was aborted and comes again, and null for a subscription's and
+     * a committed log's. */
+    public String cluster() {
+        return cluster;
     }
 }
 '''
@@ -479,6 +543,38 @@ import java.lang.foreign.MemorySegment;
 @FunctionalInterface
 public interface EntryHandler {
     void onEntry(MemorySegment body, Header header, long position);
+}
+'''
+
+REPLY_HANDLER = HEADING + r'''
+import java.lang.foreign.MemorySegment;
+
+/**
+ * Receives each reply a cluster session's poll hands over: {@code body} is the reply's
+ * payload, a segment into the log, valid for the call, and {@code reply} the reply's
+ * values.
+ */
+@FunctionalInterface
+public interface ReplyHandler {
+    void onReply(MemorySegment body, ClusterReplyValues reply);
+}
+'''
+
+SERVICE_HANDLER = HEADING + r'''
+import java.lang.foreign.MemorySegment;
+
+/**
+ * Receives each committed entry a cluster service's poll hands over: {@code body} is a
+ * session message's payload, a segment into the log, valid for the call, and of no bytes
+ * for every other entry; {@code entry} is the entry's values; and {@code service} is the
+ * service that was polled, for its {@link ClusterService#reply}. What it returns is the
+ * entry's action: {@link Abi#ACTION_CONTINUE} takes the entry and the poll goes on,
+ * {@link Abi#ACTION_BREAK} takes it and ends the poll, and {@link Abi#ACTION_ABORT} leaves
+ * it, ends the poll, and has the next poll hand it over again.
+ */
+@FunctionalInterface
+public interface ServiceHandler {
+    int onClusterEntry(MemorySegment body, ClusterEntryValues entry, ClusterService service);
 }
 '''
 
@@ -718,6 +814,62 @@ public final class Client implements AutoCloseable {
             return (int) Abi.cavalry_committed_log_close.invokeExact(log, handle);
         } catch (Throwable t) {
             throw Abi.failed("cavalry_committed_log_close", t);
+        }
+    }
+
+    /** Opens a session with a cluster: {@code members} is the members string the cluster's
+     * members were started with, and {@code responseChannel} a channel of this host for the
+     * cluster's answers, {@code cavalry:udp?endpoint=<host>:<port>}. The call returns once
+     * the leader has opened the session, and waits for that for 20 s at most beyond its
+     * adds, holding the client's lock as an add does. Its {@link CavalryException} has
+     * {@link Abi#ERR_CLUSTER_MEMBERS}, {@link Abi#ERR_CLUSTER_REFUSED},
+     * {@link Abi#ERR_CLUSTER_VERSION} or {@link Abi#ERR_CLUSTER_CONNECT_TIMEOUT}, a fault's
+     * code, or the client's or the driver's (spec/cluster.md, "Sessions"; spec/c-abi.md,
+     * "Functions", cluster session; ADR 0122). */
+    public synchronized ClusterSession connectCluster(String members, String responseChannel) {
+        try (Arena arena = Arena.ofConfined()) {
+            MemorySegment out = arena.allocate(ADDRESS);
+            Abi.check("cavalry_connect_cluster", (int) Abi.cavalry_connect_cluster.invokeExact(out, handle,
+                arena.allocateFrom(members), arena.allocateFrom(responseChannel)));
+            return new ClusterSession(out.get(ADDRESS, 0));
+        } catch (Throwable t) {
+            throw Abi.failed("cavalry_connect_cluster", t);
+        }
+    }
+
+    /** Makes a cluster's service beside the member on this client's driver. It sends
+     * nothing: the service's first poll opens the member's log. The service's poll and its
+     * close are calls on this client. The poll is on every entry's path and takes no lock,
+     * so from here until the service's close this client is used by the thread that polls
+     * the service and by no other: give the program's other threads a {@code Client} of
+     * their own (spec/cluster.md, "The service"; spec/c-abi.md, "Functions", cluster
+     * service, and "Threads"; ADR 0123; ADR 0124). */
+    public synchronized ClusterService clusterService() {
+        try (Arena arena = Arena.ofConfined()) {
+            MemorySegment out = arena.allocate(ADDRESS);
+            Abi.check("cavalry_cluster_service", (int) Abi.cavalry_cluster_service.invokeExact(out, handle));
+            return new ClusterService(out.get(ADDRESS, 0), this);
+        } catch (Throwable t) {
+            throw Abi.failed("cavalry_cluster_service", t);
+        }
+    }
+
+    /** The client's handle, for a cluster service's poll, which is a call on the client as
+     * well as on the service and takes no lock: null after this client's own close, which
+     * the ABI's poll then refuses. */
+    MemorySegment handle() {
+        return handle;
+    }
+
+    /** A cluster service's close, under the client's lock, as a committed log's: the ABI's
+     * result, with the thread's error for the caller to read. After this client's own close
+     * the handle is null, and the ABI frees the service and leaves what it held to the
+     * driver. */
+    synchronized int closeClusterService(MemorySegment service) {
+        try {
+            return (int) Abi.cavalry_cluster_service_close.invokeExact(service, handle);
+        } catch (Throwable t) {
+            throw Abi.failed("cavalry_cluster_service_close", t);
         }
     }
 }
@@ -1477,6 +1629,665 @@ public final class CommittedLog implements AutoCloseable {
         handle = MemorySegment.NULL;
         stub = MemorySegment.NULL;
         arena.close();
+    }
+}
+'''
+
+CLUSTER_SESSION = HEADING + r'''
+import java.lang.foreign.Arena;
+import java.lang.foreign.FunctionDescriptor;
+import java.lang.foreign.MemorySegment;
+import java.lang.invoke.MethodHandle;
+import java.lang.invoke.MethodHandles;
+import java.lang.invoke.MethodType;
+
+import static java.lang.foreign.ValueLayout.ADDRESS;
+import static java.lang.foreign.ValueLayout.JAVA_INT;
+import static java.lang.foreign.ValueLayout.JAVA_LONG;
+
+/**
+ * A client's session with a cluster, made by {@link Client#connectCluster}
+ * (spec/cluster.md, "Sessions"): {@link #offer} sends the leader a message of one frame and
+ * returns the position after it or a result code below zero, never throwing for a code;
+ * {@link #poll} calls the handler for each reply that is not stale, with the reply's
+ * values, and returns the count, throwing a {@link HandlerException} once the ABI has
+ * returned when a handler call threw. The poll is the session's duty cycle too: it sends
+ * the keepalive, follows a new leader, and closes the session when the cluster says so, so
+ * call it at least every 500 ms. A message taken is on its way to the leader and not
+ * committed, and a reply is no delivery: a program that needs an answer offers again when
+ * none comes. The handler is reached through an upcall stub this session makes once from a
+ * method handle bound to itself.
+ */
+@SuppressWarnings("restricted")
+public final class ClusterSession implements AutoCloseable {
+    private MemorySegment handle;
+    private final Arena arena = Arena.ofShared();
+    private MemorySegment stub;
+    private final MemorySegment values;
+    private final ClusterReplyValues reply;
+    private ReplyHandler handler;
+    private boolean polling;
+    private int raised;
+    private Throwable first;
+    private final long sessionId;
+    private final long maxMessageLength;
+
+    ClusterSession(MemorySegment handle) {
+        this.handle = handle;
+        this.values = arena.allocate(Abi.cavalry_cluster_reply_values_t);
+        this.reply = new ClusterReplyValues(values);
+        try {
+            MethodHandle target = MethodHandles.lookup().findVirtual(ClusterSession.class, "onReply",
+                MethodType.methodType(void.class, MemorySegment.class, MemorySegment.class, long.class,
+                    MemorySegment.class)).bindTo(this);
+            stub = Abi.LINKER.upcallStub(target, FunctionDescriptor.ofVoid(ADDRESS, ADDRESS, JAVA_LONG, ADDRESS), arena);
+        } catch (ReflectiveOperationException e) {
+            abandon();
+            throw new CavalryException("cavalry_connect_cluster", 0, "the upcall stub could not be made: " + e);
+        } catch (RuntimeException e) {
+            // The linker's own refusals, an IllegalCallerException among them.
+            abandon();
+            throw e;
+        }
+        try (Arena scratch = Arena.ofConfined()) {
+            MemorySegment k = scratch.allocate(Abi.cavalry_cluster_session_constants_t);
+            Abi.check("cavalry_cluster_session_constants",
+                (int) Abi.cavalry_cluster_session_constants.invokeExact(handle, k));
+            sessionId = k.get(JAVA_LONG, Abi.cavalry_cluster_session_constants_t_session_id);
+            maxMessageLength = k.get(JAVA_LONG, Abi.cavalry_cluster_session_constants_t_max_message_length);
+        } catch (Throwable t) {
+            // The session is closed first, whatever was thrown. A CavalryException already
+            // holds the constants' error, read when it was made, before this close set the
+            // thread's own.
+            abandon();
+            throw Abi.failed("cavalry_cluster_session_constants", t);
+        }
+    }
+
+    /** Closes a session this constructor cannot return: the session is open and no object
+     * will hold it, so it is closed here, as a committed log that cannot be returned is,
+     * and the arena with it. What the close answers is not the failure to report. */
+    private void abandon() {
+        try {
+            int ignored = (int) Abi.cavalry_cluster_session_close.invokeExact(handle);
+        } catch (Throwable ignored) {
+            // The constructor's own failure is the one to report.
+        } finally {
+            handle = MemorySegment.NULL;
+            arena.close();
+        }
+    }
+
+    /** The id the leader gave the session. */
+    public long sessionId() {
+        return sessionId;
+    }
+
+    /** The longest message {@link #offer} takes: what one frame carries. */
+    public long maxMessageLength() {
+        return maxMessageLength;
+    }
+
+    /** Offers the leader the message, a native segment or a heap one over an array: the
+     * position after it on the session's publication to the leader, or a code below zero.
+     * {@link Abi#PUBLICATION_ERROR} with {@link Abi#ERR_TOO_LONG} as {@link Abi#errcode()} is
+     * a message longer than {@link #maxMessageLength()}, and {@link Abi#PUBLICATION_CLOSED} a
+     * session that is closed, for the reason {@link #closed()} gives, or whose client is.
+     * From inside this session's own handler the ABI refuses the call with
+     * {@link Abi#PUBLICATION_ERROR} and {@link Abi#ERR_POLLING}: keep what the answer needs
+     * and offer after the poll has returned. One ABI call, which copies the bytes before it
+     * returns. */
+    public long offer(MemorySegment message) {
+        try {
+            return (long) Abi.cavalry_cluster_session_offer.invokeExact(handle, message, message.byteSize());
+        } catch (Throwable t) {
+            throw Abi.failed("cavalry_cluster_session_offer", t);
+        }
+    }
+
+    /** Reads up to {@code fragmentLimit} fragments of the response channel and hands the
+     * handler each reply that is not stale: one ABI call, the count of replies it handed
+     * over (or -1, with {@link Abi#errcode()} saying why: a fault, which {@link #fault()}
+     * reads until the next poll, or {@link Abi#ERR_POLLING} for a poll from inside a
+     * handler of this session, which the ABI refuses and which touches nothing here), and
+     * a {@link HandlerException} when a handler call threw, whose {@code cluster()} is
+     * "session". A stale reply, one of a leadership term below that of a reply this session
+     * has handed over, is passed over and counted in {@link #staleReplies()}, and is not in
+     * the count. Every reply the ABI hands over reaches the handler, whether or not an
+     * earlier call threw. */
+    public int poll(ReplyHandler handler, int fragmentLimit) {
+        if (polling) {
+            try {
+                return (int) Abi.cavalry_cluster_session_poll.invokeExact(handle, stub, MemorySegment.NULL, (long) fragmentLimit);
+            } catch (Throwable t) {
+                throw Abi.failed("cavalry_cluster_session_poll", t);
+            }
+        }
+        this.handler = handler;
+        polling = true;
+        raised = 0;
+        first = null;
+        int count;
+        try {
+            count = (int) Abi.cavalry_cluster_session_poll.invokeExact(handle, stub, MemorySegment.NULL, (long) fragmentLimit);
+        } catch (Throwable t) {
+            polling = false;
+            this.handler = null;
+            throw Abi.failed("cavalry_cluster_session_poll", t);
+        }
+        polling = false;
+        this.handler = null;
+        if (raised == 0) {
+            return count;
+        }
+        Throwable cause = first;
+        first = null;
+        throw new HandlerException(count, raised, cause, "session");
+    }
+
+    /** The upcall the ABI reaches through the stub, once per reply: the body as a segment over
+     * the log's bytes, no copy, the reply's values read into the one struct this session
+     * keeps, and the handler called inside a catch that keeps its first throwable and
+     * counts every one, so that no throwable unwinds through the ABI's frames and every
+     * reply of the poll reaches the handler (clients/jvm/README.md, "The exception"). The
+     * handler is handed null in the values' place if the ABI refuses the header, which on
+     * the header its own poll handed over it cannot. */
+    void onReply(MemorySegment clientd, MemorySegment buffer, long length, MemorySegment frame) {
+        MemorySegment body = buffer.reinterpret(length);
+        try {
+            handler.onReply(body, read(frame) == 0 ? reply : null);
+        } catch (Throwable t) {
+            raised++;
+            if (first == null) {
+                first = t;
+            }
+        }
+    }
+
+    /** Reads the reply's values from the header the poll handed over into this session's
+     * one struct: the ABI's result. The downcall has a try of its own, so that the catch
+     * around the handler's call in {@link #onReply} holds no {@code invokeExact} and stays
+     * the one that counts what the handler threw. */
+    private int read(MemorySegment frame) {
+        try {
+            return (int) Abi.cavalry_cluster_reply_values.invokeExact(frame, values);
+        } catch (Throwable t) {
+            throw Abi.failed("cavalry_cluster_reply_values", t);
+        }
+    }
+
+    /** What the last poll stopped on; its code is 0 when the last poll returned a count. */
+    public Subscription.Fault fault() {
+        try (Arena scratch = Arena.ofConfined()) {
+            MemorySegment f = scratch.allocate(Abi.cavalry_fault_t);
+            Abi.check("cavalry_cluster_session_fault", (int) Abi.cavalry_cluster_session_fault.invokeExact(handle, f));
+            return new Subscription.Fault(f.get(JAVA_INT, Abi.cavalry_fault_t_code),
+                f.get(JAVA_INT, Abi.cavalry_fault_t_session_id), f.get(JAVA_LONG, Abi.cavalry_fault_t_position));
+        } catch (Throwable t) {
+            throw Abi.failed("cavalry_cluster_session_fault", t);
+        }
+    }
+
+    /** The leadership term the session sends with: the term of the leader that opened it, or
+     * of the last new leader event; -1 from inside this session's own handler, which has
+     * each reply's own term. */
+    public long leadershipTermId() {
+        try {
+            return (long) Abi.cavalry_cluster_session_leadership_term_id.invokeExact(handle);
+        } catch (Throwable t) {
+            throw Abi.failed("cavalry_cluster_session_leadership_term_id", t);
+        }
+    }
+
+    /** The id of the member the session sends to: the leader, as the cluster last said; -1
+     * from inside this session's own handler. */
+    public int leaderMemberId() {
+        try {
+            return (int) Abi.cavalry_cluster_session_leader_member_id.invokeExact(handle);
+        } catch (Throwable t) {
+            throw Abi.failed("cavalry_cluster_session_leader_member_id", t);
+        }
+    }
+
+    /** How many stale replies this session's polls have passed over: the value of its counter
+     * {@code cluster.replies_stale}; -1 from inside this session's own handler. */
+    public long staleReplies() {
+        try {
+            return (long) Abi.cavalry_cluster_session_stale_replies.invokeExact(handle);
+        } catch (Throwable t) {
+            throw Abi.failed("cavalry_cluster_session_stale_replies", t);
+        }
+    }
+
+    /** Why the session is closed, or null while it is open: "TIMEOUT" when the leader closed
+     * it for hearing nothing from it for the session timeout, "NO LEADER" when its leader
+     * was lost and no member took its place, or the detail of the cluster's closed event. A
+     * poll is what closes a session, so the answer changes only across one. From inside
+     * this session's own handler the ABI refuses the call with {@link Abi#ERR_POLLING},
+     * and this is null, a refusal and not an answer; it is null too once {@link #close()}
+     * has freed the session. */
+    public String closed() {
+        try {
+            return Abi.string((MemorySegment) Abi.cavalry_cluster_session_closed.invokeExact(handle));
+        } catch (Throwable t) {
+            throw Abi.failed("cavalry_cluster_session_closed", t);
+        }
+    }
+
+    /** Offers the leader a session close for at most 500 ms, unless the session is closed
+     * already, then closes the session's publications, its subscription and its counter and
+     * frees the handle and its upcall stub. Idempotent. Close a session before its client.
+     * The handle is freed whatever the ABI answers, so when the ABI's close failed this
+     * throws the {@link CavalryException} after the handle and the stub are freed. The one
+     * exception is a close from inside this session's own handler, which the ABI refuses
+     * with {@link Abi#ERR_POLLING} (spec/c-abi.md, "Calls during a claim or a poll"): it
+     * then throws the {@link CavalryException}, sends nothing, and keeps the handle and
+     * the stub. */
+    @Override
+    public void close() {
+        if (handle.address() == 0) {
+            return;
+        }
+        int result;
+        try {
+            result = (int) Abi.cavalry_cluster_session_close.invokeExact(handle);
+        } catch (Throwable t) {
+            throw Abi.failed("cavalry_cluster_session_close", t);
+        }
+        if (result != 0) {
+            CavalryException error = Abi.lastError("cavalry_cluster_session_close");
+            if (error.code() == Abi.ERR_POLLING) {
+                throw error;
+            }
+            handle = MemorySegment.NULL;
+            stub = MemorySegment.NULL;
+            arena.close();
+            throw error;
+        }
+        handle = MemorySegment.NULL;
+        stub = MemorySegment.NULL;
+        arena.close();
+    }
+}
+'''
+
+CLUSTER_REPLY_VALUES = HEADING + r'''
+import java.lang.foreign.MemorySegment;
+
+import static java.lang.foreign.ValueLayout.JAVA_LONG;
+
+/**
+ * What a reply carries beside its payload, as {@code cavalry_cluster_reply_values} reads it.
+ * It is the one object a cluster session keeps, over the one struct the session's upcall
+ * fills for each reply before the handler runs, so copy a value out to keep it. It reads
+ * for as long as its session is open.
+ */
+public final class ClusterReplyValues {
+    private final MemorySegment values;
+
+    ClusterReplyValues(MemorySegment values) {
+        this.values = values;
+    }
+
+    /** The leadership term of the entry the reply answers. */
+    public long leadershipTermId() {
+        return values.get(JAVA_LONG, Abi.cavalry_cluster_reply_values_t_leadership_term_id);
+    }
+
+    /** The cluster's time when its leader appended that entry, in milliseconds since
+     * 1970-01-01T00:00:00Z. */
+    public long timestamp() {
+        return values.get(JAVA_LONG, Abi.cavalry_cluster_reply_values_t_timestamp);
+    }
+}
+'''
+
+CLUSTER_SERVICE = HEADING + r'''
+import java.lang.foreign.Arena;
+import java.lang.foreign.FunctionDescriptor;
+import java.lang.foreign.MemorySegment;
+import java.lang.invoke.MethodHandle;
+import java.lang.invoke.MethodHandles;
+import java.lang.invoke.MethodType;
+
+import static java.lang.foreign.ValueLayout.ADDRESS;
+import static java.lang.foreign.ValueLayout.JAVA_INT;
+import static java.lang.foreign.ValueLayout.JAVA_LONG;
+
+/**
+ * A cluster's service beside the member on the client's driver, made by
+ * {@link Client#clusterService} (spec/cluster.md, "The service" and "Replies"):
+ * {@link #poll} calls the handler for each entry a quorum has committed, in order, with
+ * the entry's values and this service, and what the handler returns is the entry's action.
+ * A handler that throws, or returns what is no action, has its entry aborted, and
+ * {@code poll} throws a {@link HandlerException} once the ABI has returned: an entry is
+ * taken only by a handler that finished with it. {@link #reply} answers a session from
+ * inside the handler. The handler is reached through an upcall stub this service makes
+ * once from a method handle bound to itself.
+ */
+@SuppressWarnings("restricted")
+public final class ClusterService implements AutoCloseable {
+    private MemorySegment handle;
+    private final Client client;
+    private final Arena arena = Arena.ofShared();
+    private MemorySegment stub;
+    private final MemorySegment values;
+    private final ClusterEntryValues entry;
+    private ServiceHandler handler;
+    private boolean polling;
+    private int raised;
+    private Throwable first;
+    private boolean refused;
+    private int refusedCode;
+    private String refusedMessage;
+
+    ClusterService(MemorySegment handle, Client client) {
+        this.handle = handle;
+        this.client = client;
+        this.values = arena.allocate(Abi.cavalry_cluster_entry_values_t);
+        this.entry = new ClusterEntryValues(values);
+        try {
+            MethodHandle target = MethodHandles.lookup().findVirtual(ClusterService.class, "onClusterEntry",
+                MethodType.methodType(void.class, MemorySegment.class, MemorySegment.class, long.class,
+                    MemorySegment.class)).bindTo(this);
+            stub = Abi.LINKER.upcallStub(target, FunctionDescriptor.ofVoid(ADDRESS, ADDRESS, JAVA_LONG, ADDRESS), arena);
+        } catch (ReflectiveOperationException e) {
+            abandon();
+            throw new CavalryException("cavalry_cluster_service", 0, "the upcall stub could not be made: " + e);
+        } catch (RuntimeException e) {
+            // The linker's own refusals, an IllegalCallerException among them.
+            abandon();
+            throw e;
+        }
+    }
+
+    /** Closes a service this constructor cannot return: the service is made and no object
+     * will hold it, so it is closed here, as a committed log that cannot be returned is,
+     * and the arena with it. What the close answers is not the failure to report. */
+    private void abandon() {
+        try {
+            client.closeClusterService(handle);
+        } catch (RuntimeException ignored) {
+            // The constructor's own failure is the one to report.
+        } finally {
+            handle = MemorySegment.NULL;
+            arena.close();
+        }
+    }
+
+    /** Sends the message, from inside the handler, to the session with {@code sessionId},
+     * with the leadership term id and the cluster's time of the entry being handled, and
+     * returns what became of the reply, {@code Abi.CLUSTER_REPLY_*}, never throwing for a
+     * code. {@code _SENT}: it is on its way, or an earlier handling of the same entry sent
+     * it. {@code _NOT_ANSWERING}: this service does not answer the entry; its member did
+     * not lead the entry's term, or the entry is history. {@code _RETRY}: the session's
+     * response channel did not take it now; return {@link Abi#ACTION_ABORT}, and the next
+     * poll hands the entry over again. {@code _DROPPED}: it is lost, and counted in
+     * {@code cluster.replies_dropped}. {@code _NO_SESSION}: no session with that id is open
+     * in the log at this entry. {@code _TOO_LONG}: it is longer than one frame carries, with
+     * {@link Abi#ERR_TOO_LONG} as {@link Abi#errcode()}. Reply first, then change the
+     * service's state, since an aborted entry is handed over again. From outside the
+     * handler it is -1, with {@link Abi#ERR_CLUSTER_NO_ENTRY}. The message is a native
+     * segment or a heap one over an array. One ABI call, which allocates nothing and waits
+     * for nothing. */
+    public int reply(long sessionId, MemorySegment message) {
+        try {
+            return (int) Abi.cavalry_cluster_service_reply.invokeExact(handle, sessionId, message, message.byteSize());
+        } catch (Throwable t) {
+            throw Abi.failed("cavalry_cluster_service_reply", t);
+        }
+    }
+
+    /** Hands up to {@code fragmentLimit} committed entries to the handler: one ABI call, the
+     * count of entries the handler took, 0 while the driver hosts no member that has a log
+     * yet (or -1, with {@link Abi#errcode()} saying why: a fault, which {@link #fault()}
+     * reads until the next poll, or {@link Abi#ERR_POLLING} for a poll from inside a
+     * handler of this service, which the ABI refuses and which touches nothing here). The
+     * poll is the service's duty cycle: it opens the member's log, follows the log's
+     * sessions, and holds a publication to each open session while the service answers.
+     * Those are commands sent with the service's client, at a session's opening, where a
+     * term's leader changes and at a recording's end, and the poll waits for the driver's
+     * answer to each; none is sent for a session message. The poll takes no lock, and it
+     * is a call on the client: no other thread uses the service's client
+     * ({@link Client#clusterService}). When the handler threw, or returned what is no
+     * action, its entry was aborted and this throws a {@link HandlerException} whose
+     * {@code cluster()} is "service": its {@code fragments()} is the count of entries taken
+     * before that entry, and its cause what the handler threw, or a
+     * {@link CavalryException} with {@link Abi#ERR_CLUSTER_ACTION} and the ABI's message
+     * for the value the handler returned. The next poll hands the aborted entry over
+     * again. */
+    public int poll(ServiceHandler handler, int fragmentLimit) {
+        if (polling) {
+            try {
+                return (int) Abi.cavalry_cluster_service_poll.invokeExact(handle, client.handle(), stub, MemorySegment.NULL,
+                    (long) fragmentLimit);
+            } catch (Throwable t) {
+                throw Abi.failed("cavalry_cluster_service_poll", t);
+            }
+        }
+        this.handler = handler;
+        polling = true;
+        raised = 0;
+        first = null;
+        refused = false;
+        int count;
+        try {
+            count = (int) Abi.cavalry_cluster_service_poll.invokeExact(handle, client.handle(), stub, MemorySegment.NULL,
+                (long) fragmentLimit);
+        } catch (Throwable t) {
+            polling = false;
+            this.handler = null;
+            throw Abi.failed("cavalry_cluster_service_poll", t);
+        }
+        polling = false;
+        this.handler = null;
+        if (raised == 0 && !refused) {
+            return count;
+        }
+        Throwable cause = first;
+        first = null;
+        if (cause == null) {
+            // The ABI refused what the handler returned: its error, read in the upcall when
+            // the call failed.
+            cause = new CavalryException("cavalry_cluster_service_action", refusedCode, refusedMessage);
+        }
+        refused = false;
+        refusedMessage = null;
+        throw new HandlerException(count, 1, cause, "service");
+    }
+
+    /** The upcall the ABI reaches through the stub, once per entry: the body as a segment over
+     * the log's bytes, no copy, and of no bytes for an entry that is no session's message;
+     * the entry's values read into the one struct this service keeps; and the handler
+     * called inside a catch that keeps what it threw, so that no throwable unwinds through
+     * the ABI's frames. What the handler returned is the entry's action, passed to the ABI
+     * unless it is {@link Abi#ACTION_CONTINUE}, which is what the ABI does with no call. A
+     * handler that threw has its entry aborted, and so has one whose action the ABI
+     * refused, whose error is kept here, in the thread that made the call, for
+     * {@link #poll} to throw: the ABI ends the poll at an abort with the entry not taken,
+     * so that a service never passes an entry its handler did not finish
+     * (clients/jvm/README.md, "The cluster service"). The handler is handed null in the
+     * values' place if the ABI refuses the header, which on the header its own poll handed
+     * over it cannot. */
+    void onClusterEntry(MemorySegment clientd, MemorySegment buffer, long length, MemorySegment frame) {
+        MemorySegment body = buffer.reinterpret(length);
+        int action = Abi.ACTION_ABORT;
+        try {
+            action = handler.onClusterEntry(body, read(frame) == 0 ? entry : null, this);
+        } catch (Throwable t) {
+            raised++;
+            if (first == null) {
+                first = t;
+            }
+        }
+        if (action != Abi.ACTION_CONTINUE && act(action) != 0) {
+            refused = true;
+            refusedCode = Abi.errcode();
+            refusedMessage = Abi.errmsg();
+            act(Abi.ACTION_ABORT);
+        }
+    }
+
+    /** Reads the entry's values from the header the poll handed over into this service's
+     * one struct: the ABI's result. The downcall has a try of its own, so that the catch
+     * around the handler's call in {@link #onClusterEntry} holds no {@code invokeExact} and
+     * stays the one that keeps what the handler threw. */
+    private int read(MemorySegment frame) {
+        try {
+            return (int) Abi.cavalry_cluster_entry_values.invokeExact(frame, values);
+        } catch (Throwable t) {
+            throw Abi.failed("cavalry_cluster_entry_values", t);
+        }
+    }
+
+    /** Says what the handler does with the entry it was handed: the ABI's result, -1 for a
+     * value that is no action. */
+    private int act(int action) {
+        try {
+            return (int) Abi.cavalry_cluster_service_action.invokeExact(handle, action);
+        } catch (Throwable t) {
+            throw Abi.failed("cavalry_cluster_service_action", t);
+        }
+    }
+
+    /** What the last poll stopped on; its code is 0 when the last poll returned a count. The
+     * code is a fault's, {@link Abi#ERR_CLUSTER_ENTRY} with the position of a committed
+     * entry that is no entry of this version's cluster protocol, or the client's or the
+     * driver's. */
+    public Subscription.Fault fault() {
+        try (Arena scratch = Arena.ofConfined()) {
+            MemorySegment f = scratch.allocate(Abi.cavalry_fault_t);
+            Abi.check("cavalry_cluster_service_fault", (int) Abi.cavalry_cluster_service_fault.invokeExact(handle, f));
+            return new Subscription.Fault(f.get(JAVA_INT, Abi.cavalry_fault_t_code),
+                f.get(JAVA_INT, Abi.cavalry_fault_t_session_id), f.get(JAVA_LONG, Abi.cavalry_fault_t_position));
+        } catch (Throwable t) {
+            throw Abi.failed("cavalry_cluster_service_fault", t);
+        }
+    }
+
+    /** The position after the last entry the handler took, 0 before the first: how far the
+     * service has applied the log; -1 from inside this service's own handler, which has
+     * each entry's own position. */
+    public long position() {
+        try {
+            return (long) Abi.cavalry_cluster_service_position.invokeExact(handle);
+        } catch (Throwable t) {
+            throw Abi.failed("cavalry_cluster_service_position", t);
+        }
+    }
+
+    /** Whether the service answered the last entry it read: its member led that entry's term
+     * and, as the entry was read, led it still, and the entry was not history. False from
+     * inside this service's own handler, a refusal and not an answer: there, what
+     * {@link #reply} returns says whether the service answers the entry. */
+    public boolean answers() {
+        try {
+            return (boolean) Abi.cavalry_cluster_service_answers.invokeExact(handle);
+        } catch (Throwable t) {
+            throw Abi.failed("cavalry_cluster_service_answers", t);
+        }
+    }
+
+    /** How many sessions the log holds open, as far as the service has read: 10 at most; -1
+     * from inside this service's own handler. */
+    public int sessions() {
+        try {
+            return (int) Abi.cavalry_cluster_service_sessions.invokeExact(handle);
+        } catch (Throwable t) {
+            throw Abi.failed("cavalry_cluster_service_sessions", t);
+        }
+    }
+
+    /** Closes the service's publications and its counter, stops its read of the log and
+     * frees the handle and its upcall stub. Idempotent. Close a service before its client;
+     * after the client's own close it frees the handle alone, and the driver ends what the
+     * service held by itself. The handle is freed whatever the ABI answers, so when the
+     * ABI's close failed this throws the {@link CavalryException} after the handle and the
+     * stub are freed. The one exception is a close from inside this service's own handler,
+     * or from inside the handler of another service whose poll holds the client, which the
+     * ABI refuses with {@link Abi#ERR_POLLING} (spec/c-abi.md, "Calls during a claim or a
+     * poll"): it then throws the {@link CavalryException} and keeps the handle and the
+     * stub. */
+    @Override
+    public void close() {
+        if (handle.address() == 0) {
+            return;
+        }
+        int result = client.closeClusterService(handle);
+        if (result != 0) {
+            CavalryException error = Abi.lastError("cavalry_cluster_service_close");
+            if (error.code() == Abi.ERR_POLLING) {
+                throw error;
+            }
+            handle = MemorySegment.NULL;
+            stub = MemorySegment.NULL;
+            arena.close();
+            throw error;
+        }
+        handle = MemorySegment.NULL;
+        stub = MemorySegment.NULL;
+        arena.close();
+    }
+}
+'''
+
+CLUSTER_ENTRY_VALUES = HEADING + r'''
+import java.lang.foreign.MemorySegment;
+
+import static java.lang.foreign.ValueLayout.JAVA_BOOLEAN;
+import static java.lang.foreign.ValueLayout.JAVA_INT;
+import static java.lang.foreign.ValueLayout.JAVA_LONG;
+
+/**
+ * One committed entry as {@code cavalry_cluster_entry_values} reads it. It is the one
+ * object a cluster service keeps, over the one struct the service's upcall fills for each
+ * entry before the handler runs, so copy a value out to keep it. It reads for as long as
+ * its service is open.
+ */
+public final class ClusterEntryValues {
+    private final MemorySegment values;
+
+    ClusterEntryValues(MemorySegment values) {
+        this.values = values;
+    }
+
+    /** The position in the log at which the entry begins. */
+    public long position() {
+        return values.get(JAVA_LONG, Abi.cavalry_cluster_entry_values_t_position);
+    }
+
+    /** The leadership term the entry was appended in. */
+    public long leadershipTermId() {
+        return values.get(JAVA_LONG, Abi.cavalry_cluster_entry_values_t_leadership_term_id);
+    }
+
+    /** The cluster's time when its leader appended the entry, in milliseconds since
+     * 1970-01-01T00:00:00Z: the one clock a service reads, so that every member's service
+     * reaches the same state. */
+    public long timestamp() {
+        return values.get(JAVA_LONG, Abi.cavalry_cluster_entry_values_t_timestamp);
+    }
+
+    /** The session of a session's message, open or close, and -1 for every other entry. */
+    public long sessionId() {
+        return values.get(JAVA_LONG, Abi.cavalry_cluster_entry_values_t_session_id);
+    }
+
+    /** What the entry is, {@code Abi.CLUSTER_ENTRY_*}. */
+    public int type() {
+        return values.get(JAVA_INT, Abi.cavalry_cluster_entry_values_t_type);
+    }
+
+    /** The member that leads the term a new leadership term event begins, and -1 for every
+     * other entry. */
+    public int leaderMemberId() {
+        return values.get(JAVA_INT, Abi.cavalry_cluster_entry_values_t_leader_member_id);
+    }
+
+    /** Whether the leader closed the session of a session close event for the session
+     * timeout. */
+    public boolean timedOut() {
+        return values.get(JAVA_BOOLEAN, Abi.cavalry_cluster_entry_values_t_timed_out);
     }
 }
 '''

@@ -4,42 +4,81 @@ package com.appshapes.cavalry;
 
 /**
  * The handler threw during a poll, a subscription's fragment handler or, when
- * {@link #committedLog()} is true, a committed log's entry handler: {@link #fragments()} is
- * the count the poll returned once the ABI was done, of fragments or of entries, or -1 when
+ * {@link #committedLog()} is true, a committed log's entry handler, or, when
+ * {@link #cluster()} is "session", a cluster session's reply handler: {@link #fragments()} is
+ * the count the poll returned once the ABI was done, of fragments, of entries or of replies,
+ * or -1 when
  * the poll also stopped on a fault, which the {@code fault()} of the object that was polled
  * reads until its next poll; {@link #raised()} how many handler calls threw, and
  * {@link #getCause()} the first throwable, kept as thrown.
+ *
+ * <p>A cluster service's entry handler, {@link #cluster()} "service", is the one whose
+ * failure stops its poll. The entry whose handler threw, or returned what is no action, was
+ * aborted: it is not taken, the poll ended at it, and the next poll hands it over again.
+ * {@link #fragments()} is then the count of entries the poll took before that entry,
+ * {@link #raised()} is 1, and {@link #getCause()} is what the handler threw, or a
+ * {@link CavalryException} with {@link Abi#ERR_CLUSTER_ACTION} and the ABI's message for
+ * the value the handler returned.
  */
 public final class HandlerException extends RuntimeException {
     private static final long serialVersionUID = 1L;
     private final int fragments;
     private final int raised;
     private final boolean committedLog;
+    private final String cluster;
 
     public HandlerException(int fragments, int raised, Throwable cause) {
-        this(fragments, raised, cause, false);
+        this(fragments, raised, cause, false, null);
     }
 
     public HandlerException(int fragments, int raised, Throwable cause, boolean committedLog) {
-        super(describe(fragments, raised, cause, committedLog), cause);
+        this(fragments, raised, cause, committedLog, null);
+    }
+
+    /** A cluster session's poll, {@code cluster} "session", or a cluster service's,
+     * "service". */
+    public HandlerException(int fragments, int raised, Throwable cause, String cluster) {
+        this(fragments, raised, cause, false, cluster);
+    }
+
+    private HandlerException(int fragments, int raised, Throwable cause, boolean committedLog, String cluster) {
+        super(describe(fragments, raised, cause, committedLog, cluster), cause);
         this.fragments = fragments;
         this.raised = raised;
         this.committedLog = committedLog;
+        this.cluster = cluster;
     }
 
-    /** The message: what the handler threw on, the fragments of a subscription's poll or the
-     * entries of a committed log's, and what to do. The fault of a committed log's own image
+    /** The message: what the handler threw on, the fragments of a subscription's poll, the
+     * entries of a committed log's or the replies of a cluster session's, and what to do. The
+     * fault of a committed log's own image
      * is reported by one poll (clients/jvm/README.md, "The committed log"), so its message
-     * names the log's own {@code fault()}. */
-    private static String describe(int fragments, int raised, Throwable cause, boolean committedLog) {
-        String one = committedLog ? "entry" : "fragment";
-        String many = committedLog ? "entries" : "fragments";
+     * names the log's own {@code fault()}. A cluster service's says that its entry was
+     * aborted and comes again (clients/jvm/README.md, "The cluster service"). */
+    private static String describe(int fragments, int raised, Throwable cause, boolean committedLog, String cluster) {
+        if ("service".equals(cluster)) {
+            String took = fragments < 0
+                ? "in a poll that also stopped on a fault, which this ClusterService's fault() reads until its next poll"
+                : "after the " + fragments + " " + (fragments == 1 ? "entry" : "entries") + " this poll took";
+            return "the entry handler threw, or returned what is no action, " + took + ". Its entry was aborted: it is"
+                + " not taken, the poll ended at it, and the next poll hands it over again. Fix the handler: what it"
+                + " did, " + cause + ", is this exception's cause; every poll hands the entry over, and throws this,"
+                + " until the handler takes it. See clients/jvm/README.md#the-exception";
+        }
+        boolean session = "session".equals(cluster);
+        String one = session ? "reply" : committedLog ? "entry" : "fragment";
+        String many = session ? "replies" : committedLog ? "entries" : "fragments";
         String delivered;
         if (fragments < 0) {
-            delivered = committedLog
+            delivered = session
+                ? "the replies this poll handed over before it stopped on a fault, which this ClusterSession's fault()"
+                    + " reads until its next poll"
+                : committedLog
                 ? "the entries this poll delivered before it stopped on a fault, which this CommittedLog's fault() reads"
                     + " until its next poll, and its faulted() from then on when the fault is the log's own image's"
                 : "the fragments this poll delivered before it stopped on a fault, which Subscription.fault() reads";
+        } else if (session) {
+            delivered = "the " + fragments + " " + (fragments == 1 ? one : many) + " this poll handed over";
         } else if (committedLog) {
             delivered = "the " + fragments + " " + (fragments == 1 ? one : many) + " this poll delivered";
         } else {
@@ -62,5 +101,12 @@ public final class HandlerException extends RuntimeException {
     /** Whether the poll was a committed log's, whose {@code fault()} then reads its fault. */
     public boolean committedLog() {
         return committedLog;
+    }
+
+    /** "session" when the poll was a cluster session's, "service" when it was a cluster
+     * service's, whose entry was aborted and comes again, and null for a subscription's and
+     * a committed log's. */
+    public String cluster() {
+        return cluster;
     }
 }
