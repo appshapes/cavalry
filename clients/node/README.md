@@ -209,6 +209,9 @@ The handler is a plain function, which has finished with its entry when it retur
 An `async` function returns a promise before it has finished, and a promise is no
 action: the entry is aborted and `poll` throws. A handler whose entry needs work that
 is not done yet returns `cavalry.ABORT`, and the next poll hands the entry over again.
+A boolean is no action either: a handler that returns `true` to say that it handled
+its entry has it aborted, and `poll` throws. The addon reads a number alone as an
+action, so `true` is never taken for 1, the value of `cavalry.ABORT`.
 
 The service's poll and its close are calls on the client the service was made on, and
 the poll holds that client for its run ("What it must never do"). `service.close()`
@@ -597,7 +600,8 @@ then throws `HandlerError`, whose `cluster` is `"service"`: `fragments` is the c
 of entries the poll took before that entry, `raised` is 1, and `cause` is the
 handler's exception. A handler that returns a value that is no action is treated the
 same way. That is a number the ABI refuses, such as 3, and anything else that is not
-`undefined`, `null` or a whole number, such as the promise an `async` handler returns.
+`undefined`, `null` or a whole number, such as `true` or the promise an `async`
+handler returns.
 The cause is then a `CavalryError` with `CAVALRY_ERR_CLUSTER_ACTION` that names the
 value. An entry the runtime kept from the handler is aborted too: `undelivered` is 1,
 and the cause is the addon's `Error`, which names the entry by its position and its

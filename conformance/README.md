@@ -71,7 +71,8 @@ poll held the GIL.
 
 The Node round is the Python round through `clients/node`, with three edges of its
 own. A service's handler that returns a promise, as an `async` handler does, has its
-entry aborted as one that returns 3 has. The one object of values a handler is handed
+entry aborted as one that returns 3 has, and so has one that returns `true`, where
+the Python round returns `True`. The one object of values a handler is handed
 reads `undefined` once the call has returned, and a kept body reads as empty. And the
 `Buffer`s the round's handlers were handed are all freed by one turn of the event
 loop, which the round checks after its report. The report is the Python round's:
