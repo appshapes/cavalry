@@ -751,7 +751,8 @@ impl ClusterSession {
     /// How many stale replies the session has read and not handed over: replies whose
     /// leadership term was below that of a reply it had handed over before
     /// ([`poll`](Self::poll)). It is the value of the session's
-    /// `cluster.replies_stale`, which `cavalry doctor` reads on this client's driver.
+    /// `cluster.replies_stale`, which `cavalry doctor` on this client's host reports
+    /// above 0, by the session's id.
     pub fn stale_replies(&self) -> i64 {
         self.stale.get()
     }
