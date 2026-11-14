@@ -247,9 +247,9 @@ every call above.
   another service whose poll holds its client. The third is a `Client`'s close from
   inside the handler of a cluster service whose poll holds that client. `Close` then
   returns the `*Error` and keeps the handle, so that the program can still use the
-  handle, and close it, after the poll has returned. A `Client`'s `Close` does not close the handles it made: each
-  `Publication`, `Subscription`, `Recording`, `Replay`, `CommittedLog`,
-  `ClusterSession` and `ClusterService` is freed by
+  handle, and close it, after the poll has returned. A `Client`'s `Close` does not
+  close the handles it made: each `Publication`, `Subscription`, `Recording`,
+  `Replay`, `CommittedLog`, `ClusterSession` and `ClusterService` is freed by
   its own `Close` and by nothing else, and a publication or a subscription answers as
   closed from the client's close until then (`spec/c-abi.md`, "Lifetimes"). An
   unclosed `Subscription`, `CommittedLog`, `ClusterSession` or `ClusterService` also
