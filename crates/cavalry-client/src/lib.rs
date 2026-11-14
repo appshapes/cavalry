@@ -11,6 +11,7 @@ mod publication;
 mod recording;
 mod replay;
 mod response;
+mod service;
 mod subscription;
 
 pub use cavalry_proto::client_protocol::{
@@ -27,4 +28,5 @@ pub use error::{ClientError, Closed};
 pub use publication::{Offer, Publication};
 pub use recording::{ArmedRecording, Recording};
 pub use replay::Replay;
+pub use service::{ClusterService, Committed, Entry, Replies, Reply};
 pub use subscription::{Fault, Image, MAX_IMAGES, Subscription};

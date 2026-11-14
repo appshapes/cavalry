@@ -473,6 +473,9 @@ pub const CLUSTER_CONNECTS_DROPPED: CounterId = CounterId(155);
 /// `cluster.ingress_ignored`, a client counter: Session messages, keepalives and session closes one cluster member read from its ingress stream and did not act on: the member does not lead, the message names a term that is not the leader's, or its session is not open. The client learns of a new leader by the new leader event and sends again (spec/cluster.md, Sessions). key: member id (i32), little-endian; label text: the member id in decimal.
 pub const CLUSTER_INGRESS_IGNORED: CounterId = CounterId(156);
 
+/// `cluster.replies_dropped`, a client counter: Replies the service beside one cluster member was to send a session and dropped: the session's response channel had taken nothing for the keepalive interval, 500 ms, since it first refused a reply, because the client's stream was not connected or was back-pressured; or the driver refused the channel, or the stream to the client had ended. The service of the leader of an entry's term sends the replies to it, so the count rises beside that member alone (spec/cluster.md, The service and Values; ADR 0118). key: member id (i32), little-endian; label text: the member id in decimal.
+pub const CLUSTER_REPLIES_DROPPED: CounterId = CounterId(157);
+
 /// Every entry of `counters.toml`, in the file's order.
 pub const COUNTERS: &[CounterDef] = &[
     CounterDef {
@@ -1722,5 +1725,13 @@ pub const COUNTERS: &[CounterDef] = &[
         scope: Scope::Client,
         doc: "Session messages, keepalives and session closes one cluster member read from its ingress stream and did not act on: the member does not lead, the message names a term that is not the leader's, or its session is not open. The client learns of a new leader by the new leader event and sends again (spec/cluster.md, Sessions). key: member id (i32), little-endian; label text: the member id in decimal.",
         doctor: "A client sent to a member that was not its leader, or for a term or a session that has ended. Some after each election are expected: a client goes on sending to the old leader until the new leader event reaches it. If it keeps rising on one member, a client there holds a session the cluster has closed, or sends to a follower: the client's own error says which.",
+    },
+    CounterDef {
+        id: CLUSTER_REPLIES_DROPPED,
+        name: "cluster.replies_dropped",
+        kind: Kind::Counter,
+        scope: Scope::Client,
+        doc: "Replies the service beside one cluster member was to send a session and dropped: the session's response channel had taken nothing for the keepalive interval, 500 ms, since it first refused a reply, because the client's stream was not connected or was back-pressured; or the driver refused the channel, or the stream to the client had ended. The service of the leader of an entry's term sends the replies to it, so the count rises beside that member alone (spec/cluster.md, The service and Values; ADR 0118). key: member id (i32), little-endian; label text: the member id in decimal.",
+        doctor: "A service answered a client that did not take the answer. The client was not reading its response channel: it polls its session less often than every 500 ms, it has stopped, or this member's host cannot reach the host and port the client names there. The service went on with the log after 500 ms and the client's reply is lost, which the client learns by its own wait for one. cluster.sessions_timed_out rises 10 s after a client stops for good.",
     },
 ];

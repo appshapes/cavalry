@@ -1,5 +1,6 @@
 //! A client's session with a cluster (`spec/cluster.md`, "The session protocol" and
-//! "Sessions"; ADR 0117). In Aeron, this is `AeronCluster` (`docs/glossary.md`).
+//! "Sessions"; ADR 0117). In Aeron, this is the cluster session, which a client holds
+//! as an `AeronCluster` (`docs/glossary.md`, cluster session).
 //!
 //! [`Cavalry::connect_cluster`] opens the session: a subscription on the client's
 //! response channel, a publication to every member's `ingress` endpoint, and a session
@@ -17,6 +18,7 @@ use cavalry_proto::cluster::{
     SESSION_CONNECT_TIMEOUT_NS, Stream, parse_members,
 };
 use cavalry_proto::frame::{DataFrameHeader, Flags};
+use cavalry_shm::log::Action;
 
 use crate::client::Cavalry;
 use crate::conductor::nano_time;
@@ -77,11 +79,19 @@ pub enum ClusterError {
     },
     /// The read of the response channel stopped on a fault.
     Egress(Fault),
+    /// A service's read of its member's committed log stopped on a fault.
+    Log(Fault),
+    /// A service read a committed entry that is not an entry of `spec/cluster.md`: the
+    /// log is not this version's, or is damaged.
+    Entry {
+        /// The position the entry begins at.
+        position: i64,
+    },
 }
 
 impl ClusterError {
     /// The reason's name: `members`, `client`, `refused`, `version`,
-    /// `connect-timeout` or `egress`.
+    /// `connect-timeout`, `egress`, `log` or `entry`.
     pub const fn reason(&self) -> &'static str {
         match self {
             ClusterError::Members(_) => "members",
@@ -90,6 +100,8 @@ impl ClusterError {
             ClusterError::Version { .. } => "version",
             ClusterError::ConnectTimeout { .. } => "connect-timeout",
             ClusterError::Egress(_) => "egress",
+            ClusterError::Log(_) => "log",
+            ClusterError::Entry { .. } => "entry",
         }
     }
 }
@@ -131,7 +143,15 @@ impl fmt::Display for ClusterError {
                  {DOC}",
                 CONNECT_GIVE_UP_NS / 1_000_000_000
             ),
-            ClusterError::Egress(fault) => write!(f, "{fault}"),
+            ClusterError::Egress(fault) | ClusterError::Log(fault) => write!(f, "{fault}"),
+            ClusterError::Entry { position } => write!(
+                f,
+                "cluster service stopped ({reason}): the committed entry at position \
+                 {position} is not an entry of this version's cluster protocol; run a \
+                 service of the cluster's version, and if it is, `cavalry doctor` on the \
+                 member's driver says whether its recording is damaged; see \
+                 docs/reference/cluster.md#the-service"
+            ),
         }
     }
 }
@@ -141,7 +161,7 @@ impl std::error::Error for ClusterError {
         match self {
             ClusterError::Members(error) => Some(error),
             ClusterError::Client(error) => Some(error),
-            ClusterError::Egress(fault) => Some(fault),
+            ClusterError::Egress(fault) | ClusterError::Log(fault) => Some(fault),
             _ => None,
         }
     }
@@ -223,7 +243,7 @@ fn host_port(endpoint: &Endpoint<'_>) -> String {
 
 /// Writes `message` into a claim of `publication` and commits it. Nothing is
 /// allocated.
-fn send(publication: &mut Publication, message: &Message<'_>) -> Result<i64, Offer> {
+pub(crate) fn send(publication: &mut Publication, message: &Message<'_>) -> Result<i64, Offer> {
     let length = message.encoded_length();
     let mut claim = publication.try_claim(length)?;
     let limit = claim.body().len();
@@ -360,27 +380,55 @@ impl ClusterSession {
         correlation_id: i64,
     ) -> Result<Option<Answer>, ClusterError> {
         let mut answer = None;
+        // A controlled poll (ADR 0114), so that the connect takes nothing that is the
+        // session's. A service may answer a session from its open event on, on a
+        // publication of its own, and its reply can reach the response channel
+        // before the leader's ok event does or beside it: a session message is left
+        // where it is, and so is everything that follows the answer. The session's
+        // polls hand them over (`spec/cluster.md`, "Sessions"; ADR 0118).
         egress
-            .poll(
+            .controlled_poll(
                 |body: &[u8], header: &DataFrameHeader| {
-                    if answer.is_some() || !header.flags().contains(Flags::UNFRAGMENTED) {
-                        return;
+                    if answer.is_some() {
+                        return Action::Abort;
                     }
-                    let Ok(Message::SessionEvent {
+                    if !header.flags().contains(Flags::UNFRAGMENTED) {
+                        return Action::Continue;
+                    }
+                    let (
                         cluster_session_id,
-                        correlation_id: answered,
+                        answered,
                         leadership_term_id,
                         leader_member_id,
                         code,
                         version,
                         leader_heartbeat_timeout_ns,
                         detail,
-                    }) = Message::parse(Stream::Egress, body)
-                    else {
-                        return;
+                    ) = match Message::parse(Stream::Egress, body) {
+                        Ok(Message::SessionEvent {
+                            cluster_session_id,
+                            correlation_id,
+                            leadership_term_id,
+                            leader_member_id,
+                            code,
+                            version,
+                            leader_heartbeat_timeout_ns,
+                            detail,
+                        }) => (
+                            cluster_session_id,
+                            correlation_id,
+                            leadership_term_id,
+                            leader_member_id,
+                            code,
+                            version,
+                            leader_heartbeat_timeout_ns,
+                            detail,
+                        ),
+                        Ok(Message::SessionMessage { .. }) => return Action::Abort,
+                        _ => return Action::Continue,
                     };
                     if answered != correlation_id {
-                        return;
+                        return Action::Continue;
                     }
                     answer = Some(if version >> 16 != PROTOCOL_VERSION >> 16 {
                         Answer::Version { version }
@@ -399,6 +447,7 @@ impl ClusterSession {
                             },
                         }
                     });
+                    Action::Break
                 },
                 CONNECT_POLL_LIMIT,
             )
@@ -458,6 +507,13 @@ impl ClusterSession {
     /// handed to `handler` as its payload and the cluster's time when the leader sent
     /// it, milliseconds since 1970-01-01T00:00:00Z. Returns how many were handed
     /// over, or the [`Fault`] that stopped the read of the response channel.
+    ///
+    /// A service's replies are in the order that service sent them. The service of a
+    /// term's leader stops answering once its member leads the term no more, so
+    /// across a change of leader a reply of the earlier term can follow one of the
+    /// later only while the former leader has not yet learnt that it lost its
+    /// quorum, the leader heartbeat timeout at most (`spec/cluster.md`, "Replies").
+    /// The handler is not given a reply's term.
     ///
     /// This is the session's duty cycle too. A new leader event turns the session to
     /// the new leader with its term, and the next thing sent is a keepalive. A session
@@ -662,7 +718,7 @@ impl ClusterSession {
 /// The length of the session message header before a session message's payload: the
 /// message header and its 24 bytes of fields (`spec/cluster.md`, "Session message
 /// header, template 1").
-const SESSION_MESSAGE_HEADER_LENGTH: usize = 32;
+pub(crate) const SESSION_MESSAGE_HEADER_LENGTH: usize = 32;
 
 impl fmt::Debug for ClusterSession {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {

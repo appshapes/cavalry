@@ -2569,6 +2569,10 @@ impl Counters {
     /// The recording id is stored before the commit position, and a commit position
     /// only once the counter holds that id, so that no commit position is stored
     /// beside a recording id that does not hold it (`spec/cluster.md`, "The service").
+    /// The term is stored before the id of the member this one leads as or follows,
+    /// and both before the commit position: a service that reads an entry asks, by
+    /// those two, whether its member leads the entry's term still, and loads them in
+    /// the reverse order (the fifth rule of order there; ADR 0118). Keep that order.
     /// Returns the recording id the counter holds after it. `module` is the module's
     /// own two counts: the consensus messages it rejected, and the duty cycles in
     /// which it could not write the file of its log's recordings. `lists` is its
