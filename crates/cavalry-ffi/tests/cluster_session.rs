@@ -539,6 +539,30 @@ fn a_session_offers_polls_reads_its_replies_values_and_closes() {
             CAVALRY_PUBLICATION_ERROR
         );
         assert_eq!(cavalry_errcode(), CAVALRY_ERR_TOO_LONG, "{}", errmsg());
+        // The caller's length and the constants' limit, not the frame's two lengths
+        // the Rust refusal gives, and no advice of a publication's.
+        let message = errmsg();
+        let limit = constants.max_message_length;
+        assert!(
+            message.starts_with(&format!(
+                "cavalry_cluster_session_offer refused (too-long): a message of {} bytes, \
+                 and this session allows {limit}, ",
+                limit + 1
+            )),
+            "{message}"
+        );
+        assert!(
+            message.contains(&format!("of at most {limit} bytes")),
+            "{message}"
+        );
+        assert!(
+            !message.contains("term-length") && !message.contains("use offer"),
+            "{message}"
+        );
+        assert!(
+            message.ends_with("; see docs/reference/c-abi.md#result-codes"),
+            "{message}"
+        );
         // A null buffer is refused, but for an empty message.
         assert_eq!(
             cavalry_cluster_session_offer(session, ptr::null(), 1),

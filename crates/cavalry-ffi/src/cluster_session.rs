@@ -7,7 +7,7 @@
 use std::ffi::{c_char, c_int, c_void};
 use std::ptr;
 
-use cavalry_client::ClusterSession;
+use cavalry_client::{ClusterSession, Offer};
 
 use crate::client::{cavalry_mut, cavalry_t};
 use crate::codes::*;
@@ -226,8 +226,35 @@ pub unsafe extern "C" fn cavalry_cluster_session_offer(
     let inner = unsafe { &mut *ptr::addr_of_mut!((*session).session) };
     match inner.offer(message) {
         Ok(position) => position,
+        // The Rust refusal's lengths are its frame's, the session message header and
+        // the message, and its advice is a publication's: a fragmenting offer and a
+        // channel's term length, neither of which a session's caller has. The ABI's
+        // own message names the caller's length and the session's limit, the
+        // `max_message_length` the constants copied. The Rust core still decides
+        // the refusal, so a closed session answers `_CLOSED` whatever the length, as
+        // `cavalry_publication_offer` refuses a closed client before a long message.
+        Err(Offer::TooLong { .. }) => {
+            too_long(length, inner.max_message_length());
+            CAVALRY_PUBLICATION_ERROR
+        }
         Err(offer) => error::offer_code(&offer),
     }
+}
+
+/// Sets the thread's error for a session message over the session's limit, with the
+/// caller's length and the limit. Nothing is allocated: the message is formatted
+/// into the thread's fixed buffer.
+fn too_long(length: usize, limit: usize) {
+    error::set(
+        CAVALRY_ERR_TOO_LONG,
+        format_args!(
+            "cavalry_cluster_session_offer refused (too-long): a message of {length} bytes, \
+             and this session allows {limit}, the max_message_length of \
+             cavalry_cluster_session_constants: one frame less the session message \
+             header; split it into messages of at most {limit} bytes, which the service \
+             reads as an entry each; see {DOC}#result-codes"
+        ),
+    );
 }
 
 /// Reads up to `fragment_limit` fragments of the response channel and hands `handler`
