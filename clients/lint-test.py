@@ -124,10 +124,13 @@ class Clients(unittest.TestCase):
         self.assertEqual(lint.findings(lint.CLIENTS), [])
 
     def test_a_lock_in_a_per_message_function_fails(self):
-        self.edit("    def offer(self, message):\n", "    def offer(self, message):\n        with threading.Lock():\n            pass\n")
-        [finding] = lint.findings(self.tmp)
-        self.assertIn("Publication.offer", finding)
-        self.assertIn("uses `threading`", finding)
+        """Both offers, the publication's and the cluster session's."""
+        self.edit("    def offer(self, message):\n", "    def offer(self, message):\n        with threading.Lock():\n            pass\n",
+                  count=2)
+        found = lint.findings(self.tmp)
+        self.assertEqual(len(found), 2, found)
+        for offer in ("Publication.offer", "ClusterSession.offer"):
+            self.assertTrue(any(offer in f and "uses `threading`" in f for f in found), found)
 
     def test_an_async_per_message_function_fails(self):
         self.edit("    def try_claim(self, length):", "    async def try_claim(self, length):")
@@ -146,13 +149,14 @@ class Clients(unittest.TestCase):
         self.assertIn("raises", finding)
 
     def test_the_handlers_raise_after_the_poll_passes_and_before_it_fails(self):
-        """Both polls, the subscription's and the committed log's: the line is in each."""
+        """The four polls, the subscription's, the committed log's, the cluster session's
+        and the cluster service's: the line is in each."""
         self.assertEqual(lint.findings(self.tmp), [])
         self.edit("        self._handler = handler\n", "        self._handler = handler\n        raise RuntimeError('too early')\n",
-                  count=2)
+                  count=4)
         found = lint.findings(self.tmp)
-        self.assertEqual(len(found), 2, found)
-        for poll in ("Subscription.poll", "CommittedLog.poll"):
+        self.assertEqual(len(found), 4, found)
+        for poll in ("Subscription.poll", "CommittedLog.poll", "ClusterSession.poll", "ClusterService.poll"):
             self.assertTrue(any(poll in f and "raises" in f for f in found), found)
 
     def test_a_raise_between_polls_two_abi_calls_fails(self):
@@ -175,20 +179,57 @@ class Clients(unittest.TestCase):
         self.assertIn("CommittedLog.poll", finding)
         self.assertIn("raises", finding)
 
-    def test_a_raise_in_the_trampoline_fails(self):
-        """Both trampolines, the subscription's and the committed log's."""
-        self.edit("            self._keep(exc)\n", "            self._keep(exc)\n            raise\n", count=2)
+    def test_a_raise_between_a_cluster_polls_two_abi_calls_fails(self):
+        """A cluster session's `poll` and a cluster service's call the ABI on two lines as
+        the subscription's does, and the raise allowed is after the last of them (ADR
+        0124)."""
+        self.edit("        try:\n            replies = self._abi.cavalry_cluster_session_poll(",
+                  "        raise RuntimeError('between')\n        try:\n"
+                  "            replies = self._abi.cavalry_cluster_session_poll(")
+        self.edit("        try:\n            entries = self._abi.cavalry_cluster_service_poll(",
+                  "        raise RuntimeError('between')\n        try:\n"
+                  "            entries = self._abi.cavalry_cluster_service_poll(")
         found = lint.findings(self.tmp)
         self.assertEqual(len(found), 2, found)
-        for trampoline in ("Subscription._on_fragment", "CommittedLog._on_fragment"):
+        for poll in ("ClusterSession.poll", "ClusterService.poll"):
+            self.assertTrue(any(poll in f and "raises" in f for f in found), found)
+
+    def test_a_raise_in_a_cluster_services_reply_fails(self):
+        """The reply is a per-message function: a code is returned, never raised."""
+        self.edit("    def reply(self, session_id, message):\n",
+                  "    def reply(self, session_id, message):\n        raise RuntimeError('no')\n")
+        [finding] = lint.findings(self.tmp)
+        self.assertIn("ClusterService.reply", finding)
+        self.assertIn("raises", finding)
+
+    def test_an_exception_built_in_a_cluster_services_trampoline_fails(self):
+        """A value that is no action is kept for `poll` to raise: the trampoline builds no
+        exception of the package's for it."""
+        self.edit("                self._refused = action\n",
+                  "                self._refused = CavalryError('cavalry_cluster_service_action', 146, 'no action')\n")
+        [finding] = lint.findings(self.tmp)
+        self.assertIn("ClusterService._on_entry", finding)
+        self.assertIn("builds CavalryError", finding)
+
+    def test_a_raise_in_the_trampoline_fails(self):
+        """The four trampolines: the subscription's, the committed log's, the cluster
+        session's and the cluster service's."""
+        self.edit("            self._keep(exc)\n", "            self._keep(exc)\n            raise\n", count=4)
+        found = lint.findings(self.tmp)
+        self.assertEqual(len(found), 4, found)
+        for trampoline in ("Subscription._on_fragment", "CommittedLog._on_fragment", "ClusterSession._on_reply",
+                           "ClusterService._on_entry"):
             self.assertTrue(any(trampoline in f for f in found), found)
 
     def test_a_raise_in_the_helper_the_trampoline_calls_fails(self):
-        self.edit("        self._raised += 1\n", "        self._raised += 1\n        raise exc\n", count=2)
+        """`_keep`, in each of the four classes that poll with a handler."""
+        self.edit("a `KeyboardInterrupt` or a `SystemExit`.\"\"\"\n        self._raised += 1\n",
+                  "a `KeyboardInterrupt` or a `SystemExit`.\"\"\"\n        self._raised += 1\n        raise exc\n", count=4)
         found = lint.findings(self.tmp)
-        self.assertEqual(len(found), 2, found)
-        for cls in ("Subscription", "CommittedLog"):
-            self.assertTrue(any(f"{cls}._on_fragment" in f and f"calls {cls}._keep" in f for f in found), found)
+        self.assertEqual(len(found), 4, found)
+        for cls, trampoline in (("Subscription", "_on_fragment"), ("CommittedLog", "_on_fragment"),
+                                ("ClusterSession", "_on_reply"), ("ClusterService", "_on_entry")):
+            self.assertTrue(any(f"{cls}.{trampoline}" in f and f"calls {cls}._keep" in f for f in found), found)
 
     def test_a_raise_in_set_reserved_value_fails(self):
         self.edit("    def set_reserved_value(self, value):\n",
@@ -199,11 +240,11 @@ class Clients(unittest.TestCase):
 
     def test_a_call_to_check_fails(self):
         self.edit("    def offer(self, message):\n",
-                  "    def offer(self, message):\n        _check(self._abi, 'cavalry_publication_offer', -1)\n")
-        [finding] = lint.findings(self.tmp)
-        self.assertIn("Publication.offer", finding)
-        self.assertIn("calls _check", finding)
-        self.assertIn("_check raises at line", finding)
+                  "    def offer(self, message):\n        _check(self._abi, 'cavalry_publication_offer', -1)\n", count=2)
+        found = lint.findings(self.tmp)
+        self.assertEqual(len(found), 2, found)
+        for offer in ("Publication.offer", "ClusterSession.offer"):
+            self.assertTrue(any(offer in f and "calls _check" in f and "_check raises at line" in f for f in found), found)
 
     def test_a_call_to_error_fails(self):
         self.edit("    def abort(self):\n", "    def abort(self):\n        _error(self._abi, 'cavalry_buffer_claim_abort')\n")
@@ -230,19 +271,31 @@ class Clients(unittest.TestCase):
         self.assertEqual(len(found), 10, found)  # values and its nine properties
 
     def test_a_package_without_the_per_message_functions_fails(self):
+        # The poll is in four classes, the subscription, the committed log, the cluster
+        # session and the cluster service; `_on_fragment` in the first two; the offer in
+        # the publication and the cluster session.
+        counts = {"poll": 4, "_on_fragment": 2, "offer": 2}
         for name in ("try_claim", "set_reserved_value", "offer", "commit", "abort", "poll", "_on_fragment", "values",
                      "session_id", "stream_id", "term_id", "term_offset", "frame_length", "flags", "type", "version",
-                     "reserved_value"):
-            # The poll and its trampoline are in two classes, the subscription and the
-            # committed log.
-            self.edit(f"    def {name}(self", f"    def renamed_{name}(self", count=2 if name in ("poll", "_on_fragment") else 1)
+                     "reserved_value", "_on_reply", "_on_entry", "reply"):
+            self.edit(f"    def {name}(self", f"    def renamed_{name}(self", count=counts.get(name, 1))
         [finding] = lint.findings(self.tmp)
         self.assertIn("none of the per-message functions", finding)
 
     def test_one_missing_per_message_function_fails(self):
-        self.edit("    def offer(self, message):", "    def send(self, message):")
+        self.edit("    def try_claim(self, length):", "    def claim_slice(self, length):")
         [finding] = lint.findings(self.tmp)
-        self.assertIn("Publication.offer is not in", finding)
+        self.assertIn("Publication.try_claim is not in", finding)
+
+    def test_a_missing_cluster_function_fails(self):
+        """A cluster session's and a cluster service's per-message functions are held to
+        the rules by name, as the others are (ADR 0124)."""
+        self.edit("    def reply(self, session_id, message):", "    def answer(self, session_id, message):")
+        self.edit("    def _on_reply(self", "    def _trampoline_of(self")
+        found = lint.findings(self.tmp)
+        self.assertEqual(len(found), 2, found)
+        for name in ("ClusterService.reply", "ClusterSession._on_reply"):
+            self.assertTrue(any(f"{name} is not in" in f for f in found), found)
 
     def test_a_missing_header_values_fails(self):
         self.edit("    def values(self):", "    def read(self):")
