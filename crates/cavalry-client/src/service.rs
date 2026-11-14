@@ -7,10 +7,10 @@
 //! [`CommittedLog`], across the member's recordings, and no further than the commit
 //! position. It follows the sessions the log opens and closes and the member that
 //! leads each term, both from the log's own entries. For the entries of a term its
-//! member leads it holds an egress publication to each open session's response
-//! channel, and [`Replies::reply`] answers a session through one. A service beside a
-//! follower runs the same code on the same entries, reaches the same state and sends
-//! nothing.
+//! member led, while the member's counters say it leads the term still, it holds an
+//! egress publication to each open session's response channel, and
+//! [`Replies::reply`] answers a session through one. A service beside a follower
+//! runs the same code on the same entries, reaches the same state and sends nothing.
 
 use std::sync::Arc;
 
@@ -810,7 +810,8 @@ impl ClusterService {
     }
 
     /// Whether the service answered the last entry it read: its member led that
-    /// entry's term, and the entry was not history.
+    /// entry's term and, as the entry was read, led it still, and the entry was not
+    /// history.
     pub fn answers(&self) -> bool {
         self.answering
     }

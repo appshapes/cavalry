@@ -1558,8 +1558,9 @@ impl Cavalry {
     /// member's committed log from its start and hands over each entry as an
     /// [`Entry`](crate::Entry) with its position and the cluster's time, and the
     /// handler answers a session through [`Replies::reply`](crate::Replies::reply).
-    /// The service beside the member that led an entry's term sends its replies, and
-    /// the service beside every other member, which runs the same code, sends none.
+    /// The service beside the member that led an entry's term sends its replies,
+    /// while that member leads the term still, and the service beside every other
+    /// member, which runs the same code, sends none.
     /// Nothing is opened here: the first poll opens the member's log, once the driver
     /// hosts a member that has one.
     ///

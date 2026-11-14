@@ -1114,9 +1114,9 @@ session open and close events, cluster actions and new leadership term events in
 order, each entry once, with the cluster's time as each entry's timestamp field and
 from no clock of its own, so that every member's service reaches the same state at
 the same position, the replay check of invariant 1 (`CLAUDE.md`). The service beside
-the member that led an entry's term replies to a session, with a session message on
-the egress stream; the service beside every other member reaches the same state and
-sends nothing ("Replies", below). A service with a version
+the member that led an entry's term replies to a session, while that member leads
+the term still, with a session message on the egress stream; the service beside
+every other member reaches the same state and sends nothing ("Replies", below). A service with a version
 writes it as the app version field a leader announces, and a member whose service's
 major version differs from the one new leadership term carries fails its election
 from the state that read it, counted in `cluster.app_version_mismatches`, and begins

@@ -7,7 +7,7 @@
   (ADR 0052, feature 5). Amends `spec/cluster.md`, whose version stays 0, since no
   field of a message changes: "The service" gains "Replies", which says which
   service answers an entry, what it does not answer, and what becomes of a reply a
-  client does not take; a member's rules of order for the service become four;
+  client does not take; a member's rules of order for the service become five;
   "Counters" gains `cluster.replies_dropped`; "Values" gives the keepalive interval
   its second use.
 
@@ -265,8 +265,8 @@ allocated, for a session message or its reply.
 
 - `crates/cavalry-client/tests/cluster_service.rs`, against a driver in the test's
   process with the member played by a client of that driver: a recording of a
-  stream it appends the log's entries to, its four counters and its file of
-  recordings. A service beside the member that leads term 0 hands over the term's
+  stream it appends the log's entries to, its five counters, in a consensus
+  module's order, and its file of recordings. A service beside the member that leads term 0 hands over the term's
   first entry, a session's open and its message with their positions, term and
   times, reads nothing above the commit position, and its reply reaches the
   session's client with the entry's term and time; in term 1, which another member
