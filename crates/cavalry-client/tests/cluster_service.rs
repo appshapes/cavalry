@@ -19,8 +19,8 @@ use cavalry_proto::cluster::{
     MAX_LOG_RECORDINGS_LENGTH, MAX_SESSIONS, Message, Stream, TimeUnit, write_log_recordings,
 };
 use cavalry_shm::counters::generated::{
-    CLUSTER_APPEND_POSITION, CLUSTER_COMMIT_POSITION, CLUSTER_LEADERSHIP_TERM_ID,
-    CLUSTER_LOG_RECORDING_ID, CLUSTER_REPLIES_DROPPED,
+    CLUSTER_APPEND_POSITION, CLUSTER_COMMIT_POSITION, CLUSTER_LEADER_MEMBER_ID,
+    CLUSTER_LEADERSHIP_TERM_ID, CLUSTER_LOG_RECORDING_ID, CLUSTER_REPLIES_DROPPED,
 };
 
 // This test's ports, from the one file that says how they are taken and why, which is
@@ -87,6 +87,8 @@ struct Member {
     /// How many entries were appended.
     entries: i64,
     leadership_term_id: Counter,
+    /// `cluster.leader_member_id`: the member this one leads as or follows.
+    leader_member_id: Counter,
     append_position: Counter,
     log_recording_id: Counter,
     commit_position: Counter,
@@ -97,8 +99,9 @@ struct Member {
 
 impl Member {
     /// A driver and a member on it with an empty log that it names no recording of
-    /// yet. Its counters are added in a consensus module's order: the term and the
-    /// append position, then the recording's id, holding −1, then the commit position.
+    /// yet. Its counters are added in a consensus module's order: the term, the id of
+    /// the member it leads as or follows, holding −1, and the append position, then
+    /// the recording's id, holding −1, then the commit position.
     fn start(test: &str) -> Self {
         let test = TestDir::new(test);
         let dir = test.path().join("driver");
@@ -117,6 +120,7 @@ impl Member {
             "cluster.leadership_term_id",
             -1,
         );
+        let leader_member_id = add(CLUSTER_LEADER_MEMBER_ID.0, "cluster.leader_member_id", -1);
         let append_position = add(CLUSTER_APPEND_POSITION.0, "cluster.append_position", 0);
         let log_recording_id = add(CLUSTER_LOG_RECORDING_ID.0, "cluster.log_recording_id", -1);
         let commit_position = add(CLUSTER_COMMIT_POSITION.0, "cluster.commit_position", 0);
@@ -133,6 +137,7 @@ impl Member {
             end: 0,
             entries: 0,
             leadership_term_id,
+            leader_member_id,
             append_position,
             log_recording_id,
             commit_position,
@@ -171,9 +176,11 @@ impl Member {
         (begins, time)
     }
 
-    /// The first entry of `term`, which `leader` leads, and the member's term stored.
+    /// The first entry of `term`, which `leader` leads, with the member's term stored
+    /// and then its leader, in a consensus module's order.
     fn term(&mut self, term: i64, leader: i32) -> (i64, i64) {
         self.leadership_term_id.store_release(term).expect("stores");
+        self.leads_as_or_follows(leader);
         let entry = encode(&Message::NewLeadershipTermEvent {
             leadership_term_id: term,
             log_position: self.end,
@@ -185,6 +192,14 @@ impl Member {
             app_version: 0,
         });
         self.append_bytes(&entry)
+    }
+
+    /// Stores the member this one leads as or follows: −1 while it has none, which is
+    /// what a member that holds an election stores.
+    fn leads_as_or_follows(&self, leader: i32) {
+        self.leader_member_id
+            .store_release(i64::from(leader))
+            .expect("stores");
     }
 
     /// A session open event of `term` for `session`, with its response channel.
@@ -1126,6 +1141,93 @@ fn a_reply_too_long_for_a_frame_takes_no_place_among_its_sessions_replies() {
     egress.close().expect("the subscription closes");
     late_egress.close().expect("the late subscription closes");
     session.close().expect("the sessions' client closes");
+    client.close().expect("the service's client closes");
+    member.close();
+}
+
+/// A service answers an entry of a term only while its member says it leads that term
+/// still (`spec/cluster.md`, "Replies"). The member leads term 0, and its service
+/// answers. The member then holds an election, its `cluster.leader_member_id` at −1:
+/// an entry of term 0 that it commits is taken and not answered. The member then
+/// stores term 1, which it leads too: an entry of term 0 is not answered either,
+/// though its reply would go to the same client from the same service. Term 1's own
+/// entries are answered. The session's client reads the first reply and the last,
+/// and nothing between, and no reply is counted as dropped.
+#[test]
+fn a_service_answers_a_terms_entries_only_while_its_member_says_it_leads_the_term() {
+    let mut member = Member::start("leads");
+    let mut client = Cavalry::connect_to(&member.dir).expect("the service's client");
+    let mut service = client.cluster_service();
+    let mut seen = Seen::default();
+    member.name();
+    open_log(&mut service, &mut client, &mut seen);
+
+    let channel = response_channel();
+    let mut session = Cavalry::connect_to(&member.dir).expect("the session's client");
+    let mut egress = session
+        .add_subscription(&channel, EGRESS_STREAM_ID)
+        .expect("the response channel");
+    member.term(0, MEMBER);
+    member.open(0, 0, &channel);
+    let one = member.message(0, 0, b"one");
+    member.commit();
+    poll_to_end(&mut service, &mut client, &mut seen, &member);
+    assert_eq!(seen.replies, [(one.0, Reply::Sent)]);
+    assert!(service.answers());
+
+    // The member holds an election: it leads no term, and term 0 is still its term.
+    member.leads_as_or_follows(-1);
+    let two = member.message(0, 0, b"two");
+    member.commit();
+    poll_to_end(&mut service, &mut client, &mut seen, &member);
+    assert_eq!(seen.replies[1..], [(two.0, Reply::NotAnswering)]);
+    assert!(!service.answers(), "it gave its publications back");
+
+    // The member leads again, in term 1, whose first entry it has not appended yet.
+    // The term is stored before the leader, as a consensus module stores them.
+    member.leadership_term_id.store_release(1).expect("stores");
+    member.leads_as_or_follows(MEMBER);
+    let three = member.message(0, 0, b"three");
+    member.commit();
+    poll_to_end(&mut service, &mut client, &mut seen, &member);
+    assert_eq!(seen.replies[2..], [(three.0, Reply::NotAnswering)]);
+    assert!(!service.answers());
+
+    // Term 1's own entries it answers.
+    member.term(1, MEMBER);
+    let four = member.message(1, 0, b"four");
+    member.commit();
+    poll_to_end(&mut service, &mut client, &mut seen, &member);
+    assert_eq!(seen.replies[3..], [(four.0, Reply::Sent)]);
+    assert!(service.answers());
+
+    // The client reads the two replies that were sent, and in 300 ms more no other.
+    let mut replies = Read::new();
+    wait("the client reads the two replies", || {
+        read(&mut egress, &mut replies);
+        replies.len() >= 2
+    });
+    let quiet = Instant::now();
+    while quiet.elapsed() < Duration::from_millis(300) {
+        read(&mut egress, &mut replies);
+        std::thread::sleep(Duration::from_millis(1));
+    }
+    assert_eq!(
+        replies,
+        [
+            (0, 0, one.1, b"one".to_vec()),
+            (1, 0, four.1, b"four".to_vec())
+        ]
+    );
+    assert_eq!(
+        dropped(&client),
+        Some(0),
+        "an entry that is not this service's to answer is not a drop"
+    );
+
+    service.close(&mut client).expect("the service closes");
+    egress.close().expect("the subscription closes");
+    session.close().expect("the session's client closes");
     client.close().expect("the service's client closes");
     member.close();
 }

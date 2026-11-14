@@ -12,14 +12,18 @@
 //! follower runs the same code on the same entries, reaches the same state and sends
 //! nothing.
 
+use std::sync::Arc;
+
 use cavalry_proto::cluster::{
     CloseReason, EGRESS_STREAM_ID, KEEPALIVE_INTERVAL_NS, MAX_SESSIONS, Message, Stream,
 };
 use cavalry_proto::frame::{self, DataFrameHeader, Flags};
 use cavalry_proto::udp::MTU_LENGTH_DEFAULT;
 use cavalry_shm::counters::generated::{
-    CLUSTER_APPEND_POSITION, CLUSTER_LEADERSHIP_TERM_ID, CLUSTER_REPLIES_DROPPED,
+    CLUSTER_APPEND_POSITION, CLUSTER_LEADER_MEMBER_ID, CLUSTER_LEADERSHIP_TERM_ID,
+    CLUSTER_REPLIES_DROPPED,
 };
+use cavalry_shm::counters::{CounterId, CountersReader};
 use cavalry_shm::log::Action;
 
 use crate::client::Cavalry;
@@ -112,10 +116,14 @@ pub enum Reply {
     /// makes its replies again, and the service does not offer a session one it has
     /// taken already.
     Sent,
-    /// This service does not answer the entry, and nothing is lost by it: its member
-    /// did not lead the entry's term, so the service beside the member that did
-    /// answers; or the entry is one the member held before this service first opened
-    /// its log, which a service before this one answered. There is nothing to do.
+    /// This service does not answer the entry. Its member did not lead the entry's
+    /// term, so the service beside the member that did answers. Or the entry is one
+    /// the member held before this service first opened its log, which a service
+    /// before this one answered. Or its member led the term and does not lead it
+    /// now: it holds an election, follows another member or leads a later term.
+    /// Then no service answers the entry, so that no reply of a term comes after the
+    /// next leader's service has answered, and the client learns by its own wait.
+    /// There is nothing to do.
     NotAnswering,
     /// The session's response channel did not take the reply now: the client's
     /// stream is not connected yet, or it is back-pressured. Return
@@ -125,7 +133,7 @@ pub enum Reply {
     /// member: those the earlier handling settled are not offered again, so no
     /// session is sent a reply twice, and a reply to this session that comes after
     /// the refused one in the same handling is `Retry` too and is not offered, so
-    /// that a session's replies keep their order. A service never waits here for
+    /// that this service's replies to a session keep their order. A service never waits here for
     /// longer than the keepalive interval, 500 ms, for one session: after that the
     /// answer is [`Reply::Dropped`]. A handler that goes on past a `Retry` gives the
     /// reply up, and the wait ends with the entry.
@@ -272,13 +280,21 @@ impl Session {
     }
 }
 
-/// What the service found of its member when it first opened the member's log.
+/// What the service found of its member when it first opened the member's log, and
+/// where it reads what the member says of itself now.
 struct Member {
     id: i32,
+    key: MemberKey,
+    counters: Arc<CountersReader>,
     /// The member's leadership term then. An entry of a term below it is history.
     leadership_term_id: i64,
     /// The member's append position then. An entry of that term below it is history.
     append_position: i64,
+    /// The records `cluster.leader_member_id` and `cluster.leadership_term_id` were
+    /// last found in: `None` until the first load, and after a load that found the
+    /// record no longer the member's.
+    leader_record: Option<u32>,
+    term_record: Option<u32>,
     /// `cluster.replies_dropped`, which the service adds.
     dropped: Counter,
 }
@@ -289,17 +305,13 @@ impl Member {
     /// read: the member closed.
     fn read(client: &mut Cavalry, key: MemberKey) -> Result<Option<Self>, ClientError> {
         let counters = client.shared_counters();
-        // A value counts only from a record that is the member's after the load, as
-        // the commit position does (`spec/cluster.md`, "The service").
-        let load = |type_id| {
-            let (id, _) = find(&counters, type_id, Some(key))?;
-            let value = counters.value(id).ok()?.load_acquire();
-            is_members(&counters, id, type_id, key).then_some(value)
-        };
-        let Some(leadership_term_id) = load(CLUSTER_LEADERSHIP_TERM_ID) else {
+        let mut term_record = None;
+        let Some(leadership_term_id) =
+            load(&counters, &mut term_record, CLUSTER_LEADERSHIP_TERM_ID, key)
+        else {
             return Ok(None);
         };
-        let Some(append_position) = load(CLUSTER_APPEND_POSITION) else {
+        let Some(append_position) = load(&counters, &mut None, CLUSTER_APPEND_POSITION, key) else {
             return Ok(None);
         };
         let id = i32::from_le_bytes(key);
@@ -310,11 +322,71 @@ impl Member {
         )?;
         Ok(Some(Self {
             id,
+            key,
+            counters,
             leadership_term_id,
             append_position,
+            leader_record: None,
+            term_record,
             dropped,
         }))
     }
+
+    /// Whether the member says, now, that it leads `leadership_term_id`: its
+    /// `cluster.leader_member_id` holds its own id, and then its
+    /// `cluster.leadership_term_id` holds that term (`spec/cluster.md`, "Replies").
+    ///
+    /// The order of the two loads is the reverse of the member's stores. A member
+    /// stores its term before the id of the member it leads as or follows, and both
+    /// before a commit position, in every duty cycle. So a service that has read an
+    /// entry below a commit position it loaded, and then loads the id and then the
+    /// term, never takes a member that leads a later term, or follows in one, for the
+    /// leader of this one: the later term was stored before the id that says so.
+    ///
+    /// Two acquire loads and two reads of a record, with no allocation. A member that
+    /// started again has added its counters anew, so a record that is no longer the
+    /// member's is looked for again, once.
+    fn leads(&mut self, leadership_term_id: i64) -> bool {
+        let leader = load(
+            &self.counters,
+            &mut self.leader_record,
+            CLUSTER_LEADER_MEMBER_ID,
+            self.key,
+        );
+        leader == Some(i64::from(self.id))
+            && load(
+                &self.counters,
+                &mut self.term_record,
+                CLUSTER_LEADERSHIP_TERM_ID,
+                self.key,
+            ) == Some(leadership_term_id)
+    }
+}
+
+/// The value of the counter of type `type_id` of the member whose key is `key`, from
+/// a record that is the member's after the load, as the commit position is read
+/// (`spec/cluster.md`, "The service"). `record` is where the counter was last found.
+/// `None` when the member has no such counter: it closed.
+fn load(
+    counters: &CountersReader,
+    record: &mut Option<u32>,
+    type_id: CounterId,
+    key: MemberKey,
+) -> Option<i64> {
+    let read = |id: u32| {
+        let value = counters.value(id).ok()?.load_acquire();
+        is_members(counters, id, type_id, key).then_some(value)
+    };
+    // At the record it was last found in, when there is one.
+    if let Some(value) = record.and_then(read) {
+        return Some(value);
+    }
+    // And where it is now: a member that started again added its counters anew.
+    *record = None;
+    let (id, _) = find(counters, type_id, Some(key))?;
+    let value = read(id)?;
+    *record = Some(id);
+    Some(value)
 }
 
 /// What a service's handler answers a session with: handed to the handler beside each
@@ -483,7 +555,10 @@ impl ClusterService {
     ///
     /// Which entries a service answers. An entry is answered by one service: the one
     /// beside the member that led the entry's term, which the term's new leadership
-    /// term event names. That service answers it unless the entry is history: of a
+    /// term event names. That service answers it while its member's counters say the
+    /// member leads the term still, loaded as the entry is read: a member that holds
+    /// an election, follows another or leads a later term has a service that sends
+    /// nothing for the earlier term's entries. And it answers it unless the entry is history: of a
     /// term below its member's leadership term when the service first opened the
     /// member's log, or of that term and below the member's append position then. So
     /// a service that starts again reads its member's log from the start, applies
@@ -497,7 +572,8 @@ impl ClusterService {
     /// response channel, and from the first it does not, none. Those are commands to
     /// the driver: at a session's opening, where a term's leader changes, and at a
     /// recording's end. Nothing is allocated, and no command is sent, for a session
-    /// message.
+    /// message. An entry the service would answer costs two loads of the member's
+    /// counters.
     pub fn poll<F>(
         &mut self,
         client: &mut Cavalry,
@@ -536,7 +612,7 @@ impl ClusterService {
             sessions,
             ..
         } = self;
-        let (Some(log), Some(member)) = (log.as_mut(), member.as_ref()) else {
+        let (Some(log), Some(member)) = (log.as_mut(), member.as_mut()) else {
             return Ok(0);
         };
         let mut failure: Option<ClusterError> = None;
@@ -646,7 +722,14 @@ impl ClusterService {
                 let history = leadership_term_id < member.leadership_term_id
                     || (leadership_term_id == member.leadership_term_id
                         && position < member.append_position);
-                let answers = !history && *term_leader == (leadership_term_id, member.id);
+                // And only while the member says it leads the term still: a member
+                // that has stopped leading it, or has joined a later term, has a
+                // service that would answer late, after the next leader's service
+                // answered later entries. Loaded here, after the commit position
+                // that let this entry be read.
+                let answers = !history
+                    && *term_leader == (leadership_term_id, member.id)
+                    && member.leads(leadership_term_id);
                 if answers != *answering {
                     for session in sessions.iter_mut().filter(|session| session.open) {
                         if !answers {

@@ -133,11 +133,12 @@ The client API implementation, re-exported by the `cavalry` crate. Data plane.
   cluster of another protocol version, a members string that fails a check, or no
   answer in 20 s. The connect takes no session message from the response channel: a
   reply that a service sent the session before the leader's answer arrived stays
-  there, and the session's first `poll` hands it over (ADR 0118).
+  there, and the session's polls hand it over (ADR 0118).
   `ClusterSession::offer(message)` sends the leader a message of one
   frame, 1,344 bytes at most on the default MTU, with back pressure returned as
   `Offer`. `ClusterSession::poll(handler, fragment_limit)` hands over the cluster's
-  replies, each with the cluster's time, and is the session's duty cycle: it sends a
+  replies, each with the cluster's time, in the order one service sent them, and
+  is the session's duty cycle: it sends a
   keepalive when 500 ms have passed since the session last sent anything, turns the
   session to a new leader when the cluster elects one, and closes it when the cluster
   says so, after which `closed()` gives the reason. A session whose leader is lost,
@@ -160,7 +161,14 @@ The client API implementation, re-exported by the `cavalry` crate. Data plane.
   bytes at most: any session that is open at the entry, which a session is from its
   own open event to its own close event, both included. Every member's service runs the same handler on the same entries
   and one of them sends: the service beside the member that led the entry's term,
-  which the log names. The others are answered `Reply::NotAnswering`, and so is a
+  which the log names, and only while that member's counters say it leads the term
+  still. A member that holds an election, follows another or leads a later term
+  has a service that sends nothing for the earlier term's entries, so no reply of
+  a term comes minutes after the next leader's service has answered; the replies
+  to the entries a leader's service had not read at the change are lost, and a
+  client sends again. A session's replies are in order from one service, and there
+  is no order between the services of two terms' leaders (ADR 0118). The others
+  are answered `Reply::NotAnswering`, and so is a
   service for the entries its member held before the service first read its log, so
   that a service that starts again answers no client twice. A reply the client's
   channel does not take is `Reply::Retry`: the handler returns `Action::Abort` and

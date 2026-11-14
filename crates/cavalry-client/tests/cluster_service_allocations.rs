@@ -17,8 +17,8 @@ use cavalry_proto::cluster::{
     TimeUnit, write_log_recordings,
 };
 use cavalry_shm::counters::generated::{
-    CLUSTER_APPEND_POSITION, CLUSTER_COMMIT_POSITION, CLUSTER_LEADERSHIP_TERM_ID,
-    CLUSTER_LOG_RECORDING_ID,
+    CLUSTER_APPEND_POSITION, CLUSTER_COMMIT_POSITION, CLUSTER_LEADER_MEMBER_ID,
+    CLUSTER_LEADERSHIP_TERM_ID, CLUSTER_LOG_RECORDING_ID,
 };
 use stats_alloc::{INSTRUMENTED_SYSTEM, Region, StatsAlloc};
 
@@ -155,6 +155,11 @@ fn a_service_allocates_nothing_per_entry_or_reply() {
         CLUSTER_LEADERSHIP_TERM_ID.0,
         "cluster.leadership_term_id",
         0,
+    );
+    let _leader = add(
+        CLUSTER_LEADER_MEMBER_ID.0,
+        "cluster.leader_member_id",
+        i64::from(MEMBER),
     );
     let append_position = add(CLUSTER_APPEND_POSITION.0, "cluster.append_position", 0);
     let log_recording_id = add(CLUSTER_LOG_RECORDING_ID.0, "cluster.log_recording_id", -1);

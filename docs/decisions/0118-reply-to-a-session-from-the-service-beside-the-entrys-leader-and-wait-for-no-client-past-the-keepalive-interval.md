@@ -76,11 +76,32 @@ at most, as a member does (ADR 0115). A reply is one frame, 1,344 bytes of paylo
 at most.
 
 **One service answers an entry: the service beside the member that led the entry's
-term.** The term's new leadership term event, its first entry, names that member,
-and the service compares it with the member id its member's counters are keyed by.
-The rule is read from the log, so it is the same wherever and whenever the entry is
-read, and no two services answer one entry. The service beside every other member is
-answered `Reply::NotAnswering` and sends nothing.
+term, and only while that member leads the term still.** The term's new leadership
+term event, its first entry, names that member, and the service compares it with
+the member id its member's counters are keyed by. Which service may answer is read
+from the log, so it is the same wherever and whenever the entry is read, and no two
+services answer one entry. The service beside every other member is answered
+`Reply::NotAnswering` and sends nothing.
+
+The service beside that member answers the entry when its member says, as the
+service reads the entry, that it leads the term: the member's
+`cluster.leader_member_id` holds the member's own id, and then its
+`cluster.leadership_term_id` holds the entry's term. A member that holds an
+election has no leader and stores −1. One that follows stores its leader's id. One
+that leads a later term stores that term. The service beside each is answered
+`NotAnswering` for the earlier term's entries. Without this, a member that was cut
+off while it led, and came back to follow, had a service that answered its old
+term's last entries when it came to read them. That could be minutes after the next
+leader's service had answered later entries, so a client read the later answer
+first. The sixth review of this change found it.
+
+The two loads are in the reverse order of the member's stores, and come after the
+commit position that let the service read the entry. A member stores its term, then
+the id of the member it leads as or follows, and both before a commit position, in
+every duty cycle. That is the fifth rule of order of "The service": the consensus
+module already keeps it, and the page now says it. So a service never takes a
+member that leads a later term, or follows in one, for the leader of the entry's
+term: the member stored that term before the id that says so.
 
 **A service does not answer history.** When it first opens its member's log it loads
 the member's `cluster.leadership_term_id` and then its `cluster.append_position`. An
@@ -107,7 +128,7 @@ counts the replies that the handlings of the entry have settled, sent or dropped
 and answers them as they were without offering them again. Once a reply to a
 session is refused, the replies the same handling makes that session after it are
 `Retry` too and are not offered, so the settled replies are always the first ones
-and a session's replies keep their order. A reply longer than one frame carries is
+and the service's replies to a session keep their order on its publication. A reply longer than one frame carries is
 not one of them: it is `Reply::TooLong`, refused before it is counted in every
 handling alike, so it moves no other reply's place in the count. It rests on what
 the replay check already asks of a handler: the same replies in the same order each
@@ -123,8 +144,8 @@ channel before the ok event does, or beside it, while the client is still in
 `Cavalry::connect_cluster`. The connect reads the response channel with a
 controlled poll (ADR 0114). It ends an image's read at its answer, and it leaves
 where it is a session message, everything behind one on the same image, and
-everything that follows the answer. The session's first poll then hands over each
-session message that carries its session id, as it does every other. A service
+everything that follows the answer. The session's polls then hand over each session
+message that carries its session id, as they do every other. A service
 replies on a publication of its own and never on the member's, so a reply the
 connect leaves holds no session event behind it.
 
@@ -143,6 +164,29 @@ allocated, for a session message or its reply.
   answers them too. And the role now is not the role at the entry: a member that
   restarts and leads again would answer the whole of its log, which it led in terms
   long closed. The log names each term's leader, once and for every reader.
+  The decision reads the member's counters as well, for one question the log cannot
+  answer, whether the member leads the term still, and in an order that the
+  member's stores make safe.
+- **Let the former leader's service answer late, and say that a session's replies
+  have no order across a change of leader.** The review's other way to settle it.
+  Lost: a program reads the answer to the message it sent again before the answer
+  to the one it sent first, minutes apart, and its handler is given nothing to tell
+  them by. Aeron does not do it: its service's offer is refused once the module has
+  told the service that it follows.
+- **The member's term alone,** as the review's example had it. Lost: a member that
+  holds an election keeps its term until it joins another. A leader that has lost
+  its quorum would have a service that answers for as long as the partition lasts.
+  The id of the member it leads as says that it leads no more, within the leader
+  heartbeat timeout.
+- **`cluster.role` beside the term.** Lost: the member stores its role before its
+  term, so a service could load the role of a new term beside the old term. The
+  leader's id is stored after the term, and needs no change to the member.
+- **Go on answering when the same member leads the next term.** Those replies would
+  be in order, one service's on one publication. Lost: the service cannot know it.
+  When it reads the old term's last entries it has not read the next term's first,
+  and the counters say who leads now, not who led each term between. The cost is
+  the replies to the entries a leader's service had not read at the change, which a
+  client sends again for.
 - **History as what lies below the member's commit position when the service
   opens.** The second form. Lost: a member that has just started knows no commit
   position until its election closes, and its counter reads 0 while its log holds
@@ -237,7 +281,13 @@ allocated, for a session message or its reply.
   `TooLong` and one of 1,344 is sent, and neither refusal is counted as a drop; a
   reply to a session at its own open event and one at its own close event are each
   `Sent`, and the client reads them before and after the reply to its message; a
-  timer event is handed over as `Other`; an entry that is not of the page stops the
+  timer event is handed over as `Other`; a service whose member holds an election,
+  its leader's id at −1, is answered `NotAnswering` for an entry of the term it led,
+  and so is one whose member has stored the next term, which it leads too, while
+  that term's own entries are answered: the client reads the two replies that were
+  sent and no other in 300 ms, and nothing is counted as dropped, and with the
+  member's say switched off the same test fails, the first of those entries
+  answered `Sent`; an entry that is not of the page stops the
   service at its position, three polls running. A service holds 10 sessions: an
   eleventh open event opens nothing, and a close gives its place to the next. An
   entry answered with four replies, to a session whose client reads, twice to one
@@ -268,7 +318,8 @@ allocated, for a session message or its reply.
   `ClusterSession` on a fourth driver, in the test's. Nothing of the protocol is
   written by hand. Every service answers a session message with its member's id
   and the message, so a reply says which service sent it. Each member has added its
-  term and its append position before its recording's id. The client's first message
+  term before the id of the member it leads as or follows, and both and its append
+  position before its recording's id. The client's first message
   is taken by all three services at one position, with one term and one time; the
   leader's service is answered `Sent` and the two others `NotAnswering`; the client
   reads one reply, the leader's, with the entry's time, and no second in 300 ms. The
@@ -306,9 +357,10 @@ says so; a reply is answered by one service, so a client need not expect the sam
 reply from two members.
 
 Harder: a reply is not a delivery. It is lost when no service ran beside the
-entry's leader, when the leader was lost before its service read the entry, and
-when the client took nothing for 500 ms, and of the three the client sees only its
-own wait. A reply that reaches a client before its connect returns is not a fourth:
+entry's leader; when the member stopped leading the term before its service read
+the entry, because it was lost, held an election, followed another or went on to
+lead the next term; and when the client took nothing for 500 ms. Of the three the
+client sees only its own wait. A reply that reaches a client before its connect returns is not a fourth:
 the connect leaves it for the session. A program that must have an answer sends again, and its service must
 then treat a message it has applied before as it chooses. A handler that returns
 `Abort` is handed the entry again with everything it did for it, so it replies
@@ -319,12 +371,24 @@ holds a log buffer for each open session, 10 at most. A session message a connec
 leaves unread holds its publication's window as any unread fragment does, for as
 long as the connect lasts, 20 s at most.
 
+A session's replies are in order on one service's publication, and there is no
+order between two services'. A leader that has lost its quorum leads, by its own
+counters, until it holds an election, within the leader heartbeat timeout, 10 s,
+of its quorum's last report, and its service answers what it reads of the term's
+committed entries until then. When the next term's leader is elected and its
+service answers before that, a client can read a reply of the earlier term last.
+A reply carries its term, and a session's handler is given the payload and the
+cluster's time and not the term, so a program cannot tell the two apart yet.
+
 Revisit: when a snapshot is built, for a service that starts from one and for the
 sessions a snapshot carries; when a service must close a session, for a message from
 a service to its member; when a client must know that its message was answered or
 lost, for an event of the leader's that says a reply was dropped; when a reply
 longer than a frame is needed, for reassembly; when `doctor` is to say that a
-leader's service is not running, for a counter of the service's position.
+leader's service is not running, for a counter of the service's position; when the
+session's handler is fixed in the C ABI, for the reply's term as one of its
+arguments, and for a session that hands over no reply of a term below one it has
+read.
 
 ## References
 

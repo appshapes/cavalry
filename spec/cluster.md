@@ -893,14 +893,14 @@ than 280 bytes, the prefix, a host name of 253 bytes, `:` and five digits, is no
 limit` when its sessions, open and connecting, are at the bound ("Values"); otherwise it
 gives the session the next session id, appends a session open event, and once that
 entry is committed sends the session event of code ok with the session id, the
-correlation id and an empty detail. The session is open from then. A service may
+correlation id and an empty detail. The session is open to its client from then. A service may
 reply to the session from its session open event on ("Replies"), on a publication of
 its own, so a session message can reach the client before the ok event does. A
 client keeps a session message it reads before its session event, for the session
 it opens: while it waits for the answer to its connect it takes no session message
 and nothing behind one on the same image, and nothing that follows its answer, and
-the session it opens reads them first and hands over each session message that
-carries its session id (ADR 0118). A session is
+the session it opens reads them in its polls and hands over each session message
+that carries its session id (ADR 0118). A session is
 opened by its committed session open event and closed by its committed session close
 event, on every member that reads them in its own log ("Roles and the election",
 states 6 and 10), the leader among them: the leader that accepted a connect holds the
@@ -989,8 +989,9 @@ it ignores what the client sends for that session, each counted in
 `cluster.ingress_ignored`; and the session stays open on every member until the
 session close event is committed (ADR 0115). A service's replies to a session are
 session messages on the egress stream, on a publication of the service's own, from
-the service beside the member that led the term of the entry it answers and from no
-other ("Replies"). When a term begins, its leader sends a new leader event
+the service beside the member that led the term of the entry it answers, while that
+member leads the term still, and from no other. They are in order from one service,
+and there is no order between the services of two terms' leaders ("Replies"). When a term begins, its leader sends a new leader event
 to every open session with the ingress endpoints, whether or not the leader changed,
 since the clients' messages carry the term and the leader ignores one for another
 term; the client sends its next message, a keepalive first, with the new term to the
@@ -1030,7 +1031,7 @@ path is the same on the leader and on a follower, and a service may start before
 member, with it or after it (ADR 0066). A service reads its own replay's session on
 that stream and reads past any other, which is another service's.
 
-A member keeps four rules of order for the service. It adds `cluster.log_recording_id`
+A member keeps five rules of order for the service. It adds `cluster.log_recording_id`
 and stores −1 in it before it adds `cluster.commit_position`, and a service reads the
 recording's id only of a member whose `cluster.commit_position` it has found: a
 counter holds 0 between its allocation and its first store, and 0 is a recording id.
@@ -1043,7 +1044,13 @@ of its log until it has stored −1 there (ADR 0103). And it adds
 `cluster.log_recording_id`, and in every duty cycle stores each before it stores a
 recording's id, so that a service that has found a member's recording loads a term
 and an append position no older than the naming of that recording ("Replies", below;
-ADR 0118).
+ADR 0118). And it adds `cluster.leader_member_id` before `cluster.log_recording_id`
+too, and in every duty cycle stores its term, then the id of the member it leads as
+or follows, and both before it stores a commit position. So a service that reads an
+entry below a commit position it loaded, and then loads that id and then the term,
+takes no member that leads a later term, or follows in one, for the leader of the
+entry's term: the member stored the later term before the id that says so
+("Replies"; ADR 0118).
 
 The member's log below its live recording is in the recordings that file lists, and
 a service takes each position from one recording by the rule of "The log": the first
@@ -1130,13 +1137,35 @@ frame, a payload of 1,344 bytes at most, and a longer one is refused to the serv
 caller (ADR 0118).
 
 One service answers an entry: the service beside the member that led the entry's
-term. The term's new leadership term event, the term's first entry, names that
-member, and a service compares it with the member id that its member's counters are
-keyed by. So the rule is read from the log, and from no member's role at the moment
-of reading. The service beside every other member reaches the same state and sends
-nothing. A member that has stopped leading a term may still have a service that
-reads the term's last committed entries, and that service answers them: no other
-does.
+term, and only while that member leads the term still. The term's new leadership
+term event, the term's first entry, names that member, and a service compares it
+with the member id that its member's counters are keyed by. So which service may
+answer an entry is read from the log, the same wherever and whenever the entry is
+read. The service beside every other member reaches the same state and sends
+nothing.
+
+The service beside that member answers the entry when its member says, as the
+service reads the entry, that it leads the term: the member's
+`cluster.leader_member_id` holds the member's own id, and then its
+`cluster.leadership_term_id` holds the entry's term. The service loads the two in
+that order, after the commit position that let it read the entry, each from a
+record that is the member's by the test above ("The service", the fifth rule of
+order). A member that holds an election has no leader, one that follows has
+another, and one that leads a later term has that term: the service beside each
+sends nothing for the earlier term's entries, and no other service answers them.
+So the replies to the entries that a leader's service had not read when its member
+stopped leading the term are lost at every change of leader, also when the same
+member leads the next term. A client that needs an answer waits for one no longer
+than it chooses, and sends again.
+
+A session's replies are in order on one service's publication, and there is no
+order between two services' publications. A leader that has lost its quorum leads
+its term, by its own counters, until it holds an election, which is within the
+leader heartbeat timeout of its quorum's last report ("Values"), and its service
+answers what it reads of the term's committed entries until then. When the next
+term's leader is elected and its service answers before that, a client can read a
+reply of the earlier term after a reply of the later one. Each reply carries its
+leadership term id ("The session protocol"), by which the two are told apart.
 
 A service does not answer history. When it first opens its member's log it loads
 the member's `cluster.leadership_term_id` and then its `cluster.append_position`,
@@ -1170,8 +1199,8 @@ offers a reply to its session once, however often it reads the entry. For each
 session it counts the replies that its readings of the entry have settled, sent or
 dropped, which are the first replies the entry makes that session, and it does not
 offer those again. When a reply to a session is refused, the replies that the same
-reading makes that session after it are not offered either, so that a session's
-replies keep their order. A reply that is longer than one frame is refused before
+reading makes that session after it are not offered either, so that the service's
+replies to a session keep their order on its publication. A reply that is longer than one frame is refused before
 it is counted, at every reading, and is not one of those replies. So no session is
 sent a reply twice. The rule rests on what the replay check asks of every service:
 the same replies, in the same order, each time an entry is read.

@@ -385,7 +385,7 @@ impl ClusterSession {
         // publication of its own, and its reply can reach the response channel
         // before the leader's ok event does or beside it: a session message is left
         // where it is, and so is everything that follows the answer. The session's
-        // first poll hands them over (`spec/cluster.md`, "Sessions"; ADR 0118).
+        // polls hand them over (`spec/cluster.md`, "Sessions"; ADR 0118).
         egress
             .controlled_poll(
                 |body: &[u8], header: &DataFrameHeader| {
@@ -507,6 +507,13 @@ impl ClusterSession {
     /// handed to `handler` as its payload and the cluster's time when the leader sent
     /// it, milliseconds since 1970-01-01T00:00:00Z. Returns how many were handed
     /// over, or the [`Fault`] that stopped the read of the response channel.
+    ///
+    /// A service's replies are in the order that service sent them. The service of a
+    /// term's leader stops answering once its member leads the term no more, so
+    /// across a change of leader a reply of the earlier term can follow one of the
+    /// later only while the former leader has not yet learnt that it lost its
+    /// quorum, the leader heartbeat timeout at most (`spec/cluster.md`, "Replies").
+    /// The handler is not given a reply's term.
     ///
     /// This is the session's duty cycle too. A new leader event turns the session to
     /// the new leader with its term, and the next thing sent is a keepalive. A session
