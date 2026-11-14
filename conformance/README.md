@@ -89,10 +89,13 @@ refuses and which frees nothing, leaves the client open: it still reaches the AB
 the service polls it again. Its report's longest poll is how long a poll held its
 goroutine.
 
-The JVM round is the Python round through `clients/jvm`, with one edge of its own.
+The JVM round is the Python round through `clients/jvm`, with two edges of its own.
 Every message it offers and every reply it sends is a segment over a `byte[]`, which
 a cluster session's offer and a cluster service's reply take as a publication's offer
-does. Its report's longest poll is how long a poll held its thread.
+does. And the client's close from inside a service's handler, which the ABI refuses
+and which frees nothing, leaves the client open, as in the Go round: the service polls
+it again, and the round closes it at its end. Its report's longest poll is how long a
+poll held its thread.
 
 The Python runner is the shape the Node, Go, JVM and .NET runners copy (ADR 0046,
 cards 206 to 209): a package of another ABI version refused when it loads the library; the C

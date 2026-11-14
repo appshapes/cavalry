@@ -2618,6 +2618,33 @@ class JvmPackage(unittest.TestCase):
         self.assertIn(".bindTo(this)", subscription)
         self.assertEqual(subscription.count("Abi.cavalry_subscription_poll.invokeExact("), 2)  # the refused nested poll and the poll
 
+    def test_a_jvm_client_close_the_abi_refuses_keeps_the_client_open(self):
+        """A cluster service's poll holds its client, so the ABI refuses the client's close
+        from inside the service's handler with ERR_POLLING and frees nothing (spec/c-abi.md,
+        "Calls during a claim or a poll"). `Client.close()` then throws and keeps the
+        handle, as the closes of a subscription, a committed log, a cluster session and a
+        cluster service do, so the JVM client never forgets a client the ABI keeps open
+        (clients/jvm/README.md, "What it must never do"). Every other failure still
+        forgets the handle, since the ABI's close frees it whatever it returns."""
+        code = gen_jvm.write_jvm(self.header)[self.BASE + "Client.java"]
+        close = code.split("    public synchronized void close() {\n", 1)[1].split("\n    }\n", 1)[0]
+        called = close.index("result = (int) Abi.cavalry_close.invokeExact(handle);")
+        read = close.index('CavalryException error = Abi.lastError("cavalry_close");')
+        refused = close.index("if (error.code() == Abi.ERR_POLLING) {\n                throw error;\n            }\n")
+        forgotten = close.index("            handle = MemorySegment.NULL;\n            throw error;\n        }\n")
+        self.assertLess(called, read)
+        self.assertLess(read, refused)
+        self.assertLess(refused, forgotten)
+        self.assertTrue(close.endswith("        handle = MemorySegment.NULL;"), close)
+        self.assertEqual(close.count("handle = MemorySegment.NULL;"), 2)
+        # The handle is the one the ABI is called with: it is not forgotten before the call.
+        self.assertNotIn("closing", close)
+        doc = code.split("    public synchronized void close() {\n", 1)[0].rsplit("\n\n", 1)[1]
+        self.assertIn("It then throws the {@link CavalryException} and keeps the handle", doc)
+        with open(os.path.join(gen.ROOT, "clients", "jvm", "README.md"), encoding="utf-8") as f:
+            readme = f.read()
+        self.assertIn("`client.close()`", readme.split("- Never read a refusal as an answer.", 1)[1].split("- Never hand the ABI", 1)[0])
+
     def test_a_publications_close_zeroes_the_claim_struct_before_the_abi_frees_its_handle(self):
         """The claim struct's `publication` field names the handle the close frees, and the
         ABI reads that field on a commit, an abort or a reserved value, so `close()` zeroes
