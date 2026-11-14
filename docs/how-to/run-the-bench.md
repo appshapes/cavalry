@@ -30,7 +30,10 @@ shared runner is
    It builds `cavalry-bench` in release, removes what bench processes that were killed
    left behind, creates a log buffer and a counters file under
    `/dev/shm` on Linux and the system's temporary directory elsewhere, and runs the
-   benchmarks for one million messages each after a warm-up; CI runs five million. The
+   benchmarks for one million messages each after a warm-up; CI runs five million. A
+   shared-memory message benchmark runs its messages twice in one loop, first with its
+   subscriber at the publisher's tail and then with it held behind the publisher; step
+   2 says which row is read in which part. The
    warm-up is one rotation through all three terms, 196,608 messages for the default
    body and term, so that every page of the log is mapped before a sample is taken: a
    first touch of a page costs microseconds, and 1,500 of them in a 5,000,000-message
@@ -92,8 +95,9 @@ shared runner is
    | Benchmark | What one sample is |
    | --- | --- |
    | `timer` | Two readings of the harness's clock back to back, the time stamp counter calibrated once ([ADR 0028](../decisions/0028-stamp-bench-samples-with-the-time-stamp-counter.md)): the harness's own overhead, present in every other row, about 20 ns on the bench host and 0 or 42 ns on Apple silicon, whose counter ticks at 24 MHz. |
-   | `claim_commit_<body>` | The publisher's `try_claim`, writing the body, and `commit`, for a body of that many bytes. |
-   | `one_way_<body>` | From the publisher's timestamp before its claim to the subscriber's handler receiving the frame, across two threads. |
+   | `claim_commit_<body>` | The publisher's `try_claim`, writing the body, and `commit`, for a body of that many bytes, read in the second part of the benchmark's loop, with the subscriber held behind the publisher (below the table). |
+   | `one_way_<body>` | From the publisher's timestamp before its claim to the subscriber's handler receiving the frame, across two threads, read in the first part of the loop, with the subscriber at the publisher's tail. |
+   | `claim_commit_<body>_at_tail` | The claim row beside it, read in the first part of the loop, with the subscriber at the publisher's tail. Every shared-memory message benchmark has one, named for it: `claim_commit_<body>_client_at_tail`, and the same for `exclusive`, `concurrent`, `recorded`, `recorded_purging` and `ffi`. Reported and never gated ([ADR 0127](../decisions/0127-measure-a-claim-row-with-its-subscriber-held-behind-the-publisher.md)). |
    | `claim_commit_<body>_client` | The same claim, write and commit through the public API: `Publication::try_claim` against a real driver in the harness's process, whose conductor loads the publisher's tail at most once every two milliseconds on its duty cycle (ADR 0022, ADR 0032), as a user's does. |
    | `one_way_<body>_client` | From the publisher's timestamp to `Subscription::poll`'s handler, through a real driver and the client's conductor hand-off; the path a user's message takes (ADR 0021). |
    | `claim_commit_<body>_recorded` | The client row's claim, write and commit while the driver's recorder writes the same stream to the durable log beside the bench directory (ADR 0025): what recording costs the publisher, whose limit respects the recorder's position. The run fails unless the recording reached the publisher's final position. |
@@ -111,6 +115,35 @@ shared runner is
    | `slot_padding_<spacing>_load` | A load of one word while another thread stores to a word that many bytes away: 0 shares the cache line, 64 shares the 128-byte pair, 128 shares nothing (ADR 0011). |
    | `slot_padding_<spacing>_store` | The other side of the same pair: one store while the other thread loads. |
    | `record_block_<body>` | The recorder's block path: one scan of a 1 MiB block of committed frames (`TermReader::block`) and its one positional write into a segment file under the bench directory (`RecordingWriter::write`), per block, under the counting allocator (ADR 0025). It runs last, so its writes reach no other row. Its change against the baseline is reported, not gated: it is not a row a message passes through (ADR 0017). The bench host's baseline for it was first recorded at 7f62673 (card 109). |
+
+   A shared-memory message benchmark is every message benchmark but the UDP ones: the
+   two log types, `client`, `recorded`, `recorded_purging` and `ffi`. After its warm-up
+   it runs `--messages` twice in one loop
+   ([ADR 0127](../decisions/0127-measure-a-claim-row-with-its-subscriber-held-behind-the-publisher.md)).
+   In the first part its subscriber polls at the publisher's tail, the position the
+   publisher writes next. The `one_way` row is read there, since a delivery is timed
+   from its claim, and so is the `_at_tail` claim row. In the second part the
+   subscriber is held behind the publisher: after a poll that returned fewer than
+   1,024 fragments it stays away from the log for as long as the publisher has been
+   taking to claim 64 messages, by its own count of what it drained and its own
+   clock. The `claim_commit` row is read there. A subscriber at the tail reads the
+   cache line the publisher writes next, and the publisher then waits to have that
+   line back. At the tail the subscriber polls several times for each claim, and how
+   many claims pay that wait follows how the two threads are timed against each
+   other. A build's layout, a process's address space or a step inside one process
+   moved that share across the gate's percentiles with no instruction changed: on
+   `grip` two trees with the same instructions on the claim path read
+   `claim_commit_32_client` at 117 to 139 ns at p99.99 by the build and the process
+   (work item 316). A held subscriber comes to the tail once for each stay, the same
+   way each time, so about one claim in 80 meets it, on any host: the publisher also
+   claims while the subscriber drains. That is over a hundred times the gate's one in
+   ten thousand, so a `claim_commit` row's p99.99 is a claim that met the reader, in
+   every run. The `_at_tail` row keeps the claim with a reader at the
+   tail in the table. The `short polls of the held subscriber` line under the table
+   gives, for each such benchmark, the fewest and the most meetings in any run, and
+   the result carries them as `held_polls`: about `--messages` ÷ 80, which was 59,000
+   to 70,000 for CI's 5,000,000 on the two bench hosts. A `claim_commit` row's `per second` is the second
+   part's rate, and the `one_way` and `_at_tail` rows' is the first part's.
 
    The last column, present with `--repeat`, lists every run's p99.99 for the row. The
    `producer position loads` line under the table counts the loads of the producer
@@ -739,6 +772,22 @@ shared runner is
   join.
 - `reported` beside a `timer` or `slot_padding` row that moved: expected; those rows
   flip between two adjacent clock steps from run to run and never fail the gate.
+- `reported` beside a `claim_commit_<body>_<name>_at_tail` row that moved: expected. The
+  row is a claim with the harness's subscriber at the publisher's tail, and its tail
+  moves by a tenth or more with a build's layout and a process's address space (step
+  2). The gate reads the `claim_commit` row beside it, where the subscriber is held
+  behind
+  ([ADR 0127](../decisions/0127-measure-a-claim-row-with-its-subscriber-held-behind-the-publisher.md)).
+- A benchmark's `short polls of the held subscriber` far from `--messages` ÷ 80: the
+  share of that `claim_commit` row's samples that met the reader has moved, and with
+  it what the row's p99.99 is. A count several times too low is a subscriber that
+  stayed away longer than 64 messages: the publisher stopped for a part of the loop
+  while the subscriber kept its stays, so look at `publisher retries` for back
+  pressure and at the host's journal for the bench's window. A count several times
+  too high is a held subscriber that leaves the publisher fewer than 64 messages: it
+  leaves a quarter of the publication window at the most, which is under 64 only
+  when `--term-length` and `--body` put fewer than 256 frames in half a term. Run the
+  default term.
 - `within a step` beside a gated row: the row is over 5 percent above the baseline's
   slowest run but by no more than one step of the clock, which on `bench` is
   10 ns of a 160 ns row; the gate cannot tell that from an unchanged commit and passes
