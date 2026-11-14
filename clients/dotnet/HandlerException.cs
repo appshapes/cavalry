@@ -7,12 +7,20 @@ namespace Cavalry;
 
 /// <summary>
 /// The handler threw during a poll, a subscription's fragment handler or, when
-/// <see cref="CommittedLog"/> is true, a committed log's entry handler:
+/// <see cref="CommittedLog"/> is true, a committed log's entry handler, or, when
+/// <see cref="Cluster"/> is "session", a cluster session's reply handler:
 /// <see cref="Fragments"/> is the count the poll returned once the ABI was done, of
-/// fragments or of entries, or -1 when the poll also stopped on a fault, which the
+/// fragments, of entries or of replies, or -1 when the poll also stopped on a fault, which the
 /// <c>GetFault()</c> of the object that was polled reads until its next poll;
 /// <see cref="Raised"/> how many handler calls threw, and
 /// <see cref="Exception.InnerException"/> the first exception, kept as thrown.
+/// A cluster service's entry handler, <see cref="Cluster"/> "service", is the one whose
+/// failure stops its poll. The entry whose handler threw, or returned what is no action, was
+/// aborted: it is not taken, the poll ended at it, and the next poll hands it over again.
+/// <see cref="Fragments"/> is then the count of entries the poll took before that entry,
+/// <see cref="Raised"/> is 1, and <see cref="Exception.InnerException"/> is what the handler
+/// threw, or a <see cref="CavalryException"/> with <see cref="Abi.ERR_CLUSTER_ACTION"/> and
+/// the ABI's message for the value the handler returned.
 /// </summary>
 public sealed class HandlerException : Exception
 {
@@ -20,29 +28,56 @@ public sealed class HandlerException : Exception
     public int Raised { get; }
     public bool CommittedLog { get; }
 
-    public HandlerException(int fragments, int raised, Exception cause, bool committedLog = false)
-        : base(Describe(fragments, raised, cause, committedLog), cause)
+    /// <summary>"session" when the poll was a cluster session's, "service" when it was a
+    /// cluster service's, whose entry was aborted and comes again, and null for a
+    /// subscription's and a committed log's.</summary>
+    public string? Cluster { get; }
+
+    public HandlerException(int fragments, int raised, Exception cause, bool committedLog = false, string? cluster = null)
+        : base(Describe(fragments, raised, cause, committedLog, cluster), cause)
     {
         Fragments = fragments;
         Raised = raised;
         CommittedLog = committedLog;
+        Cluster = cluster;
     }
 
     /// <summary>The message: what the handler threw on, the fragments of a subscription's
-    /// poll or the entries of a committed log's, and what to do. The fault of a committed
+    /// poll, the entries of a committed log's or the replies of a cluster session's, and
+    /// what to do. The fault of a committed
     /// log's own image is reported by one poll (clients/dotnet/README.md, "The committed
-    /// log"), so its message names the log's own <c>GetFault()</c>.</summary>
-    private static string Describe(int fragments, int raised, Exception cause, bool committedLog)
+    /// log"), so its message names the log's own <c>GetFault()</c>. A cluster service's
+    /// says that its entry was aborted and comes again (clients/dotnet/README.md, "The
+    /// cluster service").</summary>
+    private static string Describe(int fragments, int raised, Exception cause, bool committedLog, string? cluster)
     {
-        string one = committedLog ? "entry" : "fragment";
-        string many = committedLog ? "entries" : "fragments";
+        if (cluster == "service")
+        {
+            string took = fragments < 0
+                ? "in a poll that also stopped on a fault, which this ClusterService's GetFault() reads until its next poll"
+                : "after the " + fragments + " " + (fragments == 1 ? "entry" : "entries") + " this poll took";
+            return "the entry handler threw, or returned what is no action, " + took + ". Its entry was aborted: it is"
+                + " not taken, the poll ended at it, and the next poll hands it over again. Fix the handler: what it"
+                + " did, " + cause.GetType().Name + ", is this exception's InnerException; every poll hands the entry"
+                + " over, and throws this, until the handler takes it. See clients/dotnet/README.md#the-exception";
+        }
+        bool session = cluster == "session";
+        string one = session ? "reply" : committedLog ? "entry" : "fragment";
+        string many = session ? "replies" : committedLog ? "entries" : "fragments";
         string delivered;
         if (fragments < 0)
         {
-            delivered = committedLog
+            delivered = session
+                ? "the replies this poll handed over before it stopped on a fault, which this ClusterSession's GetFault()"
+                    + " reads until its next poll"
+                : committedLog
                 ? "the entries this poll delivered before it stopped on a fault, which this CommittedLog's GetFault() reads"
                     + " until its next poll, and its Faulted() from then on when the fault is the log's own image's"
                 : "the fragments this poll delivered before it stopped on a fault, which Subscription.GetFault() reads";
+        }
+        else if (session)
+        {
+            delivered = "the " + fragments + " " + (fragments == 1 ? one : many) + " this poll handed over";
         }
         else if (committedLog)
         {

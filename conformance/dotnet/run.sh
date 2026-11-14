@@ -1,12 +1,14 @@
 #!/usr/bin/env bash
 # Builds the driver and cavalry-ffi's shared library in release, builds the .NET client with
 # the runner's SDK (.NET 10, every warning an error: no package reference, no native shim),
-# then conformance/dotnet's Quickstart, Readme and CommittedLog, starts a driver on a
+# then conformance/dotnet's Quickstart, Readme, CommittedLog and Cluster, starts a driver on a
 # directory of its own, runs Quickstart through clients/dotnet with the runner's runtime,
 # then clients/dotnet/README.md's example through Readme; then starts three cluster members
 # on the loopback, each a `cavalry run` in a member's role, and runs CommittedLog beside
 # one of them, member 1 unless it joined late (conformance/log-member.sh), the client's
-# committed log against a cluster (spec/c-abi.md, version 2; ADR 0070); and cleans up.
+# committed log against a cluster (spec/c-abi.md, version 2; ADR 0070), and then Cluster,
+# the cluster round: the client's service beside each member and its session on the first
+# driver (spec/c-abi.md, versions 4 and 5; ADR 0124); and cleans up.
 # `just conformance` runs this after conformance/jvm
 # (clients/README.md; ADR 0046, card 209).
 set -euo pipefail
@@ -41,6 +43,7 @@ dotnet build -c Release clients/dotnet/Cavalry.csproj
 dotnet build -c Release conformance/dotnet/Quickstart/Quickstart.csproj
 dotnet build -c Release conformance/dotnet/Readme/Readme.csproj
 dotnet build -c Release conformance/dotnet/CommittedLog/CommittedLog.csproj
+dotnet build -c Release conformance/dotnet/Cluster/Cluster.csproj
 
 echo "conformance/dotnet: cavalry run, in the background, on $CAVALRY_DIR"
 target/release/cavalry run &
@@ -68,7 +71,8 @@ dotnet conformance/dotnet/Readme/bin/Release/net10.0/Readme.dll
 # member's output goes to a file beside its directories, printed if the cluster does not
 # form or the round fails.
 #
-# The fifteen ports are counted out of 10000 to 19999, never bound to be chosen, as
+# The sixteen ports, fifteen for the members and one for the session's response channel,
+# are counted out of 10000 to 19999, never bound to be chosen, as
 # `loopback_ports` in crates/cavalry/tests/cli.rs counts its own: a port found by binding
 # to port 0 is one of those the kernel gives each driver's own send sockets, so another
 # member could be given it before its owner binds it. The shell's process id picks where
@@ -85,6 +89,7 @@ for id in 0 1 2; do
     CAVALRY_CLUSTER_MEMBERS="${CAVALRY_CLUSTER_MEMBERS:+$CAVALRY_CLUSTER_MEMBERS|}$member"
 done
 export CAVALRY_CLUSTER_MEMBERS
+response="cavalry:udp?endpoint=127.0.0.1:$(( 10000 + (start + 15) % 10000 ))"
 for id in 0 1 2; do
     CAVALRY_CLUSTER_MEMBER_ID=$id target/release/cavalry run --dir "$cluster/member-$id" \
         --log-dir "$cluster/member-$id-log" >"$cluster/member-$id.out" 2>&1 &
@@ -119,6 +124,16 @@ read -r member recording <<<"$chosen"
 echo "conformance/dotnet: run CommittedLog beside member $member"
 dotnet conformance/dotnet/CommittedLog/bin/Release/net10.0/CommittedLog.dll "$cluster/member-$member" "$member" "$recording" || {
     echo "conformance/dotnet: CommittedLog failed beside member $member; the members said:" >&2
+    cat "$cluster"/member-*.out >&2 || true
+    exit 1
+}
+
+# The cluster round, after the committed log's: a service beside each member and a
+# session on the runner's first driver. The committed log round left the cluster as it
+# found it, one entry, the term's first.
+echo "conformance/dotnet: run Cluster, a service beside each member and a session on $CAVALRY_DIR"
+dotnet conformance/dotnet/Cluster/bin/Release/net10.0/Cluster.dll "$cluster" "$CAVALRY_CLUSTER_MEMBERS" "$response" || {
+    echo "conformance/dotnet: Cluster failed; the members said:" >&2
     cat "$cluster"/member-*.out >&2 || true
     exit 1
 }

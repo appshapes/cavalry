@@ -12,7 +12,6 @@
   Every call on that client from inside the service's handler, `client.close()` among
   them, is refused with `Abi.ERR_POLLING`, and a refused `client.close()` leaves the
   client open.
-  `just conformance` runs the cluster round through the JVM client. The .NET client
-  binds the same functions and has no session object or service object yet
+  `just conformance` runs the cluster round through the JVM client
   ([ADR 0124](docs/decisions/0124-give-each-client-a-session-object-and-a-service-object-whose-handlers-failure-aborts-its-entry.md);
   [the JVM client](clients/jvm/README.md); work item 229).

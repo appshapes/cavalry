@@ -16,10 +16,13 @@ path and reads `cavalry_abi_version` before any other function, refusing a libra
 another version, and the helpers the client's own code shares, `Check`, `LastError`,
 `Errcode`, `Errmsg`, `String` and `FindLibrary`. The other files are the client's own
 code: `CavalryException`, `HandlerException`, `FragmentHandler`, `Client`, `Publication`,
-`Subscription`, `Header`, `Image`, `Recording` and `Replay`, one type per file, plus
+`Subscription`, `CommittedLog`, `ClusterSession`, `ClusterReplyValues`, `ClusterService`,
+`ClusterEntryValues`, `Header`, `Image`, `Recording` and `Replay`, one type per file, plus
 `Cavalry.csproj`. The fragment handler is reached through one `UnmanagedCallersOnly`
 method, the trampoline, which finds the subscription by the `GCHandle` the subscription
-hands the ABI as its `clientd`. Python 3.9 standard library only.
+hands the ABI as its `clientd`; a committed log, a cluster session and a cluster service
+each have theirs in the same way, and a cluster service's passes the ABI the action its
+handler returned (ADR 0124). Python 3.9 standard library only.
 """
 
 from __future__ import annotations
@@ -38,6 +41,13 @@ CALLBACK = "delegate* unmanaged[Cdecl]<void*, byte*, nuint, void*, void>"
 PER_MESSAGE_DOTNET = ("Publication.TryClaim", "Publication.SetReservedValue", "Publication.Commit", "Publication.Abort",
                       "Publication.Offer", "Publication.Claim", "Subscription.Poll", "Subscription.OnFragment",
                       "Subscription.Deliver", "CommittedLog.Poll", "CommittedLog.OnEntry", "CommittedLog.Deliver",
+                      # A cluster session and a cluster service (ADR 0124).
+                      "ClusterSession.Offer", "ClusterSession.Poll", "ClusterSession.OnReply", "ClusterSession.Deliver",
+                      "ClusterService.Poll", "ClusterService.Reply", "ClusterService.OnClusterEntry",
+                      "ClusterService.Deliver", "ClusterReplyValues.LeadershipTermId", "ClusterReplyValues.Timestamp",
+                      "ClusterEntryValues.Position", "ClusterEntryValues.LeadershipTermId",
+                      "ClusterEntryValues.Timestamp", "ClusterEntryValues.SessionId", "ClusterEntryValues.Type",
+                      "ClusterEntryValues.LeaderMemberId", "ClusterEntryValues.TimedOut",
                       "Header.FrameLength", "Header.Version", "Header.Flags", "Header.Type",
                       "Header.TermOffset", "Header.SessionId", "Header.StreamId", "Header.TermId", "Header.ReservedValue")
 
@@ -168,6 +178,10 @@ def write_dotnet(header) -> dict[str, str]:
         "Publication.cs": PUBLICATION,
         "Subscription.cs": SUBSCRIPTION,
         "CommittedLog.cs": COMMITTED_LOG,
+        "ClusterSession.cs": CLUSTER_SESSION,
+        "ClusterReplyValues.cs": CLUSTER_REPLY_VALUES,
+        "ClusterService.cs": CLUSTER_SERVICE,
+        "ClusterEntryValues.cs": CLUSTER_ENTRY_VALUES,
         "Header.cs": HEADER,
         "Image.cs": IMAGE,
         "Recording.cs": RECORDING,
@@ -371,12 +385,20 @@ namespace Cavalry;
 
 /// <summary>
 /// The handler threw during a poll, a subscription's fragment handler or, when
-/// <see cref="CommittedLog"/> is true, a committed log's entry handler:
+/// <see cref="CommittedLog"/> is true, a committed log's entry handler, or, when
+/// <see cref="Cluster"/> is "session", a cluster session's reply handler:
 /// <see cref="Fragments"/> is the count the poll returned once the ABI was done, of
-/// fragments or of entries, or -1 when the poll also stopped on a fault, which the
+/// fragments, of entries or of replies, or -1 when the poll also stopped on a fault, which the
 /// <c>GetFault()</c> of the object that was polled reads until its next poll;
 /// <see cref="Raised"/> how many handler calls threw, and
 /// <see cref="Exception.InnerException"/> the first exception, kept as thrown.
+/// A cluster service's entry handler, <see cref="Cluster"/> "service", is the one whose
+/// failure stops its poll. The entry whose handler threw, or returned what is no action, was
+/// aborted: it is not taken, the poll ended at it, and the next poll hands it over again.
+/// <see cref="Fragments"/> is then the count of entries the poll took before that entry,
+/// <see cref="Raised"/> is 1, and <see cref="Exception.InnerException"/> is what the handler
+/// threw, or a <see cref="CavalryException"/> with <see cref="Abi.ERR_CLUSTER_ACTION"/> and
+/// the ABI's message for the value the handler returned.
 /// </summary>
 public sealed class HandlerException : Exception
 {
@@ -384,29 +406,56 @@ public sealed class HandlerException : Exception
     public int Raised { get; }
     public bool CommittedLog { get; }
 
-    public HandlerException(int fragments, int raised, Exception cause, bool committedLog = false)
-        : base(Describe(fragments, raised, cause, committedLog), cause)
+    /// <summary>"session" when the poll was a cluster session's, "service" when it was a
+    /// cluster service's, whose entry was aborted and comes again, and null for a
+    /// subscription's and a committed log's.</summary>
+    public string? Cluster { get; }
+
+    public HandlerException(int fragments, int raised, Exception cause, bool committedLog = false, string? cluster = null)
+        : base(Describe(fragments, raised, cause, committedLog, cluster), cause)
     {
         Fragments = fragments;
         Raised = raised;
         CommittedLog = committedLog;
+        Cluster = cluster;
     }
 
     /// <summary>The message: what the handler threw on, the fragments of a subscription's
-    /// poll or the entries of a committed log's, and what to do. The fault of a committed
+    /// poll, the entries of a committed log's or the replies of a cluster session's, and
+    /// what to do. The fault of a committed
     /// log's own image is reported by one poll (clients/dotnet/README.md, "The committed
-    /// log"), so its message names the log's own <c>GetFault()</c>.</summary>
-    private static string Describe(int fragments, int raised, Exception cause, bool committedLog)
+    /// log"), so its message names the log's own <c>GetFault()</c>. A cluster service's
+    /// says that its entry was aborted and comes again (clients/dotnet/README.md, "The
+    /// cluster service").</summary>
+    private static string Describe(int fragments, int raised, Exception cause, bool committedLog, string? cluster)
     {
-        string one = committedLog ? "entry" : "fragment";
-        string many = committedLog ? "entries" : "fragments";
+        if (cluster == "service")
+        {
+            string took = fragments < 0
+                ? "in a poll that also stopped on a fault, which this ClusterService's GetFault() reads until its next poll"
+                : "after the " + fragments + " " + (fragments == 1 ? "entry" : "entries") + " this poll took";
+            return "the entry handler threw, or returned what is no action, " + took + ". Its entry was aborted: it is"
+                + " not taken, the poll ended at it, and the next poll hands it over again. Fix the handler: what it"
+                + " did, " + cause.GetType().Name + ", is this exception's InnerException; every poll hands the entry"
+                + " over, and throws this, until the handler takes it. See clients/dotnet/README.md#the-exception";
+        }
+        bool session = cluster == "session";
+        string one = session ? "reply" : committedLog ? "entry" : "fragment";
+        string many = session ? "replies" : committedLog ? "entries" : "fragments";
         string delivered;
         if (fragments < 0)
         {
-            delivered = committedLog
+            delivered = session
+                ? "the replies this poll handed over before it stopped on a fault, which this ClusterSession's GetFault()"
+                    + " reads until its next poll"
+                : committedLog
                 ? "the entries this poll delivered before it stopped on a fault, which this CommittedLog's GetFault() reads"
                     + " until its next poll, and its Faulted() from then on when the fault is the log's own image's"
                 : "the fragments this poll delivered before it stopped on a fault, which Subscription.GetFault() reads";
+        }
+        else if (session)
+        {
+            delivered = "the " + fragments + " " + (fragments == 1 ? one : many) + " this poll handed over";
         }
         else if (committedLog)
         {
@@ -442,6 +491,26 @@ public delegate void FragmentHandler(ReadOnlySpan<byte> body, Header header);
 /// position in the log.
 /// </summary>
 public delegate void EntryHandler(ReadOnlySpan<byte> body, Header header, long position);
+
+/// <summary>
+/// Receives each reply a cluster session's poll hands over: <paramref name="body"/> is the
+/// reply's payload, a span over the log's bytes, valid for the call, and
+/// <paramref name="reply"/> the reply's values.
+/// </summary>
+public delegate void ReplyHandler(ReadOnlySpan<byte> body, ClusterReplyValues reply);
+
+/// <summary>
+/// Receives each committed entry a cluster service's poll hands over:
+/// <paramref name="body"/> is a session message's payload, a span over the log's bytes,
+/// valid for the call, and empty for every other entry; <paramref name="entry"/> is the
+/// entry's values; and <paramref name="service"/> is the service that was polled, for its
+/// <see cref="ClusterService.Reply"/>. What it returns is the entry's action:
+/// <see cref="Abi.ACTION_CONTINUE"/> takes the entry and the poll goes on,
+/// <see cref="Abi.ACTION_BREAK"/> takes it and ends the poll, and
+/// <see cref="Abi.ACTION_ABORT"/> leaves it, ends the poll, and has the next poll hand it
+/// over again.
+/// </summary>
+public delegate int ServiceHandler(ReadOnlySpan<byte> body, ClusterEntryValues entry, ClusterService service);
 '''
 
 CLIENT = HEADING + r'''
@@ -519,8 +588,13 @@ public sealed class Client : IDisposable
         }
     }
 
-    /// <summary>Closes the client and every handle it made. Idempotent; the handle is forgotten
-    /// whatever the ABI returns, and a call after it hands the ABI a null handle, which it
+    /// <summary>Closes the client and every handle it made. Idempotent. The handle is
+    /// forgotten whatever the ABI returns, but for one close: a close from inside the handler
+    /// of a cluster service whose poll holds this client, which the ABI refuses with
+    /// <see cref="Abi.ERR_POLLING"/> and which frees nothing (spec/c-abi.md, "Calls during a
+    /// claim or a poll"). It then throws the <see cref="CavalryException"/> and keeps the
+    /// handle: the client stays open, and the service's next poll and a close after the poll
+    /// has returned use it. A call after a close hands the ABI a null handle, which it
     /// refuses with <see cref="Abi.ERR_NULL"/>.</summary>
     public void Close()
     {
@@ -530,9 +604,18 @@ public sealed class Client : IDisposable
             {
                 return;
             }
-            nint closing = handle;
+            int result = Abi.cavalry_close(handle);
+            if (result != 0)
+            {
+                CavalryException error = Abi.LastError("cavalry_close");
+                if (error.Code == Abi.ERR_POLLING)
+                {
+                    throw error;
+                }
+                handle = 0;
+                throw error;
+            }
             handle = 0;
-            Abi.Check("cavalry_close", Abi.cavalry_close(closing));
         }
     }
 
@@ -681,6 +764,59 @@ public sealed class Client : IDisposable
         lock (gate)
         {
             return Abi.cavalry_committed_log_close(log, handle);
+        }
+    }
+
+    /// <summary>Opens a session with a cluster: <paramref name="members"/> is the members
+    /// string the cluster's members were started with, and
+    /// <paramref name="responseChannel"/> a channel of this host for the cluster's answers,
+    /// <c>cavalry:udp?endpoint=&lt;host&gt;:&lt;port&gt;</c>. The call returns once the leader
+    /// has opened the session, and waits for that for 20 s at most beyond its adds, holding
+    /// the client's lock as an add does. Its <see cref="CavalryException"/> has
+    /// <see cref="Abi.ERR_CLUSTER_MEMBERS"/>, <see cref="Abi.ERR_CLUSTER_REFUSED"/>,
+    /// <see cref="Abi.ERR_CLUSTER_VERSION"/> or <see cref="Abi.ERR_CLUSTER_CONNECT_TIMEOUT"/>,
+    /// a fault's code, or the client's or the driver's (spec/cluster.md, "Sessions";
+    /// spec/c-abi.md, "Functions", cluster session; ADR 0122).</summary>
+    public ClusterSession ConnectCluster(string members, string responseChannel)
+    {
+        lock (gate)
+        {
+            Abi.Check("cavalry_connect_cluster", Abi.cavalry_connect_cluster(out nint session, handle, members,
+                responseChannel));
+            return new ClusterSession(session);
+        }
+    }
+
+    /// <summary>Makes a cluster's service beside the member on this client's driver. It
+    /// sends nothing: the service's first poll opens the member's log. The service's poll
+    /// and its close are calls on this client. The poll is on every entry's path and takes
+    /// no lock, so from here until the service's close this client is used by the thread
+    /// that polls the service and by no other: give the program's other threads a
+    /// <c>Client</c> of their own (spec/cluster.md, "The service"; spec/c-abi.md,
+    /// "Functions", cluster service, and "Threads"; ADR 0123; ADR 0124).</summary>
+    public ClusterService ClusterService()
+    {
+        lock (gate)
+        {
+            Abi.Check("cavalry_cluster_service", Abi.cavalry_cluster_service(out nint service, handle));
+            return new ClusterService(service, this);
+        }
+    }
+
+    /// <summary>The client's handle, for a cluster service's poll, which is a call on the
+    /// client as well as on the service and takes no lock: null after this client's own
+    /// close, which the ABI's poll then refuses.</summary>
+    internal nint Handle => handle;
+
+    /// <summary>A cluster service's close, under the client's lock, as a committed log's:
+    /// the ABI's result, with the thread's error for the caller to read. After this
+    /// client's own close the handle is null, and the ABI frees the service and leaves
+    /// what it held to the driver.</summary>
+    internal int CloseClusterService(nint service)
+    {
+        lock (gate)
+        {
+            return Abi.cavalry_cluster_service_close(service, handle);
         }
     }
 }
@@ -1303,6 +1439,531 @@ public sealed unsafe class CommittedLog : IDisposable
     {
         Close();
     }
+}
+'''
+
+CLUSTER_SESSION = HEADING + r'''
+using System;
+using System.Runtime.CompilerServices;
+using System.Runtime.InteropServices;
+
+namespace Cavalry;
+
+/// <summary>
+/// A client's session with a cluster, made by <see cref="Client.ConnectCluster"/>
+/// (spec/cluster.md, "Sessions"): <see cref="Offer"/> sends the leader a message of one frame
+/// and returns the position after it or a result code below zero, never throwing for a code;
+/// <see cref="Poll"/> calls the handler for each reply that is not stale, with the reply's
+/// values, and returns the count, throwing a <see cref="HandlerException"/> once the ABI has
+/// returned when a handler call threw. The poll is the session's duty cycle too: it sends
+/// the keepalive, follows a new leader, and closes the session when the cluster says so, so
+/// call it at least every 500 ms. A message taken is on its way to the leader and not
+/// committed, and a reply is no delivery: a program that needs an answer offers again when
+/// none comes. The handler is reached through an <c>UnmanagedCallersOnly</c> trampoline of
+/// the session's own, which finds the session by the <c>GCHandle</c> it hands the ABI as its
+/// <c>clientd</c>.
+/// </summary>
+public sealed unsafe class ClusterSession : IDisposable
+{
+    private nint handle;
+    private GCHandle self;
+    private readonly ClusterReplyValues reply = new();
+    private ReplyHandler? handler;
+    private bool polling;
+    private int raised;
+    private Exception? first;
+    private readonly long sessionId;
+    private readonly long maxMessageLength;
+
+    internal ClusterSession(nint handle)
+    {
+        this.handle = handle;
+        self = GCHandle.Alloc(this);
+        Abi.cavalry_cluster_session_constants_t k = default;
+        try
+        {
+            Abi.Check("cavalry_cluster_session_constants", Abi.cavalry_cluster_session_constants(handle, ref k));
+        }
+        catch
+        {
+            // The session is open and no object will hold it: it is closed here, as a
+            // committed log that cannot be returned is. The exception already holds the
+            // constants' error, read before this close set the thread's own, and it is
+            // the one to report whatever the close does.
+            Abi.cavalry_cluster_session_close(handle);
+            this.handle = 0;
+            self.Free();
+            throw;
+        }
+        sessionId = k.session_id;
+        maxMessageLength = (long) k.max_message_length;
+    }
+
+    /// <summary>The id the leader gave the session.</summary>
+    public long SessionId => sessionId;
+
+    /// <summary>The longest message <see cref="Offer"/> takes: what one frame carries.</summary>
+    public long MaxMessageLength => maxMessageLength;
+
+    /// <summary>Offers the leader the message: the position after it on the session's
+    /// publication to the leader, or a code below zero. <see cref="Abi.PUBLICATION_ERROR"/>
+    /// with <see cref="Abi.ERR_TOO_LONG"/> as <see cref="Abi.Errcode"/> is a message longer
+    /// than <see cref="MaxMessageLength"/>, and <see cref="Abi.PUBLICATION_CLOSED"/> a session
+    /// that is closed, for the reason <see cref="Closed"/> gives, or whose client is. From
+    /// inside this session's own handler the ABI refuses the call with
+    /// <see cref="Abi.PUBLICATION_ERROR"/> and <see cref="Abi.ERR_POLLING"/>: keep what the
+    /// answer needs and offer after the poll has returned. One ABI call, which copies the
+    /// bytes before it returns; the span is pinned for the call and nothing is
+    /// allocated.</summary>
+    public long Offer(ReadOnlySpan<byte> message)
+    {
+        fixed (byte* bytes = message)
+        {
+            return Abi.cavalry_cluster_session_offer(handle, bytes, (nuint) message.Length);
+        }
+    }
+
+    /// <summary>Reads up to <paramref name="fragmentLimit"/> fragments of the response channel
+    /// and hands the handler each reply that is not stale: one ABI call, the count of replies
+    /// it handed over (or -1, with <see cref="Abi.Errcode"/> saying why: a fault, which
+    /// <see cref="GetFault"/> reads until the next poll, or <see cref="Abi.ERR_POLLING"/> for
+    /// a poll from inside a handler of this session, which the ABI refuses and which touches
+    /// nothing here), and a <see cref="HandlerException"/> when a handler call threw, whose
+    /// <c>Cluster</c> is "session". A stale reply, one of a leadership term below that of a
+    /// reply this session has handed over, is passed over and counted in
+    /// <see cref="StaleReplies"/>, and is not in the count. Every reply the ABI hands over
+    /// reaches the handler, whether or not an earlier call threw.</summary>
+    public int Poll(ReplyHandler handler, int fragmentLimit)
+    {
+        if (polling)
+        {
+            return Abi.cavalry_cluster_session_poll(handle, &OnReply, GCHandle.ToIntPtr(self), (nuint) fragmentLimit);
+        }
+        this.handler = handler;
+        polling = true;
+        raised = 0;
+        first = null;
+        int count = Abi.cavalry_cluster_session_poll(handle, &OnReply, GCHandle.ToIntPtr(self), (nuint) fragmentLimit);
+        polling = false;
+        this.handler = null;
+        if (raised == 0)
+        {
+            return count;
+        }
+        Exception cause = first!;
+        first = null;
+        throw new HandlerException(count, raised, cause, cluster: "session");
+    }
+
+    /// <summary>The trampoline the ABI reaches, once per reply: the session from the
+    /// <c>GCHandle</c> in <paramref name="clientd"/>, then <see cref="Deliver"/>, which catches
+    /// every exception, since none may unwind through an <c>UnmanagedCallersOnly</c> frame
+    /// (clients/dotnet/README.md, "The exception").</summary>
+    [UnmanagedCallersOnly(CallConvs = new[] { typeof(CallConvCdecl) })]
+    private static void OnReply(void* clientd, byte* buffer, nuint length, void* frame)
+    {
+        ((ClusterSession) GCHandle.FromIntPtr((nint) clientd).Target!).Deliver(buffer, length, frame);
+    }
+
+    /// <summary>The reply's values read into the one object this session keeps, the body as a
+    /// span over the log's bytes, no copy, and the handler called inside a catch that keeps
+    /// its first exception and counts every one, so that every reply of the poll reaches the
+    /// handler. The values are zero if the ABI refuses the header, which on the header its
+    /// own poll handed over it cannot.</summary>
+    private void Deliver(byte* buffer, nuint length, void* frame)
+    {
+        try
+        {
+            if (Abi.cavalry_cluster_reply_values((nint) frame, ref reply.values) != 0)
+            {
+                reply.values = default;
+            }
+            handler!(new ReadOnlySpan<byte>(buffer, (int) length), reply);
+        }
+        catch (Exception e)
+        {
+            raised++;
+            first ??= e;
+        }
+    }
+
+    /// <summary>What the last poll stopped on; its code is 0 when the last poll returned a
+    /// count.</summary>
+    public Subscription.Fault GetFault()
+    {
+        Abi.cavalry_fault_t f = default;
+        Abi.Check("cavalry_cluster_session_fault", Abi.cavalry_cluster_session_fault(handle, ref f));
+        return new Subscription.Fault(f.code, f.session_id, f.position);
+    }
+
+    /// <summary>The leadership term the session sends with: the term of the leader that
+    /// opened it, or of the last new leader event; -1 from inside this session's own
+    /// handler, which has each reply's own term.</summary>
+    public long LeadershipTermId()
+    {
+        return Abi.cavalry_cluster_session_leadership_term_id(handle);
+    }
+
+    /// <summary>The id of the member the session sends to: the leader, as the cluster last
+    /// said; -1 from inside this session's own handler.</summary>
+    public int LeaderMemberId()
+    {
+        return Abi.cavalry_cluster_session_leader_member_id(handle);
+    }
+
+    /// <summary>How many stale replies this session's polls have passed over: the value of
+    /// its counter <c>cluster.replies_stale</c>; -1 from inside this session's own
+    /// handler.</summary>
+    public long StaleReplies()
+    {
+        return Abi.cavalry_cluster_session_stale_replies(handle);
+    }
+
+    /// <summary>Why the session is closed, or null while it is open: "TIMEOUT" when the
+    /// leader closed it for hearing nothing from it for the session timeout, "NO LEADER"
+    /// when its leader was lost and no member took its place, or the detail of the
+    /// cluster's closed event. A poll is what closes a session, so the answer changes only
+    /// across one. From inside this session's own handler the ABI refuses the call with
+    /// <see cref="Abi.ERR_POLLING"/>, and this is null, a refusal and not an answer; it is
+    /// null too once <see cref="Close"/> has freed the session.</summary>
+    public string? Closed()
+    {
+        return Abi.String(Abi.cavalry_cluster_session_closed(handle));
+    }
+
+    /// <summary>Offers the leader a session close for at most 500 ms, unless the session is
+    /// closed already, then closes the session's publications, its subscription and its
+    /// counter and frees the handle. Idempotent. Close a session before its client. The
+    /// handle is freed whatever the ABI answers, so when the ABI's close failed this throws
+    /// the <see cref="CavalryException"/> after the handle is freed. The one exception is a
+    /// close from inside this session's own handler, which the ABI refuses with
+    /// <see cref="Abi.ERR_POLLING"/> (spec/c-abi.md, "Calls during a claim or a poll"): it
+    /// then throws the <see cref="CavalryException"/>, sends nothing, and keeps the
+    /// handle.</summary>
+    public void Close()
+    {
+        if (handle == 0)
+        {
+            return;
+        }
+        int result = Abi.cavalry_cluster_session_close(handle);
+        if (result != 0)
+        {
+            CavalryException error = Abi.LastError("cavalry_cluster_session_close");
+            if (error.Code == Abi.ERR_POLLING)
+            {
+                throw error;
+            }
+            handle = 0;
+            self.Free();
+            throw error;
+        }
+        handle = 0;
+        self.Free();
+    }
+
+    public void Dispose()
+    {
+        Close();
+    }
+}
+'''
+
+CLUSTER_REPLY_VALUES = HEADING + r'''
+namespace Cavalry;
+
+/// <summary>
+/// What a reply carries beside its payload, as <c>cavalry_cluster_reply_values</c> reads it.
+/// It is the one object a cluster session keeps, over the one struct the session's trampoline
+/// fills for each reply before the handler runs, so copy a value out to keep it.
+/// </summary>
+public sealed class ClusterReplyValues
+{
+    internal Abi.cavalry_cluster_reply_values_t values;
+
+    internal ClusterReplyValues()
+    {
+    }
+
+    /// <summary>The leadership term of the entry the reply answers.</summary>
+    public long LeadershipTermId => values.leadership_term_id;
+
+    /// <summary>The cluster's time when its leader appended that entry, in milliseconds since
+    /// 1970-01-01T00:00:00Z.</summary>
+    public long Timestamp => values.timestamp;
+}
+'''
+
+CLUSTER_SERVICE = HEADING + r'''
+using System;
+using System.Runtime.CompilerServices;
+using System.Runtime.InteropServices;
+
+namespace Cavalry;
+
+/// <summary>
+/// A cluster's service beside the member on the client's driver, made by
+/// <see cref="Client.ClusterService"/> (spec/cluster.md, "The service" and "Replies"):
+/// <see cref="Poll"/> calls the handler for each entry a quorum has committed, in order, with
+/// the entry's values and this service, and what the handler returns is the entry's action.
+/// A handler that throws, or returns what is no action, has its entry aborted, and
+/// <c>Poll</c> throws a <see cref="HandlerException"/> once the ABI has returned: an entry
+/// is taken only by a handler that finished with it. <see cref="Reply"/> answers a session
+/// from inside the handler. The handler is reached through an <c>UnmanagedCallersOnly</c>
+/// trampoline of the service's own, which finds the service by the <c>GCHandle</c> it hands
+/// the ABI as its <c>clientd</c>.
+/// </summary>
+public sealed unsafe class ClusterService : IDisposable
+{
+    private nint handle;
+    private GCHandle self;
+    private readonly Client client;
+    private readonly ClusterEntryValues entry = new();
+    private ServiceHandler? handler;
+    private bool polling;
+    private int raised;
+    private Exception? first;
+    private bool refused;
+    private int refusedCode;
+    private string? refusedMessage;
+
+    internal ClusterService(nint handle, Client client)
+    {
+        this.handle = handle;
+        this.client = client;
+        self = GCHandle.Alloc(this);
+    }
+
+    /// <summary>Sends the message, from inside the handler, to the session with
+    /// <paramref name="sessionId"/>, with the leadership term id and the cluster's time of
+    /// the entry being handled, and returns what became of the reply,
+    /// <c>Abi.CLUSTER_REPLY_*</c>, never throwing for a code. <c>_SENT</c>: it is on its way,
+    /// or an earlier handling of the same entry sent it. <c>_NOT_ANSWERING</c>: this service
+    /// does not answer the entry; its member did not lead the entry's term, or the entry is
+    /// history. <c>_RETRY</c>: the session's response channel did not take it now; return
+    /// <see cref="Abi.ACTION_ABORT"/>, and the next poll hands the entry over again.
+    /// <c>_DROPPED</c>: it is lost, and counted in <c>cluster.replies_dropped</c>.
+    /// <c>_NO_SESSION</c>: no session with that id is open in the log at this entry.
+    /// <c>_TOO_LONG</c>: it is longer than one frame carries, with
+    /// <see cref="Abi.ERR_TOO_LONG"/> as <see cref="Abi.Errcode"/>. Reply first, then change
+    /// the service's state, since an aborted entry is handed over again. From outside the
+    /// handler it is -1, with <see cref="Abi.ERR_CLUSTER_NO_ENTRY"/>. One ABI call, which
+    /// allocates nothing and waits for nothing; the span is pinned for the call.</summary>
+    public int Reply(long sessionId, ReadOnlySpan<byte> message)
+    {
+        fixed (byte* bytes = message)
+        {
+            return Abi.cavalry_cluster_service_reply(handle, sessionId, bytes, (nuint) message.Length);
+        }
+    }
+
+    /// <summary>Hands up to <paramref name="fragmentLimit"/> committed entries to the handler:
+    /// one ABI call, the count of entries the handler took, 0 while the driver hosts no
+    /// member that has a log yet (or -1, with <see cref="Abi.Errcode"/> saying why: a fault,
+    /// which <see cref="GetFault"/> reads until the next poll, or
+    /// <see cref="Abi.ERR_POLLING"/> for a poll from inside a handler of this service, which
+    /// the ABI refuses and which touches nothing here). The poll is the service's duty
+    /// cycle: it opens the member's log, follows the log's sessions, and holds a publication
+    /// to each open session while the service answers. Those are commands sent with the
+    /// service's client, at a session's opening, where a term's leader changes and at a
+    /// recording's end, and the poll waits for the driver's answer to each; none is sent for
+    /// a session message. The poll takes no lock, and it is a call on the client: no other
+    /// thread uses the service's client (<see cref="Client.ClusterService"/>). When the
+    /// handler threw, or returned what is no action, its entry was aborted and this throws a
+    /// <see cref="HandlerException"/> whose <c>Cluster</c> is "service": its
+    /// <c>Fragments</c> is the count of entries taken before that entry, and its
+    /// <c>InnerException</c> what the handler threw, or a <see cref="CavalryException"/> with
+    /// <see cref="Abi.ERR_CLUSTER_ACTION"/> and the ABI's message for the value the handler
+    /// returned. The next poll hands the aborted entry over again.</summary>
+    public int Poll(ServiceHandler handler, int fragmentLimit)
+    {
+        if (polling)
+        {
+            return Abi.cavalry_cluster_service_poll(handle, client.Handle, &OnClusterEntry, GCHandle.ToIntPtr(self),
+                (nuint) fragmentLimit);
+        }
+        this.handler = handler;
+        polling = true;
+        raised = 0;
+        first = null;
+        refused = false;
+        int count = Abi.cavalry_cluster_service_poll(handle, client.Handle, &OnClusterEntry, GCHandle.ToIntPtr(self),
+            (nuint) fragmentLimit);
+        polling = false;
+        this.handler = null;
+        if (raised == 0 && !refused)
+        {
+            return count;
+        }
+        // The ABI refused what the handler returned when no exception was kept: its error,
+        // read in the trampoline when the call failed.
+        Exception cause = first ?? new CavalryException("cavalry_cluster_service_action", refusedCode, refusedMessage ?? "");
+        first = null;
+        refused = false;
+        refusedMessage = null;
+        throw new HandlerException(count, 1, cause, cluster: "service");
+    }
+
+    /// <summary>The trampoline the ABI reaches, once per entry: the service from the
+    /// <c>GCHandle</c> in <paramref name="clientd"/>, then <see cref="Deliver"/>, which catches
+    /// every exception, since none may unwind through an <c>UnmanagedCallersOnly</c> frame
+    /// (clients/dotnet/README.md, "The exception").</summary>
+    [UnmanagedCallersOnly(CallConvs = new[] { typeof(CallConvCdecl) })]
+    private static void OnClusterEntry(void* clientd, byte* buffer, nuint length, void* frame)
+    {
+        ((ClusterService) GCHandle.FromIntPtr((nint) clientd).Target!).Deliver(buffer, length, frame);
+    }
+
+    /// <summary>The entry's values read into the one object this service keeps, the body as a
+    /// span over the log's bytes, no copy, and empty for an entry that is no session's
+    /// message, and the handler called inside a catch that keeps what it threw. What the
+    /// handler returned is the entry's action, passed to the ABI unless it is
+    /// <see cref="Abi.ACTION_CONTINUE"/>, which is what the ABI does with no call. A handler
+    /// that threw has its entry aborted, and so has one whose action the ABI refused, whose
+    /// error is kept here, in the thread that made the call, for <see cref="Poll"/> to
+    /// throw: the ABI ends the poll at an abort with the entry not taken, so that a service
+    /// never passes an entry its handler did not finish (clients/dotnet/README.md, "The
+    /// cluster service"). The values are zero if the ABI refuses the header, which on the
+    /// header its own poll handed over it cannot.</summary>
+    private void Deliver(byte* buffer, nuint length, void* frame)
+    {
+        int action = Abi.ACTION_ABORT;
+        try
+        {
+            if (Abi.cavalry_cluster_entry_values((nint) frame, ref entry.values) != 0)
+            {
+                entry.values = default;
+            }
+            action = handler!(new ReadOnlySpan<byte>(buffer, (int) length), entry, this);
+        }
+        catch (Exception e)
+        {
+            raised++;
+            first ??= e;
+        }
+        if (action != Abi.ACTION_CONTINUE && Abi.cavalry_cluster_service_action(handle, action) != 0)
+        {
+            refused = true;
+            refusedCode = Abi.Errcode();
+            refusedMessage = Abi.Errmsg();
+            Abi.cavalry_cluster_service_action(handle, Abi.ACTION_ABORT);
+        }
+    }
+
+    /// <summary>What the last poll stopped on; its code is 0 when the last poll returned a
+    /// count. The code is a fault's, <see cref="Abi.ERR_CLUSTER_ENTRY"/> with the position of
+    /// a committed entry that is no entry of this version's cluster protocol, or the
+    /// client's or the driver's.</summary>
+    public Subscription.Fault GetFault()
+    {
+        Abi.cavalry_fault_t f = default;
+        Abi.Check("cavalry_cluster_service_fault", Abi.cavalry_cluster_service_fault(handle, ref f));
+        return new Subscription.Fault(f.code, f.session_id, f.position);
+    }
+
+    /// <summary>The position after the last entry the handler took, 0 before the first: how
+    /// far the service has applied the log; -1 from inside this service's own handler, which
+    /// has each entry's own position.</summary>
+    public long Position()
+    {
+        return Abi.cavalry_cluster_service_position(handle);
+    }
+
+    /// <summary>Whether the service answered the last entry it read: its member led that
+    /// entry's term and, as the entry was read, led it still, and the entry was not history.
+    /// False from inside this service's own handler, a refusal and not an answer: there,
+    /// what <see cref="Reply"/> returns says whether the service answers the entry.</summary>
+    public bool Answers()
+    {
+        return Abi.cavalry_cluster_service_answers(handle);
+    }
+
+    /// <summary>How many sessions the log holds open, as far as the service has read: 10 at
+    /// most; -1 from inside this service's own handler.</summary>
+    public int Sessions()
+    {
+        return Abi.cavalry_cluster_service_sessions(handle);
+    }
+
+    /// <summary>Closes the service's publications and its counter, stops its read of the log
+    /// and frees the handle. Idempotent. Close a service before its client; after the
+    /// client's own close it frees the handle alone, and the driver ends what the service
+    /// held by itself. The handle is freed whatever the ABI answers, so when the ABI's close
+    /// failed this throws the <see cref="CavalryException"/> after the handle is freed. The
+    /// one exception is a close from inside this service's own handler, or from inside the
+    /// handler of another service whose poll holds the client, which the ABI refuses with
+    /// <see cref="Abi.ERR_POLLING"/> (spec/c-abi.md, "Calls during a claim or a poll"): it
+    /// then throws the <see cref="CavalryException"/> and keeps the handle.</summary>
+    public void Close()
+    {
+        if (handle == 0)
+        {
+            return;
+        }
+        int result = client.CloseClusterService(handle);
+        if (result != 0)
+        {
+            CavalryException error = Abi.LastError("cavalry_cluster_service_close");
+            if (error.Code == Abi.ERR_POLLING)
+            {
+                throw error;
+            }
+            handle = 0;
+            self.Free();
+            throw error;
+        }
+        handle = 0;
+        self.Free();
+    }
+
+    public void Dispose()
+    {
+        Close();
+    }
+}
+'''
+
+CLUSTER_ENTRY_VALUES = HEADING + r'''
+namespace Cavalry;
+
+/// <summary>
+/// One committed entry as <c>cavalry_cluster_entry_values</c> reads it. It is the one object
+/// a cluster service keeps, over the one struct the service's trampoline fills for each
+/// entry before the handler runs, so copy a value out to keep it.
+/// </summary>
+public sealed class ClusterEntryValues
+{
+    internal Abi.cavalry_cluster_entry_values_t values;
+
+    internal ClusterEntryValues()
+    {
+    }
+
+    /// <summary>The position in the log at which the entry begins.</summary>
+    public long Position => values.position;
+
+    /// <summary>The leadership term the entry was appended in.</summary>
+    public long LeadershipTermId => values.leadership_term_id;
+
+    /// <summary>The cluster's time when its leader appended the entry, in milliseconds since
+    /// 1970-01-01T00:00:00Z: the one clock a service reads, so that every member's service
+    /// reaches the same state.</summary>
+    public long Timestamp => values.timestamp;
+
+    /// <summary>The session of a session's message, open or close, and -1 for every other
+    /// entry.</summary>
+    public long SessionId => values.session_id;
+
+    /// <summary>What the entry is, <c>Abi.CLUSTER_ENTRY_*</c>.</summary>
+    public int Type => values.type;
+
+    /// <summary>The member that leads the term a new leadership term event begins, and -1
+    /// for every other entry.</summary>
+    public int LeaderMemberId => values.leader_member_id;
+
+    /// <summary>Whether the leader closed the session of a session close event for the
+    /// session timeout.</summary>
+    public bool TimedOut => values.timed_out != 0;
 }
 '''
 

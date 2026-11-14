@@ -2870,9 +2870,10 @@ class JvmPackage(unittest.TestCase):
 class DotnetPackage(unittest.TestCase):
     """The .NET package, `clients/dotnet` (clients/dotnet/README.md; ADR 0046, card 209)."""
 
-    FILES = sorted(["Cavalry.csproj", "Abi.cs", "CavalryException.cs", "Client.cs", "CommittedLog.cs", "FragmentHandler.cs",
-                    "HandlerException.cs", "Header.cs", "Image.cs", "Publication.cs", "Recording.cs", "Replay.cs",
-                    "Subscription.cs"])
+    FILES = sorted(["Cavalry.csproj", "Abi.cs", "CavalryException.cs", "Client.cs", "ClusterEntryValues.cs",
+                    "ClusterReplyValues.cs", "ClusterService.cs", "ClusterSession.cs", "CommittedLog.cs",
+                    "FragmentHandler.cs", "HandlerException.cs", "Header.cs", "Image.cs", "Publication.cs", "Recording.cs",
+                    "Replay.cs", "Subscription.cs"])
 
     @classmethod
     def setUpClass(cls):
@@ -2969,6 +2970,34 @@ class DotnetPackage(unittest.TestCase):
         self.assertEqual(subscription.count("[UnmanagedCallersOnly(CallConvs = new[] { typeof(CallConvCdecl) })]"), 1)
         self.assertEqual(subscription.count("Abi.cavalry_subscription_poll(handle, &OnFragment, GCHandle.ToIntPtr(self), (nuint) fragmentLimit)"), 2)
 
+    def test_a_dotnet_client_close_the_abi_refuses_keeps_the_client_open(self):
+        """A cluster service's poll holds its client, so the ABI refuses the client's close
+        from inside the service's handler with ERR_POLLING and frees nothing (spec/c-abi.md,
+        "Calls during a claim or a poll"). `Client.Close()` then throws and keeps the
+        handle, as the closes of a subscription, a committed log, a cluster session and a
+        cluster service do, so the .NET client never forgets a client the ABI keeps open
+        (clients/dotnet/README.md, "What it must never do"). Every other failure still
+        forgets the handle, since the ABI's close frees it whatever it returns."""
+        code = gen_dotnet.write_dotnet(self.header)["Client.cs"]
+        close = code.split("    public void Close()\n    {\n", 1)[1].split("\n    }\n", 1)[0]
+        called = close.index("int result = Abi.cavalry_close(handle);")
+        read = close.index('CavalryException error = Abi.LastError("cavalry_close");')
+        refused = close.index("if (error.Code == Abi.ERR_POLLING)\n                {\n                    throw error;\n"
+                              "                }\n")
+        forgotten = close.index("                handle = 0;\n                throw error;\n            }\n")
+        self.assertLess(called, read)
+        self.assertLess(read, refused)
+        self.assertLess(refused, forgotten)
+        self.assertTrue(close.endswith("            handle = 0;\n        }"), close)
+        self.assertEqual(close.count("handle = 0;"), 2)
+        # The handle is the one the ABI is called with: it is not forgotten before the call.
+        self.assertNotIn("closing", close)
+        doc = code.split("    public void Close()\n", 1)[0].rsplit("\n\n", 1)[1]
+        self.assertIn('It then throws the <see cref="CavalryException"/> and keeps the', doc)
+        with open(os.path.join(gen.ROOT, "clients", "dotnet", "README.md"), encoding="utf-8") as f:
+            readme = f.read()
+        self.assertIn("`client.Close()`", readme.split("- Never read a refusal as an answer.", 1)[1].split("- Never edit a generated", 1)[0])
+
     def test_the_publications_close_clears_the_claim_struct(self):
         """A close leaves no claim, so the struct's `publication` must not name the freed
         handle: the close clears the struct before the ABI's close, and the claim's calls
@@ -2982,10 +3011,11 @@ class DotnetPackage(unittest.TestCase):
     def test_handler_exceptions_message_says_what_to_do_and_names_a_heading_of_the_readme(self):
         files = gen_dotnet.write_dotnet(self.header)
         code = files["HandlerException.cs"]
-        self.assertIn("    public HandlerException(int fragments, int raised, Exception cause, bool committedLog = false)\n"
-                      "        : base(Describe(fragments, raised, cause, committedLog), cause)\n", code)
-        body = code.split("private static string Describe(int fragments, int raised, Exception cause, bool committedLog)",
-                          1)[1].split("\n    }\n", 1)[0]
+        self.assertIn("    public HandlerException(int fragments, int raised, Exception cause, bool committedLog = false, "
+                      "string? cluster = null)\n"
+                      "        : base(Describe(fragments, raised, cause, committedLog, cluster), cause)\n", code)
+        body = code.split("private static string Describe(int fragments, int raised, Exception cause, bool committedLog, "
+                          "string? cluster)", 1)[1].split("\n    }\n", 1)[0]
         self.assertIn("fragment(s) this poll delivered", body)
         self.assertIn("before it stopped on a fault, which Subscription.GetFault() reads", body)
         self.assertIn("    public Fault GetFault()\n", files["Subscription.cs"])
@@ -2994,16 +3024,117 @@ class DotnetPackage(unittest.TestCase):
         # A committed log's poll names its own GetFault() and its entries: the fault of the
         # log's image is reported once, so the message must not send the reader to a
         # subscription's (clients/dotnet/README.md, "The committed log").
-        self.assertIn('string one = committedLog ? "entry" : "fragment";', body)
+        self.assertIn('string one = session ? "reply" : committedLog ? "entry" : "fragment";', body)
         self.assertIn("which this CommittedLog's GetFault() reads\"\n                    + \" until its next poll, and its "
                       "Faulted() from then on when the fault is the log's own image's\"", body)
         self.assertIn("    public Subscription.Fault GetFault()\n", files["CommittedLog.cs"])
         self.assertIn("throw new HandlerException(count, raised, cause, committedLog: true);", files["CommittedLog.cs"])
         self.assertIn("throw new HandlerException(count, raised, cause);", files["Subscription.cs"])
+        # A cluster session's poll speaks of replies and names its own GetFault(); a cluster
+        # service's says that the entry was aborted and comes again (ADR 0124).
+        self.assertIn("which this ClusterSession's GetFault()\"\n                    + \" reads until its next poll\"", body)
+        self.assertIn('delivered = "the " + fragments + " " + (fragments == 1 ? one : many) + " this poll handed over";', body)
+        self.assertIn('if (cluster == "service")', body)
+        self.assertIn("Its entry was aborted: it is\"\n                + \" not taken, the poll ended at it, and the next "
+                      "poll hands it over again. Fix the handler: what it\"", body)
+        self.assertIn("which this ClusterService's GetFault() reads until its next poll", body)
+        self.assertIn('throw new HandlerException(count, raised, cause, cluster: "session");', files["ClusterSession.cs"])
+        self.assertIn('throw new HandlerException(count, 1, cause, cluster: "service");', files["ClusterService.cs"])
+        for owner in ("ClusterSession.cs", "ClusterService.cs"):
+            self.assertIn("    public Subscription.Fault GetFault()\n", files[owner])
         with open(os.path.join(gen.ROOT, "clients", "dotnet", "README.md"), encoding="utf-8") as f:
             slugs = {re.sub(r"[^a-z0-9 -]", "", line.lstrip("#").strip().lower()).replace(" ", "-")
                      for line in f if line.startswith("#")}
         self.assertIn("the-exception", slugs)
+        self.assertIn("the-cluster-session", slugs)
+        self.assertIn("the-cluster-service", slugs)
+
+    def test_the_cluster_session_and_the_cluster_service_have_the_shape_adr_0124_gives(self):
+        """The .NET cluster session and cluster service (ADR 0124), read from the generated
+        source; the runner's cluster round runs them. The client makes each from the ABI's
+        handle, and a session no object will hold is closed before its constants' error is
+        thrown. Each Poll is two calls of its ABI function, the refused nested poll and the
+        poll, and throws its HandlerException after them alone. Each trampoline finds its
+        object by the GCHandle and calls Deliver, which reads the values into the one
+        struct the object keeps and calls the handler inside a catch. A service's Deliver
+        begins with the action ACTION_ABORT, so a handler that threw has its entry aborted;
+        passes the ABI what the handler returned unless it is ACTION_CONTINUE; and for a
+        value the ABI refuses keeps the thread's code and message, where the call failed,
+        and aborts. The service's Poll reads the client's handle through the property that
+        takes no lock, and its Close goes through the client's lock. A close the ABI
+        refuses from inside a handler keeps the handle."""
+        files = gen_dotnet.write_dotnet(self.header)
+        client = files["Client.cs"]
+        self.assertIn("    public ClusterSession ConnectCluster(string members, string responseChannel)\n    {\n"
+                      "        lock (gate)\n", client)
+        self.assertIn("            return new ClusterSession(session);\n", client)
+        self.assertIn("    public ClusterService ClusterService()\n    {\n        lock (gate)\n", client)
+        self.assertIn("            return new ClusterService(service, this);\n", client)
+        self.assertIn("    internal nint Handle => handle;\n", client)
+        self.assertIn("    internal int CloseClusterService(nint service)\n    {\n        lock (gate)\n", client)
+        session = files["ClusterSession.cs"]
+        opened = session.split("    internal ClusterSession(nint handle)\n", 1)[1].split("\n    }\n", 1)[0]
+        failed = opened.index("        catch\n")
+        self.assertLess(opened.index('Abi.Check("cavalry_cluster_session_constants", '
+                                     "Abi.cavalry_cluster_session_constants(handle, ref k));"), failed)
+        closed = opened.index("Abi.cavalry_cluster_session_close(handle);")
+        self.assertLess(failed, closed)
+        self.assertLess(closed, opened.index("self.Free();"))
+        self.assertLess(opened.index("self.Free();"), opened.index("            throw;"))
+        self.assertEqual(session.count("Abi.cavalry_cluster_session_poll(handle, &OnReply, GCHandle.ToIntPtr(self), "
+                                       "(nuint) fragmentLimit)"), 2)
+        self.assertIn("((ClusterSession) GCHandle.FromIntPtr((nint) clientd).Target!).Deliver(buffer, length, frame);", session)
+        self.assertEqual(session.count("Abi.cavalry_cluster_reply_values((nint) frame, ref reply.values)"), 1)
+        self.assertIn("            handler!(new ReadOnlySpan<byte>(buffer, (int) length), reply);\n", session)
+        service = files["ClusterService.cs"]
+        self.assertEqual(service.count("Abi.cavalry_cluster_service_poll(handle, client.Handle, &OnClusterEntry, "
+                                       "GCHandle.ToIntPtr(self),\n"), 2)
+        self.assertIn("((ClusterService) GCHandle.FromIntPtr((nint) clientd).Target!).Deliver(buffer, length, frame);", service)
+        self.assertEqual(service.count("Abi.cavalry_cluster_entry_values((nint) frame, ref entry.values)"), 1)
+        deliver = service.split("    private void Deliver(byte* buffer, nuint length, void* frame)\n", 1)[1].split("\n    }\n", 1)[0]
+        began = deliver.index("        int action = Abi.ACTION_ABORT;\n")
+        called = deliver.index("            action = handler!(new ReadOnlySpan<byte>(buffer, (int) length), entry, this);\n")
+        passed = deliver.index("        if (action != Abi.ACTION_CONTINUE && Abi.cavalry_cluster_service_action(handle, action) != 0)\n")
+        self.assertLess(began, called)
+        self.assertLess(called, passed)
+        kept = deliver[passed:]
+        self.assertLess(kept.index("refused = true;"), kept.index("refusedCode = Abi.Errcode();"))
+        self.assertLess(kept.index("refusedMessage = Abi.Errmsg();"),
+                        kept.index("Abi.cavalry_cluster_service_action(handle, Abi.ACTION_ABORT);"))
+        poll = service.split("    public int Poll(ServiceHandler handler, int fragmentLimit)\n", 1)[1].split("\n    }\n", 1)[0]
+        self.assertIn("        if (raised == 0 && !refused)\n        {\n            return count;\n        }\n", poll)
+        self.assertIn('first ?? new CavalryException("cavalry_cluster_service_action", refusedCode, refusedMessage ?? "");', poll)
+        self.assertNotIn("lock (", service)
+        self.assertNotIn("lock (", session)
+        for owner, close in ((session, "int result = Abi.cavalry_cluster_session_close(handle);"),
+                             (service, "int result = client.CloseClusterService(handle);")):
+            body = owner.split("    public void Close()\n", 1)[1].split("\n    }\n", 1)[0]
+            refused = body.index("if (error.Code == Abi.ERR_POLLING)\n            {\n                throw error;\n            }")
+            self.assertLess(body.index(close), refused)
+            self.assertLess(refused, body.index("handle = 0;\n            self.Free();"))
+        # Every field of the two structs of the header has its property: a field the header
+        # gains is a property to add.
+        structs = {s.name: [f.name for f in s.fields] for s in self.header.structs}
+        for cls, struct, getters in (
+                ("ClusterReplyValues", "cavalry_cluster_reply_values_t",
+                 (("long", "LeadershipTermId", "values.leadership_term_id"), ("long", "Timestamp", "values.timestamp"))),
+                ("ClusterEntryValues", "cavalry_cluster_entry_values_t",
+                 (("long", "Position", "values.position"), ("long", "LeadershipTermId", "values.leadership_term_id"),
+                  ("long", "Timestamp", "values.timestamp"), ("long", "SessionId", "values.session_id"),
+                  ("int", "Type", "values.type"), ("int", "LeaderMemberId", "values.leader_member_id"),
+                  ("bool", "TimedOut", "values.timed_out != 0")))):
+            code = files[cls + ".cs"]
+            self.assertEqual(len(getters), len(structs[struct]), struct)
+            for (cs, getter, read), field in zip(getters, structs[struct]):
+                self.assertIn(f"    public {cs} {getter} => {read};\n", code)
+                self.assertIn(field, read)
+            self.assertIn(f"    internal Abi.{struct} values;\n", code)
+        handlers = files["FragmentHandler.cs"]
+        self.assertIn("public delegate void ReplyHandler(ReadOnlySpan<byte> body, ClusterReplyValues reply);\n", handlers)
+        self.assertIn("public delegate int ServiceHandler(ReadOnlySpan<byte> body, ClusterEntryValues entry, "
+                      "ClusterService service);\n", handlers)
+        self.assertEqual(sorted(gen_dotnet.PER_MESSAGE_DOTNET), sorted(lint.RULES["dotnet"]["functions"]))
+        self.assertEqual(sorted(lint.RULES["dotnet"]["files"]), sorted(name for name in files if name.endswith(".cs")))
 
     def test_the_generated_project_builds_with_every_warning_an_error_when_dotnet_10_is_on_the_path(self):
         """The README builds the client with `dotnet build`, whose project makes every warning

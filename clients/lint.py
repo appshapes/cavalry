@@ -4,11 +4,10 @@ boundary's second part): the per-message functions a generator writes, the wrapp
 of the ABI's per-message functions that the client wraps (`crates/cavalry-ffi/README.md`:
 the claim, the
 reserved value, the commit and abort, the offer, the poll and the header's values, and
-the committed log's poll and an entry's position, ADR 0070, in every client; and in the
-Python client, the Node client, the Go client and the JVM client the seven of a cluster
-session and a cluster service too, the session's offer, its poll and a reply's values,
-and the service's poll, an entry's values, its reply and its action, ADR 0124) and each
-trampoline that
+the committed log's poll and an entry's position, ADR 0070, and the seven of a cluster
+session and a cluster service, the session's offer, its poll and a reply's values, and
+the service's poll, an entry's values, its reply and its action, ADR 0124, in every
+client) and each trampoline that
 calls the user's handler, hold no lock, no `await` and no raise, in the language's
 forms, and so does every function of the package they call. For Python those
 forms are `threading`'s locks and anything else of `threading`, `async def`, `await`,
@@ -31,9 +30,8 @@ argument readers, which throw a TypeError or a RangeError for an argument the AB
 parameter cannot take, before the ABI is called. A call reaches the package's own functions by name: a
 module function, a class's `__init__` or `constructor`, a method of the same class
 through `self` or `this`, and any other method by its name in any class of the package.
-The one raise allowed is in `poll`, a subscription's or a committed log's, and in the
-Python client, the Node client, the Go client and the JVM client a cluster session's or
-a cluster service's,
+The one raise allowed is in `poll`, a subscription's, a committed log's, a cluster
+session's or a cluster service's,
 after the last line that calls the ABI, where the
 user's handler's exception is raised once the poll has returned
 (clients/python/README.md; clients/node/README.md); a raise between two of its calls,
@@ -342,7 +340,8 @@ RULES = {
     # before the ABI is reached.
     "dotnet": {
         "file": "Publication.cs",
-        "files": ["Abi.cs", "CavalryException.cs", "Client.cs", "CommittedLog.cs", "FragmentHandler.cs",
+        "files": ["Abi.cs", "CavalryException.cs", "Client.cs", "ClusterEntryValues.cs", "ClusterReplyValues.cs",
+                  "ClusterService.cs", "ClusterSession.cs", "CommittedLog.cs", "FragmentHandler.cs",
                   "HandlerException.cs", "Header.cs", "Image.cs", "Publication.cs", "Recording.cs", "Replay.cs",
                   "Subscription.cs"],
         "functions": [
@@ -358,6 +357,28 @@ RULES = {
             "CommittedLog.Poll",
             "CommittedLog.OnEntry",
             "CommittedLog.Deliver",
+            # A cluster session and a cluster service (ADR 0124): the session's offer, its
+            # poll, its trampoline and the method that calls the handler, which reads each
+            # reply's values; the service's poll, its reply, its trampoline and the method
+            # that calls the handler, which reads each entry's values and passes the ABI the
+            # action the handler returned; and the getters of the two objects of values.
+            "ClusterSession.Offer",
+            "ClusterSession.Poll",
+            "ClusterSession.OnReply",
+            "ClusterSession.Deliver",
+            "ClusterService.Poll",
+            "ClusterService.Reply",
+            "ClusterService.OnClusterEntry",
+            "ClusterService.Deliver",
+            "ClusterReplyValues.LeadershipTermId",
+            "ClusterReplyValues.Timestamp",
+            "ClusterEntryValues.Position",
+            "ClusterEntryValues.LeadershipTermId",
+            "ClusterEntryValues.Timestamp",
+            "ClusterEntryValues.SessionId",
+            "ClusterEntryValues.Type",
+            "ClusterEntryValues.LeaderMemberId",
+            "ClusterEntryValues.TimedOut",
             "Header.FrameLength",
             "Header.Version",
             "Header.Flags",
@@ -369,7 +390,9 @@ RULES = {
             "Header.ReservedValue",
         ],
         "raise_after": [("Subscription.Poll", "Abi.cavalry_subscription_poll"),
-                        ("CommittedLog.Poll", "Abi.cavalry_committed_log_poll")],
+                        ("CommittedLog.Poll", "Abi.cavalry_committed_log_poll"),
+                        ("ClusterSession.Poll", "Abi.cavalry_cluster_session_poll"),
+                        ("ClusterService.Poll", "Abi.cavalry_cluster_service_poll")],
         "guards": ["Header.Ensure"],
     },
 }

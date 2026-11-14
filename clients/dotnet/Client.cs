@@ -75,8 +75,13 @@ public sealed class Client : IDisposable
         }
     }
 
-    /// <summary>Closes the client and every handle it made. Idempotent; the handle is forgotten
-    /// whatever the ABI returns, and a call after it hands the ABI a null handle, which it
+    /// <summary>Closes the client and every handle it made. Idempotent. The handle is
+    /// forgotten whatever the ABI returns, but for one close: a close from inside the handler
+    /// of a cluster service whose poll holds this client, which the ABI refuses with
+    /// <see cref="Abi.ERR_POLLING"/> and which frees nothing (spec/c-abi.md, "Calls during a
+    /// claim or a poll"). It then throws the <see cref="CavalryException"/> and keeps the
+    /// handle: the client stays open, and the service's next poll and a close after the poll
+    /// has returned use it. A call after a close hands the ABI a null handle, which it
     /// refuses with <see cref="Abi.ERR_NULL"/>.</summary>
     public void Close()
     {
@@ -86,9 +91,18 @@ public sealed class Client : IDisposable
             {
                 return;
             }
-            nint closing = handle;
+            int result = Abi.cavalry_close(handle);
+            if (result != 0)
+            {
+                CavalryException error = Abi.LastError("cavalry_close");
+                if (error.Code == Abi.ERR_POLLING)
+                {
+                    throw error;
+                }
+                handle = 0;
+                throw error;
+            }
             handle = 0;
-            Abi.Check("cavalry_close", Abi.cavalry_close(closing));
         }
     }
 
@@ -237,6 +251,59 @@ public sealed class Client : IDisposable
         lock (gate)
         {
             return Abi.cavalry_committed_log_close(log, handle);
+        }
+    }
+
+    /// <summary>Opens a session with a cluster: <paramref name="members"/> is the members
+    /// string the cluster's members were started with, and
+    /// <paramref name="responseChannel"/> a channel of this host for the cluster's answers,
+    /// <c>cavalry:udp?endpoint=&lt;host&gt;:&lt;port&gt;</c>. The call returns once the leader
+    /// has opened the session, and waits for that for 20 s at most beyond its adds, holding
+    /// the client's lock as an add does. Its <see cref="CavalryException"/> has
+    /// <see cref="Abi.ERR_CLUSTER_MEMBERS"/>, <see cref="Abi.ERR_CLUSTER_REFUSED"/>,
+    /// <see cref="Abi.ERR_CLUSTER_VERSION"/> or <see cref="Abi.ERR_CLUSTER_CONNECT_TIMEOUT"/>,
+    /// a fault's code, or the client's or the driver's (spec/cluster.md, "Sessions";
+    /// spec/c-abi.md, "Functions", cluster session; ADR 0122).</summary>
+    public ClusterSession ConnectCluster(string members, string responseChannel)
+    {
+        lock (gate)
+        {
+            Abi.Check("cavalry_connect_cluster", Abi.cavalry_connect_cluster(out nint session, handle, members,
+                responseChannel));
+            return new ClusterSession(session);
+        }
+    }
+
+    /// <summary>Makes a cluster's service beside the member on this client's driver. It
+    /// sends nothing: the service's first poll opens the member's log. The service's poll
+    /// and its close are calls on this client. The poll is on every entry's path and takes
+    /// no lock, so from here until the service's close this client is used by the thread
+    /// that polls the service and by no other: give the program's other threads a
+    /// <c>Client</c> of their own (spec/cluster.md, "The service"; spec/c-abi.md,
+    /// "Functions", cluster service, and "Threads"; ADR 0123; ADR 0124).</summary>
+    public ClusterService ClusterService()
+    {
+        lock (gate)
+        {
+            Abi.Check("cavalry_cluster_service", Abi.cavalry_cluster_service(out nint service, handle));
+            return new ClusterService(service, this);
+        }
+    }
+
+    /// <summary>The client's handle, for a cluster service's poll, which is a call on the
+    /// client as well as on the service and takes no lock: null after this client's own
+    /// close, which the ABI's poll then refuses.</summary>
+    internal nint Handle => handle;
+
+    /// <summary>A cluster service's close, under the client's lock, as a committed log's:
+    /// the ABI's result, with the thread's error for the caller to read. After this
+    /// client's own close the handle is null, and the ABI frees the service and leaves
+    /// what it held to the driver.</summary>
+    internal int CloseClusterService(nint service)
+    {
+        lock (gate)
+        {
+            return Abi.cavalry_cluster_service_close(service, handle);
         }
     }
 }

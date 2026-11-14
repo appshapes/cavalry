@@ -46,14 +46,12 @@ imports), Go (`go/`, by `generate_go.py`), the JVM (`jvm/`, by `generate_jvm.py`
   the runner's driver, and fails unless it prints the line the README says the reader
   will see (`conformance/python/readme.py` is the shape).
 - `just lint` runs `clients/lint.py` over the generated per-message functions, the
-  wrapper of each of nine of the ABI's sixteen (`crates/cavalry-ffi/README.md`: the
+  wrapper of each of the ABI's sixteen (`crates/cavalry-ffi/README.md`: the
   claim, the reserved value, the commit and abort, the offer, the poll and the
-  header's values, and the committed log's poll and an entry's position; ADR 0070),
-  in the Python client, the Node client, the Go client and the JVM client the
-  wrappers of the seven others too (a cluster session's offer, its poll and a reply's
-  values, with the client's session object, and a cluster service's poll, an entry's
-  values, its reply and its action, with its service object; ADR 0124), which the
-  .NET client binds and does not wrap yet,
+  header's values; the committed log's poll and an entry's position, ADR 0070; and a
+  cluster session's offer, its poll and a reply's values, with the client's session
+  object, and a cluster service's poll, an entry's values, its reply and its action,
+  with its service object, ADR 0124),
   and each
   trampoline that calls the user's handler: no lock, no `await`, no raise, in
   the language's forms, in the function's own body or in any function of the package
@@ -74,8 +72,8 @@ imports), Go (`go/`, by `generate_go.py`), the JVM (`jvm/`, by `generate_jvm.py`
   and its values; a service's handler is given a session message's payload, the
   entry's values and the service, and what it returns is its action; and a service's
   handler that fails has its entry aborted, so the poll ends at it, raises once the
-  ABI has returned, and the next poll hands the entry over again. The Python client,
-  the Node client, the Go client and the JVM client have both.
+  ABI has returned, and the next poll hands the entry over again. Every client has
+  both.
 
 ## Released together
 
@@ -94,4 +92,4 @@ built from the same checkout, or regenerate the package from the library's heade
 | `node/` | `@cavalry/client`, an N-API addon in C over the header, linked with the static library | `conformance/node/` | ADR 0046 (card 206); ADR 0124 (work item 229) |
 | `go/` | `github.com/appshapes/cavalry/clients/go`, cgo over the header, linked with the static library | `conformance/go/` | ADR 0046 (card 207); ADR 0124 (work item 229) |
 | `jvm/` | `com.appshapes.cavalry`, `java.lang.foreign` over the shared library, Java 25 and nothing else | `conformance/jvm/` | ADR 0046 (card 208); ADR 0124 (work item 229) |
-| `dotnet/` | `Cavalry`, P/Invoke with the source-generated marshalling over the shared library, .NET 10 and nothing else | `conformance/dotnet/` | ADR 0046 (card 209) |
+| `dotnet/` | `Cavalry`, P/Invoke with the source-generated marshalling over the shared library, .NET 10 and nothing else | `conformance/dotnet/` | ADR 0046 (card 209); ADR 0124 (work item 229) |
