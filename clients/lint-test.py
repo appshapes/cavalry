@@ -10,14 +10,22 @@ rules fails. The same for the Node client's `index.js`: a per-message function t
 `async`, or that awaits, throws, builds `HandlerError`, uses `Promise` or `.then`, calls
 `Atomics.wait` or calls the module's throwing `check`, fails naming the function and the
 form; a throw in `poll` after the addon's `poll` call passes and one before it fails; a
-header getter that throws fails; a module with none of the per-message functions fails,
+header getter that throws fails; a cluster session's `poll` and a cluster service's are
+held as the subscription's is, a throw in the service's `reply` or in a getter of a
+reply's values or an entry's fails, and so does the error for a value that is no action
+built before the service's addon call (ADR 0124); a module with none of the per-message
+functions fails,
 and a missing `index.js` says to generate. The same for the Node client's addon,
 `src/addon.c`: one test per C form, `pthread_mutex_*` in the trampoline,
 `pthread_rwlock_*` in the view, C11's `mtx_*` in the poll, libuv's `uv_mutex_*` in a helper
 the trampoline calls, `uv_rwlock_*` in the header's field, an N-API thread-safe function in
 the offer, `napi_throw*` in the commit and `napi_fatal_*` in the Buffers' finalizer, each
 failing and naming the function and the form; an argument reader's throw passes and the
-same throw in a helper the poll calls fails; a missing per-message function, an addon with
+same throw in a helper the poll calls fails; a lock in the cluster polls' trampoline, in
+either poll, in the reader of a reply's values or an entry's, a throw in the helper that
+reads a service's handler's action, in what a cluster poll reports, or in the wrapper of
+the session's offer or of the service's reply or action, fails; a missing per-message
+function, an addon with
 none, and a missing addon fail. `just test` runs this through `test-scripts`. The same for the Go client's `cavalry.go` and
 `trampoline.go`: a per-message function that starts a goroutine, sends or receives on a
 channel, uses `sync`, takes a lock through a variable or a field (`registryMu.Lock()`,
@@ -28,7 +36,11 @@ fails naming the function and the form;
 building the `*HandlerError` in `Poll` after the shim's poll call passes and before it
 fails; a panic in the exported trampoline fails naming `trampoline.go`; a lock in
 `shim.c`'s trampoline fails, and one in the helper that keeps a per-message call's error
-fails each shim call that keeps one; a function that reads the thread's error through
+fails each shim call that keeps one; a cluster session's `Poll` and a cluster service's
+are held as the subscription's is, a lock in the service's `Poll`, which is a call on its
+client, a panic in either cluster trampoline or an allocation in the function that calls
+a service's handler fails, and so does a lock in either cluster trampoline of `shim.c`
+(ADR 0124); a function that reads the thread's error through
 `check` or `lastError` without `runtime.LockOSThread()` and its deferred unlock before
 its first ABI call fails, whether it lost the lock, takes it after the call, has no
 deferred unlock or is new; a module with none of the per-message functions fails, and a
@@ -107,12 +119,15 @@ class Clients(unittest.TestCase):
 
     def add_to_addon(self, function, line):
         """`line` as the first statement of the addon's C function `function`."""
-        opening = f"static napi_value {function}(napi_env env, napi_callback_info info) {{\n"
-        if function in ("trampoline", "buffer_freed", "keep_failure", "report"):
-            opening = {"trampoline": "  subscription_state_t *s = clientd;\n",
-                       "buffer_freed": "  (void) env; (void) data; (void) hint;\n",
-                       "keep_failure": "  if (s->first != FIRST_NONE) return;\n  s->first = FIRST_FAILURE;\n",
-                       "report": "  napi_value tuple, first = NULL, holder = NULL;\n"}[function]
+        handler = "(void *clientd, const uint8_t *buffer, size_t length, const cavalry_header_t *header) {\n"
+        openings = {"trampoline": "static void trampoline" + handler,
+                    "cluster_trampoline": "static void cluster_trampoline" + handler,
+                    "buffer_freed": "  (void) env; (void) data; (void) hint;\n",
+                    "keep_failure": "  if (s->first != FIRST_NONE) return;\n  s->first = FIRST_FAILURE;\n",
+                    "report": "  napi_value tuple, first = NULL, holder = NULL;\n",
+                    "cluster_action": "static void cluster_action(subscription_state_t *s, napi_value result) {\n",
+                    "cluster_report": "  napi_value first = NULL, holder = NULL, tuple;\n"}
+        opening = openings.get(function, f"static napi_value {function}(napi_env env, napi_callback_info info) {{\n")
         self.edit(opening, opening + f"  {line}\n", file=self.addon)
 
     def assert_addon_finding(self, function, form):
@@ -389,6 +404,59 @@ class Clients(unittest.TestCase):
         self.assertIn("Header.sessionId", finding)
         self.assertIn("throws", finding)
 
+    def test_the_cluster_polls_throw_after_their_addon_calls_passes_and_before_them_fails(self):
+        """A cluster session's `poll` and a cluster service's in the Node client are held as
+        the subscription's is (ADR 0124)."""
+        self.assertEqual(lint.findings(self.tmp), [])
+        self.edit_node("    const result = addon.clusterSessionPoll(this._state, this.handle, handler, fragmentLimit);\n",
+                       "    if (handler === null) throw new TypeError(\"a handler\");\n"
+                       "    const result = addon.clusterSessionPoll(this._state, this.handle, handler, fragmentLimit);\n")
+        service = ("    const result = addon.clusterServicePoll(this._state, this.handle, this._client.handle, handler, "
+                   "fragmentLimit, this);\n")
+        self.edit_node(service, "    if (handler === null) throw new TypeError(\"a handler\");\n" + service)
+        found = lint.findings(self.tmp)
+        self.assertEqual(len(found), 2, found)
+        for poll in ("ClusterSession.poll", "ClusterService.poll"):
+            self.assertTrue(any(poll in f and "throws" in f for f in found), found)
+
+    def test_the_no_action_error_built_before_a_cluster_services_addon_call_fails(self):
+        """A value that is no action is kept by the addon and its `CavalryError` built once
+        the poll has returned: `noAction` before the addon's call is a raise on the path."""
+        service = ("    const result = addon.clusterServicePoll(this._state, this.handle, this._client.handle, handler, "
+                   "fragmentLimit, this);\n")
+        self.edit_node(service, "    const early = noAction(3);\n" + service)
+        [finding] = lint.findings(self.tmp)
+        self.assertIn("ClusterService.poll", finding)
+        self.assertIn("calls noAction", finding)
+        self.assertIn("noAction builds CavalryError", finding)
+
+    def test_a_throw_in_a_node_cluster_per_message_function_fails(self):
+        """The session's offer and the service's reply return a code, never throw; and the
+        getters of a reply's values and of an entry's read through the addon alone."""
+        self.edit_node("  offer(message) { return addon.cavalry_cluster_session_offer(this.handle, message); }\n",
+                       "  offer(message) { throw new Error(\"no\"); }\n")
+        self.edit_node("  reply(sessionId, message) { return addon.cavalry_cluster_service_reply(this.handle, sessionId, "
+                       "message); }\n", "  reply(sessionId, message) { check(\"cavalry_cluster_service_reply\", -1); }\n")
+        self.edit_node("  get timestamp() { return addon.replyField(this._state, 1); }\n",
+                       "  get timestamp() { throw new Error(\"no\"); }\n")
+        self.edit_node("  get timedOut() { return addon.entryField(this._state, 6); }\n",
+                       "  get timedOut() { throw new Error(\"no\"); }\n")
+        found = lint.findings(self.tmp)
+        self.assertEqual(len(found), 4, found)
+        for name, form in (("ClusterSession.offer", "throws"), ("ClusterService.reply", "calls check"),
+                           ("ClusterReplyValues.timestamp", "throws"), ("ClusterEntryValues.timedOut", "throws")):
+            self.assertTrue(any(f.startswith(f"node: {name} (") and form in f for f in found), found)
+
+    def test_a_missing_node_cluster_function_fails(self):
+        """A cluster session's and a cluster service's per-message functions are held to the
+        rules by name, as the others are (ADR 0124)."""
+        self.edit_node("  reply(sessionId, message) {", "  answer(sessionId, message) {")
+        self.edit_node("  get leaderMemberId() {", "  get leader() {")
+        found = lint.findings(self.tmp)
+        self.assertEqual(len(found), 2, found)
+        for name in ("ClusterService.reply", "ClusterEntryValues.leaderMemberId"):
+            self.assertTrue(any(f"{name} is not in" in f for f in found), found)
+
     def test_a_node_module_without_the_per_message_functions_fails(self):
         with open(self.node, "w", encoding="utf-8") as f:
             f.write("\"use strict\";\nclass Nothing {\n  here() { return 1; }\n}\nmodule.exports = { Nothing };\n")
@@ -471,6 +539,63 @@ class Clients(unittest.TestCase):
         self.add_to_addon("report", "napi_throw_type_error(env, NULL, \"no\");")
         self.assert_addon_finding("fn_poll", "calls report")
         self.assert_addon_finding("fn_poll", "report throws, `napi_throw*`")
+
+    # A cluster session's poll and a cluster service's in the addon (ADR 0124).
+
+    def test_a_pthread_mutex_in_the_cluster_trampoline_fails(self):
+        self.add_to_addon("cluster_trampoline", "pthread_mutex_lock(&lock);")
+        found = lint.findings(self.tmp)
+        self.assertEqual(len(found), 1, found)
+        self.assertIn("node: cluster_trampoline (", found[0])
+        self.assertIn("calls `pthread_mutex_*`", found[0])
+
+    def test_a_throw_where_the_cluster_trampoline_reads_the_action_fails(self):
+        """A value that is no action is kept for the poll to report, never thrown from inside
+        the ABI's call."""
+        self.add_to_addon("cluster_action", "napi_throw_error(s->env, NULL, \"no action\");")
+        self.assert_addon_finding("cluster_trampoline", "calls cluster_action")
+        self.assert_addon_finding("cluster_trampoline", "cluster_action throws, `napi_throw*`")
+
+    def test_a_c11_mtx_in_either_cluster_poll_fails(self):
+        self.add_to_addon("fn_clusterSessionPoll", "mtx_lock(&lock);")
+        self.add_to_addon("fn_clusterServicePoll", "mtx_lock(&lock);")
+        found = lint.findings(self.tmp)
+        self.assertEqual(len(found), 2, found)
+        for poll in ("fn_clusterSessionPoll", "fn_clusterServicePoll"):
+            self.assertTrue(any(f.startswith(f"node: {poll} (") and "calls C11's `mtx_*`" in f for f in found), found)
+
+    def test_a_uv_rwlock_in_the_reply_or_the_entry_field_fails(self):
+        self.add_to_addon("fn_replyField", "uv_rwlock_rdlock(&lock);")
+        self.add_to_addon("fn_entryField", "uv_rwlock_rdlock(&lock);")
+        found = lint.findings(self.tmp)
+        self.assertEqual(len(found), 2, found)
+        for field in ("fn_replyField", "fn_entryField"):
+            self.assertTrue(any(f.startswith(f"node: {field} (") and "calls libuv's `uv_rwlock_*`" in f for f in found),
+                            found)
+
+    def test_a_throw_in_what_a_cluster_poll_reports_fails(self):
+        """cluster_report is what both cluster polls call once the ABI has returned; it
+        reads no argument, so its throw is a raise on the path of each."""
+        self.add_to_addon("cluster_report", "napi_throw_type_error(env, NULL, \"no\");")
+        for poll in ("fn_clusterSessionPoll", "fn_clusterServicePoll"):
+            self.assert_addon_finding(poll, "calls cluster_report")
+            self.assert_addon_finding(poll, "cluster_report throws, `napi_throw*`")
+
+    def test_a_throw_in_a_cluster_wrapper_fails(self):
+        """The wrappers of the session's offer and of the service's reply and action."""
+        wrappers = ("fn_cavalry_cluster_session_offer", "fn_cavalry_cluster_service_reply",
+                    "fn_cavalry_cluster_service_action")
+        for wrapper in wrappers:
+            self.add_to_addon(wrapper, "napi_throw_error(env, NULL, \"no\");")
+        found = lint.findings(self.tmp)
+        self.assertEqual(len(found), 3, found)
+        for wrapper in wrappers:
+            self.assertTrue(any(f.startswith(f"node: {wrapper} (") and "throws, `napi_throw*`" in f for f in found), found)
+
+    def test_a_missing_addon_cluster_function_fails(self):
+        self.edit("static void cluster_trampoline(", "static void cluster_handler(", file=self.addon)
+        found = lint.findings(self.tmp)
+        self.assertTrue(any("the addon's per-message function cluster_trampoline is not in" in f for f in found), found)
 
     def test_a_missing_addon_per_message_function_fails(self):
         self.edit("static napi_value fn_view(", "static napi_value fn_view_renamed(", file=self.addon)
@@ -683,9 +808,89 @@ class Clients(unittest.TestCase):
                      "  pthread_mutex_lock(&lock);\n  error->code = (int32_t) cavalry_errcode();\n", file=self.go_shim)
         found = lint.findings(self.tmp)
         for name in ("cavalry_go_try_claim", "cavalry_go_set_reserved_value", "cavalry_go_commit", "cavalry_go_abort",
-                     "cavalry_go_offer", "cavalry_go_poll", "cavalry_go_committed_log_poll"):
+                     "cavalry_go_offer", "cavalry_go_poll", "cavalry_go_committed_log_poll",
+                     "cavalry_go_cluster_session_offer", "cavalry_go_cluster_session_poll",
+                     "cavalry_go_cluster_service_reply", "cavalry_go_cluster_service_poll",
+                     "cavalry_go_service_trampoline"):
             self.assertTrue(any(f"go: {name} " in f and "calls cavalry_go_keep" in f and "pthread_mutex_*" in f
                                 for f in found), (name, found))
+
+    # A cluster session and a cluster service in the Go client (ADR 0124).
+
+    def test_the_handler_error_before_a_go_cluster_polls_shim_call_fails(self):
+        """A cluster session's Poll and a cluster service's are held as the subscription's
+        is: the *HandlerError each builds after its shim call is the one error it may build."""
+        self.assertEqual(lint.findings(self.tmp), [])
+        self.edit_go("\ts.reply = handler\n\ts.polling = true\n",
+                     "\t_ = &HandlerError{}\n\ts.reply = handler\n\ts.polling = true\n")
+        self.edit_go("\ts.service = handler\n\ts.polling = true\n",
+                     "\t_ = keptError(&s.err)\n\ts.service = handler\n\ts.polling = true\n")
+        found = lint.findings(self.tmp)
+        self.assertEqual(len(found), 2, found)
+        self.assertTrue(any("ClusterSession.Poll" in f and "builds HandlerError" in f for f in found), found)
+        self.assertTrue(any("ClusterService.Poll" in f and "calls keptError" in f and "builds Error" in f for f in found),
+                        found)
+
+    def test_the_clients_mutex_in_a_go_cluster_services_poll_fails(self):
+        """A service's Poll is a call on its client and is on every entry's path: it takes
+        no lock, the client's own among them (clients/go/README.md, "Threads")."""
+        self.edit_go("\ts.service = handler\n\ts.polling = true\n",
+                     "\tv.client.mu.Lock()\n\tdefer v.client.mu.Unlock()\n\ts.service = handler\n\ts.polling = true\n")
+        [finding] = lint.findings(self.tmp)
+        self.assertIn("ClusterService.Poll", finding)
+        self.assertIn("takes a lock with `.Lock()`", finding)
+        self.assertIn("no lock on the per-message path", finding)
+
+    def test_a_panic_in_a_go_cluster_per_message_function_fails(self):
+        """The session's Offer and the service's Reply return a code, and neither exported
+        trampoline panics: a handler's own panic is recovered in the function it calls."""
+        self.edit_go("func (n *ClusterSession) Offer(message []byte) int64 {\n",
+                     "func (n *ClusterSession) Offer(message []byte) int64 {\n\tpanic(\"no\")\n")
+        self.edit_go("func (v *ClusterService) Reply(sessionID int64, message []byte) int32 {\n",
+                     "func (v *ClusterService) Reply(sessionID int64, message []byte) int32 {\n\tpanic(\"no\")\n")
+        self.edit_go("\ts.deliverReply(body)\n", "\tpanic(\"x\")\n\ts.deliverReply(body)\n", file=self.go_trampoline)
+        self.edit_go("\te := &s.entryValues\n", "\tpanic(\"x\")\n\te := &s.entryValues\n", file=self.go_trampoline)
+        found = lint.findings(self.tmp)
+        self.assertEqual(len(found), 4, found)
+        for name in ("ClusterSession.Offer", "ClusterService.Reply", "cavalryGoReply", "cavalryGoClusterEntry"):
+            self.assertTrue(any(f"go: {name} (" in f and "panics" in f for f in found), (name, found))
+
+    def test_an_allocation_where_go_calls_a_cluster_handler_fails(self):
+        """deliverReply and deliverClusterEntry call the handlers, once per reply and per
+        entry: an allocation there fails them and the exported trampoline that calls each."""
+        self.edit_go("\tdefer s.recovered()\n\ts.reply(body, &s.replyValues)\n",
+                     "\tdefer s.recovered()\n\t_ = make([]byte, 1)\n\ts.reply(body, &s.replyValues)\n")
+        self.edit_go("\taction = ActionAbort\n", "\taction = ActionAbort\n\t_ = new(int)\n")
+        found = lint.findings(self.tmp)
+        self.assertEqual(len(found), 4, found)
+        for name in ("Subscription.deliverReply", "Subscription.deliverClusterEntry"):
+            self.assertTrue(any(f"go: {name} (" in f and "allocates" in f for f in found), (name, found))
+        for trampoline, calls in (("cavalryGoReply", "Subscription.deliverReply"),
+                                  ("cavalryGoClusterEntry", "Subscription.deliverClusterEntry")):
+            self.assertTrue(any(f"go: {trampoline} (" in f and f"calls {calls}" in f for f in found), (trampoline, found))
+
+    def test_a_lock_in_the_go_shims_cluster_trampolines_fails(self):
+        reply = "  cavalry_cluster_reply_values(header, &values);\n"
+        self.edit_go(reply, "  pthread_mutex_lock(&lock);\n" + reply, file=self.go_shim)
+        entry = "  if (cavalry_cluster_entry_values(header, &values) != 0) {\n"
+        self.edit_go(entry, "  pthread_mutex_lock(&lock);\n" + entry, file=self.go_shim)
+        found = lint.findings(self.tmp)
+        self.assertEqual(len(found), 2, found)
+        for trampoline in ("cavalry_go_reply_trampoline", "cavalry_go_service_trampoline"):
+            self.assertTrue(any(f"go: {trampoline} (" in f and "pthread_mutex_*" in f for f in found), (trampoline, found))
+
+    def test_a_missing_go_cluster_function_fails(self):
+        """A cluster session's and a cluster service's per-message functions are held to the
+        rules by name, as the others are (ADR 0124)."""
+        self.edit_go("func (v *ClusterService) Reply(", "func (v *ClusterService) Answer(")
+        self.edit_go("func cavalryGoClusterEntry(", "func cavalryGoServiceEntry(", file=self.go_trampoline)
+        self.edit_go("static void cavalry_go_service_trampoline(", "static void cavalry_go_service_handler(",
+                     file=self.go_shim)
+        found = lint.findings(self.tmp)
+        self.assertEqual(len(found), 3, found)
+        for name in ("ClusterService.Reply is not in", "cavalryGoClusterEntry is not in",
+                     "cavalry_go_service_trampoline is not in"):
+            self.assertTrue(any(name in f for f in found), (name, found))
 
     def test_a_go_module_without_the_per_message_functions_fails(self):
         with open(self.go, "w", encoding="utf-8") as f:
