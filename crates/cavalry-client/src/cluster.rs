@@ -7,7 +7,10 @@
 //! connect sent to one member after another, a redirect followed, until the leader
 //! answers ok. From then on [`ClusterSession::offer`] sends a message to the leader
 //! and [`ClusterSession::poll`] reads what the cluster sends back, keeps the session
-//! alive, and follows the leader when the cluster elects another.
+//! alive, and follows the leader when the cluster elects another. Each reply is
+//! handed over with its [`ReplyHeader`], and none whose leadership term is below that
+//! of a reply handed over before: a stale reply is passed over and counted (ADR
+//! 0121).
 
 use std::fmt;
 use std::time::Duration;
@@ -18,10 +21,12 @@ use cavalry_proto::cluster::{
     SESSION_CONNECT_TIMEOUT_NS, Stream, parse_members,
 };
 use cavalry_proto::frame::{DataFrameHeader, Flags};
+use cavalry_shm::counters::generated::CLUSTER_REPLIES_STALE;
 use cavalry_shm::log::Action;
 
 use crate::client::Cavalry;
 use crate::conductor::nano_time;
+use crate::counter::Counter;
 use crate::error::ClientError;
 use crate::publication::{Offer, Publication};
 use crate::subscription::{Fault, Subscription};
@@ -195,6 +200,24 @@ enum Answer {
     },
 }
 
+/// What a reply carries before its payload, as a session's handler is given it
+/// ([`ClusterSession::poll`]): two fields of the reply's session message header
+/// (`spec/cluster.md`, "Session message header, template 1"). The third, the session
+/// id, is the session's own.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct ReplyHeader {
+    /// The leadership term of the entry the reply answers. A service answers an entry
+    /// with the entry's term, and a leader appends a session's message in the term
+    /// the session sent it with. So a reply that a service makes at a message's own
+    /// entry carries the [`ClusterSession::leadership_term_id`] the session had when
+    /// it offered the message. The terms of the replies a session hands over never
+    /// fall.
+    pub leadership_term_id: i64,
+    /// The cluster's time when the leader appended that entry, milliseconds since
+    /// 1970-01-01T00:00:00Z.
+    pub timestamp: i64,
+}
+
 /// A client's open session with a cluster: the handle for sending the cluster
 /// messages and reading its replies.
 ///
@@ -226,6 +249,12 @@ pub struct ClusterSession {
     /// The session's nano clock when it first found the leader's image gone, or 0
     /// while the image is there.
     leaderless_since_ns: i64,
+    /// The highest leadership term among the replies handed over, −1 before the
+    /// first. A reply of a term below it is stale and is not handed over.
+    reply_term: i64,
+    /// `cluster.replies_stale`, which the session adds on its client's driver and
+    /// counts each stale reply in.
+    stale: Counter,
     closed: bool,
     closed_detail: [u8; CLOSED_DETAIL_LENGTH],
     closed_detail_length: usize,
@@ -333,6 +362,29 @@ impl ClusterSession {
                         .iter()
                         .position(|&id| id == leader_member_id)
                         .unwrap_or(target);
+                    // The session's one counter, keyed by the id the leader gave it.
+                    // A client that cannot add it holds no session: it tells the
+                    // leader so, once, and the session timeout closes what a lost
+                    // close leaves open.
+                    let stale = match client.add_counter(
+                        CLUSTER_REPLIES_STALE.0,
+                        &session_id.to_le_bytes(),
+                        &format!("cluster.replies_stale {session_id}"),
+                    ) {
+                        Ok(stale) => stale,
+                        Err(error) => {
+                            if let Some(publication) = ingress.get_mut(leader) {
+                                let _ = send(
+                                    publication,
+                                    &Message::SessionClose {
+                                        leadership_term_id,
+                                        cluster_session_id: session_id,
+                                    },
+                                );
+                            }
+                            return Err(error.into());
+                        }
+                    };
                     return Ok(Self {
                         egress,
                         ingress,
@@ -349,6 +401,8 @@ impl ClusterSession {
                             (LEADER_HEARTBEAT_TIMEOUT_NS as i64).saturating_mul(2)
                         },
                         leaderless_since_ns: 0,
+                        reply_term: -1,
+                        stale,
                         closed: false,
                         closed_detail: [0; CLOSED_DETAIL_LENGTH],
                         closed_detail_length: 0,
@@ -504,16 +558,25 @@ impl ClusterSession {
     }
 
     /// Reads up to `fragment_limit` messages the cluster sent this session, each
-    /// handed to `handler` as its payload and the cluster's time when the leader sent
-    /// it, milliseconds since 1970-01-01T00:00:00Z. Returns how many were handed
-    /// over, or the [`Fault`] that stopped the read of the response channel.
+    /// handed to `handler` as its payload and its [`ReplyHeader`]: the leadership
+    /// term of the entry the reply answers, and the cluster's time when the leader
+    /// appended that entry. Returns how many were handed over, or the [`Fault`] that
+    /// stopped the read of the response channel.
     ///
-    /// A service's replies are in the order that service sent them. The service of a
-    /// term's leader stops answering once its member leads the term no more, so
-    /// across a change of leader a reply of the earlier term can follow one of the
+    /// A service's replies are in the order that service sent them, and the terms of
+    /// the replies handed over never fall. The service of a term's leader stops
+    /// answering once its member leads the term no more, so across a change of
+    /// leader a reply of the earlier term can reach the session after one of the
     /// later only while the former leader has not yet learnt that it lost its
     /// quorum, the leader heartbeat timeout at most (`spec/cluster.md`, "Replies").
-    /// The handler is not given a reply's term.
+    /// Such a reply is stale: its term is below that of a reply the session has
+    /// handed over. The session passes it over, counts it in `cluster.replies_stale`
+    /// on its client's driver, and does not count it in what this call returns;
+    /// [`stale_replies`](Self::stale_replies) reads the count. So once the handler
+    /// has been given a reply of a term, no reply to an entry of an earlier term
+    /// follows. Where the service answers each message at the message's own entry,
+    /// a message the session offered in an earlier term, and that has no answer yet,
+    /// will have none: a program that needs one sends the message again (ADR 0121).
     ///
     /// This is the session's duty cycle too. A new leader event turns the session to
     /// the new leader with its term, and the next thing sent is a keepalive. A session
@@ -533,7 +596,7 @@ impl ClusterSession {
     /// was added by the connect.
     pub fn poll<F>(&mut self, mut handler: F, fragment_limit: usize) -> Result<usize, Fault>
     where
-        F: FnMut(&[u8], i64),
+        F: FnMut(&[u8], &ReplyHeader),
     {
         let Self {
             egress,
@@ -547,6 +610,8 @@ impl ClusterSession {
             leader_image,
             new_leader_wait_ns,
             leaderless_since_ns,
+            reply_term,
+            stale,
             closed,
             closed_detail,
             closed_detail_length,
@@ -559,13 +624,26 @@ impl ClusterSession {
                 }
                 match Message::parse(Stream::Egress, body) {
                     Ok(Message::SessionMessage {
+                        leadership_term_id,
                         cluster_session_id,
                         timestamp,
                         payload,
-                        ..
                     }) if cluster_session_id == *session_id => {
-                        handler(payload, timestamp);
-                        delivered += 1;
+                        if leadership_term_id < *reply_term {
+                            // Stale: of a term below one this session has handed
+                            // over. One compare and one relaxed add, no allocation.
+                            let _ = stale.increment();
+                        } else {
+                            *reply_term = leadership_term_id;
+                            handler(
+                                payload,
+                                &ReplyHeader {
+                                    leadership_term_id,
+                                    timestamp,
+                                },
+                            );
+                            delivered += 1;
+                        }
                     }
                     Ok(Message::NewLeaderEvent {
                         leadership_term_id: term,
@@ -670,6 +748,14 @@ impl ClusterSession {
         self.member_ids.get(self.leader).copied().unwrap_or(-1)
     }
 
+    /// How many stale replies the session has read and not handed over: replies whose
+    /// leadership term was below that of a reply it had handed over before
+    /// ([`poll`](Self::poll)). It is the value of the session's
+    /// `cluster.replies_stale`, which `cavalry doctor` reads on this client's driver.
+    pub fn stale_replies(&self) -> i64 {
+        self.stale.get()
+    }
+
     /// Whether the session is closed, and why: `TIMEOUT` when the leader closed it for
     /// hearing nothing from it for the session timeout, and `NO LEADER` when its leader
     /// was lost and no member sent the new leader event in twice the leader heartbeat
@@ -686,9 +772,9 @@ impl ClusterSession {
     }
 
     /// Closes the session: a session close to the leader, which answers nothing,
-    /// then the session's publications and its subscription. The session close is
-    /// offered for at most the keepalive interval; a leader that does not take it in
-    /// that time closes the session by its timeout.
+    /// then the session's publications, its subscription and its counter. The
+    /// session close is offered for at most the keepalive interval; a leader that
+    /// does not take it in that time closes the session by its timeout.
     pub fn close(mut self) -> Result<(), ClusterError> {
         if !self.closed {
             let close = Message::SessionClose {
@@ -711,6 +797,7 @@ impl ClusterSession {
             publication.close()?;
         }
         self.egress.close()?;
+        self.stale.close();
         Ok(())
     }
 }
@@ -726,6 +813,7 @@ impl fmt::Debug for ClusterSession {
             .field("session_id", &self.session_id)
             .field("leadership_term_id", &self.leadership_term_id)
             .field("leader_member_id", &self.leader_member_id())
+            .field("stale_replies", &self.stale_replies())
             .field("closed", &self.closed())
             .finish()
     }

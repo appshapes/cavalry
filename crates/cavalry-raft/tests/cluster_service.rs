@@ -325,15 +325,22 @@ impl Cluster {
     }
 }
 
-/// A reply as the client read it: its payload and the cluster's time on it.
-type Replies = Vec<(Vec<u8>, i64)>;
+/// A reply as the client read it: its payload, and the leadership term and the
+/// cluster's time its header gave.
+type Replies = Vec<(Vec<u8>, i64, i64)>;
 
 /// One duty cycle of the test's thread: the session's poll into `replies`, and what
 /// the cluster's thread said.
 fn cycle(session: &mut ClusterSession, cluster: &mut Cluster, replies: &mut Replies) {
     session
         .poll(
-            |payload, timestamp| replies.push((payload.to_vec(), timestamp)),
+            |payload, header| {
+                replies.push((
+                    payload.to_vec(),
+                    header.leadership_term_id,
+                    header.timestamp,
+                ))
+            },
             16,
         )
         .expect("the session polls");
@@ -508,7 +515,12 @@ fn a_message_is_answered_by_the_service_beside_its_terms_leader_alone() {
     }
     assert_eq!(
         replies,
-        [(format!("{first_leader}:one").into_bytes(), entry.timestamp)]
+        [(
+            format!("{first_leader}:one").into_bytes(),
+            first_term,
+            entry.timestamp
+        )],
+        "with the entry's term and time"
     );
 
     // The leader is lost, its service and its driver with it. The session follows
@@ -544,7 +556,8 @@ fn a_message_is_answered_by_the_service_beside_its_terms_leader_alone() {
     );
     assert_eq!(
         replies,
-        [(format!("{leader}:two").into_bytes(), entry.timestamp)]
+        [(format!("{leader}:two").into_bytes(), term, entry.timestamp)],
+        "with the next leader's term"
     );
 
     // The service beside the leader stops and another starts: it reads the log from
@@ -598,13 +611,20 @@ fn a_message_is_answered_by_the_service_beside_its_terms_leader_alone() {
         .expect("the leader's service took it");
     assert_eq!(
         replies_after,
-        [(format!("{leader}:three").into_bytes(), entry.timestamp)]
+        [(
+            format!("{leader}:three").into_bytes(),
+            term,
+            entry.timestamp
+        )]
     );
 
-    // No reply was dropped: each was sent or was not this service's to send.
+    // No reply was dropped: each was sent or was not this service's to send. And
+    // the session passed none over: no reply of the first term came after one of
+    // the next.
     for id in [leader, follower] {
         assert_eq!(dropped(dir.path(), id), 0, "member {id}");
     }
+    assert_eq!(session.stale_replies(), 0);
 
     session.close().expect("the session closes");
     cavalry.close().expect("the client closes");
@@ -660,8 +680,13 @@ fn a_reply_at_a_sessions_open_event_is_read_by_the_session_its_client_opens() {
             cycle(&mut session, &mut cluster, &mut replies);
         }
         assert_eq!(replies.len(), 1, "session {place}: {replies:?}");
-        let (payload, opened) = &replies[0];
+        let (payload, opened_in, opened) = &replies[0];
         assert_eq!(payload, b"welcome", "session {place}");
+        assert_eq!(
+            *opened_in,
+            session.leadership_term_id(),
+            "the term of the session's open event"
+        );
         assert!(*opened > 1_600_000_000_000, "the cluster's time");
 
         // Then the session's own message, answered after the welcome and once.
@@ -678,7 +703,11 @@ fn a_reply_at_a_sessions_open_event_is_read_by_the_session_its_client_opens() {
         );
         assert_eq!(
             answered,
-            [(format!("{leader}:{message}").into_bytes(), entry.timestamp)],
+            [(
+                format!("{leader}:{message}").into_bytes(),
+                entry.term,
+                entry.timestamp
+            )],
             "session {place}"
         );
         sessions.push(session);

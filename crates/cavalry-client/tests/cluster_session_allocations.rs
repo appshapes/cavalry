@@ -1,6 +1,7 @@
 //! The allocation gate over a cluster session (CLAUDE.md, invariant 2 and gate 2; ADR
-//! 0117): once the session is open, a message offered, its reply read, a keepalive
-//! sent and a new leader event followed allocate nothing and reallocate nothing. The
+//! 0117, ADR 0121): once the session is open, a message offered, its reply read, a
+//! stale reply passed over and counted, a keepalive sent and a new leader event
+//! followed allocate nothing and reallocate nothing. The
 //! cluster is played by this thread, which holds the leader's ingress subscription
 //! and its egress publication; the session is opened by a second thread, which ends
 //! before the count begins, since a region counts every thread of the process. Alone
@@ -24,6 +25,8 @@ mod ports;
 static GLOBAL: &StatsAlloc<System> = &INSTRUMENTED_SYSTEM;
 
 const ROUNDS: u64 = 5_000;
+/// A stale reply is sent after every this many rounds.
+const STALE_EVERY: u64 = 500;
 const DEADLINE: Duration = Duration::from_secs(30);
 const SESSION: i64 = 11;
 
@@ -44,6 +47,28 @@ fn send(publication: &mut Publication, message: &Message<'_>) {
             }
             Err(other) => panic!("{other}"),
         }
+    }
+}
+
+/// Sends the session a reply of the term before `term`, which is stale once the
+/// session has handed over a reply of `term`, and polls until the session has counted
+/// it. Nothing here allocates.
+fn late(session: &mut ClusterSession, egress: &mut Publication, term: i64) {
+    send(
+        egress,
+        &Message::SessionMessage {
+            leadership_term_id: term - 1,
+            cluster_session_id: SESSION,
+            timestamp: 1_700_000_000_000,
+            payload: b"late",
+        },
+    );
+    let passed = session.stale_replies();
+    let deadline = Instant::now() + DEADLINE;
+    while session.stale_replies() == passed {
+        assert!(Instant::now() < deadline, "the stale reply was not read");
+        let handed = session.poll(|_, _| {}, 1).expect("the session polls");
+        assert_eq!(handed, 0, "a stale reply was handed over");
     }
 }
 
@@ -282,6 +307,9 @@ fn an_open_session_allocates_nothing_per_message() {
             );
         }
     }
+    // And the stale path: a reply of term 2 after the session has read replies of
+    // term 3.
+    late(&mut session, &mut egress, 3);
 
     let region = Region::new(GLOBAL);
     let before = keepalives;
@@ -318,6 +346,10 @@ fn an_open_session_allocates_nothing_per_message() {
             sequence,
             &mut keepalives,
         );
+        // A reply of the term before, after one of this term: stale.
+        if sequence % STALE_EVERY == STALE_EVERY - 1 {
+            late(&mut session, &mut egress, term);
+        }
     }
     // A quiet stretch inside the region, to a keepalive.
     quiet(
@@ -335,6 +367,11 @@ fn an_open_session_allocates_nothing_per_message() {
          docs/how-to/run-the-bench.md, \"When it does not work\""
     );
     assert!(keepalives > before, "a keepalive was sent while counting");
+    assert_eq!(
+        session.stale_replies(),
+        1 + (ROUNDS / STALE_EVERY) as i64,
+        "the stale replies passed over, one of them in the warm-up"
+    );
     assert_eq!(session.leader_member_id(), leader as i32);
 
     session.close().expect("the session closes");

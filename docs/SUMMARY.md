@@ -168,3 +168,4 @@ under `docs/` is listed here; `just lint-docs` fails on one that is not.
 - [0119. Keep a decision that waits on the Brigade Board, and never as a Proposed file](decisions/0119-keep-a-decision-that-waits-on-the-brigade-board-and-never-as-a-proposed-file.md)
 - [0120. Index the book's search by page, so that its index stays under mdBook's warning](decisions/0120-index-the-books-search-by-page-so-that-its-index-stays-under-mdbooks-warning.md)
 - [0118. Reply to a session from the service beside the entry's leader, and wait for no client past the keepalive interval](decisions/0118-reply-to-a-session-from-the-service-beside-the-entrys-leader-and-wait-for-no-client-past-the-keepalive-interval.md)
+- [0121. Hand a session's handler each reply's term, and pass over a reply of a term below one handed over](decisions/0121-hand-a-sessions-handler-each-replys-term-and-pass-over-a-reply-of-a-term-below-one-handed-over.md)
