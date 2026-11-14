@@ -188,7 +188,7 @@ jobs:
         id: draft1
         if: steps.window.outputs.count > 0 && inputs.draft_run == ''
         continue-on-error: true   # the file it wrote (or did not) is judged by the lint and the verdict step; the action also fails a step whose agent exceeded --max-turns after writing
-        uses: anthropics/claude-code-action@c0949c50a78c1ec8ce2647db36629b870e715d0c # v1.0.268
+        uses: anthropics/claude-code-action@4fa93a88de49bbef68b10eb15aabedf28ca0e1ed # v1.0.271
         with:
           allowed_bots: "claude,github-actions"
           claude_code_oauth_token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
@@ -250,7 +250,7 @@ jobs:
         id: review1
         if: steps.window.outputs.count > 0 && inputs.draft_run == ''
         continue-on-error: true   # as the drafter's
-        uses: anthropics/claude-code-action@c0949c50a78c1ec8ce2647db36629b870e715d0c # v1.0.268
+        uses: anthropics/claude-code-action@4fa93a88de49bbef68b10eb15aabedf28ca0e1ed # v1.0.271
         with:
           allowed_bots: "claude,github-actions"
           claude_code_oauth_token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
@@ -316,7 +316,7 @@ jobs:
         id: draft2
         if: steps.window.outputs.count > 0 && inputs.draft_run == '' && (steps.lint1.outcome != 'success' || steps.verdict1.outputs.verdict != 'APPROVED')
         continue-on-error: true   # as the drafter's
-        uses: anthropics/claude-code-action@c0949c50a78c1ec8ce2647db36629b870e715d0c # v1.0.268
+        uses: anthropics/claude-code-action@4fa93a88de49bbef68b10eb15aabedf28ca0e1ed # v1.0.271
         with:
           allowed_bots: "claude,github-actions"
           claude_code_oauth_token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
@@ -374,7 +374,7 @@ jobs:
         id: review2
         if: steps.draft2.outcome == 'success'
         continue-on-error: true   # as the drafter's
-        uses: anthropics/claude-code-action@c0949c50a78c1ec8ce2647db36629b870e715d0c # v1.0.268
+        uses: anthropics/claude-code-action@4fa93a88de49bbef68b10eb15aabedf28ca0e1ed # v1.0.271
         with:
           allowed_bots: "claude,github-actions"
           claude_code_oauth_token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
