@@ -13,8 +13,9 @@ Checks:
   links   every relative link in docs/, README.md and crates/*/README.md resolves to a
           file or directory, and every anchor names a heading in its target
   adrs    every file in docs/decisions/ is NNNN-title.md with a matching "# NNNN." title
-          and a Status of Proposed, Accepted, Superseded by NNNN or Rejected; numbers
-          are unique
+          and a Status of Accepted, Superseded by NNNN or Rejected; numbers are
+          unique. A file is never Proposed: a decision that waits is a work item on
+          the Brigade Board (.claude/rules/docs.md, Decisions; ADR 0119)
   glossary
           the first dotted segment of every counter name in counters.toml, underscores
           read as spaces, is a term in docs/glossary.md or the first word of one
@@ -60,7 +61,10 @@ GLOSSARY = DOCS / "glossary.md"
 COUNTERS = ROOT / "counters.toml"
 CONFIG = ROOT / "config.toml"
 
-STATUSES = re.compile(r"^- \*\*Status:\*\* (Proposed|Accepted|Superseded by \d{4}|Rejected)\s*$")
+STATUSES = re.compile(r"^- \*\*Status:\*\* (Accepted|Superseded by \d{4}|Rejected)\s*$")
+# The one status a file carried until ADR 0119, named so that the finding can say what
+# to do with it.
+PROPOSED = re.compile(r"^- \*\*Status:\*\* Proposed\s*$")
 ADR_NAME = re.compile(r"^(\d{4})-[a-z0-9-]+\.md$")
 LINK = re.compile(r"\[[^\]]*\]\(([^)\s]+)(?:\s+\"[^\"]*\")?\)")
 REF_DEF = re.compile(r"^\s*\[[^\]]+\]:\s*(\S+)", re.M)
@@ -195,7 +199,13 @@ def check_adrs() -> int:
         if not first.startswith(f"# {num}. "):
             find(f"adrs: {rel(p)} first line must start with '# {num}. '")
         if adr_status(text) is None:
-            find(f"adrs: {rel(p)} has no '- **Status:**' line with a valid status")
+            if any(PROPOSED.match(line) for line in text.splitlines()):
+                find(f"adrs: {rel(p)} has the Status Proposed, which a file does not carry: "
+                     "keep a decision that waits as a work item on the Brigade Board tagged "
+                     "`decision` and `cavalry`, and land its ADR Accepted with the change it "
+                     "explains (.claude/rules/docs.md, Decisions; ADR 0119)")
+            else:
+                find(f"adrs: {rel(p)} has no '- **Status:**' line with a valid status")
     return len(files)
 
 
