@@ -10,7 +10,9 @@ code (`cavalry/__init__.py`) gives the handles the forms a Python user expects. 
 log as a writable `memoryview` or offers `bytes`; a `Subscription` polls with a callable
 fragment handler that receives the body as a `memoryview` into the log and the frame's
 header; a `Recording` and a `Replay` wrap the driver's archive; a `CommittedLog` is a
-service's read of a cluster's committed log beside a member (below). Every message the
+service's read of a cluster's committed log beside a member; a `ClusterSession` is a
+client's session with a cluster; a `ClusterService` is a cluster's service beside a
+member, handed each committed entry and answering the sessions (all three below). Every message the
 client sends or receives goes through one `extern "C"` call on the caller's thread, as
 the ABI's page promises (ADR 0046's boundary; ADR 0051). The package has no dependency:
 `ctypes` is in Python's standard library, and both CI runners carry Python 3 already.
@@ -86,12 +88,108 @@ would lose the entry at 96, and applying 192 before opening again at 96 would ap
 192 twice. A `fragment_limit` of 1 is the simple form: a poll then delivers at most
 one entry, and the service decides after each.
 
+### The cluster session
+
+A cluster session is a client's connection to a cluster: it sends the leader messages,
+which the leader appends to the cluster's log, and reads the replies of the service
+beside the leader (`spec/cluster.md`, "Sessions"). `client.connect_cluster(members,
+response_channel)` opens one and returns a `ClusterSession`. `members` is the members
+string the cluster's members were started with (`docs/how-to/run-a-cluster.md`), and
+`response_channel` a channel of this host for the cluster's answers,
+`cavalry:udp?endpoint=<host>:<port>`. The call returns once the leader has opened the
+session and waits for that for 20 s at most; it raises `CavalryError` with
+`CAVALRY_ERR_CLUSTER_MEMBERS`, `CAVALRY_ERR_CLUSTER_REFUSED`,
+`CAVALRY_ERR_CLUSTER_VERSION` or `CAVALRY_ERR_CLUSTER_CONNECT_TIMEOUT`.
+
+`session.offer(message)` sends the leader `bytes` of at most
+`session.max_message_length`, and returns the position after the message on the
+session's publication to the leader, or a publication's result code below zero:
+`cavalry.CLOSED` for a session that is closed, and `cavalry.ERROR` with
+`CAVALRY_ERR_TOO_LONG` for a message that is too long. A message taken is on its way to
+the leader and is not committed. `session.poll(handler, fragment_limit)` calls
+`handler(body, reply)` for each reply: `body` is the reply's payload, a `memoryview`
+into the log for the call, and `reply` carries `reply.leadership_term_id`, the term of
+the entry the reply answers, and `reply.timestamp`, the cluster's time when its leader
+appended that entry, in milliseconds since 1970-01-01T00:00:00Z. The poll returns the
+count of replies handed over, or −1 when it stopped on a fault, which `session.fault()`
+gives until the next poll. The poll is the session's duty cycle as well: it sends the
+keepalive, follows a new leader and closes the session when the cluster says so. Call
+it at least every 500 ms.
+
+A reply is no delivery. The terms of the replies a handler is given never fall: a
+reply of a term below one already handed over is stale, is passed over, and is counted
+in `session.stale_replies()` (ADR 0121). A message whose leader was lost before it
+committed is answered by nobody. A program that needs an answer offers again when
+none comes. `session.closed()` is `None` while the session is open, and then the
+reason: `"TIMEOUT"`, `"NO LEADER"` or the detail of the cluster's closed event.
+`session.leader_member_id()` and `session.leadership_term_id()` say whom the session
+sends to. `session.close()` offers the leader a session close for at most 500 ms and
+frees the session; it is idempotent. Close a session before its client
+(`spec/c-abi.md`, "Functions", cluster session; ADR 0122).
+
+### The cluster service
+
+A cluster's service is the program beside each member that applies the committed
+entries and answers the sessions (`spec/cluster.md`, "The service" and "Replies").
+`client.cluster_service()` makes one beside the member on the client's driver and
+returns a `ClusterService`; it sends nothing. `service.poll(handler, fragment_limit)`
+opens the member's log when the member has one, and calls `handler(body, entry,
+service)` for each committed entry, in order:
+
+- `body` is a session message's payload, a `memoryview` into the log for the call. It
+  is empty for every other entry.
+- `entry` carries the entry's values: `entry.type`, one of
+  `CAVALRY_CLUSTER_ENTRY_SESSION_MESSAGE`, `_SESSION_OPEN`, `_SESSION_CLOSE`,
+  `_NEW_LEADERSHIP_TERM` and `_OTHER`; `entry.position`; `entry.leadership_term_id`;
+  `entry.timestamp`, the cluster's time, the one clock a service reads, so that every
+  member's service reaches the same state; `entry.session_id`, −1 where the entry has
+  no session; `entry.leader_member_id`, for a new leadership term; and
+  `entry.timed_out`, for a session close.
+- `service` is the service that was polled, for `service.reply`.
+
+What the handler returns says what becomes of the entry. `None` or `cavalry.CONTINUE`
+takes it, and the poll goes on. `cavalry.BREAK` takes it and ends the poll.
+`cavalry.ABORT` leaves it and ends the poll, and the next poll hands it over again.
+The poll returns the count of entries taken, or −1 when it stopped on a fault, which
+`service.fault()` gives until the next poll.
+
+`service.reply(session_id, message)` answers a session from inside the handler and
+returns what became of the reply: `CAVALRY_CLUSTER_REPLY_SENT`;
+`CAVALRY_CLUSTER_REPLY_NOT_ANSWERING`, from a service whose member did not lead the
+entry's term, which has nothing to do; `CAVALRY_CLUSTER_REPLY_RETRY`, when the
+session's response channel did not take the reply now, for which the handler returns
+`cavalry.ABORT`; `CAVALRY_CLUSTER_REPLY_DROPPED`; `CAVALRY_CLUSTER_REPLY_NO_SESSION`;
+or `CAVALRY_CLUSTER_REPLY_TOO_LONG`. Every member's service makes the same calls for
+the same entry, and one of them sends: the one beside the leader of the entry's term.
+So a handler does this, in this order:
+
+1. It replies. When the reply answers `CAVALRY_CLUSTER_REPLY_RETRY` it returns
+   `cavalry.ABORT` and changes nothing.
+2. It changes the service's state.
+3. It returns.
+
+An entry that was aborted is handed over again, and a reply that an earlier handling
+of the same entry sent is not sent twice: the second answers
+`CAVALRY_CLUSTER_REPLY_SENT` and sends nothing. A handler that raises, or returns
+anything that is no action, has its entry aborted too, and `poll` raises `HandlerError`
+("The exception"): an entry is taken only by a handler that finished with it, so
+`service.position()`, the position after the last entry taken, never passes an entry
+whose handler failed.
+
+The service's poll and its close are calls on the client the service was made on
+("Threads"). `service.close()` is idempotent; close a service before its client
+(`spec/c-abi.md`, "Functions", cluster service; ADR 0123; ADR 0124).
+`conformance/python/cluster.py` is a program that runs three services and a session
+through every call above.
+
 ## What it must never do
 
 - Never run a message through anything but one ABI call: no lock, no `await`, no
   thread, no copy of a fragment into a new array for the handler. `clients/lint.py`
   reads the per-message functions, `try_claim`, `set_reserved_value`, `commit`,
-  `abort`, `offer`, a subscription's and a committed log's `poll` and trampoline, and
+  `abort`, `offer`, a subscription's and a committed log's `poll` and trampoline, a
+  cluster session's `offer`, `poll` and trampoline, a cluster service's `poll`, `reply`
+  and trampoline, and
   `Header.values` with the `Header` properties that call it, for Python's forms of each (`threading`'s locks,
   `async def`, `await`, `raise`, and building `CavalryError`), in their own bodies and
   in every function of the package they call, such as `_check`; `just lint` fails on
@@ -101,12 +199,16 @@ one entry, and the service decides after each.
 - Never raise for an `Offer` code: `try_claim` and `offer` return the position after
   the frame or the code below zero (`cavalry.BACK_PRESSURED`, `NOT_CONNECTED`,
   `ADMIN_ACTION`, `CLOSED`, `MAX_POSITION_EXCEEDED`, `ERROR`), as the ABI does; the
-  caller branches, as a Rust caller matches `Offer`.
+  caller branches, as a Rust caller matches `Offer`. A cluster session's `offer`
+  returns the same codes, and a cluster service's `reply` returns its
+  `CAVALRY_CLUSTER_REPLY_*` code, or −1 from outside the handler.
 - Never publish bytes the caller did not offer: `offer` takes `bytes`, or a `ctypes`
   `c_char` array such as `ctypes.create_string_buffer(n)`, which a caller may reuse
   across offers. A `str`, a `bytearray`, a `memoryview` or anything else is refused
   by `ctypes` with `ctypes.ArgumentError` before the ABI is called, so nothing is
-  published; pass `bytes(view)`, or claim and write into `publication.claim`.
+  published; pass `bytes(view)`, or claim and write into `publication.claim`. A
+  cluster session's `offer` and a cluster service's `reply` take the same and refuse
+  the same.
 - Never let a view or a header outlive its call unnoticed. The views and the header
   point into the log, which is reused and unmapped later. Once the handler returns,
   the trampoline releases `body` and clears the header's pointer, so a kept `body`
@@ -121,7 +223,9 @@ one entry, and the service decides after each.
   next claim. The close zeroes the claim struct too, so `commit`, `abort` and
   `set_reserved_value` after it answer -1 with `CAVALRY_ERR_NO_CLAIM` and the ABI reads
   no freed handle through the struct's `publication` (`spec/c-abi.md`, "Which claim a
-  struct names").
+  struct names"). A reply's values and an entry's values are no pointer into the
+  log: `reply` and `entry` are the one struct the session or the service keeps,
+  rewritten for the next reply or entry, so copy a field out to keep it.
 - Never let a call the ABI refuses change a claim or a poll (`spec/c-abi.md`, "Calls
   during a claim or a poll"). A `try_claim` while a claim is outstanding returns
   `cavalry.ERROR` with `CAVALRY_ERR_CLAIM_OUTSTANDING`, and `publication.claim` stays
@@ -134,11 +238,28 @@ one entry, and the service decides after each.
   `log.faulted()` are `None`, and `log.fault()` and `log.close()` raise `CavalryError`,
   each with `CAVALRY_ERR_POLLING`, and the log stays open. The `False` and the three
   `None` are refusals there, not answers: read the four after the poll has returned.
-  The handler has each entry's own `position`.
+  The handler has each entry's own `position`. A cluster session's handler and a
+  cluster service's are held to it as well. From inside a session's handler, `offer`
+  returns `cavalry.ERROR`, a `poll` of the same session, `leadership_term_id()`,
+  `leader_member_id()` and `stale_replies()` return −1, `closed()` is `None`, a
+  refusal there, and `fault()` and `close()` raise `CavalryError`, each with
+  `CAVALRY_ERR_POLLING`: a handler that answers a reply with a message keeps what it
+  needs and offers after the poll has returned. From inside a service's handler, a
+  `poll` of the same service, `position()` and `sessions()` return −1, `answers()` is
+  `False`, a refusal there, and `fault()` and `close()` raise `CavalryError`. The
+  service's poll holds its client too, so every call on that client from inside the
+  handler is refused the same way: `client.is_closed` is `False`, a refusal, and an
+  add, a command, `client.committed_log`, `client.connect_cluster` and
+  `client.cluster_service` raise `CavalryError` with `CAVALRY_ERR_POLLING`. Make them
+  after the poll has returned.
 - Never drop a fragment and never swallow the user's exception: the ABI's poll
   consumes every fragment it delivers, so every one reaches the handler, once and in
   order, even after a call raised; `poll` raises once the ABI has returned, the one
   raise the per-message path allows ("The exception", below).
+- Never take an entry for a cluster service's handler that failed. The handler's
+  return value is the entry's action, so the trampoline answers for a handler that
+  raised or returned no action: it aborts the entry, the poll ends there, and `poll`
+  raises. The entry is handed over again; it is never skipped.
 - Never edit a generated file by hand: `just lint` regenerates the package and fails
   when the committed files differ.
 
@@ -194,9 +315,11 @@ runners'.
 
 ### The call
 
-The package opens the library twice, which the loader maps once. The nine
+The package opens the library twice, which the loader maps once. The sixteen
 per-message functions of `crates/cavalry-ffi/README.md`, a committed log's poll and an
-entry's position among them, come through `ctypes.PyDLL`,
+entry's position, a cluster session's offer, its poll and a reply's values, and a
+cluster service's poll, an entry's values, its reply and its action among them, come
+through `ctypes.PyDLL`,
 which keeps the GIL held across the foreign call, so an offer, a claim, a commit or
 abort and a poll's call-backs run with no GIL release and re-acquire pair per message.
 `ctypes.CDLL` would release the GIL around each call and take it back in each
@@ -208,17 +331,43 @@ long, one polling another subscription included. The cost is the pair on each of
 calls, which are not per message. Every per-message function makes one call; `poll`'s
 call-backs are the ABI calling the trampoline, not calls of their own. A committed
 log's trampoline makes one call of its own per entry,
-`cavalry_committed_log_entry_position`, for the position it hands the handler. The
+`cavalry_committed_log_entry_position`, for the position it hands the handler. A
+cluster session's trampoline makes one per reply, `cavalry_cluster_reply_values`, and
+a cluster service's one per entry, `cavalry_cluster_entry_values`, and a second,
+`cavalry_cluster_service_action`, for a handler that returned `BREAK` or `ABORT`. The
 runner checks each function's loader.
+
+A cluster service's poll is the one per-message function that can wait for the driver.
+It sends commands with the service's client when it opens the member's log, at a
+session's opening, where a term's leader changes and at a recording's end, and it
+waits for each answer with the GIL held, so every other Python thread of the process
+stops for that wait. It holds the GIL all the same, because releasing it would cost
+every entry: through `ctypes.CDLL` each call-back takes the GIL back, and beside one
+Python thread that computes, a poll of 10 messages then took 5.8 to 6.3 ms at its p99,
+the interpreter's switch interval of 5 ms and more, against 4.4 to 4.6 µs with the GIL
+held (ADR 0124 has the measurement, on an Apple M5 Pro laptop with Python 3.14.6). The
+runner's cluster round reports the waits. On that laptop, in each of 25 runs, 4 of
+about 17,900 polls of three services took over 1 ms: the three that opened a member's
+log and the leader's at the session's opening. The longest took 7.4 to 12.2 ms. A
+program whose other threads cannot stop for that long runs its service in a process
+of its own.
 
 ### Threads
 
 Releasing the GIL lets two Python threads be inside the ABI at once, and the ABI runs
 one call on a handle at a time (`spec/c-abi.md`, "Threads"). A `Client` takes its own
 lock around every call on its handle, never on a message's path, so threads may share
-it. A `Publication`, `Subscription`, `Recording`, `Replay`, `Image` or `CommittedLog`
+it. A `Publication`, `Subscription`, `Recording`, `Replay`, `Image`, `CommittedLog`
+or `ClusterSession`
 is used from one thread at a time; give each thread its own. A `CommittedLog`'s open
-and close are calls on the client and take its lock; its poll is not. `Client.add_destination` and
+and close are calls on the client and take its lock; its poll is not. A
+`ClusterSession`'s connect is a call on the client and takes its lock; nothing else of
+a session is. A `ClusterService`'s poll is a call on its client as well as on the
+service, and it is on a message's path, so it takes no lock: from
+`client.cluster_service()` until the service's close, that client is used by the
+thread that polls the service and by no other. A program whose other threads add or
+command gives them a `Client` of their own. The service's open and close take the
+client's lock, as a committed log's do. `Client.add_destination` and
 `remove_destination` are calls on the client, not on the `Publication` they name: they
 may run beside that publication's `offer` or `try_claim` in another thread, but not
 beside its `close` (`spec/c-abi.md`, "Threads"; ADR 0057).
@@ -236,6 +385,10 @@ its own steps, such as finding the array type for the length, which this list do
 count. A committed log's trampoline builds the same seven and makes one ABI call more
 per entry, `cavalry_committed_log_entry_position` on the header, with what `ctypes`
 makes for a call and the `int` its result comes back as, the handler's third argument.
+A cluster session's trampoline and a cluster service's build the same seven and make
+one ABI call more per reply or entry, which fills the one struct the object keeps;
+the handler is handed that struct, and the service's handler the service itself, a
+reference and no new object. Reading a field of the struct gives an `int`.
 
 The client's four cannot be one view kept per subscription, which ADR 0046 asks for
 where the runtime allows it: the ABI hands the handler an address, not a term buffer
@@ -308,7 +461,25 @@ copies the message with `bytes(body)` to handle later. A committed log's handler
 must apply its entries in order, does what "The committed log" says instead. For a
 committed log the `HandlerError` speaks of entries, and when `fragments` is −1 it names
 `log.fault()`, to read before the next poll, and `log.faulted()`, which keeps the
-fault of the log's own image.
+fault of the log's own image. A cluster session's handler is held as a subscription's
+is: every reply the poll hands over reaches it, and the `HandlerError`, whose `cluster`
+is `"session"`, speaks of replies and names `session.fault()`.
+
+A cluster service's handler is the one whose failure stops its poll, because what it
+returns is read: it is the entry's action. When the handler raises, the trampoline
+keeps the exception and aborts the entry, so the ABI ends the poll there with the
+entry not taken. `poll` then raises `HandlerError`, whose `cluster` is `"service"`:
+`fragments` is the count of entries the poll took before that entry, `raised` is 1,
+and `__cause__` is the handler's exception. A handler that returns a value that is no
+action is treated the same way. The cause is then a `CavalryError` with
+`CAVALRY_ERR_CLUSTER_ACTION` that names the value, or the `ctypes.ArgumentError` of a
+value that is no integer. The next poll hands the aborted entry over again, and raises
+again until the handler takes it: the service does not skip an entry, since every
+member's service must apply the same entries. A reply the failed handling sent is not
+sent twice. What the handler changed of its own state before it raised is the
+handler's to guard, which is why it replies first and changes its state last ("The
+cluster service"). The runner checks it: a handler that replies and then raises is
+handed its entry twice at one position, and the session reads one reply.
 
 ## What to read next
 
@@ -317,3 +488,8 @@ fault of the log's own image.
 - `conformance/python/`: the runner and its report.
 - `docs/decisions/0046-build-the-c-abi-and-the-clients-fourth.md`: the slice this
   client is the second feature of, and what the boundary's three parts are.
+- `docs/decisions/0124-give-each-client-a-session-object-and-a-service-object-whose-handlers-failure-aborts-its-entry.md`:
+  why a service's handler returns its action, why its failure aborts the entry, and
+  why the service's poll holds the GIL and takes no lock.
+- `docs/how-to/run-a-cluster.md`: how to start the three members a session connects
+  to and a service runs beside.

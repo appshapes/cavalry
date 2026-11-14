@@ -218,6 +218,205 @@ class Package(unittest.TestCase):
         for name in ("cavalry_committed_log_poll", "cavalry_committed_log_entry_position"):
             self.assertIn(name, gen.PER_MESSAGE)
 
+    def test_a_cluster_services_handler_answers_for_its_entry_and_a_failure_aborts_it(self):
+        """The Python cluster service (ADR 0124). What the handler returns is its action:
+        nothing or CONTINUE makes no call, since the ABI continues by itself, and BREAK and
+        ABORT are passed on. A handler that raises, or returns what the ABI refuses as no
+        action, has its entry aborted in the trampoline, and `poll` raises `HandlerError`
+        once the ABI has returned, with the entries taken before that one as `fragments`.
+        The entry handed over is the one struct the service keeps, the third argument is
+        the service, and the body's view is released after the call."""
+        cavalry = load_package()
+        buffer = ctypes.create_string_buffer(b"hello", 5)
+
+        class Abi:
+            """A poll that hands over three entries, at positions 100, 200 and 300, as
+            the ABI does: an abort leaves its entry and ends the poll, a break takes its
+            entry and ends the poll, and a value that is no action is refused and leaves
+            the action as it was."""
+
+            def __init__(self):
+                self.calls = []
+
+            def cavalry_cluster_entry_values(self, header, values):
+                values._obj.position = header * 100
+                values._obj.type = cavalry.CAVALRY_CLUSTER_ENTRY_SESSION_MESSAGE
+                return 0
+
+            def cavalry_cluster_service_action(self, handle, action):
+                self.calls.append(action)
+                if action not in (cavalry.ABORT, cavalry.BREAK, cavalry.CONTINUE):
+                    return -1
+                self.action = action
+                return 0
+
+            def cavalry_cluster_service_poll(self, handle, client, trampoline, clientd, fragment_limit):
+                taken = 0
+                for header in (1, 2, 3):
+                    self.action = cavalry.CONTINUE
+                    trampoline(None, ctypes.addressof(buffer), 5, header)
+                    if self.action == cavalry.ABORT:
+                        break
+                    taken += 1
+                    if self.action == cavalry.BREAK:
+                        break
+                return taken
+
+        class Client:
+            _handle = 1
+
+        abi = Abi()
+        service = cavalry.ClusterService(abi, 2, Client())
+        handed = []
+
+        def taking(body, entry, service_):
+            handed.append((bytes(body), entry.position, entry, service_, body))
+
+        self.assertEqual(service.poll(taking, 16), 3)
+        self.assertEqual([(h[0], h[1]) for h in handed], [(b"hello", 100), (b"hello", 200), (b"hello", 300)])
+        self.assertTrue(all(h[2] is handed[0][2] and h[3] is service for h in handed))
+        with self.assertRaises(ValueError):  # the view was released when its call returned
+            bytes(handed[0][4])
+        self.assertEqual(abi.calls, [])  # a handler that returns nothing makes no call
+        self.assertEqual(service.poll(lambda body, entry, service_: cavalry.CONTINUE, 16), 3)
+        self.assertEqual(abi.calls, [])
+        self.assertEqual(service.poll(lambda body, entry, service_: cavalry.BREAK, 16), 1)
+        self.assertEqual(abi.calls, [cavalry.BREAK])
+        del abi.calls[:]
+        self.assertEqual(service.poll(lambda body, entry, service_: cavalry.ABORT, 16), 0)
+        self.assertEqual(abi.calls, [cavalry.ABORT])
+
+        # A handler that raises on the second entry: aborted there, one entry taken.
+        del abi.calls[:]
+        cause = ValueError("the handler's own")
+
+        def raising(body, entry, service_):
+            if entry.position == 200:
+                raise cause
+
+        with self.assertRaises(cavalry.HandlerError) as raised:
+            service.poll(raising, 16)
+        error = raised.exception
+        self.assertEqual((error.fragments, error.raised, error.cluster, error.committed_log), (1, 1, "service", False))
+        self.assertIs(error.__cause__, cause)
+        self.assertEqual(abi.calls, [cavalry.ABORT])
+        self.assertEqual(service.poll(taking, 16), 3)  # nothing of the failure is left for the next poll
+
+        # A handler that returns what is no action: refused by the ABI, then aborted.
+        del abi.calls[:]
+        with self.assertRaises(cavalry.HandlerError) as raised:
+            service.poll(lambda body, entry, service_: 3, 16)
+        error = raised.exception
+        self.assertEqual((error.fragments, error.raised, error.cluster), (0, 1, "service"))
+        self.assertIsInstance(error.__cause__, cavalry.CavalryError)
+        self.assertEqual(error.__cause__.code, cavalry.CAVALRY_ERR_CLUSTER_ACTION)
+        self.assertIn("the entry handler returned 3, which is no action: return nothing or cavalry.CONTINUE",
+                      error.__cause__.message)
+        self.assertTrue(error.__cause__.message.endswith("see docs/reference/c-abi.md#constants"))
+        self.assertEqual(abi.calls, [3, cavalry.ABORT])
+
+        # An exception that is not an `Exception` aborts the entry too, and is raised as itself.
+        del abi.calls[:]
+
+        def interrupted(body, entry, service_):
+            raise KeyboardInterrupt()
+
+        with self.assertRaises(KeyboardInterrupt):
+            service.poll(interrupted, 16)
+        self.assertEqual(abi.calls, [cavalry.ABORT])
+
+        # The poll takes no lock, and it is in no `with`: the client's lock is taken by
+        # the service's open and close alone (clients/python/README.md, "Threads").
+        code = gen.write_python(self.header)["cavalry/__init__.py"]
+        source = code.split("class ClusterService:", 1)[1].split("\ndef abi_version", 1)[0]
+        poll = source.split("    def poll(self, handler, fragment_limit):\n", 1)[1].split("\n    def ", 1)[0]
+        self.assertNotIn("_lock", poll.split('"""', 2)[2])
+        self.assertEqual(poll.count("self._abi.cavalry_cluster_service_poll("), 2)  # the nested refusal and the poll itself
+        close = source.split("    def close(self):\n", 1)[1]
+        self.assertIn("with self._client._lock:", close)
+        self.assertIn("if error is None or error.code != _abi.CAVALRY_ERR_POLLING:\n            self._handle = None", close)
+        for name in ("cavalry_cluster_service_poll", "cavalry_cluster_entry_values", "cavalry_cluster_service_reply",
+                     "cavalry_cluster_service_action"):
+            self.assertIn(name, gen.PER_MESSAGE)
+
+    def test_a_cluster_sessions_poll_hands_every_reply_over_and_raises_after_it(self):
+        """The Python cluster session (ADR 0124): the trampoline reads each reply's values
+        into the one struct the session keeps before the handler runs, every reply the
+        ABI hands over reaches the handler whether or not an earlier call raised, and
+        `poll` raises `HandlerError` once the ABI has returned. `closed()` is the reason
+        or None, and `close` drops its handle only when the ABI freed it."""
+        cavalry = load_package()
+        buffer = ctypes.create_string_buffer(b"1:hello", 7)
+
+        class Abi:
+            closed = None
+            close_code = 0
+
+            def cavalry_cluster_session_constants(self, handle, constants):
+                constants._obj.session_id = 7
+                constants._obj.max_message_length = 1312
+                return 0
+
+            def cavalry_cluster_reply_values(self, header, values):
+                values._obj.leadership_term_id = header
+                values._obj.timestamp = header * 1000
+                return 0
+
+            def cavalry_cluster_session_poll(self, handle, trampoline, clientd, fragment_limit):
+                for header in (1, 2, 3):
+                    trampoline(None, ctypes.addressof(buffer), 7, header)
+                return 3
+
+            def cavalry_cluster_session_offer(self, handle, message, length):
+                return 64 + length
+
+            def cavalry_cluster_session_closed(self, handle):
+                return self.closed
+
+            def cavalry_cluster_session_close(self, handle):
+                return self.close_code
+
+            def cavalry_errcode(self):
+                return cavalry.CAVALRY_ERR_POLLING
+
+            def cavalry_errmsg(self):
+                return b"refused from inside the handler"
+
+        abi = Abi()
+        session = cavalry.ClusterSession(abi, 2)
+        self.assertEqual((session.session_id, session.max_message_length), (7, 1312))
+        self.assertEqual(session.offer(b"hello"), 69)
+        handed = []
+
+        def reading(body, reply):
+            handed.append((bytes(body), reply.leadership_term_id, reply.timestamp, reply))
+            if reply.leadership_term_id == 2:
+                raise ValueError("the reply handler's own")
+
+        with self.assertRaises(cavalry.HandlerError) as raised:
+            session.poll(reading, 16)
+        error = raised.exception
+        self.assertEqual((error.fragments, error.raised, error.cluster, error.committed_log), (3, 1, "session", False))
+        self.assertIsInstance(error.__cause__, ValueError)
+        self.assertEqual([h[:3] for h in handed], [(b"1:hello", 1, 1000), (b"1:hello", 2, 2000), (b"1:hello", 3, 3000)])
+        self.assertTrue(all(h[3] is handed[0][3] for h in handed))
+        self.assertEqual(session.poll(lambda body, reply: None, 16), 3)
+        self.assertIsNone(session.closed())
+        abi.closed = b"TIMEOUT"
+        self.assertEqual(session.closed(), "TIMEOUT")
+        # A close the ABI refuses from inside the session's own handler leaves the session
+        # open; any other answer frees it, and a second close does nothing.
+        abi.close_code = -1
+        with self.assertRaises(cavalry.CavalryError):
+            session.close()
+        self.assertEqual(session._handle, 2)
+        abi.close_code = 0
+        session.close()
+        self.assertIsNone(session._handle)
+        session.close()
+        for name in ("cavalry_cluster_session_offer", "cavalry_cluster_session_poll", "cavalry_cluster_reply_values"):
+            self.assertIn(name, gen.PER_MESSAGE)
+
     def test_offer_takes_bytes_and_refuses_a_str(self):
         """`c_void_p` took a `str` as its `wchar_t` buffer, so `offer("hello")` published
         `h\\0\\0\\0e`; the binding's `c_char_p` refuses it, and every other non-bytes form,
@@ -232,6 +431,10 @@ class Package(unittest.TestCase):
                 buffer.from_param(refused)
         buffer.from_param(b"hello")
         buffer.from_param(ctypes.create_string_buffer(5))
+        # A cluster session's offer and a cluster service's reply take their bytes the
+        # same way (ADR 0124).
+        self.assertIn('"cavalry_cluster_session_offer": (c_int64, [c_void_p, c_char_p, c_size_t]),', abi)
+        self.assertIn('"cavalry_cluster_service_reply": (c_int, [c_void_p, c_int64, c_char_p, c_size_t]),', abi)
 
     def test_a_header_without_what_the_version_check_reads_fails_to_generate(self):
         for removed, name in (("#define CAVALRY_ERR_ABI_VERSION 135\n", "CAVALRY_ERR_ABI_VERSION"),
@@ -332,9 +535,35 @@ class Package(unittest.TestCase):
             self.assertNotIn("fragment", message)
             self.assertIn(f"Fix the handler: its first exception, {cause!r}, is this error's __cause__", message)
             self.assertTrue(message.endswith("See clients/python/README.md#the-exception"), message)
+        # A cluster session's poll speaks of replies and names its own fault().
+        for replies, delivered in ((1, "the reply handler raised on 1 of the 1 reply this poll handed over;"),
+                                   (3, "the reply handler raised on 1 of the 3 replies this poll handed over;"),
+                                   (-1, "before it stopped on a fault, which this ClusterSession's fault() reads until "
+                                        "its next poll;")):
+            message = str(cavalry.HandlerError(replies, 1, cause, cluster="session"))
+            self.assertIn(delivered, message)
+            self.assertNotIn("Subscription", message)
+            self.assertNotIn("fragment", message)
+            self.assertIn(f"Fix the handler: its first exception, {cause!r}, is this error's __cause__", message)
+            self.assertTrue(message.endswith("See clients/python/README.md#the-exception"), message)
+        # A cluster service's poll is the one a handler's failure stops: the message says
+        # the entry was aborted and comes again, and never that it is not delivered again.
+        for entries, took in ((0, "after the 0 entries this poll took."), (1, "after the 1 entry this poll took."),
+                              (-1, "in a poll that also stopped on a fault, which this ClusterService's fault() reads "
+                                   "until its next poll.")):
+            message = str(cavalry.HandlerError(entries, 1, cause, cluster="service"))
+            self.assertIn(f"the entry handler raised, or returned what is no action, {took} Its entry was aborted: "
+                          f"it is not taken, the poll ended at it, and the next poll hands it over again.", message)
+            self.assertIn(f"Fix the handler: what it did, {cause!r}, is this error's __cause__", message)
+            self.assertNotIn("does not deliver", message)
+            self.assertTrue(message.endswith("See clients/python/README.md#the-exception"), message)
         code = gen.write_python(self.header)["cavalry/__init__.py"]
-        log = code.split("class CommittedLog:", 1)[1].split("\ndef abi_version", 1)[0]
+        log = code.split("class CommittedLog:", 1)[1].split("\nclass ClusterSession:", 1)[0]
         self.assertIn("raise HandlerError(entries, raised, pending, committed_log=True)", log)
+        self.assertIn('raise HandlerError(replies, raised, pending, cluster="session")',
+                      code.split("class ClusterSession:", 1)[1].split("\nclass ClusterService:", 1)[0])
+        self.assertIn('raise HandlerError(entries, 1, pending, cluster="service")',
+                      code.split("class ClusterService:", 1)[1])
         self.assertIn("raise HandlerError(fragments, raised, pending)", code.split("class Subscription:", 1)[1])
         with open(os.path.join(gen.ROOT, "clients", "python", "README.md"), encoding="utf-8") as f:
             slugs = {re.sub(r"[^a-z0-9 -]", "", line.lstrip("#").strip().lower()).replace(" ", "-")

@@ -171,3 +171,4 @@ under `docs/` is listed here; `just lint-docs` fails on one that is not.
 - [0121. Hand a session's handler each reply's term, and pass over a reply of a term below one handed over](decisions/0121-hand-a-sessions-handler-each-replys-term-and-pass-over-a-reply-of-a-term-below-one-handed-over.md)
 - [0122. Take the C ABI to version 4 with the cluster session, through the one fragment handler](decisions/0122-take-the-c-abi-to-version-4-with-the-cluster-session-through-the-one-fragment-handler.md)
 - [0123. Take the C ABI to version 5 with the cluster service, answered from inside the one fragment handler](decisions/0123-take-the-c-abi-to-version-5-with-the-cluster-service-answered-from-inside-the-one-fragment-handler.md)
+- [0124. Give each client a session object and a service object, whose handler's failure aborts its entry](decisions/0124-give-each-client-a-session-object-and-a-service-object-whose-handlers-failure-aborts-its-entry.md)
