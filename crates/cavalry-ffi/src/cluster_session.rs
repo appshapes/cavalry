@@ -9,7 +9,7 @@ use std::ptr;
 
 use cavalry_client::ClusterSession;
 
-use crate::client::{cavalry_mut, cavalry_t};
+use crate::client::{self, cavalry_mut, cavalry_t};
 use crate::codes::*;
 use crate::error::{self, DOC};
 use crate::handle;
@@ -135,6 +135,10 @@ pub unsafe extern "C" fn cavalry_connect_cluster(
         error::null("cavalry_connect_cluster", "response_channel");
         return -1;
     }
+    // SAFETY: `client` is non-null, checked above, and a live handle.
+    if unsafe { client::refused("cavalry_connect_cluster", client) } {
+        return -1;
+    }
     // SAFETY: both are non-null, checked above, and NUL-terminated, by the caller's
     // convention.
     let (Some(members), Some(response_channel)) = (unsafe {
@@ -155,8 +159,8 @@ pub unsafe extern "C" fn cavalry_connect_cluster(
     }) else {
         return -1;
     };
-    // SAFETY: `client` is non-null, checked above, and a live handle used from one
-    // thread at a time ("Threads").
+    // SAFETY: `client` is non-null, checked above, a live handle used from one thread
+    // at a time ("Threads"), and held by no poll, checked above.
     let client = unsafe { cavalry_mut(client) };
     match client.connect_cluster(members, response_channel) {
         Ok(opened) => {
@@ -323,7 +327,8 @@ pub unsafe extern "C" fn cavalry_cluster_session_poll(
 /// Fills `values` with the leadership term id and the cluster's time of the reply
 /// whose header `cavalry_cluster_session_poll` handed its handler; −1 with
 /// `CAVALRY_ERR_WRONG_HEADER` for a header from `cavalry_subscription_poll` or from
-/// `cavalry_committed_log_poll`, which carries a frame's header and no reply's values.
+/// `cavalry_committed_log_poll`, which carries a frame's header and no reply's values,
+/// and for one from `cavalry_cluster_service_poll`, which carries an entry's.
 ///
 /// # Safety
 ///

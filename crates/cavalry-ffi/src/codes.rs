@@ -1,14 +1,15 @@
 //! The header's defines: the ABI version, the Rust API's public constants, the six
 //! result codes of a claim or an offer, the error codes `cavalry_errcode` returns, why
-//! a client closed and why a replay ended (`spec/c-abi.md`, "Result codes", "Error
-//! codes" and "Constants"). cbindgen writes each as a `#define`.
+//! a client closed, why a replay ended, what a committed entry is, what became of a
+//! service's reply and what a service's handler does with its entry (`spec/c-abi.md`,
+//! "Result codes", "Error codes" and "Constants"). cbindgen writes each as a `#define`.
 
 use std::ffi::c_int;
 
 /// This page's version: the header's `CAVALRY_ABI_VERSION`, which
 /// `cavalry_context_init` passes to `cavalry_context_init_v` and the library compares
 /// with its own.
-pub const CAVALRY_ABI_VERSION: c_int = 4;
+pub const CAVALRY_ABI_VERSION: c_int = 5;
 /// The environment variable a context's default directory reads.
 pub const CAVALRY_DIR_ENV: &str = "CAVALRY_DIR";
 /// The images a subscription holds at most.
@@ -119,7 +120,9 @@ pub const CAVALRY_ERR_NULL: c_int = 131;
 pub const CAVALRY_ERR_CLAIM_OUTSTANDING: c_int = 132;
 /// The claim struct names no claim outstanding on its publication.
 pub const CAVALRY_ERR_NO_CLAIM: c_int = 133;
-/// The call came from inside the subscription's own fragment handler.
+/// The call came from inside the handle's own fragment handler, or, for a function
+/// that takes a client, from inside the handler of a cluster service whose poll holds
+/// that client.
 pub const CAVALRY_ERR_POLLING: c_int = 134;
 /// The header the program was built against is another version than the library's.
 pub const CAVALRY_ERR_ABI_VERSION: c_int = 135;
@@ -131,9 +134,10 @@ pub const CAVALRY_ERR_EMPTY_DIR: c_int = 137;
 /// subscription's poll or a cluster session's handed its handler.
 pub const CAVALRY_ERR_NO_POSITION: c_int = 138;
 /// A header of another kind than the function reads: `cavalry_header_values` on a
-/// cluster session's, which carries no frame's fields, or
-/// `cavalry_cluster_reply_values` on a subscription's or a committed log's, which
-/// carries no reply's values.
+/// cluster session's or a cluster service's, which carries no frame's fields,
+/// `cavalry_cluster_reply_values` on any header but a cluster session's, which carries
+/// no reply's values, or `cavalry_cluster_entry_values` on any header but a cluster
+/// service's, which carries no entry's values.
 pub const CAVALRY_ERR_WRONG_HEADER: c_int = 139;
 /// A cluster session's connect: the members string failed a check.
 pub const CAVALRY_ERR_CLUSTER_MEMBERS: c_int = 140;
@@ -143,6 +147,15 @@ pub const CAVALRY_ERR_CLUSTER_REFUSED: c_int = 141;
 pub const CAVALRY_ERR_CLUSTER_VERSION: c_int = 142;
 /// A cluster session's connect: no member opened a session in 20 s.
 pub const CAVALRY_ERR_CLUSTER_CONNECT_TIMEOUT: c_int = 143;
+/// A cluster service's poll: a committed entry is no entry of this version's cluster
+/// protocol; its position is in the message and in `cavalry_cluster_service_fault`.
+pub const CAVALRY_ERR_CLUSTER_ENTRY: c_int = 144;
+/// `cavalry_cluster_service_reply` or `cavalry_cluster_service_action` from outside the
+/// service's fragment handler, where no entry is being handled.
+pub const CAVALRY_ERR_CLUSTER_NO_ENTRY: c_int = 145;
+/// `cavalry_cluster_service_action` with a value that is none of `CAVALRY_ACTION_ABORT`,
+/// `CAVALRY_ACTION_BREAK` and `CAVALRY_ACTION_CONTINUE`.
+pub const CAVALRY_ERR_CLUSTER_ACTION: c_int = 146;
 
 /// Why a client closed: `cavalry_close` was called.
 pub const CAVALRY_CLOSED_BY_USER: i32 = 1;
@@ -167,6 +180,47 @@ pub const CAVALRY_REPLAY_STOP_STOPPED: i32 = 1;
 pub const CAVALRY_REPLAY_STOP_NOT_CONNECTED: i32 = 2;
 /// Why a replay ended: the driver failed to play it.
 pub const CAVALRY_REPLAY_STOP_FAILED: i32 = 3;
+
+/// A committed entry: a session's message. Its payload is the handler's `buffer` and
+/// `length`; a session id of −1 is a message the leader's own process appended.
+pub const CAVALRY_CLUSTER_ENTRY_SESSION_MESSAGE: i32 = 1;
+/// A committed entry: a session opened.
+pub const CAVALRY_CLUSTER_ENTRY_SESSION_OPEN: i32 = 2;
+/// A committed entry: a session closed; `timed_out` says whether the leader closed it.
+pub const CAVALRY_CLUSTER_ENTRY_SESSION_CLOSE: i32 = 3;
+/// A committed entry: a leadership term began, led by `leader_member_id`.
+pub const CAVALRY_CLUSTER_ENTRY_NEW_LEADERSHIP_TERM: i32 = 4;
+/// A committed entry that no leader of this version appends and a service of this
+/// version does nothing with: a timer event, a cluster action or a membership change
+/// event.
+pub const CAVALRY_CLUSTER_ENTRY_OTHER: i32 = 5;
+
+/// A service's reply: it is on its way to the session, or an earlier handling of the
+/// same entry sent it.
+pub const CAVALRY_CLUSTER_REPLY_SENT: c_int = 1;
+/// A service's reply: this service does not answer the entry. Nothing to do.
+pub const CAVALRY_CLUSTER_REPLY_NOT_ANSWERING: c_int = 2;
+/// A service's reply: the session's response channel did not take it now. Abort the
+/// entry with `cavalry_cluster_service_action`, and the next poll hands it over again.
+pub const CAVALRY_CLUSTER_REPLY_RETRY: c_int = 3;
+/// A service's reply: it is lost, and counted in `cluster.replies_dropped`.
+pub const CAVALRY_CLUSTER_REPLY_DROPPED: c_int = 4;
+/// A service's reply: no session with that id is open in the log at this entry.
+pub const CAVALRY_CLUSTER_REPLY_NO_SESSION: c_int = 5;
+/// A service's reply: it is longer than one frame carries, 1,344 bytes; the thread's
+/// error is `CAVALRY_ERR_TOO_LONG`, with both lengths in the message.
+pub const CAVALRY_CLUSTER_REPLY_TOO_LONG: c_int = 6;
+
+/// A service's handler: the entry is not taken, the poll ends, and the next poll
+/// begins with the same entry. Aeron's `AERON_ACTION_ABORT`, on its value.
+pub const CAVALRY_ACTION_ABORT: i32 = 1;
+/// A service's handler: the entry is taken and the poll ends after it. Aeron's
+/// `AERON_ACTION_BREAK`, on its value.
+pub const CAVALRY_ACTION_BREAK: i32 = 2;
+/// A service's handler: the entry is taken and the poll goes on, which is what a
+/// handler that does not call `cavalry_cluster_service_action` does. Aeron's
+/// `AERON_ACTION_CONTINUE`, on its value; there is no 3, Aeron's `COMMIT`.
+pub const CAVALRY_ACTION_CONTINUE: i32 = 4;
 
 /// The header's BEGIN flag: the first fragment of a message.
 pub const CAVALRY_FLAGS_BEGIN: u8 = 0x80;

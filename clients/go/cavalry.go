@@ -38,7 +38,7 @@ import (
 // The header's constants, as the ABI names them (spec/c-abi.md), in Go's casing.
 const (
 	DirEnv                            = "CAVALRY_DIR" // CAVALRY_DIR_ENV
-	ABIVersion                        = 4             // CAVALRY_ABI_VERSION
+	ABIVersion                        = 5             // CAVALRY_ABI_VERSION
 	MaxImages                         = 256           // CAVALRY_MAX_IMAGES
 	ServiceLogStreamID                = 104           // CAVALRY_SERVICE_LOG_STREAM_ID
 	NullPosition                      = -1            // CAVALRY_NULL_POSITION
@@ -98,6 +98,9 @@ const (
 	ErrClusterRefused                 = 141           // CAVALRY_ERR_CLUSTER_REFUSED
 	ErrClusterVersion                 = 142           // CAVALRY_ERR_CLUSTER_VERSION
 	ErrClusterConnectTimeout          = 143           // CAVALRY_ERR_CLUSTER_CONNECT_TIMEOUT
+	ErrClusterEntry                   = 144           // CAVALRY_ERR_CLUSTER_ENTRY
+	ErrClusterNoEntry                 = 145           // CAVALRY_ERR_CLUSTER_NO_ENTRY
+	ErrClusterAction                  = 146           // CAVALRY_ERR_CLUSTER_ACTION
 	ClosedByUser                      = 1             // CAVALRY_CLOSED_BY_USER
 	ClosedDriverClosed                = 2             // CAVALRY_CLOSED_DRIVER_CLOSED
 	ClosedDriverTimeout               = 3             // CAVALRY_CLOSED_DRIVER_TIMEOUT
@@ -109,6 +112,20 @@ const (
 	ReplayStopStopped                 = 1             // CAVALRY_REPLAY_STOP_STOPPED
 	ReplayStopNotConnected            = 2             // CAVALRY_REPLAY_STOP_NOT_CONNECTED
 	ReplayStopFailed                  = 3             // CAVALRY_REPLAY_STOP_FAILED
+	ClusterEntrySessionMessage        = 1             // CAVALRY_CLUSTER_ENTRY_SESSION_MESSAGE
+	ClusterEntrySessionOpen           = 2             // CAVALRY_CLUSTER_ENTRY_SESSION_OPEN
+	ClusterEntrySessionClose          = 3             // CAVALRY_CLUSTER_ENTRY_SESSION_CLOSE
+	ClusterEntryNewLeadershipTerm     = 4             // CAVALRY_CLUSTER_ENTRY_NEW_LEADERSHIP_TERM
+	ClusterEntryOther                 = 5             // CAVALRY_CLUSTER_ENTRY_OTHER
+	ClusterReplySent                  = 1             // CAVALRY_CLUSTER_REPLY_SENT
+	ClusterReplyNotAnswering          = 2             // CAVALRY_CLUSTER_REPLY_NOT_ANSWERING
+	ClusterReplyRetry                 = 3             // CAVALRY_CLUSTER_REPLY_RETRY
+	ClusterReplyDropped               = 4             // CAVALRY_CLUSTER_REPLY_DROPPED
+	ClusterReplyNoSession             = 5             // CAVALRY_CLUSTER_REPLY_NO_SESSION
+	ClusterReplyTooLong               = 6             // CAVALRY_CLUSTER_REPLY_TOO_LONG
+	ActionAbort                       = 1             // CAVALRY_ACTION_ABORT
+	ActionBreak                       = 2             // CAVALRY_ACTION_BREAK
+	ActionContinue                    = 4             // CAVALRY_ACTION_CONTINUE
 	FlagsBegin                        = 128           // CAVALRY_FLAGS_BEGIN
 	FlagsEnd                          = 64            // CAVALRY_FLAGS_END
 	FlagsEOS                          = 32            // CAVALRY_FLAGS_EOS

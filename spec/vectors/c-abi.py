@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Write spec/vectors/c-abi.json: the vectors for spec/c-abi.md, version 4.
+"""Write spec/vectors/c-abi.json: the vectors for spec/c-abi.md, version 5.
 
 This script is the page's reference, independent of the Rust code and of the committed
 header: it lists, from the page's own tables, every opaque type, every struct with its
@@ -17,12 +17,12 @@ and a reader checks a header against them (spec/README.md, "Conventions").
 import json
 from pathlib import Path
 
-ABI_VERSION = 4
+ABI_VERSION = 5
 
 OPAQUE_TYPES = [
     "cavalry_context_t", "cavalry_t", "cavalry_publication_t", "cavalry_subscription_t",
     "cavalry_image_t", "cavalry_recording_t", "cavalry_replay_t", "cavalry_committed_log_t",
-    "cavalry_cluster_session_t", "cavalry_header_t",
+    "cavalry_cluster_session_t", "cavalry_cluster_service_t", "cavalry_header_t",
 ]
 
 # Every struct the caller owns, its fields in order, C's natural layout, no packing.
@@ -66,6 +66,12 @@ STRUCTS = {
         ("int64_t", "session_id"), ("size_t", "max_message_length"),
     ],
     "cavalry_cluster_reply_values_t": [("int64_t", "leadership_term_id"), ("int64_t", "timestamp")],
+    # Version 5: the cluster service (ADR 0123).
+    "cavalry_cluster_entry_values_t": [
+        ("int64_t", "position"), ("int64_t", "leadership_term_id"), ("int64_t", "timestamp"),
+        ("int64_t", "session_id"), ("int32_t", "type"), ("int32_t", "leader_member_id"),
+        ("bool", "timed_out"),
+    ],
 }
 
 TYPEDEFS = {
@@ -101,6 +107,8 @@ LOG = ("cavalry_committed_log_t *", "log")
 CLOG = ("const cavalry_committed_log_t *", "log")
 SESSION = ("cavalry_cluster_session_t *", "session")
 CSESSION = ("const cavalry_cluster_session_t *", "session")
+SERVICE = ("cavalry_cluster_service_t *", "service")
+CSERVICE = ("const cavalry_cluster_service_t *", "service")
 
 FUNCTIONS = [
     # context
@@ -206,6 +214,20 @@ FUNCTIONS = [
     fn("int", "cavalry_cluster_session_constants", CSESSION,
        ("cavalry_cluster_session_constants_t *", "constants")),
     fn("int", "cavalry_cluster_session_close", SESSION),
+    # Version 5: the cluster service (ADR 0123).
+    fn("int", "cavalry_cluster_service", ("cavalry_cluster_service_t **", "service"), CLIENT),
+    fn("int", "cavalry_cluster_service_poll", SERVICE, CLIENT,
+       ("cavalry_fragment_handler_t", "handler"), ("void *", "clientd"), ("size_t", "fragment_limit")),
+    fn("int", "cavalry_cluster_entry_values", ("const cavalry_header_t *", "header"),
+       ("cavalry_cluster_entry_values_t *", "values")),
+    fn("int", "cavalry_cluster_service_reply", SERVICE, ("int64_t", "session_id"),
+       ("const uint8_t *", "buffer"), ("size_t", "length")),
+    fn("int", "cavalry_cluster_service_action", SERVICE, ("int32_t", "action")),
+    fn("int", "cavalry_cluster_service_fault", CSERVICE, ("cavalry_fault_t *", "fault")),
+    fn("int64_t", "cavalry_cluster_service_position", CSERVICE),
+    fn("bool", "cavalry_cluster_service_answers", CSERVICE),
+    fn("int", "cavalry_cluster_service_sessions", CSERVICE),
+    fn("int", "cavalry_cluster_service_close", SERVICE, CLIENT),
     # errors and version
     fn("int", "cavalry_errcode"),
     fn("const char *", "cavalry_errmsg"),
@@ -233,7 +255,7 @@ DEFINES = {
     "CAVALRY_PUBLICATION_ERROR": -6,
     # the error codes: 0, the driver's 1 to 99 (spec/client-protocol.md, "Error codes",
     # the ones this version names), the client's from 100, the faults from 120, the
-    # ABI's own from 130, the cluster's from 140
+    # ABI's own from 130, the cluster's from 140, a cluster service's handler's from 145
     "CAVALRY_ERR_NONE": 0,
     "CAVALRY_ERR_INVALID_CHANNEL": 1,
     "CAVALRY_ERR_UNKNOWN_SUBSCRIPTION": 2,
@@ -282,6 +304,9 @@ DEFINES = {
     "CAVALRY_ERR_CLUSTER_REFUSED": 141,
     "CAVALRY_ERR_CLUSTER_VERSION": 142,
     "CAVALRY_ERR_CLUSTER_CONNECT_TIMEOUT": 143,
+    "CAVALRY_ERR_CLUSTER_ENTRY": 144,
+    "CAVALRY_ERR_CLUSTER_NO_ENTRY": 145,
+    "CAVALRY_ERR_CLUSTER_ACTION": 146,
     # why a client closed, `Closed`'s reasons in order
     "CAVALRY_CLOSED_BY_USER": 1,
     "CAVALRY_CLOSED_DRIVER_CLOSED": 2,
@@ -295,6 +320,23 @@ DEFINES = {
     "CAVALRY_REPLAY_STOP_STOPPED": 1,
     "CAVALRY_REPLAY_STOP_NOT_CONNECTED": 2,
     "CAVALRY_REPLAY_STOP_FAILED": 3,
+    # what a committed entry is, `Entry`'s five in order
+    "CAVALRY_CLUSTER_ENTRY_SESSION_MESSAGE": 1,
+    "CAVALRY_CLUSTER_ENTRY_SESSION_OPEN": 2,
+    "CAVALRY_CLUSTER_ENTRY_SESSION_CLOSE": 3,
+    "CAVALRY_CLUSTER_ENTRY_NEW_LEADERSHIP_TERM": 4,
+    "CAVALRY_CLUSTER_ENTRY_OTHER": 5,
+    # what became of a reply, `Reply`'s six in order
+    "CAVALRY_CLUSTER_REPLY_SENT": 1,
+    "CAVALRY_CLUSTER_REPLY_NOT_ANSWERING": 2,
+    "CAVALRY_CLUSTER_REPLY_RETRY": 3,
+    "CAVALRY_CLUSTER_REPLY_DROPPED": 4,
+    "CAVALRY_CLUSTER_REPLY_NO_SESSION": 5,
+    "CAVALRY_CLUSTER_REPLY_TOO_LONG": 6,
+    # what a service's handler does with its entry: Aeron's values, without its COMMIT, 3
+    "CAVALRY_ACTION_ABORT": 1,
+    "CAVALRY_ACTION_BREAK": 2,
+    "CAVALRY_ACTION_CONTINUE": 4,
     # the header's flags and types (spec/frame.md)
     "CAVALRY_FLAGS_BEGIN": 0x80,
     "CAVALRY_FLAGS_END": 0x40,

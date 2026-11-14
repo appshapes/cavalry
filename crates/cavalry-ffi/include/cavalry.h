@@ -21,7 +21,7 @@
  `cavalry_context_init` passes to `cavalry_context_init_v` and the library compares
  with its own.
  */
-#define CAVALRY_ABI_VERSION 4
+#define CAVALRY_ABI_VERSION 5
 
 /*
  The images a subscription holds at most.
@@ -275,7 +275,9 @@
 #define CAVALRY_ERR_NO_CLAIM 133
 
 /*
- The call came from inside the subscription's own fragment handler.
+ The call came from inside the handle's own fragment handler, or, for a function
+ that takes a client, from inside the handler of a cluster service whose poll holds
+ that client.
  */
 #define CAVALRY_ERR_POLLING 134
 
@@ -302,9 +304,10 @@
 
 /*
  A header of another kind than the function reads: `cavalry_header_values` on a
- cluster session's, which carries no frame's fields, or
- `cavalry_cluster_reply_values` on a subscription's or a committed log's, which
- carries no reply's values.
+ cluster session's or a cluster service's, which carries no frame's fields,
+ `cavalry_cluster_reply_values` on any header but a cluster session's, which carries
+ no reply's values, or `cavalry_cluster_entry_values` on any header but a cluster
+ service's, which carries no entry's values.
  */
 #define CAVALRY_ERR_WRONG_HEADER 139
 
@@ -327,6 +330,24 @@
  A cluster session's connect: no member opened a session in 20 s.
  */
 #define CAVALRY_ERR_CLUSTER_CONNECT_TIMEOUT 143
+
+/*
+ A cluster service's poll: a committed entry is no entry of this version's cluster
+ protocol; its position is in the message and in `cavalry_cluster_service_fault`.
+ */
+#define CAVALRY_ERR_CLUSTER_ENTRY 144
+
+/*
+ `cavalry_cluster_service_reply` or `cavalry_cluster_service_action` from outside the
+ service's fragment handler, where no entry is being handled.
+ */
+#define CAVALRY_ERR_CLUSTER_NO_ENTRY 145
+
+/*
+ `cavalry_cluster_service_action` with a value that is none of `CAVALRY_ACTION_ABORT`,
+ `CAVALRY_ACTION_BREAK` and `CAVALRY_ACTION_CONTINUE`.
+ */
+#define CAVALRY_ERR_CLUSTER_ACTION 146
 
 /*
  Why a client closed: `cavalry_close` was called.
@@ -384,6 +405,86 @@
 #define CAVALRY_REPLAY_STOP_FAILED 3
 
 /*
+ A committed entry: a session's message. Its payload is the handler's `buffer` and
+ `length`; a session id of −1 is a message the leader's own process appended.
+ */
+#define CAVALRY_CLUSTER_ENTRY_SESSION_MESSAGE 1
+
+/*
+ A committed entry: a session opened.
+ */
+#define CAVALRY_CLUSTER_ENTRY_SESSION_OPEN 2
+
+/*
+ A committed entry: a session closed; `timed_out` says whether the leader closed it.
+ */
+#define CAVALRY_CLUSTER_ENTRY_SESSION_CLOSE 3
+
+/*
+ A committed entry: a leadership term began, led by `leader_member_id`.
+ */
+#define CAVALRY_CLUSTER_ENTRY_NEW_LEADERSHIP_TERM 4
+
+/*
+ A committed entry that no leader of this version appends and a service of this
+ version does nothing with: a timer event, a cluster action or a membership change
+ event.
+ */
+#define CAVALRY_CLUSTER_ENTRY_OTHER 5
+
+/*
+ A service's reply: it is on its way to the session, or an earlier handling of the
+ same entry sent it.
+ */
+#define CAVALRY_CLUSTER_REPLY_SENT 1
+
+/*
+ A service's reply: this service does not answer the entry. Nothing to do.
+ */
+#define CAVALRY_CLUSTER_REPLY_NOT_ANSWERING 2
+
+/*
+ A service's reply: the session's response channel did not take it now. Abort the
+ entry with `cavalry_cluster_service_action`, and the next poll hands it over again.
+ */
+#define CAVALRY_CLUSTER_REPLY_RETRY 3
+
+/*
+ A service's reply: it is lost, and counted in `cluster.replies_dropped`.
+ */
+#define CAVALRY_CLUSTER_REPLY_DROPPED 4
+
+/*
+ A service's reply: no session with that id is open in the log at this entry.
+ */
+#define CAVALRY_CLUSTER_REPLY_NO_SESSION 5
+
+/*
+ A service's reply: it is longer than one frame carries, 1,344 bytes; the thread's
+ error is `CAVALRY_ERR_TOO_LONG`, with both lengths in the message.
+ */
+#define CAVALRY_CLUSTER_REPLY_TOO_LONG 6
+
+/*
+ A service's handler: the entry is not taken, the poll ends, and the next poll
+ begins with the same entry. Aeron's `AERON_ACTION_ABORT`, on its value.
+ */
+#define CAVALRY_ACTION_ABORT 1
+
+/*
+ A service's handler: the entry is taken and the poll ends after it. Aeron's
+ `AERON_ACTION_BREAK`, on its value.
+ */
+#define CAVALRY_ACTION_BREAK 2
+
+/*
+ A service's handler: the entry is taken and the poll goes on, which is what a
+ handler that does not call `cavalry_cluster_service_action` does. Aeron's
+ `AERON_ACTION_CONTINUE`, on its value; there is no 3, Aeron's `COMMIT`.
+ */
+#define CAVALRY_ACTION_CONTINUE 4
+
+/*
  The header's BEGIN flag: the first fragment of a message.
  */
 #define CAVALRY_FLAGS_BEGIN 128
@@ -414,6 +515,12 @@
 #define CAVALRY_FRAME_TYPE_DATA 1
 
 /*
+ A cluster's service beside one member; made by `cavalry_cluster_service`, freed by
+ `cavalry_cluster_service_close`.
+ */
+typedef struct cavalry_cluster_service_t cavalry_cluster_service_t;
+
+/*
  A client's session with a cluster; made by `cavalry_connect_cluster`, freed by
  `cavalry_cluster_session_close`.
  */
@@ -433,8 +540,8 @@ typedef struct cavalry_context_t cavalry_context_t;
 
 /*
  What a poll hands the fragment handler beside the body, valid for the call: a
- frame's header, or from a cluster session's poll a reply's values in its place
- (`spec/c-abi.md`, "What a header carries").
+ frame's header, or from a cluster session's poll a reply's values in its place, or
+ from a cluster service's an entry's (`spec/c-abi.md`, "What a header carries").
  */
 typedef struct cavalry_header_t cavalry_header_t;
 
@@ -483,6 +590,74 @@ typedef void (*cavalry_fragment_handler_t)(void *clientd,
                                            const cavalry_header_t *header);
 
 /*
+ One committed entry as a service is handed it: what `cavalry_cluster_entry_values`
+ fills. A session message's payload is the handler's `buffer` and `length`.
+ */
+typedef struct {
+  /*
+   The position in the log at which the entry begins.
+   */
+  int64_t position;
+  /*
+   The leadership term the entry was appended in.
+   */
+  int64_t leadership_term_id;
+  /*
+   The cluster's time when its leader appended the entry, milliseconds since
+   1970-01-01T00:00:00Z: the one clock a service reads, so that every member's
+   service reaches the same state.
+   */
+  int64_t timestamp;
+  /*
+   The session of a session message, a session open event or a session close
+   event; −1 for every other entry, and for a session message the leader's own
+   process appended for no session.
+   */
+  int64_t session_id;
+  /*
+   What the entry is, `CAVALRY_CLUSTER_ENTRY_*`.
+   */
+  int32_t type;
+  /*
+   The member that leads the term a new leadership term event begins; −1 for
+   every other entry.
+   */
+  int32_t leader_member_id;
+  /*
+   Whether the leader closed the session of a session close event for the
+   session timeout, and not the client; `false` for every other entry.
+   */
+  bool timed_out;
+} cavalry_cluster_entry_values_t;
+
+/*
+ What the subscription's last poll stopped on, or the committed log's, the cluster
+ session's or the cluster service's; 0 when it returned a count. Also the fault
+ that ended a committed log, as `cavalry_committed_log_faulted` writes it.
+ */
+typedef struct {
+  /*
+   `CAVALRY_ERR_FAULT_IMAGE`, `_IMAGES_FULL`, `_CLOSED`, or 0. From a cluster
+   service's poll it is whichever code `cavalry_errcode` gave after that poll:
+   one of those three, `CAVALRY_ERR_CLUSTER_ENTRY`, or the client's or the
+   driver's.
+   */
+  int32_t code;
+  /*
+   The image's session id for 120 and 121, else 0.
+   */
+  int32_t session_id;
+  /*
+   The reader's position when the check failed, for 120, else
+   `CAVALRY_NULL_POSITION`. A 120 with `CAVALRY_NULL_POSITION` is an image that
+   was gone before the client read its announcement: it had no reader (ADR 0078).
+   For `CAVALRY_ERR_CLUSTER_ENTRY`, the position at which the entry that is no
+   entry begins.
+   */
+  int64_t position;
+} cavalry_fault_t;
+
+/*
  What a reply carries before its payload: what `cavalry_cluster_reply_values` fills.
  */
 typedef struct {
@@ -497,28 +672,6 @@ typedef struct {
    */
   int64_t timestamp;
 } cavalry_cluster_reply_values_t;
-
-/*
- What the subscription's last poll stopped on, or the committed log's; 0 when it
- returned a count. Also the fault that ended a committed log, as
- `cavalry_committed_log_faulted` writes it.
- */
-typedef struct {
-  /*
-   `CAVALRY_ERR_FAULT_IMAGE`, `_IMAGES_FULL`, `_CLOSED`, or 0.
-   */
-  int32_t code;
-  /*
-   The image's session id for 120 and 121, else 0.
-   */
-  int32_t session_id;
-  /*
-   The reader's position when the check failed, for 120, else
-   `CAVALRY_NULL_POSITION`. A 120 with `CAVALRY_NULL_POSITION` is an image that
-   was gone before the client read its announcement: it had no reader (ADR 0078).
-   */
-  int64_t position;
-} cavalry_fault_t;
 
 /*
  A cluster session's constants.
@@ -774,7 +927,10 @@ int cavalry_init(cavalry_t **client,
 
 /*
  Closes the client and frees the handle: its publications and subscriptions answer
- `CLOSED` from then and still need their own close.
+ `CLOSED` from then and still need their own close. The handle is freed whatever the
+ function returns, with one exception: a call from inside the handler of a cluster
+ service whose poll holds the client is refused with `CAVALRY_ERR_POLLING` and frees
+ nothing.
 
  # Safety
 
@@ -801,7 +957,9 @@ bool cavalry_is_closed(const cavalry_t *client);
 int32_t cavalry_closed(const cavalry_t *client);
 
 /*
- The client's id, the one it took from the command ring when it attached.
+ The client's id, the one it took from the command ring when it attached. It
+ answers from the handle's copy, so also from inside the handler of a cluster
+ service whose poll holds the client.
 
  # Safety
 
@@ -810,7 +968,9 @@ int32_t cavalry_closed(const cavalry_t *client);
 int64_t cavalry_client_id(const cavalry_t *client);
 
 /*
- The driver directory the client attached to, valid for the client's life.
+ The driver directory the client attached to, valid for the client's life. It
+ answers from the handle's copy, so also from inside the handler of a cluster
+ service whose poll holds the client.
 
  # Safety
 
@@ -973,6 +1133,160 @@ int cavalry_stop_replay(cavalry_t *client,
                         int64_t replay_session_id);
 
 /*
+ Makes a cluster's service beside the member on `client`'s driver, as the Rust
+ `Cavalry::cluster_service` does. It sends nothing: the service's first poll opens
+ the member's log. 0 with `*service` the handle; −1 with `*service` null for a null
+ argument, and for a call from inside the handler of a service whose poll holds
+ `client` (`spec/c-abi.md`; ADR 0123).
+
+ # Safety
+
+ `service` is null or writable; `client` is null or a live client handle not in use
+ by another call.
+ */
+int cavalry_cluster_service(cavalry_cluster_service_t **service,
+                            cavalry_t *client);
+
+/*
+ Reads up to `fragment_limit` committed entries of the member's log and hands
+ `handler` each, with `clientd`; returns the entries the handler took, or −1 with
+ the error and in `cavalry_cluster_service_fault`; 0 while the driver hosts no
+ member that has a log yet. A session message's payload is the handler's `buffer`
+ and `length`, and every other entry has a `length` of 0. The header carries the
+ entry's values, which `cavalry_cluster_entry_values` fills. From inside the
+ handler `cavalry_cluster_service_reply` answers a session and
+ `cavalry_cluster_service_action` says what the handler does with the entry; a
+ handler that calls no action continues. The poll is the service's duty cycle: it
+ opens the member's log, follows the log's sessions, and holds a publication to
+ each open session while the service answers. Those are commands sent with
+ `client`, which the poll holds for its run: none of them is sent, and nothing is
+ allocated, for a session message.
+
+ # Safety
+
+ `service` is null or a live handle not in use by another call; `client` is null or
+ a live client handle not in use by another call; `handler` is null or a function
+ that returns, without unwinding or a `longjmp`, and holds the rules of "Calls
+ during a claim or a poll".
+ */
+int cavalry_cluster_service_poll(cavalry_cluster_service_t *service,
+                                 cavalry_t *client,
+                                 cavalry_fragment_handler_t handler,
+                                 void *clientd,
+                                 size_t fragment_limit);
+
+/*
+ Fills `values` with the values of the committed entry whose header
+ `cavalry_cluster_service_poll` handed its handler; −1 with
+ `CAVALRY_ERR_WRONG_HEADER` for a header from any other poll, which carries a
+ frame's header or a reply's values and no entry's.
+
+ # Safety
+
+ `header` is null or the header a poll handed the handler, during that call;
+ `values` is null or writable.
+ */
+int cavalry_cluster_entry_values(const cavalry_header_t *header,
+                                 cavalry_cluster_entry_values_t *values);
+
+/*
+ From inside the service's handler: sends the `length` bytes at `buffer` to the
+ session with `session_id`, as a session message on the egress stream with the
+ leadership term id and the cluster's time of the entry being handled, as the Rust
+ `Replies::reply` does, and returns what became of the reply,
+ `CAVALRY_CLUSTER_REPLY_*`. `_TOO_LONG` sets the thread's error too,
+ `CAVALRY_ERR_TOO_LONG`, with the length and the limit in the message. −1 with
+ `CAVALRY_ERR_CLUSTER_NO_ENTRY` for a call from outside the handler. Nothing here
+ allocates, and nothing waits.
+
+ # Safety
+
+ `service` is null or a live handle, and the call is made by the thread that polls
+ it or by no poll's handler at all; `buffer` is null with a `length` of 0, or
+ readable for `length` bytes.
+ */
+int cavalry_cluster_service_reply(cavalry_cluster_service_t *service,
+                                  int64_t session_id,
+                                  const uint8_t *buffer,
+                                  size_t length);
+
+/*
+ From inside the service's handler: says what the handler does with the entry it
+ was handed, `CAVALRY_ACTION_ABORT`, `CAVALRY_ACTION_BREAK` or
+ `CAVALRY_ACTION_CONTINUE`, the `Action` the Rust handler returns. A handler that
+ does not call it continues, and the last call for an entry counts. −1 with
+ `CAVALRY_ERR_CLUSTER_ACTION` for any other value, which leaves the action as it
+ was, and with `CAVALRY_ERR_CLUSTER_NO_ENTRY` for a call from outside the handler.
+
+ # Safety
+
+ `service` is null or a live handle, and the call is made by the thread that polls
+ it or by no poll's handler at all.
+ */
+int cavalry_cluster_service_action(cavalry_cluster_service_t *service,
+                                   int32_t action);
+
+/*
+ Fills `fault` with what the last poll stopped on: a fault's fields, the position
+ of an entry that is no entry with `CAVALRY_ERR_CLUSTER_ENTRY`, or the client's or
+ the driver's code; a code of 0 when the last poll returned a count.
+
+ # Safety
+
+ `service` is null or a live handle; `fault` is null or writable.
+ */
+int cavalry_cluster_service_fault(const cavalry_cluster_service_t *service,
+                                  cavalry_fault_t *fault);
+
+/*
+ The position after the last entry the handler took, 0 before the first: how far
+ the service has applied the log.
+
+ # Safety
+
+ `service` is null or a live handle not in use by another call.
+ */
+int64_t cavalry_cluster_service_position(const cavalry_cluster_service_t *service);
+
+/*
+ Whether the service answered the last entry it read: its member led that entry's
+ term and, as the entry was read, led it still, and the entry was not history.
+
+ # Safety
+
+ `service` is null or a live handle not in use by another call.
+ */
+bool cavalry_cluster_service_answers(const cavalry_cluster_service_t *service);
+
+/*
+ How many sessions the log holds open, as far as the service has read: 10 at most.
+
+ # Safety
+
+ `service` is null or a live handle not in use by another call.
+ */
+int cavalry_cluster_service_sessions(const cavalry_cluster_service_t *service);
+
+/*
+ Closes the service's publications and its counter, stops its read of the log, and
+ frees the handle, as the Rust `ClusterService::close` does. With a null `client`
+ it is the Rust handle's drop: the publications, the counter and the log's
+ subscription are closed with no answer waited for, the replay is left to the
+ driver, and the function returns 0, which is how a service is closed after its
+ client's `cavalry_close`. The handle is freed whatever the function returns, with
+ one exception: a call from inside the service's own handler, or from inside the
+ handler of another service whose poll holds `client`, is refused with
+ `CAVALRY_ERR_POLLING` and frees nothing.
+
+ # Safety
+
+ `service` is null or a live handle, closed once; `client` is null or a live client
+ handle not in use by another call.
+ */
+int cavalry_cluster_service_close(cavalry_cluster_service_t *service,
+                                  cavalry_t *client);
+
+/*
  Opens a session with a cluster, as the Rust `Cavalry::connect_cluster` does: a
  subscription on `response_channel`, an exclusive publication to the `ingress`
  endpoint of every member in `members`, a session connect to one member after
@@ -1033,7 +1347,8 @@ int cavalry_cluster_session_poll(cavalry_cluster_session_t *session,
  Fills `values` with the leadership term id and the cluster's time of the reply
  whose header `cavalry_cluster_session_poll` handed its handler; −1 with
  `CAVALRY_ERR_WRONG_HEADER` for a header from `cavalry_subscription_poll` or from
- `cavalry_committed_log_poll`, which carries a frame's header and no reply's values.
+ `cavalry_committed_log_poll`, which carries a frame's header and no reply's values,
+ and for one from `cavalry_cluster_service_poll`, which carries an entry's.
 
  # Safety
 
@@ -1163,9 +1478,10 @@ int cavalry_committed_log_poll(cavalry_committed_log_t *log,
 
 /*
  The position in the log at which the entry begins whose header
- `cavalry_committed_log_poll` handed its handler; −1 with `CAVALRY_ERR_NO_POSITION`
- for a header from `cavalry_subscription_poll` or from
- `cavalry_cluster_session_poll`, which carries none.
+ `cavalry_committed_log_poll` handed its handler, or `cavalry_cluster_service_poll`,
+ whose entries carry their positions too; −1 with `CAVALRY_ERR_NO_POSITION` for a
+ header from `cavalry_subscription_poll` or from `cavalry_cluster_session_poll`,
+ which carries none.
 
  # Safety
 
@@ -1292,7 +1608,8 @@ int cavalry_committed_log_constants(const cavalry_committed_log_t *log,
  alone, and returns 0: the driver ends the replay by itself once the replay connect
  timeout has passed with no subscriber, which is how a log is closed after its
  client's `cavalry_close`. The handle is freed whatever the function returns, with
- one exception: a call from inside the log's own handler is refused with
+ one exception: a call from inside the log's own handler, or from inside the
+ handler of a cluster service whose poll holds `client`, is refused with
  `CAVALRY_ERR_POLLING` and frees nothing.
 
  # Safety
@@ -1640,8 +1957,9 @@ bool cavalry_image_is_end_of_stream(const cavalry_image_t *image);
  Fills `values` with the header's fields: the frame header of a fragment a
  subscription's poll handed its handler, or of an entry a committed log's did. −1
  with `CAVALRY_ERR_WRONG_HEADER` for a header from a cluster session's poll, which
- carries a reply's values and no frame's fields; `cavalry_cluster_reply_values`
- reads that one.
+ carries a reply's values and no frame's fields, and for one from a cluster
+ service's poll, which carries an entry's values and none; `cavalry_cluster_reply_values`
+ and `cavalry_cluster_entry_values` read those.
 
  # Safety
 

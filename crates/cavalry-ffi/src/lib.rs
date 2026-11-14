@@ -2,6 +2,7 @@
 #![deny(missing_docs, rustdoc::broken_intra_doc_links)]
 
 mod client;
+mod cluster_service;
 mod cluster_session;
 mod codes;
 mod committed_log;
@@ -17,6 +18,7 @@ mod subscription;
 mod version;
 
 pub use client::*;
+pub use cluster_service::*;
 pub use cluster_session::*;
 pub use codes::*;
 pub use committed_log::*;
@@ -33,7 +35,8 @@ pub use version::*;
 // made one `!Send` would otherwise pass unnoticed until a client used it so. The
 // subscription handle is `Send` by an `unsafe impl` (subscription.rs), which the check
 // on the handle cannot fail, so the client type it wraps is checked on its own: the
-// impl's SAFETY comment rests on it.
+// impl's SAFETY comment rests on it. The cluster service's handle is the same
+// (cluster_service.rs), and so is the check of the service it wraps.
 const _: () = {
     const fn assert_send<T: Send>() {}
     assert_send::<cavalry_context_t>();
@@ -45,4 +48,6 @@ const _: () = {
     assert_send::<cavalry_replay_t>();
     assert_send::<cavalry_committed_log_t>();
     assert_send::<cavalry_cluster_session_t>();
+    assert_send::<cavalry_cluster_service_t>();
+    assert_send::<cavalry_client::ClusterService>();
 };

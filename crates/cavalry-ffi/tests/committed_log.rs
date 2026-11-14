@@ -231,6 +231,11 @@ unsafe extern "C" fn collect(
         let mut reply = std::mem::zeroed::<cavalry_cluster_reply_values_t>();
         assert_eq!(cavalry_cluster_reply_values(header, &mut reply), -1);
         assert_eq!(cavalry_errcode(), CAVALRY_ERR_WRONG_HEADER);
+        // Nor a service's entry's values: the committed log hands over the entry as
+        // its bytes, and its caller parses them.
+        let mut entry = std::mem::zeroed::<cavalry_cluster_entry_values_t>();
+        assert_eq!(cavalry_cluster_entry_values(header, &mut entry), -1);
+        assert_eq!(cavalry_errcode(), CAVALRY_ERR_WRONG_HEADER);
         collected.entries.push(Entry {
             position: cavalry_committed_log_entry_position(header),
             body: std::slice::from_raw_parts(buffer, length).to_vec(),

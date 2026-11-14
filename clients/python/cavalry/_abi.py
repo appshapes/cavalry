@@ -14,7 +14,7 @@ from ctypes import (CFUNCTYPE, POINTER, Structure, c_bool, c_char_p, c_int, c_in
 # The defines, the header's constants (spec/c-abi.md, "Constants", "Result codes",
 # "Error codes").
 CAVALRY_DIR_ENV = "CAVALRY_DIR"
-CAVALRY_ABI_VERSION = 4
+CAVALRY_ABI_VERSION = 5
 CAVALRY_MAX_IMAGES = 256
 CAVALRY_SERVICE_LOG_STREAM_ID = 104
 CAVALRY_NULL_POSITION = -1
@@ -74,6 +74,9 @@ CAVALRY_ERR_CLUSTER_MEMBERS = 140
 CAVALRY_ERR_CLUSTER_REFUSED = 141
 CAVALRY_ERR_CLUSTER_VERSION = 142
 CAVALRY_ERR_CLUSTER_CONNECT_TIMEOUT = 143
+CAVALRY_ERR_CLUSTER_ENTRY = 144
+CAVALRY_ERR_CLUSTER_NO_ENTRY = 145
+CAVALRY_ERR_CLUSTER_ACTION = 146
 CAVALRY_CLOSED_BY_USER = 1
 CAVALRY_CLOSED_DRIVER_CLOSED = 2
 CAVALRY_CLOSED_DRIVER_TIMEOUT = 3
@@ -85,6 +88,20 @@ CAVALRY_REPLAY_STOP_ENDED = 0
 CAVALRY_REPLAY_STOP_STOPPED = 1
 CAVALRY_REPLAY_STOP_NOT_CONNECTED = 2
 CAVALRY_REPLAY_STOP_FAILED = 3
+CAVALRY_CLUSTER_ENTRY_SESSION_MESSAGE = 1
+CAVALRY_CLUSTER_ENTRY_SESSION_OPEN = 2
+CAVALRY_CLUSTER_ENTRY_SESSION_CLOSE = 3
+CAVALRY_CLUSTER_ENTRY_NEW_LEADERSHIP_TERM = 4
+CAVALRY_CLUSTER_ENTRY_OTHER = 5
+CAVALRY_CLUSTER_REPLY_SENT = 1
+CAVALRY_CLUSTER_REPLY_NOT_ANSWERING = 2
+CAVALRY_CLUSTER_REPLY_RETRY = 3
+CAVALRY_CLUSTER_REPLY_DROPPED = 4
+CAVALRY_CLUSTER_REPLY_NO_SESSION = 5
+CAVALRY_CLUSTER_REPLY_TOO_LONG = 6
+CAVALRY_ACTION_ABORT = 1
+CAVALRY_ACTION_BREAK = 2
+CAVALRY_ACTION_CONTINUE = 4
 CAVALRY_FLAGS_BEGIN = 128
 CAVALRY_FLAGS_END = 64
 CAVALRY_FLAGS_EOS = 32
@@ -94,6 +111,7 @@ CAVALRY_FRAME_TYPE_DATA = 1
 
 # The opaque handle types, each a `c_void_p` here: the ABI hands out a pointer the client
 # keeps and passes back, and never reads through.
+cavalry_cluster_service_t = c_void_p
 cavalry_cluster_session_t = c_void_p
 cavalry_committed_log_t = c_void_p
 cavalry_context_t = c_void_p
@@ -105,12 +123,17 @@ cavalry_replay_t = c_void_p
 cavalry_subscription_t = c_void_p
 cavalry_t = c_void_p
 
-class cavalry_cluster_reply_values_t(Structure):
-    """`cavalry_cluster_reply_values_t` of spec/c-abi.md, "Structs": the caller's copy the ABI fills."""
+class cavalry_cluster_entry_values_t(Structure):
+    """`cavalry_cluster_entry_values_t` of spec/c-abi.md, "Structs": the caller's copy the ABI fills."""
 
     _fields_ = [
+        ("position", c_int64),
         ("leadership_term_id", c_int64),
         ("timestamp", c_int64),
+        ("session_id", c_int64),
+        ("type", c_int32),
+        ("leader_member_id", c_int32),
+        ("timed_out", c_bool),
     ]
 
 
@@ -121,6 +144,15 @@ class cavalry_fault_t(Structure):
         ("code", c_int32),
         ("session_id", c_int32),
         ("position", c_int64),
+    ]
+
+
+class cavalry_cluster_reply_values_t(Structure):
+    """`cavalry_cluster_reply_values_t` of spec/c-abi.md, "Structs": the caller's copy the ABI fills."""
+
+    _fields_ = [
+        ("leadership_term_id", c_int64),
+        ("timestamp", c_int64),
     ]
 
 
@@ -260,6 +292,16 @@ FUNCTIONS = {
     "cavalry_purge_recording": (c_int, [c_void_p, c_int64]),
     "cavalry_start_replay": (c_int, [POINTER(c_void_p), c_void_p, c_int64, c_int64, c_int64, c_int32, c_char_p]),
     "cavalry_stop_replay": (c_int, [c_void_p, c_int64]),
+    "cavalry_cluster_service": (c_int, [POINTER(c_void_p), c_void_p]),
+    "cavalry_cluster_service_poll": (c_int, [c_void_p, c_void_p, cavalry_fragment_handler_t, c_void_p, c_size_t]),
+    "cavalry_cluster_entry_values": (c_int, [c_void_p, POINTER(cavalry_cluster_entry_values_t)]),
+    "cavalry_cluster_service_reply": (c_int, [c_void_p, c_int64, c_char_p, c_size_t]),
+    "cavalry_cluster_service_action": (c_int, [c_void_p, c_int32]),
+    "cavalry_cluster_service_fault": (c_int, [c_void_p, POINTER(cavalry_fault_t)]),
+    "cavalry_cluster_service_position": (c_int64, [c_void_p]),
+    "cavalry_cluster_service_answers": (c_bool, [c_void_p]),
+    "cavalry_cluster_service_sessions": (c_int, [c_void_p]),
+    "cavalry_cluster_service_close": (c_int, [c_void_p, c_void_p]),
     "cavalry_connect_cluster": (c_int, [POINTER(c_void_p), c_void_p, c_char_p, c_char_p]),
     "cavalry_cluster_session_offer": (c_int64, [c_void_p, c_char_p, c_size_t]),
     "cavalry_cluster_session_poll": (c_int, [c_void_p, cavalry_fragment_handler_t, c_void_p, c_size_t]),
@@ -341,6 +383,10 @@ PER_MESSAGE = (
     "cavalry_cluster_session_offer",
     "cavalry_cluster_session_poll",
     "cavalry_cluster_reply_values",
+    "cavalry_cluster_service_poll",
+    "cavalry_cluster_entry_values",
+    "cavalry_cluster_service_reply",
+    "cavalry_cluster_service_action",
 )
 
 

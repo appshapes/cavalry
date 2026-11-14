@@ -5,7 +5,7 @@ The `extern "C"` ABI and its cbindgen header. Data plane, and the other crate wh
 
 ## What this does
 
-- Exposes the client API as a C ABI, `spec/c-abi.md` version 4, declared by the
+- Exposes the client API as a C ABI, `spec/c-abi.md` version 5, declared by the
   committed header `include/cavalry.h`, so one Rust core serves every language. The
   thin clients under `clients/` for Python, Node, Go, the JVM and .NET are generated
   over it and released together.
@@ -34,11 +34,24 @@ The `extern "C"` ABI and its cbindgen header. Data plane, and the other crate wh
   `cavalry_cluster_session_stale_replies` reads the count.
   `cavalry_cluster_session_closed` returns null while the session is open, and why
   it is closed from then on
-  (`spec/cluster.md`, "Sessions"; ADR 0121; ADR 0122). A cluster's service comes
-  with the next version of the page.
+  (`spec/cluster.md`, "Sessions"; ADR 0121; ADR 0122).
+- Runs a cluster's service for a program in C: `cavalry_cluster_service` makes one
+  beside the member on the client's driver, and `cavalry_cluster_service_poll` hands
+  the fragment handler each committed entry as what it is and is the service's duty
+  cycle. The handler reads the entry with `cavalry_cluster_entry_values(header,
+  values)`: its type, its session, its position, its term and the cluster's time,
+  the one clock a service reads. A session message's payload is the handler's
+  buffer. From inside the handler `cavalry_cluster_service_reply` answers a session
+  and returns what became of the reply, and `cavalry_cluster_service_action` says
+  whether the entry is taken: `CAVALRY_ACTION_ABORT` leaves it for the next poll,
+  which is what the reply code `CAVALRY_CLUSTER_REPLY_RETRY` asks for. The service
+  beside every member runs the same handler on the same entries, and the one beside
+  the entry's leader answers. The poll holds the client it was called with: a
+  function that takes that client is refused from inside the handler
+  (`spec/cluster.md`, "The service" and "Replies"; ADR 0118; ADR 0123).
 - Carries every non-Rust client's messages: a claim, a commit, an offer and a poll
-  cross this boundary per message, a cluster session's among them, which is why it
-  is on the data plane.
+  cross this boundary per message, a cluster session's and a cluster service's
+  among them, which is why it is on the data plane.
 - Is the one surface frozen between releases. Rust-to-Rust integration goes through
   crates with semver; everything else goes through this ABI.
 - Builds three ways: `cdylib`, the shared library the generated clients load,
@@ -74,13 +87,21 @@ the only implementation and the C ABI is a thin layer over it
   `cavalry_buffer_claim_abort`, `cavalry_buffer_claim_set_reserved_value`,
   `cavalry_subscription_poll`, `cavalry_header_values`, `cavalry_committed_log_poll`,
   `cavalry_committed_log_entry_position`, `cavalry_cluster_session_offer`,
-  `cavalry_cluster_session_poll` and `cavalry_cluster_reply_values`. The
+  `cavalry_cluster_session_poll`, `cavalry_cluster_reply_values`,
+  `cavalry_cluster_service_poll`, `cavalry_cluster_entry_values`,
+  `cavalry_cluster_service_reply` and `cavalry_cluster_service_action`. The
   thread-local error is a fixed buffer, and `tests/allocations.rs` counts across
-  all twelve.
+  all sixteen. A service's poll sends a command to the driver at a session's
+  opening, where its answering changes and at a recording's end, and none for a
+  session message.
 - Hand a function a header's values that the header does not carry. A header is of
-  three kinds, by the poll that made it, and a function asked for what a kind lacks
+  four kinds, by the poll that made it, and a function asked for what a kind lacks
   sets `CAVALRY_ERR_WRONG_HEADER` or `CAVALRY_ERR_NO_POSITION` and fills nothing
   (`spec/c-abi.md`, "What a header carries").
+- Let two calls reach one Rust client at once. A cluster service's poll holds its
+  client for the run of the handler, as the Rust borrow does, and every function
+  that takes that client answers `CAVALRY_ERR_POLLING` from inside the handler
+  (`spec/c-abi.md`, "Calls during a claim or a poll"; ADR 0123).
 
 ## Where the data plane ends
 
@@ -185,7 +206,7 @@ Running it prints one line, such as `received "hello" from session -1716223105`.
 program built against another version of the header is refused at its first call:
 
 ```text
-cavalry_context_init refused (abi-version): the program was built against ABI version 3 and this library is version 4; rebuild the program against this library's header; see docs/reference/c-abi.md#versions-and-what-a-reader-rejects
+cavalry_context_init refused (abi-version): the program was built against ABI version 4 and this library is version 5; rebuild the program against this library's header; see docs/reference/c-abi.md#versions-and-what-a-reader-rejects
 ```
 
 A session with a cluster is the same calls in C, in this order. The block is
@@ -227,6 +248,63 @@ unsafe {
         assert!(cavalry_cluster_session_poll(session, Some(on_reply), (&mut replies as *mut Vec<_>).cast(), 10) >= 0);
     }
     assert_eq!(cavalry_cluster_session_close(session), 0);
+    assert_eq!(cavalry_close(client), 0);
+    assert_eq!(cavalry_context_close(context), 0);
+}
+# Ok(())
+# }
+```
+
+A cluster's service is these calls, in this order. The block is compiled and not
+run: it needs a cluster member on the client's driver.
+[Run a cluster](../../docs/how-to/run-a-cluster.md) starts one.
+
+```no_run
+use std::ffi::{CStr, c_void};
+use std::ptr;
+
+use cavalry_ffi::*;
+
+// What the handler is given as its `clientd`: the service it answers through, and
+// the service's own state, which the service beside every member reaches alike.
+struct Echo {
+    service: *mut cavalry_cluster_service_t,
+    total: u64,
+}
+
+// The C fragment handler: a committed entry, its values from the header, and a
+// session message's payload as the buffer.
+unsafe extern "C" fn on_entry(clientd: *mut c_void, buffer: *const u8, length: usize, header: *const cavalry_header_t) {
+    let echo = unsafe { &mut *clientd.cast::<Echo>() };
+    let mut values = unsafe { std::mem::zeroed::<cavalry_cluster_entry_values_t>() };
+    unsafe { cavalry_cluster_entry_values(header, &mut values) };
+    if values.r#type != CAVALRY_CLUSTER_ENTRY_SESSION_MESSAGE {
+        return;
+    }
+    // Reply first, then change the state: an entry that is aborted is handed over again.
+    let reply = unsafe { cavalry_cluster_service_reply(echo.service, values.session_id, buffer, length) };
+    if reply == CAVALRY_CLUSTER_REPLY_RETRY {
+        unsafe { cavalry_cluster_service_action(echo.service, CAVALRY_ACTION_ABORT) };
+        return;
+    }
+    echo.total += length as u64;
+}
+
+# fn main() -> Result<(), Box<dyn std::error::Error>> {
+unsafe {
+    let mut context = ptr::null_mut();
+    assert_eq!(cavalry_context_init_v(&mut context, CAVALRY_ABI_VERSION), 0);
+    let mut client = ptr::null_mut();
+    assert_eq!(cavalry_init(&mut client, context), 0);
+    let mut service = ptr::null_mut();
+    assert_eq!(cavalry_cluster_service(&mut service, client), 0);
+    let mut echo = Echo { service, total: 0 };
+    // The service's duty cycle: the entries a quorum committed, in the log's order.
+    while echo.total < 5 {
+        let taken = cavalry_cluster_service_poll(service, client, Some(on_entry), (&mut echo as *mut Echo).cast(), 10);
+        assert!(taken >= 0, "{}", CStr::from_ptr(cavalry_errmsg()).to_str()?);
+    }
+    assert_eq!(cavalry_cluster_service_close(service, client), 0);
     assert_eq!(cavalry_close(client), 0);
     assert_eq!(cavalry_context_close(context), 0);
 }
