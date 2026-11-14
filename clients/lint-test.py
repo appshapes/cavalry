@@ -36,7 +36,11 @@ fails naming the function and the form;
 building the `*HandlerError` in `Poll` after the shim's poll call passes and before it
 fails; a panic in the exported trampoline fails naming `trampoline.go`; a lock in
 `shim.c`'s trampoline fails, and one in the helper that keeps a per-message call's error
-fails each shim call that keeps one; a function that reads the thread's error through
+fails each shim call that keeps one; a cluster session's `Poll` and a cluster service's
+are held as the subscription's is, a lock in the service's `Poll`, which is a call on its
+client, a panic in either cluster trampoline or an allocation in the function that calls
+a service's handler fails, and so does a lock in either cluster trampoline of `shim.c`
+(ADR 0124); a function that reads the thread's error through
 `check` or `lastError` without `runtime.LockOSThread()` and its deferred unlock before
 its first ABI call fails, whether it lost the lock, takes it after the call, has no
 deferred unlock or is new; a module with none of the per-message functions fails, and a
@@ -804,9 +808,89 @@ class Clients(unittest.TestCase):
                      "  pthread_mutex_lock(&lock);\n  error->code = (int32_t) cavalry_errcode();\n", file=self.go_shim)
         found = lint.findings(self.tmp)
         for name in ("cavalry_go_try_claim", "cavalry_go_set_reserved_value", "cavalry_go_commit", "cavalry_go_abort",
-                     "cavalry_go_offer", "cavalry_go_poll", "cavalry_go_committed_log_poll"):
+                     "cavalry_go_offer", "cavalry_go_poll", "cavalry_go_committed_log_poll",
+                     "cavalry_go_cluster_session_offer", "cavalry_go_cluster_session_poll",
+                     "cavalry_go_cluster_service_reply", "cavalry_go_cluster_service_poll",
+                     "cavalry_go_service_trampoline"):
             self.assertTrue(any(f"go: {name} " in f and "calls cavalry_go_keep" in f and "pthread_mutex_*" in f
                                 for f in found), (name, found))
+
+    # A cluster session and a cluster service in the Go client (ADR 0124).
+
+    def test_the_handler_error_before_a_go_cluster_polls_shim_call_fails(self):
+        """A cluster session's Poll and a cluster service's are held as the subscription's
+        is: the *HandlerError each builds after its shim call is the one error it may build."""
+        self.assertEqual(lint.findings(self.tmp), [])
+        self.edit_go("\ts.reply = handler\n\ts.polling = true\n",
+                     "\t_ = &HandlerError{}\n\ts.reply = handler\n\ts.polling = true\n")
+        self.edit_go("\ts.service = handler\n\ts.polling = true\n",
+                     "\t_ = keptError(&s.err)\n\ts.service = handler\n\ts.polling = true\n")
+        found = lint.findings(self.tmp)
+        self.assertEqual(len(found), 2, found)
+        self.assertTrue(any("ClusterSession.Poll" in f and "builds HandlerError" in f for f in found), found)
+        self.assertTrue(any("ClusterService.Poll" in f and "calls keptError" in f and "builds Error" in f for f in found),
+                        found)
+
+    def test_the_clients_mutex_in_a_go_cluster_services_poll_fails(self):
+        """A service's Poll is a call on its client and is on every entry's path: it takes
+        no lock, the client's own among them (clients/go/README.md, "Threads")."""
+        self.edit_go("\ts.service = handler\n\ts.polling = true\n",
+                     "\tv.client.mu.Lock()\n\tdefer v.client.mu.Unlock()\n\ts.service = handler\n\ts.polling = true\n")
+        [finding] = lint.findings(self.tmp)
+        self.assertIn("ClusterService.Poll", finding)
+        self.assertIn("takes a lock with `.Lock()`", finding)
+        self.assertIn("no lock on the per-message path", finding)
+
+    def test_a_panic_in_a_go_cluster_per_message_function_fails(self):
+        """The session's Offer and the service's Reply return a code, and neither exported
+        trampoline panics: a handler's own panic is recovered in the function it calls."""
+        self.edit_go("func (n *ClusterSession) Offer(message []byte) int64 {\n",
+                     "func (n *ClusterSession) Offer(message []byte) int64 {\n\tpanic(\"no\")\n")
+        self.edit_go("func (v *ClusterService) Reply(sessionID int64, message []byte) int32 {\n",
+                     "func (v *ClusterService) Reply(sessionID int64, message []byte) int32 {\n\tpanic(\"no\")\n")
+        self.edit_go("\ts.deliverReply(body)\n", "\tpanic(\"x\")\n\ts.deliverReply(body)\n", file=self.go_trampoline)
+        self.edit_go("\te := &s.entryValues\n", "\tpanic(\"x\")\n\te := &s.entryValues\n", file=self.go_trampoline)
+        found = lint.findings(self.tmp)
+        self.assertEqual(len(found), 4, found)
+        for name in ("ClusterSession.Offer", "ClusterService.Reply", "cavalryGoReply", "cavalryGoClusterEntry"):
+            self.assertTrue(any(f"go: {name} (" in f and "panics" in f for f in found), (name, found))
+
+    def test_an_allocation_where_go_calls_a_cluster_handler_fails(self):
+        """deliverReply and deliverClusterEntry call the handlers, once per reply and per
+        entry: an allocation there fails them and the exported trampoline that calls each."""
+        self.edit_go("\tdefer s.recovered()\n\ts.reply(body, &s.replyValues)\n",
+                     "\tdefer s.recovered()\n\t_ = make([]byte, 1)\n\ts.reply(body, &s.replyValues)\n")
+        self.edit_go("\taction = ActionAbort\n", "\taction = ActionAbort\n\t_ = new(int)\n")
+        found = lint.findings(self.tmp)
+        self.assertEqual(len(found), 4, found)
+        for name in ("Subscription.deliverReply", "Subscription.deliverClusterEntry"):
+            self.assertTrue(any(f"go: {name} (" in f and "allocates" in f for f in found), (name, found))
+        for trampoline, calls in (("cavalryGoReply", "Subscription.deliverReply"),
+                                  ("cavalryGoClusterEntry", "Subscription.deliverClusterEntry")):
+            self.assertTrue(any(f"go: {trampoline} (" in f and f"calls {calls}" in f for f in found), (trampoline, found))
+
+    def test_a_lock_in_the_go_shims_cluster_trampolines_fails(self):
+        reply = "  cavalry_cluster_reply_values(header, &values);\n"
+        self.edit_go(reply, "  pthread_mutex_lock(&lock);\n" + reply, file=self.go_shim)
+        entry = "  if (cavalry_cluster_entry_values(header, &values) != 0) {\n"
+        self.edit_go(entry, "  pthread_mutex_lock(&lock);\n" + entry, file=self.go_shim)
+        found = lint.findings(self.tmp)
+        self.assertEqual(len(found), 2, found)
+        for trampoline in ("cavalry_go_reply_trampoline", "cavalry_go_service_trampoline"):
+            self.assertTrue(any(f"go: {trampoline} (" in f and "pthread_mutex_*" in f for f in found), (trampoline, found))
+
+    def test_a_missing_go_cluster_function_fails(self):
+        """A cluster session's and a cluster service's per-message functions are held to the
+        rules by name, as the others are (ADR 0124)."""
+        self.edit_go("func (v *ClusterService) Reply(", "func (v *ClusterService) Answer(")
+        self.edit_go("func cavalryGoClusterEntry(", "func cavalryGoServiceEntry(", file=self.go_trampoline)
+        self.edit_go("static void cavalry_go_service_trampoline(", "static void cavalry_go_service_handler(",
+                     file=self.go_shim)
+        found = lint.findings(self.tmp)
+        self.assertEqual(len(found), 3, found)
+        for name in ("ClusterService.Reply is not in", "cavalryGoClusterEntry is not in",
+                     "cavalry_go_service_trampoline is not in"):
+            self.assertTrue(any(name in f for f in found), (name, found))
 
     def test_a_go_module_without_the_per_message_functions_fails(self):
         with open(self.go, "w", encoding="utf-8") as f:

@@ -10,7 +10,10 @@ handles the forms a Go user expects. A `Client` closes with `Close`; a `Publicat
 claims a slice of the log as a `[]byte` over it or offers a `[]byte`; a `Subscription`
 polls with a fragment handler function that receives the body as a `[]byte` into the
 log and the frame's `Header`; a `Recording` and a `Replay` wrap the driver's archive; a
-`CommittedLog` is a service's read of a cluster's committed log beside a member (below).
+`CommittedLog` is a service's read of a cluster's committed log beside a member; a
+`ClusterSession` is a client's session with a cluster; a `ClusterService` is a
+cluster's service beside a member, handed each committed entry and answering the
+sessions (all three below).
 Every message the client sends or receives goes through one `extern "C"` call on the
 caller's goroutine, as the ABI's page promises (ADR 0046's boundary; ADR 0051). The
 module has no dependency beyond Go's standard library: cgo is part of the Go toolchain,
@@ -99,13 +102,110 @@ would lose the entry at 96, and applying 192 before opening again at 96 would ap
 192 twice. A `fragmentLimit` of 1 is the simple form: a poll then delivers at most one
 entry, and the service decides after each.
 
+### The cluster session
+
+A cluster session is a client's connection to a cluster: it sends the leader messages,
+which the leader appends to the cluster's log, and reads the replies of the service
+beside the leader (`spec/cluster.md`, "Sessions"). `client.ConnectCluster(members,
+responseChannel)` opens one and returns a `*ClusterSession`. `members` is the members
+string the cluster's members were started with (`docs/how-to/run-a-cluster.md`), and
+`responseChannel` a channel of this host for the cluster's answers,
+`cavalry:udp?endpoint=<host>:<port>`. The call returns once the leader has opened the
+session and waits for that for 20 s at most; its `*Error` has `ErrClusterMembers`,
+`ErrClusterRefused`, `ErrClusterVersion` or `ErrClusterConnectTimeout`.
+
+`session.Offer(message)` sends the leader a `[]byte` of at most
+`session.MaxMessageLength` bytes, and returns the position after the message on the
+session's publication to the leader, or a publication's result code below zero:
+`PublicationClosed` for a session that is closed, and `PublicationError`, with
+`ErrTooLong` in `session.Err()`, for a message that is too long. A message taken is on
+its way to the leader and is not committed. `session.Poll(handler, fragmentLimit)`
+calls `handler(body, reply)` for each reply: `body` is the reply's payload, a `[]byte`
+into the log for the call, and `reply` is a `*ClusterReplyValues` with
+`reply.LeadershipTermID`, the term of the entry the reply answers, and
+`reply.Timestamp`, the cluster's time when its leader appended that entry, in
+milliseconds since 1970-01-01T00:00:00Z. `reply` is the one struct the session keeps,
+written for each reply, so copy a field out to keep it. The poll returns the count of
+replies handed over, or −1 when it stopped on a fault, with `session.Err()` saying why
+and `session.Fault()` giving the fault until the next poll. The poll is the session's
+duty cycle as well: it sends the keepalive, follows a new leader and closes the
+session when the cluster says so. Call it at least every 500 ms.
+
+A reply is no delivery. The terms of the replies a handler is given never fall: a
+reply of a term below one already handed over is stale, is passed over, and is counted
+in `session.StaleReplies()` (ADR 0121). A message whose leader was lost before it
+committed is answered by nobody. A program that needs an answer offers again when
+none comes. `session.Closed()` is `""` and `false` while the session is open, and then
+the reason and `true`: `"TIMEOUT"`, `"NO LEADER"` or the detail of the cluster's closed
+event. `session.LeaderMemberID()` and `session.LeadershipTermID()` say whom the
+session sends to, and `session.SessionID` is the id the leader gave it.
+`session.Close()` offers the leader a session close for at most 500 ms and frees the
+session; it is idempotent. Close a session before its client (`spec/c-abi.md`,
+"Functions", cluster session; ADR 0122).
+
+### The cluster service
+
+A cluster's service is the program beside each member that applies the committed
+entries and answers the sessions (`spec/cluster.md`, "The service" and "Replies").
+`client.ClusterService()` makes one beside the member on the client's driver and
+returns a `*ClusterService`; it sends nothing. `service.Poll(handler, fragmentLimit)`
+opens the member's log when the member has one, and calls `handler(body, entry,
+service)` for each committed entry, in order:
+
+- `body` is a session message's payload, a `[]byte` into the log for the call. It is
+  `nil` for every other entry.
+- `entry` is a `*ClusterEntryValues`: `entry.Type`, one of `ClusterEntrySessionMessage`,
+  `ClusterEntrySessionOpen`, `ClusterEntrySessionClose`, `ClusterEntryNewLeadershipTerm`
+  and `ClusterEntryOther`; `entry.Position`; `entry.LeadershipTermID`;
+  `entry.Timestamp`, the cluster's time, the one clock a service reads, so that every
+  member's service reaches the same state; `entry.SessionID`, −1 where the entry has
+  no session; `entry.LeaderMemberID`, for a new leadership term; and `entry.TimedOut`,
+  for a session close. It is the one struct the service keeps, written for each
+  entry, so copy a field out to keep it.
+- `service` is the service that was polled, for `service.Reply`.
+
+What the handler returns says what becomes of the entry. `ActionContinue` takes it,
+and the poll goes on. `ActionBreak` takes it and ends the poll. `ActionAbort` leaves it
+and ends the poll, and the next poll hands it over again. The poll returns the count
+of entries taken, or −1 when it stopped on a fault, with `service.Err()` saying why
+and `service.Fault()` giving the fault until the next poll.
+
+`service.Reply(sessionID, message)` answers a session from inside the handler and
+returns what became of the reply: `ClusterReplySent`; `ClusterReplyNotAnswering`, from
+a service whose member did not lead the entry's term, which has nothing to do;
+`ClusterReplyRetry`, when the session's response channel did not take the reply now,
+for which the handler returns `ActionAbort`; `ClusterReplyDropped`;
+`ClusterReplyNoSession`; or `ClusterReplyTooLong`. Every member's service makes the
+same calls for the same entry, and one of them sends: the one beside the leader of the
+entry's term. So a handler does this, in this order:
+
+1. It replies. When the reply answers `ClusterReplyRetry` it returns `ActionAbort`
+   and changes nothing.
+2. It changes the service's state.
+3. It returns.
+
+An entry that was aborted is handed over again, and a reply that an earlier handling
+of the same entry sent is not sent twice: the second answers `ClusterReplySent` and
+sends nothing. A handler that panics, or returns a value that is no action, has its
+entry aborted too, and `Poll` returns a `*HandlerError` ("The panic"): an entry is
+taken only by a handler that finished with it, so `service.Position()`, the position
+after the last entry taken, never passes an entry whose handler failed.
+
+The service's `Poll` and its `Close` are calls on the client the service was made on
+("Threads"). `service.Close()` is idempotent; close a service before its client
+(`spec/c-abi.md`, "Functions", cluster service; ADR 0123; ADR 0124).
+`conformance/go/cluster` is a program that runs three services and a session through
+every call above.
+
 ## What it must never do
 
 - Never run a message through anything but one ABI call: no lock, no goroutine, no
   channel, no allocation, no copy of a fragment for the handler. `clients/lint.py`
   reads the per-message functions of `cavalry.go` and `trampoline.go`, the claim, the
   reserved value, the commit, the abort, the offer, a subscription's and a committed
-  log's poll, the header's values and the trampoline, for Go's forms of each (`sync`, a lock or a wait through a variable
+  log's poll, the header's values and the trampoline, a cluster session's offer and
+  poll, a cluster service's poll and reply, the two functions that call their
+  handlers and the two exported functions the C trampolines call, for Go's forms of each (`sync`, a lock or a wait through a variable
   or a field, such as `registryMu.Lock()`, which names no `sync.`, a `go` statement, a
   channel send or receive, `select`, `panic`, and `make`, `new` and `append`), and
   those of `shim.c`, the C trampoline and the poll, for C's (`pthread_mutex_*`,
@@ -115,12 +215,23 @@ entry, and the service decides after each.
   after the frame or the code below zero (`PublicationNotConnected`,
   `PublicationBackPressured`, `PublicationAdminAction`, `PublicationClosed`,
   `PublicationMaxPositionExceeded`, `PublicationError`), as the ABI does; the caller
-  branches.
+  branches. A cluster session's `Offer` returns the same codes, and a cluster
+  service's `Reply` returns its `ClusterReply*` code, or −1 from outside the handler.
 - Never swallow the handler's panic, or a fragment: a fragment handler that panics
   keeps every later fragment of that poll reaching the handler, and `Poll` returns a
   `*HandlerError` once the ABI has returned, with the first panic's value as its
   `Cause` and the counts. A panic must not unwind through the ABI's frames, so the
   trampoline recovers every one.
+- Never take an entry for a cluster service's handler that failed. The handler's
+  return value is the entry's action, so the client answers for a handler that
+  panicked, with `ActionAbort`, and the C trampoline aborts an entry whose action the
+  ABI refused: the poll ends there, and `Poll` returns a `*HandlerError`. The entry is
+  handed over again; it is never skipped.
+- Never make a slice at an address that holds no byte. For an entry that is no
+  session's message the ABI's buffer is an address of 1 with a length of 0. Go ends
+  the process when it copies a goroutine's stack and finds a pointer below 4,096 on
+  it, so the trampolines of a cluster session and of a cluster service hand the
+  handler `nil` for a body of no bytes and make no slice.
 - Never read the ABI's error on another thread than the failing call's. The error is
   the calling OS thread's and Go moves goroutines between threads, so a call that is
   not a message holds its goroutine's thread from the call to the read, and a
@@ -128,17 +239,23 @@ entry, and the service decides after each.
   error"). `just lint` fails a function that reads the error without the lock.
 - Never lose a handle the ABI keeps open. Every close frees its handle, whatever it
   returns, so `Close` forgets the handle once the ABI's close has returned. The one
-  exception is the close of a subscription or of a committed log from inside a handler
+  exception is the close of a subscription, of a committed log, of a cluster session
+  or of a cluster service from inside a handler
   of its own poll, which the ABI refuses with `ErrPolling`, leaving it open
-  (`spec/c-abi.md`, "Calls during a claim or a poll"). `Close` then returns the
-  `*Error` and keeps the handle, so the subscription or the log can be polled and
+  (`spec/c-abi.md`, "Calls during a claim or a poll"); a cluster service's close is
+  refused in the same way from inside the handler of another service whose poll holds
+  its client. `Close` then returns the
+  `*Error` and keeps the handle, so that it can be polled and
   closed after the poll. A `Client`'s `Close` does not close the handles it made: each
-  `Publication`, `Subscription`, `Recording`, `Replay` and `CommittedLog` is freed by
+  `Publication`, `Subscription`, `Recording`, `Replay`, `CommittedLog`,
+  `ClusterSession` and `ClusterService` is freed by
   its own `Close` and by nothing else, and a publication or a subscription answers as
   closed from the client's close until then (`spec/c-abi.md`, "Lifetimes"). An
-  unclosed `Subscription` or `CommittedLog` also keeps its slot in the table
+  unclosed `Subscription`, `CommittedLog`, `ClusterSession` or `ClusterService` also
+  keeps its slot in the table
   ("Threads"), so a program that closes only its clients fills the table, and
-  `AddSubscription` and `CommittedLog` return `ErrSubscriptionsFull`. A publication's
+  `AddSubscription`, `CommittedLog`, `ConnectCluster` and `ClusterService` return
+  `ErrSubscriptionsFull`. A publication's
   close zeroes the claim struct too, so `Commit`, `Abort` and `SetReservedValue`
   after it answer -1 with `ErrNoClaim` in `Err` and the ABI reads no freed handle
   through the struct's `publication` (`spec/c-abi.md`, "Which claim a struct names").
@@ -150,7 +267,19 @@ entry, and the service decides after each.
   `false`, and `log.Fault()` and `log.Close()` return an `*Error`, each with
   `ErrPolling`, and the log stays open. The four `false` are refusals there, not
   answers: read the four after the poll has returned. The handler has each entry's own
-  `position`.
+  `position`. A cluster session's handler and a cluster service's are held to it as
+  well. From inside a session's handler, `Offer` returns `PublicationError`, a `Poll`
+  of the same session, `LeadershipTermID()`, `LeaderMemberID()` and `StaleReplies()`
+  return −1, `Closed()` is `""` and `false`, a refusal there, and `Fault()` and
+  `Close()` return an `*Error`, each with `ErrPolling`: a handler that answers a reply
+  with a message keeps what it needs and offers after the poll has returned. From
+  inside a service's handler, a `Poll` of the same service, `Position()` and
+  `Sessions()` return −1, `Answers()` is `false`, a refusal there, and `Fault()` and
+  `Close()` return an `*Error`. The service's poll holds its client too, so every call
+  on that client from inside the handler is refused the same way: `client.IsClosed()`
+  is `false`, a refusal, and an add, a command, `client.CommittedLog`,
+  `client.ConnectCluster` and `client.ClusterService` return an `*Error` with
+  `ErrPolling`. Make them after the poll has returned.
 - Never edit a generated file by hand: `just lint` regenerates the module and fails
   when the committed files differ. `example/main.go` is the one file written by hand,
   and it is this README's program.
@@ -246,6 +375,16 @@ their fast path these take no lock and make no syscall, and "The call-back, by
 construction" says when their slow path runs and what it costs. An add, a command or a
 close waits on the driver for up to 10 s (`spec/c-abi.md`, "Threads"); the goroutine
 blocks in the call and the scheduler runs the program's other goroutines meanwhile.
+`client.ConnectCluster` waits until the leader has opened the session, 20 s at most.
+
+A cluster service's `Poll` is the one per-message function that can wait for the
+driver. It sends commands with the service's client when it opens the member's log,
+at a session's opening, where a term's leader changes and at a recording's end, and
+it waits for each answer in the call, as an add does; a session message costs no
+command. The runner's cluster round reports the waits. On this laptop (Apple M5 Pro),
+in each of 25 runs, 4 of about 17,900 polls of three services took over 1 ms. The
+longest, in 23 of the runs a poll that opened a member's log, took 7.2 to 11.5 ms.
+The program's other goroutines run meanwhile.
 
 ### Threads
 
@@ -258,7 +397,8 @@ making on it, an add or a command for up to 10 s; no message passes through a
 `Client`, so the mutex is never on a message's path. `conformance/go/quickstart`
 shares one client among eight goroutines that add and close at once.
 
-A `Publication`, `Subscription`, `CommittedLog`, `Recording`, `Replay` or `Image` is
+A `Publication`, `Subscription`, `CommittedLog`, `ClusterSession`, `ClusterService`,
+`Recording`, `Replay` or `Image` is
 used from one goroutine at a time, as the Rust API's handles are: the client adds no lock to them.
 A program with several goroutines gives each its own `Publication` and
 `Subscription`. Two handles may be used from two goroutines at once, a client and its
@@ -267,8 +407,23 @@ publications and subscriptions among them. `Client.AddDestination` and
 may run beside that publication's `Offer` or `TryClaim` in another goroutine, but not
 beside its `Close` (`spec/c-abi.md`, "Threads"; ADR 0057).
 
-The table the trampoline reads subscriptions from holds 4,096 subscriptions and
-committed logs together: `AddSubscription` or `CommittedLog` above that returns an
+A `ClusterService` changes that for one client. Its `Poll` is a call on its client as
+well as on the service: the ABI's poll sends its commands with the client and holds it
+for the run of the handler. `Poll` is on every entry's path, so it takes no lock, the
+client's mutex among them. So from `client.ClusterService()` until the service's
+`Close`, that client is used by the goroutine that polls the service and by no other.
+A program whose other goroutines add or command gives them a `Client` of their own,
+as `spec/c-abi.md`, "Threads", says for a program in C. A mutex in `Poll` would not
+make the client safe to share. A handler that calls its client must reach the ABI,
+which refuses the call with `ErrPolling`; behind a mutex that its own poll held, the
+same call would stop the goroutine for ever, since a `sync.Mutex` is not taken twice
+(ADR 0124, Alternatives). The service's open and its close take the client's mutex,
+as a committed log's do. A `ClusterSession`'s connect is a call on the client and
+takes its mutex; nothing else of a session is.
+
+The table the trampoline reads subscriptions from holds 4,096 subscriptions, committed
+logs, cluster sessions and cluster services together: `AddSubscription`,
+`CommittedLog`, `ConnectCluster` or `ClusterService` above that returns an
 `*Error` with `ErrSubscriptionsFull`, and each `Close` frees a slot. The table is written under a lock when a
 subscription is added or closed, never on a message's path, and read with one atomic
 load per fragment. The package's own test, `cavalry_test.go`, which
@@ -381,6 +536,22 @@ which the publisher writes over once the subscription's position has moved past 
 Go has no view that can be detached, so a slice kept past the call reads whatever the
 log holds later; copy what must outlive the handler.
 
+A cluster session's poll and a cluster service's each have a C trampoline of their
+own in `shim.c`. It reads the reply's values or the entry's from the header, with one
+ABI call, `cavalry_cluster_reply_values` or `cavalry_cluster_entry_values`, and hands
+them to the exported Go function as integers, so the Go side makes no cgo call of its
+own for them. The Go function writes them into the one `ClusterReplyValues` or
+`ClusterEntryValues` the session or the service keeps, and the handler is handed that
+struct's address and, for a service, the service: nothing is allocated. A service's
+Go function returns the handler's action to the C trampoline, which passes it to the
+ABI with `cavalry_cluster_service_action`, unless it is `ActionContinue`, which the
+ABI does with no call. For a service the poll's `clientd` is the address of a small C
+struct on the stack of the shim's poll, which holds the table index, the service's
+handle and where an aborted entry is told; it is C memory and holds no Go pointer.
+The package's own test calls both exported functions as the C trampolines do, and
+`clients/generate-test.py` compiles `shim.c` against a stand-in for the ABI and for
+the Go side and checks each action.
+
 ### The view over a claimed slice, by construction
 
 `publication.Claim` is a `[]byte` over the bytes the ABI reserved, made with
@@ -423,7 +594,26 @@ fault. A committed log's `*HandlerError` has `CommittedLog` true and speaks of e
 and when `Fragments` is −1 it names the log's `Fault` and `Err`, to read before the
 next poll ("The committed log"). The value is kept as it was panicked, an `error`, a
 string or anything else, and stays the first when an `error` follows it in the same
-poll.
+poll. A cluster session's handler is held as a subscription's is: every reply the poll
+hands over reaches it, and the `*HandlerError`, whose `Cluster` is `"session"`, speaks
+of replies and names the session's `Fault` and `Err`.
+
+A cluster service's handler is the one whose failure stops its poll, because what it
+returns is read: it is the entry's action. When the handler panics, the client
+recovers the panic, keeps its value, and answers `ActionAbort` for the entry, so the
+ABI ends the poll there with the entry not taken. `Poll` then returns a
+`*HandlerError`, whose `Cluster` is `"service"`: `Fragments` is the count of entries
+the poll took before that entry, `Raised` is 1, and `Cause` is the panic's value. A
+handler that returns a value that is no action, such as 3, is treated the same way.
+The ABI refuses the value, the C trampoline keeps the ABI's error and aborts the
+entry, and `Cause` is that `*Error`, with `ErrClusterAction` and a message that names
+the value. The next poll hands the aborted entry over again, and returns the error
+again until the handler takes it: the service does not skip an entry, since every
+member's service must apply the same entries. A reply the failed handling sent is not
+sent twice. What the handler changed of its own state before it panicked is the
+handler's to guard, which is why it replies first and changes its state last ("The
+cluster service"). The runner checks it: a handler that replies and then panics is
+handed its entry twice at one position, and the session reads one reply.
 `runtime.Goexit` in a handler is not a panic and is not recovered; a program that
 calls it from a handler ends the goroutine that called `Poll` inside the ABI, which
 the ABI's page does not allow.
@@ -436,3 +626,7 @@ the ABI's page does not allow.
 - `conformance/go/`: the runner and its report.
 - `docs/decisions/0046-build-the-c-abi-and-the-clients-fourth.md`: the slice this
   client is the fourth feature of.
+- `docs/decisions/0124-give-each-client-a-session-object-and-a-service-object-whose-handlers-failure-aborts-its-entry.md`:
+  the shape of the cluster session and the cluster service in every client, why a
+  failed handler's entry is aborted, and why a service's poll takes no lock.
+- `docs/how-to/run-a-cluster.md`: how to start the members a session connects to.
