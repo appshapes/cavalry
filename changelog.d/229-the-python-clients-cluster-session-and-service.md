@@ -5,7 +5,8 @@
   `ClusterService`: `poll` hands a handler each committed entry with its values, the
   handler answers a session with `service.reply`, and what it returns, nothing,
   `cavalry.CONTINUE`, `cavalry.BREAK` or `cavalry.ABORT`, says what becomes of the
-  entry. A service's handler that raises has its entry aborted: the poll ends at it,
+  entry. A service's handler that raises, or returns anything else, `True` among
+  them, has its entry aborted: the poll ends at it,
   raises `HandlerError`, and the next poll hands the entry over again, so a service
   never passes an entry it did not apply. `just conformance` runs the cluster round
   through the Python client. The Node, Go, JVM and .NET clients bind the same

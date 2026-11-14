@@ -174,7 +174,10 @@ of the same entry sent is not sent twice: the second answers
 anything that is no action, has its entry aborted too, and `poll` raises `HandlerError`
 ("The exception"): an entry is taken only by a handler that finished with it, so
 `service.position()`, the position after the last entry taken, never passes an entry
-whose handler failed.
+whose handler failed. An action is an `int`. `True` is no action, though it equals 1,
+the value of `cavalry.ABORT`: a handler that returns `True` to say that it handled the
+entry would otherwise leave the entry at every poll, with nothing raised. `False` and
+every other value that is no `int` are no action either.
 
 The service's poll and its close are calls on the client the service was made on
 ("Threads"). `service.close()` is idempotent; close a service before its client
@@ -472,8 +475,9 @@ entry not taken. `poll` then raises `HandlerError`, whose `cluster` is `"service
 `fragments` is the count of entries the poll took before that entry, `raised` is 1,
 and `__cause__` is the handler's exception. A handler that returns a value that is no
 action is treated the same way. The cause is then a `CavalryError` with
-`CAVALRY_ERR_CLUSTER_ACTION` that names the value, or the `ctypes.ArgumentError` of a
-value that is no integer. The next poll hands the aborted entry over again, and raises
+`CAVALRY_ERR_CLUSTER_ACTION` that names the value: an `int` that the ABI refused, such
+as 3, or a value that is no `int`, such as `True`, which the client does not pass to
+the ABI. The next poll hands the aborted entry over again, and raises
 again until the handler takes it: the service does not skip an entry, since every
 member's service must apply the same entries. A reply the failed handling sent is not
 sent twice. What the handler changed of its own state before it raised is the

@@ -315,6 +315,23 @@ class Package(unittest.TestCase):
         self.assertTrue(error.__cause__.message.endswith("see docs/reference/c-abi.md#constants"))
         self.assertEqual(abi.calls, [3, cavalry.ABORT])
 
+        # A handler that returns True, as a call-back that says "handled" does: no
+        # action, though True equals 1, the value of ABORT, which ctypes would pass
+        # as that. The entry would be aborted at every poll and nothing raised. A
+        # value that is no int is not passed to the ABI: the entry is aborted once,
+        # and the poll raises with the ABI's code for a value that is no action.
+        for value, shown in ((True, "True"), (False, "False"), (2.0, "2.0"), ("continue", "'continue'")):
+            del abi.calls[:]
+            with self.assertRaises(cavalry.HandlerError) as raised:
+                service.poll(lambda body, entry, service_: value, 16)
+            error = raised.exception
+            self.assertEqual((error.fragments, error.raised, error.cluster), (0, 1, "service"), shown)
+            self.assertIsInstance(error.__cause__, cavalry.CavalryError)
+            self.assertEqual(error.__cause__.code, cavalry.CAVALRY_ERR_CLUSTER_ACTION)
+            self.assertIn(f"the entry handler returned {shown}, which is no action", error.__cause__.message)
+            self.assertEqual(abi.calls, [cavalry.ABORT], shown)
+        self.assertEqual(service.poll(taking, 16), 3)  # and the next poll takes the entries
+
         # An exception that is not an `Exception` aborts the entry too, and is raised as itself.
         del abi.calls[:]
 
