@@ -5,7 +5,10 @@
 # conformance/python/readme.py; then starts three cluster members on the loopback, each a
 # `cavalry run` in a member's role, and runs conformance/python/committed_log.py beside
 # one of them, member 1 unless it joined late (conformance/log-member.sh), the client's
-# committed log against a cluster (spec/c-abi.md, version 2; ADR 0070); and cleans up. `just conformance` runs this after conformance/c
+# committed log against a cluster (spec/c-abi.md, version 2; ADR 0070), and then
+# conformance/python/cluster.py, the cluster round: the client's service beside each
+# member and its session on the first driver (spec/c-abi.md, versions 4 and 5; ADR 0124);
+# and cleans up. `just conformance` runs this after conformance/c
 # (clients/README.md; ADR 0046, card 205). Nothing is installed: ctypes is in the standard
 # library.
 set -euo pipefail
@@ -57,7 +60,8 @@ python3 conformance/python/readme.py
 # docs/how-to/run-a-cluster.md starts them. A member's output goes to a file beside its
 # directories, printed if the cluster does not form or the round fails.
 #
-# The fifteen ports are counted out of 10000 to 19999, never bound to be chosen, as
+# The sixteen ports, fifteen for the members and one for the session's response channel,
+# are counted out of 10000 to 19999, never bound to be chosen, as
 # `loopback_ports` in crates/cavalry/tests/cli.rs counts its own: a port found by binding
 # to port 0 is one of those the kernel gives each driver's own send sockets, so another
 # member could be given it before its owner binds it. The shell's process id picks where
@@ -74,6 +78,7 @@ for id in 0 1 2; do
     CAVALRY_CLUSTER_MEMBERS="${CAVALRY_CLUSTER_MEMBERS:+$CAVALRY_CLUSTER_MEMBERS|}$member"
 done
 export CAVALRY_CLUSTER_MEMBERS
+response="cavalry:udp?endpoint=127.0.0.1:$(( 10000 + (start + 15) % 10000 ))"
 for id in 0 1 2; do
     CAVALRY_CLUSTER_MEMBER_ID=$id target/release/cavalry run --dir "$cluster/member-$id" \
         --log-dir "$cluster/member-$id-log" >"$cluster/member-$id.out" 2>&1 &
@@ -108,6 +113,16 @@ read -r member recording <<<"$chosen"
 echo "conformance/python: run committed_log.py beside member $member"
 python3 conformance/python/committed_log.py "$cluster/member-$member" "$member" "$recording" || {
     echo "conformance/python: committed_log.py failed beside member $member; the members said:" >&2
+    cat "$cluster"/member-*.out >&2 || true
+    exit 1
+}
+
+# The cluster round, after the committed log's: a service beside each member and a
+# session on the runner's first driver. The committed log round left the cluster as it
+# found it, one entry, the term's first.
+echo "conformance/python: run cluster.py, a service beside each member and a session on $CAVALRY_DIR"
+python3 conformance/python/cluster.py "$cluster" "$CAVALRY_CLUSTER_MEMBERS" "$response" || {
+    echo "conformance/python: cluster.py failed; the members said:" >&2
     cat "$cluster"/member-*.out >&2 || true
     exit 1
 }

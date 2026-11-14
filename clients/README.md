@@ -48,11 +48,12 @@ imports), Go (`go/`, by `generate_go.py`), the JVM (`jvm/`, by `generate_jvm.py`
 - `just lint` runs `clients/lint.py` over the generated per-message functions, the
   wrapper of each of nine of the ABI's sixteen (`crates/cavalry-ffi/README.md`: the
   claim, the reserved value, the commit and abort, the offer, the poll and the
-  header's values, and the committed log's poll and an entry's position; ADR 0070;
-  a cluster session's offer, its poll and a reply's values are bound and get their
-  wrappers with each client's session object, ADR 0122, and a cluster service's
-  poll, an entry's values, its reply and its action with each client's service
-  object, ADR 0123), and each
+  header's values, and the committed log's poll and an entry's position; ADR 0070),
+  in the Python client the wrappers of the seven others too (a cluster session's
+  offer, its poll and a reply's values, with the client's session object, and a
+  cluster service's poll, an entry's values, its reply and its action, with its
+  service object; ADR 0124), which the four other clients bind and do not wrap yet,
+  and each
   trampoline that calls the user's handler: no lock, no `await`, no raise, in
   the language's forms, in the function's own body or in any function of the package
   it calls. Generated code of the client in another language on the same path is read
@@ -66,6 +67,14 @@ imports), Go (`go/`, by `generate_go.py`), the JVM (`jvm/`, by `generate_jvm.py`
   runtime frees what it allocated, whether the view over a
   claimed slice is one object per publication or a new one per claim, and where an
   exception the user's handler raises goes.
+- A client with a session object and a service object runs the cluster round in its
+  runner (`conformance/README.md`, "The cluster round"). The two objects have one
+  shape in every client (ADR 0124): a session's handler is given a reply's payload
+  and its values; a service's handler is given a session message's payload, the
+  entry's values and the service, and what it returns is its action; and a service's
+  handler that fails has its entry aborted, so the poll ends at it, raises once the
+  ABI has returned, and the next poll hands the entry over again. The Python client
+  has both.
 
 ## Released together
 
@@ -80,7 +89,7 @@ built from the same checkout, or regenerate the package from the library's heade
 
 | Client | Package | Runner | Decided in |
 | --- | --- | --- | --- |
-| `python/` | `cavalry`, `ctypes` over the shared library | `conformance/python/` | ADR 0046 (card 205) |
+| `python/` | `cavalry`, `ctypes` over the shared library | `conformance/python/` | ADR 0046 (card 205); ADR 0124 (work item 229) |
 | `node/` | `@cavalry/client`, an N-API addon in C over the header, linked with the static library | `conformance/node/` | ADR 0046 (card 206) |
 | `go/` | `github.com/appshapes/cavalry/clients/go`, cgo over the header, linked with the static library | `conformance/go/` | ADR 0046 (card 207) |
 | `jvm/` | `com.appshapes.cavalry`, `java.lang.foreign` over the shared library, Java 25 and nothing else | `conformance/jvm/` | ADR 0046 (card 208) |
