@@ -4,13 +4,22 @@
 //! `cavalry_buffer_claim_abort`, `cavalry_publication_offer`,
 //! `cavalry_subscription_poll`, `cavalry_header_values`,
 //! `cavalry_committed_log_poll`, `cavalry_committed_log_entry_position`,
-//! `cavalry_cluster_session_offer`, `cavalry_cluster_session_poll` and
-//! `cavalry_cluster_reply_values`, counted with `stats_alloc`, allocations and
+//! `cavalry_cluster_session_offer`, `cavalry_cluster_session_poll`,
+//! `cavalry_cluster_reply_values`, `cavalry_cluster_service_poll`,
+//! `cavalry_cluster_entry_values`, `cavalry_cluster_service_reply` and
+//! `cavalry_cluster_service_action`, counted with `stats_alloc`, allocations and
 //! reallocations both, over a window after the image has joined, with none at all.
 //! The committed log's two have a window of their own, beside three cluster members
-//! in this process whose duty cycles run inside it (ADR 0070). The cluster session's
-//! three have a third, against a leader this thread plays (ADR 0122). Alone in its
-//! binary, so that no other test's threads are counted.
+//! in this process whose duty cycles run inside it (ADR 0070). The cluster service's
+//! four have a third, beside the leader of those members, with a session through the
+//! ABI whose every message the service answers (ADR 0123). The cluster session's
+//! three have a fourth as well, against a leader this thread plays (ADR 0122). Alone
+//! in its binary, so that no other test's threads are counted.
+//!
+//! No window's handles are closed until the last window has ended. A driver removes a
+//! closed publication's log once the publication linger, 5 s, has passed, and its
+//! conductor allocates as it does so, a path and a list: on the control plane, and in
+//! a thread of this process, so inside whichever window were open then.
 
 use std::alloc::System;
 use std::ffi::{CString, c_void};
@@ -84,7 +93,62 @@ unsafe extern "C" fn count_reply(
     }
 }
 
-/// The id and the term the played leader gives the session of the third window.
+static mut ANSWERED: usize = 0;
+
+/// The service's handler of the third window: it reads the entry's values, answers a
+/// session's message with the message, and says that it continues.
+unsafe extern "C" fn answer_entry(
+    clientd: *mut c_void,
+    buffer: *const u8,
+    length: usize,
+    header: *const cavalry_header_t,
+) {
+    // SAFETY: `clientd` is the service whose poll called this; the buffer and the
+    // header are valid for the call; the counter is this test's, on one thread.
+    unsafe {
+        let service = clientd.cast::<cavalry_cluster_service_t>();
+        let mut values = std::mem::zeroed::<cavalry_cluster_entry_values_t>();
+        assert_eq!(cavalry_cluster_entry_values(header, &mut values), 0);
+        if values.r#type != CAVALRY_CLUSTER_ENTRY_SESSION_MESSAGE || values.session_id < 0 {
+            return;
+        }
+        let reply = cavalry_cluster_service_reply(service, values.session_id, buffer, length);
+        if reply == CAVALRY_CLUSTER_REPLY_RETRY {
+            assert_eq!(
+                cavalry_cluster_service_action(service, CAVALRY_ACTION_ABORT),
+                0
+            );
+            return;
+        }
+        assert_eq!(reply, CAVALRY_CLUSTER_REPLY_SENT);
+        assert_eq!(
+            cavalry_cluster_service_action(service, CAVALRY_ACTION_CONTINUE),
+            0
+        );
+        ANSWERED += 1;
+    }
+}
+
+static mut ANSWERS: usize = 0;
+
+/// The session's handler of the third window: a reply of eight bytes, and its values.
+unsafe extern "C" fn count_answer(
+    _clientd: *mut c_void,
+    _buffer: *const u8,
+    length: usize,
+    header: *const cavalry_header_t,
+) {
+    // SAFETY: the header is valid for the call; the counter is this test's, on one
+    // thread.
+    unsafe {
+        let mut values = std::mem::zeroed::<cavalry_cluster_reply_values_t>();
+        assert_eq!(cavalry_cluster_reply_values(header, &mut values), 0);
+        assert_eq!(length, 8);
+        ANSWERS += 1;
+    }
+}
+
+/// The id and the term the played leader gives the session of the fourth window.
 const SESSION_ID: i64 = 11;
 const SESSION_TERM: i64 = 1;
 
@@ -149,7 +213,8 @@ use ports::free_ports;
 /// cluster has for a leader (ADR 0100, change 3). They start in the order 1, 2, 0,
 /// so that no member's place is its id, before the leader is put first or after. The
 /// follower in place 1 joined the leader's log on time, and its log is one recording.
-fn cluster(dir: &Path) -> Vec<(Driver, ConsensusModule)> {
+/// The members string comes back with them, for a session with the cluster.
+fn cluster(dir: &Path) -> (Vec<(Driver, ConsensusModule)>, String) {
     let ports = free_ports(15);
     let members_string = (0..3)
         .map(|member| {
@@ -216,7 +281,7 @@ fn cluster(dir: &Path) -> Vec<(Driver, ConsensusModule)> {
         })
         .expect("a follower that joined the log on time");
     members.swap(1, on_time);
-    members
+    (members, members_string)
 }
 
 fn work(members: &mut [(Driver, ConsensusModule)]) {
@@ -233,8 +298,11 @@ fn the_message_path_allocates_nothing() {
     let _ = std::fs::remove_dir_all(&dir);
     let _ = std::fs::remove_dir_all(&log_dir);
     let _ = std::fs::remove_dir_all(&cluster_dir);
-    // The cluster starts before either window, so that neither holds a start.
-    let mut members = cluster(&cluster_dir);
+    // The cluster starts before any window, so that none holds a start.
+    let (mut members, members_string) = cluster(&cluster_dir);
+    // The service of the third window runs beside the leader, `members[0]`.
+    let leader = format!("member-{}", members[0].1.member_id());
+    let leader_dir = CString::new(cluster_dir.join(leader).to_str().unwrap()).unwrap();
     // The service reads beside a follower, `members[1]`, in that member's directory.
     let follower = format!("member-{}", members[1].1.member_id());
     let member_dir = CString::new(cluster_dir.join(follower).to_str().unwrap()).unwrap();
@@ -242,7 +310,7 @@ fn the_message_path_allocates_nothing() {
     let dir_c = CString::new(dir.to_str().unwrap()).unwrap();
     let channel = c"cavalry:ipc";
     // SAFETY: the ABI's conventions, held by this test.
-    unsafe {
+    let (first, second) = unsafe {
         let mut context = ptr::null_mut();
         assert_eq!(cavalry_context_init_v(&mut context, CAVALRY_ABI_VERSION), 0);
         assert_eq!(cavalry_context_set_dir(context, dir_c.as_ptr()), 0);
@@ -304,10 +372,8 @@ fn the_message_path_allocates_nothing() {
         while cavalry_subscription_poll(subscription, Some(count), ptr::null_mut(), 64) > 0 {}
         let change = region.change();
         let delivered = SEEN - before;
-        assert_eq!(cavalry_publication_close(publication), 0);
-        assert_eq!(cavalry_subscription_close(subscription), 0);
-        assert_eq!(cavalry_close(client), 0);
-        assert_eq!(cavalry_context_close(context), 0);
+        // Closed after the last window, as the module's doc says.
+        let first = (context, client, subscription, publication);
         assert!(
             delivered > 10_000,
             "the window delivered {delivered} fragments"
@@ -370,16 +436,150 @@ fn the_message_path_allocates_nothing() {
         }
         let change = region.change();
         let read = ENTRIES - before;
-        assert_eq!(cavalry_committed_log_close(log, client), 0);
-        assert_eq!(cavalry_close(client), 0);
-        assert_eq!(cavalry_context_close(context), 0);
         assert_eq!(
             change.allocations + change.reallocations,
             0,
             "the committed log's path allocated across {read} entries, {change:?}; see \
              .claude/rules/data-plane.md"
         );
-    }
+        (first, (context, client, log))
+    };
+
+    // The cluster service's window (ADR 0123): a service through the ABI beside the
+    // leader, and a session through the ABI on the first driver. A message is offered
+    // on the session, the members commit it, the service's C handler reads the entry's
+    // values, answers the session and says that it continues, and the session's C
+    // handler is handed the reply, two thousand times. The members' duty cycles run
+    // inside the window, as they do in the committed log's.
+    let ports = free_ports(1);
+    let members_c = CString::new(members_string).unwrap();
+    let service_channel =
+        CString::new(format!("cavalry:udp?endpoint=127.0.0.1:{}", ports[0])).unwrap();
+    // The connect blocks until the leader has opened the session, which this thread's
+    // duty cycles bring about, so a thread of its own makes it and has ended before
+    // anything is counted.
+    let opening = {
+        let (dir_c, members_c, channel) =
+            (dir_c.clone(), members_c.clone(), service_channel.clone());
+        std::thread::spawn(move || {
+            // SAFETY: the ABI's conventions, held by this test.
+            unsafe {
+                let mut context = ptr::null_mut();
+                assert_eq!(cavalry_context_init_v(&mut context, CAVALRY_ABI_VERSION), 0);
+                assert_eq!(cavalry_context_set_dir(context, dir_c.as_ptr()), 0);
+                let mut client = ptr::null_mut();
+                assert_eq!(cavalry_init(&mut client, context), 0);
+                let mut session = ptr::null_mut();
+                assert_eq!(
+                    cavalry_connect_cluster(
+                        &mut session,
+                        client,
+                        members_c.as_ptr(),
+                        channel.as_ptr()
+                    ),
+                    0
+                );
+                (context as usize, client as usize, session as usize)
+            }
+        })
+    };
+    // SAFETY: the ABI's conventions, held by this test; the session's three handles are
+    // the opening thread's, which has ended before they are used.
+    let third = unsafe {
+        let mut service_context = ptr::null_mut();
+        assert_eq!(
+            cavalry_context_init_v(&mut service_context, CAVALRY_ABI_VERSION),
+            0
+        );
+        assert_eq!(
+            cavalry_context_set_dir(service_context, leader_dir.as_ptr()),
+            0
+        );
+        let mut service_client = ptr::null_mut();
+        assert_eq!(cavalry_init(&mut service_client, service_context), 0);
+        let mut service = ptr::null_mut();
+        assert_eq!(cavalry_cluster_service(&mut service, service_client), 0);
+        // The service's poll, with the service itself as the handler's `clientd`.
+        let serve = || {
+            assert!(
+                cavalry_cluster_service_poll(
+                    service,
+                    service_client,
+                    Some(answer_entry),
+                    service.cast(),
+                    16
+                ) >= 0
+            );
+        };
+        let deadline = Instant::now() + Duration::from_secs(60);
+        while !opening.is_finished() {
+            assert!(Instant::now() < deadline, "the session opened");
+            work(&mut members);
+            serve();
+        }
+        let (context, client, session) = opening.join().expect("the opening thread ended");
+        let (context, client, session) = (
+            context as *mut cavalry_context_t,
+            client as *mut cavalry_t,
+            session as *mut cavalry_cluster_session_t,
+        );
+        // One round: forty messages to the cluster, each entry answered by the
+        // service, and the forty replies through the session's C handler. A message
+        // alone takes the time of a commit across three members, which is the time of
+        // forty together.
+        let mut round = |first: u64| {
+            let deadline = Instant::now() + Duration::from_secs(60);
+            let before = ANSWERS;
+            let mut sent = 0;
+            while ANSWERS - before < 40 {
+                assert!(
+                    Instant::now() < deadline,
+                    "no forty replies from message {first}"
+                );
+                if sent < 40 {
+                    let message = (first + sent).to_le_bytes();
+                    let offered =
+                        cavalry_cluster_session_offer(session, message.as_ptr(), message.len());
+                    assert_ne!(offered, CAVALRY_PUBLICATION_ERROR);
+                    assert_ne!(offered, CAVALRY_PUBLICATION_CLOSED);
+                    if offered >= 0 {
+                        sent += 1;
+                    }
+                }
+                work(&mut members);
+                serve();
+                assert!(
+                    cavalry_cluster_session_poll(session, Some(count_answer), ptr::null_mut(), 16)
+                        >= 0
+                );
+            }
+        };
+        // Warm up: the service reads the log from its start, the images join and every
+        // first-time path is taken.
+        for batch in 0..5 {
+            round(batch * 40);
+        }
+        let (answered_before, answers_before) = (ANSWERED, ANSWERS);
+        let region = Region::new(GLOBAL);
+        for batch in 0..50u64 {
+            round(batch * 40);
+        }
+        let change = region.change();
+        let (answered, read) = (ANSWERED - answered_before, ANSWERS - answers_before);
+        assert!(cavalry_cluster_service_answers(service));
+        assert_eq!(cavalry_cluster_service_sessions(service), 1);
+        assert_eq!((answered, read), (2_000, 2_000));
+        assert_eq!(
+            change.allocations + change.reallocations,
+            0,
+            "the cluster service's path allocated across {answered} entries answered and \
+             {read} replies read, {change:?}; see .claude/rules/data-plane.md"
+        );
+        (
+            (service_context, service_client, service),
+            (context, client, session),
+        )
+    };
 
     // The cluster session's window (ADR 0122): a session through the ABI on the first
     // driver, against a leader this thread plays with a subscription on its ingress
@@ -559,6 +759,27 @@ fn the_message_path_allocates_nothing() {
             "the cluster session's path allocated across {read} replies and {stale} stale \
              ones, {change:?}; see .claude/rules/data-plane.md"
         );
+    }
+    // The last window has ended: what the first three kept open closes now.
+    // SAFETY: the ABI's conventions, held by this test: each handle is live and closed
+    // once, a service and a log before the client that made it.
+    unsafe {
+        let ((service_context, service_client, service), (context, client, session)) = third;
+        assert_eq!(cavalry_cluster_session_close(session), 0);
+        assert_eq!(cavalry_close(client), 0);
+        assert_eq!(cavalry_context_close(context), 0);
+        assert_eq!(cavalry_cluster_service_close(service, service_client), 0);
+        assert_eq!(cavalry_close(service_client), 0);
+        assert_eq!(cavalry_context_close(service_context), 0);
+        let (context, client, log) = second;
+        assert_eq!(cavalry_committed_log_close(log, client), 0);
+        assert_eq!(cavalry_close(client), 0);
+        assert_eq!(cavalry_context_close(context), 0);
+        let (context, client, subscription, publication) = first;
+        assert_eq!(cavalry_publication_close(publication), 0);
+        assert_eq!(cavalry_subscription_close(subscription), 0);
+        assert_eq!(cavalry_close(client), 0);
+        assert_eq!(cavalry_context_close(context), 0);
     }
     drop(egress);
     drop(ingress);

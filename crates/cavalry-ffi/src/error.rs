@@ -167,9 +167,10 @@ pub(crate) fn set_client(error: &ClientError) {
     set(code, format_args!("{error}"));
 }
 
-/// Sets the thread's error from a cluster session's error: the session's own four
-/// kinds on the cluster's codes, the client's kind as [`set_client`] sets it, and a
-/// fault's as [`set_fault`] does (`spec/c-abi.md`, "Error codes").
+/// Sets the thread's error from a cluster session's error or a cluster service's:
+/// the session's own four kinds and the service's one on the cluster's codes, the
+/// client's kind as [`set_client`] sets it, and a fault's as [`set_fault`] does
+/// (`spec/c-abi.md`, "Error codes").
 pub(crate) fn set_cluster(error: &ClusterError) {
     let code = match error {
         ClusterError::Client(error) => return set_client(error),
@@ -181,10 +182,7 @@ pub(crate) fn set_cluster(error: &ClusterError) {
         ClusterError::Refused { .. } => CAVALRY_ERR_CLUSTER_REFUSED,
         ClusterError::Version { .. } => CAVALRY_ERR_CLUSTER_VERSION,
         ClusterError::ConnectTimeout { .. } => CAVALRY_ERR_CLUSTER_CONNECT_TIMEOUT,
-        // A service's kind, which no function of this version returns: the service
-        // comes with the ABI's next version, and its code with it. Until then the
-        // client's code for a message it could not read, with the error's own words.
-        ClusterError::Entry { .. } => CAVALRY_ERR_PROTOCOL,
+        ClusterError::Entry { .. } => CAVALRY_ERR_CLUSTER_ENTRY,
     };
     set(code, format_args!("{error}"));
 }
@@ -395,6 +393,31 @@ mod tests {
         assert_eq!(
             String::from_utf8(message()).expect("UTF-8"),
             Fault::Closed.to_string()
+        );
+    }
+
+    /// A cluster service's error on the codes of `spec/c-abi.md`, "Error codes": its
+    /// own kind, an entry that is no entry, on 144 with the error's own message, which
+    /// names the position and ends with its anchor; a fault of its read of the log on
+    /// the fault's code.
+    #[test]
+    fn a_cluster_services_error_has_the_clusters_codes() {
+        let entry = ClusterError::Entry { position: 4_096 };
+        set_cluster(&entry);
+        assert_eq!(cavalry_errcode(), CAVALRY_ERR_CLUSTER_ENTRY);
+        let text = String::from_utf8(message()).expect("UTF-8");
+        assert_eq!(text, entry.to_string(), "the error's own words");
+        assert!(text.contains("position 4096"), "{text}");
+        assert!(
+            text.ends_with("; see docs/reference/cluster.md#the-service"),
+            "{text}"
+        );
+        let fault = Fault::ImagesFull { session_id: 7 };
+        set_cluster(&ClusterError::Log(fault));
+        assert_eq!(cavalry_errcode(), CAVALRY_ERR_FAULT_IMAGES_FULL);
+        assert_eq!(
+            String::from_utf8(message()).expect("UTF-8"),
+            fault.to_string()
         );
     }
 

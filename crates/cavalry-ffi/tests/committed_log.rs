@@ -227,10 +227,31 @@ unsafe extern "C" fn collect(
         let mut values = std::mem::zeroed::<cavalry_header_values_t>();
         assert_eq!(cavalry_header_values(header, &mut values), 0);
         // An entry's header carries a frame and a position, and no reply's values
-        // (`spec/c-abi.md`, "What a header carries").
+        // (`spec/c-abi.md`, "What a header carries"). Each refusal names the two
+        // readers that fit it, and none that refuses it.
+        let fits = |reader: &str| {
+            let message = errmsg();
+            assert!(
+                message.starts_with(reader)
+                    && message.contains("came from cavalry_committed_log_poll")
+                    && message.contains(
+                        "read it with cavalry_header_values, and the entry's position with \
+                         cavalry_committed_log_entry_position;"
+                    )
+                    && message.ends_with("; see docs/reference/c-abi.md#what-a-header-carries"),
+                "{message}"
+            );
+        };
         let mut reply = std::mem::zeroed::<cavalry_cluster_reply_values_t>();
         assert_eq!(cavalry_cluster_reply_values(header, &mut reply), -1);
         assert_eq!(cavalry_errcode(), CAVALRY_ERR_WRONG_HEADER);
+        fits("cavalry_cluster_reply_values refused (wrong-header)");
+        // Nor a service's entry's values: the committed log hands over the entry as
+        // its bytes, and its caller parses them.
+        let mut entry = std::mem::zeroed::<cavalry_cluster_entry_values_t>();
+        assert_eq!(cavalry_cluster_entry_values(header, &mut entry), -1);
+        assert_eq!(cavalry_errcode(), CAVALRY_ERR_WRONG_HEADER);
+        fits("cavalry_cluster_entry_values refused (wrong-header)");
         collected.entries.push(Entry {
             position: cavalry_committed_log_entry_position(header),
             body: std::slice::from_raw_parts(buffer, length).to_vec(),

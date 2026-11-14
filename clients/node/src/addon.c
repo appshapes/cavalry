@@ -844,6 +844,103 @@ static napi_value fn_cavalry_stop_replay(napi_env env, napi_callback_info info) 
   return make_int32(env, (int32_t) result);
 }
 
+static napi_value fn_cavalry_cluster_service(napi_env env, napi_callback_info info) {
+  size_t argc = 1; napi_value argv[1];
+  if (!read_args(env, info, 1, &argc, argv, "cavalry_cluster_service")) return NULL;
+  cavalry_cluster_service_t *service = NULL;
+  cavalry_t *client = (cavalry_t *) external_arg(env, argv[0], "client");
+  if (arg_failed) return NULL;
+  int result = cavalry_cluster_service(&service, client);
+  napi_value tuple; napi_create_array_with_length(env, 2, &tuple);
+  napi_set_element(env, tuple, 0, make_int32(env, (int32_t) result));
+  napi_set_element(env, tuple, 1, make_external(env, (void *) service));
+  return tuple;
+}
+
+static napi_value fn_cavalry_cluster_entry_values(napi_env env, napi_callback_info info) {
+  size_t argc = 2; napi_value argv[2];
+  if (!read_args(env, info, 2, &argc, argv, "cavalry_cluster_entry_values")) return NULL;
+  cavalry_header_t *header = (cavalry_header_t *) external_arg(env, argv[0], "header");
+  if (arg_failed) return NULL;
+  cavalry_cluster_entry_values_t *values = (cavalry_cluster_entry_values_t *) struct_arg(env, argv[1], sizeof(cavalry_cluster_entry_values_t), _Alignof(cavalry_cluster_entry_values_t), "values");
+  if (arg_failed) return NULL;
+  int result = cavalry_cluster_entry_values(header, values);
+  return make_int32(env, (int32_t) result);
+}
+
+static napi_value fn_cavalry_cluster_service_reply(napi_env env, napi_callback_info info) {
+  size_t argc = 3; napi_value argv[3];
+  if (!read_args(env, info, 3, &argc, argv, "cavalry_cluster_service_reply")) return NULL;
+  cavalry_cluster_service_t *service = (cavalry_cluster_service_t *) external_arg(env, argv[0], "service");
+  if (arg_failed) return NULL;
+  int64_t session_id = (int64_t) int64_arg(env, argv[1], "session_id");
+  if (arg_failed) return NULL;
+  size_t length = 0; const uint8_t *buffer = (const uint8_t *) bytes_arg(env, argv[2], &length, "buffer");
+  if (arg_failed) return NULL;
+  int result = cavalry_cluster_service_reply(service, session_id, buffer, length);
+  return make_int32(env, (int32_t) result);
+}
+
+static napi_value fn_cavalry_cluster_service_action(napi_env env, napi_callback_info info) {
+  size_t argc = 2; napi_value argv[2];
+  if (!read_args(env, info, 2, &argc, argv, "cavalry_cluster_service_action")) return NULL;
+  cavalry_cluster_service_t *service = (cavalry_cluster_service_t *) external_arg(env, argv[0], "service");
+  if (arg_failed) return NULL;
+  int32_t action = (int32_t) int32_arg(env, argv[1], "action");
+  if (arg_failed) return NULL;
+  int result = cavalry_cluster_service_action(service, action);
+  return make_int32(env, (int32_t) result);
+}
+
+static napi_value fn_cavalry_cluster_service_fault(napi_env env, napi_callback_info info) {
+  size_t argc = 2; napi_value argv[2];
+  if (!read_args(env, info, 2, &argc, argv, "cavalry_cluster_service_fault")) return NULL;
+  cavalry_cluster_service_t *service = (cavalry_cluster_service_t *) external_arg(env, argv[0], "service");
+  if (arg_failed) return NULL;
+  cavalry_fault_t *fault = (cavalry_fault_t *) struct_arg(env, argv[1], sizeof(cavalry_fault_t), _Alignof(cavalry_fault_t), "fault");
+  if (arg_failed) return NULL;
+  int result = cavalry_cluster_service_fault(service, fault);
+  return make_int32(env, (int32_t) result);
+}
+
+static napi_value fn_cavalry_cluster_service_position(napi_env env, napi_callback_info info) {
+  size_t argc = 1; napi_value argv[1];
+  if (!read_args(env, info, 1, &argc, argv, "cavalry_cluster_service_position")) return NULL;
+  cavalry_cluster_service_t *service = (cavalry_cluster_service_t *) external_arg(env, argv[0], "service");
+  if (arg_failed) return NULL;
+  int64_t result = cavalry_cluster_service_position(service);
+  return make_int64(env, result);
+}
+
+static napi_value fn_cavalry_cluster_service_answers(napi_env env, napi_callback_info info) {
+  size_t argc = 1; napi_value argv[1];
+  if (!read_args(env, info, 1, &argc, argv, "cavalry_cluster_service_answers")) return NULL;
+  cavalry_cluster_service_t *service = (cavalry_cluster_service_t *) external_arg(env, argv[0], "service");
+  if (arg_failed) return NULL;
+  bool result = cavalry_cluster_service_answers(service);
+  return make_bool(env, result);
+}
+
+static napi_value fn_cavalry_cluster_service_sessions(napi_env env, napi_callback_info info) {
+  size_t argc = 1; napi_value argv[1];
+  if (!read_args(env, info, 1, &argc, argv, "cavalry_cluster_service_sessions")) return NULL;
+  cavalry_cluster_service_t *service = (cavalry_cluster_service_t *) external_arg(env, argv[0], "service");
+  if (arg_failed) return NULL;
+  int result = cavalry_cluster_service_sessions(service);
+  return make_int32(env, (int32_t) result);
+}
+
+static napi_value fn_cavalry_cluster_service_close(napi_env env, napi_callback_info info) {
+  size_t argc = 2; napi_value argv[2];
+  if (!read_args(env, info, 2, &argc, argv, "cavalry_cluster_service_close")) return NULL;
+  cavalry_cluster_service_t *service = (cavalry_cluster_service_t *) external_arg(env, argv[0], "service");
+  if (arg_failed) return NULL;
+  cavalry_t *client = (cavalry_t *) external_arg(env, argv[1], "client");
+  if (arg_failed) return NULL;
+  int result = cavalry_cluster_service_close(service, client);
+  return make_int32(env, (int32_t) result);
+}
+
 static napi_value fn_cavalry_connect_cluster(napi_env env, napi_callback_info info) {
   size_t argc = 3; napi_value argv[3];
   if (!read_args(env, info, 3, &argc, argv, "cavalry_connect_cluster")) return NULL;
@@ -1482,6 +1579,15 @@ static napi_value init(napi_env env, napi_value exports) {
     { "cavalry_purge_recording", NULL, fn_cavalry_purge_recording, NULL, NULL, NULL, napi_default, NULL },
     { "cavalry_start_replay", NULL, fn_cavalry_start_replay, NULL, NULL, NULL, napi_default, NULL },
     { "cavalry_stop_replay", NULL, fn_cavalry_stop_replay, NULL, NULL, NULL, napi_default, NULL },
+    { "cavalry_cluster_service", NULL, fn_cavalry_cluster_service, NULL, NULL, NULL, napi_default, NULL },
+    { "cavalry_cluster_entry_values", NULL, fn_cavalry_cluster_entry_values, NULL, NULL, NULL, napi_default, NULL },
+    { "cavalry_cluster_service_reply", NULL, fn_cavalry_cluster_service_reply, NULL, NULL, NULL, napi_default, NULL },
+    { "cavalry_cluster_service_action", NULL, fn_cavalry_cluster_service_action, NULL, NULL, NULL, napi_default, NULL },
+    { "cavalry_cluster_service_fault", NULL, fn_cavalry_cluster_service_fault, NULL, NULL, NULL, napi_default, NULL },
+    { "cavalry_cluster_service_position", NULL, fn_cavalry_cluster_service_position, NULL, NULL, NULL, napi_default, NULL },
+    { "cavalry_cluster_service_answers", NULL, fn_cavalry_cluster_service_answers, NULL, NULL, NULL, napi_default, NULL },
+    { "cavalry_cluster_service_sessions", NULL, fn_cavalry_cluster_service_sessions, NULL, NULL, NULL, napi_default, NULL },
+    { "cavalry_cluster_service_close", NULL, fn_cavalry_cluster_service_close, NULL, NULL, NULL, napi_default, NULL },
     { "cavalry_connect_cluster", NULL, fn_cavalry_connect_cluster, NULL, NULL, NULL, napi_default, NULL },
     { "cavalry_cluster_session_offer", NULL, fn_cavalry_cluster_session_offer, NULL, NULL, NULL, napi_default, NULL },
     { "cavalry_cluster_reply_values", NULL, fn_cavalry_cluster_reply_values, NULL, NULL, NULL, napi_default, NULL },

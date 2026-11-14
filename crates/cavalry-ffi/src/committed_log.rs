@@ -8,7 +8,7 @@ use std::ptr;
 
 use cavalry_client::CommittedLog;
 
-use crate::client::{cavalry_mut, cavalry_t};
+use crate::client::{self, cavalry_mut, cavalry_t};
 use crate::codes::*;
 use crate::error::{self, DOC};
 use crate::handle;
@@ -104,8 +104,12 @@ pub unsafe extern "C" fn cavalry_committed_log(
         error::null("cavalry_committed_log", "client");
         return -1;
     }
-    // SAFETY: `client` is non-null, checked above, and a live handle used from one
-    // thread at a time ("Threads").
+    // SAFETY: `client` is non-null, checked above, and a live handle.
+    if unsafe { client::refused("cavalry_committed_log", client) } {
+        return -1;
+    }
+    // SAFETY: `client` is non-null, checked above, a live handle used from one thread
+    // at a time ("Threads"), and held by no poll, checked above.
     let client = unsafe { cavalry_mut(client) };
     match client.committed_log(position) {
         Ok(Some(opened)) => {
@@ -201,9 +205,10 @@ pub unsafe extern "C" fn cavalry_committed_log_poll(
 }
 
 /// The position in the log at which the entry begins whose header
-/// `cavalry_committed_log_poll` handed its handler; −1 with `CAVALRY_ERR_NO_POSITION`
-/// for a header from `cavalry_subscription_poll` or from
-/// `cavalry_cluster_session_poll`, which carries none.
+/// `cavalry_committed_log_poll` handed its handler, or `cavalry_cluster_service_poll`,
+/// whose entries carry their positions too; −1 with `CAVALRY_ERR_NO_POSITION` for a
+/// header from `cavalry_subscription_poll` or from `cavalry_cluster_session_poll`,
+/// which carries none.
 ///
 /// # Safety
 ///
@@ -219,6 +224,7 @@ pub unsafe extern "C" fn cavalry_committed_log_entry_position(
     // SAFETY: the handler's header, valid for the call.
     match unsafe { (*header).carries } {
         Carries::Entry(_, position) => position,
+        Carries::Committed(values) => values.position,
         Carries::Frame(_) => {
             error::set(
                 CAVALRY_ERR_NO_POSITION,
@@ -531,7 +537,8 @@ pub unsafe extern "C" fn cavalry_committed_log_constants(
 /// alone, and returns 0: the driver ends the replay by itself once the replay connect
 /// timeout has passed with no subscriber, which is how a log is closed after its
 /// client's `cavalry_close`. The handle is freed whatever the function returns, with
-/// one exception: a call from inside the log's own handler is refused with
+/// one exception: a call from inside the log's own handler, or from inside the
+/// handler of a cluster service whose poll holds `client`, is refused with
 /// `CAVALRY_ERR_POLLING` and frees nothing.
 ///
 /// # Safety
@@ -552,6 +559,11 @@ pub unsafe extern "C" fn cavalry_committed_log_close(
         polling("cavalry_committed_log_close");
         return -1;
     }
+    // SAFETY: when it is not null, `client` is a live handle, by the caller's
+    // convention. Checked before anything is freed.
+    if !client.is_null() && unsafe { client::refused("cavalry_committed_log_close", client) } {
+        return -1;
+    }
     // SAFETY: a live handle freed once, by the caller's convention; the log is moved
     // out, so its own close below consumes it.
     let closed = unsafe { handle::take_out(log) };
@@ -561,8 +573,8 @@ pub unsafe extern "C" fn cavalry_committed_log_close(
         drop(closed);
         return 0;
     }
-    // SAFETY: `client` is non-null, checked above, and a live handle used from one
-    // thread at a time ("Threads").
+    // SAFETY: `client` is non-null, checked above, a live handle used from one thread
+    // at a time ("Threads"), and held by no poll, checked above.
     let client = unsafe { cavalry_mut(client) };
     match closed.log.close(client) {
         Ok(()) => 0,

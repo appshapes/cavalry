@@ -1,14 +1,18 @@
 //! The client: the attachment to one driver and its conductor thread, made from a
 //! context, and the adds and commands it answers (`spec/c-abi.md`, "Functions",
-//! client, adds and commands).
+//! client, adds and commands). A cluster service's poll holds the client for its run,
+//! as the Rust `ClusterService::poll` borrows it: every function here reads the
+//! handle's state word first and refuses a call from inside that poll's handler
+//! ("Calls during a claim or a poll"; ADR 0123).
 
 use std::ffi::{CString, c_char, c_int};
+use std::ptr;
 
 use cavalry_client::{Cavalry, Closed};
 
 use crate::codes::*;
 use crate::context::cavalry_context_t;
-use crate::error;
+use crate::error::{self, DOC};
 use crate::handle;
 use crate::publication::{cavalry_publication_t, publication_handle};
 use crate::recording::{cavalry_recording_t, recording_handle};
@@ -16,10 +20,74 @@ use crate::replay::{cavalry_replay_t, replay_handle};
 use crate::strings;
 use crate::subscription::{cavalry_subscription_t, subscription_handle};
 
+/// Whether a cluster service's poll holds the client: the state word every function
+/// that takes the client reads first.
+// not a state machine: the word records whether a caller's poll of a cluster service is running with this client, a borrow the page replaces by convention, and no counter counts a caller's polls
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum State {
+    Idle,
+    Polling,
+}
+
 /// A client; made by `cavalry_init`, freed by `cavalry_close`.
 pub struct cavalry_t {
+    state: State,
+    /// Copied out of the client when the handle is made, so that `cavalry_client_id`
+    /// answers from inside the handler of a cluster service's poll without reaching
+    /// the client that poll borrows.
+    client_id: i64,
     client: Cavalry,
     dir_c: CString,
+}
+
+/// Whether a cluster service's poll holds the client, read through the handle's
+/// pointer without a reference to the wrapped client.
+///
+/// # Safety
+///
+/// `client` is a live handle.
+pub(crate) unsafe fn held(client: *const cavalry_t) -> bool {
+    // SAFETY: a live handle; the read touches the state field alone, which a running
+    // poll does not borrow.
+    unsafe { ptr::addr_of!((*client).state).read() == State::Polling }
+}
+
+/// Marks the client held by a cluster service's poll, or free again when it returns.
+///
+/// # Safety
+///
+/// `client` is a live handle, and the caller is the one poll that holds it.
+pub(crate) unsafe fn hold(client: *mut cavalry_t, holds: bool) {
+    let state = if holds { State::Polling } else { State::Idle };
+    // SAFETY: a live handle; the write touches the state field alone.
+    unsafe { ptr::addr_of_mut!((*client).state).write(state) };
+}
+
+/// The error of a function that was handed a client a cluster service's poll holds.
+pub(crate) fn polling(function: &str) {
+    error::set(
+        CAVALRY_ERR_POLLING,
+        format_args!(
+            "{function} refused (polling): the call came from inside the fragment handler \
+             of a cluster service whose poll holds this client; make it after the poll \
+             returns; see {DOC}#calls-during-a-claim-or-a-poll"
+        ),
+    );
+}
+
+/// Whether `function` is refused because a cluster service's poll holds `client`,
+/// with the error set when it is.
+///
+/// # Safety
+///
+/// `client` is a live handle.
+pub(crate) unsafe fn refused(function: &str, client: *const cavalry_t) -> bool {
+    // SAFETY: the caller's convention above.
+    if unsafe { held(client) } {
+        polling(function);
+        return true;
+    }
+    false
 }
 
 /// Attaches to the driver at the context's directory and starts the client conductor,
@@ -51,6 +119,8 @@ pub unsafe extern "C" fn cavalry_init(
             // SAFETY: `client` is non-null and writable by the caller's convention.
             unsafe {
                 *client = handle::give(cavalry_t {
+                    state: State::Idle,
+                    client_id: connected.client_id(),
                     client: connected,
                     dir_c,
                 })
@@ -65,7 +135,10 @@ pub unsafe extern "C" fn cavalry_init(
 }
 
 /// Closes the client and frees the handle: its publications and subscriptions answer
-/// `CLOSED` from then and still need their own close.
+/// `CLOSED` from then and still need their own close. The handle is freed whatever the
+/// function returns, with one exception: a call from inside the handler of a cluster
+/// service whose poll holds the client is refused with `CAVALRY_ERR_POLLING` and frees
+/// nothing.
 ///
 /// # Safety
 ///
@@ -74,6 +147,10 @@ pub unsafe extern "C" fn cavalry_init(
 pub unsafe extern "C" fn cavalry_close(client: *mut cavalry_t) -> c_int {
     if client.is_null() {
         error::null("cavalry_close", "client");
+        return -1;
+    }
+    // SAFETY: a live handle, by the caller's convention.
+    if unsafe { refused("cavalry_close", client) } {
         return -1;
     }
     // SAFETY: a live handle freed once, by the caller's convention ("Lifetimes").
@@ -99,6 +176,10 @@ pub unsafe extern "C" fn cavalry_is_closed(client: *const cavalry_t) -> bool {
         return false;
     }
     // SAFETY: a live handle, by the caller's convention.
+    if unsafe { refused("cavalry_is_closed", client) } {
+        return false;
+    }
+    // SAFETY: a live handle that no poll holds, by the check above.
     unsafe { (*client).client.is_closed() }
 }
 
@@ -114,6 +195,10 @@ pub unsafe extern "C" fn cavalry_closed(client: *const cavalry_t) -> i32 {
         return -1;
     }
     // SAFETY: a live handle, by the caller's convention.
+    if unsafe { refused("cavalry_closed", client) } {
+        return -1;
+    }
+    // SAFETY: a live handle that no poll holds, by the check above.
     match unsafe { (*client).client.closed() } {
         None => 0,
         Some(why) => closed_code(why),
@@ -132,7 +217,9 @@ pub(crate) const fn closed_code(why: Closed) -> i32 {
     }
 }
 
-/// The client's id, the one it took from the command ring when it attached.
+/// The client's id, the one it took from the command ring when it attached. It
+/// answers from the handle's copy, so also from inside the handler of a cluster
+/// service whose poll holds the client.
 ///
 /// # Safety
 ///
@@ -143,11 +230,14 @@ pub unsafe extern "C" fn cavalry_client_id(client: *const cavalry_t) -> i64 {
         error::null("cavalry_client_id", "client");
         return -1;
     }
-    // SAFETY: a live handle, by the caller's convention.
-    unsafe { (*client).client.client_id() }
+    // SAFETY: a live handle, by the caller's convention; the read touches the copied
+    // id alone, which a running poll does not borrow.
+    unsafe { ptr::addr_of!((*client).client_id).read() }
 }
 
-/// The driver directory the client attached to, valid for the client's life.
+/// The driver directory the client attached to, valid for the client's life. It
+/// answers from the handle's copy, so also from inside the handler of a cluster
+/// service whose poll holds the client.
 ///
 /// # Safety
 ///
@@ -158,20 +248,24 @@ pub unsafe extern "C" fn cavalry_dir(client: *const cavalry_t) -> *const c_char 
         error::null("cavalry_dir", "client");
         return std::ptr::null();
     }
-    // SAFETY: a live handle, by the caller's convention.
-    unsafe { (*client).dir_c.as_ptr() }
+    // SAFETY: a live handle, by the caller's convention; the reference is to the
+    // copied directory alone, which a running poll does not borrow and nothing writes.
+    unsafe { (*ptr::addr_of!((*client).dir_c)).as_ptr() }
 }
 
 /// The client a handle wraps, for a function of another handle that sends commands
-/// through it: a committed log's open and close.
+/// through it: a committed log's open and close, a cluster session's connect, and a
+/// cluster service's poll and close.
 ///
 /// # Safety
 ///
-/// `client` is a live client handle not in use by another call ("Threads"), so the
-/// exclusive reference is the only one for the call it is made for.
+/// `client` is a live client handle not in use by another call ("Threads") and not
+/// held by a cluster service's poll, which the caller has checked with [`refused`],
+/// so the exclusive reference is the only one for the call it is made for.
 pub(crate) unsafe fn cavalry_mut<'a>(client: *mut cavalry_t) -> &'a mut Cavalry {
-    // SAFETY: the caller's convention above.
-    unsafe { &mut (*client).client }
+    // SAFETY: the caller's convention above. The reference is to the client field
+    // alone, so the state word beside it stays readable through the handle's pointer.
+    unsafe { &mut *ptr::addr_of_mut!((*client).client) }
 }
 
 /// Reads the three arguments every add takes, or sets the error and returns `None`.
@@ -198,12 +292,16 @@ unsafe fn add_arguments<'a, T>(
         error::null(function, "channel");
         return None;
     }
+    // SAFETY: `client` is non-null, checked above, and a live handle.
+    if unsafe { refused(function, client) } {
+        return None;
+    }
     // SAFETY: `channel` is NUL-terminated by the caller's convention.
     let channel = unsafe { strings::channel(function, channel) }?;
-    // SAFETY: `client` is non-null, checked above, and a live handle used from one
-    // thread at a time ("Threads"), so the exclusive reference is the only one for
-    // this call.
-    let client = unsafe { &mut (*client).client };
+    // SAFETY: `client` is non-null, checked above, a live handle used from one thread
+    // at a time ("Threads"), and held by no poll, checked above, so the exclusive
+    // reference is the only one for this call.
+    let client = unsafe { cavalry_mut(client) };
     Some((client, channel))
 }
 
@@ -353,8 +451,13 @@ unsafe fn command(
         error::null(function, "client");
         return -1;
     }
-    // SAFETY: a live handle used from one thread at a time ("Threads").
-    let client = unsafe { &mut (*client).client };
+    // SAFETY: a live handle, by the caller's convention.
+    if unsafe { refused(function, client) } {
+        return -1;
+    }
+    // SAFETY: a live handle used from one thread at a time ("Threads") and held by no
+    // poll, checked above.
+    let client = unsafe { cavalry_mut(client) };
     match run(client) {
         Ok(()) => 0,
         Err(error) => {

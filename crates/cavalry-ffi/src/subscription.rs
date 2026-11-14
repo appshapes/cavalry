@@ -9,6 +9,7 @@ use std::ptr;
 use cavalry_client::{Image, ReplyHeader, Subscription};
 use cavalry_proto::frame::DataFrameHeader;
 
+use crate::cluster_service::cavalry_cluster_entry_values_t;
 use crate::codes::*;
 use crate::error::{self, DOC};
 use crate::handle;
@@ -67,14 +68,15 @@ pub struct cavalry_image_t {
 }
 
 /// What a poll hands the fragment handler beside the body, valid for the call: a
-/// frame's header, or from a cluster session's poll a reply's values in its place
-/// (`spec/c-abi.md`, "What a header carries").
+/// frame's header, or from a cluster session's poll a reply's values in its place, or
+/// from a cluster service's an entry's (`spec/c-abi.md`, "What a header carries").
 pub struct cavalry_header_t {
     pub(crate) carries: Carries,
 }
 
-/// What a header carries, by the poll that made it. Three functions read a header,
-/// and each refuses the kinds that do not carry what it reads (ADR 0070, ADR 0122).
+/// What a header carries, by the poll that made it. Four functions read a header,
+/// and each refuses the kinds that do not carry what it reads (ADR 0070, ADR 0122,
+/// ADR 0123).
 #[derive(Clone, Copy)]
 pub(crate) enum Carries {
     /// A subscription's poll: the frame's header. It knows no position
@@ -86,6 +88,10 @@ pub(crate) enum Carries {
     /// A cluster session's poll: the reply's leadership term id and the cluster's
     /// time. The Rust poll hands its handler no frame header, so this carries none.
     Reply(ReplyHeader),
+    /// A cluster service's poll: the committed entry's values, its position among
+    /// them. The Rust poll hands its handler the entry as what it is and no frame
+    /// header, so this carries none.
+    Committed(cavalry_cluster_entry_values_t),
 }
 
 /// The data frame header's fields, in the order and the types of `spec/frame.md`.
@@ -118,19 +124,24 @@ pub struct cavalry_header_values_t {
     pub frame: cavalry_header_values_frame_t,
 }
 
-/// What the subscription's last poll stopped on, or the committed log's; 0 when it
-/// returned a count. Also the fault that ended a committed log, as
-/// `cavalry_committed_log_faulted` writes it.
+/// What the subscription's last poll stopped on, or the committed log's, the cluster
+/// session's or the cluster service's; 0 when it returned a count. Also the fault
+/// that ended a committed log, as `cavalry_committed_log_faulted` writes it.
 #[repr(C)]
 #[derive(Clone, Copy)]
 pub struct cavalry_fault_t {
-    /// `CAVALRY_ERR_FAULT_IMAGE`, `_IMAGES_FULL`, `_CLOSED`, or 0.
+    /// `CAVALRY_ERR_FAULT_IMAGE`, `_IMAGES_FULL`, `_CLOSED`, or 0. From a cluster
+    /// service's poll it is whichever code `cavalry_errcode` gave after that poll:
+    /// one of those three, `CAVALRY_ERR_CLUSTER_ENTRY`, or the client's or the
+    /// driver's.
     pub code: i32,
     /// The image's session id for 120 and 121, else 0.
     pub session_id: i32,
     /// The reader's position when the check failed, for 120, else
     /// `CAVALRY_NULL_POSITION`. A 120 with `CAVALRY_NULL_POSITION` is an image that
     /// was gone before the client read its announcement: it had no reader (ADR 0078).
+    /// For `CAVALRY_ERR_CLUSTER_ENTRY`, the position at which the entry that is no
+    /// entry begins.
     pub position: i64,
 }
 
@@ -545,8 +556,9 @@ pub unsafe extern "C" fn cavalry_image_is_end_of_stream(image: *const cavalry_im
 /// Fills `values` with the header's fields: the frame header of a fragment a
 /// subscription's poll handed its handler, or of an entry a committed log's did. −1
 /// with `CAVALRY_ERR_WRONG_HEADER` for a header from a cluster session's poll, which
-/// carries a reply's values and no frame's fields; `cavalry_cluster_reply_values`
-/// reads that one.
+/// carries a reply's values and no frame's fields, and for one from a cluster
+/// service's poll, which carries an entry's values and none; `cavalry_cluster_reply_values`
+/// and `cavalry_cluster_entry_values` read those.
 ///
 /// # Safety
 ///
@@ -575,6 +587,18 @@ pub unsafe extern "C" fn cavalry_header_values(
                     "cavalry_header_values refused (wrong-header): the header came from \
                      cavalry_cluster_session_poll, which hands over a reply's values and no \
                      frame's fields; read it with cavalry_cluster_reply_values; see \
+                     {DOC}#what-a-header-carries"
+                ),
+            );
+            return -1;
+        }
+        Carries::Committed(_) => {
+            error::set(
+                CAVALRY_ERR_WRONG_HEADER,
+                format_args!(
+                    "cavalry_header_values refused (wrong-header): the header came from \
+                     cavalry_cluster_service_poll, which hands over an entry's values and no \
+                     frame's fields; read it with cavalry_cluster_entry_values; see \
                      {DOC}#what-a-header-carries"
                 ),
             );
