@@ -131,10 +131,14 @@ The client API implementation, re-exported by the `cavalry` crate. Data plane.
   returns a `ClusterSession` once the leader has opened the session, or a
   `ClusterError` that says what to do: the leader's refusal with its reason, a
   cluster of another protocol version, a members string that fails a check, or no
-  answer in 20 s. `ClusterSession::offer(message)` sends the leader a message of one
+  answer in 20 s. The connect takes no session message from the response channel: a
+  reply that a service sent the session before the leader's answer arrived stays
+  there, and the session's polls hand it over (ADR 0118).
+  `ClusterSession::offer(message)` sends the leader a message of one
   frame, 1,344 bytes at most on the default MTU, with back pressure returned as
   `Offer`. `ClusterSession::poll(handler, fragment_limit)` hands over the cluster's
-  replies, each with the cluster's time, and is the session's duty cycle: it sends a
+  replies, each with the cluster's time, in the order one service sent them, and
+  is the session's duty cycle: it sends a
   keepalive when 500 ms have passed since the session last sent anything, turns the
   session to a new leader when the cluster elects one, and closes it when the cluster
   says so, after which `closed()` gives the reason. A session whose leader is lost,
@@ -147,6 +151,38 @@ The client API implementation, re-exported by the `cavalry` crate. Data plane.
   the next `poll` counts the message as sent, for the keepalive, and a poll reads the
   clock once. A message `offer` accepted is on its way, not committed: a program that
   must know asks its service to reply (ADR 0117).
+- Runs a cluster's service: `Cavalry::cluster_service()` returns a `ClusterService`
+  beside the cluster member on this client's driver, and
+  `ClusterService::poll(client, handler, fragment_limit)` reads the member's
+  committed log from its start and hands over each entry as an `Entry`, a session's
+  message, a session's open or close, or a term's first entry, with its position, its
+  term and the cluster's time, which is the one clock a service reads. The handler
+  answers a session with `Replies::reply(session_id, payload)`, one frame, 1,344
+  bytes at most: any session that is open at the entry, which a session is from its
+  own open event to its own close event, both included. Every member's service runs the same handler on the same entries
+  and one of them sends: the service beside the member that led the entry's term,
+  which the log names, and only while that member's counters say it leads the term
+  still. A member that holds an election, follows another or leads a later term
+  has a service that sends nothing for the earlier term's entries, so no reply of
+  a term comes minutes after the next leader's service has answered; the replies
+  to the entries a leader's service had not read at the change are lost, and a
+  client sends again. A session's replies are in order from one service, and there
+  is no order between the services of two terms' leaders (ADR 0118). The others
+  are answered `Reply::NotAnswering`, and so is a
+  service for the entries its member held before the service first read its log, so
+  that a service that starts again answers no client twice. A reply the client's
+  channel does not take is `Reply::Retry`: the handler returns `Action::Abort` and
+  is handed the entry again, so it replies before it changes its state. An entry
+  handed over again makes its replies again, in the same order, and the service
+  offers each to its session once: what an earlier handling sent or dropped it
+  does not offer again, so no client reads a reply twice. A reply over 1,344 bytes
+  is `Reply::TooLong` at every handling and takes no place among those. A service
+  waits so for one client no longer than 500 ms, the keepalive interval. After that
+  the reply is `Reply::Dropped`, counted in `cluster.replies_dropped`, and each
+  reply to that client is dropped at once until its channel takes one. Nothing in
+  `poll` allocates for an entry or a reply, and its commands to the driver are at a
+  session's opening, at a change of the term's leader and at a recording's end
+  (ADR 0118).
 - Holds a recording the driver arms: `Cavalry::arm_recording(channel, stream_id)`, on a
   `cavalry:udp` stream with a subscription and no publication or image yet, returns
   an `ArmedRecording`, and `ArmedRecording::poll()` returns the `Recording` once the

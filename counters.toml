@@ -1568,6 +1568,19 @@ scope = "client"
 doc = "Session messages, keepalives and session closes one cluster member read from its ingress stream and did not act on: the member does not lead, the message names a term that is not the leader's, or its session is not open. The client learns of a new leader by the new leader event and sends again (spec/cluster.md, Sessions). key: member id (i32), little-endian; label text: the member id in decimal."
 doctor = "A client sent to a member that was not its leader, or for a term or a session that has ended. Some after each election are expected: a client goes on sending to the old leader until the new leader event reaches it. If it keeps rising on one member, a client there holds a session the cluster has closed, or sends to a follower: the client's own error says which."
 
+# A cluster member's service (spec/cluster.md, "The service" and "Counters"; ADR 0052,
+# feature 5; ADR 0118): what the service beside a member counts of its replies. The
+# service adds the counter, as a client of the member's driver, when it first opens the
+# member's log, keyed by the member id as the member's own counters are.
+
+[[counter]]
+id = 157
+name = "cluster.replies_dropped"
+kind = "counter"
+scope = "client"
+doc = "Replies the service beside one cluster member was to send a session and dropped: the session's response channel had taken nothing for the keepalive interval, 500 ms, since it first refused a reply, because the client's stream was not connected or was back-pressured; or the driver refused the channel, or the stream to the client had ended. The service of the leader of an entry's term sends the replies to it, so the count rises beside that member alone (spec/cluster.md, The service and Values; ADR 0118). key: member id (i32), little-endian; label text: the member id in decimal."
+doctor = "A service answered a client that did not take the answer. The client was not reading its response channel: it polls its session less often than every 500 ms, it has stopped, or this member's host cannot reach the host and port the client names there. The service went on with the log after 500 ms and the client's reply is lost, which the client learns by its own wait for one. cluster.sessions_timed_out rises 10 s after a client stops for good."
+
 # A cluster member's role (spec/cluster.md, "Roles and the election"; ADR 0052, feature
 # 3). A member is a candidate (ADR 0077, ADR 0081) from its nomination until it
 # leads, loses its ballot, votes for another, follows another member that won its

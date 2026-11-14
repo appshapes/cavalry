@@ -92,6 +92,9 @@ enum Reply {
     Version(i32),
     /// Nothing: the member is down.
     Silent,
+    /// It leads, and the service beside it sends the session a message, on a
+    /// publication of its own, before the leader sends its ok event.
+    Welcome,
 }
 
 /// What the played members read from their ingress endpoints, each with the place of
@@ -213,6 +216,10 @@ fn play(
     let mut response: Option<String> = None;
     // What is yet to go out on the response channel, oldest first.
     let mut owed: Vec<Vec<u8>> = Vec::new();
+    // A service's publication to the response channel, and the ok event the leader
+    // holds until the service's message has gone, with when it went.
+    let mut service: Option<Publication> = None;
+    let mut held_ok: Option<(Vec<u8>, Option<Instant>)> = None;
     while !stop.load(Ordering::Acquire) {
         let mut read: Vec<(usize, Vec<u8>)> = Vec::new();
         for (member, subscription) in ingress.iter_mut().enumerate() {
@@ -274,6 +281,16 @@ fn play(
                             owed.push(event(EventCode::Ok, member as i32, *version, b"", SESSION))
                         }
                         Reply::Silent => {}
+                        Reply::Welcome => {
+                            let ok = event(EventCode::Ok, member as i32, 0, b"", SESSION);
+                            let channel = std::str::from_utf8(response_channel).expect("a channel");
+                            service = Some(
+                                client
+                                    .add_exclusive_publication(channel, EGRESS_STREAM_ID)
+                                    .expect("the service's egress publication"),
+                            );
+                            held_ok = Some((ok, None));
+                        }
                     }
                 }
                 Message::SessionMessage {
@@ -328,6 +345,29 @@ fn play(
                 }
             }
         }
+        // The service's message goes first, on its own publication. The leader's ok
+        // event follows 50 ms after that message was taken, so that it is on the
+        // client's response channel before the answer the client's connect waits for.
+        let mut release = false;
+        if let (Some(publication), Some((_, sent))) = (service.as_mut(), held_ok.as_mut()) {
+            match sent {
+                None => {
+                    let welcome = encode(&Message::SessionMessage {
+                        leadership_term_id: TERM,
+                        cluster_session_id: SESSION,
+                        timestamp: TIME,
+                        payload: b"welcome",
+                    });
+                    if publication.offer(&welcome).is_ok() {
+                        *sent = Some(Instant::now());
+                    }
+                }
+                Some(at) => release = at.elapsed() >= Duration::from_millis(50),
+            }
+        }
+        if release && let Some((ok, _)) = held_ok.take() {
+            owed.push(ok);
+        }
         if let Some(publication) = egress.as_mut() {
             while let Some(bytes) = owed.first() {
                 if publication.offer(bytes).is_err() {
@@ -338,6 +378,7 @@ fn play(
         }
         std::thread::sleep(Duration::from_micros(200));
     }
+    drop(service);
     drop(egress);
     drop(ingress);
     client.close().expect("the played members close");
@@ -802,5 +843,50 @@ fn a_session_whose_leader_is_lost_and_not_replaced_closes_itself() {
             .seen(|seen| (seen.keepalives.len(), seen.closes.len())),
         (keepalives, 0)
     );
+    world.close();
+}
+
+/// A service may reply to a session as soon as the log opens it (`spec/cluster.md`,
+/// "Replies"), so its first message can reach the client before the leader's ok
+/// event does. The played service sends one on a publication of its own, and the
+/// played leader sends its ok event 50 ms after that message was taken. The connect
+/// returns the session and takes no session message: the session's polls hand the
+/// message over, once.
+#[test]
+fn a_session_message_that_arrives_before_the_ok_event_is_kept_for_the_session() {
+    let mut world = World::start("welcome", [Reply::Welcome, Reply::Silent, Reply::Silent]);
+    let mut session = world.connect().expect("the session opens");
+    assert_eq!(
+        (
+            session.session_id(),
+            session.leadership_term_id(),
+            session.leader_member_id(),
+            session.closed()
+        ),
+        (SESSION, TERM, 0, None)
+    );
+
+    let mut read = Vec::new();
+    assert!(
+        poll_until(&mut session, &mut read, |_, read| !read.is_empty()),
+        "the session is handed the message that reached it before its ok event"
+    );
+    // Once: 200 ms more of polls hand over nothing else.
+    let quiet = Instant::now();
+    while quiet.elapsed() < Duration::from_millis(200) {
+        session
+            .poll(|payload, time| read.push((payload.to_vec(), time)), 10)
+            .expect("the session polls");
+        std::thread::sleep(Duration::from_millis(1));
+    }
+    assert_eq!(read, [(b"welcome".to_vec(), TIME)]);
+    assert_eq!(session.closed(), None);
+
+    session.close().expect("the session closes");
+    assert!(wait_until(Duration::from_secs(5), || {
+        world
+            .played
+            .seen(|seen| seen.closes == [(0, TERM, SESSION)])
+    }));
     world.close();
 }

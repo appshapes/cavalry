@@ -474,6 +474,66 @@ impl Subscription {
         Ok(taken)
     }
 
+    /// [`bounded_poll`](Self::bounded_poll) with a handler that says for each fragment
+    /// whether the read takes it, as [`controlled_poll`](Self::controlled_poll)'s does:
+    /// one image, the first of `session_id`, no frame that begins at or past
+    /// `limit_position`, and a fragment the handler aborts left at the image's
+    /// position for the next read (`spec/log-buffer.md`, "Reading"; ADR 0114, ADR
+    /// 0118). In Aeron, this is `Image.boundedControlledPoll`.
+    ///
+    /// It is for a reader of a stream that may be read only so far, which learns
+    /// from a fragment whether it can take it: a cluster's service, which reads its
+    /// log no further than the commit position and leaves an entry unread while the
+    /// reply it owes is back-pressured ([`ClusterService`](crate::ClusterService)).
+    ///
+    /// Returns how many fragments were taken, 0 when the subscription holds no image
+    /// of that session, or the [`Fault`] that stopped the poll. Nothing here
+    /// allocates, locks, opens or unmaps, on the fault path either.
+    pub fn bounded_controlled_poll<F>(
+        &mut self,
+        session_id: i32,
+        mut handler: F,
+        limit_position: i64,
+        fragment_limit: usize,
+    ) -> Result<usize, Fault>
+    where
+        F: FnMut(&[u8], &DataFrameHeader) -> Action,
+    {
+        if self.shared.closed().is_some() {
+            return Err(Fault::Closed);
+        }
+        self.apply_events()?;
+        let Some(index) = self
+            .images
+            .iter()
+            .position(|image| image.session_id == session_id)
+        else {
+            return Ok(0);
+        };
+        let Some(image) = self.images.get_mut(index) else {
+            return Ok(0);
+        };
+        match image
+            .reader
+            .controlled_poll(limit_position, fragment_limit, &mut handler)
+        {
+            Ok(poll) => {
+                image.position.store_release(poll.position);
+                Ok(poll.fragments)
+            }
+            Err(error) => {
+                let image = self.images.swap_remove(index);
+                let fault = Fault::Image {
+                    session_id: image.session_id,
+                    position: image.position(),
+                    reason: error.reason(),
+                };
+                self.retire(image);
+                Err(fault)
+            }
+        }
+    }
+
     /// Reads every image but the first of `session_id` with no bound, up to
     /// `fragment_limit` fragments in all, and drops what it reads: for a reader of one
     /// session on a stream others may publish on, whose images would otherwise hold
