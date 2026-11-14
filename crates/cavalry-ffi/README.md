@@ -5,7 +5,7 @@ The `extern "C"` ABI and its cbindgen header. Data plane, and the other crate wh
 
 ## What this does
 
-- Exposes the client API as a C ABI, `spec/c-abi.md` version 2, declared by the
+- Exposes the client API as a C ABI, `spec/c-abi.md` version 4, declared by the
   committed header `include/cavalry.h`, so one Rust core serves every language. The
   thin clients under `clients/` for Python, Node, Go, the JVM and .NET are generated
   over it and released together.
@@ -23,8 +23,22 @@ The `extern "C"` ABI and its cbindgen header. Data plane, and the other crate wh
   `cavalry_committed_log_position` gives the member's next recording, so a service
   in any language reads a log that is in several recordings from position 0, with
   no call added (ADR 0103).
+- Holds a session with a cluster for a program in C: `cavalry_connect_cluster` asks
+  the members in turn and returns once the leader has opened the session,
+  `cavalry_cluster_session_offer` sends the leader a message of one frame with the
+  result codes of a publication's offer, and `cavalry_cluster_session_poll` hands
+  the fragment handler each reply's payload and is the session's duty cycle, called
+  at least every 500 ms. The handler reads a reply's leadership term and the
+  cluster's time with `cavalry_cluster_reply_values(header, values)`. The terms of
+  the replies it is given never fall: a stale reply is passed over and counted, and
+  `cavalry_cluster_session_stale_replies` reads the count.
+  `cavalry_cluster_session_closed` returns null while the session is open, and why
+  it is closed from then on
+  (`spec/cluster.md`, "Sessions"; ADR 0121; ADR 0122). A cluster's service comes
+  with the next version of the page.
 - Carries every non-Rust client's messages: a claim, a commit, an offer and a poll
-  cross this boundary per message, which is why it is on the data plane.
+  cross this boundary per message, a cluster session's among them, which is why it
+  is on the data plane.
 - Is the one surface frozen between releases. Rust-to-Rust integration goes through
   crates with semver; everything else goes through this ABI.
 - Builds three ways: `cdylib`, the shared library the generated clients load,
@@ -58,9 +72,15 @@ the only implementation and the C ABI is a thin layer over it
   functions a message passes through: `cavalry_publication_try_claim`,
   `cavalry_publication_offer`, `cavalry_buffer_claim_commit`,
   `cavalry_buffer_claim_abort`, `cavalry_buffer_claim_set_reserved_value`,
-  `cavalry_subscription_poll`, `cavalry_header_values`, `cavalry_committed_log_poll`
-  and `cavalry_committed_log_entry_position`. The thread-local error is a fixed
-  buffer, and `tests/allocations.rs` counts across all nine.
+  `cavalry_subscription_poll`, `cavalry_header_values`, `cavalry_committed_log_poll`,
+  `cavalry_committed_log_entry_position`, `cavalry_cluster_session_offer`,
+  `cavalry_cluster_session_poll` and `cavalry_cluster_reply_values`. The
+  thread-local error is a fixed buffer, and `tests/allocations.rs` counts across
+  all twelve.
+- Hand a function a header's values that the header does not carry. A header is of
+  three kinds, by the poll that made it, and a function asked for what a kind lacks
+  sets `CAVALRY_ERR_WRONG_HEADER` or `CAVALRY_ERR_NO_POSITION` and fills nothing
+  (`spec/c-abi.md`, "What a header carries").
 
 ## Where the data plane ends
 
@@ -165,7 +185,53 @@ Running it prints one line, such as `received "hello" from session -1716223105`.
 program built against another version of the header is refused at its first call:
 
 ```text
-cavalry_context_init refused (abi-version): the program was built against ABI version 1 and this library is version 2; rebuild the program against this library's header; see docs/reference/c-abi.md#versions-and-what-a-reader-rejects
+cavalry_context_init refused (abi-version): the program was built against ABI version 3 and this library is version 4; rebuild the program against this library's header; see docs/reference/c-abi.md#versions-and-what-a-reader-rejects
+```
+
+A session with a cluster is the same calls in C, in this order. The block is
+compiled and not run: it needs a cluster of three members on three hosts.
+[Run a cluster](../../docs/how-to/run-a-cluster.md) runs one on one host, on the
+loopback.
+
+```no_run
+use std::ffi::{CStr, CString, c_void};
+use std::ptr;
+
+use cavalry_ffi::*;
+
+// The C fragment handler: a reply's payload, and its term and time from the header.
+unsafe extern "C" fn on_reply(clientd: *mut c_void, buffer: *const u8, length: usize, header: *const cavalry_header_t) {
+    let replies = unsafe { &mut *clientd.cast::<Vec<(Vec<u8>, i64)>>() };
+    let mut values = unsafe { std::mem::zeroed::<cavalry_cluster_reply_values_t>() };
+    unsafe { cavalry_cluster_reply_values(header, &mut values) };
+    replies.push((unsafe { std::slice::from_raw_parts(buffer, length) }.to_vec(), values.leadership_term_id));
+}
+
+# fn main() -> Result<(), Box<dyn std::error::Error>> {
+let members = CString::new("0,10.0.0.1:9010,10.0.0.1:9020,10.0.0.1:9030,10.0.0.1:9040,10.0.0.1:9050\
+                           |1,10.0.0.2:9010,10.0.0.2:9020,10.0.0.2:9030,10.0.0.2:9040,10.0.0.2:9050\
+                           |2,10.0.0.3:9010,10.0.0.3:9020,10.0.0.3:9030,10.0.0.3:9040,10.0.0.3:9050")?;
+let response_channel = CString::new("cavalry:udp?endpoint=10.0.0.9:9100")?;
+unsafe {
+    let mut context = ptr::null_mut();
+    assert_eq!(cavalry_context_init_v(&mut context, CAVALRY_ABI_VERSION), 0);
+    let mut client = ptr::null_mut();
+    assert_eq!(cavalry_init(&mut client, context), 0);
+    let mut session = ptr::null_mut();
+    let opened = cavalry_connect_cluster(&mut session, client, members.as_ptr(), response_channel.as_ptr());
+    assert_eq!(opened, 0, "{}", CStr::from_ptr(cavalry_errmsg()).to_str()?);
+    assert!(cavalry_cluster_session_offer(session, b"hello".as_ptr(), 5) > 0);
+    // The session's duty cycle: the cluster's replies, and a keepalive when due.
+    let mut replies: Vec<(Vec<u8>, i64)> = Vec::new();
+    while cavalry_cluster_session_closed(session).is_null() && replies.is_empty() {
+        assert!(cavalry_cluster_session_poll(session, Some(on_reply), (&mut replies as *mut Vec<_>).cast(), 10) >= 0);
+    }
+    assert_eq!(cavalry_cluster_session_close(session), 0);
+    assert_eq!(cavalry_close(client), 0);
+    assert_eq!(cavalry_context_close(context), 0);
+}
+# Ok(())
+# }
 ```
 
 ## What to read next

@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Write spec/vectors/c-abi.json: the vectors for spec/c-abi.md, version 3.
+"""Write spec/vectors/c-abi.json: the vectors for spec/c-abi.md, version 4.
 
 This script is the page's reference, independent of the Rust code and of the committed
 header: it lists, from the page's own tables, every opaque type, every struct with its
@@ -17,12 +17,12 @@ and a reader checks a header against them (spec/README.md, "Conventions").
 import json
 from pathlib import Path
 
-ABI_VERSION = 3
+ABI_VERSION = 4
 
 OPAQUE_TYPES = [
     "cavalry_context_t", "cavalry_t", "cavalry_publication_t", "cavalry_subscription_t",
     "cavalry_image_t", "cavalry_recording_t", "cavalry_replay_t", "cavalry_committed_log_t",
-    "cavalry_header_t",
+    "cavalry_cluster_session_t", "cavalry_header_t",
 ]
 
 # Every struct the caller owns, its fields in order, C's natural layout, no packing.
@@ -61,6 +61,11 @@ STRUCTS = {
     ],
     # Version 2: the committed log (ADR 0070).
     "cavalry_committed_log_constants_t": [("int64_t", "recording_id"), ("int32_t", "member_id")],
+    # Version 4: the cluster session (ADR 0122).
+    "cavalry_cluster_session_constants_t": [
+        ("int64_t", "session_id"), ("size_t", "max_message_length"),
+    ],
+    "cavalry_cluster_reply_values_t": [("int64_t", "leadership_term_id"), ("int64_t", "timestamp")],
 }
 
 TYPEDEFS = {
@@ -94,6 +99,8 @@ REC = ("const cavalry_recording_t *", "recording")
 REPLAY = ("const cavalry_replay_t *", "replay")
 LOG = ("cavalry_committed_log_t *", "log")
 CLOG = ("const cavalry_committed_log_t *", "log")
+SESSION = ("cavalry_cluster_session_t *", "session")
+CSESSION = ("const cavalry_cluster_session_t *", "session")
 
 FUNCTIONS = [
     # context
@@ -182,6 +189,23 @@ FUNCTIONS = [
     fn("int", "cavalry_committed_log_constants", CLOG,
        ("cavalry_committed_log_constants_t *", "constants")),
     fn("int", "cavalry_committed_log_close", LOG, CLIENT),
+    # Version 4: the cluster session (ADR 0122).
+    fn("int", "cavalry_connect_cluster", ("cavalry_cluster_session_t **", "session"), CLIENT,
+       ("const char *", "members"), ("const char *", "response_channel")),
+    fn("int64_t", "cavalry_cluster_session_offer", SESSION, ("const uint8_t *", "buffer"),
+       ("size_t", "length")),
+    fn("int", "cavalry_cluster_session_poll", SESSION, ("cavalry_fragment_handler_t", "handler"),
+       ("void *", "clientd"), ("size_t", "fragment_limit")),
+    fn("int", "cavalry_cluster_reply_values", ("const cavalry_header_t *", "header"),
+       ("cavalry_cluster_reply_values_t *", "values")),
+    fn("int", "cavalry_cluster_session_fault", CSESSION, ("cavalry_fault_t *", "fault")),
+    fn("int64_t", "cavalry_cluster_session_leadership_term_id", CSESSION),
+    fn("int32_t", "cavalry_cluster_session_leader_member_id", CSESSION),
+    fn("int64_t", "cavalry_cluster_session_stale_replies", CSESSION),
+    fn("const char *", "cavalry_cluster_session_closed", CSESSION),
+    fn("int", "cavalry_cluster_session_constants", CSESSION,
+       ("cavalry_cluster_session_constants_t *", "constants")),
+    fn("int", "cavalry_cluster_session_close", SESSION),
     # errors and version
     fn("int", "cavalry_errcode"),
     fn("const char *", "cavalry_errmsg"),
@@ -209,7 +233,7 @@ DEFINES = {
     "CAVALRY_PUBLICATION_ERROR": -6,
     # the error codes: 0, the driver's 1 to 99 (spec/client-protocol.md, "Error codes",
     # the ones this version names), the client's from 100, the faults from 120, the
-    # ABI's own from 130
+    # ABI's own from 130, the cluster's from 140
     "CAVALRY_ERR_NONE": 0,
     "CAVALRY_ERR_INVALID_CHANNEL": 1,
     "CAVALRY_ERR_UNKNOWN_SUBSCRIPTION": 2,
@@ -253,6 +277,11 @@ DEFINES = {
     "CAVALRY_ERR_NOT_UTF8": 136,
     "CAVALRY_ERR_EMPTY_DIR": 137,
     "CAVALRY_ERR_NO_POSITION": 138,
+    "CAVALRY_ERR_WRONG_HEADER": 139,
+    "CAVALRY_ERR_CLUSTER_MEMBERS": 140,
+    "CAVALRY_ERR_CLUSTER_REFUSED": 141,
+    "CAVALRY_ERR_CLUSTER_VERSION": 142,
+    "CAVALRY_ERR_CLUSTER_CONNECT_TIMEOUT": 143,
     # why a client closed, `Closed`'s reasons in order
     "CAVALRY_CLOSED_BY_USER": 1,
     "CAVALRY_CLOSED_DRIVER_CLOSED": 2,

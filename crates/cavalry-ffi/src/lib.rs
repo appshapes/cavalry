@@ -2,6 +2,7 @@
 #![deny(missing_docs, rustdoc::broken_intra_doc_links)]
 
 mod client;
+mod cluster_session;
 mod codes;
 mod committed_log;
 mod context;
@@ -16,6 +17,7 @@ mod subscription;
 mod version;
 
 pub use client::*;
+pub use cluster_session::*;
 pub use codes::*;
 pub use committed_log::*;
 pub use context::*;
@@ -42,4 +44,5 @@ const _: () = {
     assert_send::<cavalry_recording_t>();
     assert_send::<cavalry_replay_t>();
     assert_send::<cavalry_committed_log_t>();
+    assert_send::<cavalry_cluster_session_t>();
 };

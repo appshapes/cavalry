@@ -13,7 +13,7 @@ use crate::codes::*;
 use crate::error::{self, DOC};
 use crate::handle;
 use crate::subscription::{
-    NO_FAULT, cavalry_fault_t, cavalry_fragment_handler_t, cavalry_header_t, fault_fields,
+    Carries, NO_FAULT, cavalry_fault_t, cavalry_fragment_handler_t, cavalry_header_t, fault_fields,
     fault_struct,
 };
 
@@ -174,8 +174,7 @@ pub unsafe extern "C" fn cavalry_committed_log_poll(
         let result = inner.poll(
             |body, header, position| {
                 let view = cavalry_header_t {
-                    header: *header,
-                    position,
+                    carries: Carries::Entry(*header, position),
                 };
                 // The caller's handler, by the convention above, inside the enclosing
                 // unsafe block; the body and the header are valid for the call.
@@ -203,7 +202,8 @@ pub unsafe extern "C" fn cavalry_committed_log_poll(
 
 /// The position in the log at which the entry begins whose header
 /// `cavalry_committed_log_poll` handed its handler; −1 with `CAVALRY_ERR_NO_POSITION`
-/// for a header from `cavalry_subscription_poll`, which carries none.
+/// for a header from `cavalry_subscription_poll` or from
+/// `cavalry_cluster_session_poll`, which carries none.
 ///
 /// # Safety
 ///
@@ -217,20 +217,33 @@ pub unsafe extern "C" fn cavalry_committed_log_entry_position(
         return -1;
     }
     // SAFETY: the handler's header, valid for the call.
-    let position = unsafe { (*header).position };
-    if position == CAVALRY_NULL_POSITION {
-        error::set(
-            CAVALRY_ERR_NO_POSITION,
-            format_args!(
-                "cavalry_committed_log_entry_position refused (no-position): the header came \
-                 from cavalry_subscription_poll, whose headers carry no position; compute a \
-                 subscription's frame position from its image's constants; see \
-                 {DOC}#a-frames-position"
-            ),
-        );
-        return -1;
+    match unsafe { (*header).carries } {
+        Carries::Entry(_, position) => position,
+        Carries::Frame(_) => {
+            error::set(
+                CAVALRY_ERR_NO_POSITION,
+                format_args!(
+                    "cavalry_committed_log_entry_position refused (no-position): the header \
+                     came from cavalry_subscription_poll, whose headers carry no position; \
+                     compute a subscription's frame position from its image's constants; see \
+                     {DOC}#a-frames-position"
+                ),
+            );
+            -1
+        }
+        Carries::Reply(_) => {
+            error::set(
+                CAVALRY_ERR_NO_POSITION,
+                format_args!(
+                    "cavalry_committed_log_entry_position refused (no-position): the header \
+                     came from cavalry_cluster_session_poll, whose headers carry a reply's \
+                     values and no position; read it with cavalry_cluster_reply_values; see \
+                     {DOC}#what-a-header-carries"
+                ),
+            );
+            -1
+        }
     }
-    position
 }
 
 /// Fills `fault` with what the last poll stopped on.

@@ -8,7 +8,7 @@ use std::cell::RefCell;
 use std::ffi::{c_char, c_int};
 use std::fmt::{self, Write};
 
-use cavalry_client::{ClientError, Fault, Offer};
+use cavalry_client::{ClientError, ClusterError, Fault, Offer};
 
 use crate::codes::*;
 
@@ -163,6 +163,28 @@ pub(crate) fn set_client(error: &ClientError) {
         ClientError::Log(_) => CAVALRY_ERR_LOG,
         ClientError::Driver { .. } => CAVALRY_ERR_DRIVER,
         ClientError::Io { .. } => CAVALRY_ERR_IO,
+    };
+    set(code, format_args!("{error}"));
+}
+
+/// Sets the thread's error from a cluster session's error: the session's own four
+/// kinds on the cluster's codes, the client's kind as [`set_client`] sets it, and a
+/// fault's as [`set_fault`] does (`spec/c-abi.md`, "Error codes").
+pub(crate) fn set_cluster(error: &ClusterError) {
+    let code = match error {
+        ClusterError::Client(error) => return set_client(error),
+        ClusterError::Egress(fault) | ClusterError::Log(fault) => {
+            set_fault(fault);
+            return;
+        }
+        ClusterError::Members(_) => CAVALRY_ERR_CLUSTER_MEMBERS,
+        ClusterError::Refused { .. } => CAVALRY_ERR_CLUSTER_REFUSED,
+        ClusterError::Version { .. } => CAVALRY_ERR_CLUSTER_VERSION,
+        ClusterError::ConnectTimeout { .. } => CAVALRY_ERR_CLUSTER_CONNECT_TIMEOUT,
+        // A service's kind, which no function of this version returns: the service
+        // comes with the ABI's next version, and its code with it. Until then the
+        // client's code for a message it could not read, with the error's own words.
+        ClusterError::Entry { .. } => CAVALRY_ERR_PROTOCOL,
     };
     set(code, format_args!("{error}"));
 }
@@ -325,6 +347,55 @@ mod tests {
                 assert!(head.len() > BUFFER / 2, "the head keeps most of the buffer");
             }
         }
+    }
+
+    /// A cluster session's error on the codes of `spec/c-abi.md`, "Error codes": the
+    /// session's own four kinds on 140 to 143, each with the error's own message,
+    /// which ends with its anchor; the client's kind and a fault's on the codes they
+    /// have everywhere else.
+    #[test]
+    fn a_cluster_sessions_error_has_the_clusters_codes() {
+        use cavalry_proto::cluster::{EMPTY_MEMBER, MAX_MEMBERS, parse_members};
+
+        let mut parsed = [EMPTY_MEMBER; MAX_MEMBERS];
+        let members = parse_members(b"0,127.0.0.1:9", &mut parsed, None)
+            .expect_err("a member with one endpoint fails a check");
+        for (error, code) in [
+            (ClusterError::Members(members), CAVALRY_ERR_CLUSTER_MEMBERS),
+            (
+                ClusterError::Refused {
+                    detail: "concurrent session limit".to_owned(),
+                },
+                CAVALRY_ERR_CLUSTER_REFUSED,
+            ),
+            (
+                ClusterError::Version { version: 2 << 16 },
+                CAVALRY_ERR_CLUSTER_VERSION,
+            ),
+            (
+                ClusterError::ConnectTimeout { connects: 4 },
+                CAVALRY_ERR_CLUSTER_CONNECT_TIMEOUT,
+            ),
+        ] {
+            set_cluster(&error);
+            assert_eq!(cavalry_errcode(), code, "{error}");
+            let text = String::from_utf8(message()).expect("UTF-8");
+            assert_eq!(text, error.to_string(), "the error's own words");
+            assert!(
+                text.ends_with("; see docs/reference/cluster.md#sessions"),
+                "{text}"
+            );
+        }
+        set_cluster(&ClusterError::Client(ClientError::ResponseTimeout {
+            command: "add subscription",
+        }));
+        assert_eq!(cavalry_errcode(), CAVALRY_ERR_RESPONSE_TIMEOUT);
+        set_cluster(&ClusterError::Egress(Fault::Closed));
+        assert_eq!(cavalry_errcode(), CAVALRY_ERR_FAULT_CLOSED);
+        assert_eq!(
+            String::from_utf8(message()).expect("UTF-8"),
+            Fault::Closed.to_string()
+        );
     }
 
     #[test]

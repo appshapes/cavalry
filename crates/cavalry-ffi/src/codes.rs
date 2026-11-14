@@ -8,7 +8,7 @@ use std::ffi::c_int;
 /// This page's version: the header's `CAVALRY_ABI_VERSION`, which
 /// `cavalry_context_init` passes to `cavalry_context_init_v` and the library compares
 /// with its own.
-pub const CAVALRY_ABI_VERSION: c_int = 3;
+pub const CAVALRY_ABI_VERSION: c_int = 4;
 /// The environment variable a context's default directory reads.
 pub const CAVALRY_DIR_ENV: &str = "CAVALRY_DIR";
 /// The images a subscription holds at most.
@@ -128,8 +128,21 @@ pub const CAVALRY_ERR_NOT_UTF8: c_int = 136;
 /// An empty directory.
 pub const CAVALRY_ERR_EMPTY_DIR: c_int = 137;
 /// `cavalry_committed_log_entry_position` on a header that carries no position: one a
-/// subscription's poll handed its handler.
+/// subscription's poll or a cluster session's handed its handler.
 pub const CAVALRY_ERR_NO_POSITION: c_int = 138;
+/// A header of another kind than the function reads: `cavalry_header_values` on a
+/// cluster session's, which carries no frame's fields, or
+/// `cavalry_cluster_reply_values` on a subscription's or a committed log's, which
+/// carries no reply's values.
+pub const CAVALRY_ERR_WRONG_HEADER: c_int = 139;
+/// A cluster session's connect: the members string failed a check.
+pub const CAVALRY_ERR_CLUSTER_MEMBERS: c_int = 140;
+/// A cluster session's connect: the leader refused it; its reason is in the message.
+pub const CAVALRY_ERR_CLUSTER_REFUSED: c_int = 141;
+/// A cluster session's connect: the cluster speaks another major protocol version.
+pub const CAVALRY_ERR_CLUSTER_VERSION: c_int = 142;
+/// A cluster session's connect: no member opened a session in 20 s.
+pub const CAVALRY_ERR_CLUSTER_CONNECT_TIMEOUT: c_int = 143;
 
 /// Why a client closed: `cavalry_close` was called.
 pub const CAVALRY_CLOSED_BY_USER: i32 = 1;

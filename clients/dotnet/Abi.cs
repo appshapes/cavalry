@@ -23,7 +23,7 @@ public static unsafe partial class Abi
     internal const string Library = "cavalry_ffi";
 
     public const string DIR_ENV = "CAVALRY_DIR"; // CAVALRY_DIR_ENV
-    public const int ABI_VERSION = 3; // CAVALRY_ABI_VERSION
+    public const int ABI_VERSION = 4; // CAVALRY_ABI_VERSION
     public const int MAX_IMAGES = 256; // CAVALRY_MAX_IMAGES
     public const int SERVICE_LOG_STREAM_ID = 104; // CAVALRY_SERVICE_LOG_STREAM_ID
     public const int NULL_POSITION = -1; // CAVALRY_NULL_POSITION
@@ -78,6 +78,11 @@ public static unsafe partial class Abi
     public const int ERR_NOT_UTF8 = 136; // CAVALRY_ERR_NOT_UTF8
     public const int ERR_EMPTY_DIR = 137; // CAVALRY_ERR_EMPTY_DIR
     public const int ERR_NO_POSITION = 138; // CAVALRY_ERR_NO_POSITION
+    public const int ERR_WRONG_HEADER = 139; // CAVALRY_ERR_WRONG_HEADER
+    public const int ERR_CLUSTER_MEMBERS = 140; // CAVALRY_ERR_CLUSTER_MEMBERS
+    public const int ERR_CLUSTER_REFUSED = 141; // CAVALRY_ERR_CLUSTER_REFUSED
+    public const int ERR_CLUSTER_VERSION = 142; // CAVALRY_ERR_CLUSTER_VERSION
+    public const int ERR_CLUSTER_CONNECT_TIMEOUT = 143; // CAVALRY_ERR_CLUSTER_CONNECT_TIMEOUT
     public const int CLOSED_BY_USER = 1; // CAVALRY_CLOSED_BY_USER
     public const int CLOSED_DRIVER_CLOSED = 2; // CAVALRY_CLOSED_DRIVER_CLOSED
     public const int CLOSED_DRIVER_TIMEOUT = 3; // CAVALRY_CLOSED_DRIVER_TIMEOUT
@@ -96,6 +101,14 @@ public static unsafe partial class Abi
     public const int FRAME_TYPE_PAD = 0; // CAVALRY_FRAME_TYPE_PAD
     public const int FRAME_TYPE_DATA = 1; // CAVALRY_FRAME_TYPE_DATA
 
+    /// <summary>`cavalry_cluster_reply_values_t` of spec/c-abi.md, "Structs": the caller's copy the ABI fills, laid out as C lays it out.</summary>
+    [StructLayout(LayoutKind.Sequential)]
+    public struct cavalry_cluster_reply_values_t
+    {
+        public long leadership_term_id;
+        public long timestamp;
+    }
+
     /// <summary>`cavalry_fault_t` of spec/c-abi.md, "Structs": the caller's copy the ABI fills, laid out as C lays it out.</summary>
     [StructLayout(LayoutKind.Sequential)]
     public struct cavalry_fault_t
@@ -103,6 +116,14 @@ public static unsafe partial class Abi
         public int code;
         public int session_id;
         public long position;
+    }
+
+    /// <summary>`cavalry_cluster_session_constants_t` of spec/c-abi.md, "Structs": the caller's copy the ABI fills, laid out as C lays it out.</summary>
+    [StructLayout(LayoutKind.Sequential)]
+    public struct cavalry_cluster_session_constants_t
+    {
+        public long session_id;
+        public nuint max_message_length;
     }
 
     /// <summary>`cavalry_committed_log_constants_t` of spec/c-abi.md, "Structs": the caller's copy the ABI fills, laid out as C lays it out.</summary>
@@ -254,6 +275,39 @@ public static unsafe partial class Abi
 
     [LibraryImport(Library)]
     internal static partial int cavalry_stop_replay(nint client, long replay_session_id);
+
+    [LibraryImport(Library, StringMarshalling = StringMarshalling.Utf8)]
+    internal static partial int cavalry_connect_cluster(out nint session, nint client, string members, string response_channel);
+
+    [LibraryImport(Library)]
+    internal static partial long cavalry_cluster_session_offer(nint session, byte* buffer, nuint length);
+
+    [LibraryImport(Library)]
+    internal static partial int cavalry_cluster_session_poll(nint session, delegate* unmanaged[Cdecl]<void*, byte*, nuint, void*, void> handler, nint clientd, nuint fragment_limit);
+
+    [LibraryImport(Library)]
+    internal static partial int cavalry_cluster_reply_values(nint header, ref cavalry_cluster_reply_values_t values);
+
+    [LibraryImport(Library)]
+    internal static partial int cavalry_cluster_session_fault(nint session, ref cavalry_fault_t fault);
+
+    [LibraryImport(Library)]
+    internal static partial long cavalry_cluster_session_leadership_term_id(nint session);
+
+    [LibraryImport(Library)]
+    internal static partial int cavalry_cluster_session_leader_member_id(nint session);
+
+    [LibraryImport(Library)]
+    internal static partial long cavalry_cluster_session_stale_replies(nint session);
+
+    [LibraryImport(Library)]
+    internal static partial nint cavalry_cluster_session_closed(nint session);
+
+    [LibraryImport(Library)]
+    internal static partial int cavalry_cluster_session_constants(nint session, ref cavalry_cluster_session_constants_t constants);
+
+    [LibraryImport(Library)]
+    internal static partial int cavalry_cluster_session_close(nint session);
 
     [LibraryImport(Library)]
     internal static partial int cavalry_committed_log(out nint log, nint client, long position);
