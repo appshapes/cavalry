@@ -44,7 +44,12 @@ or continue, break, or abort. **A handler that fails has its entry aborted**: wh
 it raises or throws, or returns a value that is no action, the wrapper calls
 `cavalry_cluster_service_action` with `CAVALRY_ACTION_ABORT` from inside the
 trampoline, the ABI ends the poll with the entry not taken, the poll raises once the
-ABI has returned, and the next poll hands the entry over again. A session's handler
+ABI has returned, and the next poll hands the entry over again. Where a language
+lets a handler return more than an integer, the client says what is no action
+before the ABI is asked: in Python an action is an `int`, and `True` is none, though
+it equals 1, the value of `CAVALRY_ACTION_ABORT`, since a handler that returns
+`True` to say that it handled the entry would abort it at every poll and hear
+nothing. A session's handler
 is held as a subscription's is: every reply reaches it and the poll raises after.
 The values are read once per call into one struct the object keeps. In Python the
 service's poll **keeps the GIL held and takes no lock**: the client a service was

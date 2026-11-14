@@ -18,9 +18,10 @@
 // each service holds one session, and its position is past the entry.
 //
 // The client's own edges: what Offer refuses; the calls the ABI refuses from inside a
-// service's handler, on the service and on the client its poll holds, and from inside the
-// session's, each made after the thread's error was set to another code, so that a refusal
-// that answers what an open handle answers is told from an answer; the one struct of values
+// service's handler, on the service and on the client its poll holds, the client's close
+// among them, after which the client is open, and from inside the session's, each made
+// after the thread's error was set to another code, so that a refusal that answers what
+// an open handle answers is told from an answer; the one struct of values
 // a handler is handed, and the nil body of an entry that is no session's message; a
 // service's handler that panics after it replied, and one that returns what is no action,
 // whose entry is aborted, handed over again by the next poll and answered once; a reply too
@@ -214,11 +215,26 @@ func (s *served) onEntry(body []byte, entry *cavalry.ClusterEntryValues, service
 		setAnotherError()
 		s.refusals = append(s.refusals, refusal{"Client.IsClosed", flag(s.client.IsClosed()), cavalry.Errcode()})
 		setAnotherError()
+		s.refusals = append(s.refusals, refusal{"Client.Closed", int64(s.client.Closed()), cavalry.Errcode()})
+		setAnotherError()
 		_, err = s.client.ClusterService()
 		s.refusals = append(s.refusals, refusal{"Client.ClusterService", failed(err), codeOf(err)})
 		setAnotherError()
 		_, err = s.client.AddSubscription("cavalry:ipc", 1229)
 		s.refusals = append(s.refusals, refusal{"Client.AddSubscription", failed(err), codeOf(err)})
+		// A refused close frees nothing, not the client (spec/c-abi.md, "Calls during a claim
+		// or a poll"), so the client still reaches the ABI after it: IsClosed is refused
+		// again, and the service's next poll and step 11's close use the client.
+		setAnotherError()
+		err = s.client.Close()
+		s.refusals = append(s.refusals, refusal{"Client.Close", failed(err), codeOf(err)})
+		setAnotherError()
+		closed := s.client.IsClosed()
+		s.refusals = append(s.refusals, refusal{"Client.IsClosed after its Close", flag(closed), cavalry.Errcode()})
+		if closed {
+			fail("the client of the service beside member %d reads closed after a Close from inside the handler, which "+
+				"the ABI refuses and which frees nothing; the Close returned %v", s.member, err)
+		}
 	}
 	s.codes[payload] = append(s.codes[payload], code)
 	s.messages[payload] = append(s.messages[payload], values)
@@ -504,7 +520,8 @@ func main() {
 		}
 		expected := []refusal{{"Poll", -1, polling}, {"Position", -1, polling}, {"Answers", 0, polling},
 			{"Sessions", -1, polling}, {"Fault", -1, polling}, {"Close", -1, polling}, {"Client.IsClosed", 0, polling},
-			{"Client.ClusterService", -1, polling}, {"Client.AddSubscription", -1, polling}}
+			{"Client.Closed", -1, polling}, {"Client.ClusterService", -1, polling}, {"Client.AddSubscription", -1, polling},
+			{"Client.Close", -1, polling}, {"Client.IsClosed after its Close", 0, polling}}
 		if !reflect.DeepEqual(s.refusals, expected) || codeOf(s.nested) != polling {
 			fail("the calls from inside the handler of the service beside member %d answered %v, not %v, and the refused "+
 				"poll left Err %v", s.member, s.refusals, expected, s.nested)
@@ -560,8 +577,8 @@ func main() {
 			"is member %d and the session %d", terms, opens, leader.member, session.SessionID)
 	}
 	say("session %d's message, the entry at position %d of term %d, taken by three services and answered once, by the "+
-		"service beside member %d; nine calls from inside a service's handler and eight from inside the session's "+
-		"refused with ErrPolling; an entry that is no session's message has a nil body", session.SessionID,
+		"service beside member %d; twelve calls from inside a service's handler, the client's close among them, and "+
+		"eight from inside the session's refused with ErrPolling; an entry that is no session's message has a nil body", session.SessionID,
 		first.Position, first.LeadershipTermID, leader.member)
 
 	// 6. A handler that replies and then panics: its entry is aborted, so the poll ends at

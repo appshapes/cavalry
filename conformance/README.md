@@ -59,7 +59,8 @@ service object, and then the client's own edges (ADR 0124), of which the Python 
 is the shape. What `offer` refuses. The calls `spec/c-abi.md` refuses from inside a
 service's handler, on the service and on the client its poll holds, and from inside a
 session's, each made after the thread's error was set to another code. A service's
-handler that replies and then raises, and one that returns what is no action: each
+handler that replies and then raises, and one that returns what is no action, in
+Python `True` and then 3: each
 entry is aborted, handed over again at the same position, and answered once. A reply
 too long for a frame and a reply to a session that is not open. A handler that returns
 break with two entries waiting, whose poll takes one. A session's handler that raises,
@@ -71,18 +72,22 @@ poll held the GIL.
 
 The Node round is the Python round through `clients/node`, with three edges of its
 own. A service's handler that returns a promise, as an `async` handler does, has its
-entry aborted as one that returns 3 has. The one object of values a handler is handed
+entry aborted as one that returns 3 has, and so has one that returns `true`, where
+the Python round returns `True`. The one object of values a handler is handed
 reads `undefined` once the call has returned, and a kept body reads as empty. And the
 `Buffer`s the round's handlers were handed are all freed by one turn of the event
 loop, which the round checks after its report. The report is the Python round's:
 there the longest poll is how long a poll held the thread, and with it the event loop.
 
 The Go round is the Python round through `clients/go`, where a handler that fails
-panics, with two edges of its own. An entry that is no session's message reaches its
+panics, with three edges of its own. An entry that is no session's message reaches its
 handler with a `nil` body, since the client makes no slice at the address the ABI
-gives for no bytes. And each open session and each open service holds one slot of the
+gives for no bytes. Each open session and each open service holds one slot of the
 client's table, which each close frees, so that the table holds what it held before
-the round. Its report's longest poll is how long a poll held its goroutine.
+the round. And the client's close from inside a service's handler, which the ABI
+refuses and which frees nothing, leaves the client open: it still reaches the ABI, and
+the service polls it again. Its report's longest poll is how long a poll held its
+goroutine.
 
 The JVM round is the Python round through `clients/jvm`, with one edge of its own.
 Every message it offers and every reply it sends is a segment over a `byte[]`, which

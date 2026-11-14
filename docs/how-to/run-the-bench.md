@@ -479,6 +479,12 @@ shared runner is
    pull request that holds the second red waits, and its job is not re-run: its next
    run is the one that a merge of master into the branch starts once the re-record or
    the work item's answer is on master, judged against the entry master then holds.
+   A re-record outside the three cases is the owner's to rule, on a work item tagged
+   `decision`.
+   [ADR 0125](../decisions/0125-re-record-grips-checked-profile-at-pull-request-280s-tree-on-the-owners-ruling-and-again-when-work-item-316-reports.md)
+   is one: a red that held at a pull request's own tree, re-recorded in that pull
+   request from eight processes at its head, with the work item that will find the
+   cause named as the condition for recording the profile again.
 
    A new row joins a baseline that already exists by adding its entry from the tree's
    processes that have it and leaving the other rows as they were recorded, in a
