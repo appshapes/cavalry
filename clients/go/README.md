@@ -239,14 +239,15 @@ every call above.
   error"). `just lint` fails a function that reads the error without the lock.
 - Never lose a handle the ABI keeps open. Every close frees its handle, whatever it
   returns, so `Close` forgets the handle once the ABI's close has returned. The one
-  exception is the close of a subscription, of a committed log, of a cluster session
-  or of a cluster service from inside a handler
-  of its own poll, which the ABI refuses with `ErrPolling`, leaving it open
-  (`spec/c-abi.md`, "Calls during a claim or a poll"); a cluster service's close is
-  refused in the same way from inside the handler of another service whose poll holds
-  its client. `Close` then returns the
-  `*Error` and keeps the handle, so that it can be polled and
-  closed after the poll. A `Client`'s `Close` does not close the handles it made: each
+  exception is a close that the ABI refuses with `ErrPolling`, which frees nothing
+  and leaves the handle open (`spec/c-abi.md`, "Calls during a claim or a poll"). The
+  ABI refuses three kinds of close. The first is the close of a subscription, of a
+  committed log, of a cluster session or of a cluster service from inside a handler
+  of its own poll. The second is a cluster service's close from inside the handler of
+  another service whose poll holds its client. The third is a `Client`'s close from
+  inside the handler of a cluster service whose poll holds that client. `Close` then
+  returns the `*Error` and keeps the handle, so that the program can still use the
+  handle, and close it, after the poll has returned. A `Client`'s `Close` does not close the handles it made: each
   `Publication`, `Subscription`, `Recording`, `Replay`, `CommittedLog`,
   `ClusterSession` and `ClusterService` is freed by
   its own `Close` and by nothing else, and a publication or a subscription answers as
@@ -277,9 +278,11 @@ every call above.
   `Sessions()` return −1, `Answers()` is `false`, a refusal there, and `Fault()` and
   `Close()` return an `*Error`. The service's poll holds its client too, so every call
   on that client from inside the handler is refused the same way: `client.IsClosed()`
-  is `false`, a refusal, and an add, a command, `client.CommittedLog`,
-  `client.ConnectCluster` and `client.ClusterService` return an `*Error` with
-  `ErrPolling`. Make them after the poll has returned.
+  is `false`, a refusal, `client.Closed()` is −1, and an add, a command,
+  `client.CommittedLog`, `client.ConnectCluster`, `client.ClusterService` and
+  `client.Close()` return an `*Error` with `ErrPolling`. A refused `client.Close()`
+  frees nothing, and the client stays open. Make these calls after the poll has
+  returned.
 - Never edit a generated file by hand: `just lint` regenerates the module and fails
   when the committed files differ. `example/main.go` is the one file written by hand,
   and it is this README's program.

@@ -2321,6 +2321,35 @@ class GoPackage(unittest.TestCase):
             self.assertIn(name, gen_go.PER_MESSAGE_GO)
         self.assertEqual(sorted(gen_go.PER_MESSAGE_GO), sorted(lint.RULES["go"]["functions"]))
 
+    def test_a_client_close_the_abi_refuses_keeps_the_client_open(self):
+        """A cluster service's poll holds its client, so the ABI refuses the client's close
+        from inside the service's handler with ErrPolling and frees nothing (spec/c-abi.md,
+        "Calls during a claim or a poll"). Client.Close then returns the *Error and keeps
+        the handle, as the closes of a subscription, a committed log, a cluster session and
+        a cluster service do, so the Go client never forgets a client the ABI keeps open
+        (clients/go/README.md, "What it must never do"). Every other failure still forgets
+        the handle, since the ABI's close frees it whatever it returns."""
+        code = gen_go.write_go(self.header)["cavalry.go"]
+        body = code.split("func (c *Client) Close() error {\n", 1)[1].split("\n}\n", 1)[0]
+        close = body.index("if result := C.cavalry_close(c.handle); result != 0 {\n")
+        read = body.index('err := lastError("cavalry_close")\n')
+        refused = body.index("if err.Code == ErrPolling {\n\t\t\treturn err\n\t\t}\n")
+        forgotten = body.index("\t\tc.handle = nil\n\t\treturn err\n\t}\n")
+        self.assertLess(close, read)
+        self.assertLess(read, refused)
+        self.assertLess(refused, forgotten)
+        self.assertTrue(body.endswith("\tc.handle = nil\n\treturn nil"), body)
+        self.assertEqual(body.count("c.handle = nil"), 2)
+        doc = code.split("func (c *Client) Close() error {\n", 1)[0].rsplit("\n\n", 1)[1]
+        for said in ("Publication, Subscription, Recording, Replay, CommittedLog, ClusterSession and\n// ClusterService",
+                     "Subscription, CommittedLog, ClusterSession or ClusterService keeps its slot",
+                     "AddSubscription, CommittedLog, ConnectCluster and ClusterService return",
+                     "Close then returns the *Error with ErrPolling and keeps the handle"):
+            self.assertIn(said, doc)
+        with open(os.path.join(gen.ROOT, "clients", "go", "README.md"), encoding="utf-8") as f:
+            readme = f.read()
+        self.assertIn("`client.Close()`", readme.split("## Example", 1)[0].split("- Never read a refusal as an answer.", 1)[1])
+
     def test_the_package_tests_the_table_at_its_bound_and_run_sh_runs_them(self):
         """The subscription table is bounded (CLAUDE.md, invariant 3; gate 3: a test at
         capacity), so the module carries a test that fills it and calls the trampoline with

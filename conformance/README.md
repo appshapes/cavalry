@@ -80,11 +80,14 @@ loop, which the round checks after its report. The report is the Python round's:
 there the longest poll is how long a poll held the thread, and with it the event loop.
 
 The Go round is the Python round through `clients/go`, where a handler that fails
-panics, with two edges of its own. An entry that is no session's message reaches its
+panics, with three edges of its own. An entry that is no session's message reaches its
 handler with a `nil` body, since the client makes no slice at the address the ABI
-gives for no bytes. And each open session and each open service holds one slot of the
+gives for no bytes. Each open session and each open service holds one slot of the
 client's table, which each close frees, so that the table holds what it held before
-the round. Its report's longest poll is how long a poll held its goroutine.
+the round. And the client's close from inside a service's handler, which the ABI
+refuses and which frees nothing, leaves the client open: it still reaches the ABI, and
+the service polls it again. Its report's longest poll is how long a poll held its
+goroutine.
 
 The Python runner is the shape the Node, Go, JVM and .NET runners copy (ADR 0046,
 cards 206 to 209): a package of another ABI version refused when it loads the library; the C
