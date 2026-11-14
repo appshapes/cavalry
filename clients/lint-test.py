@@ -66,7 +66,12 @@ or `Abi.LastError`, fails naming the member and the form; the `Span` the claim's
 makes over the ABI's bytes passes while a throw in that getter fails; a throw in the
 trampoline's catch fails; building the `HandlerException` in `Poll` before its ABI call
 fails; a header getter that throws fails while `Header.Ensure`'s own throw, the guard,
-passes; a package with none of the per-message members fails, one member renamed fails,
+passes; a cluster session's `Poll` and a cluster service's are held as the subscription's
+is, a service's `Poll` under the client's lock or one that calls the client's locking
+method fails, and so does a throw in either cluster catch, an exception built where a
+service's trampoline keeps the ABI's refusal, a throw in the session's `Offer` or the
+service's `Reply`, and an allocation in a getter of a reply's values or an entry's (ADR
+0124); a package with none of the per-message members fails, one member renamed fails,
 and a missing file says to generate.
 """
 
@@ -1301,8 +1306,103 @@ class Clients(unittest.TestCase):
         self.assertIn("calls Abi.LastError", finding)
         self.assertIn("builds CavalryException", finding)
 
+    # A cluster session and a cluster service in the .NET client (ADR 0124).
+
+    def test_building_handler_exception_before_a_cluster_polls_call_in_dotnet_fails(self):
+        """A cluster session's Poll and a cluster service's are held as the subscription's
+        is: the exception each builds after its ABI call is the one it may build."""
+        self.assertEqual(lint.findings(self.tmp), [])
+        self.edit_dotnet("        first = null;\n        int count = Abi.cavalry_cluster_session_poll(",
+                         "        first = null;\n        Exception early = new HandlerException(0, 0, first!);\n"
+                         "        int count = Abi.cavalry_cluster_session_poll(", file="ClusterSession.cs")
+        self.edit_dotnet("        refused = false;\n        int count = Abi.cavalry_cluster_service_poll(",
+                         "        refused = false;\n        Exception early = new CavalryException(\"x\", 0, \"y\");\n"
+                         "        int count = Abi.cavalry_cluster_service_poll(", file="ClusterService.cs")
+        found = lint.findings(self.tmp)
+        self.assertEqual(len(found), 2, found)
+        self.assertTrue(any("ClusterSession.Poll" in f and "builds HandlerException" in f for f in found), found)
+        self.assertTrue(any("ClusterService.Poll" in f and "builds CavalryException" in f for f in found), found)
+
+    def test_a_lock_in_a_dotnet_cluster_services_poll_fails(self):
+        """A service's Poll is a call on its client and is on every entry's path: it takes
+        no lock, and it calls no method of the client that takes the client's, whose
+        handle it reads through the one property that takes none
+        (clients/dotnet/README.md, "Threads")."""
+        begins = "        this.handler = handler;\n        polling = true;\n        raised = 0;\n        first = null;\n" \
+                 "        refused = false;\n"
+        self.edit_dotnet(begins, "        lock (client)\n        {\n        }\n" + begins, file="ClusterService.cs")
+        [finding] = lint.findings(self.tmp)
+        self.assertIn("ClusterService.Poll", finding)
+        self.assertIn("uses `lock`", finding)
+        self.setUp()
+        self.edit_dotnet(begins, "        bool closed = client.IsClosed();\n" + begins, file="ClusterService.cs")
+        [finding] = lint.findings(self.tmp)
+        self.assertIn("ClusterService.Poll", finding)
+        self.assertIn("calls Client.IsClosed", finding)
+        self.assertIn("uses `lock`", finding)
+
+    def test_a_throw_in_a_dotnet_cluster_catch_fails(self):
+        """Each cluster trampoline calls a method that catches what the handler threw: a
+        throw from that catch would unwind through the ABI's frames. The lint finds a
+        method by its name, and four classes have a Deliver, so each trampoline is found
+        for each Deliver that throws: the findings are looked for, and not counted."""
+        self.assertEqual(lint.findings(self.tmp), [])
+        for file in ("ClusterSession.cs", "ClusterService.cs"):
+            self.edit_dotnet("        catch (Exception e)\n        {\n            raised++;\n",
+                             "        catch (Exception e)\n        {\n            raised++;\n            throw;\n", file=file)
+        found = lint.findings(self.tmp)
+        for owner, trampoline in (("ClusterSession", "OnReply"), ("ClusterService", "OnClusterEntry")):
+            self.assertTrue(any(f.startswith(f"dotnet: {owner}.Deliver ") and "throws" in f for f in found), found)
+            self.assertTrue(any(f.startswith(f"dotnet: {owner}.{trampoline} ") and f"calls {owner}.Deliver" in f
+                                for f in found), found)
+
+    def test_an_exception_built_where_a_dotnet_cluster_service_keeps_a_refusal_fails(self):
+        """An action the ABI refused is kept as its code and its message for Poll to throw:
+        the method the trampoline calls builds no exception for it."""
+        self.assertEqual(lint.findings(self.tmp), [])
+        self.edit_dotnet("            refusedMessage = Abi.Errmsg();\n",
+                         "            first = Abi.LastError(\"cavalry_cluster_service_action\");\n", file="ClusterService.cs")
+        found = lint.findings(self.tmp)
+        self.assertTrue(any(f.startswith("dotnet: ClusterService.Deliver ") and "calls Abi.LastError" in f
+                            and "builds CavalryException" in f for f in found), found)
+        self.assertTrue(any(f.startswith("dotnet: ClusterService.OnClusterEntry ") and "calls ClusterService.Deliver" in f
+                            for f in found), found)
+
+    def test_a_throw_or_an_allocation_in_a_dotnet_cluster_per_message_member_fails(self):
+        """The session's Offer and the service's Reply return a code, and the getters of a
+        reply's values and of an entry's read the one struct their object keeps."""
+        self.edit_dotnet("    public long Offer(ReadOnlySpan<byte> message)\n    {\n",
+                         "    public long Offer(ReadOnlySpan<byte> message)\n    {\n        Abi.Check(\"x\", -1);\n",
+                         file="ClusterSession.cs")
+        self.edit_dotnet("    public int Reply(long sessionId, ReadOnlySpan<byte> message)\n    {\n",
+                         "    public int Reply(long sessionId, ReadOnlySpan<byte> message)\n    {\n        Abi.Check(\"x\", -1);\n",
+                         file="ClusterService.cs")
+        self.edit_dotnet("    public long Timestamp => values.timestamp;\n",
+                         "    public long Timestamp => new long[1][0] + values.timestamp;\n", file="ClusterReplyValues.cs")
+        self.edit_dotnet("    public bool TimedOut => values.timed_out != 0;\n",
+                         "    public bool TimedOut => new byte[1][0] != values.timed_out;\n", file="ClusterEntryValues.cs")
+        found = lint.findings(self.tmp)
+        self.assertEqual(len(found), 4, found)
+        for name, form in (("ClusterSession.Offer", "calls Abi.Check"), ("ClusterService.Reply", "calls Abi.Check"),
+                           ("ClusterReplyValues.Timestamp", "allocates long with `new`"),
+                           ("ClusterEntryValues.TimedOut", "allocates byte with `new`")):
+            self.assertTrue(any(f.startswith(f"dotnet: {name} ") and form in f for f in found), (name, found))
+
+    def test_a_missing_dotnet_cluster_member_fails(self):
+        """A cluster session's and a cluster service's per-message members are held to the
+        rules by name, as the others are (ADR 0124)."""
+        self.edit_dotnet("    public int Reply(long sessionId, ReadOnlySpan<byte> message)\n",
+                         "    public int Answer(long sessionId, ReadOnlySpan<byte> message)\n", file="ClusterService.cs")
+        self.edit_dotnet("    private static void OnReply(void* clientd,", "    private static void OnAnswer(void* clientd,",
+                         file="ClusterSession.cs")
+        found = lint.findings(self.tmp)
+        self.assertEqual(len(found), 2, found)
+        for name in ("ClusterService.Reply", "ClusterSession.OnReply"):
+            self.assertTrue(any(f"{name} is not in" in f for f in found), (name, found))
+
     def test_a_dotnet_package_without_the_per_message_members_fails(self):
-        for name in ("Publication", "Subscription", "CommittedLog", "Header"):
+        for name in ("Publication", "Subscription", "CommittedLog", "Header", "ClusterSession", "ClusterService",
+                     "ClusterReplyValues", "ClusterEntryValues"):
             with open(os.path.join(self.dotnet, name + ".cs"), "w", encoding="utf-8") as f:
                 f.write(f"namespace Cavalry;\n\npublic sealed class {name}\n{{\n    internal int Here()\n    {{\n"
                         f"        return 1;\n    }}\n}}\n")

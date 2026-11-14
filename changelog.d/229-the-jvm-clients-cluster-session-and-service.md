@@ -9,7 +9,6 @@
   aborted: the poll ends at it, throws `HandlerException`, and the next poll hands the
   entry over again. A service's `poll` is a call on its client and takes no lock, so
   that client is one thread's from `clusterService()` to the service's `close()`.
-  `just conformance` runs the cluster round through the JVM client. The .NET client
-  binds the same functions and has no session object or service object yet
+  `just conformance` runs the cluster round through the JVM client
   ([ADR 0124](docs/decisions/0124-give-each-client-a-session-object-and-a-service-object-whose-handlers-failure-aborts-its-entry.md);
   [the JVM client](clients/jvm/README.md); work item 229).

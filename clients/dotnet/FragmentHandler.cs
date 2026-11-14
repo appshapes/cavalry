@@ -18,3 +18,23 @@ public delegate void FragmentHandler(ReadOnlySpan<byte> body, Header header);
 /// position in the log.
 /// </summary>
 public delegate void EntryHandler(ReadOnlySpan<byte> body, Header header, long position);
+
+/// <summary>
+/// Receives each reply a cluster session's poll hands over: <paramref name="body"/> is the
+/// reply's payload, a span over the log's bytes, valid for the call, and
+/// <paramref name="reply"/> the reply's values.
+/// </summary>
+public delegate void ReplyHandler(ReadOnlySpan<byte> body, ClusterReplyValues reply);
+
+/// <summary>
+/// Receives each committed entry a cluster service's poll hands over:
+/// <paramref name="body"/> is a session message's payload, a span over the log's bytes,
+/// valid for the call, and empty for every other entry; <paramref name="entry"/> is the
+/// entry's values; and <paramref name="service"/> is the service that was polled, for its
+/// <see cref="ClusterService.Reply"/>. What it returns is the entry's action:
+/// <see cref="Abi.ACTION_CONTINUE"/> takes the entry and the poll goes on,
+/// <see cref="Abi.ACTION_BREAK"/> takes it and ends the poll, and
+/// <see cref="Abi.ACTION_ABORT"/> leaves it, ends the poll, and has the next poll hand it
+/// over again.
+/// </summary>
+public delegate int ServiceHandler(ReadOnlySpan<byte> body, ClusterEntryValues entry, ClusterService service);
