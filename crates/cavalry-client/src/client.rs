@@ -1534,7 +1534,7 @@ impl Cavalry {
     /// session.offer(b"hello")?;
     /// // The session's duty cycle: the cluster's replies, and a keepalive when due.
     /// while session.closed().is_none() {
-    ///     session.poll(|reply, time_ms| println!("{time_ms}: {} bytes", reply.len()), 10)?;
+    ///     session.poll(|reply, header| println!("term {}: {} bytes", header.leadership_term_id, reply.len()), 10)?;
     /// #   break;
     /// }
     /// session.close()?;

@@ -1,5 +1,6 @@
 //! A client's session with a cluster, through the client API against a real driver in
-//! this process (`spec/cluster.md`, "The session protocol" and "Sessions"; ADR 0117).
+//! this process (`spec/cluster.md`, "The session protocol" and "Sessions"; ADR 0117,
+//! ADR 0121).
 //! The cluster is played by hand, by a second client of the same driver in a thread
 //! of its own: a subscription on each member's `ingress` endpoint, and one publication
 //! to the session's response channel, on which it answers as its script says. The
@@ -14,9 +15,12 @@ use std::sync::mpsc::{Receiver, Sender, channel};
 use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
 
-use cavalry_client::{Cavalry, ClusterError, ClusterSession, Offer, Publication, Subscription};
+use cavalry_client::{
+    Cavalry, ClientError, ClusterError, ClusterSession, Offer, Publication, Subscription,
+};
 use cavalry_driver::Driver;
 use cavalry_proto::cluster::{EGRESS_STREAM_ID, EventCode, INGRESS_STREAM_ID, Message, Stream};
+use cavalry_shm::counters::generated::CLUSTER_REPLIES_STALE;
 
 // This test's ports, from the one file that says how they are taken and why, which is
 // `cavalry-raft`'s: `crates/cavalry-raft/tests/ports/mod.rs`.
@@ -430,7 +434,10 @@ fn poll_until(
 ) -> bool {
     wait_until(Duration::from_secs(5), || {
         session
-            .poll(|payload, time| read.push((payload.to_vec(), time)), 10)
+            .poll(
+                |payload, header| read.push((payload.to_vec(), header.timestamp)),
+                10,
+            )
             .expect("the session polls");
         done(session, read)
     })
@@ -521,7 +528,10 @@ fn a_message_offered_puts_off_the_keepalive() {
             offered += 1;
         }
         session
-            .poll(|payload, time| read.push((payload.to_vec(), time)), 10)
+            .poll(
+                |payload, header| read.push((payload.to_vec(), header.timestamp)),
+                10,
+            )
             .expect("the session polls");
         std::thread::sleep(Duration::from_millis(1));
     }
@@ -875,7 +885,10 @@ fn a_session_message_that_arrives_before_the_ok_event_is_kept_for_the_session() 
     let quiet = Instant::now();
     while quiet.elapsed() < Duration::from_millis(200) {
         session
-            .poll(|payload, time| read.push((payload.to_vec(), time)), 10)
+            .poll(
+                |payload, header| read.push((payload.to_vec(), header.timestamp)),
+                10,
+            )
             .expect("the session polls");
         std::thread::sleep(Duration::from_millis(1));
     }
@@ -888,5 +901,171 @@ fn a_session_message_that_arrives_before_the_ok_event_is_kept_for_the_session() 
             .played
             .seen(|seen| seen.closes == [(0, TERM, SESSION)])
     }));
+    world.close();
+}
+
+/// The session's `cluster.replies_stale` in the driver's counters file, with its
+/// label, or `None` when no record holds it: the session adds it when the leader has
+/// opened it, keyed by the session id, and removes it when it closes.
+fn stale(client: &Cavalry) -> Option<(i64, String)> {
+    let counters = client.counters();
+    (0..counters.capacity()).find_map(|id| {
+        let record = counters.record(id).ok().flatten()?;
+        (record.type_id() == CLUSTER_REPLIES_STALE.0
+            && record.key().starts_with(&SESSION.to_le_bytes()))
+        .then(|| {
+            (
+                counters.read(id).expect("the counter reads"),
+                record.label().to_owned(),
+            )
+        })
+    })
+}
+
+/// The terms of the replies a session hands over never fall (`spec/cluster.md`,
+/// "Sessions"; ADR 0121). The played cluster sends the session seven session
+/// messages: a reply of the session's term, one of the next term, one of the term far
+/// above for another session, one of the session's first term again, one of the next
+/// term again, one of the term before the first, and one of the term after the next.
+/// The session hands over the first, the second, the fifth and the seventh, each with
+/// its term and the cluster's time. The fourth and the sixth are stale: they are
+/// passed over, counted in the session's `cluster.replies_stale` and in no poll's
+/// return. A reply of the term the session has reached is not stale, and another
+/// session's message moves nothing.
+#[test]
+fn a_reply_of_a_term_below_one_handed_over_is_passed_over_and_counted() {
+    let mut world = World::start("stale", [Reply::Ok, Reply::Silent, Reply::Silent]);
+    let mut session = world.connect().expect("the session opens");
+    assert_eq!(
+        stale(&world.client),
+        Some((0, format!("cluster.replies_stale {SESSION}"))),
+        "the session added its counter, keyed by its id"
+    );
+    assert_eq!(session.stale_replies(), 0);
+
+    let reply = |term: i64, session: i64, time: i64, payload: &[u8]| {
+        Ask::Send(encode(&Message::SessionMessage {
+            leadership_term_id: term,
+            cluster_session_id: session,
+            timestamp: time,
+            payload,
+        }))
+    };
+    for ask in [
+        reply(TERM, SESSION, TIME, b"first"),
+        reply(TERM + 1, SESSION, TIME + 1, b"second"),
+        reply(TERM + 9, SESSION + 1, TIME + 2, b"another session's"),
+        reply(TERM, SESSION, TIME + 3, b"late"),
+        reply(TERM + 1, SESSION, TIME + 4, b"third"),
+        reply(TERM - 1, SESSION, TIME + 5, b"later still"),
+        reply(TERM + 2, SESSION, TIME + 6, b"fourth"),
+    ] {
+        world.played.send.send(ask).expect("sent");
+    }
+
+    let mut read: Vec<(Vec<u8>, i64, i64)> = Vec::new();
+    let mut handed = 0;
+    let poll = |session: &mut ClusterSession, read: &mut Vec<(Vec<u8>, i64, i64)>| {
+        session
+            .poll(
+                |payload, header| {
+                    read.push((
+                        payload.to_vec(),
+                        header.leadership_term_id,
+                        header.timestamp,
+                    ))
+                },
+                10,
+            )
+            .expect("the session polls")
+    };
+    assert!(
+        wait_until(Duration::from_secs(5), || {
+            handed += poll(&mut session, &mut read);
+            read.len() >= 4
+        }),
+        "the session read {read:?}"
+    );
+    // Nothing more in 200 ms: the stale replies are not handed over late either.
+    let quiet = Instant::now();
+    while quiet.elapsed() < Duration::from_millis(200) {
+        handed += poll(&mut session, &mut read);
+        std::thread::sleep(Duration::from_millis(1));
+    }
+    assert_eq!(
+        read,
+        [
+            (b"first".to_vec(), TERM, TIME),
+            (b"second".to_vec(), TERM + 1, TIME + 1),
+            (b"third".to_vec(), TERM + 1, TIME + 4),
+            (b"fourth".to_vec(), TERM + 2, TIME + 6),
+        ],
+        "each reply with its term and the cluster's time, and no term below one read"
+    );
+    assert_eq!(handed, 4, "a poll returns what it handed over");
+    assert_eq!(session.stale_replies(), 2, "`late` and `later still`");
+    assert_eq!(
+        stale(&world.client).map(|(value, _)| value),
+        Some(2),
+        "in the driver's counters file, where `cavalry doctor` reads it"
+    );
+    // The replies' terms are not the session's: no new leader event came.
+    assert_eq!(session.leadership_term_id(), TERM);
+    assert_eq!(session.closed(), None);
+
+    session.close().expect("the session closes");
+    assert!(
+        wait_until(Duration::from_secs(5), || stale(&world.client).is_none()),
+        "a closed session's counter is removed"
+    );
+    world.close();
+}
+
+/// A session needs its counter, and a driver holds 256 counters for its clients
+/// (`spec/client-protocol.md`, "Values"). With all 256 taken, the leader opens the
+/// session and the client cannot hold it: the connect fails with the driver's
+/// refusal, code 10, and the client offers the leader a session close first, so
+/// that the cluster does not keep the session for its timeout.
+#[test]
+fn a_session_whose_counter_the_driver_refuses_is_closed_and_the_connect_fails() {
+    let mut world = World::start("no-counter", [Reply::Ok, Reply::Silent, Reply::Silent]);
+    let mut other = Cavalry::connect_to(world._dir.path()).expect("another client connects");
+    let held: Vec<_> = (0..256i64)
+        .map(|key| {
+            other
+                .add_counter(
+                    CLUSTER_REPLIES_STALE.0,
+                    &(1_000 + key).to_le_bytes(),
+                    &format!("cluster.replies_stale {}", 1_000 + key),
+                )
+                .expect("the driver holds 256 client counters")
+        })
+        .collect();
+
+    let error = world.connect().expect_err("the driver refuses the counter");
+    assert!(
+        matches!(
+            error,
+            ClusterError::Client(ClientError::Refused { raw_code: 10, .. })
+        ),
+        "{error}"
+    );
+    assert_eq!(world.played.seen(|seen| seen.connects.clone()), [0]);
+    assert!(
+        wait_until(Duration::from_secs(5), || {
+            world
+                .played
+                .seen(|seen| seen.closes == [(0, TERM, SESSION)])
+        }),
+        "the leader was offered the session's close"
+    );
+    assert_eq!(
+        stale(&world.client),
+        None,
+        "no counter of the session's is left"
+    );
+
+    drop(held);
+    other.close().expect("the other client closes");
     world.close();
 }

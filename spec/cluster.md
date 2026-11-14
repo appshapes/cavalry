@@ -991,7 +991,14 @@ session close event is committed (ADR 0115). A service's replies to a session ar
 session messages on the egress stream, on a publication of the service's own, from
 the service beside the member that led the term of the entry it answers, while that
 member leads the term still, and from no other. They are in order from one service,
-and there is no order between the services of two terms' leaders ("Replies"). When a term begins, its leader sends a new leader event
+and there is no order between the services of two terms' leaders ("Replies"). A
+client hands its caller each reply with the leadership term id and the timestamp of
+its session message header, and hands over no stale reply: one whose leadership
+term id is below that of a reply it has handed its caller before, on that session.
+It reads a stale reply, counts it in `cluster.replies_stale` ("Counters") and
+passes it over, so that the terms of the replies a session's caller reads never
+fall. Only a reply it hands over moves the term it compares with: a new leader
+event does not, and neither does a session message of another session (ADR 0121). When a term begins, its leader sends a new leader event
 to every open session with the ingress endpoints, whether or not the leader changed,
 since the clients' messages carry the term and the leader ignores one for another
 term; the client sends its next message, a keepalive first, with the new term to the
@@ -1163,9 +1170,17 @@ order between two services' publications. A leader that has lost its quorum lead
 its term, by its own counters, until it holds an election, which is within the
 leader heartbeat timeout of its quorum's last report ("Values"), and its service
 answers what it reads of the term's committed entries until then. When the next
-term's leader is elected and its service answers before that, a client can read a
-reply of the earlier term after a reply of the later one. Each reply carries its
-leadership term id ("The session protocol"), by which the two are told apart.
+term's leader is elected and its service answers before that, a reply of the
+earlier term can reach a client after a reply of the later one. Each reply carries
+its leadership term id ("The session protocol"), by which the two are told apart:
+the client hands its caller each reply with its term, and passes over, counted, a
+reply of a term below one it has handed over ("Sessions"; ADR 0121). So once a
+session's caller has read a reply of a term, it reads no reply to an entry of an
+earlier term. A leader appends a session's message only in the term the message
+names, so a reply that a service makes at a message's own entry carries the term
+the client sent the message with. Where a service answers each message so, a
+message the caller sent in an earlier term, and that has no answer yet, has none
+coming.
 
 A service does not answer history. When it first opens its member's log it loads
 the member's `cluster.leadership_term_id` and then its `cluster.append_position`,
@@ -1302,6 +1317,7 @@ that a reader of a counters file knows which transition it saw.
 | `cluster.connects_dropped` | a session connect dropped unanswered: the member's pending answers at their bound, the response channel refused by the driver, the answer unsent at the session connect timeout, or a connect the leader had accepted and gave up, its session open event not taken by the log for that timeout or not committed when the leader stopped leading |
 | `cluster.ingress_ignored` | a session message, keepalive or close a member ignored: it does not lead, the term is not its own, or the session is not open or is being closed |
 | `cluster.replies_dropped` | a reply the service beside the member dropped: the session's response channel had taken nothing for the keepalive interval since it first refused a reply, the driver refused the channel, or the stream to the client had ended ("The service", "Replies"; ADR 0118). The service adds the counter, as a client of the member's driver, when it first opens the member's log, keyed by the member id |
+| `cluster.replies_stale` | a stale reply a client's session read and did not hand its caller: its leadership term id was below that of a reply the session had handed over ("Sessions", "Replies"; ADR 0121). The client adds the counter, on its own driver, when the leader has opened the session, keyed by the session id, an i64, and removes it when the session closes |
 | `cluster.log_replications` | on the follower, a catch-up position sent from state 9, one for each replay it asks for (ADR 0092); on the leader, a replay started for a replication, once per replay where a replication spans several recordings |
 | `cluster.log_replications_unavailable` | a replication whose append position did not move for the leader heartbeat timeout while below the stop position, so the member failed its election: the leader's recordings not holding the position asked, purged by retention; a replay that stopped for a fault; or a leader lost mid-replication |
 | `cluster.app_version_mismatches` | a member that failed its election because the service's major version is not the one new leadership term carries |

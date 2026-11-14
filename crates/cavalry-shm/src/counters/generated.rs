@@ -476,6 +476,9 @@ pub const CLUSTER_INGRESS_IGNORED: CounterId = CounterId(156);
 /// `cluster.replies_dropped`, a client counter: Replies the service beside one cluster member was to send a session and dropped: the session's response channel had taken nothing for the keepalive interval, 500 ms, since it first refused a reply, because the client's stream was not connected or was back-pressured; or the driver refused the channel, or the stream to the client had ended. The service of the leader of an entry's term sends the replies to it, so the count rises beside that member alone (spec/cluster.md, The service and Values; ADR 0118). key: member id (i32), little-endian; label text: the member id in decimal.
 pub const CLUSTER_REPLIES_DROPPED: CounterId = CounterId(157);
 
+/// `cluster.replies_stale`, a client counter: Stale replies one cluster session read and did not hand to its program: each carried a leadership term below the term of a reply the session had handed over before. The service beside a member that led the earlier term sent it, and it reached the client after a reply of the later term, which happens only around a change of leader, while the member that led before still says it leads. A session's program reads replies whose terms never fall (spec/cluster.md, Sessions and Replies; ADR 0121). key: cluster session id (i64), little-endian; label text: the session id in decimal.
+pub const CLUSTER_REPLIES_STALE: CounterId = CounterId(158);
+
 /// Every entry of `counters.toml`, in the file's order.
 pub const COUNTERS: &[CounterDef] = &[
     CounterDef {
@@ -1733,5 +1736,13 @@ pub const COUNTERS: &[CounterDef] = &[
         scope: Scope::Client,
         doc: "Replies the service beside one cluster member was to send a session and dropped: the session's response channel had taken nothing for the keepalive interval, 500 ms, since it first refused a reply, because the client's stream was not connected or was back-pressured; or the driver refused the channel, or the stream to the client had ended. The service of the leader of an entry's term sends the replies to it, so the count rises beside that member alone (spec/cluster.md, The service and Values; ADR 0118). key: member id (i32), little-endian; label text: the member id in decimal.",
         doctor: "A service answered a client that did not take the answer. The client was not reading its response channel: it polls its session less often than every 500 ms, it has stopped, or this member's host cannot reach the host and port the client names there. The service went on with the log after 500 ms and the client's reply is lost, which the client learns by its own wait for one. cluster.sessions_timed_out rises 10 s after a client stops for good.",
+    },
+    CounterDef {
+        id: CLUSTER_REPLIES_STALE,
+        name: "cluster.replies_stale",
+        kind: Kind::Counter,
+        scope: Scope::Client,
+        doc: "Stale replies one cluster session read and did not hand to its program: each carried a leadership term below the term of a reply the session had handed over before. The service beside a member that led the earlier term sent it, and it reached the client after a reply of the later term, which happens only around a change of leader, while the member that led before still says it leads. A session's program reads replies whose terms never fall (spec/cluster.md, Sessions and Replies; ADR 0121). key: cluster session id (i64), little-endian; label text: the session id in decimal.",
+        doctor: "A session passed over a reply that came too late: a reply of the term before a change of leader, read after a reply of the term after it. The program reads no answer to a message it sent in the earlier term and sends it again, as it does for any reply that does not come. A few at an election are expected. If it rises while cluster.terms_led rises on no member, a service sends replies with a term that is not its entry's: check that every member's service is of the cluster's version.",
     },
 ];

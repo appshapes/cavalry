@@ -137,8 +137,17 @@ The client API implementation, re-exported by the `cavalry` crate. Data plane.
   `ClusterSession::offer(message)` sends the leader a message of one
   frame, 1,344 bytes at most on the default MTU, with back pressure returned as
   `Offer`. `ClusterSession::poll(handler, fragment_limit)` hands over the cluster's
-  replies, each with the cluster's time, in the order one service sent them, and
-  is the session's duty cycle: it sends a
+  replies, each with a `ReplyHeader`, the leadership term of the entry it answers
+  and the cluster's time, in the order one service sent them. The terms of the
+  replies handed over never fall: a stale reply, one of a term below that of a
+  reply the session has handed over, is passed over and counted, in
+  `cluster.replies_stale` on this client's driver and in
+  `ClusterSession::stale_replies()`. It reaches a client only around a change of
+  leader. Once a program has read a reply of a term, it reads no reply to an entry
+  of an earlier term: where its service answers each message at the message's own
+  entry, a message it offered in an earlier term that has no answer yet has none
+  coming, and it sends the message again (ADR 0121). `poll` is the session's duty
+  cycle too: it sends a
   keepalive when 500 ms have passed since the session last sent anything, turns the
   session to a new leader when the cluster elects one, and closes it when the cluster
   says so, after which `closed()` gives the reason. A session whose leader is lost,
@@ -167,7 +176,8 @@ The client API implementation, re-exported by the `cavalry` crate. Data plane.
   a term comes minutes after the next leader's service has answered; the replies
   to the entries a leader's service had not read at the change are lost, and a
   client sends again. A session's replies are in order from one service, and there
-  is no order between the services of two terms' leaders (ADR 0118). The others
+  is no order between the services of two terms' leaders (ADR 0118); the client's
+  session hands over none that goes back a term (ADR 0121). The others
   are answered `Reply::NotAnswering`, and so is a
   service for the entries its member held before the service first read its log, so
   that a service that starts again answers no client twice. A reply the client's

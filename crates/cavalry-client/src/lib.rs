@@ -21,7 +21,7 @@ pub use cavalry_proto::cluster::{LOG_REPLAY_STREAM_ID, SERVICE_LOG_STREAM_ID};
 pub use cavalry_proto::frame::{DataFrameHeader, Flags, FrameType};
 pub use cavalry_shm::log::{Action, BufferClaim, Positions};
 pub use client::{Cavalry, DIR_ENV};
-pub use cluster::{ClusterError, ClusterSession};
+pub use cluster::{ClusterError, ClusterSession, ReplyHeader};
 pub use committed_log::CommittedLog;
 pub use counter::Counter;
 pub use error::{ClientError, Closed};
