@@ -125,22 +125,25 @@ shared runner is
    from its claim, and so is the `_at_tail` claim row. In the second part the
    subscriber is held behind the publisher: after a poll that returned fewer than
    1,024 fragments it stays away from the log for as long as the publisher has been
-   taking to claim 1,000 messages, by its own count of what it drained and its own
+   taking to claim 64 messages, by its own count of what it drained and its own
    clock. The `claim_commit` row is read there. A subscriber at the tail reads the
    cache line the publisher writes next, and the publisher then waits to have that
-   line back. How many claims pay that wait follows how the two threads are timed
-   against each other, and a build's layout, a process's address space or a step
-   inside one process moved that share across the gate's percentiles with no
-   instruction changed: on `grip` two trees with the same instructions on the claim
-   path read `claim_commit_32_client` at 117 to 139 ns at p99.99 by the build and the
-   process (work item 316). A held subscriber meets the tail once for each time it
-   stays away, about one claim in a thousand on any host. So a `claim_commit` row's
-   p50 and p99 are the claim alone, and its p99.99 is a claim that met a reader, at a
-   share that sits on neither percentile. The `_at_tail` row keeps the claim with a
-   reader at the tail in the table. The `short polls of the held subscriber` line
-   under the table gives, for each such benchmark, the fewest and the most meetings
-   in any run, and the result carries them as `held_polls`: @@POLLS@@. A `claim_commit` row's `per second` is the second part's rate, and the
-   `one_way` and `_at_tail` rows' is the first part's.
+   line back. At the tail the subscriber polls several times for each claim, and how
+   many claims pay that wait follows how the two threads are timed against each
+   other. A build's layout, a process's address space or a step inside one process
+   moved that share across the gate's percentiles with no instruction changed: on
+   `grip` two trees with the same instructions on the claim path read
+   `claim_commit_32_client` at 117 to 139 ns at p99.99 by the build and the process
+   (work item 316). A held subscriber comes to the tail once for each stay, the same
+   way each time, so about one claim in 80 meets it, on any host: the publisher also
+   claims while the subscriber drains. That is over a hundred times the gate's one in
+   ten thousand, so a `claim_commit` row's p99.99 is a claim that met the reader, in
+   every run. The `_at_tail` row keeps the claim with a reader at the
+   tail in the table. The `short polls of the held subscriber` line under the table
+   gives, for each such benchmark, the fewest and the most meetings in any run, and
+   the result carries them as `held_polls`: about `--messages` ÷ 80, which was 59,000
+   to 70,000 for CI's 5,000,000 on the two bench hosts. A `claim_commit` row's `per second` is the second
+   part's rate, and the `one_way` and `_at_tail` rows' is the first part's.
 
    The last column, present with `--repeat`, lists every run's p99.99 for the row. The
    `producer position loads` line under the table counts the loads of the producer
@@ -775,16 +778,16 @@ shared runner is
   2). The gate reads the `claim_commit` row beside it, where the subscriber is held
   behind
   ([ADR 0127](../decisions/0127-measure-a-claim-row-with-its-subscriber-held-behind-the-publisher.md)).
-- A benchmark's `short polls of the held subscriber` far from `--messages` ÷ 1,000:
-  the share of that `claim_commit` row's samples that met a reader has moved, and
-  with it what the row's percentiles are. Above `--messages` ÷ 100 the row's p99
-  holds meetings; below `--messages` ÷ 10,000 its p99.99 is no longer one. A count
-  several times too high is a held subscriber that leaves the publisher fewer than
-  1,000 messages: it leaves a quarter of the publication window at the most, so with
-  `--term-length 65536` and the default body a stay is 128 messages. Run the
-  default term. A count that is too low is a publisher that stopped for a part of
-  the loop while the subscriber kept its stays: look at `publisher retries` for back
-  pressure and at the host's journal for the bench's window.
+- A benchmark's `short polls of the held subscriber` far from `--messages` ÷ 80: the
+  share of that `claim_commit` row's samples that met the reader has moved, and with
+  it what the row's p99.99 is. A count several times too low is a subscriber that
+  stayed away longer than 64 messages: the publisher stopped for a part of the loop
+  while the subscriber kept its stays, so look at `publisher retries` for back
+  pressure and at the host's journal for the bench's window. A count several times
+  too high is a held subscriber that leaves the publisher fewer than 64 messages: it
+  leaves a quarter of the publication window at the most, which is under 64 only
+  when `--term-length` and `--body` put fewer than 256 frames in half a term. Run the
+  default term.
 - `within a step` beside a gated row: the row is over 5 percent above the baseline's
   slowest run but by no more than one step of the clock, which on `bench` is
   10 ns of a 160 ns row; the gate cannot tell that from an unchanged commit and passes

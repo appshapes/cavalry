@@ -202,8 +202,9 @@ const FRAGMENT_LIMIT: usize = 1024;
 /// a build's layout, a process's address space or a step inside one process moved
 /// the share across the gate's percentiles, and the row's p50 with it, with no
 /// instruction changed (work item 316). A held subscriber comes to the tail once
-/// for each stay, the same way each time, so one claim in this many meets it, on any
-/// host and at any rate.
+/// for each stay, the same way each time, so about one claim in this many meets it,
+/// on any host and at any rate: one in 71 to 94 on the bench hosts, since the
+/// publisher also claims while the subscriber drains.
 ///
 /// 64 and not more, by what both bench hosts read (ADR 0127, Evidence). A claim row
 /// holds other slow claims that are rare: `bench` has about one in ten thousand with
@@ -212,8 +213,8 @@ const FRAGMENT_LIMIT: usize = 1024;
 /// reader were about as many as those, and a row's p99.99 fell among them or under
 /// them by the run, the build and the process: `bench` read its client row from 90
 /// to 160 ns, and `grip` its exclusive row from 40 to 67 ns. At 64 the meetings are
-/// 150 times the gate's one in ten thousand, a row's p99.99 is a claim that met the
-/// reader in every process of both hosts, and it reads at one level.
+/// over a hundred times the gate's one in ten thousand, a row's p99.99 is a claim
+/// that met the reader in every process of both hosts, and it reads at one level.
 const HOLD_MESSAGES: u64 = 64;
 /// The held subscriber's first stay, until it has drained [`HOLD_MESSAGES`] and so
 /// knows the publisher's rate, in nanoseconds.
@@ -1115,7 +1116,7 @@ fn span_ns(from: u64, to: u64) -> u64 {
 /// pause is about 16 ns on `grip`'s processor and far less on `bench`'s; and it
 /// follows the rate and is not one fixed time, since a fixed time leaves the
 /// publisher a number of messages that follows the host: 20 million claims a second
-/// on `grip`, 12 million on `bench` and 68 million on a laptop (ADR 0127, Evidence).
+/// on `grip`, 10 million on `bench` and 68 million on a laptop (ADR 0127, Evidence).
 struct Held {
     /// How many messages the publisher is left to claim during one stay.
     messages: u64,
@@ -1323,8 +1324,8 @@ impl Purged {
 }
 
 /// The short polls of a shared-memory benchmark's held subscriber over its runs
-/// ([`LogRun::held_polls`]; ADR 0127): the fewest and the most of any run, about
-/// `--messages` ÷ [`HOLD_MESSAGES`] each. A count far from that says the share of the
+/// ([`LogRun::held_polls`]; ADR 0127): the fewest and the most of any run, a little
+/// under `--messages` ÷ [`HOLD_MESSAGES`] each. A count far from that says the share of the
 /// claim row's samples that met a reader has moved, and with it what the row's
 /// p99.99 is, so both are printed and written to the result.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

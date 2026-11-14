@@ -62,16 +62,18 @@ nothing depends on it.
   reported and never gated. In the second part the subscriber is held behind the
   publisher, and the `claim_commit` row is read there: after a poll that came back
   short of its 1,024 fragments the subscriber stays away from the log for as long as
-  the publisher has been taking to claim 1,000 messages, by its own count and the
-  time stamp counter, so it touches no line another thread writes while it waits. A
+  the publisher has been taking to claim 64 messages, by its own count and the time
+  stamp counter, so it touches no line another thread writes while it waits. A
   subscriber at the tail reads the line the publisher writes next, and how many
   claims then wait for that line followed a build's layout and a process's draw:
   `claim_commit_32_client` read 117 to 139 ns at p99.99 on `grip` by the process, with
-  the same instructions on the claim path (work item 316). Held, the subscriber meets
-  the tail about once in a thousand claims on any host, so the claim row's p50 and
-  p99 are the claim alone and its p99.99 is a claim that met a reader. The meetings
-  of each benchmark's run are counted, printed under the table and written to the
-  result as `held_polls`. The UDP rows keep one loop: there the reader at the
+  the same instructions on the claim path (work item 316). Held, the subscriber comes
+  to the tail about once in 80 claims on any host, over a hundred times the gate's
+  one in ten thousand, so the claim row's p99.99 is a claim that met the reader in
+  every run,
+  where a longer stay left it among the row's other rare slow claims by the run. The
+  meetings of each benchmark's run are counted, printed under the table and written
+  to the result as `held_polls`. The UDP rows keep one loop: there the reader at the
   publisher's tail is the driver's sender, which the harness does not hold.
 - Measures the same two rows through the C ABI, `claim_commit_32_ffi` and
   `one_way_32_ffi`: the client path of `claim_commit_32_client` reached through
