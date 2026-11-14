@@ -11,7 +11,6 @@
   client is one goroutine's from `ClusterService` to the service's `Close`. Every call
   on that client from inside the service's handler, `client.Close()` among them, is
   refused with `ErrPolling`, and a refused `client.Close()` leaves the client open. `just
-  conformance` runs the cluster round through the Go client. The JVM and .NET clients
-  bind the same functions and have no session object or service object yet
+  conformance` runs the cluster round through the Go client
   ([ADR 0124](docs/decisions/0124-give-each-client-a-session-object-and-a-service-object-whose-handlers-failure-aborts-its-entry.md);
   [the Go client](clients/go/README.md); work item 229).

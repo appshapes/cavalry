@@ -2500,9 +2500,10 @@ class JvmPackage(unittest.TestCase):
 
     BASE = JVM_BASE
     FILES = sorted(JVM_BASE + name for name in (
-        "Abi.java", "CavalryException.java", "Client.java", "CommittedLog.java", "EntryHandler.java",
+        "Abi.java", "CavalryException.java", "Client.java", "ClusterEntryValues.java", "ClusterReplyValues.java",
+        "ClusterService.java", "ClusterSession.java", "CommittedLog.java", "EntryHandler.java",
         "FragmentHandler.java", "HandlerException.java", "Header.java", "Image.java", "Publication.java",
-        "Recording.java", "Replay.java", "Subscription.java"))
+        "Recording.java", "Replay.java", "ReplyHandler.java", "ServiceHandler.java", "Subscription.java"))
 
     @classmethod
     def setUpClass(cls):
@@ -2601,11 +2602,48 @@ class JvmPackage(unittest.TestCase):
         abi, subscription = files[self.BASE + "Abi.java"], files[self.BASE + "Subscription.java"]
         self.assertRegex(abi, r'cavalry_publication_offer = LINKER\.downcallHandle\(LOOKUP\.findOrThrow\("cavalry_publication_offer"\), '
                               r'FunctionDescriptor\.of\(JAVA_LONG, ADDRESS, ADDRESS, JAVA_LONG\), Linker\.Option\.critical\(true\)\);')
-        self.assertEqual(abi.count("Linker.Option.critical("), 1)
+        # A cluster session's offer and a cluster service's reply are critical too (ADR
+        # 0124): each is a publication's offer underneath, copies the bytes and returns at
+        # once, calls nothing back and blocks on nothing, and takes a message over a byte[]
+        # as a publication's offer does. No other function is.
+        for name, descriptor in (("cavalry_cluster_session_offer", "JAVA_LONG, ADDRESS, ADDRESS, JAVA_LONG"),
+                                 ("cavalry_cluster_service_reply", "JAVA_INT, ADDRESS, JAVA_LONG, ADDRESS, JAVA_LONG")):
+            self.assertIn(f'{name} = LINKER.downcallHandle(LOOKUP.findOrThrow("{name}"), '
+                          f"FunctionDescriptor.of({descriptor}), Linker.Option.critical(true));", abi)
+        self.assertEqual(gen_jvm.CRITICAL, ("cavalry_publication_offer", "cavalry_cluster_session_offer",
+                                            "cavalry_cluster_service_reply"))
+        self.assertEqual(abi.count("Linker.Option.critical("), 3)
         self.assertEqual(subscription.count("Abi.LINKER.upcallStub("), 1)
         self.assertIn('findVirtual(Subscription.class, "onFragment"', subscription)
         self.assertIn(".bindTo(this)", subscription)
         self.assertEqual(subscription.count("Abi.cavalry_subscription_poll.invokeExact("), 2)  # the refused nested poll and the poll
+
+    def test_a_jvm_client_close_the_abi_refuses_keeps_the_client_open(self):
+        """A cluster service's poll holds its client, so the ABI refuses the client's close
+        from inside the service's handler with ERR_POLLING and frees nothing (spec/c-abi.md,
+        "Calls during a claim or a poll"). `Client.close()` then throws and keeps the
+        handle, as the closes of a subscription, a committed log, a cluster session and a
+        cluster service do, so the JVM client never forgets a client the ABI keeps open
+        (clients/jvm/README.md, "What it must never do"). Every other failure still
+        forgets the handle, since the ABI's close frees it whatever it returns."""
+        code = gen_jvm.write_jvm(self.header)[self.BASE + "Client.java"]
+        close = code.split("    public synchronized void close() {\n", 1)[1].split("\n    }\n", 1)[0]
+        called = close.index("result = (int) Abi.cavalry_close.invokeExact(handle);")
+        read = close.index('CavalryException error = Abi.lastError("cavalry_close");')
+        refused = close.index("if (error.code() == Abi.ERR_POLLING) {\n                throw error;\n            }\n")
+        forgotten = close.index("            handle = MemorySegment.NULL;\n            throw error;\n        }\n")
+        self.assertLess(called, read)
+        self.assertLess(read, refused)
+        self.assertLess(refused, forgotten)
+        self.assertTrue(close.endswith("        handle = MemorySegment.NULL;"), close)
+        self.assertEqual(close.count("handle = MemorySegment.NULL;"), 2)
+        # The handle is the one the ABI is called with: it is not forgotten before the call.
+        self.assertNotIn("closing", close)
+        doc = code.split("    public synchronized void close() {\n", 1)[0].rsplit("\n\n", 1)[1]
+        self.assertIn("It then throws the {@link CavalryException} and keeps the handle", doc)
+        with open(os.path.join(gen.ROOT, "clients", "jvm", "README.md"), encoding="utf-8") as f:
+            readme = f.read()
+        self.assertIn("`client.close()`", readme.split("- Never read a refusal as an answer.", 1)[1].split("- Never hand the ABI", 1)[0])
 
     def test_a_publications_close_zeroes_the_claim_struct_before_the_abi_frees_its_handle(self):
         """The claim struct's `publication` field names the handle the close frees, and the
@@ -2646,10 +2684,15 @@ class JvmPackage(unittest.TestCase):
     def test_handler_exceptions_message_says_what_to_do_and_names_a_heading_of_the_readme(self):
         files = gen_jvm.write_jvm(self.header)
         code = files[self.BASE + "HandlerException.java"]
+        self.assertIn("    private HandlerException(int fragments, int raised, Throwable cause, boolean committedLog, "
+                      "String cluster) {\n"
+                      "        super(describe(fragments, raised, cause, committedLog, cluster), cause);\n", code)
         self.assertIn("    public HandlerException(int fragments, int raised, Throwable cause, boolean committedLog) {\n"
-                      "        super(describe(fragments, raised, cause, committedLog), cause);\n", code)
-        body = code.split("private static String describe(int fragments, int raised, Throwable cause, boolean committedLog) {",
-                          1)[1].split("\n    }\n", 1)[0]
+                      "        this(fragments, raised, cause, committedLog, null);\n", code)
+        self.assertIn("    public HandlerException(int fragments, int raised, Throwable cause, String cluster) {\n"
+                      "        this(fragments, raised, cause, false, cluster);\n", code)
+        body = code.split("private static String describe(int fragments, int raised, Throwable cause, boolean committedLog, "
+                          "String cluster) {", 1)[1].split("\n    }\n", 1)[0]
         self.assertIn("fragment(s) this poll delivered", body)
         self.assertIn("before it stopped on a fault, which Subscription.fault() reads", body)
         self.assertIn("Fix the handler: its first throwable, ", body)
@@ -2657,15 +2700,124 @@ class JvmPackage(unittest.TestCase):
         # A committed log's poll names its own fault() and its entries: the fault of the
         # log's image is reported once, so the message must not send the reader to a
         # subscription's (clients/jvm/README.md, "The committed log").
-        self.assertIn('String one = committedLog ? "entry" : "fragment";', body)
+        self.assertIn('String one = session ? "reply" : committedLog ? "entry" : "fragment";', body)
         self.assertIn("which this CommittedLog's fault() reads\"\n                    + \" until its next poll, and its "
                       "faulted() from then on when the fault is the log's own image's\"", body)
         self.assertIn("throw new HandlerException(count, raised, cause, true);", files[self.BASE + "CommittedLog.java"])
         self.assertIn("throw new HandlerException(count, raised, cause);", files[self.BASE + "Subscription.java"])
+        # A cluster session's poll speaks of replies and names its own fault(); a cluster
+        # service's says that the entry was aborted and comes again (ADR 0124).
+        self.assertIn("which this ClusterSession's fault()\"\n                    + \" reads until its next poll\"", body)
+        self.assertIn('delivered = "the " + fragments + " " + (fragments == 1 ? one : many) + " this poll handed over";', body)
+        self.assertIn('if ("service".equals(cluster)) {', body)
+        self.assertIn("Its entry was aborted: it is\"\n                + \" not taken, the poll ended at it, and the next "
+                      "poll hands it over again. Fix the handler: what it\"", body)
+        self.assertIn("which this ClusterService's fault() reads until its next poll", body)
+        self.assertIn('throw new HandlerException(count, raised, cause, "session");', files[self.BASE + "ClusterSession.java"])
+        self.assertIn('throw new HandlerException(count, 1, cause, "service");', files[self.BASE + "ClusterService.java"])
         with open(os.path.join(gen.ROOT, "clients", "jvm", "README.md"), encoding="utf-8") as f:
             slugs = {re.sub(r"[^a-z0-9 -]", "", line.lstrip("#").strip().lower()).replace(" ", "-")
                      for line in f if line.startswith("#")}
         self.assertIn("the-exception", slugs)
+        self.assertIn("the-cluster-session", slugs)
+        self.assertIn("the-cluster-service", slugs)
+
+    def test_the_cluster_session_and_the_cluster_service_have_the_shape_adr_0124_gives(self):
+        """The JVM cluster session and cluster service (ADR 0124), read from the generated
+        source; the runner's cluster round runs them. The client makes each from the ABI's
+        handle, and a handle no object will hold is closed, with its arena, before anything
+        is thrown. Each poll is two calls of its downcall, the refused nested poll and the
+        poll, and throws its HandlerException after them alone. Each upcall reads its values
+        in a helper with a try of its own, into the one struct its object keeps, and calls
+        the handler inside a catch that holds no invokeExact. A service's upcall begins with
+        the action ACTION_ABORT, so a handler that threw has its entry aborted; passes the
+        ABI what the handler returned unless it is ACTION_CONTINUE; and for a value the ABI
+        refuses keeps the thread's code and message, where the call failed, and aborts. The
+        service's poll reads the client's handle through the accessor that takes no lock,
+        and its close goes through the client's lock. A close the ABI refuses from inside
+        a handler keeps the handle and the stub."""
+        files = gen_jvm.write_jvm(self.header)
+        client = files[self.BASE + "Client.java"]
+        self.assertIn("    public synchronized ClusterSession connectCluster(String members, String responseChannel) {\n", client)
+        self.assertIn("            return new ClusterSession(out.get(ADDRESS, 0));\n", client)
+        self.assertIn("    public synchronized ClusterService clusterService() {\n", client)
+        self.assertIn("            return new ClusterService(out.get(ADDRESS, 0), this);\n", client)
+        self.assertIn("    MemorySegment handle() {\n        return handle;\n    }\n", client)
+        self.assertIn("    synchronized int closeClusterService(MemorySegment service) {\n", client)
+        session = files[self.BASE + "ClusterSession.java"]
+        opened = session.split("    ClusterSession(MemorySegment handle) {\n", 1)[1].split("\n    }\n", 1)[0]
+        self.assertEqual(opened.count("abandon();"), 3)
+        self.assertNotIn("arena.close();", opened)
+        for thrown in ('throw new CavalryException("cavalry_connect_cluster", 0, "the upcall stub could not be made: " + e);',
+                       "throw e;", 'throw Abi.failed("cavalry_cluster_session_constants", t);'):
+            at = opened.index(thrown)
+            self.assertEqual(opened[:at].rstrip().rsplit("\n", 1)[-1].strip(), "abandon();", thrown)
+        abandon = session.split("    private void abandon() {\n", 1)[1].split("\n    }\n", 1)[0]
+        self.assertLess(abandon.index("Abi.cavalry_cluster_session_close.invokeExact(handle);"), abandon.index("} finally {"))
+        self.assertLess(abandon.index("handle = MemorySegment.NULL;"), abandon.index("arena.close();"))
+        self.assertEqual(session.count("Abi.LINKER.upcallStub("), 1)
+        self.assertIn('findVirtual(ClusterSession.class, "onReply"', session)
+        self.assertEqual(session.count("Abi.cavalry_cluster_session_poll.invokeExact("), 2)
+        self.assertEqual(session.count("Abi.cavalry_cluster_reply_values.invokeExact(frame, values)"), 1)
+        upcall = session.split("    void onReply(MemorySegment clientd, MemorySegment buffer, long length, MemorySegment frame) {\n",
+                               1)[1].split("\n    }\n", 1)[0]
+        self.assertIn("            handler.onReply(body, read(frame) == 0 ? reply : null);\n", upcall)
+        self.assertNotIn("invokeExact", upcall)
+        service = files[self.BASE + "ClusterService.java"]
+        made = service.split("    ClusterService(MemorySegment handle, Client client) {\n", 1)[1].split("\n    }\n", 1)[0]
+        self.assertEqual(made.count("abandon();"), 2)
+        abandon = service.split("    private void abandon() {\n", 1)[1].split("\n    }\n", 1)[0]
+        self.assertLess(abandon.index("client.closeClusterService(handle);"), abandon.index("} finally {"))
+        self.assertEqual(service.count("Abi.LINKER.upcallStub("), 1)
+        self.assertIn('findVirtual(ClusterService.class, "onClusterEntry"', service)
+        self.assertEqual(service.count("Abi.cavalry_cluster_service_poll.invokeExact(handle, client.handle(), stub, "
+                                       "MemorySegment.NULL,"), 2)
+        self.assertEqual(service.count("Abi.cavalry_cluster_entry_values.invokeExact(frame, values)"), 1)
+        self.assertEqual(service.count("Abi.cavalry_cluster_service_action.invokeExact(handle, action)"), 1)
+        upcall = service.split("    void onClusterEntry(MemorySegment clientd, MemorySegment buffer, long length, "
+                               "MemorySegment frame) {\n", 1)[1].split("\n    }\n", 1)[0]
+        self.assertNotIn("invokeExact", upcall)
+        began = upcall.index("        int action = Abi.ACTION_ABORT;\n")
+        called = upcall.index("            action = handler.onClusterEntry(body, read(frame) == 0 ? entry : null, this);\n")
+        passed = upcall.index("        if (action != Abi.ACTION_CONTINUE && act(action) != 0) {\n")
+        self.assertLess(began, called)
+        self.assertLess(called, passed)
+        kept = upcall[passed:]
+        self.assertLess(kept.index("refused = true;"), kept.index("refusedCode = Abi.errcode();"))
+        self.assertLess(kept.index("refusedMessage = Abi.errmsg();"), kept.index("act(Abi.ACTION_ABORT);"))
+        poll = service.split("    public int poll(ServiceHandler handler, int fragmentLimit) {\n", 1)[1].split("\n    }\n", 1)[0]
+        self.assertIn("        if (raised == 0 && !refused) {\n            return count;\n        }\n", poll)
+        self.assertIn('            cause = new CavalryException("cavalry_cluster_service_action", refusedCode, refusedMessage);\n',
+                      poll)
+        self.assertNotIn("synchronized", service.replace("closeClusterService", ""))
+        for owner, close in ((session, "result = (int) Abi.cavalry_cluster_session_close.invokeExact(handle);"),
+                             (service, "int result = client.closeClusterService(handle);")):
+            body = owner.split("    public void close() {\n", 1)[1].split("\n    }\n", 1)[0]
+            refused = body.index("if (error.code() == Abi.ERR_POLLING) {\n                throw error;\n            }")
+            self.assertLess(body.index(close), refused)
+            self.assertLess(refused, body.index("handle = MemorySegment.NULL;\n            stub = MemorySegment.NULL;\n"
+                                                "            arena.close();"))
+        # Every field of the two structs of the header has its getter, at the offset the
+        # binding gives: a field the header gains is a getter to add.
+        structs = {s.name: [f.name for f in s.fields] for s in self.header.structs}
+        for cls, struct, getters in (
+                ("ClusterReplyValues", "cavalry_cluster_reply_values_t",
+                 (("long", "leadershipTermId", "JAVA_LONG"), ("long", "timestamp", "JAVA_LONG"))),
+                ("ClusterEntryValues", "cavalry_cluster_entry_values_t",
+                 (("long", "position", "JAVA_LONG"), ("long", "leadershipTermId", "JAVA_LONG"),
+                  ("long", "timestamp", "JAVA_LONG"), ("long", "sessionId", "JAVA_LONG"), ("int", "type", "JAVA_INT"),
+                  ("int", "leaderMemberId", "JAVA_INT"), ("boolean", "timedOut", "JAVA_BOOLEAN")))):
+            code = files[self.BASE + cls + ".java"]
+            self.assertEqual(len(getters), len(structs[struct]), struct)
+            for (java, getter, layout), field in zip(getters, structs[struct]):
+                self.assertIn(f"    public {java} {getter}() {{\n        return values.get({layout}, Abi.{struct}_{field});\n"
+                              "    }\n", code)
+        self.assertIn("    void onReply(MemorySegment body, ClusterReplyValues reply);\n", files[self.BASE + "ReplyHandler.java"])
+        self.assertIn("    int onClusterEntry(MemorySegment body, ClusterEntryValues entry, ClusterService service);\n",
+                      files[self.BASE + "ServiceHandler.java"])
+        self.assertEqual(sorted(gen_jvm.PER_MESSAGE_JVM), sorted(lint.RULES["jvm"]["functions"]))
+        self.assertEqual(sorted(os.path.basename(name) for name in lint.RULES["jvm"]["files"]),
+                         sorted(os.path.basename(name) for name in files))
 
     def test_the_generated_java_compiles_with_every_lint_an_error_when_javac_25_is_on_the_path(self):
         """The README builds the client with `javac --release 25` and run.sh adds

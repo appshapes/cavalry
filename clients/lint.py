@@ -5,9 +5,9 @@ of the ABI's per-message functions that the client wraps (`crates/cavalry-ffi/RE
 the claim, the
 reserved value, the commit and abort, the offer, the poll and the header's values, and
 the committed log's poll and an entry's position, ADR 0070, in every client; and in the
-Python client, the Node client and the Go client the seven of a cluster session and a
-cluster service too, the session's offer, its poll and a reply's values, and the
-service's poll, an entry's values, its reply and its action, ADR 0124) and each
+Python client, the Node client, the Go client and the JVM client the seven of a cluster
+session and a cluster service too, the session's offer, its poll and a reply's values,
+and the service's poll, an entry's values, its reply and its action, ADR 0124) and each
 trampoline that
 calls the user's handler, hold no lock, no `await` and no raise, in the language's
 forms, and so does every function of the package they call. For Python those
@@ -32,8 +32,8 @@ parameter cannot take, before the ABI is called. A call reaches the package's ow
 module function, a class's `__init__` or `constructor`, a method of the same class
 through `self` or `this`, and any other method by its name in any class of the package.
 The one raise allowed is in `poll`, a subscription's or a committed log's, and in the
-Python client, the Node client and the Go client a cluster session's or a cluster
-service's,
+Python client, the Node client, the Go client and the JVM client a cluster session's or
+a cluster service's,
 after the last line that calls the ABI, where the
 user's handler's exception is raised once the poll has returned
 (clients/python/README.md; clients/node/README.md); a raise between two of its calls,
@@ -50,7 +50,7 @@ run a goroutine's next cgo call on another OS thread and the ABI's error is the 
 thread's, so for Go it also fails any function of the package that reads that error,
 through `check` or `lastError`, without `runtime.LockOSThread()` and then
 `defer runtime.UnlockOSThread()` before its first ABI call (clients/go/README.md, "The
-thread's error"). For Java, read from the thirteen files of `clients/jvm/src/com/appshapes/cavalry` by
+thread's error"). For Java, read from the nineteen files of `clients/jvm/src/com/appshapes/cavalry` by
 the same tokenizer, the forms are `synchronized`, as a modifier or a block, the locks of
 `java.util.concurrent` and a lock taken on any receiver, `.lock(`, `.tryLock(` or
 `.acquire(`, a blocking wait, `wait`, `join`, `await`, `park`, `sleep` or `take`, a future
@@ -284,9 +284,10 @@ RULES = {
     "jvm": {
         "file": os.path.join("src", "com", "appshapes", "cavalry", "Publication.java"),
         "files": [os.path.join("src", "com", "appshapes", "cavalry", name) for name in (
-            "Abi.java", "CavalryException.java", "Client.java", "CommittedLog.java", "EntryHandler.java",
+            "Abi.java", "CavalryException.java", "Client.java", "ClusterEntryValues.java", "ClusterReplyValues.java",
+            "ClusterService.java", "ClusterSession.java", "CommittedLog.java", "EntryHandler.java",
             "FragmentHandler.java", "HandlerException.java", "Header.java", "Image.java", "Publication.java",
-            "Recording.java", "Replay.java", "Subscription.java")],
+            "Recording.java", "Replay.java", "ReplyHandler.java", "ServiceHandler.java", "Subscription.java")],
         "functions": [
             "Publication.tryClaim",
             "Publication.setReservedValue",
@@ -297,6 +298,25 @@ RULES = {
             "Subscription.onFragment",
             "CommittedLog.poll",
             "CommittedLog.onEntry",
+            # A cluster session and a cluster service (ADR 0124): the session's offer, its
+            # poll and its upcall, which reads each reply's values; the service's poll, its
+            # reply and its upcall, which reads each entry's values and passes the ABI the
+            # action the handler returned; and the getters of the two objects of values.
+            "ClusterSession.offer",
+            "ClusterSession.poll",
+            "ClusterSession.onReply",
+            "ClusterService.poll",
+            "ClusterService.reply",
+            "ClusterService.onClusterEntry",
+            "ClusterReplyValues.leadershipTermId",
+            "ClusterReplyValues.timestamp",
+            "ClusterEntryValues.position",
+            "ClusterEntryValues.leadershipTermId",
+            "ClusterEntryValues.timestamp",
+            "ClusterEntryValues.sessionId",
+            "ClusterEntryValues.type",
+            "ClusterEntryValues.leaderMemberId",
+            "ClusterEntryValues.timedOut",
             "Header.frameLength",
             "Header.version",
             "Header.flags",
@@ -308,7 +328,9 @@ RULES = {
             "Header.reservedValue",
         ],
         "raise_after": [("Subscription.poll", "cavalry_subscription_poll.invokeExact"),
-                        ("CommittedLog.poll", "cavalry_committed_log_poll.invokeExact")],
+                        ("CommittedLog.poll", "cavalry_committed_log_poll.invokeExact"),
+                        ("ClusterSession.poll", "cavalry_cluster_session_poll.invokeExact"),
+                        ("ClusterService.poll", "cavalry_cluster_service_poll.invokeExact")],
         "guards": ["Header.ensure"],
     },
     # The .NET client calls the ABI through LibraryImport stubs (clients/dotnet/README.md):
