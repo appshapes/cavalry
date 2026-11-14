@@ -196,22 +196,31 @@ const FRAGMENT_LIMIT: usize = 1024;
 /// ([`Held`]; ADR 0127).
 ///
 /// A subscriber that polls at the publisher's tail reads the line the publisher
-/// writes next, and the publisher then waits to have it back. That wait is real, and
-/// how many claims pay it follows how the two threads happen to be timed against each
-/// other: a build's layout, a process's address space or a step inside one process
-/// moved the share across the gate's percentiles with no instruction changed (work
-/// item 316). A held subscriber meets the tail once for each time it stays away, so
-/// about one claim in this many pays the wait, on any host and at any rate. One in a
-/// thousand is a tenth of one in a hundred, so a claim row's p50 and p99 are the
-/// claim alone, and ten times one in ten thousand, so its p99.99 is a claim that met
-/// a reader: the share sits on neither percentile.
-const HOLD_MESSAGES: u64 = 1_000;
-/// The held subscriber's first stays, until it has drained [`HOLD_MESSAGES`] and so
+/// writes next, and the publisher then waits to have it back. That wait is real. At
+/// the tail the subscriber polls several times for each claim, and how many claims
+/// pay the wait follows how the two threads happen to be timed against each other:
+/// a build's layout, a process's address space or a step inside one process moved
+/// the share across the gate's percentiles, and the row's p50 with it, with no
+/// instruction changed (work item 316). A held subscriber comes to the tail once
+/// for each stay, the same way each time, so one claim in this many meets it, on any
+/// host and at any rate.
+///
+/// 64 and not more, by what both bench hosts read (ADR 0127, Evidence). A claim row
+/// holds other slow claims that are rare: `bench` has about one in ten thousand with
+/// no reader on the log at all, and a log row has one each time its conductor raises
+/// the limit. With a stay of 1,000 messages or of 250, the claims that met the
+/// reader were about as many as those, and a row's p99.99 fell among them or under
+/// them by the run, the build and the process: `bench` read its client row from 90
+/// to 160 ns, and `grip` its exclusive row from 40 to 67 ns. At 64 the meetings are
+/// 150 times the gate's one in ten thousand, a row's p99.99 is a claim that met the
+/// reader in every process of both hosts, and it reads at one level.
+const HOLD_MESSAGES: u64 = 64;
+/// The held subscriber's first stay, until it has drained [`HOLD_MESSAGES`] and so
 /// knows the publisher's rate, in nanoseconds.
-const HOLD_FIRST_NS: u64 = 16_000;
+const HOLD_FIRST_NS: u64 = 4_000;
 /// The least one stay may be, in nanoseconds: a publisher faster than any measured is
 /// still left alone for this long.
-const HOLD_LEAST_NS: u64 = 1_000;
+const HOLD_LEAST_NS: u64 = 100;
 /// The most one stay may be, in nanoseconds: a publisher that stalled does not hold
 /// the subscriber away for the stall.
 const HOLD_MOST_NS: u64 = 1_000_000;
@@ -1104,10 +1113,9 @@ fn span_ns(from: u64, to: u64) -> u64 {
 /// counter. So neither the estimate nor the stay reads or writes a line another
 /// thread writes. A stay is a time and not a count of pause instructions, since a
 /// pause is about 16 ns on `grip`'s processor and far less on `bench`'s; and it
-/// follows the rate and is not one fixed time, since a fixed time is a different
-/// share of the claims on a faster host: 64 µs is one claim in 860 on `grip` and one
-/// in 5,400 on a laptop that claims 68 million a second, where the share came back
-/// to the gate's percentile (ADR 0127, Evidence).
+/// follows the rate and is not one fixed time, since a fixed time leaves the
+/// publisher a number of messages that follows the host: 20 million claims a second
+/// on `grip`, 12 million on `bench` and 68 million on a laptop (ADR 0127, Evidence).
 struct Held {
     /// How many messages the publisher is left to claim during one stay.
     messages: u64,
@@ -1273,9 +1281,8 @@ struct LogRun {
     claim_at_tail: Option<Summary>,
     /// How many polls of the held subscriber came back short of [`FRAGMENT_LIMIT`]:
     /// it had reached a frame not yet committed, the publisher's tail, or the end of
-    /// a term. About one claim for each paid for the meeting, so this over
-    /// `--messages` is the share of the claim row's samples that met a reader.
-    /// `None` for a UDP row.
+    /// a term. One claim met the reader for each, so this over `--messages` is the
+    /// share of the claim row's samples that did. `None` for a UDP row.
     held_polls: Option<u64>,
     retries: u64,
     allocations: usize,
@@ -1316,10 +1323,10 @@ impl Purged {
 }
 
 /// The short polls of a shared-memory benchmark's held subscriber over its runs
-/// ([`LogRun::held_polls`]; ADR 0127): the fewest and the most of any run. The fewest
-/// over `--messages` must stay well over one in ten thousand for the claim row's
-/// p99.99 to be a claim that met a reader, and the most well under one in a hundred
-/// for its p99 to be the claim alone, so both are printed and written to the result.
+/// ([`LogRun::held_polls`]; ADR 0127): the fewest and the most of any run, about
+/// `--messages` ÷ [`HOLD_MESSAGES`] each. A count far from that says the share of the
+/// claim row's samples that met a reader has moved, and with it what the row's
+/// p99.99 is, so both are printed and written to the result.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 struct HeldPolls {
     fewest: u64,
@@ -5007,19 +5014,20 @@ mod tests {
         assert_eq!(pass.held_polls, BTreeMap::from([("client".to_string(), 7)]));
     }
 
-    /// A held subscriber leaves the publisher a thousand messages, or a quarter of the
-    /// window when the window holds fewer than four thousand frames, and one at the
-    /// least, so that holding it never back-pressures the publisher (ADR 0127).
+    /// A held subscriber leaves the publisher 64 messages, or a quarter of the window
+    /// when the window holds fewer than 256 frames, and one at the least, so that
+    /// holding it never back-pressures the publisher (ADR 0127).
     #[test]
-    fn a_held_subscriber_leaves_a_thousand_messages_or_a_quarter_of_the_window() {
+    fn a_held_subscriber_leaves_64_messages_or_a_quarter_of_the_window() {
         // The log rows' default: a 4 MiB term's window of 2 MiB, 64-byte frames.
-        assert_eq!(Held::new(2 * 1024 * 1024, 64).messages, 1_000);
+        assert_eq!(Held::new(2 * 1024 * 1024, 64).messages, 64);
         // The driver's: a 32 MiB window, the largest frame of the MTU.
-        assert_eq!(Held::new(32 * 1024 * 1024, 1408).messages, 1_000);
-        // The least term, 64 KiB: a window of 512 frames.
-        assert_eq!(Held::new(32 * 1024, 64).messages, 128);
-        // A window of fewer than four frames still leaves one.
+        assert_eq!(Held::new(32 * 1024 * 1024, 1408).messages, 64);
+        // The least term, 64 KiB: a window of 512 frames of 64 bytes.
+        assert_eq!(Held::new(32 * 1024, 64).messages, 64);
+        // The same window in the MTU's largest frames holds 23: a quarter is 5.
         assert_eq!(Held::new(32 * 1024, 1408).messages, 5);
+        // A window of fewer than four frames still leaves one.
         assert_eq!(Held::new(1024, 1408).messages, 1);
     }
 
@@ -5029,38 +5037,22 @@ mod tests {
     #[test]
     fn a_stay_follows_the_drained_rate_within_its_bounds() {
         // Fewer drained than a stay leaves: the rate is not known yet.
-        assert_eq!(
-            Held::stay_ns(1_000, 999, 50_000, HOLD_FIRST_NS),
-            HOLD_FIRST_NS
-        );
-        // 13.5 million a second, `grip`'s client row: 74 µs for a thousand.
-        assert_eq!(
-            Held::stay_ns(1_000, 13_500_000, 1_000_000_000, 16_000),
-            74_074
-        );
-        // 8 million a second, `bench`'s: 125 µs.
-        assert_eq!(
-            Held::stay_ns(1_000, 8_000_000, 1_000_000_000, 16_000),
-            125_000
-        );
-        // 68 million a second, a laptop's: under 15 µs, where a fixed 64 µs left the
-        // publisher 4,400 messages.
-        assert_eq!(
-            Held::stay_ns(1_000, 68_000_000, 1_000_000_000, 16_000),
-            14_705
-        );
+        assert_eq!(Held::stay_ns(64, 63, 3_000, HOLD_FIRST_NS), HOLD_FIRST_NS);
+        // 20 million a second, `grip`'s client row held: 3.2 µs for 64 messages.
+        assert_eq!(Held::stay_ns(64, 20_000_000, 1_000_000_000, 4_000), 3_200);
+        // 10 million a second, `bench`'s: 6.4 µs.
+        assert_eq!(Held::stay_ns(64, 10_000_000, 1_000_000_000, 4_000), 6_400);
+        // 68 million a second, a laptop's: under a microsecond, and inside the bounds.
+        assert_eq!(Held::stay_ns(64, 68_000_000, 1_000_000_000, 4_000), 941);
         // A publisher that stalled for ten seconds does not hold the subscriber away
         // for more than the bound, and a rate past any measured still leaves a stay.
+        assert_eq!(Held::stay_ns(64, 64, 10_000_000_000, 4_000), HOLD_MOST_NS);
         assert_eq!(
-            Held::stay_ns(1_000, 1_000, 10_000_000_000, 16_000),
-            HOLD_MOST_NS
-        );
-        assert_eq!(
-            Held::stay_ns(1_000, 5_000_000, 1_000_000, 16_000),
+            Held::stay_ns(64, 5_000_000, 1_000_000, 4_000),
             HOLD_LEAST_NS
         );
-        // A quarter of a small window: 128 messages at 13.5 million a second.
-        assert_eq!(Held::stay_ns(128, 13_500_000, 1_000_000_000, 16_000), 9_481);
+        // A quarter of a small window: 5 messages at 10 million a second.
+        assert_eq!(Held::stay_ns(5, 10_000_000, 1_000_000_000, 4_000), 500);
     }
 
     /// Over the runs the held subscriber's short polls keep the fewest and the most,
@@ -5068,18 +5060,18 @@ mod tests {
     #[test]
     fn the_held_polls_over_runs_keep_the_fewest_and_the_most() {
         let first = HeldPolls {
-            fewest: 5_800,
-            most: 5_800,
+            fewest: 78_300,
+            most: 78_300,
         };
-        let over = first.and_run(5_790).and_run(5_812);
+        let over = first.and_run(78_100).and_run(78_900);
         assert_eq!(
             over,
             HeldPolls {
-                fewest: 5_790,
-                most: 5_812
+                fewest: 78_100,
+                most: 78_900
             }
         );
-        assert_eq!(over.to_string(), "5790 to 5812");
+        assert_eq!(over.to_string(), "78100 to 78900");
     }
 
     /// A run whose loops allocated fails naming the count, the benchmarks that made it
