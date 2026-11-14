@@ -1160,9 +1160,10 @@ session it counts the replies that its readings of the entry have settled, sent 
 dropped, which are the first replies the entry makes that session, and it does not
 offer those again. When a reply to a session is refused, the replies that the same
 reading makes that session after it are not offered either, so that a session's
-replies keep their order. So no session is sent a reply twice. The rule rests on
-what the replay check asks of every service: the same replies, in the same order,
-each time an entry is read.
+replies keep their order. A reply that is longer than one frame is refused before
+it is counted, at every reading, and is not one of those replies. So no session is
+sent a reply twice. The rule rests on what the replay check asks of every service:
+the same replies, in the same order, each time an entry is read.
 
 ## The log's recordings
 
