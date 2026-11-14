@@ -188,6 +188,32 @@ const LINK_TIMEOUT: Duration = Duration::from_secs(600);
 /// The least body the link rows carry: this host's clock stamp, this host's wall-clock
 /// stamp and the peer's wall-clock stamp, eight bytes each.
 const LINK_BODY_LEAST: usize = 24;
+/// The most fragments one poll of a shared-memory message row's subscriber takes, in
+/// both parts of its loop.
+const FRAGMENT_LIMIT: usize = 1024;
+/// How many messages the publisher claims while the subscriber of a shared-memory
+/// message row stays away from the log, in the second part of the row's loop
+/// ([`Held`]; ADR 0127).
+///
+/// A subscriber that polls at the publisher's tail reads the line the publisher
+/// writes next, and the publisher then waits to have it back. That wait is real, and
+/// how many claims pay it follows how the two threads happen to be timed against each
+/// other: a build's layout, a process's address space or a step inside one process
+/// moved the share across the gate's percentiles with no instruction changed (work
+/// item 316). A held subscriber meets the tail once for each time it stays away, so
+/// about one claim in this many pays the wait, on any host and at any rate. One in a
+/// thousand is a tenth of one in a hundred, so a claim row's p50 and p99 are the
+/// claim alone, and ten times one in ten thousand, so its p99.99 is a claim that met
+/// a reader: the share sits on neither percentile.
+const HOLD_MESSAGES: u64 = 1_000;
+/// The held subscriber's first stays, until it has drained [`HOLD_MESSAGES`] and so
+/// knows the publisher's rate, in nanoseconds.
+const HOLD_FIRST_NS: u64 = 16_000;
+/// The bounds of one stay, in nanoseconds: a publisher that stalls must not hold the
+/// subscriber away for the stall, and one faster than any measured must still be
+/// left alone for a while.
+const HOLD_LEAST_NS: u64 = 1_000;
+const HOLD_MOST_NS: u64 = 1_000_000;
 
 struct Options {
     messages: u64,
@@ -311,13 +337,15 @@ impl Benchmark {
 
     /// The rows this benchmark writes, named as the table and the result name them for
     /// a body of `body` bytes, in the order `run_pass` has their summaries: the claim
-    /// row before the one-way row, the load row before the store row.
+    /// row before the one-way row, then for a shared-memory row the claim with the
+    /// subscriber at the publisher's tail (ADR 0127); the load row before the store row.
     fn rows(self, body: usize) -> Vec<String> {
         match self {
             Benchmark::Timer => vec!["timer".into()],
             Benchmark::Log { name, .. } | Benchmark::Client { name, .. } => vec![
                 format!("claim_commit_{body}_{name}"),
                 format!("one_way_{body}_{name}"),
+                format!("claim_commit_{body}_{name}_at_tail"),
             ],
             Benchmark::Udp => vec![
                 format!("claim_commit_{body}_udp"),
@@ -330,6 +358,7 @@ impl Benchmark {
             Benchmark::Ffi => vec![
                 format!("claim_commit_{body}_ffi"),
                 format!("one_way_{body}_ffi"),
+                format!("claim_commit_{body}_ffi_at_tail"),
             ],
             Benchmark::Slot { spacing } => vec![
                 format!("slot_padding_{spacing}_load"),
@@ -385,8 +414,11 @@ const USAGE: &str = "\
 cavalry-bench: the latency harness of `just bench` (CLAUDE.md, gate 2; ADR 0015).
 
 Options:
-  --messages N      messages per benchmark after the warm-up (default 1000000, at most
-                    100000000)
+  --messages N      messages each row measures after the warm-up (default 1000000, at
+                    most 100000000); a shared-memory benchmark's loop runs them twice,
+                    first with its subscriber at the publisher's tail, for the one_way
+                    row and the claim_commit row named _at_tail, then with it held
+                    behind the publisher, for the claim_commit row (ADR 0127)
   --warmup N        messages before recording starts; the default is one rotation through
                     all three terms, so no measured message first-touches a page (196608
                     for the default body and term), and 10000 for the UDP rows, whose
@@ -606,10 +638,15 @@ impl Options {
     /// not size, the driver's for the client rows.
     fn warmup_for(&self, term_length: u32) -> u64 {
         const DEFAULT: u64 = 100_000;
-        const HEADER: usize = 32;
-        let frame = (HEADER + self.body).next_multiple_of(32) as u64;
         self.warmup_option
-            .unwrap_or_else(|| DEFAULT.max(3 * u64::from(term_length) / frame.max(1)))
+            .unwrap_or_else(|| DEFAULT.max(3 * u64::from(term_length) / self.frame_length()))
+    }
+
+    /// The bytes one message takes in a log: its 32-byte header and `--body`, aligned
+    /// to 32 (`spec/frame.md`). Never 0.
+    fn frame_length(&self) -> u64 {
+        const HEADER: usize = 32;
+        (HEADER + self.body).next_multiple_of(32) as u64
     }
 
     /// The UDP rows' warm-up: `--warmup`, or [`UDP_WARMUP`].
@@ -1054,6 +1091,82 @@ fn span_ns(from: u64, to: u64) -> u64 {
     clock().delta_as_nanos(from, to)
 }
 
+/// The subscriber of a shared-memory message row in the second part of its loop,
+/// held behind the publisher (ADR 0127). After a poll that came back short of
+/// [`FRAGMENT_LIMIT`], it stays away from the log for as long as the publisher has
+/// been taking to claim `messages` messages, and after a full poll it polls again at
+/// once, so no backlog grows. A short poll has reached a frame not yet committed,
+/// which is the publisher's tail, or the end of a term.
+///
+/// The publisher's rate is the subscriber's own: what it has drained in this part
+/// over the time the part has run, by the harness's clock, which is the time stamp
+/// counter. So neither the estimate nor the stay reads or writes a line another
+/// thread writes. A stay is a time and not a count of pause instructions, since a
+/// pause is about 16 ns on `grip`'s processor and far less on `bench`'s; and it
+/// follows the rate and is not one fixed time, since a fixed time is a different
+/// share of the claims on a faster host: 64 µs is one claim in 860 on `grip` and one
+/// in 5,400 on a laptop that claims 68 million a second, where the share came back
+/// to the gate's percentile (ADR 0127, Evidence).
+struct Held {
+    /// How many messages the publisher is left to claim during one stay.
+    messages: u64,
+    /// When this part began, a reading of the clock.
+    start: u64,
+    /// The messages delivered in this part.
+    drained: u64,
+    /// The stay in force, in nanoseconds, within [`HOLD_LEAST_NS`] and
+    /// [`HOLD_MOST_NS`].
+    hold_ns: u64,
+    /// The short polls so far ([`LogRun::held_polls`]).
+    short_polls: u64,
+}
+
+impl Held {
+    /// A subscriber about to begin the second part, over a log whose publication
+    /// window is `window` bytes and whose frames are `frame` bytes: it leaves the
+    /// publisher [`HOLD_MESSAGES`] messages, or a quarter of the window when that is
+    /// less, so that holding it never back-pressures the publisher.
+    fn new(window: u64, frame: u64) -> Self {
+        Self {
+            messages: HOLD_MESSAGES.min(window / frame.max(1) / 4).max(1),
+            start: tick(),
+            drained: 0,
+            hold_ns: HOLD_FIRST_NS,
+            short_polls: 0,
+        }
+    }
+
+    /// Takes one poll's count of fragments, and stays away after a short one.
+    #[inline(always)]
+    fn polled(&mut self, delivered: usize) {
+        self.drained += delivered as u64;
+        if delivered < FRAGMENT_LIMIT {
+            self.short_polls += 1;
+            let from = tick();
+            self.hold_ns = Self::stay_ns(
+                self.messages,
+                self.drained,
+                span_ns(self.start, from),
+                self.hold_ns,
+            );
+            while span_ns(from, tick()) < self.hold_ns {
+                std::hint::spin_loop();
+            }
+        }
+    }
+
+    /// The next stay: the time the publisher has been taking to claim `messages`
+    /// messages, `drained` of them in `elapsed_ns`, within the bounds; or the stay in
+    /// force, `hold_ns`, until `messages` have been drained, since a rate read from
+    /// fewer is the first poll's and not the publisher's.
+    fn stay_ns(messages: u64, drained: u64, elapsed_ns: u64, hold_ns: u64) -> u64 {
+        if drained < messages {
+            return hold_ns;
+        }
+        (messages.saturating_mul(elapsed_ns) / drained).clamp(HOLD_LEAST_NS, HOLD_MOST_NS)
+    }
+}
+
 /// How many pairs of consecutive readings `clock_step` takes.
 const STEP_PAIRS: usize = 1_000_000;
 /// The largest advance `clock_step` counts; a larger one is an interrupt or a migration.
@@ -1145,8 +1258,24 @@ fn bench_timer(options: &Options) -> Summary {
 
 /// What the log benchmark produced for one log type.
 struct LogRun {
+    /// The publisher's claim and commit: for a shared-memory row, in the second part
+    /// of its loop, with the subscriber held behind the publisher (ADR 0127).
     claim_commit: Summary,
+    /// The delivery's time from the publisher's stamp: for a shared-memory row, in the
+    /// first part of its loop, with the subscriber at the publisher's tail.
     one_way: Summary,
+    /// The publisher's claim and commit in the first part of a shared-memory row's
+    /// loop, with the subscriber at its tail: the `_at_tail` row, reported and never
+    /// gated (ADR 0127). `None` for a UDP row, whose loop has one part: there the
+    /// reader at the publisher's tail is the driver's sender, which the harness does
+    /// not hold.
+    claim_at_tail: Option<Summary>,
+    /// How many polls of the held subscriber came back short of [`FRAGMENT_LIMIT`]:
+    /// it had reached a frame not yet committed, the publisher's tail, or the end of
+    /// a term. About one claim for each paid for the meeting, so this over
+    /// `--messages` is the share of the claim row's samples that met a reader.
+    /// `None` for a UDP row.
+    held_polls: Option<u64>,
     retries: u64,
     allocations: usize,
     /// How many times the harness's own conductor loaded the producer position during
@@ -1182,6 +1311,33 @@ impl Purged {
             outlasted: self.outlasted && run.outlasted,
             ..fewest
         }
+    }
+}
+
+/// The short polls of a shared-memory benchmark's held subscriber over its runs
+/// ([`LogRun::held_polls`]; ADR 0127): the fewest and the most of any run. The fewest
+/// over `--messages` must stay well over one in ten thousand for the claim row's
+/// p99.99 to be a claim that met a reader, and the most well under one in a hundred
+/// for its p99 to be the claim alone, so both are printed and written to the result.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct HeldPolls {
+    fewest: u64,
+    most: u64,
+}
+
+impl HeldPolls {
+    /// The figures over the runs so far and one more run's count.
+    fn and_run(self, polls: u64) -> HeldPolls {
+        HeldPolls {
+            fewest: self.fewest.min(polls),
+            most: self.most.max(polls),
+        }
+    }
+}
+
+impl std::fmt::Display for HeldPolls {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{} to {}", self.fewest, self.most)
     }
 }
 
@@ -1246,7 +1402,11 @@ fn run_log(options: &Options, log_type: LogType, dir: &std::path::Path) -> Resul
     limit.store_release(i64::from(window));
 
     let warmup = options.warmup();
-    let total = warmup + options.messages;
+    // The loop's two parts, `--messages` each (ADR 0127): the first with the
+    // subscriber at the publisher's tail, which the one-way row needs, and the second,
+    // from message `held_from`, with it held behind, which the claim row is read in.
+    let held_from = warmup + options.messages;
+    let total = held_from + options.messages;
     let epoch = tick();
     let done = Arc::new(AtomicBool::new(false));
 
@@ -1255,20 +1415,24 @@ fn run_log(options: &Options, log_type: LogType, dir: &std::path::Path) -> Resul
         let dir = dir.to_path_buf();
         let position = subscriber_position.clone();
         let cpu = options.pin.map(|pin| pin.subscriber);
-        let mut hist = Samples::with_capacity(total - warmup);
+        let (held_window, frame) = (u64::from(window), options.frame_length());
+        let mut hist = Samples::with_capacity(options.messages);
         thread::Builder::new()
             .name("subscriber".into())
-            .spawn(move || -> Result<Samples, String> {
+            .spawn(move || -> Result<(Samples, u64), String> {
                 pin_to(cpu)?;
                 let log =
                     LogBuffers::open(&dir, CORRELATION_ID, false).map_err(|e| e.to_string())?;
                 let mut reader = log.reader(0).map_err(|e| e.to_string())?;
                 let mut received: u64 = 0;
-                while received < total {
+                // The first part: at the publisher's tail, each delivery timed. A poll
+                // can run past the part's end, so the handler keeps a sample only of a
+                // message inside it.
+                while received < held_from {
                     let poll = reader
-                        .poll(1024, |body, _| {
+                        .poll(FRAGMENT_LIMIT, |body, _| {
                             let stamp = u64::from_le_bytes(body[..8].try_into().expect("8 bytes"));
-                            if received >= warmup {
+                            if (warmup..held_from).contains(&received) {
                                 hist.record(nanos(epoch).saturating_sub(stamp));
                             }
                             received += 1;
@@ -1279,7 +1443,22 @@ fn run_log(options: &Options, log_type: LogType, dir: &std::path::Path) -> Resul
                         std::hint::spin_loop();
                     }
                 }
-                Ok(hist)
+                // The second part: held behind the publisher (`Held`). The body is
+                // read as the first part reads it, and nothing is timed.
+                let mut held = Held::new(held_window, frame);
+                while received < total {
+                    let poll = reader
+                        .poll(FRAGMENT_LIMIT, |body, _| {
+                            std::hint::black_box(u64::from_le_bytes(
+                                body[..8].try_into().expect("8 bytes"),
+                            ));
+                            received += 1;
+                        })
+                        .map_err(|e| e.to_string())?;
+                    position.store_release(poll.position);
+                    held.polled(poll.fragments);
+                }
+                Ok((hist, held.short_polls))
             })
             .map_err(|e| e.to_string())?
     };
@@ -1348,14 +1527,20 @@ fn run_log(options: &Options, log_type: LogType, dir: &std::path::Path) -> Resul
     // The publisher, on this thread, with its own writable mapping.
     let publisher_log = LogBuffers::open(dir, CORRELATION_ID, true).map_err(|e| e.to_string())?;
     let mut appender = publisher_log.appender().map_err(|e| e.to_string())?;
+    // One histogram for each part: a claim with the subscriber at the tail, then a
+    // claim with it held behind.
+    let mut at_tail = histogram();
     let mut hist = histogram();
     let mut retries: u64 = 0;
     let mut counting: Option<Counting> = None;
     let mut start = Instant::now();
+    let mut held_start = start;
     for i in 0..total {
         if i == warmup {
             counting = Some(Counting::open());
             start = Instant::now();
+        } else if i == held_from {
+            held_start = Instant::now();
         }
         let stamp = nanos(epoch);
         let t0 = tick();
@@ -1373,13 +1558,16 @@ fn run_log(options: &Options, log_type: LogType, dir: &std::path::Path) -> Resul
                 Err(other) => return Err(other.to_string()),
             }
         }
-        if i >= warmup {
-            hist.saturating_record(span_ns(t0, tick()));
+        let taken = span_ns(t0, tick());
+        if i >= held_from {
+            hist.saturating_record(taken);
+        } else if i >= warmup {
+            at_tail.saturating_record(taken);
         }
     }
-    let elapsed = start.elapsed();
+    let (at_tail_elapsed, elapsed) = parts_elapsed(start, held_start);
     let allocations = counting.as_ref().map_or(0, Counting::close);
-    let one_way = subscriber
+    let (one_way, held_polls) = subscriber
         .join()
         .map_err(|_| "the subscriber thread panicked".to_string())??;
     done.store(true, Ordering::Release);
@@ -1392,12 +1580,22 @@ fn run_log(options: &Options, log_type: LogType, dir: &std::path::Path) -> Resul
     let one_way = one_way.histogram()?;
     Ok(LogRun {
         claim_commit: summarize(&hist, elapsed),
-        one_way: summarize(&one_way, elapsed),
+        one_way: summarize(&one_way, at_tail_elapsed),
+        claim_at_tail: Some(summarize(&at_tail, at_tail_elapsed)),
+        held_polls: Some(held_polls),
         retries,
         allocations,
         producer_position_loads: Some(producer_position_loads),
         purged: None,
     })
+}
+
+/// How long each part of a shared-memory row's measured loop took, read when the loop
+/// has ended: the first from `start`, when the warm-up ended, to `held_start`, when
+/// the publisher claimed the second part's first message, and the second from there
+/// to now. A row's rate is its own part's (ADR 0127).
+fn parts_elapsed(start: Instant, held_start: Instant) -> (Duration, Duration) {
+    (held_start.duration_since(start), held_start.elapsed())
 }
 
 /// The client rows: a real driver and a real client in this process, a publication and a
@@ -1756,12 +1954,18 @@ fn run_client(
     }
 
     let warmup = options.warmup_for(spec::IPC_TERM_LENGTH);
-    let total = warmup + options.messages;
+    // The loop's two parts, as in `run_log` (ADR 0127).
+    let held_from = warmup + options.messages;
+    let total = held_from + options.messages;
     let epoch = tick();
 
     let subscriber = {
         let cpu = options.pin.map(|pin| pin.subscriber);
-        let mut hist = Samples::with_capacity(total - warmup);
+        let (held_window, frame) = (
+            u64::from(spec::IPC_PUBLICATION_WINDOW),
+            options.frame_length(),
+        );
+        let mut hist = Samples::with_capacity(options.messages);
         thread::Builder::new()
             .name("client-subscriber".into())
             // The subscription comes back with the histogram and is closed by the
@@ -1771,32 +1975,50 @@ fn run_client(
             // once in twenty million messages, and the driver's conductor ran
             // `drop_subscription` on its next duty cycle; that allocates, and the
             // window counted it (card 176).
-            .spawn(move || -> Result<(Subscription, Samples), String> {
+            .spawn(move || -> Result<(Subscription, Samples, u64), String> {
                 pin_to(cpu)?;
                 let mut received: u64 = 0;
-                while received < total {
+                // The first part: at the publisher's tail, each delivery timed.
+                while received < held_from {
                     let delivered = subscription
                         .poll(
                             |body, _| {
                                 let stamp =
                                     u64::from_le_bytes(body[..8].try_into().expect("8 bytes"));
-                                if received >= warmup {
+                                if (warmup..held_from).contains(&received) {
                                     hist.record(nanos(epoch).saturating_sub(stamp));
                                 }
                                 received += 1;
                             },
-                            1024,
+                            FRAGMENT_LIMIT,
                         )
                         .map_err(|e| e.to_string())?;
                     if delivered == 0 {
                         std::hint::spin_loop();
                     }
                 }
-                Ok((subscription, hist))
+                // The second part: held behind the publisher, as in `run_log`.
+                let mut held = Held::new(held_window, frame);
+                while received < total {
+                    let delivered = subscription
+                        .poll(
+                            |body, _| {
+                                std::hint::black_box(u64::from_le_bytes(
+                                    body[..8].try_into().expect("8 bytes"),
+                                ));
+                                received += 1;
+                            },
+                            FRAGMENT_LIMIT,
+                        )
+                        .map_err(|e| e.to_string())?;
+                    held.polled(delivered);
+                }
+                Ok((subscription, hist, held.short_polls))
             })
             .map_err(|e| e.to_string())?
     };
 
+    let mut at_tail = histogram();
     let mut hist = histogram();
     let mut retries: u64 = 0;
     // The retries of the message being claimed. A subscriber that has returned, or one
@@ -1807,11 +2029,14 @@ fn run_client(
     const STALL_LIMIT: Duration = Duration::from_secs(10);
     let mut counting: Option<Counting> = None;
     let mut start = Instant::now();
+    let mut held_start = start;
     for i in 0..total {
         if i == warmup {
             purged_before = purged_at(&counters)? as u64;
             counting = Some(Counting::open());
             start = Instant::now();
+        } else if i == held_from {
+            held_start = Instant::now();
         }
         let stamp = nanos(epoch);
         let t0 = tick();
@@ -1844,17 +2069,20 @@ fn run_client(
             }
         }
         stalled = 0;
-        if i >= warmup {
-            hist.saturating_record(span_ns(t0, tick()));
+        let taken = span_ns(t0, tick());
+        if i >= held_from {
+            hist.saturating_record(taken);
+        } else if i >= warmup {
+            at_tail.saturating_record(taken);
         }
     }
-    let elapsed = start.elapsed();
+    let (at_tail_elapsed, elapsed) = parts_elapsed(start, held_start);
     // The counter at the loop's end, read before the window closes so that it is the
     // loop's and not the close's: files of the pile still to go mean the purge outlasted
     // the loop, exactly, where the reply's arrival would say so a duty cycle or two late.
     let purged_after = purged_at(&counters)? as u64;
     let allocations = counting.as_ref().map_or(0, Counting::close);
-    let (subscription, one_way) = match subscriber.join() {
+    let (subscription, one_way, held_polls) = match subscriber.join() {
         Ok(Ok(returned)) => returned,
         failed => return Err(subscriber_failure(failed)),
     };
@@ -1902,7 +2130,9 @@ fn run_client(
     let one_way = one_way.histogram()?;
     Ok(LogRun {
         claim_commit: summarize(&hist, elapsed),
-        one_way: summarize(&one_way, elapsed),
+        one_way: summarize(&one_way, at_tail_elapsed),
+        claim_at_tail: Some(summarize(&at_tail, at_tail_elapsed)),
+        held_polls: Some(held_polls),
         retries,
         allocations,
         producer_position_loads: None,
@@ -1959,40 +2189,62 @@ fn run_ffi(options: &Options, dir: &std::path::Path) -> Result<LogRun, String> {
     }
 
     let warmup = options.warmup_for(spec::IPC_TERM_LENGTH);
-    let total = warmup + options.messages;
+    // The loop's two parts, as in `run_log` (ADR 0127).
+    let held_from = warmup + options.messages;
+    let total = held_from + options.messages;
     let epoch = tick();
 
     let subscriber = {
         let cpu = options.pin.map(|pin| pin.subscriber);
-        let mut hist = Samples::with_capacity(total - warmup);
+        let (held_window, frame) = (
+            u64::from(spec::IPC_PUBLICATION_WINDOW),
+            options.frame_length(),
+        );
+        let mut hist = Samples::with_capacity(options.messages);
         thread::Builder::new()
             .name("ffi-subscriber".into())
             .spawn(
-                move || -> Result<(harness::Subscription, Samples), String> {
+                move || -> Result<(harness::Subscription, Samples, u64), String> {
                     pin_to(cpu)?;
                     let mut received: u64 = 0;
-                    while received < total {
+                    // The first part: at the publisher's tail, each delivery timed.
+                    while received < held_from {
                         let delivered = subscription.poll(
                             &mut |body| {
                                 let stamp =
                                     u64::from_le_bytes(body[..8].try_into().expect("8 bytes"));
-                                if received >= warmup {
+                                if (warmup..held_from).contains(&received) {
                                     hist.record(nanos(epoch).saturating_sub(stamp));
                                 }
                                 received += 1;
                             },
-                            1024,
+                            FRAGMENT_LIMIT,
                         )?;
                         if delivered == 0 {
                             std::hint::spin_loop();
                         }
                     }
-                    Ok((subscription, hist))
+                    // The second part: held behind the publisher, as in `run_log`.
+                    let mut held = Held::new(held_window, frame);
+                    while received < total {
+                        let delivered = subscription.poll(
+                            &mut |body| {
+                                std::hint::black_box(u64::from_le_bytes(
+                                    body[..8].try_into().expect("8 bytes"),
+                                ));
+                                received += 1;
+                            },
+                            FRAGMENT_LIMIT,
+                        )?;
+                        held.polled(delivered);
+                    }
+                    Ok((subscription, hist, held.short_polls))
                 },
             )
             .map_err(|e| e.to_string())?
     };
 
+    let mut at_tail = histogram();
     let mut hist = histogram();
     let mut retries: u64 = 0;
     let mut stalled: u64 = 0;
@@ -2000,10 +2252,13 @@ fn run_ffi(options: &Options, dir: &std::path::Path) -> Result<LogRun, String> {
     const STALL_LIMIT: Duration = Duration::from_secs(10);
     let mut counting: Option<Counting> = None;
     let mut start = Instant::now();
+    let mut held_start = start;
     for i in 0..total {
         if i == warmup {
             counting = Some(Counting::open());
             start = Instant::now();
+        } else if i == held_from {
+            held_start = Instant::now();
         }
         let stamp = nanos(epoch);
         let t0 = tick();
@@ -2037,13 +2292,16 @@ fn run_ffi(options: &Options, dir: &std::path::Path) -> Result<LogRun, String> {
             }
         }
         stalled = 0;
-        if i >= warmup {
-            hist.saturating_record(span_ns(t0, tick()));
+        let taken = span_ns(t0, tick());
+        if i >= held_from {
+            hist.saturating_record(taken);
+        } else if i >= warmup {
+            at_tail.saturating_record(taken);
         }
     }
-    let elapsed = start.elapsed();
+    let (at_tail_elapsed, elapsed) = parts_elapsed(start, held_start);
     let allocations = counting.as_ref().map_or(0, Counting::close);
-    let (subscription, one_way) = match subscriber.join() {
+    let (subscription, one_way, held_polls) = match subscriber.join() {
         Ok(Ok(returned)) => returned,
         failed => return Err(subscriber_failure(failed)),
     };
@@ -2060,7 +2318,9 @@ fn run_ffi(options: &Options, dir: &std::path::Path) -> Result<LogRun, String> {
     let one_way = one_way.histogram()?;
     Ok(LogRun {
         claim_commit: summarize(&hist, elapsed),
-        one_way: summarize(&one_way, elapsed),
+        one_way: summarize(&one_way, at_tail_elapsed),
+        claim_at_tail: Some(summarize(&at_tail, at_tail_elapsed)),
+        held_polls: Some(held_polls),
         retries,
         allocations,
         producer_position_loads: None,
@@ -3092,6 +3352,8 @@ fn mdc_rows(
     Ok(LogRun {
         claim_commit: summarize(&published.claim_commit, published.elapsed),
         one_way: summarize(&one_way.histogram()?, published.elapsed),
+        claim_at_tail: None,
+        held_polls: None,
         retries: published.retries,
         allocations: published.allocations,
         producer_position_loads: None,
@@ -3189,6 +3451,8 @@ fn run_udp(options: &Options, dir: &std::path::Path) -> Result<LogRun, String> {
     Ok(LogRun {
         claim_commit: summarize(&published.claim_commit, published.elapsed),
         one_way: summarize(&one_way.histogram()?, published.elapsed),
+        claim_at_tail: None,
+        held_polls: None,
         retries: published.retries,
         allocations: published.allocations,
         producer_position_loads: None,
@@ -3750,12 +4014,16 @@ struct Pass {
     /// fails the allocation gate names the loop to look at; the sum over the names is
     /// the count the run is judged on.
     allocations: BTreeMap<String, usize>,
-    /// The messages the message rows measured, for the allocations per message:
-    /// `--messages` for each of the two log rows and the two client rows in a full
-    /// pass, a tenth of that for the UDP row ([`UDP_SHARE`]), fewer under `--only`.
+    /// The messages the message benchmarks' counting windows covered, for the
+    /// allocations per message: twice `--messages` for each shared-memory benchmark,
+    /// whose loop has two parts (ADR 0127), and a tenth of `--messages` for each UDP
+    /// one ([`UDP_SHARE`]); fewer under `--only`.
     messages_measured: u64,
     /// What the purge running through a benchmark's loop did, under its name (card 177).
     purged: BTreeMap<String, Purged>,
+    /// The short polls of each shared-memory benchmark's held subscriber, under its
+    /// name ([`LogRun::held_polls`]; ADR 0127).
+    held_polls: BTreeMap<String, u64>,
 }
 
 impl Pass {
@@ -3772,9 +4040,11 @@ impl Pass {
         }
     }
 
-    /// Records a message benchmark's run of `messages` messages, a log, a client or a
-    /// UDP one: its two rows, and its retries, producer position loads and allocations
-    /// under `name`.
+    /// Records a message benchmark's run, a log, a client or a UDP one: its rows, and
+    /// its retries, producer position loads, held polls and allocations under `name`.
+    /// `messages` is what each part of its loop measured: a shared-memory benchmark's
+    /// loop has two parts under one counting window (ADR 0127), so it adds twice that
+    /// to the messages the allocations are counted over, and a UDP benchmark's has one.
     fn insert_message_run(
         &mut self,
         benchmark: Benchmark,
@@ -3783,7 +4053,17 @@ impl Pass {
         run: LogRun,
         messages: u64,
     ) {
-        self.insert_rows(benchmark, body, [run.claim_commit, run.one_way]);
+        let parts = if run.claim_at_tail.is_some() { 2 } else { 1 };
+        self.insert_rows(
+            benchmark,
+            body,
+            [Some(run.claim_commit), Some(run.one_way), run.claim_at_tail]
+                .into_iter()
+                .flatten(),
+        );
+        if let Some(polls) = run.held_polls {
+            self.held_polls.insert(name.into(), polls);
+        }
         self.retries.insert(name.into(), run.retries);
         if let Some(loads) = run.producer_position_loads {
             self.producer_position_loads.insert(name.into(), loads);
@@ -3792,7 +4072,7 @@ impl Pass {
         if let Some(purged) = run.purged {
             self.purged.insert(name.into(), purged);
         }
-        self.messages_measured += messages;
+        self.messages_measured += parts * messages;
     }
 }
 
@@ -3967,6 +4247,9 @@ fn main() -> ExitCode {
     // The purge's figures over the runs: the fewest files removed during a loop, of
     // that run's pile, and whether it outlasted every loop (card 177; `merge_purged`).
     let mut purged_by_benchmark: BTreeMap<String, Purged> = BTreeMap::new();
+    // The short polls of each shared-memory benchmark's held subscriber: the fewest
+    // and the most of any run (ADR 0127).
+    let mut held_polls: BTreeMap<String, HeldPolls> = BTreeMap::new();
     let mut messages_measured: u64 = 0;
     let mut below_zero: u64 = 0;
     if let Some(link) = &options.link {
@@ -4035,6 +4318,15 @@ fn main() -> ExitCode {
             *allocations_by_benchmark.entry(name).or_insert(0) += count;
         }
         merge_purged(&mut purged_by_benchmark, pass.purged);
+        for (name, polls) in pass.held_polls {
+            held_polls
+                .entry(name)
+                .and_modify(|runs| *runs = runs.and_run(polls))
+                .or_insert(HeldPolls {
+                    fewest: polls,
+                    most: polls,
+                });
+        }
         messages_measured += pass.messages_measured;
     }
     let mut benchmarks: BTreeMap<String, Summary> = BTreeMap::new();
@@ -4050,19 +4342,24 @@ fn main() -> ExitCode {
         benchmarks.insert(name, median);
     }
 
-    // The messages the message rows measured: five rows in a full pass, the two log
-    // rows and the two client rows of `--messages` each and the UDP row of a tenth, or
-    // the link rows alone; fewer under `--only`, and none when it admitted only the
-    // timer, slot or record rows, where the ratio has no denominator and is left out of
-    // the line and the result, while the count still decides the exit code. The
-    // recorder's block row adds its allocations to the count and no messages.
+    // The messages the message benchmarks' counting windows covered: in a full pass
+    // twice `--messages` for each of the two log benchmarks, the two client ones and
+    // the ffi one, whose loops have two parts (ADR 0127), and a tenth of `--messages`
+    // for each UDP one, or the link rows alone; fewer under `--only`, and none when it
+    // admitted only the timer, slot or record rows, where the ratio has no denominator
+    // and is left out of the line and the result, while the count still decides the
+    // exit code. The recorder's block row adds its allocations to the count and no
+    // messages.
     let allocations: usize = allocations_by_benchmark.values().sum();
     let allocations_per_message =
         (messages_measured > 0).then(|| allocations as f64 / messages_measured as f64);
 
+    // The name column is as wide as the longest row's name, 28 at the least: an
+    // `_at_tail` row's name is longer than that (ADR 0127).
+    let wide = benchmarks.keys().map(String::len).fold(28, usize::max);
     println!();
     println!(
-        "  {:<28} {:>10} {:>10} {:>10} {:>10} {:>12} {:>14}  p99.99 ns of every run",
+        "  {:<wide$} {:>10} {:>10} {:>10} {:>10} {:>12} {:>14}  p99.99 ns of every run",
         "benchmark", "count", "p50 ns", "p99 ns", "p99.99 ns", "max ns", "per second"
     );
     for (name, s) in &benchmarks {
@@ -4070,7 +4367,7 @@ fn main() -> ExitCode {
             r.iter().map(u64::to_string).collect::<Vec<_>>().join(" ")
         });
         println!(
-            "  {:<28} {:>10} {:>10} {:>10} {:>10} {:>12} {:>14.0}  {every}",
+            "  {:<wide$} {:>10} {:>10} {:>10} {:>10} {:>12} {:>14.0}  {every}",
             name, s.count, s.p50_ns, s.p99_ns, s.p99_99_ns, s.max_ns, s.rate_per_s
         );
     }
@@ -4082,6 +4379,11 @@ fn main() -> ExitCode {
     println!(
         "  producer position loads by the harness's conductor, at the driver's cadence by the clock, the most of any run: {}",
         listed(&producer_position_loads, "no log row ran")
+    );
+    println!(
+        "  short polls of the held subscriber, each a meeting with the publisher's tail or a term's end, the fewest and the most of any run of {} messages: {}",
+        options.messages,
+        listed(&held_polls, "no shared-memory message row ran")
     );
     println!(
         "  allocations by benchmark, summed over the runs: {}",
@@ -4156,6 +4458,17 @@ fn main() -> ExitCode {
         out,
         "  \"producer_position_loads\": {{{}}},",
         json_object(&producer_position_loads)
+    );
+    // The held subscriber's short polls by benchmark, `[fewest, most]` over the runs:
+    // over `messages`, the share of a claim row's samples that met a reader (ADR 0127).
+    let held_polls_json: BTreeMap<String, String> = held_polls
+        .iter()
+        .map(|(name, polls)| (name.clone(), format!("[{}, {}]", polls.fewest, polls.most)))
+        .collect();
+    let _ = writeln!(
+        out,
+        "  \"held_polls\": {{{}}},",
+        json_object(&held_polls_json)
     );
     // Each benchmark's share of the count under its name, then the count the exit code
     // is decided on, beside the ratio: `bench-compare` judges the count when no message
@@ -4419,9 +4732,19 @@ mod tests {
         };
         assert!(error.starts_with("--only slot_padding_96:"), "{error}");
         // The timer, two rows each of the seven message benchmarks and the three slot
-        // pairs, and the record row.
+        // pairs, the `_at_tail` row of each of the five shared-memory message
+        // benchmarks (ADR 0127), and the record row.
         let rows = options(&[]).rows();
-        assert_eq!(rows.len(), 22);
+        assert_eq!(rows.len(), 27);
+        assert_eq!(
+            rows.iter().filter(|row| row.ends_with("_at_tail")).count(),
+            5
+        );
+        assert!(
+            !rows
+                .iter()
+                .any(|row| row.contains("udp") && row.ends_with("_at_tail"))
+        );
         for row in rows {
             assert!(error.contains(&row), "{error} does not list {row}");
         }
@@ -4627,7 +4950,7 @@ mod tests {
     /// failure can name the loop that allocated, and its messages in the sum.
     #[test]
     fn a_pass_keeps_allocations_by_benchmark() {
-        let run = |allocations| {
+        let run = |allocations, two_parts: bool| {
             let empty = Summary {
                 count: 0,
                 p50_ns: 0,
@@ -4638,7 +4961,9 @@ mod tests {
             };
             LogRun {
                 claim_commit: empty.clone(),
-                one_way: empty,
+                one_way: empty.clone(),
+                claim_at_tail: two_parts.then(|| empty.clone()),
+                held_polls: two_parts.then_some(7),
                 retries: 0,
                 allocations,
                 producer_position_loads: None,
@@ -4646,7 +4971,7 @@ mod tests {
             }
         };
         let mut pass = Pass::default();
-        pass.insert_message_run(Benchmark::Udp, "udp", 32, run(1), 10);
+        pass.insert_message_run(Benchmark::Udp, "udp", 32, run(1, false), 10);
         pass.insert_message_run(
             Benchmark::Client {
                 recorded: false,
@@ -4655,15 +4980,105 @@ mod tests {
             },
             "client",
             32,
-            run(0),
+            run(0, true),
             100,
         );
         assert_eq!(
             pass.allocations,
             BTreeMap::from([("client".to_string(), 0), ("udp".to_string(), 1)])
         );
-        assert_eq!(pass.messages_measured, 110);
-        assert_eq!(pass.benchmarks.len(), 4);
+        // The client benchmark's window covered both parts of its loop, 100 messages
+        // each (ADR 0127); the UDP benchmark's loop has one.
+        assert_eq!(pass.messages_measured, 210);
+        assert_eq!(
+            pass.benchmarks
+                .keys()
+                .map(String::as_str)
+                .collect::<Vec<_>>(),
+            [
+                "claim_commit_32_client",
+                "claim_commit_32_client_at_tail",
+                "claim_commit_32_udp",
+                "one_way_32_client",
+                "one_way_32_udp",
+            ]
+        );
+        assert_eq!(pass.held_polls, BTreeMap::from([("client".to_string(), 7)]));
+    }
+
+    /// A held subscriber leaves the publisher a thousand messages, or a quarter of the
+    /// window when the window holds fewer than four thousand frames, and one at the
+    /// least, so that holding it never back-pressures the publisher (ADR 0127).
+    #[test]
+    fn a_held_subscriber_leaves_a_thousand_messages_or_a_quarter_of_the_window() {
+        // The log rows' default: a 4 MiB term's window of 2 MiB, 64-byte frames.
+        assert_eq!(Held::new(2 * 1024 * 1024, 64).messages, 1_000);
+        // The driver's: a 32 MiB window, the largest frame of the MTU.
+        assert_eq!(Held::new(32 * 1024 * 1024, 1408).messages, 1_000);
+        // The least term, 64 KiB: a window of 512 frames.
+        assert_eq!(Held::new(32 * 1024, 64).messages, 128);
+        // A window of fewer than four frames still leaves one.
+        assert_eq!(Held::new(32 * 1024, 1408).messages, 5);
+        assert_eq!(Held::new(1024, 1408).messages, 1);
+    }
+
+    /// The stay is the time the publisher has been taking to claim the messages it is
+    /// left, by what the subscriber drained over the part so far, within its bounds;
+    /// until that many have been drained the stay in force stands.
+    #[test]
+    fn a_stay_follows_the_drained_rate_within_its_bounds() {
+        // Fewer drained than a stay leaves: the rate is not known yet.
+        assert_eq!(
+            Held::stay_ns(1_000, 999, 50_000, HOLD_FIRST_NS),
+            HOLD_FIRST_NS
+        );
+        // 13.5 million a second, `grip`'s client row: 74 µs for a thousand.
+        assert_eq!(
+            Held::stay_ns(1_000, 13_500_000, 1_000_000_000, 16_000),
+            74_074
+        );
+        // 8 million a second, `bench`'s: 125 µs.
+        assert_eq!(
+            Held::stay_ns(1_000, 8_000_000, 1_000_000_000, 16_000),
+            125_000
+        );
+        // 68 million a second, a laptop's: under 15 µs, where a fixed 64 µs left the
+        // publisher 4,400 messages.
+        assert_eq!(
+            Held::stay_ns(1_000, 68_000_000, 1_000_000_000, 16_000),
+            14_705
+        );
+        // A publisher that stalled for ten seconds does not hold the subscriber away
+        // for more than the bound, and a rate past any measured still leaves a stay.
+        assert_eq!(
+            Held::stay_ns(1_000, 1_000, 10_000_000_000, 16_000),
+            HOLD_MOST_NS
+        );
+        assert_eq!(
+            Held::stay_ns(1_000, 5_000_000, 1_000_000, 16_000),
+            HOLD_LEAST_NS
+        );
+        // A quarter of a small window: 128 messages at 13.5 million a second.
+        assert_eq!(Held::stay_ns(128, 13_500_000, 1_000_000_000, 16_000), 9_481);
+    }
+
+    /// Over the runs the held subscriber's short polls keep the fewest and the most,
+    /// which is what the line under the table and the result's `held_polls` say.
+    #[test]
+    fn the_held_polls_over_runs_keep_the_fewest_and_the_most() {
+        let first = HeldPolls {
+            fewest: 5_800,
+            most: 5_800,
+        };
+        let over = first.and_run(5_790).and_run(5_812);
+        assert_eq!(
+            over,
+            HeldPolls {
+                fewest: 5_790,
+                most: 5_812
+            }
+        );
+        assert_eq!(over.to_string(), "5790 to 5812");
     }
 
     /// A run whose loops allocated fails naming the count, the benchmarks that made it
@@ -5291,7 +5706,8 @@ mod tests {
     }
 
     /// `--purging` adds the recorded rows with a purge running, right after the
-    /// recorded rows, and the rows grow by its two.
+    /// recorded rows, and the rows grow by its three: the claim, the one-way and the
+    /// claim with the subscriber at the tail (ADR 0127).
     #[test]
     fn purging_adds_the_recorded_purging_benchmark_after_recorded() {
         let without = options(&[]).rows().len();
@@ -5303,11 +5719,16 @@ mod tests {
         let mut expected = Benchmark::ALL.to_vec();
         expected.insert(recorded + 1, Benchmark::PURGING);
         assert_eq!(options.benchmarks(), expected);
-        assert_eq!(options.rows().len(), without + 2);
+        assert_eq!(options.rows().len(), without + 3);
         assert!(
             options
                 .rows()
                 .contains(&"one_way_32_recorded_purging".to_string())
+        );
+        assert!(
+            options
+                .rows()
+                .contains(&"claim_commit_32_recorded_purging_at_tail".to_string())
         );
     }
 
@@ -5342,6 +5763,8 @@ mod tests {
         let run = |purged| LogRun {
             claim_commit: empty.clone(),
             one_way: empty.clone(),
+            claim_at_tail: Some(empty.clone()),
+            held_polls: Some(0),
             retries: 0,
             allocations: 0,
             producer_position_loads: None,

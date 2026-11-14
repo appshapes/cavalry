@@ -122,6 +122,22 @@ class Rule(unittest.TestCase):
         self.assertTrue(verdicts["one_way_32_udp"].endswith("+100.0% REGRESSION"), out)
         self.assertTrue(verdicts["one_way_32_udp_mdc"].endswith("+100.0% reported"), out)
 
+    def test_a_claim_at_the_tail_is_reported_and_the_claim_row_beside_it_gated(self):
+        # A shared-memory row's loop has two parts (ADR 0127): the claim with the
+        # subscriber at the publisher's tail is reported, since its tail moves with a
+        # build's layout and a process's draw (work item 316), and the claim with the
+        # subscriber held behind is the gated row.
+        code, out = run(result(1, claim_commit_32_client=row(80), claim_commit_32_client_at_tail=row(240)),
+                        baseline(step=1, claim_commit_32_client=row(80), claim_commit_32_client_at_tail=row(120)))
+        self.assertEqual(code, 0, out)
+        verdicts = {line.split()[0]: line for line in out.splitlines() if line.strip().startswith("claim_commit_")}
+        self.assertTrue(verdicts["claim_commit_32_client_at_tail"].endswith("+100.0% reported"), out)
+        code, out = run(result(1, claim_commit_32_client=row(160), claim_commit_32_client_at_tail=row(120)),
+                        baseline(step=1, claim_commit_32_client=row(80), claim_commit_32_client_at_tail=row(120)))
+        self.assertEqual(code, 1, out)
+        verdicts = {line.split()[0]: line for line in out.splitlines() if line.strip().startswith("claim_commit_")}
+        self.assertTrue(verdicts["claim_commit_32_client"].endswith("REGRESSION"), out)
+
     def test_a_probe_row_is_reported_never_failed(self):
         code, out = run(result(10, timer=row(40)), baseline(step=10, timer=row(20)))
         self.assertEqual(code, 0, out)

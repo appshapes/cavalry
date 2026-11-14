@@ -54,6 +54,25 @@ nothing depends on it.
   timestamp to the subscriber's handler, for the exclusive and the concurrent log type,
   and a slot-padding microbench that times a load of a word and a store to a word 0, 64
   or 128 bytes away, from two threads (ADR 0011).
+- Runs every shared-memory message benchmark, the two log types, `client`, `recorded`,
+  `recorded_purging` and `ffi`, as one loop of two parts, `--messages` each
+  ([ADR 0127](../docs/decisions/0127-measure-a-claim-row-with-its-subscriber-held-behind-the-publisher.md)).
+  In the first part the subscriber polls at the publisher's tail: the `one_way` row
+  is read there, and the claim there is the `claim_commit_<body>_<name>_at_tail` row,
+  reported and never gated. In the second part the subscriber is held behind the
+  publisher, and the `claim_commit` row is read there: after a poll that came back
+  short of its 1,024 fragments the subscriber stays away from the log for as long as
+  the publisher has been taking to claim 1,000 messages, by its own count and the
+  time stamp counter, so it touches no line another thread writes while it waits. A
+  subscriber at the tail reads the line the publisher writes next, and how many
+  claims then wait for that line followed a build's layout and a process's draw:
+  `claim_commit_32_client` read 117 to 139 ns at p99.99 on `grip` by the process, with
+  the same instructions on the claim path (work item 316). Held, the subscriber meets
+  the tail about once in a thousand claims on any host, so the claim row's p50 and
+  p99 are the claim alone and its p99.99 is a claim that met a reader. The meetings
+  of each benchmark's run are counted, printed under the table and written to the
+  result as `held_polls`. The UDP rows keep one loop: there the reader at the
+  publisher's tail is the driver's sender, which the harness does not hold.
 - Measures the same two rows through the C ABI, `claim_commit_32_ffi` and
   `one_way_32_ffi`: the client path of `claim_commit_32_client` reached through
   `cavalry-ffi`'s `extern "C"` functions in this binary, behind its `harness` module's
@@ -183,8 +202,8 @@ second compares the newest result with the baseline for the profile and ends wit
 `bench-compare: ok`, or names the regression. The columns are nanoseconds.
 
 ```text
-  benchmark                         count     p50 ns     p99 ns  p99.99 ns       max ns     per second
-  claim_commit_32_exclusive       2000000         ...
+  benchmark                               count     p50 ns     p99 ns  p99.99 ns       max ns     per second
+  claim_commit_32_exclusive             2000000         ...
 ```
 
 ## What to read next
