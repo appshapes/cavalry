@@ -31,14 +31,17 @@ p99.99 and no runs list (docs/how-to/run-the-bench.md, step 4); a join carries i
 through as such, each percentile the larger of the row's and the new process's and the
 p99.99 the slowest run of both, still with no list (card 221). Only
 the rows a message passes through, claim_commit_*, one_way_* and udp_round_trip_*, can
-fail the gate, and of those not the *_udp_mdc rows; the timer and slot_padding_* rows hold
+fail the gate, and of those not the *_udp_mdc rows nor the *_at_tail rows; the timer and slot_padding_* rows hold
 no Cavalry code, they probe the host and the clock at 30 to 60 ns, where one 10 ns step of
 the clock is 15 to 33 percent, and they are printed with their change marked "reported"
 (ADR 0017), as is udp_one_way_*, the one-way row across the two bench hosts, which carries
 the offset between their clocks (ADR 0039, ADR 0044), and as are claim_commit_*_udp_mdc
 and one_way_*_udp_mdc, the multi-destination cast rows: every isolated core of both bench
 hosts is taken, and they join the gate with the host change that gives them cores (ADR
-0052, feature 1).
+0052, feature 1). The claim_commit_*_at_tail rows are reported as well: a claim with the
+harness's subscriber at the publisher's tail, whose tail follows how the two threads are
+timed against each other and moved with no instruction changed; the gated claim rows are
+read with the subscriber held behind the publisher (ADR 0127).
 
     bench-compare.py                        compare the newest result; what `just bench-compare` and CI run
     bench-compare.py <result>               compare that result file instead
@@ -82,7 +85,10 @@ REPORTED_ROWS = ("udp_one_way_",)
 # The rows that are reported and never gated by their suffix: the multi-destination cast
 # rows run beside the UDP rows on hosts whose isolated cores the gated rows take, and join
 # the gate with the host change that gives them cores (ADR 0052, feature 1; ADR 0053).
-REPORTED_SUFFIXES = ("_udp_mdc",)
+# And the claim with the harness's subscriber at the publisher's tail, the first part of
+# a shared-memory row's loop: real, reported beside the gated claim row, and never gated,
+# since a build's layout or a process's draw moves its tail (ADR 0127; work item 316).
+REPORTED_SUFFIXES = ("_udp_mdc", "_at_tail")
 # The rows a message passes through; every other row is a probe of the host (ADR 0017).
 GATED_ROWS = ("claim_commit_", "one_way_", "udp_round_trip_")
 
