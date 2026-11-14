@@ -209,10 +209,11 @@ const HOLD_MESSAGES: u64 = 1_000;
 /// The held subscriber's first stays, until it has drained [`HOLD_MESSAGES`] and so
 /// knows the publisher's rate, in nanoseconds.
 const HOLD_FIRST_NS: u64 = 16_000;
-/// The bounds of one stay, in nanoseconds: a publisher that stalls must not hold the
-/// subscriber away for the stall, and one faster than any measured must still be
-/// left alone for a while.
+/// The least one stay may be, in nanoseconds: a publisher faster than any measured is
+/// still left alone for this long.
 const HOLD_LEAST_NS: u64 = 1_000;
+/// The most one stay may be, in nanoseconds: a publisher that stalled does not hold
+/// the subscriber away for the stall.
 const HOLD_MOST_NS: u64 = 1_000_000;
 
 struct Options {
