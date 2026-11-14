@@ -1026,7 +1026,9 @@ class ClusterService:
     on, `BREAK` takes it and ends the poll, and `ABORT` leaves it, ends the poll, and has
     the next poll hand it over again. A handler that raises, or returns anything else,
     has its entry aborted, and `poll` raises `HandlerError` once the ABI has returned:
-    an entry is taken only by a handler that finished with it. `poll` returns the count
+    an entry is taken only by a handler that finished with it. An action is an `int`:
+    `True`, `False` and every value that is no `int` are no action, though `True`
+    equals 1, the value of `ABORT`. `poll` returns the count
     of entries taken, or the ABI's -1 when the poll stopped on a fault, which `fault()`
     reads until the next poll. `entry.timestamp` is the one clock a service reads, so
     that every member's service reaches the same state."""
@@ -1068,8 +1070,12 @@ class ClusterService:
         # the handler is handed None in its place if the ABI refuses the header, which
         # on the handler's own it cannot. What the handler returns is its action, passed
         # to the ABI unless it is CONTINUE, which is what the ABI does with no call. An
-        # action the ABI refuses, and a handler that raised, abort the entry: the poll
-        # ends here, with the entry not taken, and raises once the ABI has returned.
+        # action the ABI refuses, a value that is no `int`, and a handler that raised,
+        # abort the entry: the poll ends here, with the entry not taken, and raises once
+        # the ABI has returned. A `bool` is no `int` here: `True` equals 1, which is
+        # ABORT, and ctypes would pass it as that, so a handler that returns `True` to
+        # say that it handled the entry would leave the entry at every poll, with
+        # nothing raised. It is not passed to the ABI.
         try:
             body = memoryview((ctypes.c_uint8 * length).from_address(buffer)).cast("B")
             try:
@@ -1077,9 +1083,9 @@ class ClusterService:
                 action = self._handler(body, self._entry if refused == 0 else None, self)
             finally:
                 body.release()
-            if action is None or action == CONTINUE:
+            if action is None or (type(action) is int and action == CONTINUE):
                 return
-            if self._abi.cavalry_cluster_service_action(self._handle, action) != 0:
+            if type(action) is not int or self._abi.cavalry_cluster_service_action(self._handle, action) != 0:
                 self._refused = action
                 self._raised += 1
                 self._abi.cavalry_cluster_service_action(self._handle, ABORT)
@@ -1112,7 +1118,8 @@ class ClusterService:
         raises after the ABI call returns: an exception that is not an `Exception` as
         itself, else `HandlerError`, whose `fragments` is the count of entries taken
         before that entry and whose `__cause__` is the handler's exception, or a
-        `CavalryError` with `CAVALRY_ERR_CLUSTER_ACTION` for a value that is no action.
+        `CavalryError` with `CAVALRY_ERR_CLUSTER_ACTION` for a value that is no action:
+        an `int` the ABI refuses, or a value that is no `int`, `True` among them.
         The next poll hands the aborted entry over again. Called from a handler of this
         service's own poll, it passes the call to the ABI, which refuses it with -1 and
         `CAVALRY_ERR_POLLING`, and touches nothing (spec/c-abi.md, "Calls during a claim

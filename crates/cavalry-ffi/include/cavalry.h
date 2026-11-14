@@ -1196,8 +1196,12 @@ int cavalry_cluster_entry_values(const cavalry_header_t *header,
  `Replies::reply` does, and returns what became of the reply,
  `CAVALRY_CLUSTER_REPLY_*`. `_TOO_LONG` sets the thread's error too,
  `CAVALRY_ERR_TOO_LONG`, with the length and the limit in the message. −1 with
- `CAVALRY_ERR_CLUSTER_NO_ENTRY` for a call from outside the handler. Nothing here
- allocates, and nothing waits.
+ `CAVALRY_ERR_CLUSTER_NO_ENTRY` for a call from outside the handler. The checks
+ run in this order and stop at the first refusal: a null `service`, or a null
+ `buffer` with a `length` above 0, is −1 with `CAVALRY_ERR_NULL`, from inside the
+ handler or outside it; then a call from outside the handler is −1 with
+ `CAVALRY_ERR_CLUSTER_NO_ENTRY`, whatever its `session_id` and `length`. Nothing
+ here allocates, and nothing waits.
 
  # Safety
 
@@ -1217,6 +1221,10 @@ int cavalry_cluster_service_reply(cavalry_cluster_service_t *service,
  does not call it continues, and the last call for an entry counts. −1 with
  `CAVALRY_ERR_CLUSTER_ACTION` for any other value, which leaves the action as it
  was, and with `CAVALRY_ERR_CLUSTER_NO_ENTRY` for a call from outside the handler.
+ The checks run in this order and stop at the first refusal: a null `service` is
+ −1 with `CAVALRY_ERR_NULL`; then a call from outside the handler is −1 with
+ `CAVALRY_ERR_CLUSTER_NO_ENTRY`, whatever its `action`; then an `action` that is
+ none of the three is −1 with `CAVALRY_ERR_CLUSTER_ACTION`.
 
  # Safety
 

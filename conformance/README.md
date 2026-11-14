@@ -59,7 +59,8 @@ service object, and then the client's own edges (ADR 0124), of which the Python 
 is the shape. What `offer` refuses. The calls `spec/c-abi.md` refuses from inside a
 service's handler, on the service and on the client its poll holds, and from inside a
 session's, each made after the thread's error was set to another code. A service's
-handler that replies and then raises, and one that returns what is no action: each
+handler that replies and then raises, and one that returns what is no action, in
+Python `True` and then 3: each
 entry is aborted, handed over again at the same position, and answered once. A reply
 too long for a frame and a reply to a session that is not open. A handler that returns
 break with two entries waiting, whose poll takes one. A session's handler that raises,
@@ -71,7 +72,8 @@ poll held the GIL.
 
 The Node round is the Python round through `clients/node`, with three edges of its
 own. A service's handler that returns a promise, as an `async` handler does, has its
-entry aborted as one that returns 3 has. The one object of values a handler is handed
+entry aborted as one that returns 3 has, and so has one that returns `true`, where
+the Python round returns `True`. The one object of values a handler is handed
 reads `undefined` once the call has returned, and a kept body reads as empty. And the
 `Buffer`s the round's handlers were handed are all freed by one turn of the event
 loop, which the round checks after its report. The report is the Python round's:
