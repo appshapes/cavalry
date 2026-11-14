@@ -7,7 +7,9 @@
 # cluster members on the loopback, each a `cavalry run` in a member's role, and runs
 # conformance/node/committed_log.js beside one of them, member 1 unless it joined late
 # (conformance/log-member.sh), the client's committed log against a cluster
-# (spec/c-abi.md, version 2; ADR 0070); and cleans up.
+# (spec/c-abi.md, version 2; ADR 0070), and then conformance/node/cluster.js, the cluster
+# round: the client's service beside each member and its session on the first driver
+# (spec/c-abi.md, versions 4 and 5; ADR 0124); and cleans up.
 # `just conformance` runs this after conformance/python (clients/README.md; ADR 0046, card
 # 206). The runner takes `--expose-gc` so that its allocation round can read the heap after
 # a full collection.
@@ -64,7 +66,8 @@ node conformance/node/readme.js
 # member's output goes to a file beside its directories, printed if the cluster does not
 # form or the round fails.
 #
-# The fifteen ports are counted out of 10000 to 19999, never bound to be chosen, as
+# The sixteen ports, fifteen for the members and one for the session's response channel,
+# are counted out of 10000 to 19999, never bound to be chosen, as
 # `loopback_ports` in crates/cavalry/tests/cli.rs counts its own: a port found by binding
 # to port 0 is one of those the kernel gives each driver's own send sockets, so another
 # member could be given it before its owner binds it. The shell's process id picks where
@@ -81,6 +84,7 @@ for id in 0 1 2; do
     CAVALRY_CLUSTER_MEMBERS="${CAVALRY_CLUSTER_MEMBERS:+$CAVALRY_CLUSTER_MEMBERS|}$member"
 done
 export CAVALRY_CLUSTER_MEMBERS
+response="cavalry:udp?endpoint=127.0.0.1:$(( 10000 + (start + 15) % 10000 ))"
 for id in 0 1 2; do
     CAVALRY_CLUSTER_MEMBER_ID=$id target/release/cavalry run --dir "$cluster/member-$id" \
         --log-dir "$cluster/member-$id-log" >"$cluster/member-$id.out" 2>&1 &
@@ -115,6 +119,16 @@ read -r member recording <<<"$chosen"
 echo "conformance/node: run committed_log.js beside member $member"
 node conformance/node/committed_log.js "$cluster/member-$member" "$member" "$recording" || {
     echo "conformance/node: committed_log.js failed beside member $member; the members said:" >&2
+    cat "$cluster"/member-*.out >&2 || true
+    exit 1
+}
+
+# The cluster round, after the committed log's: a service beside each member and a
+# session on the runner's first driver. The committed log round left the cluster as it
+# found it, one entry, the term's first.
+echo "conformance/node: run cluster.js, a service beside each member and a session on $CAVALRY_DIR"
+node conformance/node/cluster.js "$cluster" "$CAVALRY_CLUSTER_MEMBERS" "$response" || {
+    echo "conformance/node: cluster.js failed; the members said:" >&2
     cat "$cluster"/member-*.out >&2 || true
     exit 1
 }

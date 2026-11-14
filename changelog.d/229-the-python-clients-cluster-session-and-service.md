@@ -9,7 +9,6 @@
   them, has its entry aborted: the poll ends at it,
   raises `HandlerError`, and the next poll hands the entry over again, so a service
   never passes an entry it did not apply. `just conformance` runs the cluster round
-  through the Python client. The Node, Go, JVM and .NET clients bind the same
-  functions and have no session object or service object yet
+  through the Python client
   ([ADR 0124](docs/decisions/0124-give-each-client-a-session-object-and-a-service-object-whose-handlers-failure-aborts-its-entry.md);
   [the Python client](clients/python/README.md); work item 229).

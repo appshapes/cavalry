@@ -112,6 +112,13 @@ export const MAX_POSITION_EXCEEDED: number;
 export const ERROR: number;
 export const NULL_POSITION: number;
 
+/** What a cluster service's handler returns for the entry it was handed: ABORT leaves it for
+ * the next poll and ends this one, BREAK takes it and ends the poll, CONTINUE takes it and
+ * goes on. */
+export const ABORT: number;
+export const BREAK: number;
+export const CONTINUE: number;
+
 /** A call that is not a message failed, with the ABI's code and message. */
 export class CavalryError extends Error {
   fn: string;
@@ -126,13 +133,17 @@ export class CavalryError extends Error {
  * next poll. `undeliveredAt` is a committed log's position of the poll's first entry that
  * never reached the handler, after which the handler was handed no entry of the poll, and
  * where the service opens the log again; null when every entry reached it, and for a
- * subscription. */
+ * subscription. `cluster` is "session" for a reply of a cluster session's poll, whose
+ * `fragments` counts replies, and "service" for an entry of a cluster service's poll: that
+ * entry was aborted, `fragments` is the count of entries the poll took before it, and the
+ * next poll hands it over again. It is null for a subscription and a committed log. */
 export class HandlerError extends Error {
   fragments: number;
   raised: number;
   undelivered: number;
   committedLog: boolean;
   undeliveredAt: number | null;
+  cluster: "session" | "service" | null;
 }
 
 /** The body as a Buffer into the log, valid for the call, and the frame's header. */
@@ -141,6 +152,15 @@ export type FragmentHandler = (body: Buffer, header: Header) => void;
 /** A committed log's entry: the body and the header as a fragment's, and the entry's position
  * in the log. */
 export type EntryHandler = (body: Buffer, header: Header, position: number) => void;
+
+/** A cluster session's reply: its payload as a Buffer into the log, valid for the call, and
+ * the reply's values. */
+export type ReplyHandler = (body: Buffer, reply: ClusterReplyValues) => void;
+
+/** A cluster service's entry: a session message's payload as a Buffer into the log, valid for
+ * the call and empty for every other entry, the entry's values, and the service. What it
+ * returns is its action: nothing or CONTINUE, BREAK, or ABORT. */
+export type ServiceHandler = (body: Buffer, entry: ClusterEntryValues, service: ClusterService) => number | void | null;
 
 export class Client {
   constructor(dir?: string | null);
@@ -162,6 +182,8 @@ export class Client {
   startReplay(recordingId: number, position: number, length: number, replayStreamId: number, channel: string): Replay;
   stopReplay(replaySessionId: number): void;
   committedLog(position: number): CommittedLog | null;
+  connectCluster(members: string, responseChannel: string): ClusterSession;
+  clusterService(): ClusterService;
   [Symbol.dispose](): void;
 }
 
@@ -236,6 +258,50 @@ export class CommittedLog {
   failedAt(): number | null;
   withdrawnAt(): number | null;
   faulted(): { code: number; sessionId: number; position: number } | null;
+  close(): void;
+}
+
+/** A reply's values, valid for the handler's call; undefined outside it. */
+export class ClusterReplyValues {
+  readonly leadershipTermId: number | undefined;
+  /** The cluster's time, milliseconds since 1970-01-01T00:00:00Z. */
+  readonly timestamp: number | undefined;
+}
+
+export class ClusterSession {
+  readonly sessionId: number;
+  readonly maxMessageLength: number;
+  offer(message: Buffer | Uint8Array): number;
+  poll(handler: ReplyHandler, fragmentLimit: number): number;
+  fault(): { code: number; sessionId: number; position: number };
+  leadershipTermId(): number;
+  leaderMemberId(): number;
+  staleReplies(): number;
+  closed(): string | null;
+  close(): void;
+}
+
+/** A committed entry's values, valid for the handler's call; undefined outside it. */
+export class ClusterEntryValues {
+  readonly position: number | undefined;
+  readonly leadershipTermId: number | undefined;
+  /** The cluster's time, milliseconds since 1970-01-01T00:00:00Z. */
+  readonly timestamp: number | undefined;
+  readonly sessionId: number | undefined;
+  /** One of `constants.CAVALRY_CLUSTER_ENTRY_*`. */
+  readonly type: number | undefined;
+  readonly leaderMemberId: number | undefined;
+  readonly timedOut: boolean | undefined;
+}
+
+export class ClusterService {
+  poll(handler: ServiceHandler, fragmentLimit: number): number;
+  /** One of `constants.CAVALRY_CLUSTER_REPLY_*`, or -1 from outside the handler. */
+  reply(sessionId: number | bigint, message: Buffer | Uint8Array): number;
+  fault(): { code: number; sessionId: number; position: number };
+  position(): number;
+  answers(): boolean;
+  sessions(): number;
   close(): void;
 }
 

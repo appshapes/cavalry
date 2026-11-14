@@ -641,6 +641,7 @@ static bool handler_throws, pending;
 static int handler_ran, scopes_open, buffers_live;
 static size_t handler_argc;
 static int64_t position_made;
+static bool boolean_made;
 static char handles[12];
 #define HANDLE(i) ((void *) &handles[i])
 #define NULL_VALUE HANDLE(9)
@@ -753,9 +754,9 @@ napi_status napi_create_bigint_int64(napi_env env, int64_t value, napi_value *re
   return s;
 }
 napi_status napi_get_boolean(napi_env env, bool value, napi_value *result) {
-  (void) env; (void) value;
+  (void) env;
   napi_status s = step("napi_get_boolean");
-  if (s == napi_ok) *result = HANDLE(4);
+  if (s == napi_ok) { *result = HANDLE(4); boolean_made = value; }
   return s;
 }
 napi_status napi_get_null(napi_env env, napi_value *result) {
@@ -995,6 +996,292 @@ int main(void) {
 '''
 
 
+# The cluster polls' trampoline and its helpers, from the cluster section's opening comment
+# to cluster_report's closing brace, compiled after the subscription's trampoline against
+# the same stand-in for N-API, the part of TRAMPOLINE_HARNESS before the generated code, with
+# stand-ins for what the cluster section adds: `napi_typeof` and `napi_get_value_double`,
+# which say what the handler returned, the ABI's two reads of a header's values, and
+# `cavalry_cluster_service_action`, which records every action it is given and takes the
+# three the ABI takes. `main` runs one reply and one entry with no failure to learn their
+# calls, then each with every call failing in turn, for a handler that returns and one that
+# throws; then a service's handler returning each kind of value; then what a poll reports.
+CLUSTER_STANDINS = r"""
+typedef enum { napi_undefined, napi_null, napi_boolean, napi_number, napi_string, napi_symbol, napi_object,
+               napi_function, napi_external, napi_bigint } napi_valuetype;
+
+static napi_valuetype returned_type;
+static double returned_number;
+static int actions[8];
+static int nactions;
+static bool values_refused;
+
+napi_status napi_typeof(napi_env env, napi_value value, napi_valuetype *result) {
+  (void) env; (void) value;
+  napi_status s = step("napi_typeof");
+  if (s == napi_ok) *result = returned_type;
+  return s;
+}
+napi_status napi_get_value_double(napi_env env, napi_value value, double *result) {
+  (void) env; (void) value;
+  napi_status s = step("napi_get_value_double");
+  if (s == napi_ok) *result = returned_number;
+  return s;
+}
+/* The entry every run hands over is at position 320, and the later one of the same poll at
+ * 416; both of leadership term 5 at the cluster's time 1700000000000. */
+int cavalry_cluster_entry_values(const cavalry_header_t *header, cavalry_cluster_entry_values_t *values) {
+  if (values_refused) return -1;
+  memset(values, 0, sizeof *values);
+  values->position = header == (const cavalry_header_t *) HANDLE(1) ? 320 : 416;
+  values->leadership_term_id = 5;
+  values->timestamp = 1700000000000;
+  values->session_id = 7;
+  values->type = CAVALRY_CLUSTER_ENTRY_SESSION_MESSAGE;
+  values->leader_member_id = -1;
+  return 0;
+}
+int cavalry_cluster_reply_values(const cavalry_header_t *header, cavalry_cluster_reply_values_t *values) {
+  (void) header;
+  if (values_refused) return -1;
+  values->leadership_term_id = 5;
+  values->timestamp = 1700000000000;
+  return 0;
+}
+/* As the ABI: the three actions are taken, and any other value is refused. */
+int cavalry_cluster_service_action(cavalry_cluster_service_t *service, int32_t action) {
+  (void) service;
+  if (nactions < 8) actions[nactions++] = action;
+  return action == CAVALRY_ACTION_ABORT || action == CAVALRY_ACTION_BREAK || action == CAVALRY_ACTION_CONTINUE ? 0 : -1;
+}
+"""
+
+CLUSTER_MAIN = r"""
+static int failures;
+#define EXPECT(cond, ...) do { if (!(cond)) { failures++; printf(__VA_ARGS__); printf("\n"); } } while (0)
+
+static void reset(int at, bool throws) {
+  ncalls = 0; fail_at = at; handler_throws = throws; pending = false;
+  handler_ran = 0; scopes_open = 0; buffers_live = 0; handler_argc = 0; nactions = 0; boolean_made = false;
+  nnumbers = 0; nnamed = 0; text_made[0] = '\0'; memset(tuple_elements, 0, sizeof tuple_elements);
+}
+
+/* A state as the addon's poll leaves it for the trampoline: a session's, or a service's with
+ * its handle and its JS object. */
+static void state(subscription_state_t *s, int cluster) {
+  memset(s, 0, sizeof *s);
+  s->env = (napi_env) HANDLE(0);
+  s->cluster = cluster;
+  if (cluster == CLUSTER_SERVICE) {
+    s->service = (cavalry_cluster_service_t *) HANDLE(8);
+    s->self = (napi_value) HANDLE(8);
+  }
+}
+
+static void hand(subscription_state_t *s, int header) {
+  cluster_trampoline(s, (const uint8_t *) "body", 4, (const cavalry_header_t *) HANDLE(header));
+}
+
+static bool aborted_once(void) { return nactions == 1 && actions[0] == CAVALRY_ACTION_ABORT; }
+
+static void one(int at, bool throws, int cluster) {
+  bool service = cluster == CLUSTER_SERVICE;
+  subscription_state_t s;
+  state(&s, cluster);
+  returned_type = napi_undefined;
+  reset(at, throws);
+  hand(&s, 1);
+  const char *failed = at >= 0 && at < ncalls ? calls[at] : NULL;
+  char where[200];
+  snprintf(where, sizeof where, "%s, with %s failing (call %d), the handler %s",
+           service ? "a service's entry" : "a session's reply", failed ? failed : "no call", at,
+           throws ? "throwing" : "returning");
+  /* A service's handler is handed three arguments, the third the service; a session's two. */
+  if (handler_ran) {
+    EXPECT(handler_argc == (service ? 3u : 2u), "%s: the handler was handed %u argument(s)", where, (unsigned) handler_argc);
+  }
+  /* A service's handler that returned, whose answer the addon could not read, did not get
+   * through: its action is not known. */
+  bool unread = service && failed != NULL && strcmp(failed, "napi_typeof") == 0;
+  if (handler_ran && !throws && !unread) {
+    EXPECT(s.raised == 0 && s.undelivered == 0 && s.first == FIRST_NONE,
+           "%s: the handler returned, yet it was counted (raised %u, undelivered %u)", where, (unsigned) s.raised,
+           (unsigned) s.undelivered);
+    EXPECT(nactions == 0, "%s: the handler returned nothing, yet %d action call(s) were made", where, nactions);
+  } else {
+    EXPECT(s.raised + s.undelivered == 1, "%s: counted %u time(s) (raised %u, undelivered %u), not once", where,
+           (unsigned) (s.raised + s.undelivered), (unsigned) s.raised, (unsigned) s.undelivered);
+    EXPECT(s.first != FIRST_NONE, "%s: nothing kept for poll to report", where);
+    if (!handler_ran) EXPECT(s.undelivered == 1, "%s: the handler never ran, yet undelivered is %u", where, (unsigned) s.undelivered);
+    /* Every way a service's entry does not get through its handler aborts it, once; a
+     * session's reply has no action. */
+    if (service) {
+      EXPECT(aborted_once(), "%s: the entry was not aborted once: %d action call(s), the first %d", where, nactions,
+             nactions ? actions[0] : 0);
+    } else {
+      EXPECT(nactions == 0, "%s: %d action call(s) were made for a reply", where, nactions);
+    }
+  }
+  if (s.first == FIRST_FAILURE) {
+    EXPECT(failed != NULL && s.failed != NULL && strstr(s.failed, failed) != NULL,
+           "%s: the failure kept says \"%s\", not the call that failed", where, s.failed ? s.failed : "(nothing)");
+    EXPECT(s.failed_status == (int) fail_with, "%s: the failure kept has status %d, not %d", where, s.failed_status,
+           (int) fail_with);
+    EXPECT(s.failed_frame && s.failed_term == 5 &&
+           (service ? s.failed_position == 320 : s.failed_timestamp == 1700000000000),
+           "%s: the failure kept does not name the %s", where, service ? "entry's position and term" : "reply's term and time");
+  }
+  EXPECT(scopes_open == 0, "%s: %d handle scope(s) left open", where, scopes_open);
+  if (failed == NULL || (strcmp(failed, "napi_get_typedarray_info") != 0 && strcmp(failed, "napi_detach_arraybuffer") != 0)) {
+    EXPECT(buffers_live == 0, "%s: %d body Buffer(s) left attached", where, buffers_live);
+  }
+  /* The ABI ends a service's poll at an abort. Were it to hand over a later entry all the
+   * same, that entry makes no N-API call, does not reach the handler, and is aborted too, with
+   * the poll's cause as it was: a service never applies an entry after one it did not. A
+   * session's later reply still reaches its handler. */
+  if (s.first != FIRST_NONE) {
+    uint32_t counted = s.raised + s.undelivered;
+    const char *kept = s.failed;
+    first_t first = s.first;
+    reset(-1, false);
+    hand(&s, 2);
+    if (service) {
+      EXPECT(handler_ran == 0 && ncalls == 0, "%s, then a later entry of the same poll: the handler ran %d time(s) and "
+             "%d N-API call(s) were made", where, handler_ran, ncalls);
+      EXPECT(aborted_once(), "%s, then a later entry of the same poll: it was not aborted unseen", where);
+      EXPECT(s.raised + s.undelivered == counted && s.failed == kept && s.first == first,
+             "%s, then a later entry of the same poll: what the poll reports changed", where);
+    } else {
+      EXPECT(handler_ran == 1 && s.raised + s.undelivered == counted, "%s, then a later reply of the same poll: the "
+             "handler ran %d time(s), counted %u", where, handler_ran, (unsigned) (s.raised + s.undelivered));
+    }
+  }
+}
+
+/* A service's handler that returns `type`, a number being `number`: the action calls made,
+ * in order, and whether the value was no action. */
+static void returns(const char *what, napi_valuetype type, double number, int first, int second, bool no_action) {
+  subscription_state_t s;
+  state(&s, CLUSTER_SERVICE);
+  returned_type = type;
+  returned_number = number;
+  reset(-1, false);
+  hand(&s, 1);
+  int expected = (first != 0) + (second != 0);
+  EXPECT(handler_ran == 1 && nactions == expected && (first == 0 || actions[0] == first) &&
+         (second == 0 || actions[1] == second),
+         "a handler that returns %s: %d action call(s), %d then %d, not %d, %d then %d", what, nactions,
+         nactions > 0 ? actions[0] : 0, nactions > 1 ? actions[1] : 0, expected, first, second);
+  if (no_action) {
+    EXPECT(s.raised == 1 && s.undelivered == 0 && s.first == FIRST_NO_ACTION,
+           "a handler that returns %s: raised %u, undelivered %u, and the value is not kept as no action", what,
+           (unsigned) s.raised, (unsigned) s.undelivered);
+  } else {
+    EXPECT(s.raised == 0 && s.undelivered == 0 && s.first == FIRST_NONE,
+           "a handler that returns %s was counted: raised %u, undelivered %u", what, (unsigned) s.raised,
+           (unsigned) s.undelivered);
+  }
+  EXPECT(scopes_open == 0 && buffers_live == 0, "a handler that returns %s: a scope or a body left", what);
+}
+
+int main(void) {
+  static const int kinds[2] = { CLUSTER_SESSION, CLUSTER_SERVICE };
+  for (int k = 0; k < 2; k++) {
+    for (int throws = 0; throws < 2; throws++) {
+      subscription_state_t s;
+      state(&s, kinds[k]);
+      returned_type = napi_undefined;
+      reset(-1, throws);
+      hand(&s, 1);
+      int n = ncalls;
+      printf("%s whose handler %s calls:", kinds[k] == CLUSTER_SERVICE ? "an entry" : "a reply", throws ? "throws" : "returns");
+      for (int i = 0; i < n; i++) printf(" %s", calls[i]);
+      printf("\n");
+      for (int at = 0; at <= n; at++) one(at, throws, kinds[k]);
+    }
+  }
+  /* What a service's handler returns is its action. Nothing, null and CONTINUE make no call;
+   * BREAK and ABORT are passed on, and an ABORT the handler chose is no failure; a whole
+   * number the ABI refuses is passed, refused, and then aborted; and what is no whole int32,
+   * or no number, is aborted with no call for it. */
+  const int abort_ = CAVALRY_ACTION_ABORT, break_ = CAVALRY_ACTION_BREAK;
+  returns("nothing", napi_undefined, 0, 0, 0, false);
+  returns("null", napi_null, 0, 0, 0, false);
+  returns("CONTINUE", napi_number, CAVALRY_ACTION_CONTINUE, 0, 0, false);
+  returns("BREAK", napi_number, CAVALRY_ACTION_BREAK, break_, 0, false);
+  returns("ABORT", napi_number, CAVALRY_ACTION_ABORT, abort_, 0, false);
+  returns("3", napi_number, 3, 3, abort_, true);
+  returns("-1", napi_number, -1, -1, abort_, true);
+  returns("2.5", napi_number, 2.5, abort_, 0, true);
+  returns("NaN", napi_number, strtod("nan", NULL), abort_, 0, true);
+  returns("1e12", napi_number, 1e12, abort_, 0, true);
+  returns("a string", napi_string, 0, abort_, 0, true);
+  returns("true", napi_boolean, 0, abort_, 0, true);
+  returns("a promise", napi_object, 0, abort_, 0, true);
+  returns("a BigInt", napi_bigint, 0, abort_, 0, true);
+
+  /* What a poll reports. The body's Buffer refused: a service's cause names the entry by its
+   * position and its term and says that it comes again, a session's the reply by its term and
+   * the cluster's time and says that it does not. */
+  subscription_state_t s;
+  for (int k = 0; k < 2; k++) {
+    bool service = kinds[k] == CLUSTER_SERVICE;
+    const char *where = service ? "a cluster service's report" : "a cluster session's report";
+    state(&s, kinds[k]);
+    returned_type = napi_undefined;
+    reset(1, false);
+    hand(&s, 1);
+    reset(-1, false);
+    napi_value tuple = cluster_report(s.env, &s, 0);
+    napi_value raised = tuple_elements[1], undelivered = tuple_elements[3];
+    napi_value position = property("position"), term = property("leadershipTermId"), time = property("timestamp");
+    printf("%s's cause: %s\n", where, text_made);
+    EXPECT(tuple == TUPLE && tuple_elements[2] == ERROR_VALUE, "%s: no tuple with the failure's Error as its cause", where);
+    EXPECT(is_number(raised) && *(int64_t *) raised == 0 && is_number(undelivered) && *(int64_t *) undelivered == 1,
+           "%s: raised is not 0 and undelivered 1", where);
+    EXPECT(tuple_elements[4] == HANDLE(4) && !boolean_made, "%s: noAction is not false", where);
+    EXPECT(term != NULL && is_number(term) && *(int64_t *) term == 5, "%s: the cause's leadershipTermId is not 5", where);
+    if (service) {
+      EXPECT(position != NULL && is_number(position) && *(int64_t *) position == 320 && time == NULL,
+             "%s: the cause's position is not 320, or it has a timestamp", where);
+    } else {
+      EXPECT(time != NULL && is_number(time) && *(int64_t *) time == 1700000000000 && position == NULL,
+             "%s: the cause's timestamp is not the reply's, or it has a position", where);
+    }
+    EXPECT(s.first == FIRST_NONE && s.raised == 0 && s.undelivered == 0, "%s: the state was not cleared", where);
+  }
+  /* A value that is no action, and an exception: `first` is the value kept, element 0 of the
+   * holder, and `noAction` says which of the two it is. */
+  for (int threw_ = 0; threw_ < 2; threw_++) {
+    state(&s, CLUSTER_SERVICE);
+    returned_type = napi_number;
+    returned_number = 3;
+    reset(-1, threw_);
+    hand(&s, 1);
+    reset(-1, false);
+    cluster_report(s.env, &s, 2);
+    EXPECT(tuple_elements[2] == HANDLE(6) && is_number(tuple_elements[1]) && *(int64_t *) tuple_elements[1] == 1 &&
+           is_number(tuple_elements[0]) && *(int64_t *) tuple_elements[0] == 2,
+           "a service's report after its handler %s: not [2, 1, the value kept, ...]", threw_ ? "threw" : "returned 3");
+    EXPECT(boolean_made == !threw_, "a service's report after its handler %s: noAction is %d",
+           threw_ ? "threw" : "returned 3", (int) boolean_made);
+  }
+  /* A header whose values the ABI did not give is still reported. */
+  values_refused = true;
+  state(&s, CLUSTER_SERVICE);
+  reset(0, false);
+  hand(&s, 1);
+  EXPECT(aborted_once() && !s.failed_frame, "an entry whose values the ABI refused was not aborted, or is named");
+  reset(-1, false);
+  cluster_report(s.env, &s, 0);
+  printf("a report with no values' cause: %s\n", text_made);
+  values_refused = false;
+  (void) make_string; (void) make_external; (void) make_bigint64; (void) trampoline;
+  printf("%d failure(s)\n", failures);
+  return failures != 0;
+}
+"""
+
+
 class NodePackage(unittest.TestCase):
     """The Node package, `clients/node` (clients/node/README.md; ADR 0046, card 206)."""
 
@@ -1077,15 +1364,20 @@ class NodePackage(unittest.TestCase):
         `cavalry_subscription_poll` call with its trampoline and its `committedLogPoll` the
         one `cavalry_committed_log_poll` call with the same trampoline (ADR 0070), and the
         header's fields are read through `headerField`. The third and the fourth, a
-        cluster session's poll and a cluster service's, have no binding yet: the addon's
-        own poll for each comes with the client's session object and its service object
-        (ADR 0122, ADR 0123)."""
+        cluster session's poll and a cluster service's, are the addon's
+        `clusterSessionPoll` and `clusterServicePoll`, each the one call of its ABI
+        function with the cluster polls' trampoline, whose reads of a reply's values and
+        an entry's the client reaches through `replyField` and `entryField` (ADR 0124)."""
         addon = gen_node.write_node(self.header)["src/addon.c"]
         self.assertEqual(gen_node.HANDLER_FUNCTIONS, ("cavalry_subscription_poll", "cavalry_committed_log_poll",
                                                       "cavalry_cluster_session_poll", "cavalry_cluster_service_poll"))
-        self.assertNotIn("cavalry_cluster_session_poll", addon)
-        self.assertNotIn("cavalry_cluster_service_poll", addon)
-        self.assertEqual(addon.count("cavalry_committed_log_poll("), 2)  # the nested refusal and the poll itself
+        for poll in ("cavalry_cluster_session_poll(session, cluster_trampoline, s, limit)",
+                     "cavalry_cluster_service_poll(service, client, cluster_trampoline, s, limit)",
+                     "cavalry_committed_log_poll(log, trampoline, s, limit)"):
+            self.assertEqual(addon.count(poll), 2, poll)  # the nested refusal and the poll itself
+        self.assertEqual(addon.count("cavalry_cluster_session_poll("), 2)
+        self.assertEqual(addon.count("cavalry_cluster_service_poll("), 2)
+        self.assertEqual(addon.count("cavalry_committed_log_poll("), 2)
         for fn in self.header.functions:
             if fn.name in gen_node.HANDLER_FUNCTIONS:
                 self.assertNotIn(f"fn_{fn.name}", addon)
@@ -1093,10 +1385,25 @@ class NodePackage(unittest.TestCase):
             self.assertIn(f"static napi_value fn_{fn.name}(napi_env env, napi_callback_info info)", addon)
             self.assertIn(f'{{ "{fn.name}", NULL, fn_{fn.name}, NULL, NULL, NULL, napi_default, NULL }},', addon)
         self.assertEqual(addon.count("cavalry_subscription_poll("), 2)  # the nested refusal and the poll itself
-        for own in ("registerSubscription", "poll", "registerCommittedLog", "committedLogPoll", "headerField", "view",
-                    "detach", "stringAt", "buffersHeld"):
-            self.assertIn(f'{{ "{own}", NULL, fn_{own}, NULL, NULL, NULL, napi_default, NULL }},', addon)
+        own = ("registerSubscription", "poll", "registerCommittedLog", "committedLogPoll", "headerField",
+               "registerClusterSession", "clusterSessionPoll", "replyField", "registerClusterService",
+               "clusterServicePoll", "entryField", "view", "detach", "stringAt", "buffersHeld")
+        self.assertEqual(gen_node.OWN_FUNCTIONS, own)
+        for name in own:
+            self.assertIn(f'{{ "{name}", NULL, fn_{name}, NULL, NULL, NULL, napi_default, NULL }},', addon)
+        # The count the generator's docstring, the addon's opening comment and the README give.
+        self.assertEqual(len(own), 15)
+        self.assertIn("and fifteen of the addon's own", addon)
         self.assertIn("cavalry_header_values(s->current, &s->values)", addon)
+        # The values of a reply and of an entry are read once, by the trampoline, before the
+        # handler runs (ADR 0124), and nowhere else.
+        self.assertEqual(addon.count("cavalry_cluster_reply_values(header, &s->reply)"), 1)
+        self.assertEqual(addon.count("cavalry_cluster_entry_values(header, &s->entry)"), 1)
+        self.assertEqual(addon.count("&s->reply"), 1)
+        self.assertEqual(addon.count("&s->entry"), 1)
+        trampoline = addon.split("static void cluster_trampoline(", 1)[1].split("\n}\n", 1)[0]
+        self.assertLess(trampoline.index("cavalry_cluster_reply_values(header, &s->reply)"),
+                        trampoline.index("napi_open_handle_scope("))
 
     def test_the_layout_the_client_reads_by_is_the_layout_ctypes_gives(self):
         """index.js reads a struct's fields from a DataView at the offsets `layout` computes
@@ -1123,7 +1430,7 @@ class NodePackage(unittest.TestCase):
         self.assertIn("fragment(s) this poll delivered", body)
         self.assertIn("before it stopped on a fault, which subscription.fault() reads", body)
         self.assertIn("Fix the handler: its first exception, ${describe(cause)}, is this error's cause", body)
-        self.assertIn('const one = committedLog ? "entry" : "fragment";', body)
+        self.assertIn('const one = session ? "reply" : committedLog ? "entry" : "fragment";', body)
         self.assertIn("never reached the ${one} handler", body)
         self.assertIn("The first failure, ${describe(cause)}, is this ` +\n      `error's cause and says what to do.", body)
         self.assertIn("super(`${what} See clients/node/README.md#the-exception`, { cause });", body)
@@ -1148,10 +1455,188 @@ class NodePackage(unittest.TestCase):
         self.assertIn('the entry at position %lld, of session %d at term offset %d', failure)
         self.assertIn('napi_set_named_property(env, error, "position", make_int64(env, s->failed_position));', failure)
         self.assertIn('%s. %s. See "\n           "clients/node/README.md#the-exception"', failure)
+        # A cluster session's poll speaks of replies and names its own fault(); a cluster
+        # service's says that the entry was aborted and comes again (ADR 0124).
+        self.assertIn("`the ${fragments} ${fragments === 1 ? one : many} this poll handed over`", body)
+        self.assertIn("which this ClusterSession's fault() reads \" +\n      \"until its next poll\" :", body)
+        self.assertIn("Its entry was aborted: it is not taken, ` +\n      `the poll ended at it, and the next poll "
+                      "hands it over again. Fix the handler: what it did, ` +\n      `${describe(cause)}, is this "
+                      "error's cause; every poll hands the entry over, and throws this, until the ` +\n      "
+                      "`handler takes it.`", body)
+        self.assertIn("`the runtime kept an entry from the entry handler ${took}.", body)
+        self.assertIn("which this ClusterService's fault() reads until its next poll", body)
+        self.assertIn('const what = cluster === "service" ? aborted : undelivered === 0 ?', body)
+        self.assertIn("this.cluster = cluster;", body)
+        no_action = files["index.js"].split("function noAction(value) {", 1)[1].split("\n}\n", 1)[0]
+        self.assertIn('new CavalryError("cavalry_cluster_service_action", constants.CAVALRY_ERR_CLUSTER_ACTION,', no_action)
+        self.assertIn("`the entry handler returned ${describe(value)}, which is no action: return nothing or "
+                      "cavalry.CONTINUE to take ` +", no_action)
+        self.assertIn("poll; see docs/reference/c-abi.md#constants`);", no_action)
+        cluster = files["src/addon.c"].split("static napi_value cluster_failure_error(", 1)[1].split("\n}\n", 1)[0]
+        self.assertIn("run the client on a Node built", cluster)
+        self.assertIn('"the entry at position %lld, of leadership term %lld"', cluster)
+        self.assertIn("\"the reply of leadership term %lld, at the cluster's time %lld\"", cluster)
+        self.assertIn('%s. %s. See "\n           "clients/node/README.md#the-exception"', cluster)
         with open(os.path.join(gen.ROOT, "clients", "node", "README.md"), encoding="utf-8") as f:
             slugs = {re.sub(r"[^a-z0-9 -]", "", line.lstrip("#").strip().lower()).replace(" ", "-")
                      for line in f if line.startswith("#")}
         self.assertIn("the-exception", slugs)
+        self.assertIn("the-cluster-session", slugs)
+        self.assertIn("the-cluster-service", slugs)
+
+    def test_the_cluster_session_and_the_cluster_service_have_the_shape_adr_0124_gives(self):
+        """The Node cluster session and cluster service (ADR 0124), read from the generated
+        source, since the test does not need Node; the runner's cluster round runs them. The
+        client makes each from the ABI's handle. A session that cannot be returned is
+        closed, after its error is read. Each poll is one call of the addon's, and throws
+        `HandlerError` after it alone: a session's with `cluster` "session", a service's with
+        "service" and, when the addon says the value kept is what the handler returned, a
+        `CavalryError` for no action as its cause. The service's poll hands the addon the
+        client's handle, which the ABI's poll holds, and the service itself, the handler's
+        third argument. A close the ABI refuses from inside a handler keeps the handle. The
+        getters of a reply's values and of an entry's read through the addon by index, in
+        the order of its two switches. `ABORT`, `BREAK` and `CONTINUE` are the ABI's
+        actions."""
+        files = gen_node.write_node(self.header)
+        index, addon, types = files["index.js"], files["src/addon.c"], files["index.d.ts"]
+        client = index.split("class Client {", 1)[1].split("\nclass ", 1)[0]
+        self.assertIn("const [code, handle] = addon.cavalry_connect_cluster(this.handle, members, responseChannel);\n"
+                      "    check(\"cavalry_connect_cluster\", code);\n    return new ClusterSession(handle);", client)
+        self.assertIn("const [code, handle] = addon.cavalry_cluster_service(this.handle);\n"
+                      "    check(\"cavalry_cluster_service\", code);\n    return new ClusterService(handle, this);", client)
+        session = index.split("class ClusterSession {", 1)[1].split("\nclass ", 1)[0]
+        opened = session.split("  constructor(handle) {\n", 1)[1].split("\n  }\n", 1)[0]
+        read = opened.index('const failed = error("cavalry_cluster_session_constants");')
+        closed = opened.index("addon.cavalry_cluster_session_close(handle);")
+        self.assertLess(opened.index("if (addon.cavalry_cluster_session_constants(handle, c.buffer) !== 0) {"), read)
+        self.assertLess(read, closed)
+        self.assertLess(closed, opened.index("throw failed;"))
+        self.assertIn("this._state = addon.registerClusterSession(this._reply);\n    this._reply._state = this._state;",
+                      opened)
+        self.assertIn("  offer(message) { return addon.cavalry_cluster_session_offer(this.handle, message); }\n", session)
+        self.assertIn("    const result = addon.clusterSessionPoll(this._state, this.handle, handler, fragmentLimit);\n"
+                      "    if (typeof result === \"number\") return result;\n"
+                      "    throw new HandlerError(result[0], result[1], result[2], result[3], false, null, \"session\");",
+                      session)
+        self.assertIn('    if (this.handle !== null) closeHandle(this, "cavalry_cluster_session_close");', session)
+        service = index.split("class ClusterService {", 1)[1].split("\nclass ", 1)[0]
+        self.assertIn("this._state = addon.registerClusterService(this._entry);\n    this._entry._state = this._state;",
+                      service)
+        self.assertIn("  reply(sessionId, message) { return addon.cavalry_cluster_service_reply(this.handle, sessionId, "
+                      "message); }\n", service)
+        self.assertIn("    const result = addon.clusterServicePoll(this._state, this.handle, this._client.handle, handler, "
+                      "fragmentLimit, this);\n    if (typeof result === \"number\") return result;\n"
+                      "    throw new HandlerError(result[0], result[1], result[4] ? noAction(result[2]) : result[2], "
+                      "result[3], false, null, \"service\");", service)
+        self.assertNotIn("cavalry_cluster_service_action", index.replace('"cavalry_cluster_service_action"', ""))
+        close = service.split("  close() {\n", 1)[1]
+        self.assertLess(close.index("if (result !== 0 && addon.cavalry_errcode() === constants.CAVALRY_ERR_POLLING) "
+                                    "throw error(\"cavalry_cluster_service_close\");"), close.index("this.handle = null;"))
+        for cls, reader, fields in (
+                ("ClusterReplyValues", "replyField", ("leadershipTermId", "timestamp")),
+                ("ClusterEntryValues", "entryField", ("position", "leadershipTermId", "timestamp", "sessionId", "type",
+                                                      "leaderMemberId", "timedOut"))):
+            body = index.split(f"class {cls} {{", 1)[1].split("\nclass ", 1)[0]
+            for i, field in enumerate(fields):
+                self.assertIn(f"  get {field}() {{ return addon.{reader}(this._state, {i}); }}\n", body)
+            self.assertEqual(body.count("  get "), len(fields))
+        reply = addon.split("static napi_value fn_replyField(", 1)[1].split("\n}\n", 1)[0]
+        for i, field in enumerate(("leadership_term_id", "timestamp")):
+            self.assertIn(f"      case {i}: return make_int64(env, s->reply.{field});", reply)
+        entry = addon.split("static napi_value fn_entryField(", 1)[1].split("\n}\n", 1)[0]
+        for i, (field, make) in enumerate((("position", "make_int64"), ("leadership_term_id", "make_int64"),
+                                           ("timestamp", "make_int64"), ("session_id", "make_int64"),
+                                           ("type", "make_int32"), ("leader_member_id", "make_int32"),
+                                           ("timed_out", "make_bool"))):
+            self.assertIn(f"      case {i}: return {make}(env, s->entry.{field});", entry)
+        # Every field of the two structs has its getter: a field the header gains is a
+        # getter to add.
+        structs = {s.name: [f.name for f in s.fields] for s in self.header.structs}
+        self.assertEqual(structs["cavalry_cluster_reply_values_t"], ["leadership_term_id", "timestamp"])
+        self.assertEqual(structs["cavalry_cluster_entry_values_t"],
+                         ["position", "leadership_term_id", "timestamp", "session_id", "type", "leader_member_id",
+                          "timed_out"])
+        # Outside the handler's call, and for another kind of state, a value reads undefined.
+        self.assertIn("if (s->current != NULL && s->cluster_values && s->cluster == CLUSTER_SESSION) {", reply)
+        self.assertIn("if (s->current != NULL && s->cluster_values && s->cluster == CLUSTER_SERVICE) {", entry)
+        poll = addon.split("static napi_value fn_clusterServicePoll(", 1)[1].split("\n}\n", 1)[0]
+        self.assertIn("s->env = env; s->handler = argv[3]; s->self = argv[5]; s->service = service; s->polling = true;", poll)
+        self.assertIn("s->polling = false; s->handler = NULL; s->self = NULL; s->service = NULL;", poll)
+        for name in ("ABORT", "BREAK", "CONTINUE"):
+            self.assertIn(f"const {name} = constants.CAVALRY_ACTION_{name};", index)
+            self.assertIn(f"export const {name}: number;", types)
+        exports = index.split("module.exports = {", 1)[1]
+        for name in ("ABORT, BREAK, CONTINUE,", "ClusterSession", "ClusterReplyValues", "ClusterService",
+                     "ClusterEntryValues"):
+            self.assertIn(name, exports)
+        self.assertIn("  connectCluster(members: string, responseChannel: string): ClusterSession;", types)
+        self.assertIn("  clusterService(): ClusterService;", types)
+        self.assertIn("  poll(handler: ReplyHandler, fragmentLimit: number): number;", types)
+        self.assertIn("  poll(handler: ServiceHandler, fragmentLimit: number): number;", types)
+        self.assertIn('  cluster: "session" | "service" | null;', types)
+
+    def test_the_cluster_trampoline_aborts_a_services_entry_that_did_not_get_through_its_handler(self):
+        """Invariant 1, for a cluster service and a cluster session in the Node client (ADR
+        0124). The generated cluster section is compiled with the runner's `cc` against the
+        stand-in for N-API, which fails each call of a reply and of an entry in turn, for a
+        handler that returns and one that throws. A session's reply is held as a
+        subscription's fragment: one the handler did not return from is counted once, with
+        the first failure naming the call that failed and the reply by its term and the
+        cluster's time, and a later reply of the poll still reaches the handler. A
+        service's entry is held to more: every way it does not get through its handler, a
+        throw, an N-API call that failed before the handler ran, or an answer the addon
+        could not read, makes exactly one `cavalry_cluster_service_action` call, with
+        `CAVALRY_ACTION_ABORT`, and an entry handed over after it in the same poll makes
+        no N-API call, does not reach the handler, and is aborted too. What the handler
+        returns is its action: nothing, null and CONTINUE make no call, BREAK and ABORT are
+        passed on, 3 is passed, refused and aborted, and what is no whole int32 or no
+        number, a promise among them, is aborted with no call of its own."""
+        cc = shutil.which("cc")
+        if cc is None:
+            self.skipTest("no C compiler on PATH; the Node client's install needs one, and both CI runners have it")
+        addon = gen_node.write_node(self.header)["src/addon.c"]
+        code = lint.blank(addon)
+        makers = addon.index("static napi_value make_int32(")
+        end = lint.block_end(code, addon.index("{", addon.index("static void trampoline(")))
+        cluster_start = addon.index("/* A cluster session's poll and a cluster service's (ADR 0124).")
+        cluster_end = lint.block_end(code, addon.index("{", addon.index("static napi_value cluster_report(")))
+        self.assertLess(end, cluster_start)
+        with tempfile.TemporaryDirectory() as tmp:
+            source = os.path.join(tmp, "harness.c")
+            with open(source, "w", encoding="utf-8") as f:
+                f.write(TRAMPOLINE_HARNESS.split("@TRAMPOLINE@", 1)[0] + CLUSTER_STANDINS + addon[makers:end] + "\n\n" +
+                        addon[cluster_start:cluster_end] + "\n" + CLUSTER_MAIN)
+            binary = os.path.join(tmp, "harness")
+            include = os.path.join(gen.ROOT, "crates", "cavalry-ffi", "include")
+            built = subprocess.run([cc, "-std=c11", "-Wall", "-Wextra", "-I", include, source, "-o", binary],
+                                   capture_output=True, text=True)
+            self.assertEqual(built.returncode, 0, built.stderr)
+            ran = subprocess.run([binary], capture_output=True, text=True)
+        self.assertEqual(ran.returncode, 0, ran.stdout + ran.stderr)
+        # What the runtime is asked for, which clients/node/README.md, "The call-back, by
+        # construction", records: a reply costs what a subscription's fragment costs, and a
+        # service's entry one call more, the type of what its handler returned.
+        self.assertIn("a reply whose handler returns calls: napi_open_handle_scope napi_create_external_buffer "
+                      "napi_get_reference_value napi_get_undefined napi_call_function napi_get_typedarray_info "
+                      "napi_detach_arraybuffer napi_close_handle_scope\n", ran.stdout)
+        self.assertIn("an entry whose handler returns calls: napi_open_handle_scope napi_create_external_buffer "
+                      "napi_get_reference_value napi_get_undefined napi_call_function napi_typeof "
+                      "napi_get_typedarray_info napi_detach_arraybuffer napi_close_handle_scope\n", ran.stdout)
+        self.assertIn("a cluster service's report's cause: the addon could not make the body's Buffer "
+                      "(napi_create_external_buffer) for the entry at position 320, of leadership term 5: N-API status "
+                      "9, napi_generic_failure; the runtime refused a call the addon makes for every reply and every "
+                      "entry: call poll on the thread that made the client, on a Node that package.json's engines "
+                      "admits. The entry was aborted: the ABI did not take it, the poll ended at it, and the next poll "
+                      "hands it over again. See clients/node/README.md#the-exception\n", ran.stdout)
+        self.assertIn("a cluster session's report's cause: the addon could not make the body's Buffer "
+                      "(napi_create_external_buffer) for the reply of leadership term 5, at the cluster's time "
+                      "1700000000000: N-API status 9, napi_generic_failure; the runtime refused a call the addon makes "
+                      "for every reply and every entry: call poll on the thread that made the client, on a Node that "
+                      "package.json's engines admits. The ABI consumed the reply, so polling again does not deliver it. "
+                      "See clients/node/README.md#the-exception\n", ran.stdout)
+        self.assertIn("a report with no values' cause: the addon could not open a handle scope (napi_open_handle_scope) "
+                      "for an entry whose values the ABI did not give: ", ran.stdout)
+        self.assertIn("0 failure(s)", ran.stdout)
 
     def test_the_trampoline_counts_and_reports_every_fragment_the_handler_did_not_see(self):
         """Invariant 1: the ABI has consumed a fragment before the trampoline runs, so a
@@ -1250,12 +1735,17 @@ class NodePackage(unittest.TestCase):
         and its helpers make or delete a reference."""
         addon = gen_node.write_node(self.header)["src/addon.c"]
         code = lint.blank(addon)
-        for name in ("fn_poll", "trampoline", "keep_failure", "undelivered", "threw", "report", "failure_error"):
+        for name in ("fn_poll", "trampoline", "keep_failure", "undelivered", "threw", "report", "failure_error",
+                     "fn_clusterSessionPoll", "fn_clusterServicePoll", "cluster_trampoline", "cluster_keep_failure",
+                     "cluster_abort", "cluster_undelivered", "cluster_hold", "cluster_action", "cluster_failure_error",
+                     "cluster_report"):
             start = code.index("{", re.search(rf"^static \w+ \*?{name}\(", code, re.M).start())
             body = code[start:lint.block_end(code, start)]
             for made in ("napi_create_reference(", "napi_delete_reference(", "napi_reference_ref(", "napi_reference_unref("):
                 self.assertNotIn(made, body, f"{name} calls {made}")
         self.assertIn("s->handler = argv[2];", addon)
+        # A cluster service's poll holds the JS service the same way, for the call alone.
+        self.assertIn("s->self = argv[5];", addon)
 
     def test_the_reserved_value_is_a_bigint_both_ways(self):
         """Invariant 1: the reserved value is any int64 a publisher sets, so the header's
