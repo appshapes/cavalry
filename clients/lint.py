@@ -5,9 +5,9 @@ of the ABI's per-message functions that the client wraps (`crates/cavalry-ffi/RE
 the claim, the
 reserved value, the commit and abort, the offer, the poll and the header's values, and
 the committed log's poll and an entry's position, ADR 0070, in every client; and in the
-Python client the seven of a cluster session and a cluster service too, the session's
-offer, its poll and a reply's values, and the service's poll, an entry's values, its
-reply and its action, ADR 0124) and each trampoline that
+Python client and the Node client the seven of a cluster session and a cluster service
+too, the session's offer, its poll and a reply's values, and the service's poll, an
+entry's values, its reply and its action, ADR 0124) and each trampoline that
 calls the user's handler, hold no lock, no `await` and no raise, in the language's
 forms, and so does every function of the package they call. For Python those
 forms are `threading`'s locks and anything else of `threading`, `async def`, `await`,
@@ -18,7 +18,11 @@ and matches braces, they are `async` on the function, `await`, `Promise`, `.then
 blocking wait the language has. The Node client's addon, `clients/node/src/addon.c`, is
 generated client code in C on the same path, so its per-message functions, the trampoline,
 the finalizer of each Buffer, the addon's own `poll`, `committedLogPoll`, `headerField`, `view` and `detach`,
-and the wrappers of the claim, the reserved value, the commit, the abort and the offer, are
+and the wrappers of the claim, the reserved value, the commit, the abort and the offer,
+and for a cluster session and a cluster service the trampoline of their polls,
+`cluster_trampoline`, the addon's own `clusterSessionPoll`, `clusterServicePoll`,
+`replyField` and `entryField`, and the wrappers of the session's offer and the service's
+reply and action, are
 read by the same tokenizer for C's forms: a lock, `pthread_mutex_*`, `pthread_rwlock_*`,
 C11's `mtx_*`, libuv's `uv_mutex_*` and `uv_rwlock_*`, and N-API's
 `napi_*threadsafe_function*`; and a raise, `napi_throw*` and `napi_fatal_*`, except in the
@@ -27,7 +31,7 @@ parameter cannot take, before the ABI is called. A call reaches the package's ow
 module function, a class's `__init__` or `constructor`, a method of the same class
 through `self` or `this`, and any other method by its name in any class of the package.
 The one raise allowed is in `poll`, a subscription's or a committed log's, and in the
-Python client a cluster session's or a cluster service's,
+Python client and the Node client a cluster session's or a cluster service's,
 after the last line that calls the ABI, where the
 user's handler's exception is raised once the poll has returned
 (clients/python/README.md; clients/node/README.md); a raise between two of its calls,
@@ -137,6 +141,23 @@ RULES = {
             "Publication.offer",
             "Subscription.poll",
             "CommittedLog.poll",
+            # A cluster session and a cluster service (ADR 0124): the session's offer and
+            # its poll, the service's poll and its reply, and the getters of a reply's
+            # values and an entry's, which read through the addon's `replyField` and
+            # `entryField` what its trampoline read with one ABI call.
+            "ClusterSession.offer",
+            "ClusterSession.poll",
+            "ClusterService.poll",
+            "ClusterService.reply",
+            "ClusterReplyValues.leadershipTermId",
+            "ClusterReplyValues.timestamp",
+            "ClusterEntryValues.position",
+            "ClusterEntryValues.leadershipTermId",
+            "ClusterEntryValues.timestamp",
+            "ClusterEntryValues.sessionId",
+            "ClusterEntryValues.type",
+            "ClusterEntryValues.leaderMemberId",
+            "ClusterEntryValues.timedOut",
             "Header.frameLength",
             "Header.version",
             "Header.flags",
@@ -147,7 +168,9 @@ RULES = {
             "Header.termId",
             "Header.reservedValue",
         ],
-        "raise_after": [("Subscription.poll", "addon.poll"), ("CommittedLog.poll", "addon.committedLogPoll")],
+        "raise_after": [("Subscription.poll", "addon.poll"), ("CommittedLog.poll", "addon.committedLogPoll"),
+                        ("ClusterSession.poll", "addon.clusterSessionPoll"),
+                        ("ClusterService.poll", "addon.clusterServicePoll")],
         # The addon is generated client code in C on the same path: the functions the
         # per-message functions above call and the trampoline the ABI calls, with the
         # finalizer Node calls for each of their Buffers. The argument readers may throw a
@@ -168,6 +191,19 @@ RULES = {
                 "fn_cavalry_buffer_claim_commit",
                 "fn_cavalry_buffer_claim_abort",
                 "fn_cavalry_publication_offer",
+                # A cluster session's poll and a cluster service's, their one trampoline,
+                # which passes the ABI the action a service's handler returned and aborts
+                # an entry that did not get through its handler, the readers of a reply's
+                # values and an entry's, and the wrappers of the session's offer and the
+                # service's reply and action (ADR 0124).
+                "cluster_trampoline",
+                "fn_clusterSessionPoll",
+                "fn_clusterServicePoll",
+                "fn_replyField",
+                "fn_entryField",
+                "fn_cavalry_cluster_session_offer",
+                "fn_cavalry_cluster_service_reply",
+                "fn_cavalry_cluster_service_action",
             ],
             "readers": ["read_args", "type_error", "is_nullish", "external_arg", "bytes_arg", "struct_arg",
                         "string_arg", "int64_arg", "int32_arg", "size_arg", "bool_arg"],
@@ -759,8 +795,8 @@ def node_findings(language: str, path: str, rules: dict) -> list[str]:
     for name in rules["functions"]:
         if name not in module.functions:
             findings.append(f"{language}: the per-message function {name} is not in {path}; {HELP}")
-    # Each poll and the addon call after which it may throw: a subscription's and a
-    # committed log's.
+    # Each poll and the addon call after which it may throw: a subscription's, a committed
+    # log's, a cluster session's and a cluster service's.
     raise_after = raise_after_of(rules)
     for name in present:
         line, _, body, start = module.functions[name]
