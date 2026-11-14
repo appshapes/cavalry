@@ -9,7 +9,9 @@
 //!
 //! Every service runs one handler, which answers a session message with the id of
 //! its own member and the message. So the reply a client reads says which member's
-//! service sent it, which a real service has no reason to say.
+//! service sent it, which a real service has no reason to say. In the second test the
+//! handler also sends a session `welcome` at the session's own open event, which can
+//! reach the client before the leader's ok event does.
 
 use std::path::{Path, PathBuf};
 use std::sync::mpsc::{Receiver, Sender, TryRecvError, channel};
@@ -115,8 +117,15 @@ struct Member {
 }
 
 /// The cluster's thread: every member's duty cycle and every service's poll, until it
-/// is asked to stop.
-fn run(dir: PathBuf, members_string: String, asks: Receiver<Ask>, told: Sender<Told>) {
+/// is asked to stop. With `welcome`, every service also replies `welcome` to a session
+/// at the session's open event.
+fn run(
+    dir: PathBuf,
+    members_string: String,
+    welcome: bool,
+    asks: Receiver<Ask>,
+    told: Sender<Told>,
+) {
     let mut members: Vec<Member> = [1, 2, 0]
         .into_iter()
         .map(|id| {
@@ -178,6 +187,14 @@ fn run(dir: PathBuf, members_string: String, asks: Receiver<Ask>, told: Sender<T
                 .poll(
                     &mut member.client,
                     |committed, replies| {
+                        // A reply at the session's own open event: the session is
+                        // open at it (`spec/cluster.md`, "Replies").
+                        if welcome
+                            && let Entry::SessionOpen { session_id } = committed.entry
+                            && replies.reply(session_id, b"welcome") == Reply::Retry
+                        {
+                            return Action::Abort;
+                        }
                         if let Entry::SessionMessage {
                             session_id,
                             payload,
@@ -248,13 +265,13 @@ struct Cluster {
 }
 
 impl Cluster {
-    fn start(dir: &Path, members: &str) -> Self {
+    fn start(dir: &Path, members: &str, welcome: bool) -> Self {
         let (asks, asked) = channel();
         let (tell, told) = channel();
         let (dir, members) = (dir.to_path_buf(), members.to_string());
         let thread = std::thread::Builder::new()
             .name("cluster".into())
-            .spawn(move || run(dir, members, asked, tell))
+            .spawn(move || run(dir, members, welcome, asked, tell))
             .expect("the cluster's thread starts");
         Self {
             asks,
@@ -419,7 +436,7 @@ fn a_message_is_answered_by_the_service_beside_its_terms_leader_alone() {
     let dir = TestDir::new("replies");
     let ports = free_ports(16);
     let members = members_on(&ports[..15]);
-    let mut cluster = Cluster::start(dir.path(), &members);
+    let mut cluster = Cluster::start(dir.path(), &members, false);
     let deadline = Instant::now() + DEADLINE;
     while cluster.led.is_none() {
         assert!(Instant::now() < deadline, "the cluster has a leader");
@@ -587,6 +604,89 @@ fn a_message_is_answered_by_the_service_beside_its_terms_leader_alone() {
     }
 
     session.close().expect("the session closes");
+    cavalry.close().expect("the client closes");
+    cluster.stop();
+    driver.close().expect("the client's driver closes");
+}
+
+/// A service that replies to a session at the session's own open event, end to end.
+/// The leader's module sends the ok event and the leader's service sends its reply
+/// when each reads the same committed entry, so either can reach the client first,
+/// and the client is still in its connect. Three sessions, each on a response channel
+/// of its own: each is handed `welcome` once, with the cluster's time of its open
+/// event, and then the answer to a message of its own, in that order. No reply is
+/// dropped.
+#[test]
+fn a_reply_at_a_sessions_open_event_is_read_by_the_session_its_client_opens() {
+    let dir = TestDir::new("welcome");
+    let ports = free_ports(18);
+    let members = members_on(&ports[..15]);
+    let mut cluster = Cluster::start(dir.path(), &members, true);
+    let deadline = Instant::now() + DEADLINE;
+    while cluster.led.is_none() {
+        assert!(Instant::now() < deadline, "the cluster has a leader");
+        cluster.hear();
+        std::thread::sleep(Duration::from_millis(1));
+    }
+    let (leader, _) = cluster.led.expect("a leader");
+
+    let client_dir = dir.path().join("client");
+    let driver =
+        Driver::start(&client_dir, dir.path().join("client-log")).expect("the client's driver");
+    let mut cavalry = Cavalry::connect_to(&client_dir).expect("the client connects");
+    let mut sessions = Vec::new();
+    for (place, port) in ports[15..].iter().enumerate() {
+        let channel = format!("cavalry:udp?endpoint=127.0.0.1:{port}");
+        let mut session = cavalry
+            .connect_cluster(&members, &channel)
+            .expect("the session opens");
+        assert_eq!(session.leader_member_id(), leader);
+
+        // The welcome, whichever side of the ok event it arrived on, and nothing else
+        // in 300 ms more.
+        let mut replies = Replies::new();
+        until(
+            &mut session,
+            &mut cluster,
+            &mut replies,
+            "the session reads the reply to its open event",
+            |_, _, replies| !replies.is_empty(),
+        );
+        let quiet = Instant::now() + Duration::from_millis(300);
+        while Instant::now() < quiet {
+            cycle(&mut session, &mut cluster, &mut replies);
+        }
+        assert_eq!(replies.len(), 1, "session {place}: {replies:?}");
+        let (payload, opened) = &replies[0];
+        assert_eq!(payload, b"welcome", "session {place}");
+        assert!(*opened > 1_600_000_000_000, "the cluster's time");
+
+        // Then the session's own message, answered after the welcome and once.
+        let message = format!("hello {place}");
+        let (answered, took) = converse(&mut session, &mut cluster, message.as_bytes(), 3);
+        let entry = took
+            .iter()
+            .find(|took| took.member == leader)
+            .expect("the leader's service took it");
+        assert_eq!(entry.reply, Reply::Sent);
+        assert!(
+            entry.timestamp >= *opened,
+            "the message is above the open event"
+        );
+        assert_eq!(
+            answered,
+            [(format!("{leader}:{message}").into_bytes(), entry.timestamp)],
+            "session {place}"
+        );
+        sessions.push(session);
+    }
+
+    for id in 0..3 {
+        assert_eq!(dropped(dir.path(), id), 0, "member {id}");
+    }
+    for session in sessions {
+        session.close().expect("the session closes");
+    }
     cavalry.close().expect("the client closes");
     cluster.stop();
     driver.close().expect("the client's driver closes");
