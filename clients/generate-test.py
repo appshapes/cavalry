@@ -2970,6 +2970,34 @@ class DotnetPackage(unittest.TestCase):
         self.assertEqual(subscription.count("[UnmanagedCallersOnly(CallConvs = new[] { typeof(CallConvCdecl) })]"), 1)
         self.assertEqual(subscription.count("Abi.cavalry_subscription_poll(handle, &OnFragment, GCHandle.ToIntPtr(self), (nuint) fragmentLimit)"), 2)
 
+    def test_a_dotnet_client_close_the_abi_refuses_keeps_the_client_open(self):
+        """A cluster service's poll holds its client, so the ABI refuses the client's close
+        from inside the service's handler with ERR_POLLING and frees nothing (spec/c-abi.md,
+        "Calls during a claim or a poll"). `Client.Close()` then throws and keeps the
+        handle, as the closes of a subscription, a committed log, a cluster session and a
+        cluster service do, so the .NET client never forgets a client the ABI keeps open
+        (clients/dotnet/README.md, "What it must never do"). Every other failure still
+        forgets the handle, since the ABI's close frees it whatever it returns."""
+        code = gen_dotnet.write_dotnet(self.header)["Client.cs"]
+        close = code.split("    public void Close()\n    {\n", 1)[1].split("\n    }\n", 1)[0]
+        called = close.index("int result = Abi.cavalry_close(handle);")
+        read = close.index('CavalryException error = Abi.LastError("cavalry_close");')
+        refused = close.index("if (error.Code == Abi.ERR_POLLING)\n                {\n                    throw error;\n"
+                              "                }\n")
+        forgotten = close.index("                handle = 0;\n                throw error;\n            }\n")
+        self.assertLess(called, read)
+        self.assertLess(read, refused)
+        self.assertLess(refused, forgotten)
+        self.assertTrue(close.endswith("            handle = 0;\n        }"), close)
+        self.assertEqual(close.count("handle = 0;"), 2)
+        # The handle is the one the ABI is called with: it is not forgotten before the call.
+        self.assertNotIn("closing", close)
+        doc = code.split("    public void Close()\n", 1)[0].rsplit("\n\n", 1)[1]
+        self.assertIn('It then throws the <see cref="CavalryException"/> and keeps the', doc)
+        with open(os.path.join(gen.ROOT, "clients", "dotnet", "README.md"), encoding="utf-8") as f:
+            readme = f.read()
+        self.assertIn("`client.Close()`", readme.split("- Never read a refusal as an answer.", 1)[1].split("- Never edit a generated", 1)[0])
+
     def test_the_publications_close_clears_the_claim_struct(self):
         """A close leaves no claim, so the struct's `publication` must not name the freed
         handle: the close clears the struct before the ABI's close, and the claim's calls

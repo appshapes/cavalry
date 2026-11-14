@@ -98,8 +98,11 @@ and which frees nothing, leaves the client open, as in the Go round: the service
 it again, and the round closes it at its end. Its report's longest poll is how long a
 poll held its thread.
 
-The .NET round is the Python round through `clients/dotnet`, with no edge of its own:
-a handler's body is a span, which cannot leave its call, and an entry that is no
+The .NET round is the Python round through `clients/dotnet`, with one edge of its own.
+The client's close from inside a service's handler, which the ABI refuses and which
+frees nothing, leaves the client open, as in the Go and JVM rounds: the service polls
+it again, and the round closes it at its end. A handler's body is a span, which cannot
+leave its call, and an entry that is no
 session's message has an empty one. It sleeps 1 ms between its duty cycles, where the
 other rounds sleep 200 µs: `Thread.Sleep` counts in milliseconds and yields alone for
 less, and a round that only yields spins beside the members. So its report counts
