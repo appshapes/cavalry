@@ -33,6 +33,36 @@ pub(crate) unsafe fn channel<'a>(function: &str, channel: *const c_char) -> Opti
     }
 }
 
+/// Reads a string that is not a channel and must be UTF-8 all the same, since it is a
+/// `&str` in the Rust API: `parameter` of `function`, with `pass` as what to pass.
+///
+/// # Safety
+///
+/// As for [`channel`].
+pub(crate) unsafe fn utf8<'a>(
+    function: &str,
+    parameter: &str,
+    pass: &str,
+    text: *const c_char,
+) -> Option<&'a str> {
+    // SAFETY: non-null and NUL-terminated by the caller's convention, and read during
+    // the call only.
+    let bytes = unsafe { CStr::from_ptr(text) };
+    match bytes.to_str() {
+        Ok(text) => Some(text),
+        Err(_) => {
+            error::set(
+                CAVALRY_ERR_NOT_UTF8,
+                format_args!(
+                    "{function} refused (not-utf8): {parameter} is not UTF-8; pass {pass}; see \
+                     {DOC}#strings"
+                ),
+            );
+            None
+        }
+    }
+}
+
 /// Reads a directory: NUL-terminated bytes, a path as the operating system holds it,
 /// refused when empty.
 ///

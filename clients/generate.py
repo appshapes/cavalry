@@ -47,6 +47,9 @@ PER_MESSAGE = (
     "cavalry_header_values",
     "cavalry_committed_log_poll",
     "cavalry_committed_log_entry_position",
+    "cavalry_cluster_session_offer",
+    "cavalry_cluster_session_poll",
+    "cavalry_cluster_reply_values",
 )
 
 

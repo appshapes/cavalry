@@ -46,9 +46,11 @@ imports), Go (`go/`, by `generate_go.py`), the JVM (`jvm/`, by `generate_jvm.py`
   the runner's driver, and fails unless it prints the line the README says the reader
   will see (`conformance/python/readme.py` is the shape).
 - `just lint` runs `clients/lint.py` over the generated per-message functions, the
-  wrapper of each of the ABI's nine (`crates/cavalry-ffi/README.md`: the claim, the
-  reserved value, the commit and abort, the offer, the poll and the header's values,
-  and the committed log's poll and an entry's position; ADR 0070), and each
+  wrapper of each of nine of the ABI's twelve (`crates/cavalry-ffi/README.md`: the
+  claim, the reserved value, the commit and abort, the offer, the poll and the
+  header's values, and the committed log's poll and an entry's position; ADR 0070;
+  a cluster session's offer, its poll and a reply's values are bound and get their
+  wrappers with each client's session object, ADR 0122), and each
   trampoline that calls the user's handler: no lock, no `await`, no raise, in
   the language's forms, in the function's own body or in any function of the package
   it calls. Generated code of the client in another language on the same path is read

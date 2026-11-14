@@ -226,6 +226,11 @@ unsafe extern "C" fn collect(
         let collected = &mut *clientd.cast::<Collected>();
         let mut values = std::mem::zeroed::<cavalry_header_values_t>();
         assert_eq!(cavalry_header_values(header, &mut values), 0);
+        // An entry's header carries a frame and a position, and no reply's values
+        // (`spec/c-abi.md`, "What a header carries").
+        let mut reply = std::mem::zeroed::<cavalry_cluster_reply_values_t>();
+        assert_eq!(cavalry_cluster_reply_values(header, &mut reply), -1);
+        assert_eq!(cavalry_errcode(), CAVALRY_ERR_WRONG_HEADER);
         collected.entries.push(Entry {
             position: cavalry_committed_log_entry_position(header),
             body: std::slice::from_raw_parts(buffer, length).to_vec(),

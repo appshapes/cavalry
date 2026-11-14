@@ -6,7 +6,7 @@
 use std::ffi::{CString, c_char, c_int, c_void};
 use std::ptr;
 
-use cavalry_client::{Image, Subscription};
+use cavalry_client::{Image, ReplyHeader, Subscription};
 use cavalry_proto::frame::DataFrameHeader;
 
 use crate::codes::*;
@@ -66,14 +66,26 @@ pub struct cavalry_image_t {
     source_identity: CString,
 }
 
-/// The frame header a poll hands the fragment handler, valid for the call.
+/// What a poll hands the fragment handler beside the body, valid for the call: a
+/// frame's header, or from a cluster session's poll a reply's values in its place
+/// (`spec/c-abi.md`, "What a header carries").
 pub struct cavalry_header_t {
-    pub(crate) header: DataFrameHeader,
-    /// The position in its stream at which the frame begins, when the poll that made
-    /// the header knows it: a committed log's poll does, and a subscription's does
-    /// not and writes `CAVALRY_NULL_POSITION` (`spec/c-abi.md`, "A frame's position";
-    /// ADR 0070).
-    pub(crate) position: i64,
+    pub(crate) carries: Carries,
+}
+
+/// What a header carries, by the poll that made it. Three functions read a header,
+/// and each refuses the kinds that do not carry what it reads (ADR 0070, ADR 0122).
+#[derive(Clone, Copy)]
+pub(crate) enum Carries {
+    /// A subscription's poll: the frame's header. It knows no position
+    /// (`spec/c-abi.md`, "A frame's position").
+    Frame(DataFrameHeader),
+    /// A committed log's poll: the entry's frame header, and the position in the log
+    /// at which the entry begins.
+    Entry(DataFrameHeader, i64),
+    /// A cluster session's poll: the reply's leadership term id and the cluster's
+    /// time. The Rust poll hands its handler no frame header, so this carries none.
+    Reply(ReplyHeader),
 }
 
 /// The data frame header's fields, in the order and the types of `spec/frame.md`.
@@ -277,8 +289,7 @@ pub unsafe extern "C" fn cavalry_subscription_poll(
         let result = inner.poll(
             |body, header| {
                 let view = cavalry_header_t {
-                    header: *header,
-                    position: CAVALRY_NULL_POSITION,
+                    carries: Carries::Frame(*header),
                 };
                 // The caller's handler, by the convention above, inside the enclosing
                 // unsafe block; the body and the header are valid for the call.
@@ -531,7 +542,11 @@ pub unsafe extern "C" fn cavalry_image_is_end_of_stream(image: *const cavalry_im
     }
 }
 
-/// Fills `values` with the header's fields.
+/// Fills `values` with the header's fields: the frame header of a fragment a
+/// subscription's poll handed its handler, or of an entry a committed log's did. −1
+/// with `CAVALRY_ERR_WRONG_HEADER` for a header from a cluster session's poll, which
+/// carries a reply's values and no frame's fields; `cavalry_cluster_reply_values`
+/// reads that one.
 ///
 /// # Safety
 ///
@@ -550,9 +565,24 @@ pub unsafe extern "C" fn cavalry_header_values(
         error::null("cavalry_header_values", "values");
         return -1;
     }
-    // SAFETY: the handler's header, valid for the call, and a writable struct.
+    // SAFETY: the handler's header, valid for the call.
+    let frame = match unsafe { (*header).carries } {
+        Carries::Frame(frame) | Carries::Entry(frame, _) => frame,
+        Carries::Reply(_) => {
+            error::set(
+                CAVALRY_ERR_WRONG_HEADER,
+                format_args!(
+                    "cavalry_header_values refused (wrong-header): the header came from \
+                     cavalry_cluster_session_poll, which hands over a reply's values and no \
+                     frame's fields; read it with cavalry_cluster_reply_values; see \
+                     {DOC}#what-a-header-carries"
+                ),
+            );
+            return -1;
+        }
+    };
+    // SAFETY: a writable struct, by the caller's convention.
     unsafe {
-        let frame = &(*header).header;
         *values = cavalry_header_values_t {
             frame: cavalry_header_values_frame_t {
                 frame_length: frame.frame_length(),

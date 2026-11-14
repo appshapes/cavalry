@@ -3,11 +3,14 @@
 //! `cavalry_buffer_claim_set_reserved_value`, `cavalry_buffer_claim_commit`,
 //! `cavalry_buffer_claim_abort`, `cavalry_publication_offer`,
 //! `cavalry_subscription_poll`, `cavalry_header_values`,
-//! `cavalry_committed_log_poll` and `cavalry_committed_log_entry_position`, counted
-//! with `stats_alloc`, allocations and reallocations both, over a window after the
-//! image has joined, with none at all. The committed log's two have a window of their
-//! own, beside three cluster members in this process whose duty cycles run inside it
-//! (ADR 0070). Alone in its binary, so that no other test's threads are counted.
+//! `cavalry_committed_log_poll`, `cavalry_committed_log_entry_position`,
+//! `cavalry_cluster_session_offer`, `cavalry_cluster_session_poll` and
+//! `cavalry_cluster_reply_values`, counted with `stats_alloc`, allocations and
+//! reallocations both, over a window after the image has joined, with none at all.
+//! The committed log's two have a window of their own, beside three cluster members
+//! in this process whose duty cycles run inside it (ADR 0070). The cluster session's
+//! three have a third, against a leader this thread plays (ADR 0122). Alone in its
+//! binary, so that no other test's threads are counted.
 
 use std::alloc::System;
 use std::ffi::{CString, c_void};
@@ -15,9 +18,13 @@ use std::path::Path;
 use std::ptr;
 use std::time::{Duration, Instant};
 
+use cavalry_client::{Cavalry, Offer, Publication, Subscription};
 use cavalry_driver::Driver;
 use cavalry_ffi::*;
-use cavalry_proto::cluster::{LOG_RECORDINGS_FILE_PREFIX, LogRecordings};
+use cavalry_proto::cluster::{
+    EGRESS_STREAM_ID, EventCode, INGRESS_STREAM_ID, LOG_RECORDINGS_FILE_PREFIX, LogRecordings,
+    Message, Stream,
+};
 use cavalry_raft::{ConsensusModule, ElectionState, Role};
 use stats_alloc::{INSTRUMENTED_SYSTEM, Region, StatsAlloc};
 
@@ -56,6 +63,78 @@ unsafe extern "C" fn count_entry(
         assert_eq!(cavalry_header_values(header, &mut values), 0);
         assert!(cavalry_committed_log_entry_position(header) >= 0);
         ENTRIES += 1;
+    }
+}
+
+static mut REPLIES: usize = 0;
+
+unsafe extern "C" fn count_reply(
+    _clientd: *mut c_void,
+    _buffer: *const u8,
+    length: usize,
+    header: *const cavalry_header_t,
+) {
+    // SAFETY: the header is valid for the call; the counter is this test's, on one
+    // thread.
+    unsafe {
+        let mut values = std::mem::zeroed::<cavalry_cluster_reply_values_t>();
+        assert_eq!(cavalry_cluster_reply_values(header, &mut values), 0);
+        assert_eq!((length, values.leadership_term_id), (8, SESSION_TERM));
+        REPLIES += 1;
+    }
+}
+
+/// The id and the term the played leader gives the session of the third window.
+const SESSION_ID: i64 = 11;
+const SESSION_TERM: i64 = 1;
+
+/// Sends `message` on the played leader's egress publication, from a buffer on the
+/// stack, until it is taken. Nothing here allocates.
+fn send(egress: &mut Publication, message: &Message<'_>) {
+    let mut bytes = [0u8; 256];
+    let length = message.write(&mut bytes).expect("fits");
+    let deadline = Instant::now() + Duration::from_secs(30);
+    loop {
+        match egress.offer(&bytes[..length]) {
+            Ok(_) => return,
+            Err(Offer::NotConnected | Offer::BackPressured | Offer::AdminAction) => {
+                assert!(Instant::now() < deadline, "the played leader's offer");
+                std::thread::sleep(Duration::from_micros(50));
+            }
+            Err(other) => panic!("{other}"),
+        }
+    }
+}
+
+/// The played leader's duty cycle: a session message it reads is answered with the
+/// same payload, the session's term and a time. Nothing here allocates.
+fn serve(ingress: &mut Subscription, egress: &mut Publication) {
+    let mut reply = [0u8; 8];
+    let mut read = false;
+    ingress
+        .poll(
+            |body, _| {
+                if let Ok(Message::SessionMessage { payload, .. }) =
+                    Message::parse(Stream::Ingress, body)
+                    && payload.len() == reply.len()
+                {
+                    reply.copy_from_slice(payload);
+                    read = true;
+                }
+            },
+            1,
+        )
+        .expect("the ingress polls");
+    if read {
+        send(
+            egress,
+            &Message::SessionMessage {
+                leadership_term_id: SESSION_TERM,
+                cluster_session_id: SESSION_ID,
+                timestamp: 1_700_000_000_000,
+                payload: &reply,
+            },
+        );
     }
 }
 
@@ -301,6 +380,189 @@ fn the_message_path_allocates_nothing() {
              .claude/rules/data-plane.md"
         );
     }
+
+    // The cluster session's window (ADR 0122): a session through the ABI on the first
+    // driver, against a leader this thread plays with a subscription on its ingress
+    // endpoint and a publication to the session's response channel. A message is
+    // offered, the played leader answers it, and the C handler is handed the reply
+    // and reads its term, two thousand times; a stale reply is passed over and
+    // counted after every five hundred.
+    let ports = free_ports(3);
+    let session_members = CString::new(
+        (0..2)
+            .map(|id| {
+                format!(
+                    "{id},127.0.0.1:{},127.0.0.1:1,127.0.0.1:2,127.0.0.1:3,127.0.0.1:4",
+                    ports[id]
+                )
+            })
+            .collect::<Vec<_>>()
+            .join("|"),
+    )
+    .unwrap();
+    let response_channel = format!("cavalry:udp?endpoint=127.0.0.1:{}", ports[2]);
+    let response_channel_c = CString::new(response_channel.clone()).unwrap();
+    let mut played = Cavalry::connect_to(&dir).expect("the played leader connects");
+    let mut ingress = played
+        .add_subscription(
+            &format!("cavalry:udp?endpoint=127.0.0.1:{}", ports[0]),
+            INGRESS_STREAM_ID,
+        )
+        .expect("the ingress subscription");
+    let mut egress = played
+        .add_exclusive_publication(&response_channel, EGRESS_STREAM_ID)
+        .expect("the egress publication");
+    // The connect blocks until the leader answers, which this thread does, so a
+    // thread of its own makes it and has ended before anything is counted. The
+    // handles cross back as addresses: a handle may move between threads between
+    // calls (`spec/c-abi.md`, "Threads").
+    let opening = {
+        let (dir_c, members, channel) = (
+            dir_c.clone(),
+            session_members.clone(),
+            response_channel_c.clone(),
+        );
+        std::thread::spawn(move || {
+            // SAFETY: the ABI's conventions, held by this test.
+            unsafe {
+                let mut context = ptr::null_mut();
+                assert_eq!(cavalry_context_init_v(&mut context, CAVALRY_ABI_VERSION), 0);
+                assert_eq!(cavalry_context_set_dir(context, dir_c.as_ptr()), 0);
+                let mut client = ptr::null_mut();
+                assert_eq!(cavalry_init(&mut client, context), 0);
+                let mut session = ptr::null_mut();
+                assert_eq!(
+                    cavalry_connect_cluster(
+                        &mut session,
+                        client,
+                        members.as_ptr(),
+                        channel.as_ptr()
+                    ),
+                    0
+                );
+                (context as usize, client as usize, session as usize)
+            }
+        })
+    };
+    let deadline = Instant::now() + Duration::from_secs(30);
+    let mut correlation = None;
+    while correlation.is_none() {
+        assert!(Instant::now() < deadline, "no session connect arrived");
+        ingress
+            .poll(
+                |body, _| {
+                    if let Ok(Message::SessionConnect { correlation_id, .. }) =
+                        Message::parse(Stream::Ingress, body)
+                    {
+                        correlation = Some(correlation_id);
+                    }
+                },
+                1,
+            )
+            .expect("the ingress polls");
+        std::thread::sleep(Duration::from_micros(200));
+    }
+    send(
+        &mut egress,
+        &Message::SessionEvent {
+            cluster_session_id: SESSION_ID,
+            correlation_id: correlation.expect("read"),
+            leadership_term_id: SESSION_TERM,
+            leader_member_id: 0,
+            code: EventCode::Ok,
+            version: 0,
+            leader_heartbeat_timeout_ns: 10_000_000_000,
+            detail: b"",
+        },
+    );
+    let (context, client, session) = opening.join().expect("the opening thread ended");
+    let (context, client, session) = (
+        context as *mut cavalry_context_t,
+        client as *mut cavalry_t,
+        session as *mut cavalry_cluster_session_t,
+    );
+    // SAFETY: the ABI's conventions, held by this test; the three handles are the
+    // opening thread's, which has ended.
+    unsafe {
+        // One round: a message to the leader, and its reply through the C handler.
+        let round = |ingress: &mut Subscription, egress: &mut Publication, sequence: u64| {
+            let message = sequence.to_le_bytes();
+            let deadline = Instant::now() + Duration::from_secs(30);
+            loop {
+                let offered =
+                    cavalry_cluster_session_offer(session, message.as_ptr(), message.len());
+                if offered >= 0 {
+                    break;
+                }
+                assert_ne!(offered, CAVALRY_PUBLICATION_ERROR);
+                assert_ne!(offered, CAVALRY_PUBLICATION_CLOSED);
+                assert!(Instant::now() < deadline, "the session's offer was refused");
+                std::thread::sleep(Duration::from_micros(50));
+            }
+            let before = REPLIES;
+            while REPLIES == before {
+                assert!(Instant::now() < deadline, "no reply to message {sequence}");
+                serve(ingress, egress);
+                assert!(
+                    cavalry_cluster_session_poll(session, Some(count_reply), ptr::null_mut(), 1)
+                        >= 0
+                );
+            }
+        };
+        // Warm up: the images join and every first-time path is taken.
+        for sequence in 0..200 {
+            round(&mut ingress, &mut egress, sequence);
+        }
+        let stale_before = cavalry_cluster_session_stale_replies(session);
+        let before = REPLIES;
+        let region = Region::new(GLOBAL);
+        for sequence in 0..2_000u64 {
+            round(&mut ingress, &mut egress, sequence);
+            if sequence % 500 == 499 {
+                // A reply of the term before: stale, passed over and counted.
+                send(
+                    &mut egress,
+                    &Message::SessionMessage {
+                        leadership_term_id: SESSION_TERM - 1,
+                        cluster_session_id: SESSION_ID,
+                        timestamp: 1_700_000_000_000,
+                        payload: b"too late",
+                    },
+                );
+                let passed = cavalry_cluster_session_stale_replies(session);
+                let deadline = Instant::now() + Duration::from_secs(30);
+                while cavalry_cluster_session_stale_replies(session) == passed {
+                    assert!(Instant::now() < deadline, "the stale reply was not read");
+                    assert_eq!(
+                        cavalry_cluster_session_poll(
+                            session,
+                            Some(count_reply),
+                            ptr::null_mut(),
+                            1
+                        ),
+                        0,
+                        "a stale reply is not handed over"
+                    );
+                }
+            }
+        }
+        let change = region.change();
+        let read = REPLIES - before;
+        let stale = cavalry_cluster_session_stale_replies(session) - stale_before;
+        assert_eq!(cavalry_cluster_session_close(session), 0);
+        assert_eq!(cavalry_close(client), 0);
+        assert_eq!(cavalry_context_close(context), 0);
+        assert_eq!((read, stale), (2_000, 4));
+        assert_eq!(
+            change.allocations + change.reallocations,
+            0,
+            "the cluster session's path allocated across {read} replies and {stale} stale \
+             ones, {change:?}; see .claude/rules/data-plane.md"
+        );
+    }
+    drop(egress);
+    drop(ingress);
+    played.close().expect("the played leader closes");
     driver.close().expect("the driver closes");
     drop(members);
     let _ = std::fs::remove_dir_all(&dir);
