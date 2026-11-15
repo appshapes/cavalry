@@ -1950,7 +1950,7 @@ fn a_session_message_longer_than_an_entry_is_rejected_and_holds_no_image() {
     };
     assert!(
         sessions
-            .on_entry(clock, &open, &mut io)
+            .on_entry(clock, 0, &open, &mut io)
             .expect("the entry is taken")
     );
     let encode = |message: &Message<'_>| {
@@ -4228,4 +4228,135 @@ fn a_message_that_arrives_in_init_is_acted_on_after_it() {
         (module.io.terms.candidate_term() == 7).then_some(())
     });
     assert_eq!(module.messages_rejected, 0);
+}
+
+/// Three members over three drivers on the loopback, run until one leads and every
+/// election has closed: the leader first. A cluster of one cannot stand in for them
+/// here, since a leader's log publication takes no entry until a member has joined
+/// it.
+fn three(test: &str) -> (TestDir, Vec<(Driver, ConsensusModule)>) {
+    let dir = TestDir::new(test);
+    let ports = free_ports(15);
+    let members = (0..3)
+        .map(|member| {
+            let endpoints: Vec<String> = ports[member * 5..member * 5 + 5]
+                .iter()
+                .map(|port| format!("127.0.0.1:{port}"))
+                .collect();
+            format!("{member},{}", endpoints.join(","))
+        })
+        .collect::<Vec<_>>()
+        .join("|");
+    let mut started: Vec<(Driver, ConsensusModule)> = [1, 0, 2]
+        .into_iter()
+        .map(|id| {
+            let driver_dir = dir.0.join(format!("member-{id}"));
+            let log_dir = dir.0.join(format!("member-{id}-log"));
+            let driver = Driver::start(&driver_dir, &log_dir).expect("the driver starts");
+            let module = ConsensusModule::start(&driver_dir, &log_dir, &members, id)
+                .expect("the member starts");
+            (driver, module)
+        })
+        .collect();
+    let deadline = Instant::now() + Duration::from_secs(60);
+    loop {
+        for (_, module) in started.iter_mut() {
+            module.do_work().expect("the member's duty cycle");
+        }
+        let end = started[0].1.append_position();
+        if end > 0
+            && started.iter().all(|(_, module)| {
+                module.election_state() == ElectionState::Closed
+                    && module.commit_position() == end
+                    && module.session_log_position() == end
+            })
+        {
+            break;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "the three members have no leader"
+        );
+    }
+    let leader = started
+        .iter()
+        .position(|(_, module)| module.role() == Role::Leader)
+        .expect("one member leads");
+    started.swap(0, leader);
+    (dir, started)
+}
+
+/// Runs every member's duty cycle `cycles` times.
+fn run(members: &mut [(Driver, ConsensusModule)], cycles: usize) {
+    for _ in 0..cycles {
+        for (_, module) in members.iter_mut() {
+            module.do_work().expect("the member's duty cycle");
+        }
+    }
+}
+
+#[test]
+fn a_leader_asks_for_a_snapshot_when_its_log_has_grown_by_the_interval_and_not_before() {
+    let (_dir, mut members) = three("interval");
+    // A log shorter than the interval: no action, however many cycles run.
+    members[0].1.offer(b"an entry").expect("the leader appends");
+    // The term's event and the entry, committed and read by every member.
+    let end = 2 * 96;
+    let deadline = Instant::now() + Duration::from_secs(20);
+    while members
+        .iter()
+        .any(|(_, module)| module.commit_position() != end || module.session_log_position() != end)
+    {
+        assert!(Instant::now() < deadline, "the entry was not committed");
+        run(&mut members, 1);
+    }
+    run(&mut members, 2_000);
+    for (_, module) in &members {
+        assert_eq!(module.snapshot_counts(), SnapshotCounts::default());
+        assert_eq!(module.snapshot_position(), None);
+    }
+    // 32 bytes short of the interval since the last action. A test cannot write an
+    // interval of log, so the mark of the last action is moved back instead.
+    members[0].1.snapshot_asked_at = end - SNAPSHOT_INTERVAL + 32;
+    run(&mut members, 2_000);
+    assert_eq!(
+        members[0].1.snapshot_counts().actions,
+        0,
+        "32 bytes short of it"
+    );
+    // At the interval: the leader appends the action by itself, once, and every
+    // member takes the snapshot when it reads the action.
+    members[0].1.snapshot_asked_at = end - SNAPSHOT_INTERVAL;
+    let deadline = Instant::now() + Duration::from_secs(20);
+    while members
+        .iter()
+        .any(|(_, module)| module.snapshot_counts().taken < 1)
+    {
+        assert!(Instant::now() < deadline, "the snapshot was not taken");
+        run(&mut members, 1);
+    }
+    let action_end = end + 96;
+    run(&mut members, 2_000);
+    for (index, (_, module)) in members.iter().enumerate() {
+        assert_eq!(module.snapshot_position(), Some(action_end));
+        // Every member notes where the last action ended: the leader when it
+        // appended it, a follower when it read it, so that a follower that leads
+        // next asks an interval after it.
+        assert_eq!(module.snapshot_asked_at, action_end);
+        assert_eq!(
+            module.snapshot_counts(),
+            SnapshotCounts {
+                actions: u64::from(index == 0),
+                begun: 1,
+                steps: 1,
+                taken: 1,
+                failed: 0,
+            },
+            "one action for one interval"
+        );
+    }
+    for (driver, module) in members {
+        module.close().expect("the member closes");
+        driver.close().expect("the driver closes");
+    }
 }

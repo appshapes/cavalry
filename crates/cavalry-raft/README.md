@@ -262,6 +262,19 @@ commit path runs per message.
   were a quorum (ADR 0052, "Harder"). Under a cgroup's quota of a twentieth of a
   processor, on CI's Linux runner, it committed 13,000 to 18,000 a second: the
   member runs a part of every period (ADR 0111, "Evidence").
+- Takes a snapshot of a member's sessions (`spec/cluster.md`, "Snapshots"; ADR 0129).
+  The leader appends a cluster action that asks for one each time its log has grown
+  by 256 MiB, and when its own process asks, `ConsensusModule::snapshot()`. Every
+  member takes the snapshot when its read of its own committed log reaches the
+  action, so the three snapshots are of one position and hold the same bytes: a
+  marker, each open session in the order of the sessions' ids, the id the next
+  session is given, and a marker. A member writes them to its one publication on
+  the snapshot stream, as a recording of its own, and lists the snapshot in its
+  snapshots file once the recording has stopped at the end of what it wrote (ADR
+  0128). Each step is one duty cycle's work: the longest cycle while a snapshot was
+  taken measured 20 ms at the median on a laptop. A step that fails is counted in
+  `cluster.snapshots_failed`, and the member goes on with its log whole. A member
+  does not start from a snapshot yet: it still reads its log from position 0.
 - Holds a member's sessions, the member's side of the session protocol
   (`spec/cluster.md`, "Sessions"; ADR 0115): `Sessions` is plain state, as `Consensus`
   is. Its caller hands it each message of the ingress stream, each entry of the

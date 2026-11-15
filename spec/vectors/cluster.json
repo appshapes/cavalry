@@ -586,6 +586,64 @@
     },
     {
       "kind": "message",
+      "name": "cluster-session",
+      "stream": "snapshot",
+      "bytes": "2800670001000000070000000000000029000000000000006000010000000000ffffffffffffffff000000806600000023000000636176616c72793a7564703f656e64706f696e743d31302e302e302e393a3331303030",
+      "template": "cluster-session",
+      "fields": {
+        "cluster_session_id": 7,
+        "correlation_id": 41,
+        "opened_log_position": 65632,
+        "time_of_last_activity": -1,
+        "close_reason": -2147483648,
+        "response_stream_id": 102,
+        "response_channel": "cavalry:udp?endpoint=10.0.0.9:31000"
+      }
+    },
+    {
+      "kind": "message",
+      "name": "cluster-session-longest-channel",
+      "stream": "snapshot",
+      "bytes": "28006700010000000700000000000000290000000000000000000000000000000010e49aa1010000020000006600000018010000636176616c72793a7564703f656e64706f696e743d686868686868686868686868686868686868686868686868686868686868686868686868686868686868686868686868686868686868686868686868686868686868686868686868686868686868686868686868686868686868686868686868686868686868686868686868686868686868686868686868686868686868686868686868686868686868686868686868686868686868686868686868686868686868686868686868686868686868686868686868686868686868686868686868686868686868686868686868686868686868686868686868686868686868686868686868686868686868686868686868686868686868686868686868683a3635353335",
+      "template": "cluster-session",
+      "fields": {
+        "cluster_session_id": 7,
+        "correlation_id": 41,
+        "opened_log_position": 0,
+        "time_of_last_activity": 1793600000000,
+        "close_reason": 2,
+        "response_stream_id": 102,
+        "response_channel": "cavalry:udp?endpoint=hhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhh:65535"
+      }
+    },
+    {
+      "kind": "message",
+      "name": "consensus-module",
+      "stream": "snapshot",
+      "bytes": "1c0069000100000008000000000000000000000000000000000000000000000000000000",
+      "template": "consensus-module",
+      "fields": {
+        "next_session_id": 8,
+        "next_service_session_id": 0,
+        "log_service_session_id": 0,
+        "pending_message_capacity": 0
+      }
+    },
+    {
+      "kind": "message",
+      "name": "consensus-module-of-no-session-yet",
+      "stream": "snapshot",
+      "bytes": "1c0069000100000000000000000000000100000000000080000000000000008000100000",
+      "template": "consensus-module",
+      "fields": {
+        "next_session_id": 0,
+        "next_service_session_id": -9223372036854775807,
+        "log_service_session_id": -9223372036854775808,
+        "pending_message_capacity": 4096
+      }
+    },
+    {
+      "kind": "message",
       "name": "reject-too-short-header",
       "stream": "consensus",
       "bytes": "14003700010000",
@@ -632,6 +690,34 @@
       "stream": "log",
       "bytes": "14003700010000000300000000000000008001000000000000000000",
       "error": "stream"
+    },
+    {
+      "kind": "message",
+      "name": "reject-template-of-a-services-snapshot",
+      "stream": "snapshot",
+      "bytes": "0c006600010000000000000000000000000000000000000000000000",
+      "error": "template"
+    },
+    {
+      "kind": "message",
+      "name": "reject-stream-cluster-session-on-the-log",
+      "stream": "log",
+      "bytes": "2800670001000000070000000000000029000000000000006000010000000000ffffffffffffffff000000806600000023000000636176616c72793a7564703f656e64706f696e743d31302e302e302e393a3331303030",
+      "error": "stream"
+    },
+    {
+      "kind": "message",
+      "name": "reject-stream-consensus-module-on-the-egress",
+      "stream": "egress",
+      "bytes": "1c0069000100000008000000000000000000000000000000000000000000000000000000",
+      "error": "stream"
+    },
+    {
+      "kind": "message",
+      "name": "reject-block-length-consensus-module",
+      "stream": "snapshot",
+      "bytes": "20006900010000000800000000000000000000000000000000000000000000000000000000000000",
+      "error": "block-length"
     },
     {
       "kind": "message",
@@ -779,6 +865,27 @@
       "stream": "consensus",
       "bytes": "6000350001000000020000000000000003000000000000000000010000000000feffffffffffffff03000000000000000000010000000000008001000000000000000000000000000010e49aa101000000000000f56d9a4200000000000000000080010000000000",
       "error": "position"
+    },
+    {
+      "kind": "message",
+      "name": "reject-position-opened-log-position",
+      "stream": "snapshot",
+      "bytes": "280067000100000007000000000000002900000000000000ffffffffffffffffffffffffffffffff000000806600000023000000636176616c72793a7564703f656e64706f696e743d31302e302e302e393a3331303030",
+      "error": "position"
+    },
+    {
+      "kind": "message",
+      "name": "reject-ascii-before-position-in-a-cluster-session",
+      "stream": "snapshot",
+      "bytes": "280067000100000007000000000000002900000000000000ffffffffffffffffffffffffffffffff000000806600000023000000636176616c72793a75647001656e64706f696e743d31302e302e302e393a3331303030",
+      "error": "ascii"
+    },
+    {
+      "kind": "message",
+      "name": "reject-length-cluster-session-trailing",
+      "stream": "snapshot",
+      "bytes": "2800670001000000070000000000000029000000000000006000010000000000ffffffffffffffff000000806600000023000000636176616c72793a7564703f656e64706f696e743d31302e302e302e393a333130303000000000",
+      "error": "length"
     },
     {
       "kind": "message",

@@ -16,12 +16,12 @@
 //! [`MAX_MEMBERS`].
 
 use cavalry_proto::cluster::{
-    APPEND_POSITION_FLAG_CATCHUP, CanvassAction, CanvassTerms, ELECTION_STATUS_INTERVAL_NS,
-    ELECTION_TIMEOUT_NS, LEADER_HEARTBEAT_INTERVAL_NS, LEADER_HEARTBEAT_TIMEOUT_NS,
-    LIVE_ADD_MAX_WINDOW, LogReport, MAX_MEMBERS, MemberPosition, Message, PROTOCOL_VERSION,
-    STARTUP_CANVASS_TIMEOUT_NS, TermAction, TermFields, TermSpan, TimeUnit, Vote, VoteRequest,
-    ballot, candidate, canvass_position_action, commit_position, new_leadership_term_action,
-    next_fields, quorum, request_vote,
+    APPEND_POSITION_FLAG_CATCHUP, CanvassAction, CanvassTerms, ClusterAction,
+    ELECTION_STATUS_INTERVAL_NS, ELECTION_TIMEOUT_NS, LEADER_HEARTBEAT_INTERVAL_NS,
+    LEADER_HEARTBEAT_TIMEOUT_NS, LIVE_ADD_MAX_WINDOW, LogReport, MAX_MEMBERS, MemberPosition,
+    Message, PROTOCOL_VERSION, STARTUP_CANVASS_TIMEOUT_NS, TermAction, TermFields, TermSpan,
+    TimeUnit, Vote, VoteRequest, ballot, candidate, canvass_position_action, commit_position,
+    new_leadership_term_action, next_fields, quorum, request_vote,
 };
 use cavalry_shm::counters::CounterId;
 use cavalry_shm::counters::generated::{
@@ -1598,6 +1598,38 @@ impl Consensus {
             cluster_session_id: NO_SESSION,
             timestamp: clock.time_ms,
             payload,
+        })?;
+        Ok(if appended {
+            Ok(())
+        } else {
+            Err(Refused::BackPressured)
+        })
+    }
+
+    /// Appends a cluster action that asks every member for a snapshot, for the
+    /// leader's own process or at the leader's snapshot interval (`spec/cluster.md`,
+    /// "Snapshots"; ADR 0129). `log_position` is the position at which the entry
+    /// begins. A member takes the snapshot when the entry is committed and its read
+    /// of its own log reaches it. What is refused is what [`Consensus::offer`]
+    /// refuses.
+    pub fn snapshot<I: Io>(
+        &mut self,
+        clock: Clock,
+        log_position: i64,
+        io: &mut I,
+    ) -> Result<Result<(), Refused>, I::Fault> {
+        if self.member_id() != self.leader_id {
+            return Ok(Err(Refused::NotLeader));
+        }
+        if self.role != Role::Leader || self.state != ElectionState::Closed {
+            return Ok(Err(Refused::Election));
+        }
+        let appended = io.append(&Message::ClusterAction {
+            leadership_term_id: self.term,
+            log_position,
+            timestamp: clock.time_ms,
+            action: ClusterAction::Snapshot,
+            flags: 0,
         })?;
         Ok(if appended {
             Ok(())

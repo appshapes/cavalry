@@ -246,7 +246,7 @@ fn commit(sessions: &mut Sessions, world: &mut World, ms: u64) -> Vec<bool> {
         .iter()
         .map(|bytes| {
             let entry = Message::parse(Stream::Log, bytes).expect("an entry");
-            let Ok(known) = sessions.on_entry(at(ms), &entry, world);
+            let Ok(known) = sessions.on_entry(at(ms), 0, &entry, world);
             known
         })
         .collect()
@@ -1163,7 +1163,7 @@ fn an_entry_the_table_cannot_hold_is_reported_and_changes_nothing() {
             close_reason: CloseReason::ClientAction,
         },
     ] {
-        let Ok(known) = sessions.on_entry(at(1), &entry, &mut world);
+        let Ok(known) = sessions.on_entry(at(1), 0, &entry, &mut world);
         assert!(!known, "{entry:?}");
     }
     assert_eq!(sessions.open(), MAX_SESSIONS);
@@ -1171,6 +1171,7 @@ fn an_entry_the_table_cannot_hold_is_reported_and_changes_nothing() {
     // An entry that is none of the sessions' is passed.
     let Ok(known) = sessions.on_entry(
         at(1),
+        0,
         &Message::SessionMessage {
             leadership_term_id: 1,
             cluster_session_id: 0,
@@ -1183,6 +1184,7 @@ fn an_entry_the_table_cannot_hold_is_reported_and_changes_nothing() {
     // And the id a later leader gives is past every id the log has named.
     let Ok(_) = sessions.on_entry(
         at(1),
+        0,
         &Message::SessionCloseEvent {
             leadership_term_id: 1,
             cluster_session_id: 0,
@@ -1204,4 +1206,83 @@ fn an_entry_the_table_cannot_hold_is_reported_and_changes_nothing() {
         world.entries(MAX_SESSIONS)
     );
     assert_eq!(EventCode::Ok as i32, 0);
+}
+
+/// What a snapshot of the table holds (`spec/cluster.md`, "Snapshots"; ADR 0129): the
+/// open sessions in the order of their ids, whatever slot each has, each with the
+/// position its session open event began at; and the id the next session is given.
+#[test]
+fn the_open_sessions_are_given_in_the_order_of_their_ids_with_where_each_opened() {
+    let mut sessions = Sessions::new(1, ENDPOINTS);
+    let mut world = World::new();
+    assert_eq!(sessions.open_session(0), None, "no session is open");
+    assert_eq!(sessions.next_session_id(), 0);
+    // A follower reads three session open events, the ids not in the order of the
+    // entries, as a table whose slots a leader before it gave out of order would be.
+    let channels = [channel(30_007), channel(30_002), channel(30_005)];
+    for (id, position, response) in [
+        (7i64, 96i64, &channels[0]),
+        (2, 224, &channels[1]),
+        (5, 352, &channels[2]),
+    ] {
+        let Ok(known) = sessions.on_entry(
+            at(1),
+            position,
+            &Message::SessionOpenEvent {
+                leadership_term_id: 1,
+                correlation_id: 100 + id,
+                cluster_session_id: id,
+                timestamp: TIME,
+                response_stream_id: EGRESS_STREAM_ID,
+                response_channel: response,
+                encoded_principal: &[],
+            },
+            &mut world,
+        );
+        assert!(known, "session {id} opens");
+    }
+    let given: Vec<(i64, i64, i64, Vec<u8>)> = (0..3)
+        .map(|nth| {
+            let session = sessions.open_session(nth).expect("an open session");
+            (
+                session.id,
+                session.correlation_id,
+                session.opened_log_position,
+                session.response_channel.to_vec(),
+            )
+        })
+        .collect();
+    assert_eq!(
+        given,
+        [
+            (2, 102, 224, channels[1].clone()),
+            (5, 105, 352, channels[2].clone()),
+            (7, 107, 96, channels[0].clone()),
+        ]
+    );
+    assert_eq!(sessions.open_session(3), None, "past the last");
+    assert_eq!(
+        sessions.next_session_id(),
+        8,
+        "one past the highest id read"
+    );
+    // A session that closes leaves the order of the others as it was.
+    let Ok(known) = sessions.on_entry(
+        at(2),
+        480,
+        &Message::SessionCloseEvent {
+            leadership_term_id: 1,
+            cluster_session_id: 5,
+            timestamp: TIME,
+            close_reason: CloseReason::ClientAction,
+        },
+        &mut world,
+    );
+    assert!(known);
+    let ids: Vec<i64> = (0..2)
+        .map(|nth| sessions.open_session(nth).expect("an open session").id)
+        .collect();
+    assert_eq!(ids, [2, 7]);
+    assert_eq!(sessions.open_session(2), None);
+    assert_eq!(sessions.next_session_id(), 8);
 }

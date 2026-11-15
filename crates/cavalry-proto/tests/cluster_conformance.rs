@@ -280,6 +280,31 @@ fn fields(message: &Message<'_>) -> Value {
             "leadership_term_id": leadership_term_id, "index": index, "mark": mark.code(),
             "time_unit": time_unit.code(), "app_version": app_version,
         }),
+        Message::ClusterSession {
+            cluster_session_id,
+            correlation_id,
+            opened_log_position,
+            time_of_last_activity,
+            close_reason,
+            response_stream_id,
+            response_channel,
+        } => json!({
+            "cluster_session_id": cluster_session_id, "correlation_id": correlation_id,
+            "opened_log_position": opened_log_position,
+            "time_of_last_activity": time_of_last_activity, "close_reason": close_reason,
+            "response_stream_id": response_stream_id, "response_channel": text(response_channel),
+        }),
+        Message::ConsensusModule {
+            next_session_id,
+            next_service_session_id,
+            log_service_session_id,
+            pending_message_capacity,
+        } => json!({
+            "next_session_id": next_session_id,
+            "next_service_session_id": next_service_session_id,
+            "log_service_session_id": log_service_session_id,
+            "pending_message_capacity": pending_message_capacity,
+        }),
     }
 }
 

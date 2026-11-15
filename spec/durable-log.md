@@ -338,7 +338,7 @@ position the member truncated to.
 A cluster member's record of the snapshots in this directory that a start may begin
 from. A snapshot is a recording that holds the state of the member's consensus
 module, or of a service beside the member, as that state was at one position of the
-member's log (`spec/cluster.md`, "The snapshot marker"). The catalog holds the
+member's log (`spec/cluster.md`, "Snapshots"). The catalog holds the
 recording as it holds every other. It does not say that the recording is a
 snapshot, whose state it holds or at which position, and it also holds a snapshot
 whose writer stopped before it was whole. This file says those things: a snapshot is
@@ -623,9 +623,9 @@ writes it again; a zero magic over any other slot whose checksum matches is dama
 refused with `not-ready`. A snapshot is listed by one write and one sync, and a
 snapshot that a reader would refuse in the list is not written: it is the writer's
 fault, `list`, and the file is left as it was. The recovery pass of this section
-leaves the file alone, as it leaves the two others. No member of version 0 of
-`spec/cluster.md` takes a snapshot ("Out of this version" there), so no member lists
-one yet: this version gives the file a snapshot is listed in.
+leaves the file alone, as it leaves the two others. A member lists a snapshot of its
+consensus module when it has taken one (`spec/cluster.md`, "Snapshots"; ADR 0129),
+and no service's snapshot yet.
 
 What the order of a truncation leaves after a crash: before the list is written,
 recordings the list names are gone from the catalog, the last ones it names, since

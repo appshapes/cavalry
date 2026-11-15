@@ -5,10 +5,12 @@ pub mod consensus;
 pub mod memory;
 pub mod module;
 pub mod sessions;
+mod snapshot;
 
 pub use consensus::{
     Clock, Consensus, Counts, ElectionCause, ElectionState, Io, Log, MembersRefused, NO_SESSION,
     Refused, ReplayStopped, Role,
 };
-pub use module::{ConsensusModule, ListedFound, MAX_PAYLOAD_LENGTH, RaftError};
-pub use sessions::{Ingress, Leadership, SessionCounts, SessionIo, Sessions};
+pub use module::{ConsensusModule, ListedFound, MAX_PAYLOAD_LENGTH, RaftError, SNAPSHOT_INTERVAL};
+pub use sessions::{Ingress, Leadership, OpenSession, SessionCounts, SessionIo, Sessions};
+pub use snapshot::{SNAPSHOT_TIMEOUT, SnapshotCounts};
