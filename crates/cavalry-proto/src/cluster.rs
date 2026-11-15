@@ -2222,9 +2222,9 @@ impl<'a> Message<'a> {
 /// rejects", for a members string, and [`MembersError::reason`] their names.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum MembersError {
-    /// An empty string, a member with other than six fields, an id that is not an
-    /// integer from 0 to 2147483647, or an endpoint without a host or a port from 1 to
-    /// 65535.
+    /// An empty string, a member with fewer than six fields or more than seven or
+    /// with a seventh that is not `standby`, an id that is not an integer from 0 to
+    /// 2147483647, or an endpoint without a host or a port from 1 to 65535.
     Grammar {
         /// Which member, counting from 0.
         member: usize,
@@ -2238,6 +2238,11 @@ pub enum MembersError {
     Count {
         /// How many.
         found: usize,
+    },
+    /// Every member is a standby: the string gives no member a vote (ADR 0134).
+    NoVoter {
+        /// How many members, each a standby.
+        standbys: usize,
     },
     /// The member's own id is not in the string.
     SelfNotFound {
@@ -2253,6 +2258,7 @@ impl MembersError {
             MembersError::Grammar { .. } => "members-grammar",
             MembersError::Duplicate { .. } => "members-duplicate",
             MembersError::Count { .. } => "members-count",
+            MembersError::NoVoter { .. } => "members-voters",
             MembersError::SelfNotFound { .. } => "members-self",
         }
     }
@@ -2265,7 +2271,8 @@ impl fmt::Display for MembersError {
                 f,
                 "members string rejected (members-grammar): member {member} is not \
                  `id,ingress,consensus,log,catchup,archive` with an id from 0 upward and \
-                 every endpoint `host:port`; fix the string; see {DOC}"
+                 every endpoint `host:port`, or the same followed by `,standby`; fix the \
+                 string; see {DOC}"
             ),
             MembersError::Duplicate { id } => write!(
                 f,
@@ -2276,6 +2283,12 @@ impl fmt::Display for MembersError {
                 f,
                 "members string rejected (members-count): {found} members, at most \
                  {MAX_MEMBERS} allowed; see {DOC}"
+            ),
+            MembersError::NoVoter { standbys } => write!(
+                f,
+                "members string rejected (members-voters): each of its {standbys} members \
+                 is marked `standby`, so no member has a vote and none can lead; take \
+                 `,standby` off the members that vote; see {DOC}"
             ),
             MembersError::SelfNotFound { id } => write!(
                 f,
@@ -2313,6 +2326,9 @@ pub struct Member<'a> {
     pub catchup: Endpoint<'a>,
     /// Where a peer asks it to replicate its recording.
     pub archive: Endpoint<'a>,
+    /// Whether the string marks it a standby, with a seventh field `standby`: a member
+    /// that follows the log and has no vote (`spec/cluster.md`, "Standbys"; ADR 0134).
+    pub standby: bool,
 }
 
 /// The integer that `text`'s ASCII digits make, any number of them, leading zeros
@@ -2360,6 +2376,12 @@ fn parse_member(text: &[u8]) -> Option<Member<'_>> {
     let log = parse_endpoint(fields.next()?)?;
     let catchup = parse_endpoint(fields.next()?)?;
     let archive = parse_endpoint(fields.next()?)?;
+    // A seventh field is the standby's mark and nothing else, and no eighth follows.
+    let standby = match fields.next() {
+        None => false,
+        Some(mark) if mark == STANDBY_MARK => true,
+        Some(_) => return None,
+    };
     if fields.next().is_some() {
         return None;
     }
@@ -2370,13 +2392,19 @@ fn parse_member(text: &[u8]) -> Option<Member<'_>> {
         log,
         catchup,
         archive,
+        standby,
     })
 }
 
+/// The seventh field of a member that the members string marks a standby
+/// (`spec/cluster.md`, "Members and streams").
+pub const STANDBY_MARK: &[u8] = b"standby";
+
 /// Parses a members string into `members`, returning how many it holds, with the
 /// spec's checks in the spec's order: the grammar of every member, duplicate ids, the
-/// count, and `self_id` named in the string when one is given. Allocates nothing: a
-/// string of more than [`MAX_MEMBERS`] members is refused before any is stored.
+/// count, a member that is no standby, and `self_id` named in the string when one is
+/// given. Allocates nothing: a string of more than [`MAX_MEMBERS`] members is refused
+/// before any is stored.
 pub fn parse_members<'a>(
     text: &'a [u8],
     members: &mut [Member<'a>; MAX_MEMBERS],
@@ -2404,6 +2432,9 @@ pub fn parse_members<'a>(
     if count > MAX_MEMBERS {
         return Err(MembersError::Count { found: count });
     }
+    if items().all(|item| parse_member(item).is_some_and(|member| member.standby)) {
+        return Err(MembersError::NoVoter { standbys: count });
+    }
     if let Some(id) = self_id
         && !items().any(|item| parse_member(item).map(|m| m.id) == Some(id))
     {
@@ -2425,6 +2456,7 @@ pub const EMPTY_MEMBER: Member<'static> = Member {
     log: EMPTY_ENDPOINT,
     catchup: EMPTY_ENDPOINT,
     archive: EMPTY_ENDPOINT,
+    standby: false,
 };
 
 const EMPTY_ENDPOINT: Endpoint<'static> = Endpoint { host: b"", port: 0 };

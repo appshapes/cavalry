@@ -351,12 +351,28 @@ commit path runs per message.
   pressure. A members string whose ingress
   endpoints do not fit one frame of the egress stream as a redirect lists them,
   1,320 bytes, is `RaftError::IngressEndpoints`, and the member does not start.
-- To come, each with its card: the C ABI's calls for a service, so that a service is
-  a program in any of the five client languages (card 227), mixed versions in a
-  rolling upgrade (card 228), the
-  cluster client (card 229), snapshots
-  and catch-up (card 230), and standby members, which follow the log without voting,
-  in the open core.
+- Follows as a standby: a member whose entry in the members string ends in
+  `,standby` records the log, reads its committed log for its sessions, takes the
+  snapshots its leader asks for and redirects a client, and it has no vote. It
+  never nominates itself, and it answers a request vote with nothing, counted in
+  `cluster.standby_vote_requests`. A voter counts the voters of its own string
+  alone, for a quorum, for a commit and for its ballot, and waits for no standby.
+  It sends to every member and reads every member's messages, so it votes for a
+  candidate, and follows a leader, that its own string marks a standby: that is
+  what lets two strings one mark apart run side by side while a mark is changed.
+  `Consensus::with_standbys(voter_ids, standby_ids, member_id, seed)` is that
+  member, and `ConsensusModule::start` makes it from the string.
+  `cluster.voters` and `cluster.standby` say which string a member runs. A
+  standby is promoted by starting each member again with a string that gives it a
+  vote, one mark at a time and each change complete before the next:
+  `spec/cluster.md`, "Changing a standby's mark", has the three rules, which no
+  member checks, and `docs/how-to/promote-a-standby.md` the steps. A test runs
+  what the rules prevent: two marks changed at once elect a leader that lacks a
+  committed entry (ADR 0134).
+- To come, each with its work item: mixed versions in a rolling upgrade (work item
+  231), the gate across three hosts (work item 232), a service's snapshot through
+  the C ABI and the five clients (work item 335), and a member that lost its log
+  directory (work item 286).
 
 In Aeron, this is Cluster, with Cluster Standby as a paid component
 ([glossary](../../docs/glossary.md)).

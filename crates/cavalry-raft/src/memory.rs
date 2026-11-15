@@ -669,6 +669,10 @@ pub struct Cluster {
     world: World,
     /// The seed each member's own is made from.
     seed: u64,
+    /// The members that each member's own members string marks a standby, by the
+    /// member's place: one string for all when the cluster is made, and a member's
+    /// own from [`Cluster::restart_with`] on (ADR 0134).
+    standbys: Vec<Vec<i32>>,
 }
 
 impl Cluster {
@@ -679,13 +683,38 @@ impl Cluster {
     /// elections at every run. Which member leads depends on the seed:
     /// [`Cluster::leader`] says.
     pub fn with_election(member_ids: &[i32], seed: u64) -> Result<Self, MembersRefused> {
+        Self::with_standbys(member_ids, &[], seed)
+    }
+
+    /// A cluster of the members with `member_ids`, of which those with `standby_ids`
+    /// are standbys in every member's members string ([`Consensus::with_standbys`];
+    /// `spec/cluster.md`, "Standbys"; ADR 0134), otherwise as
+    /// [`Cluster::with_election`] makes it. An id of `standby_ids` that is no
+    /// member's marks nothing.
+    ///
+    /// ```
+    /// use cavalry_raft::memory::Cluster;
+    ///
+    /// // Three voters and a standby: the standby follows, and never leads.
+    /// let mut cluster = Cluster::with_standbys(&[0, 1, 2, 3], &[3], 1).expect("four members");
+    /// cluster.run_ms(2_000);
+    /// let leader = cluster.leader().expect("the voters elect a leader");
+    /// assert_ne!(leader, 3);
+    /// assert!(cluster.member(3).expect("a member").is_standby());
+    /// ```
+    pub fn with_standbys(
+        member_ids: &[i32],
+        standby_ids: &[i32],
+        seed: u64,
+    ) -> Result<Self, MembersRefused> {
         let cores = (0..member_ids.len())
-            .map(|index| Self::core(member_ids, index, seed))
+            .map(|index| Self::core(member_ids, standby_ids, index, seed))
             .collect::<Result<Vec<_>, _>>()?;
         let disks = member_ids.iter().map(|&id| Disk::empty(id)).collect();
         Ok(Self {
             cores,
             seed,
+            standbys: vec![standby_ids.to_vec(); member_ids.len()],
             world: World {
                 clock: Clock {
                     now_ns: 0,
@@ -705,12 +734,22 @@ impl Cluster {
         })
     }
 
-    /// The core of the member at `index` among `member_ids`.
-    fn core(member_ids: &[i32], index: usize, seed: u64) -> Result<Consensus, MembersRefused> {
+    /// The core of the member at `index` among `member_ids`, whose own members string
+    /// marks those of `standby_ids` standbys.
+    fn core(
+        member_ids: &[i32],
+        standby_ids: &[i32],
+        index: usize,
+        seed: u64,
+    ) -> Result<Consensus, MembersRefused> {
         let id = member_ids.get(index).copied().unwrap_or(-1);
+        let (standbys, voters): (Vec<i32>, Vec<i32>) = member_ids
+            .iter()
+            .partition(|&&member| standby_ids.contains(&member));
         // One seed for each member: the cluster's, moved on by the member's place.
-        Consensus::with_election(
-            member_ids,
+        Consensus::with_standbys(
+            &voters,
+            &standbys,
             id,
             seed.wrapping_add(1)
                 .wrapping_mul(0x9E37_79B9_7F4A_7C15)
@@ -1192,13 +1231,14 @@ impl Cluster {
             return;
         };
         let ids: Vec<i32> = self.world.disks.iter().map(|disk| disk.id).collect();
+        let standbys = self.standbys.get(index).cloned().unwrap_or_default();
         let led = self
             .cores
             .get(index)
             .is_some_and(|core| core.role() == Role::Leader);
         if let (Some(core), Ok(new)) = (
             self.cores.get_mut(index),
-            Self::core(&ids, index, self.seed),
+            Self::core(&ids, &standbys, index, self.seed),
         ) {
             *core = new;
         }
@@ -1229,20 +1269,38 @@ impl Cluster {
     /// subscriptions, its image of the log and every replay it ran or received. When
     /// it led, its log publication is gone with it, and every follower's image of it.
     /// A member that was halted or stalled runs again, and its counts begin at 0.
+    /// Its members string marks the standbys it marked before.
     pub fn restart(&mut self, member: i32) {
         let Some(index) = self.index(member) else {
             return;
         };
+        let standbys = self.standbys.get(index).cloned().unwrap_or_default();
+        // The marks the member ran with made a core before, so they make one now.
+        let _ = self.restart_with(member, &standbys);
+    }
+
+    /// Starts the member again on the log directory it kept, as [`Cluster::restart`]
+    /// does, with a members string that marks the members with `standby_ids` its
+    /// standbys: how a standby is promoted and how a voter is made a standby
+    /// (`spec/cluster.md`, "Changing a standby's mark"; ADR 0134). The other members
+    /// keep the strings they run with, so two members can hold two strings, as they
+    /// do while an operator starts them again one after another. Marks that leave no
+    /// voter are refused, and the member runs on as it was.
+    pub fn restart_with(&mut self, member: i32, standby_ids: &[i32]) -> Result<(), MembersRefused> {
+        let Some(index) = self.index(member) else {
+            return Ok(());
+        };
         let ids: Vec<i32> = self.world.disks.iter().map(|disk| disk.id).collect();
+        let new = Self::core(&ids, standby_ids, index, self.seed)?;
         let led = self
             .cores
             .get(index)
             .is_some_and(|core| core.role() == Role::Leader);
-        if let (Some(core), Ok(new)) = (
-            self.cores.get_mut(index),
-            Self::core(&ids, index, self.seed),
-        ) {
+        if let Some(core) = self.cores.get_mut(index) {
             *core = new;
+        }
+        if let Some(marks) = self.standbys.get_mut(index) {
+            *marks = standby_ids.to_vec();
         }
         if let Some(disk) = self.world.disks.get_mut(index) {
             let synced = disk.synced;
@@ -1271,6 +1329,7 @@ impl Cluster {
                 disk.image_lost = disk.image.is_some();
             }
         }
+        Ok(())
     }
 
     /// Takes the member's image of the log away, as the transport does when the

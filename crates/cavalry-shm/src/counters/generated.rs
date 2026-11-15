@@ -530,6 +530,15 @@ pub const CLUSTER_SERVICE_SNAPSHOT_START_POSITION: CounterId = CounterId(174);
 /// `cluster.service_snapshots_passed_over`, a client counter: Snapshots that the service beside one cluster member was told of at its start and did not start from: the driver refused the replay of the snapshot's recording, played nothing of it for 5 s, or the recording did not hold a service's snapshot with sessions the service's table takes. The service read the log from position 0. The service adds the counter with cluster.service_snapshot_start_position (spec/cluster.md, A service's start; ADR 0132). key: member id (i32), little-endian; label text: the member id in decimal.
 pub const CLUSTER_SERVICE_SNAPSHOTS_PASSED_OVER: CounterId = CounterId(175);
 
+/// `cluster.voters`, a client gauge: The members to which one cluster member's own members string gives a vote: one bit for each member of the string in the rising order of their ids, the lowest id's bit the lowest, set for a voter and clear for a standby; 7 for a string of four members whose highest id is a standby. It does not change while the member runs: a member takes its string when it starts (spec/cluster.md, Standbys; ADR 0134). key and label as cluster.elections.
+pub const CLUSTER_VOTERS: CounterId = CounterId(176);
+
+/// `cluster.standby`, a client gauge: Whether one cluster member's own members string marks it a standby: 1 for a standby, a member that follows the log and has no vote, and 0 for a voter. It does not change while the member runs (spec/cluster.md, Standbys; ADR 0134). key and label as cluster.elections.
+pub const CLUSTER_STANDBY: CounterId = CounterId(177);
+
+/// `cluster.standby_vote_requests`, a client counter: Request votes one cluster member read while its own members string marks it a standby, each answered with nothing: the candidate's string gives this member a vote, and the member's own does not (spec/cluster.md, Standbys; ADR 0134). key and label as cluster.elections.
+pub const CLUSTER_STANDBY_VOTE_REQUESTS: CounterId = CounterId(178);
+
 /// Every entry of `counters.toml`, in the file's order.
 pub const COUNTERS: &[CounterDef] = &[
     CounterDef {
@@ -1931,5 +1940,29 @@ pub const COUNTERS: &[CounterDef] = &[
         scope: Scope::Client,
         doc: "Snapshots that the service beside one cluster member was told of at its start and did not start from: the driver refused the replay of the snapshot's recording, played nothing of it for 5 s, or the recording did not hold a service's snapshot with sessions the service's table takes. The service read the log from position 0. The service adds the counter with cluster.service_snapshot_start_position (spec/cluster.md, A service's start; ADR 0132). key: member id (i32), little-endian; label text: the member id in decimal.",
         doctor: "The service beside this member started from position 0 and not from its snapshot, and read the whole log. Nothing committed is lost. If this member's log no longer begins at 0, the service's own error says that its replay was refused: the snapshot's recording was purged or is damaged in this member's log directory, which recording.invalidated on this driver counts, or this host was too loaded to play it back. Start the service once more first.",
+    },
+    CounterDef {
+        id: CLUSTER_VOTERS,
+        name: "cluster.voters",
+        kind: Kind::Gauge,
+        scope: Scope::Client,
+        doc: "The members to which one cluster member's own members string gives a vote: one bit for each member of the string in the rising order of their ids, the lowest id's bit the lowest, set for a voter and clear for a standby; 7 for a string of four members whose highest id is a standby. It does not change while the member runs: a member takes its string when it starts (spec/cluster.md, Standbys; ADR 0134). key and label as cluster.elections.",
+        doctor: "Every member of a cluster holds the same value while the members run with one members string. Two values on two members are a change of a standby's mark that is not complete, or a member that was started with an older string: start that member again with the cluster's string (docs/how-to/promote-a-standby.md).",
+    },
+    CounterDef {
+        id: CLUSTER_STANDBY,
+        name: "cluster.standby",
+        kind: Kind::Gauge,
+        scope: Scope::Client,
+        doc: "Whether one cluster member's own members string marks it a standby: 1 for a standby, a member that follows the log and has no vote, and 0 for a voter. It does not change while the member runs (spec/cluster.md, Standbys; ADR 0134). key and label as cluster.elections.",
+        doctor: "A standby records the log, takes snapshots and redirects clients, and it neither votes nor leads: it counts toward no quorum. To give it a vote, promote it (docs/how-to/promote-a-standby.md).",
+    },
+    CounterDef {
+        id: CLUSTER_STANDBY_VOTE_REQUESTS,
+        name: "cluster.standby_vote_requests",
+        kind: Kind::Counter,
+        scope: Scope::Client,
+        doc: "Request votes one cluster member read while its own members string marks it a standby, each answered with nothing: the candidate's string gives this member a vote, and the member's own does not (spec/cluster.md, Standbys; ADR 0134). key and label as cluster.elections.",
+        doctor: "A candidate asked this member for a vote, and this member is a standby by its own members string, so it gave none: the two members run with strings that differ, and the candidate waited the election timeout, 1 s, for this vote. While a standby's mark is being changed that is expected: finish the change, starting each member again with the new string, the leader last (docs/how-to/promote-a-standby.md). With no change under way, a member was started with the wrong string: read cluster.voters on every member, which is one value where the strings agree, and start the member that differs with the cluster's string.",
     },
 ];

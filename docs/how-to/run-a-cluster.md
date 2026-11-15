@@ -52,7 +52,9 @@ committed once a quorum, two of three, has it on disk.
    ```
 
    Every member must be given the same string. The members elect one of them as the
-   leader; which one is not the same at every start.
+   leader; which one is not the same at every start. A member whose entry ends in a
+   seventh field, `,standby`, is a standby: it follows the log and has no vote, and
+   [Promote a standby to a voter](promote-a-standby.md) gives it one.
 
 2. Check the string before anything starts:
 
@@ -429,6 +431,19 @@ committed once a quorum, two of three, has it on disk.
   log directory failed. The service takes the next snapshot by itself, when the
   leader's log has grown by 256 MiB. A count that no longer rises is a fault that
   has passed.
+- `WARN cluster-voters`: this member runs with a members string that gives a vote
+  to other members than `CAVALRY_CLUSTER_MEMBERS` does on its host. The line names
+  both sets. A member takes the string when it starts. While a standby is promoted,
+  the members are started with the new string one at a time, and each has this line
+  until its turn: [Promote a standby to a voter](promote-a-standby.md). With no
+  change under way, correct the variable on this host, or start the member again
+  with it. Do not leave it: two members whose strings differ by more than one
+  member's `standby` mark can elect a leader that lacks an entry the cluster
+  committed.
+- `WARN cluster.standby_vote_requests`: this member is a standby, and a member
+  whose string gives it a vote asked it for one. It gave none, and the candidate
+  waited 1 s for it. The two run with strings that differ: find the member that
+  prints `WARN cluster-voters`, as above.
 - `WARN cluster.service_snapshots_passed_over`: the service beside this member was
   told of a snapshot when it started, and could not take it. It read the log from
   position 0. Nothing committed is lost. If this member's log no longer begins at

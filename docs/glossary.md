@@ -61,7 +61,7 @@ pages elsewhere mention Aeron at most once.
 | log (durable) | The on-disk, ordered, replayable record of a stream, written by the driver. | Archive recording | `docs/reference/durable-log.md` |
 | replay | Reading a durable log back into a subscription from a given position, at maximum speed in this version, whole frames only: a frame that begins below the replay's end position is played to its end. | Archive replay | `docs/reference/client-protocol.md` |
 | cluster | A set of drivers running the same replicated state machine over Raft, fed by a durable log. | Aeron Cluster | `docs/reference/cluster.md` |
-| standby | A cluster member that follows the log without voting, ready to be promoted. Open core in Cavalry. | Cluster Standby (Premium) | `docs/reference/cluster.md` |
+| standby | A cluster member that the members string marks `standby`: it follows the log and takes snapshots, has no vote and leads no term, and is promoted by a change of the string. Open core in Cavalry. | Cluster Standby (Premium) | `docs/reference/cluster.md` |
 | data plane | Any code a message passes through between claim on the publisher and the fragment handler on the subscriber, including the driver's sender and receiver threads. | none | `CLAUDE.md` |
 | control plane | Everything else: admin API, discovery, configuration, metrics export. May use async. | none | `CLAUDE.md` |
 | client protocol | The commands a client sends the driver through the command ring and the events the driver answers with through the broadcast buffer, their type ids, fields and timeouts. | control protocol (`io.aeron.command`) | `docs/reference/client-protocol.md` |
@@ -140,7 +140,7 @@ pages elsewhere mention Aeron at most once.
 | term base log position | The log position at which a leadership term's first entry, its new leadership term event, begins. | term base log position | `docs/reference/cluster.md` |
 | append position | The end of the contiguous span a member's recordings of the cluster's log hold from its start, reported to the leader. | append position | `docs/reference/cluster.md` |
 | commit position | The highest log position a quorum of active members that have recorded the leader's term have appended at or past its base, bounded by the leader's own; the service reads nothing above it. | commit position | `docs/reference/cluster.md` |
-| quorum | Half the members plus one: the members whose recordings make an entry committed, and the votes that make a leader. | quorum | `docs/reference/cluster.md` |
+| quorum | Half the voters plus one: the voters whose recordings make an entry committed, and the votes that make a leader. | quorum | `docs/reference/cluster.md` |
 | election | The state machine a member runs to find or become the leader, eighteen states from init to closed. | election | `docs/reference/cluster.md` |
 | canvass | The election state in which a member reports its log to every other and nominates itself once every member has reported with no log ahead of its own, or a quorum has at the deadline. | canvass | `docs/reference/cluster.md` |
 | candidate term | The highest term a member has voted in, proposed or followed, stored before the vote or request vote that raises it is sent, so that it votes once in a term across a restart and follows no leader of a lower term. | candidate term id | `docs/reference/cluster.md` |
@@ -188,3 +188,4 @@ pages elsewhere mention Aeron at most once.
 | service ack | The message by which a service tells the member on its driver that it took a snapshot, with the snapshot's log position and its recording; the member lists the snapshot and sends no answer. | service ack | `docs/reference/cluster.md` |
 | client session | One open session as a service's snapshot holds it: the session's id and its response channel. | client session | `docs/reference/cluster.md` |
 | service snapshot replay stream | The `cavalry:ipc` stream, id 109, on which a service that starts from a snapshot has that snapshot's recording played back; nothing subscribes to it but a service reading its snapshot. | none; Aeron loads a snapshot on its replay stream | `docs/reference/cluster.md` |
+| voter | A cluster member that the members string does not mark `standby`: it votes, it can lead, and it counts toward a quorum. | none; every member of an Aeron cluster votes | `docs/reference/cluster.md` |

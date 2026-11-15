@@ -28,6 +28,7 @@ under `docs/` is listed here; `just lint-docs` fails on one that is not.
 - [Set up a soak host](how-to/set-up-a-soak-host.md)
 - [Send the weekly release-notes email](how-to/send-the-release-notes.md)
 - [Run a test many times in a row](how-to/run-a-test-many-times.md)
+- [Promote a standby to a voter](how-to/promote-a-standby.md)
 
 # Reference
 
@@ -179,3 +180,4 @@ under `docs/` is listed here; `just lint-docs` fails on one that is not.
 - [0130. Start a member from its newest snapshot, and hold its log to that position alone](decisions/0130-start-a-member-from-its-newest-snapshot-and-hold-its-log-to-that-position-alone.md)
 - [0131. Have a service write its own snapshot, and its member list it](decisions/0131-have-a-service-write-its-own-snapshot-and-its-member-list-it.md)
 - [0132. Start a service from the snapshot its member names, when its program asks](decisions/0132-start-a-service-from-the-snapshot-its-member-names-when-its-program-asks.md)
+- [0134. Mark a standby in the members string, and change one mark at a time](decisions/0134-mark-a-standby-in-the-members-string-and-change-one-mark-at-a-time.md)

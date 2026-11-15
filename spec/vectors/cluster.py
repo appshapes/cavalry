@@ -399,18 +399,23 @@ def parse_members(text, self_id=None):
     members = []
     for item in text.split("|"):
         fields = item.split(",")
-        if len(fields) != 6:
+        # Six fields, or seven whose last is the standby's mark ("Members and streams").
+        if len(fields) not in (6, 7) or (len(fields) == 7 and fields[6] != "standby"):
             raise ValueError("members-grammar")
         if not ascii_digits(fields[0]) or int(fields[0]) > 2**31 - 1:
             raise ValueError("members-grammar")
         member = {"id": int(fields[0])}
-        for name, endpoint in zip(("ingress", "consensus", "log", "catchup", "archive"), fields[1:]):
+        for name, endpoint in zip(("ingress", "consensus", "log", "catchup", "archive"), fields[1:6]):
             member[name] = parse_endpoint(endpoint)
+        if len(fields) == 7:
+            member["standby"] = True
         members.append(member)
     if len({m["id"] for m in members}) != len(members):
         raise ValueError("members-duplicate")
     if len(members) > MAX_MEMBERS:
         raise ValueError("members-count")
+    if all(m.get("standby") for m in members):
+        raise ValueError("members-voters")
     if self_id is not None and all(m["id"] != self_id for m in members):
         raise ValueError("members-self")
     return members
@@ -434,9 +439,19 @@ VECTORS += [
     members("members-one", ONE),
     members("members-ipv6", "0,[::1]:20000,[::1]:20001,[::1]:20002,[::1]:20003,[::1]:20004"),
     members("members-eight", EIGHT),
+    # A standby's mark, a seventh field (ADR 0134): on the last member, on a member in
+    # the middle, on every member but one, and on the member that reads the string.
+    members("members-standby-last", MEMBERS + "|3,d:1,d:2,d:3,d:4,d:5,standby", self_id=1),
+    members("members-standby-middle", ONE + "|1,b:1,b:2,b:3,b:4,b:5,standby|2,c:1,c:2,c:3,c:4,c:5"),
+    members("members-standby-all-but-one", ONE + ",standby|1,b:1,b:2,b:3,b:4,b:5|2,c:1,c:2,c:3,c:4,c:5,standby"),
+    members("members-standby-self", ONE + "|1,b:1,b:2,b:3,b:4,b:5,standby", self_id=1),
     members("members-grammar-empty", ""),
     members("members-grammar-five-fields", "0,a:1,a:2,a:3,a:4"),
     members("members-grammar-seven-fields", ONE + ",a:6"),
+    members("members-grammar-seventh-not-standby", ONE + ",Standby"),
+    members("members-grammar-seventh-empty", ONE + ","),
+    members("members-grammar-eight-fields", ONE + ",standby,standby"),
+    members("members-grammar-standby-in-place-of-an-endpoint", "0,a:1,a:2,a:3,a:4,standby"),
     members("members-grammar-id-not-integer", "x,a:1,a:2,a:3,a:4,a:5"),
     members("members-grammar-id-negative", "-1,a:1,a:2,a:3,a:4,a:5"),
     members("members-grammar-id-too-large", "2147483648,a:1,a:2,a:3,a:4,a:5"),
@@ -450,6 +465,11 @@ VECTORS += [
     members("members-grammar-before-duplicate", ONE + "|0,b:1,b:2,b:3,b"),
     members("members-duplicate", ONE + "|0,b:1,b:2,b:3,b:4,b:5"),
     members("members-count", EIGHT + "|8,h8:1,h8:2,h8:3,h8:4,h8:5"),
+    members("members-voters-one-standby", ONE + ",standby"),
+    members("members-voters-every-member-a-standby", ONE + ",standby|1,b:1,b:2,b:3,b:4,b:5,standby"),
+    # The checks run in their order: the count before the voters, the voters before self.
+    members("members-count-before-voters", "|".join(f"{i},h{i}:1,h{i}:2,h{i}:3,h{i}:4,h{i}:5,standby" for i in range(9))),
+    members("members-voters-before-self", ONE + ",standby", self_id=3),
     members("members-self", MEMBERS, self_id=3),
 ]
 

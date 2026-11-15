@@ -19,18 +19,23 @@ this one second.
 
 ## Members and streams
 
-A cluster is a members string, the same string on every member and every client:
+A cluster is a members string, the same string on every member and every client,
+but for which of its members it marks a standby while that is changed ("Roles and
+the election", "Changing a standby's mark"):
 
 ```text
-<id>,<ingress>,<consensus>,<log>,<catchup>,<archive>|<id>,<ingress>,...
+<id>,<ingress>,<consensus>,<log>,<catchup>,<archive>[,standby]|<id>,<ingress>,...
 ```
 
-Each member is six fields separated by `,`, members separated by `|`. `id` is the
-member id, an integer from 0 upward, unique within the string; the other five are
-endpoints, `host:port`, a host name or an address literal, an IPv6 literal in square
-brackets, and a port from 1 to 65535, each resolved as `spec/udp.md`, "The channel
-URI", resolves an endpoint. A string holds at most 8 members ("Values"). The endpoints
-are where a member receives:
+Each member is six fields separated by `,`, or seven, members separated by `|`. `id`
+is the member id, an integer from 0 upward, unique within the string; the next five
+are endpoints, `host:port`, a host name or an address literal, an IPv6 literal in
+square brackets, and a port from 1 to 65535, each resolved as `spec/udp.md`, "The
+channel URI", resolves an endpoint. A seventh field is the word `standby`, and marks
+the member a standby: a member that follows the log and has no vote ("Roles and the
+election", "Standbys"; ADR 0134). A member without the mark is a voter. A string
+holds at most 8 members ("Values"), at least one of them a voter. The endpoints are
+where a member receives:
 
 | Endpoint | Who receives on it | What |
 | --- | --- | --- |
@@ -719,8 +724,9 @@ service to the member on its driver: the service took a snapshot.
 
 A member is a follower, a candidate or the leader. The leader writes the log and
 commits it; a follower records the log and reports its append position; a candidate
-is a follower asking for votes. A cluster of n members has a quorum of n ÷ 2 + 1,
-integer division: 2 of 3, 3 of 5, 4 of 7, and 1 of 1.
+is a follower asking for votes. A cluster of n voters has a quorum of n ÷ 2 + 1,
+integer division: 2 of 3, 3 of 5, 4 of 7, and 1 of 1. A standby is a follower that
+is no voter, and where this section counts members it counts voters ("Standbys").
 
 **The commit position.** The leader keeps each member's last append position, the
 term it was reported for and the time it arrived, its own among them, set to its own
@@ -985,6 +991,68 @@ one the leader ignored ("Sessions"); the client learns of the first by the new l
 event and of neither by a message of its own, so a client treats a message with no
 reply from the service as possibly lost and sends it again when its service's rule
 allows, as Aeron's clients do.
+
+**Standbys.** A standby is a member that the members string marks `standby`
+("Members and streams"; ADR 0134). It is a follower. It canvasses, takes a leader's
+new leadership term, replicates what it lacks, catches up, records the log, reports
+its append position, reads its committed log for its sessions, takes the snapshots
+its leader's cluster actions ask for ("Snapshots"), and answers a client's connect
+with a redirect ("Sessions"), each as a follower that is a voter does. Two things
+it does not do. It never goes from canvass to nominate, so it asks for no vote and
+leads no term. And it answers a request vote with nothing, in every state, its
+candidate term unchanged, counted in `cluster.standby_vote_requests`: a vote against
+would end the candidate's ballot (state 3), and a standby has no vote to give. With
+the request's term it does what a voter in its state does: once its election has
+closed, a request for a term above its own is a ballot the cluster holds without
+its leader, and it holds an election ("Messages outside an election").
+
+A member counts voters, the voters of its own members string, wherever this section
+counts members: for a quorum; for the quorum position and a leader's active members
+("The commit position"); for a canvassing member's unanimous and quorum candidate
+(state 1); and for a ballot, in which a candidate sends request vote to the voters,
+counts their votes, and waits for those of them it has heard (state 3). A standby's
+report, its append position and a vote it sent count toward none of them, and a
+standby that is heard is not waited for. A member that is the only voter of its
+string leads from init, as a cluster of one member does (state 0), and its standbys
+canvass and follow it. The arithmetic vectors are given the voters alone.
+
+A member reads a message of any member its string names as the message's template
+has it read, whether its string marks the sender a standby or not, and sends what
+it sends to every other member, standbys among them: canvass position, new
+leadership term, commit position, the log and a replay. So a member votes, on the
+logs compared, for a candidate that its own string marks a standby, and follows a
+leader that its own string marks one. The mark changes what a member counts and
+what a standby itself does, and nothing else. That is what lets one member's mark
+differ between the strings of two members while the members are started again with
+a new string, one after another.
+
+**Changing a standby's mark.** A standby is promoted, and a voter is made a standby,
+by a change of the members string, which each member takes when it is started with
+it. Nothing else of the string changes while a cluster keeps its log: its members,
+their ids and their endpoints stay ("Out of this version", dynamic membership).
+Three rules keep every committed entry in the log of every leader across such a
+change. No message carries a member's string, so no member checks them: they are
+the operator's, and `docs/how-to/promote-a-standby.md` is the procedure that keeps
+them.
+
+1. One mark at a time. Two strings whose voters differ by one member have no two
+   quorums apart: a quorum of the one and a quorum of the other share a voter, so a
+   leader that either elects holds what the other committed ("Logs compared"). Two
+   strings whose voters differ by two members do not have that. Of the voters 0, 1
+   and 2 and the voters 0, 1 and 3, members 1 and 2 are a quorum of the first, and
+   members 0 and 3 a quorum of the second.
+2. A change is complete before the next begins. It is complete when every member
+   that runs was started with the new string and, after that, a leader has closed
+   its election (state 8): a quorum of the new string's voters has then recorded
+   that leader's term at its log position, and so holds every entry committed
+   before. Until then the string before it is still one of two side by side, and a
+   third would differ from it by two marks.
+3. No member is started with an older string than the newest that a member of the
+   cluster was started with.
+
+`cluster.voters` holds which members a member's own string gives a vote, and
+`cluster.standby` whether it marks the member itself, so that which string each
+member runs can be read from its counters ("Counters").
 
 **A member's start.** A member starts on a new log directory or on the one it kept
 ("The log"; ADR 0089, ADR 0108). On a new one its record holds no term, its candidate
@@ -1584,6 +1652,9 @@ that a reader of a counters file knows which transition it saw.
 | `cluster.candidacies` | a ballot begun: a member in nominate that stored candidate term + 1, voted for itself and went to candidate ballot, `cluster.role` going to candidate (ADR 0081) |
 | `cluster.ballots_lost` | a ballot that ended with no leader for the member, which canvasses again: a candidate on a vote against its candidate term or once it holds no vote of its own for that term, at once (ADR 0105), or at the election timeout short of a quorum, a member in follower ballot whose candidate's new leadership term did not come within the election timeout, or either that reads a new leadership term for a log term that is not its own, once it has dropped any terms the message says its leader's record lacks ("Messages during an election"; ADR 0096); two members that count one with `cluster.candidacies` each are a split vote (ADR 0081) |
 | `cluster.leadership_terms_ignored` | a new leadership term ignored for its term: below the reader's candidate term in canvass, or not the candidate term in a ballot state |
+| `cluster.voters` | a gauge: the members to which the member's own string gives a vote, one bit for each member of the string in the rising order of their ids, the lowest id's bit the lowest, set for a voter: 7 for a string of four members whose highest id is a standby. It does not change while the member runs ("Standbys"; ADR 0134) |
+| `cluster.standby` | a gauge: 1 when the member's own string marks it a standby, 0 when it gives it a vote. It does not change while the member runs ("Standbys") |
+| `cluster.standby_vote_requests` | a request vote that the member read as a standby and answered with nothing: the candidate's string gives this member a vote, and the member's own does not ("Standbys", "Changing a standby's mark") |
 | `cluster.sessions` | a gauge: open sessions, on every member, as the snapshot it started from and its log's committed session open and close events since left them |
 | `cluster.sessions_accepted` | a session connect the leader accepted: a session id given, and a session open event to append |
 | `cluster.sessions_opened` | a session opened by a committed session open event, on every member, or taken open from the snapshot the member started from ("A member's start"), so that this count less `cluster.sessions_closed` is `cluster.sessions` |
@@ -1628,7 +1699,7 @@ that a reader of a counters file knows which transition it saw.
 | --- | --- |
 | schema id, version | 1, 0 |
 | stream ids | log 100, ingress 101, egress 102, log replay 103, service log 104, consensus module 105, service snapshot 106, snapshot 107, consensus 108, service snapshot replay 109, which is none of Aeron's. In Aeron 104 is the service stream, which carries the consensus module's messages to a service; here it carries the log a service reads ("The service") |
-| members | at most 8; a ninth is `members-count` |
+| members | at most 8, at least one of them a voter; a ninth is `members-count`, and a string of standbys alone `members-voters` |
 | member id | 0 to 2147483647, unique |
 | leader heartbeat interval | 200 ms: how often the leader sends commit position with nothing to report, and new leadership term during an election |
 | leader heartbeat timeout | 10 s: a follower with nothing from its leader for this long holds an election; a member's append position older than this leaves it out of the quorum position, and a leader whose active members fall below a quorum holds an election, in states 5 and 8 as outside one; and the time a replication, a catch-up or a join may make no progress before the election fails |
@@ -1679,10 +1750,12 @@ order, reporting the first that fails by name; a rejected message is counted in
 | `term` | a term id is below −1 |
 
 A members string is checked in this order, each check over the whole string: `members-grammar`
-(an empty string; a member with other than six fields; an id that is not ASCII digits
+(an empty string; a member with fewer than six fields or more than seven, or with a
+seventh that is not `standby`, those seven lower-case letters; an id that is not ASCII digits
 making an integer from 0 to 2147483647; an endpoint without `:`, with an empty host, or
 with a port that is not ASCII digits making an integer from 1 to 65535), `members-duplicate` (two members with one id),
-`members-count` (more than 8 members), `members-self` (the member's own id is not in
+`members-count` (more than 8 members), `members-voters` (every member a standby),
+`members-self` (the member's own id is not in
 the string); then `host` (a name that does not resolve), `spec/client-protocol.md`'s
 error code 9. A host that holds `:` is an IPv6 literal and is written in square
 brackets, else `members-grammar`.
@@ -1709,7 +1782,8 @@ encoder. Each vector has a `kind`:
   reports; every template once valid, with its null values where a field allows them,
   and one vector per rejection in the order the checks run.
 - `members`: a members `string` and the `members` it parses to, each an id and its
-  five endpoints as host and port, or the `error`.
+  five endpoints as host and port, with `standby`, true, for a member the string
+  marks a standby and no such field for a voter, or the `error`.
 - `arithmetic`: `inputs` and the `fields` that follow: the quorum of a member count;
   the quorum position and the commit position from the members' append positions, the
   terms they were reported for, their ages, and the leader's own position, term and

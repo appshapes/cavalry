@@ -127,7 +127,8 @@ The client API implementation, re-exported by the `cavalry` crate. Data plane.
 - Holds a session with a cluster: `Cavalry::connect_cluster(members,
   response_channel)` takes the members string the cluster was started with and a
   channel of this client's host, `cavalry:udp?endpoint=<host:port>`, for the cluster's
-  answers. It asks one member after another, follows a redirect to the leader, and
+  answers. A member the string marks `standby` is asked as any other is, and
+  redirects as a follower does (ADR 0134). It asks one member after another, follows a redirect to the leader, and
   returns a `ClusterSession` once the leader has opened the session, or a
   `ClusterError` that says what to do: the leader's refusal with its reason, a
   cluster of another protocol version, a members string that fails a check, or no

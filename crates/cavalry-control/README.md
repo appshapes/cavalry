@@ -41,7 +41,11 @@ is allowed here.
   its last election began (`cluster-member`, a note; ADR 0102); a member that follows
   no leader, with the state its election is in, why it began, and that a quorum of
   the members elects a leader, the quorum by its size when `examine_config` has the
-  members string (`cluster-no-leader`); a member that has taken its leader and joins
+  members string, and of the voters when the string marks a standby
+  (`cluster-no-leader`); a standby, named as one in its note; a member that runs
+  with other voters than the members string its host is configured with, both sets
+  by their ids, as while a standby's mark is changed (`cluster-voters`; ADR 0134);
+  a member that has taken its leader and joins
   its log, with what its election's state waits for, an image of the leader's log, a
   replication or a catch-up, and the path that needs with its endpoints
   (`cluster-joining`, a note); a leader that lost its quorum (`cluster-quorum-lost`); a

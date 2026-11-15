@@ -1382,6 +1382,317 @@
     },
     {
       "kind": "members",
+      "name": "members-standby-last",
+      "string": "0,10.0.0.1:20000,10.0.0.1:20001,10.0.0.1:20002,10.0.0.1:20003,10.0.0.1:20004|1,10.0.0.2:20000,10.0.0.2:20001,10.0.0.2:20002,10.0.0.2:20003,10.0.0.2:20004|2,10.0.0.3:20000,10.0.0.3:20001,10.0.0.3:20002,10.0.0.3:20003,10.0.0.3:20004|3,d:1,d:2,d:3,d:4,d:5,standby",
+      "self_id": 1,
+      "members": [
+        {
+          "id": 0,
+          "ingress": {
+            "host": "10.0.0.1",
+            "port": 20000
+          },
+          "consensus": {
+            "host": "10.0.0.1",
+            "port": 20001
+          },
+          "log": {
+            "host": "10.0.0.1",
+            "port": 20002
+          },
+          "catchup": {
+            "host": "10.0.0.1",
+            "port": 20003
+          },
+          "archive": {
+            "host": "10.0.0.1",
+            "port": 20004
+          }
+        },
+        {
+          "id": 1,
+          "ingress": {
+            "host": "10.0.0.2",
+            "port": 20000
+          },
+          "consensus": {
+            "host": "10.0.0.2",
+            "port": 20001
+          },
+          "log": {
+            "host": "10.0.0.2",
+            "port": 20002
+          },
+          "catchup": {
+            "host": "10.0.0.2",
+            "port": 20003
+          },
+          "archive": {
+            "host": "10.0.0.2",
+            "port": 20004
+          }
+        },
+        {
+          "id": 2,
+          "ingress": {
+            "host": "10.0.0.3",
+            "port": 20000
+          },
+          "consensus": {
+            "host": "10.0.0.3",
+            "port": 20001
+          },
+          "log": {
+            "host": "10.0.0.3",
+            "port": 20002
+          },
+          "catchup": {
+            "host": "10.0.0.3",
+            "port": 20003
+          },
+          "archive": {
+            "host": "10.0.0.3",
+            "port": 20004
+          }
+        },
+        {
+          "id": 3,
+          "ingress": {
+            "host": "d",
+            "port": 1
+          },
+          "consensus": {
+            "host": "d",
+            "port": 2
+          },
+          "log": {
+            "host": "d",
+            "port": 3
+          },
+          "catchup": {
+            "host": "d",
+            "port": 4
+          },
+          "archive": {
+            "host": "d",
+            "port": 5
+          },
+          "standby": true
+        }
+      ]
+    },
+    {
+      "kind": "members",
+      "name": "members-standby-middle",
+      "string": "0,a:1,a:2,a:3,a:4,a:5|1,b:1,b:2,b:3,b:4,b:5,standby|2,c:1,c:2,c:3,c:4,c:5",
+      "members": [
+        {
+          "id": 0,
+          "ingress": {
+            "host": "a",
+            "port": 1
+          },
+          "consensus": {
+            "host": "a",
+            "port": 2
+          },
+          "log": {
+            "host": "a",
+            "port": 3
+          },
+          "catchup": {
+            "host": "a",
+            "port": 4
+          },
+          "archive": {
+            "host": "a",
+            "port": 5
+          }
+        },
+        {
+          "id": 1,
+          "ingress": {
+            "host": "b",
+            "port": 1
+          },
+          "consensus": {
+            "host": "b",
+            "port": 2
+          },
+          "log": {
+            "host": "b",
+            "port": 3
+          },
+          "catchup": {
+            "host": "b",
+            "port": 4
+          },
+          "archive": {
+            "host": "b",
+            "port": 5
+          },
+          "standby": true
+        },
+        {
+          "id": 2,
+          "ingress": {
+            "host": "c",
+            "port": 1
+          },
+          "consensus": {
+            "host": "c",
+            "port": 2
+          },
+          "log": {
+            "host": "c",
+            "port": 3
+          },
+          "catchup": {
+            "host": "c",
+            "port": 4
+          },
+          "archive": {
+            "host": "c",
+            "port": 5
+          }
+        }
+      ]
+    },
+    {
+      "kind": "members",
+      "name": "members-standby-all-but-one",
+      "string": "0,a:1,a:2,a:3,a:4,a:5,standby|1,b:1,b:2,b:3,b:4,b:5|2,c:1,c:2,c:3,c:4,c:5,standby",
+      "members": [
+        {
+          "id": 0,
+          "ingress": {
+            "host": "a",
+            "port": 1
+          },
+          "consensus": {
+            "host": "a",
+            "port": 2
+          },
+          "log": {
+            "host": "a",
+            "port": 3
+          },
+          "catchup": {
+            "host": "a",
+            "port": 4
+          },
+          "archive": {
+            "host": "a",
+            "port": 5
+          },
+          "standby": true
+        },
+        {
+          "id": 1,
+          "ingress": {
+            "host": "b",
+            "port": 1
+          },
+          "consensus": {
+            "host": "b",
+            "port": 2
+          },
+          "log": {
+            "host": "b",
+            "port": 3
+          },
+          "catchup": {
+            "host": "b",
+            "port": 4
+          },
+          "archive": {
+            "host": "b",
+            "port": 5
+          }
+        },
+        {
+          "id": 2,
+          "ingress": {
+            "host": "c",
+            "port": 1
+          },
+          "consensus": {
+            "host": "c",
+            "port": 2
+          },
+          "log": {
+            "host": "c",
+            "port": 3
+          },
+          "catchup": {
+            "host": "c",
+            "port": 4
+          },
+          "archive": {
+            "host": "c",
+            "port": 5
+          },
+          "standby": true
+        }
+      ]
+    },
+    {
+      "kind": "members",
+      "name": "members-standby-self",
+      "string": "0,a:1,a:2,a:3,a:4,a:5|1,b:1,b:2,b:3,b:4,b:5,standby",
+      "self_id": 1,
+      "members": [
+        {
+          "id": 0,
+          "ingress": {
+            "host": "a",
+            "port": 1
+          },
+          "consensus": {
+            "host": "a",
+            "port": 2
+          },
+          "log": {
+            "host": "a",
+            "port": 3
+          },
+          "catchup": {
+            "host": "a",
+            "port": 4
+          },
+          "archive": {
+            "host": "a",
+            "port": 5
+          }
+        },
+        {
+          "id": 1,
+          "ingress": {
+            "host": "b",
+            "port": 1
+          },
+          "consensus": {
+            "host": "b",
+            "port": 2
+          },
+          "log": {
+            "host": "b",
+            "port": 3
+          },
+          "catchup": {
+            "host": "b",
+            "port": 4
+          },
+          "archive": {
+            "host": "b",
+            "port": 5
+          },
+          "standby": true
+        }
+      ]
+    },
+    {
+      "kind": "members",
       "name": "members-grammar-empty",
       "string": "",
       "error": "members-grammar"
@@ -1396,6 +1707,30 @@
       "kind": "members",
       "name": "members-grammar-seven-fields",
       "string": "0,a:1,a:2,a:3,a:4,a:5,a:6",
+      "error": "members-grammar"
+    },
+    {
+      "kind": "members",
+      "name": "members-grammar-seventh-not-standby",
+      "string": "0,a:1,a:2,a:3,a:4,a:5,Standby",
+      "error": "members-grammar"
+    },
+    {
+      "kind": "members",
+      "name": "members-grammar-seventh-empty",
+      "string": "0,a:1,a:2,a:3,a:4,a:5,",
+      "error": "members-grammar"
+    },
+    {
+      "kind": "members",
+      "name": "members-grammar-eight-fields",
+      "string": "0,a:1,a:2,a:3,a:4,a:5,standby,standby",
+      "error": "members-grammar"
+    },
+    {
+      "kind": "members",
+      "name": "members-grammar-standby-in-place-of-an-endpoint",
+      "string": "0,a:1,a:2,a:3,a:4,standby",
       "error": "members-grammar"
     },
     {
@@ -1475,6 +1810,31 @@
       "name": "members-count",
       "string": "0,h0:1,h0:2,h0:3,h0:4,h0:5|1,h1:1,h1:2,h1:3,h1:4,h1:5|2,h2:1,h2:2,h2:3,h2:4,h2:5|3,h3:1,h3:2,h3:3,h3:4,h3:5|4,h4:1,h4:2,h4:3,h4:4,h4:5|5,h5:1,h5:2,h5:3,h5:4,h5:5|6,h6:1,h6:2,h6:3,h6:4,h6:5|7,h7:1,h7:2,h7:3,h7:4,h7:5|8,h8:1,h8:2,h8:3,h8:4,h8:5",
       "error": "members-count"
+    },
+    {
+      "kind": "members",
+      "name": "members-voters-one-standby",
+      "string": "0,a:1,a:2,a:3,a:4,a:5,standby",
+      "error": "members-voters"
+    },
+    {
+      "kind": "members",
+      "name": "members-voters-every-member-a-standby",
+      "string": "0,a:1,a:2,a:3,a:4,a:5,standby|1,b:1,b:2,b:3,b:4,b:5,standby",
+      "error": "members-voters"
+    },
+    {
+      "kind": "members",
+      "name": "members-count-before-voters",
+      "string": "0,h0:1,h0:2,h0:3,h0:4,h0:5,standby|1,h1:1,h1:2,h1:3,h1:4,h1:5,standby|2,h2:1,h2:2,h2:3,h2:4,h2:5,standby|3,h3:1,h3:2,h3:3,h3:4,h3:5,standby|4,h4:1,h4:2,h4:3,h4:4,h4:5,standby|5,h5:1,h5:2,h5:3,h5:4,h5:5,standby|6,h6:1,h6:2,h6:3,h6:4,h6:5,standby|7,h7:1,h7:2,h7:3,h7:4,h7:5,standby|8,h8:1,h8:2,h8:3,h8:4,h8:5,standby",
+      "error": "members-count"
+    },
+    {
+      "kind": "members",
+      "name": "members-voters-before-self",
+      "string": "0,a:1,a:2,a:3,a:4,a:5,standby",
+      "self_id": 3,
+      "error": "members-voters"
     },
     {
       "kind": "members",

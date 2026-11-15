@@ -46,7 +46,8 @@ Wire types, zero-copy frames and version negotiation. Data plane.
   message header of schema 1, version 0, in `cluster`, with the spec's checks in the
   spec's order, each stream refusing a template it does not carry, the variable fields
   and the payload borrowed from the message; the members string, parsed into a
-  caller's array of at most 8; and the rules of the election and the log as free
+  caller's array of at most 8, each member with whether the string marks it a
+  standby (ADR 0134); and the rules of the election and the log as free
   functions (ADR 0058): `quorum` and `commit_position`; `log_at_least`, the order of
   two logs; `candidate`, a canvassing member's nomination; `request_vote`, a reader's
   vote; `ballot`, a candidate's outcome from the votes and the members it has heard
