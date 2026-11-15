@@ -4,7 +4,11 @@
 //! joined again, and a leader cut off, replaced, and joined again as a follower with
 //! the log the others committed. Each test holds that the cluster stays available
 //! while a quorum remains and that a service beside every member reads every
-//! committed entry, once and in order.
+//! committed entry, once and in order. A third test holds one follower's log back
+//! with [`Relay::hold_log`] and loses nothing else: a follower that joins late then
+//! catches up past what its recording of the live log has synced, and it and the
+//! service beside it run on with no log at that position yet (work item 352; ADR
+//! 0135).
 //!
 //! # How long a member takes to join again
 //!
@@ -504,26 +508,34 @@ fn a_follower_whose_catch_up_ended_ahead_of_its_live_recording_runs_on() {
     let on_time = members[1].module.member_id();
     offer(&mut members[..2], 0, 100);
     let first = FRAME + 100 * FRAME;
-    run_until(&mut members[..2], "the first hundred committed", |members| {
-        committed(members, first)
-    });
+    run_until(
+        &mut members[..2],
+        "the first hundred committed",
+        |members| committed(members, first),
+    );
 
     // The leader appends 192,000 bytes that the follower on time is held from: more
     // than the receiver window, so that the sender stops short of the log's end.
     relay.hold_log(on_time);
     offer(&mut members[..2], 100, 2000);
     let second = first + 2000 * FRAME;
-    run_until(&mut members[..2], "the leader holds two thousand more", |members| {
-        members[0].module.append_position() == second
-    });
+    run_until(
+        &mut members[..2],
+        "the leader holds two thousand more",
+        |members| members[0].module.append_position() == second,
+    );
     assert_eq!(members[1].module.append_position(), first);
 
     // The late follower runs: its image joins past its log, its election fails once,
     // and it catches up in the next.
-    run_until(&mut members, "the late follower closed its election", |members| {
-        members[2].module.election_state() == ElectionState::Closed
-            && members[2].module.log_recording_id().is_some()
-    });
+    run_until(
+        &mut members,
+        "the late follower closed its election",
+        |members| {
+            members[2].module.election_state() == ElectionState::Closed
+                && members[2].module.log_recording_id().is_some()
+        },
+    );
     let counts = members[2].module.counts();
     assert_eq!(
         (counts.join_position_mismatches, counts.elections),
@@ -565,17 +577,21 @@ fn a_follower_whose_catch_up_ended_ahead_of_its_live_recording_runs_on() {
     // a quarter of a second of duty cycles, none of which fails.
     let mut service = Cavalry::connect_to(&members[2].dir).expect("the service's client connects");
     let until = Instant::now() + Duration::from_millis(250);
-    run_until(&mut members, "duty cycles while the log is held", |members| {
-        assert!(
-            service
-                .committed_log(caught_up_to)
-                .expect("no refusal of a position the live recording has not reached")
-                .is_none(),
-            "member {}: no log at {caught_up_to} yet",
-            members[2].module.member_id()
-        );
-        Instant::now() >= until
-    });
+    run_until(
+        &mut members,
+        "duty cycles while the log is held",
+        |members| {
+            assert!(
+                service
+                    .committed_log(caught_up_to)
+                    .expect("no refusal of a position the live recording has not reached")
+                    .is_none(),
+                "member {}: no log at {caught_up_to} yet",
+                members[2].module.member_id()
+            );
+            Instant::now() >= until
+        },
+    );
     service.close().expect("the service's client closes");
     assert_eq!(members[2].module.session_log_position(), caught_up_to);
     assert_eq!(members[2].module.append_position(), caught_up_to);
