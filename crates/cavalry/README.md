@@ -20,7 +20,10 @@ binary's `main`.
   service beside it, whose recordings the gate replays and compares with each other
   and with what the services read. `examples/cluster-service.rs` is a service on its
   own: it prints each entry of the committed log of the member whose driver it is
-  given (`docs/how-to/read-the-committed-log.md`).
+  given (`docs/how-to/read-the-committed-log.md`). `examples/adder-service.rs` and
+  `examples/adder-client.rs` are the cluster tutorial's two programs, a service that
+  keeps a total and answers its sessions, and a client that sends it numbers
+  (`docs/tutorials/run-a-cluster.md`); `just quickstart` runs that page's path too.
 - `cavalry::cluster` is a cluster member's consensus module, re-exported from
   `cavalry-raft`: `ConsensusModule` replicates the cluster's log across drivers and
   commits it at a quorum, as a client of the driver beside it (ADR 0063).
