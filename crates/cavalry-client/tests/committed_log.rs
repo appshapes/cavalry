@@ -16,7 +16,7 @@ use cavalry_proto::cluster::{
     write_log_recordings,
 };
 use cavalry_shm::counters::generated::{
-    CLUSTER_COMMIT_POSITION, CLUSTER_LOG_RECORDING_ID, REPLAY_STARTED,
+    CLUSTER_COMMIT_POSITION, CLUSTER_LOG_RECORDING_ID, REPLAY_START_FAILED, REPLAY_STARTED,
 };
 
 /// A directory of its own per test, removed when the guard drops.
@@ -489,6 +489,98 @@ fn a_service_follows_a_recording_still_being_made_to_where_it_stops() {
         log.position() == 14 * ENTRY
     });
     assert_eq!(read[12..], [(12 * ENTRY, 12, 72), (13 * ENTRY, 13, 72)]);
+    log.close(&mut service).expect("the handle closes");
+    service.close().expect("the service's client closes");
+    member.close();
+}
+
+/// A follower whose catch-up ran ahead of the live log: the leader's replay gave its
+/// recording of the replay 12 entries, to 768, while its recording of the live log,
+/// which begins at 320, has synced 8, to 512, as it does when the leader's sender is
+/// paced by a slower member. A service that read the replay's recording to its stop
+/// opens the log again at 768, which no listed recording holds and the live
+/// recording has not reached: there is no log there yet, and no replay is asked of
+/// the driver. Once the live recording has synced to it, the same call gives the
+/// entries from 768 (work item 352).
+#[test]
+fn the_log_opened_past_what_the_live_recording_has_synced_is_no_log_yet() {
+    let mut member = Member::start("ahead");
+    let replayed = member.record(71, 12);
+    let replayed_id = replayed.recording.recording_id();
+    let mut live = member.record(72, 8);
+    let live_id = live.recording.recording_id();
+    // The replay's recording is listed with what it had synced when the member named
+    // its live recording, 640, and the member's log is committed to the replay's end.
+    member.name(
+        live_id,
+        5 * ENTRY,
+        &[(replayed_id, 0, 10 * ENTRY)],
+        12 * ENTRY,
+    );
+    let (_, stopped_at) = member.stop(replayed);
+    assert_eq!(stopped_at, 12 * ENTRY);
+
+    let mut service = Cavalry::connect_to(&member.dir).expect("the service's client connects");
+    let mut log = open(&mut service, 0);
+    assert_eq!(log.recording_id(), replayed_id);
+    let mut read = Read::new();
+    wait("the handle is ended at the replay's recording's stop", || {
+        poll(&mut log, &mut read);
+        log.is_ended()
+    });
+    assert_eq!(log.position(), stopped_at);
+    assert_eq!(
+        (log.failed_at(), log.withdrawn_at(), log.faulted()),
+        (None, None, None)
+    );
+    log.close(&mut service).expect("the handle closes");
+
+    let count = |service: &Cavalry, counter: cavalry_shm::counters::CounterId| {
+        service
+            .counters()
+            .read(counter.record())
+            .expect("the counter")
+    };
+    let started_before = count(&service, REPLAY_STARTED);
+    let failed_before = count(&service, REPLAY_START_FAILED);
+    for _ in 0..3 {
+        assert!(
+            service
+                .committed_log(stopped_at)
+                .expect("a position the live recording has not reached is no refusal")
+                .is_none(),
+            "no log at the position yet"
+        );
+    }
+    assert_eq!(
+        (
+            count(&service, REPLAY_STARTED),
+            count(&service, REPLAY_START_FAILED)
+        ),
+        (started_before, failed_before),
+        "no replay was asked of the driver"
+    );
+
+    // The live log reaches the position, one entry short of passing it: the log is
+    // there from the position on, with nothing to read yet.
+    live.append(4);
+    assert_eq!(live.end, stopped_at);
+    let mut log = open(&mut service, stopped_at);
+    assert_eq!(log.recording_id(), live_id);
+    live.append(2);
+    member
+        .commit_position
+        .store_release(14 * ENTRY)
+        .expect("stores");
+    wait("the service read on in the live recording", || {
+        poll(&mut log, &mut read);
+        log.position() == 14 * ENTRY
+    });
+    let expected: Read = (0..12)
+        .map(|number| (number * ENTRY, number, 71))
+        .chain([(12 * ENTRY, 12, 72), (13 * ENTRY, 13, 72)])
+        .collect();
+    assert_eq!(read, expected, "every entry once, in order");
     log.close(&mut service).expect("the handle closes");
     service.close().expect("the service's client closes");
     member.close();

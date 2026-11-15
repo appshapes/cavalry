@@ -29,6 +29,12 @@
 //! - [`Relay::cut`] and [`Relay::mend`]: while a member is cut, every datagram to it
 //!   and from it is lost, in both directions, on every link. That is a partition
 //!   with the member alone on its side.
+//! - [`Relay::hold_log`] and [`Relay::release_log`]: while a member's log is held,
+//!   every data frame sent to its `log` endpoint is lost, and nothing else is: its
+//!   image of the leader's log stays, fed by the heartbeats, and holds no entry past
+//!   the hold until the release, when a NAK brings what was lost. That is a member
+//!   whose live log lags, as it does behind a loss or a slow receiver, while its
+//!   `consensus` and `catchup` endpoints go on.
 //!
 //! One thread serves every link, its sockets non-blocking.
 
@@ -42,6 +48,9 @@ use cavalry_proto::frame::FrameType;
 /// The endpoints of a members string a peer sends to, by their place among a
 /// member's five: `consensus`, `log` and `catchup`.
 const RELAYED: [usize; 3] = [1, 2, 3];
+
+/// The place of the `log` endpoint among a member's five.
+const LOG: usize = 2;
 
 /// How long a data frame is held back when no other follows it.
 const HOLD: Duration = Duration::from_millis(2);
@@ -70,16 +79,20 @@ pub struct Totals {
     pub held: usize,
     /// Datagrams lost because a member was cut.
     pub cut: usize,
+    /// Data frames lost because the log of the member they were sent to was held.
+    pub log_held: usize,
 }
 
 #[derive(Default)]
 struct Shared {
     stop: AtomicBool,
     cut: [AtomicBool; 8],
+    log_held: [AtomicBool; 8],
     forwarded: AtomicUsize,
     dropped: AtomicUsize,
     held: AtomicUsize,
     cut_count: AtomicUsize,
+    log_held_count: AtomicUsize,
 }
 
 /// One direction between two members on one endpoint.
@@ -93,6 +106,8 @@ struct Link {
     facing_receiver: UdpSocket,
     /// The receiver's own endpoint.
     endpoint: SocketAddr,
+    /// The endpoint is the receiver's `log` endpoint.
+    log: bool,
     /// Where the sender sends from, learned from its last datagram.
     sender: Option<SocketAddr>,
     /// The data frames this link has carried.
@@ -140,6 +155,7 @@ impl Relay {
                             facing_sender,
                             facing_receiver,
                             endpoint: own(to, endpoint),
+                            log: endpoint == LOG,
                             sender: None,
                             data: 0,
                             holding: None,
@@ -183,6 +199,19 @@ impl Relay {
             .store(false, Ordering::Release);
     }
 
+    /// Holds the member's log: every data frame sent to its `log` endpoint is lost
+    /// until [`Relay::release_log`].
+    pub fn hold_log(&self, member: i32) {
+        self.shared.log_held[usize::try_from(member).expect("a member id")]
+            .store(true, Ordering::Release);
+    }
+
+    /// Ends a [`Relay::hold_log`].
+    pub fn release_log(&self, member: i32) {
+        self.shared.log_held[usize::try_from(member).expect("a member id")]
+            .store(false, Ordering::Release);
+    }
+
     /// What the relay has done so far.
     pub fn totals(&self) -> Totals {
         Totals {
@@ -190,6 +219,7 @@ impl Relay {
             dropped: self.shared.dropped.load(Ordering::Acquire),
             held: self.shared.held.load(Ordering::Acquire),
             cut: self.shared.cut_count.load(Ordering::Acquire),
+            log_held: self.shared.log_held_count.load(Ordering::Acquire),
         }
     }
 }
@@ -245,6 +275,11 @@ fn serve(links: &mut [Link], faults: Faults, shared: &Shared) {
                 if !is_data(datagram) {
                     let _ = link.facing_receiver.send_to(datagram, link.endpoint);
                     shared.forwarded.fetch_add(1, Ordering::AcqRel);
+                    continue;
+                }
+                // Read as the cut is, once the datagram has arrived.
+                if link.log && shared.log_held[link.to].load(Ordering::Acquire) {
+                    shared.log_held_count.fetch_add(1, Ordering::AcqRel);
                     continue;
                 }
                 link.data += 1;
