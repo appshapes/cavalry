@@ -276,7 +276,8 @@ commit path runs per message.
   the snapshot stream, as a recording of its own, and lists the snapshot in its
   snapshots file once the recording has stopped at the end of what it wrote (ADR
   0128). Each step is one duty cycle's work: the longest cycle while a snapshot was
-  taken measured 20 ms at the median on a laptop. A step that fails is counted in
+  taken measured 25.44 ms at the most over 50 snapshots on a laptop, and 19.71 ms
+  at the median. A step that fails is counted in
   `cluster.snapshots_failed`, and the member goes on with its log whole.
 - Starts a member from its newest snapshot (`spec/cluster.md`, "A member's start";
   ADR 0130). The start reads the member's snapshots file, plays the newest
