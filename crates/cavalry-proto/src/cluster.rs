@@ -1036,7 +1036,11 @@ pub enum Message<'a> {
     },
     /// Template 105.
     ConsensusModule {
-        /// The id the next session a leader accepts is given.
+        /// One more than the highest cluster session id of a session open event below
+        /// the snapshot's log position, 0 for none: the log's, and not a leader's own
+        /// next session id, which it moves when it accepts a connect, before that
+        /// session open event is committed (`spec/cluster.md`, "Consensus module,
+        /// template 105"; ADR 0129).
         next_session_id: i64,
         /// Aeron's, of a service's own messages, which no service sends here: written
         /// as 0, and a reader ignores it.

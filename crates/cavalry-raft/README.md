@@ -268,8 +268,11 @@ commit path runs per message.
   by 256 MiB, and when its own process asks, `ConsensusModule::snapshot()`. Every
   member takes the snapshot when its read of its own committed log reaches the
   action, so the three snapshots are of one position and hold the same bytes: a
-  marker, each open session in the order of the sessions' ids, the id the next
-  session is given, and a marker. A member writes them to its one publication on
+  marker, each open session in the order of the sessions' ids, the next session id
+  that the log below the action gives, and a marker. That id is
+  `Sessions::committed_next_session_id()`, which only a committed session open event
+  moves, and not the leader's own, which moves at a connect it accepts. A member
+  writes them to its one publication on
   the snapshot stream, as a recording of its own, and lists the snapshot in its
   snapshots file once the recording has stopped at the end of what it wrote (ADR
   0128). Each step is one duty cycle's work: the longest cycle while a snapshot was
@@ -369,6 +372,17 @@ commit path runs per message.
   member checks, and `docs/how-to/promote-a-standby.md` the steps. A test runs
   what the rules prevent: two marks changed at once elect a leader that lacks a
   committed entry (ADR 0134).
+- Built on it since, in other crates (work item 229): the cluster client and the
+  service's replies, `Cavalry::connect_cluster` with `ClusterSession` and
+  `Cavalry::cluster_service` with `ClusterService` in `cavalry-client`
+  ([ADR 0117](../../docs/decisions/0117-open-a-cluster-session-from-the-client-with-a-publication-to-every-member.md),
+  [ADR 0118](../../docs/decisions/0118-reply-to-a-session-from-the-service-beside-the-entrys-leader-and-wait-for-no-client-past-the-keepalive-interval.md));
+  the C ABI's calls for both, and a session object and a service object in each of
+  the five generated clients, so that a client or a service is a program in any of
+  their languages
+  ([ADR 0124](../../docs/decisions/0124-give-each-client-a-session-object-and-a-service-object-whose-handlers-failure-aborts-its-entry.md));
+  and the tutorial that runs three members, a service and a client,
+  [Run a cluster in ten minutes](../../docs/tutorials/run-a-cluster.md).
 - To come, each with its work item: mixed versions in a rolling upgrade (work item
   231), the gate across three hosts (work item 232), a service's snapshot through
   the C ABI and the five clients (work item 335), and a member that lost its log
@@ -379,10 +393,12 @@ In Aeron, this is Cluster, with Cluster Standby as a paid component
 
 ### What the sessions do not do yet
 
-No client of Cavalry's own speaks the session protocol yet: a program connects by
-writing the messages of `spec/cluster.md` itself, as `tests/cluster_sessions.rs`
-does. The service of the leader does not reply to a session yet. Both are the next
-changes of work item 229.
+A message of the session protocol is one frame. A client's message and a service's
+reply carry at most 1,344 bytes, and nothing longer is reassembled (ADR 0116, ADR
+0118). A service cannot close a session, and no event tells a client that a reply
+to it was dropped (ADR 0118, Revisit). The protocol has no authentication: the
+challenge and its response are reserved (`spec/cluster.md`, "Out of this
+version").
 
 ### What the election does not do yet
 

@@ -180,6 +180,25 @@ nothing depends on it.
   stood, and 520 ns on `bench`'s checked `one_way_32_recorded` row, where 730 ns
   stood. The link's profile, `bench-linux-link`, stands as it was recorded on
   2026-11-04: its gated row, `udp_round_trip_32`, did not move with the harness.
+  On 2026-11-15 both hosts' four profiles were re-recorded again, from the eight
+  processes each host had run at the tree of 6e4cc7b, the first entries measured with
+  a claim row's subscriber held behind the publisher, which is the re-record that
+  decision asked for
+  ([ADR 0127](../docs/decisions/0127-measure-a-claim-row-with-its-subscriber-held-behind-the-publisher.md))
+  and the one `grip-linux` was owed since its checked profile was widened for pull
+  request 280
+  ([ADR 0125](../docs/decisions/0125-re-record-grips-checked-profile-at-pull-request-280s-tree-on-the-owners-ruling-and-again-when-work-item-316-reports.md)):
+  the slowest run the gate compares with is 95 ns and 117 ns on `grip`'s checked
+  `claim_commit_32_client` and `claim_commit_32_recorded` rows, where 139 ns and
+  160 ns stood, and 5,827 ns on its `one_way_32_udp` row, where 20,639 ns stood. Each
+  entry also holds the five `_at_tail` rows, reported and never gated. The link's
+  profile was re-recorded the same day from the three link processes of that tree,
+  after `master`'s own run there failed `udp_round_trip_32` twice with no line of the
+  link rows changed: the row's tail had risen on the two hosts, to runs of 190,207
+  to 244,863 ns where the entry of 2026-11-04 held 188,671 to 190,591, so the slowest
+  run the gate compares with is 244,863 ns
+  ([ADR 0033](../docs/decisions/0033-record-a-bench-baseline-from-every-process-at-one-tree.md));
+  what widened it is not found (work item 198).
 
 ## What it must never do
 
