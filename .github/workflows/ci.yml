@@ -103,10 +103,14 @@ jobs:
     # and a cold cache the jobs took 1 min 53 s (macOS) and 2 min 40 s (Linux) on run
     # 38298993157, and 35 s warm before them (run 38286062189). `just miri` is the
     # long step, 57 s and 80 s: Miri's sysroot build, 12 s and 20 s, is not in the
-    # cache, and the rest is the interpreted tests. Twice the slowest cold job is under
-    # six minutes, so this stays at 15. Re-measure when `just miri` nears five minutes,
-    # when it moves to a job of its own.
-    timeout-minutes: 15
+    # cache, and the rest is the interpreted tests. Re-measure when `just miri` nears
+    # five minutes, when it moves to a job of its own.
+    # On 2026-11-15 the jobs took 13 min 18 s (macOS) and 10 min 51 s (Linux) on run
+    # 43766622479, with the cluster's tests and the six conformance runners that the
+    # fifth slice added, and `just conformance` then gained conformance/upgrade/, which
+    # builds a second tree of Cavalry when the cache does not hold it (work item 231;
+    # ADR 0136). Twice the slowest of those is under 27 minutes, so the bound is 30.
+    timeout-minutes: 30
     strategy:
       fail-fast: false
       # Linux for every event; macOS as well for a push to master and a run by hand,

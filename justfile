@@ -78,6 +78,11 @@ bench-compare:
 # cgo (card 207), then conformance/jvm/run.sh, the JVM client's runner through
 # java.lang.foreign (card 208), then conformance/dotnet/run.sh, the .NET client's runner
 # through P/Invoke (card 209). A client in clients/ joins here with its own runner.
+# Last, conformance/upgrade/run.sh, the gate of CLAUDE.md's invariant 3, "Mixed
+# versions run during an upgrade" (work item 231; ADR 0136): it builds the last tree
+# of the cluster protocol's version before this one beside this tree, and upgrades a
+# cluster of three members on the loopback from the one to the other, one member at a
+# time. It needs the repository's whole history to name that tree.
 conformance:
     cargo test -p cavalry-proto --test conformance
     cargo test -p cavalry-proto --test client_protocol_conformance
@@ -95,6 +100,7 @@ conformance:
     conformance/go/run.sh
     conformance/jvm/run.sh
     conformance/dotnet/run.sh
+    conformance/upgrade/run.sh
 
 # Deterministic replay test (CLAUDE.md, gate 1; ADR 0030): a driver on a directory of
 # its own records 100,000 hash-chained messages while a live subscriber prints them,
