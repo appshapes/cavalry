@@ -23,6 +23,7 @@
 use std::sync::Arc;
 use std::time::Duration;
 
+use cavalry_proto::client_protocol::ErrorCode;
 use cavalry_proto::cluster::{
     CONSENSUS_MODULE_STREAM_ID, CloseReason, ClusterAction, EGRESS_STREAM_ID,
     KEEPALIVE_INTERVAL_NS, MAX_SERVICE_SNAPSHOT_STATE_LENGTH, MAX_SESSIONS, Message, SERVICE_ID,
@@ -809,8 +810,9 @@ impl SnapshotReader {
 }
 
 /// Plays a service's snapshot back whole, through its member's driver, and reads it:
-/// `None` when the driver refuses the replay, plays nothing for the service
-/// snapshot load timeout, or the recording holds no service's snapshot.
+/// `None` when the driver refuses the replay for its recording, plays nothing for the
+/// service snapshot load timeout, or the recording holds no service's snapshot. Any
+/// other refusal of the driver's is the error.
 fn read_snapshot(client: &mut Cavalry, recording_id: i64) -> Result<Option<Snapshot>, ClientError> {
     // The subscription first: a replay with no subscriber does not move. And on a
     // stream of its own: on the service log stream a service that is not polling
@@ -826,8 +828,19 @@ fn read_snapshot(client: &mut Cavalry, recording_id: i64) -> Result<Option<Snaps
         IPC_CHANNEL,
     ) {
         Ok(replay) => replay,
-        // A recording the driver does not hold, or holds no bytes of.
-        Err(ClientError::Refused { .. }) => return Ok(None),
+        // A refusal for the recording itself, which a later call meets again: the
+        // driver does not hold it as a valid recording, code 21, or holds no bytes of
+        // it where the replay starts, code 23.
+        Err(ClientError::Refused {
+            code: Some(ErrorCode::UnknownRecording | ErrorCode::PositionOutOfRange),
+            ..
+        }) => return Ok(None),
+        // Every other refusal can pass, and is the caller's to retry: a registry, the
+        // counters file or a queue at its bound, code 10; a retention command at work
+        // on the recording, code 24, after which the recording plays or is unknown;
+        // and code 12, one code for a segment file that cannot be read and for a
+        // replay's log that cannot be created under shm pressure. A start that passed
+        // its snapshot over for back-pressure could not take it again (invariant 3).
         Err(error) => return Err(error),
     };
     let session = replay.session_id();
@@ -1098,7 +1111,10 @@ impl ClusterService {
     /// lists (`spec/cluster.md`, "A service's start"; ADR 0132). It is called before
     /// the first poll, by a program that gives its state to
     /// [`snapshot`](Self::snapshot): a program that never calls it reads its
-    /// member's log from position 0. In Aeron, this is the snapshot image of
+    /// member's log from position 0, and needs the whole of it. The member's
+    /// `cluster.log_purge_position`, from which an operator purges, assumes a
+    /// program that calls it: beside a service that takes snapshots and never calls
+    /// it, nothing may be purged. In Aeron, this is the snapshot image of
     /// `ClusteredService.onStart`.
     ///
     /// [`Restored::State`] is the program's state as the program gave it. The
@@ -1121,12 +1137,18 @@ impl ClusterService {
     /// member's log, or once it has answered [`Restored::State`] or
     /// [`Restored::FromStart`].
     ///
-    /// A replay that the driver refuses, as it does for a recording it does not
-    /// hold, passes the snapshot over, counted. Any other command of the call that the
-    /// driver refuses, the add of the two counters of the service's start or of its
-    /// subscription, is [`ClusterError::Client`]: the service has not started, has
-    /// counted nothing and holds neither counter, and the call is made again. The
-    /// driver counts a registry at its bound in `driver.registry_full`.
+    /// A replay that the driver refuses for its recording, which it does not hold as
+    /// a valid recording, error code 21, or holds no bytes of where the replay starts,
+    /// code 23, passes the snapshot over, counted. Every other refusal of the call's
+    /// commands is [`ClusterError::Client`], with the driver's code: the add of the two
+    /// counters of the service's start or of its subscription, and a replay refused for
+    /// a registry, the counters file or a queue at its bound, code 10, a retention
+    /// command at work on the recording, code 24, or a file that cannot be read or
+    /// created, code 12. The service has not started, has counted nothing and holds
+    /// neither counter, and the call is made again: a refusal that passes is never a
+    /// snapshot passed over. The driver counts a registry at its bound in
+    /// `driver.registry_full`, and the error's message says what the operator does
+    /// about the others.
     ///
     /// ```
     /// use cavalry_client::{Cavalry, Restored};

@@ -228,12 +228,18 @@ The client API implementation, re-exported by the `cavalry` crate. Data plane.
   that the polls read from position 0: the member lists no snapshot of a service,
   or the service could not take the one it lists, which
   `cluster.service_snapshots_passed_over` counts. `Restored::NoMember` says that
-  the driver hosts no member with a log yet, and the program asks again. A program
-  that never calls `restore` reads its member's log from position 0, as before,
-  and so does a service written through the C ABI. For the entries of the term its
-  snapshot was taken in, a service that started from one answers on its member's
-  counters alone: a member that says it leads a term is the member that term's
-  first entry names (ADR 0132).
+  the driver hosts no member with a log yet, and the program asks again. Any
+  refusal of the driver's but one for the snapshot's recording, error code 21 or
+  23, is the call's error, a registry at its bound, code 10, among them: the
+  service has not started, and the program asks again. A program that never calls
+  `restore` reads its member's log from position 0, as before, and so does a
+  service written through the C ABI. Such a service needs its member's whole log:
+  the member's `cluster.log_purge_position` rises once the service takes
+  snapshots, and assumes a program that calls `restore`, so beside a program that
+  takes snapshots and never calls it, nothing may be purged. For the entries of
+  the term its snapshot was taken in, a service that started from one answers on
+  its member's counters alone: a member that says it leads a term is the member
+  that term's first entry names (ADR 0132).
 - Holds a recording the driver arms: `Cavalry::arm_recording(channel, stream_id)`, on a
   `cavalry:udp` stream with a subscription and no publication or image yet, returns
   an `ArmedRecording`, and `ArmedRecording::poll()` returns the `Recording` once the

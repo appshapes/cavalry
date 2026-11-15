@@ -37,7 +37,7 @@ after; and from where a member's log is then needed.
 
 A program asks its service to start from a snapshot: `ClusterService::restore`,
 before the first poll. A program that does not ask reads the log from position 0,
-as before.
+as before, and needs its member's whole log.
 
 The member names one recording: the gauge `cluster.service_snapshot_recording_id`
 holds the recording of the newest snapshot of a service that it lists, −1 for
@@ -58,14 +58,27 @@ position 0: `Restored::FromStart`, which is also the answer when the member list
 none. With no member that has a log yet the answer is `Restored::NoMember`, and
 the program asks again.
 
+The driver's refusal of the replay fails the snapshot only when it is a refusal
+for the recording, which a later start meets again: error code 21, a recording the
+driver does not hold as a valid one, or code 23, no bytes of it where the replay
+starts. Every other refusal of the start's commands is the call's error, with the
+driver's code: a registry, the counters file or a queue at its bound, code 10; a
+retention command at work on the recording, code 24; code 12, a file that cannot
+be read or created; and a refusal of the add of the start's two counters or of its
+subscription. The service has not started and has counted nothing, and the
+program asks again.
+
 A service that started from a snapshot takes the snapshot's term as the term it
 is in, without that term's leader. For an entry of that term it answers when its
 member's counters say that the member leads the term.
 
 A member's log is needed from the lower of two positions, those of the newest
 snapshot of its consensus module and of the newest snapshot of a service that it
-lists, and from 0 while it lists none of either. The gauge
-`cluster.log_purge_position` holds it.
+lists, and from 0 while it lists no snapshot of one of the two. The gauge
+`cluster.log_purge_position` holds it. The position assumes a service whose
+program calls `restore`, which the member cannot tell: it lists the snapshots of a
+service that never calls it all the same. Beside such a service the log is needed
+from 0, and the pages that give the purge rule say so.
 
 ## Alternatives considered
 
@@ -96,6 +109,18 @@ lists, and from 0 while it lists none of either. The gauge
   subscribed to only while a snapshot is read, nothing stands still.
 - **The service reads the member's snapshots file.** Lost. The file is in the log
   directory, which a client of the driver is not given (ADR 0066).
+- **Pass the snapshot over at every refusal of its replay.** Lost, after it was
+  built; the review of pull request 303 found it. The driver also refuses a replay
+  for a registry at its bound, code 10, for a retention command at work on the
+  recording, code 24, and for a replay's log it cannot create under shm pressure,
+  code 12, and each of those passes. A start that passed its snapshot over for one
+  of them could not take it again: it read the whole log for a condition of a few
+  milliseconds, and beside a log purged at `cluster.log_purge_position` its poll
+  was refused its replay and the service did not run. That is back-pressure
+  absorbed, against invariant 3. Code 12 is also the code of a segment file that
+  cannot be read, which does not pass, and one code names both: a program refused
+  it at every start reads its driver's message, which names the file, and may poll
+  without the call, which reads from position 0.
 - **Refuse the service's start when its snapshot cannot be read.** Lost, for ADR
   0130's reason: the log may be whole, and then position 0 gives the same state
   after a longer read. Where the log is not whole, the replay's refusal says so,
@@ -139,6 +164,14 @@ lists, and from 0 while it lists none of either. The gauge
   from position 0 and adds no counter; with its snapshot's recording purged it is
   told of that snapshot, cannot play it back, counts one passed over, reads the
   log from position 0 and holds what the others hold.
+- The same file, a driver with no room for the replay: another client holds the
+  64 replays of a follower's driver, each following a live recording, and a
+  service's start beside that member is refused twice with code 10. It has not
+  started, its position is 0, it counted nothing, and the driver holds no counter
+  of its start once it has taken the removes. Once one of the other client's
+  replays stops, the next call is given the state at the snapshot and the service
+  reads on to what the others hold. With every refusal passing the snapshot over,
+  as first built, the same test found `Restored::FromStart` at the first call.
 - `crates/cavalry-client/src/service.rs`, three tests of the reader with no
   driver: a snapshot as a service writes it is read back, a state of 2,500 bytes
   in three messages; a state whose bytes are themselves a client session, or the
@@ -170,7 +203,8 @@ lists, and from 0 while it lists none of either. The gauge
 - A program that takes snapshots makes one call before its first poll, and reads
   the log written since its last snapshot.
 - A service's start costs the replay of its snapshot and no read of the log below
-  it. A member's log below the lower of the two snapshots may be purged.
+  it. A member's log below the lower of the two snapshots may be purged, when the
+  service's program calls `restore`.
 - Beside a member whose service takes no snapshot, or is written through the C
   ABI, `cluster.log_purge_position` stays 0 and nothing is purged. That is every
   cluster whose service is not Rust until work item 335.
@@ -178,10 +212,21 @@ lists, and from 0 while it lists none of either. The gauge
   it reads from position 0, and beside a log purged below that snapshot it is
   refused its replay and does not run until its member has the log again, which
   no command of this version gives it (work item 286).
-- A program that calls `restore` after a poll is refused, and a program that
-  never calls it loses nothing: it reads the whole log.
+- A program that calls `restore` after a poll is refused. A program that never
+  calls it reads the whole log at every start, and needs it whole. Every program
+  written to ADR 0131 takes snapshots and makes no such call, and its member's
+  `cluster.log_purge_position` rises above 0 all the same: an operator who purged
+  at that gauge would leave its service refused its replay, unable to run. The
+  member cannot tell such a service from one that calls `restore`, so the rule is
+  on the pages that give the gauge, the how-to and the counter's `doctor` text:
+  beside a service that takes snapshots and never calls it, purge nothing. A
+  service that says at its start whether it will call `restore` would let the
+  member hold the gauge at 0 for it; that is a message this version does not
+  have, and the Revisit names it.
 - Revisit: when `cavalry` has a command that purges a member's log, for a `doctor`
-  finding that names the recordings; when a service must pass over its newest
+  finding that names the recordings, and a member that knows whether its service
+  starts from its snapshot, so that the gauge holds 0 beside one that does not;
+  when a service must pass over its newest
   snapshot for an older one; when a service starts from a snapshot of another
   host's, for a standby or a member that lost its directory.
 

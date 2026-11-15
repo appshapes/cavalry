@@ -626,7 +626,8 @@ it stopped, is a snapshot that is in no list: the next action asks again.
 
 **A service's start.** A service that has read no entry starts from a snapshot when
 its program asks it to, before its first read of the log. A program that does not
-ask reads the log from position 0, as a program of a version before this did. The
+ask reads the log from position 0, as a program of a version before this did, and
+needs its member's whole log ("A member's start"). The
 member stores the recording id of the newest snapshot of a service that it lists
 in `cluster.service_snapshot_recording_id`, −1 while it lists none, from its start
 and from each listing on. The service loads that counter from a record that is the
@@ -634,8 +635,10 @@ member's by the test of "The service", and only of a member whose live recording
 it has found: the member adds the counter and stores its value before it stores a
 recording's id in `cluster.log_recording_id`, since a counter holds 0 between its
 allocation and its first store, and 0 is a recording id. With no such member on
-its driver yet it has nothing to start from, and its program asks again. With −1, or a member that has
-no such counter, it reads the log from position 0. Otherwise it plays the
+its driver yet it has nothing to start from, and its program asks again. With −1,
+or a member that has no such counter, it reads the log from position 0.
+
+Otherwise the service plays the
 recording back whole, on `cavalry:ipc` and the service snapshot replay stream
 ("Members and streams"), reading its own replay's session, and takes the snapshot
 when three things hold. The driver plays
@@ -651,12 +654,20 @@ the same type id, position and term. And the service's table of sessions takes
 the sessions whole: a response channel longer than a session holds is one it does
 not take. A snapshot that fails one of the three is passed over, counted in
 `cluster.service_snapshots_passed_over`, and the service reads the log from
-position 0. The member's newest is the one snapshot a service is told of. A replay
-that the driver refuses, as it does for a recording it does not hold, passes the
-snapshot over. Any other command of the start that the driver refuses, the add of
-the service's two counters of its start or of its subscription, is no snapshot
-passed over: the service reports it to its program, has not started and has
-counted nothing, and its program asks again.
+position 0. The member's newest is the one snapshot a service is told of.
+
+The driver's refusal of the replay passes the snapshot over only when it is a
+refusal for the recording, which a later start meets again: error code 21, a
+recording the driver does not hold as a valid one, or code 23, no bytes of it where
+the replay starts (`spec/client-protocol.md`, "Error codes"). Every other refusal
+of a command of the start is no snapshot passed over: code 10, a registry, the
+counters file or a queue at its bound; code 24, a retention command at work on the
+recording, after which the recording plays or is unknown; code 12, which a segment
+file that cannot be read and a replay's log that cannot be created share; any
+other code; and any refusal of the add of the service's two counters of its start
+or of its subscription. The service reports the refusal to its program with the
+driver's code, has not started and has counted nothing, and its program asks
+again.
 
 From the snapshot the service takes its sessions, each open as its session open
 event left it, and the position its read of the log begins at, the snapshot's log
@@ -1189,11 +1200,16 @@ longer reaches back to that position its replay is refused, as a replay of a
 position the member forgot is. So a member's log is needed from the lower of two
 positions: the log position of the newest snapshot of its consensus module, and
 that of the newest snapshot of a service that it lists. `cluster.log_purge_position`
-holds that position, and 0 while the member lists none of either: the member's own
-start and a service that starts from its newest snapshot read nothing below it. An
-operator purges the recordings of a member's log that stopped at or below it, and
-none above it. Beside a member whose service takes no snapshot the position stays
-0, and nothing is purged.
+holds that position, and 0 while the member lists no snapshot of one of the two:
+the member's own start and a service that starts from its newest snapshot read
+nothing below it. The position assumes a service whose program asks it to start
+from its snapshot ("A service's start"). The member cannot tell whether it does,
+and lists the snapshots of a service that never asks all the same; such a service
+reads the log from position 0 at every start. Beside a service whose program asks,
+an operator purges the recordings of a member's log that stopped at or below the
+position, and none above it; beside one whose program takes snapshots and never
+asks, none. Beside a member whose service takes no snapshot the position stays 0,
+and nothing is purged.
 
 A member does not start, and says why and what to do, in each of these cases. Its
 record of terms holds a term and its log directory holds no log recordings file:
@@ -1738,9 +1754,9 @@ that a reader of a counters file knows which transition it saw.
 | `cluster.service_snapshots_taken` | a snapshot the service beside the member wrote and sent its service ack for; the service adds the counter, with its member's id as the key ("Snapshots") |
 | `cluster.service_snapshots_failed` | a snapshot the service beside the member gave up, for one of the reasons of "A service's snapshot"; the service adds the counter, with its member's id as the key |
 | `cluster.service_snapshot_recording_id` | a gauge: the id, in the catalog of the member's driver, of the recording of the newest snapshot of a service that the member lists, −1 while it lists none; a service that starts from a snapshot reads it ("A service's start"; ADR 0132) |
-| `cluster.log_purge_position` | a gauge: the position the member's log is needed from, the lower of the log positions of the newest snapshot of its consensus module and of the newest snapshot of a service that it lists, 0 while it lists none of either; a recording of the log that stopped at or below it may be purged ("A member's start") |
+| `cluster.log_purge_position` | a gauge: the position the member's log is needed from, the lower of the log positions of the newest snapshot of its consensus module and of the newest snapshot of a service that it lists, 0 while it lists no snapshot of one of the two; a recording of the log that stopped at or below it may be purged when the service's program asks it to start from its snapshot, and none beside a service whose program never asks ("A member's start") |
 | `cluster.service_snapshot_start_position` | a gauge: the log position of the snapshot the service beside the member started from, −1 when the member named one and the service passed it over; the service adds the counter, with its member's id as the key, when its program asks it to start from a snapshot and the member names one ("A service's start") |
-| `cluster.service_snapshots_passed_over` | a snapshot that the service beside the member was told of at its start and could not take, so that it reads the log from position 0; the service adds the counter as the one before it ("A service's start") |
+| `cluster.service_snapshots_passed_over` | a snapshot that the service beside the member was told of at its start and could not take, so that it reads the log from position 0; a refusal of its replay is one only when it is for the recording, error code 21 or 23, and any other refusal is the start's error and is not counted; the service adds the counter as the one before it ("A service's start") |
 
 ## Values
 
