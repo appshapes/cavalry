@@ -182,6 +182,23 @@ pub enum RaftError {
         /// What the catalog holds instead.
         found: ListedFound,
     },
+    /// The member's log ends below where its start reads it from, and the catalog
+    /// holds every recording that the member's record of the log's recordings names
+    /// (`spec/cluster.md`, "A member's start"; ADR 0130). That position is the log
+    /// position of the snapshot the start took its state from. The member read its
+    /// log to it as committed, and a truncation never cuts a committed entry (ADR
+    /// 0083), so the end of the member's log was cut, as by a `truncate recording`,
+    /// or the record and the catalog are older than the snapshot. The member does
+    /// not start on a log shorter than the one it reported. With the record's last
+    /// recordings gone from the catalog the refusal is
+    /// [`RaftError::ListedRecording`] with [`ListedFound::EndsBelowSnapshot`], which
+    /// names the first of them.
+    LogShort {
+        /// Where the recordings the record names end.
+        end_position: i64,
+        /// The log position of the snapshot the start took its state from.
+        from_position: i64,
+    },
     /// The `terms` file could not be read or written.
     Terms(TermsError),
     /// The driver's catalog could not be read in the member's log directory, at the
@@ -282,13 +299,26 @@ pub enum ListedFound {
         /// Where the recordings before it end.
         end_position: i64,
     },
+    /// No recording, and none of the ones the record names after it either, where
+    /// the recordings before it end below the position the start reads its log from,
+    /// that of the snapshot it took its state from (ADR 0130). The member read its
+    /// log to that position as committed, and a truncation never cuts a committed
+    /// entry, so this is no truncation that a stop cut short: recordings of the
+    /// member's log at or above the snapshot's position were removed.
+    EndsBelowSnapshot {
+        /// Where the recordings before it end.
+        end_position: i64,
+        /// The log position of the snapshot the start took its state from.
+        from_position: i64,
+    },
 }
 
 impl RaftError {
-    /// The reason's name: `members`, `member`, `recordings`, `terms-lost`,
-    /// `log-forgotten`, `listed-recording`, `terms`, `catalog`, `client`, `poll`,
-    /// `unsupported`, `payload-too-long`, `ingress-endpoints`, `offer`, `append`,
-    /// `stop-timeout`, `start-stop-timeout` or `log-recordings`.
+    /// The reason's name: `members`, `member`, `recordings`, `snapshots`,
+    /// `terms-lost`, `log-forgotten`, `listed-recording`, `log-short`, `terms`,
+    /// `catalog`, `client`, `poll`, `unsupported`, `payload-too-long`,
+    /// `ingress-endpoints`, `offer`, `append`, `stop-timeout`, `start-stop-timeout`
+    /// or `log-recordings`.
     pub const fn reason(&self) -> &'static str {
         match self {
             RaftError::Members(_) => "members",
@@ -298,6 +328,7 @@ impl RaftError {
             RaftError::TermsLost { .. } => "terms-lost",
             RaftError::LogForgotten { .. } => "log-forgotten",
             RaftError::ListedRecording { .. } => "listed-recording",
+            RaftError::LogShort { .. } => "log-short",
             RaftError::Terms(_) => "terms",
             RaftError::Catalog(_) => "catalog",
             RaftError::Client(_) => "client",
@@ -450,6 +481,19 @@ impl core::fmt::Display for RaftError {
                         "the recordings before it ending at {end_position}, below where \
                          it begins: part of the member's log is gone"
                     )?,
+                    ListedFound::EndsBelowSnapshot {
+                        end_position,
+                        from_position,
+                    } => write!(
+                        f,
+                        "no such recording, and none of the ones the record names after \
+                         it, so the member's log would end at {end_position}, below \
+                         position {from_position} of the newest snapshot the member can \
+                         read. The member had read its log to that position as \
+                         committed, and a truncation never cuts a committed entry: a \
+                         recording of the member's log at or above its snapshot's \
+                         position was removed, as by a `purge recording` of one too many"
+                    )?,
                 }
                 write!(
                     f,
@@ -462,6 +506,26 @@ impl core::fmt::Display for RaftError {
                      new log directory; see {DOC_KEPT_LOG}"
                 )
             }
+            RaftError::LogShort {
+                end_position,
+                from_position,
+            } => write!(
+                f,
+                "member refused ({reason}): the member's record of its log's recordings, \
+                 the `log-recordings` file in its log directory, names a log that the \
+                 `catalog` beside it holds whole, and that log ends at {end_position}, \
+                 below position {from_position} of the newest snapshot the member can \
+                 read. The member had read its log to that position as committed, and \
+                 a truncation never cuts a committed entry: the end of the member's \
+                 log was cut, as by a `truncate recording`, or the two files are older \
+                 than the snapshot. The member does not start on a log it cannot vouch \
+                 for. Start it with the log directory it had, whole, as its driver \
+                 left it. If that directory is lost or damaged, leave the member \
+                 stopped: the cluster goes on while a quorum of the others runs, and a \
+                 cluster is brought back to its full count by starting it again as a \
+                 new cluster, every member on a new log directory. Do not start this \
+                 member alone on a new log directory; see {DOC_KEPT_LOG}"
+            ),
             RaftError::Terms(error) => write!(f, "member stopped ({reason}): {error}"),
             RaftError::Catalog(error) => write!(
                 f,
@@ -1083,7 +1147,10 @@ enum Cataloged {
 /// The log a member kept, read back at its start (`spec/cluster.md`, "A member's
 /// start"; ADR 0108): the recordings its record names, each carrying the log on from
 /// where the ones before it end, the first from `floor`, the record's floor position.
-/// Returns the table of them and where the log ends. `cataloged` says what the
+/// Returns the table of them, where the log ends, and whether the record's last
+/// recordings were missing from the catalog, a truncation that the member's stop cut
+/// short, which `cluster.truncations_finished` counts; recordings purged below a
+/// snapshot, at the record's head, are not that. `cataloged` says what the
 /// catalog holds under a recording id, and `stop` stops a recording still being
 /// made, the driver having run on while the member was away, and returns where it
 /// stopped, so that a stop is read once and is final.
@@ -1122,13 +1189,26 @@ enum Cataloged {
 /// begin at or below `from`, and is [`RaftError::LogForgotten`] when they do not;
 /// that count is known only once the recordings still being made are stopped.
 /// With `from` at 0 a start forgets nothing and takes no purge.
+///
+/// The record's last recordings missing are a truncation cut short only while the
+/// log the ones before them hold reaches `from`. The snapshot is of a position the
+/// member read from its committed log, and a truncation never cuts below a commit
+/// position (ADR 0083), so a log that ends below `from` lost recordings of its own
+/// at or above the snapshot's position, as by a purge of one too many:
+/// [`ListedFound::EndsBelowSnapshot`], refused once the recordings still being
+/// made are stopped, since where the log ends is known only then. A start that
+/// passed over to an older snapshot would not mend it: the log would still be
+/// shorter than the member reported it. The same holds with no recording missing:
+/// a log that the catalog holds whole and that ends below `from` had its end cut,
+/// as by a `truncate recording`, or is an older record's, and is
+/// [`RaftError::LogShort`].
 fn kept_log(
     floor: i64,
     from: i64,
     listed: &[ListedRecording],
     mut cataloged: impl FnMut(i64) -> Result<Cataloged, RaftError>,
     mut stop: impl FnMut(i64) -> Result<i64, RaftError>,
-) -> Result<(VecDeque<Kept>, i64), RaftError> {
+) -> Result<(VecDeque<Kept>, i64, bool), RaftError> {
     let refused = |entry: &ListedRecording, found| RaftError::ListedRecording {
         recording_id: entry.recording_id,
         listed_start: entry.start_position,
@@ -1185,6 +1265,9 @@ fn kept_log(
             }
         }
     }
+    // What is still missing is the record's last recordings, from the first that was
+    // not purged: a truncation the member's stop cut short.
+    let cut_short = missing.is_some();
     // The recordings the catalog holds, from the first that was not purged.
     let listed = listed.get(purged..).unwrap_or(&[]);
     // The stopped recordings that hold bytes: more of them than the table keeps,
@@ -1240,6 +1323,26 @@ fn kept_log(
             });
         }
     }
+    // A log that ends below where the start reads from. The snapshot is of a
+    // position the member read from its committed log, and a truncation never cuts
+    // below a commit position (ADR 0083). So the record's last recordings missing
+    // are no truncation the member's stop cut short, and with none missing the
+    // log's end was cut or the record is an older one.
+    if end < from {
+        return Err(match missing {
+            Some(first_missing) => refused(
+                first_missing,
+                ListedFound::EndsBelowSnapshot {
+                    end_position: end,
+                    from_position: from,
+                },
+            ),
+            None => RaftError::LogShort {
+                end_position: end,
+                from_position: from,
+            },
+        });
+    }
     if holding > KEPT_RECORDINGS
         && let Some(first) = kept.front()
         && first.start > from
@@ -1251,7 +1354,7 @@ fn kept_log(
             snapshots_passed_over: 0,
         });
     }
-    Ok((kept, end))
+    Ok((kept, end, cut_short))
 }
 
 /// What the driver's catalog holds under `recording_id`, for [`kept_log`].
@@ -2851,8 +2954,11 @@ impl ConsensusModule {
     /// ([`ConsensusModule::session_log_position`]); with none, the table is empty and
     /// the read begins at 0 (ADR 0130). The log need be whole from that position
     /// alone: recordings below it that the member forgot, or that were purged, do
-    /// not refuse the start, and a log that begins above it is
-    /// [`RaftError::LogForgotten`].
+    /// not refuse the start, a log that begins above it is
+    /// [`RaftError::LogForgotten`], and a log that ends below it is refused too:
+    /// [`RaftError::ListedRecording`] with [`ListedFound::EndsBelowSnapshot`] when
+    /// its last recordings are gone, and [`RaftError::LogShort`] when the catalog
+    /// holds every one of them.
     pub fn start(
         dir: impl AsRef<Path>,
         log_dir: impl AsRef<Path>,
@@ -2982,7 +3088,10 @@ impl ConsensusModule {
         let from = restored
             .as_ref()
             .map_or(0, |restored| restored.log_position);
-        let (kept, stopped_at) = kept_log(
+        // A recording the catalog lacks at the end of the record is a truncation the
+        // member's stop cut short, `cut_short`; one that holds nothing is not, and
+        // neither is one purged below the snapshot, at the record's head.
+        let (kept, stopped_at, cut_short) = kept_log(
             recordings.floor_position(),
             from,
             recordings.entries(),
@@ -3027,14 +3136,6 @@ impl ConsensusModule {
             listed: u64::from(recordings.was_created()),
             ..ListCounts::default()
         };
-        // A recording the catalog lacks at the end of the record is a truncation
-        // the member's stop cut short; one that holds nothing is not.
-        let cut_short = recordings.entries().iter().any(|listed| {
-            matches!(
-                cataloged(&catalog, listed.recording_id),
-                Ok(Cataloged::Missing)
-            )
-        });
         if !unchanged {
             // A list that cannot be written ends the start before a term is deleted.
             write_list(&mut recordings, &kept, [None, None], stopped_at)?;
