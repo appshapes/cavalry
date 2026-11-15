@@ -10,6 +10,13 @@
 //! which member's service sent it. The members and the services run in the test's
 //! thread. The session's connect blocks while the members answer it, so a thread of
 //! its own makes it and has ended before the test goes on.
+//!
+//! A handling whose reply the session's response channel did not take,
+//! `CAVALRY_CLUSTER_REPLY_RETRY`, aborts its entry and is no taking of it: the
+//! handler counts it and records nothing, and the entry is handed over again
+//! (`spec/cluster.md`, "Replies"). Any reply can be answered so, and the first to a
+//! session most of all, since its publication was added one entry before. So what a
+//! test reads of a service's takings is the handlings that settled their replies.
 
 use std::ffi::{CStr, CString, c_void};
 use std::path::{Path, PathBuf};
@@ -117,7 +124,12 @@ struct Served {
     member: i32,
     service: *mut cavalry_cluster_service_t,
     client: *mut cavalry_t,
+    /// Every entry the handler took: every handling but those that were told to try
+    /// their reply again.
     handed: Vec<Handed>,
+    /// How many handlings were told to try their reply again and aborted their
+    /// entry, which is handed over again: none of them is in `handed`.
+    retries: usize,
     /// How many handlings of a message that begins `again` are still to be aborted,
     /// each after its reply.
     aborts: u32,
@@ -425,8 +437,9 @@ fn served_session(served: &Served) -> i64 {
 }
 
 /// The services' C handler. It reads the entry's values, answers a session's message
-/// with its member's id, a colon and the message, aborts on a reply that asks for it,
-/// and does what its script says for the messages `again`, `one` and `probe`.
+/// with its member's id, a colon and the message, aborts on a reply that asks for it
+/// and counts that handling as no taking, and does what its script says for the
+/// messages `again`, `one` and `probe`.
 unsafe extern "C" fn serve(
     clientd: *mut c_void,
     buffer: *const u8,
@@ -472,7 +485,18 @@ unsafe extern "C" fn serve(
             );
             handed.reply = Some(reply);
             if reply == CAVALRY_CLUSTER_REPLY_RETRY {
-                handed.action = CAVALRY_ACTION_ABORT;
+                // The session's response channel did not take the reply now: the
+                // entry is aborted and handed over again, and this handling took
+                // nothing. It is counted and not recorded, so that what a test reads
+                // of an entry is the handling that settled its reply.
+                assert_eq!(
+                    cavalry_cluster_service_action(served.service, CAVALRY_ACTION_ABORT),
+                    0,
+                    "{}",
+                    errmsg()
+                );
+                served.retries += 1;
+                return;
             } else if payload.starts_with(b"again") && served.aborts > 0 {
                 served.aborts -= 1;
                 handed.action = CAVALRY_ACTION_ABORT;
@@ -532,7 +556,8 @@ impl Member {
         taken as usize
     }
 
-    /// What the service did with the session message `payload`: every handling.
+    /// What the service did with the session message `payload`: every handling that
+    /// took it, which is every handling but those told to try their reply again.
     fn took(&self, payload: &[u8]) -> Vec<&Handed> {
         self.served
             .handed
@@ -598,6 +623,7 @@ impl Cluster {
                         service,
                         client,
                         handed: Vec::new(),
+                        retries: 0,
                         aborts: 0,
                         breaks: false,
                         others: None,
@@ -1233,6 +1259,119 @@ fn a_service_takes_each_entry_answers_its_session_and_holds_its_client_while_it_
     cluster.stop();
 }
 
+/// A reply offered before its session's response channel has connected is tried again
+/// and sent once (`spec/cluster.md`, "Replies"; ADR 0118). A service adds a session's
+/// publication at the session's open event, and that publication takes nothing until
+/// the client's driver has answered its setup. A service that reads the open event
+/// and the session's first message in one poll offers its reply before then: it is
+/// told to try again, aborts the entry, and is handed the entry again.
+///
+/// This test makes that history. The leader's service is not polled from before the
+/// session connects until the session's message is committed and taken beside the
+/// other members, so its next poll reads the open event and the message together.
+/// However many handlings were told to try again, the message is taken once, in the
+/// log's order, and answered once. It is the history of `master`'s run 43760846674,
+/// in which the first test of this file took a handling that was told to try again
+/// for the taking (work item 356).
+#[test]
+fn a_reply_offered_before_its_sessions_channel_connects_is_tried_again_and_sent_once() {
+    let mut cluster = Cluster::start("retry");
+    let leader = cluster.members[0].id;
+    cluster.members[0].polled = false;
+    let mut session = cluster.connect_session();
+    cluster.offer(&mut session, b"ping");
+    cluster.converse(
+        &mut session,
+        "the services beside the followers took the message",
+        |cluster, _| {
+            cluster.members[1..]
+                .iter()
+                .all(|member| !member.took(b"ping").is_empty())
+        },
+    );
+    assert!(
+        session.replies.is_empty(),
+        "no service answers but the leader's, which has not polled: {:?}",
+        session.replies
+    );
+    assert!(cluster.members[0].took(b"ping").is_empty());
+    assert_eq!(cluster.members[0].served.retries, 0);
+
+    // The leader's service polls: the session's open event and its message are both
+    // committed, and it reads them together.
+    cluster.members[0].polled = true;
+    cluster.converse(
+        &mut session,
+        "the leader's service answered the message",
+        |cluster, session| {
+            !session.replies.is_empty() && !cluster.members[0].took(b"ping").is_empty()
+        },
+    );
+    // No second reply follows: the members, the services and the session run on.
+    let until = Instant::now() + Duration::from_millis(100);
+    cluster.converse(&mut session, "a tenth of a second more", |_, _| {
+        Instant::now() >= until
+    });
+    let retries = cluster.members[0].served.retries;
+    println!(
+        "cluster_service: the leader's service was told to try the session's first reply \
+         again {retries} time(s) before the session's channel took it"
+    );
+
+    let took = cluster.members[0].took(b"ping");
+    assert_eq!(
+        took.len(),
+        1,
+        "taken once, however often it was handed over"
+    );
+    let ping = took[0].clone();
+    assert_eq!(
+        (ping.session, ping.reply, ping.action),
+        (
+            session.id,
+            Some(CAVALRY_CLUSTER_REPLY_SENT),
+            CAVALRY_ACTION_CONTINUE
+        )
+    );
+    let mut answer = vec![b'0' + leader as u8, b':'];
+    answer.extend_from_slice(b"ping");
+    assert_eq!(
+        session.replies,
+        vec![(answer, ping.term, ping.timestamp)],
+        "one reply, with the entry's term and time"
+    );
+    for member in &cluster.members {
+        let took = member.took(b"ping");
+        assert_eq!(took.len(), 1, "member {}", member.id);
+        assert_eq!(
+            (took[0].position, took[0].term, took[0].timestamp),
+            (ping.position, ping.term, ping.timestamp),
+            "member {}: the same entry, wherever it is read",
+            member.id
+        );
+        assert!(
+            member
+                .served
+                .handed
+                .windows(2)
+                .all(|pair| pair[0].position < pair[1].position),
+            "member {}: each entry taken once, in the log's order",
+            member.id
+        );
+        if member.id != leader {
+            assert_eq!(
+                (took[0].reply, member.served.retries),
+                (Some(CAVALRY_CLUSTER_REPLY_NOT_ANSWERING), 0),
+                "member {}: the service beside a follower sends nothing",
+                member.id
+            );
+        }
+    }
+
+    session.close();
+    cluster.stop();
+}
+
 /// A service beside no member takes nothing and says so; its handler's two calls are
 /// refused from outside a handler; every function refuses a null handle or pointer;
 /// and a service outlives its client and closes without one.
@@ -1273,6 +1412,7 @@ fn a_service_refuses_what_the_page_says_and_outlives_its_client() {
             service,
             client,
             handed: Vec::new(),
+            retries: 0,
             aborts: 0,
             breaks: false,
             others: None,
