@@ -37,13 +37,14 @@ use cavalry_client::{
 use cavalry_log::catalog::{CatalogError, CatalogReader};
 use cavalry_log::layout::State;
 use cavalry_log::recordings::{ListedRecording, RecordingsError, RecordingsFile};
+use cavalry_log::snapshots::SnapshotsError;
 use cavalry_log::terms::{NO_RECORDING, TermsError, TermsFile};
 use cavalry_proto::client_protocol::{ErrorCode, FOLLOW_LENGTH, ReplayStopReason};
 use cavalry_proto::cluster::{
-    CONSENSUS_STREAM_ID, EGRESS_STREAM_ID, EMPTY_MEMBER, Endpoint, INGRESS_STREAM_ID,
-    LOG_RECORDINGS_FILE_PREFIX, LOG_RECORDINGS_TMP_SUFFIX, LOG_REPLAY_STREAM_ID, LOG_STREAM_ID,
-    LogRecording, LogRecordingsError, MAX_LOG_RECORDINGS_LENGTH, MAX_MEMBERS, MembersError,
-    Message, Stream, parse_members, write_log_recordings,
+    CONSENSUS_STREAM_ID, ClusterAction, EGRESS_STREAM_ID, EMPTY_MEMBER, Endpoint,
+    INGRESS_STREAM_ID, LOG_RECORDINGS_FILE_PREFIX, LOG_RECORDINGS_TMP_SUFFIX, LOG_REPLAY_STREAM_ID,
+    LOG_STREAM_ID, LogRecording, LogRecordingsError, MAX_LOG_RECORDINGS_LENGTH, MAX_MEMBERS,
+    MembersError, Message, Stream, parse_members, write_log_recordings,
 };
 use cavalry_proto::udp::UDP_TERM_LENGTH;
 use cavalry_shm::counters::CounterId;
@@ -60,6 +61,7 @@ use crate::consensus::{
     base_above, term_at_or_below, terms_above,
 };
 use crate::sessions::{EGRESS_SLOTS, Ingress, Leadership, SessionCounts, SessionIo, Sessions};
+use crate::snapshot::{ModuleSnapshot, OpenError, SnapshotCounts, SnapshotDue};
 
 /// The longest payload [`ConsensusModule::offer`] takes: what one frame of the log
 /// carries after the frame header and the session message header, at the UDP
@@ -95,6 +97,10 @@ const STOP_TIMEOUT: Duration = Duration::from_secs(1);
 const KEPT_RECORDINGS: usize = 1024;
 /// No sync asked for yet: no position a recording has written.
 const NO_SYNC_ASKED: i64 = -1;
+/// The snapshot interval: how far a leader's log grows past the last cluster action
+/// that asked for a snapshot before the leader appends the next, 256 MiB
+/// (`spec/cluster.md`, "Values"; ADR 0129).
+pub const SNAPSHOT_INTERVAL: i64 = 256 << 20;
 
 const DOC: &str = "docs/reference/cluster.md#roles-and-the-election";
 const DOC_MEMBERS: &str = "docs/reference/cluster.md#members-and-streams";
@@ -115,6 +121,12 @@ pub enum RaftError {
     /// the recording that was to join the member's log is no part of it yet, and the
     /// next cycle writes the record again.
     Recordings(RecordingsError),
+    /// The member's record of its snapshots, the `snapshots` file in its log
+    /// directory, could not be read or written (`spec/durable-log.md`, "Snapshots";
+    /// ADR 0128). At a start the member does not start. In a duty cycle the snapshot
+    /// that was to be listed is no snapshot, and the next cluster action asks for
+    /// one again.
+    Snapshots(SnapshotsError),
     /// The member's log directory holds a log and no record of its terms
     /// (`spec/cluster.md`, "A member's start"; ADR 0104, ADR 0108): the `terms` file
     /// was removed or replaced, and with it went the terms of the log and the votes
@@ -267,6 +279,7 @@ impl RaftError {
             RaftError::Members(_) => "members",
             RaftError::Member(_) => "member",
             RaftError::Recordings(_) => "recordings",
+            RaftError::Snapshots(_) => "snapshots",
             RaftError::TermsLost { .. } => "terms-lost",
             RaftError::LogForgotten { .. } => "log-forgotten",
             RaftError::ListedRecording { .. } => "listed-recording",
@@ -295,6 +308,7 @@ impl core::fmt::Display for RaftError {
             }
             RaftError::Member(error) => write!(f, "member refused ({reason}): {error}"),
             RaftError::Recordings(error) => write!(f, "member stopped ({reason}): {error}"),
+            RaftError::Snapshots(error) => write!(f, "member stopped ({reason}): {error}"),
             RaftError::TermsLost {
                 recording_id,
                 log_end,
@@ -554,6 +568,7 @@ impl std::error::Error for RaftError {
             RaftError::Member(error) => Some(error),
             RaftError::Terms(error) => Some(error),
             RaftError::Recordings(error) => Some(error),
+            RaftError::Snapshots(error) => Some(error),
             RaftError::Catalog(error) => Some(error),
             RaftError::Client(error) => Some(error),
             RaftError::Poll(fault) => Some(fault),
@@ -579,6 +594,21 @@ impl From<TermsError> for RaftError {
 impl From<RecordingsError> for RaftError {
     fn from(error: RecordingsError) -> Self {
         RaftError::Recordings(error)
+    }
+}
+
+impl From<SnapshotsError> for RaftError {
+    fn from(error: SnapshotsError) -> Self {
+        RaftError::Snapshots(error)
+    }
+}
+
+impl From<OpenError> for RaftError {
+    fn from(error: OpenError) -> Self {
+        match error {
+            OpenError::File(error) => RaftError::Snapshots(error),
+            OpenError::Client(error) => RaftError::Client(error),
+        }
     }
 }
 
@@ -2251,6 +2281,8 @@ fn work_sessions(
     position: &mut i64,
     rejected: &mut u64,
     clock: Clock,
+    snapshot_writing: bool,
+    due: &mut Option<SnapshotDue>,
 ) -> Result<usize, RaftError> {
     let mut work = 0;
     let mut fault: Option<RaftError> = None;
@@ -2259,29 +2291,64 @@ fn work_sessions(
             .client
             .committed_log_on(LOG_REPLAY_STREAM_ID, *position)?;
     }
-    if let Some(reader) = log.as_mut() {
-        let polled = reader.poll(
-            |bytes, header, _| {
+    // While a snapshot's messages are being written the log is not read: they are
+    // written from the table of sessions, which must stay the table at the
+    // snapshot's position (`spec/cluster.md`, "Snapshots"; ADR 0129).
+    if !snapshot_writing && let Some(reader) = log.as_mut() {
+        // The term and the cluster's time of a cluster action that asks for a
+        // snapshot, when the read met one. The read ends at that entry, so that the
+        // table is what every entry below the snapshot's position made it.
+        let mut asked: Option<(i64, i64)> = None;
+        let polled = reader.controlled_poll(
+            |bytes, header, entry_position| {
                 if !header.flags().contains(Flags::UNFRAGMENTED) {
                     *rejected = rejected.saturating_add(1);
-                    return;
+                    return Action::Continue;
                 }
                 match Message::parse(Stream::Log, bytes) {
-                    Ok(entry) => match sessions.on_entry(clock, &entry, io) {
-                        Ok(true) => {}
-                        Ok(false) => *rejected = rejected.saturating_add(1),
-                        Err(error) => {
-                            if fault.is_none() {
-                                fault = Some(error);
+                    Ok(entry) => {
+                        match sessions.on_entry(clock, entry_position, &entry, io) {
+                            Ok(true) => {}
+                            Ok(false) => *rejected = rejected.saturating_add(1),
+                            Err(error) => {
+                                if fault.is_none() {
+                                    fault = Some(error);
+                                }
                             }
                         }
-                    },
+                        if let Message::ClusterAction {
+                            action: ClusterAction::Snapshot,
+                            leadership_term_id,
+                            timestamp,
+                            ..
+                        } = entry
+                        {
+                            asked = Some((leadership_term_id, timestamp));
+                            return Action::Break;
+                        }
+                    }
                     Err(_) => *rejected = rejected.saturating_add(1),
                 }
+                Action::Continue
             },
             SESSION_LOG_POLL_LIMIT,
         );
         *position = reader.position();
+        // The snapshot is of the position after the action's entry, in the action's
+        // term, whose base the member recorded before it recorded the entry.
+        if let Some((leadership_term_id, timestamp)) = asked
+            && let Some(term) = io
+                .terms
+                .terms()
+                .find(|term| term.leadership_term_id == leadership_term_id)
+        {
+            *due = Some(SnapshotDue {
+                log_position: *position,
+                leadership_term_id,
+                term_base_log_position: term.term_base_log_position,
+                timestamp,
+            });
+        }
         // A handle that has ended, at its recording's stop or on a fault, is closed:
         // the next cycle opens the log again where this one stopped.
         let ended = polled.is_err() || reader.is_ended();
@@ -2641,6 +2708,13 @@ pub struct ConsensusModule {
     /// after the last entry it handed them.
     session_log: Option<CommittedLog>,
     session_log_position: i64,
+    /// The member's snapshot of its sessions, one at a time, and the file that lists
+    /// the ones it took (ADR 0128, ADR 0129).
+    snapshot: ModuleSnapshot,
+    /// The position after the last cluster action asking for a snapshot that the
+    /// member read in its log or appended to it: a leader asks for the next one a
+    /// snapshot interval past it.
+    snapshot_asked_at: i64,
     io: ClientIo,
     counters: Counters,
     messages_rejected: u64,
@@ -2827,6 +2901,9 @@ impl ConsensusModule {
         // Each counter holds the core's value from its add: −1 for the term and the
         // recording, before a duty cycle has run.
         let counters = Counters::add(&mut client, member_id, &core, list_counts)?;
+        // The member's snapshots file, created when the directory has none, and its
+        // counters of its snapshots, after the others (ADR 0128, ADR 0129).
+        let snapshot = ModuleSnapshot::open(&mut client, log_dir.as_ref(), member_id)?;
         let started = Instant::now();
         Ok(Self {
             core,
@@ -2836,6 +2913,8 @@ impl ConsensusModule {
             held_ingress: None,
             session_log: None,
             session_log_position: 0,
+            snapshot,
+            snapshot_asked_at: 0,
             io: ClientIo {
                 client,
                 terms,
@@ -2974,6 +3053,7 @@ impl ConsensusModule {
         // The member's sessions, after the election's cycle and with what it left.
         // Their error is returned after the core's own, and after the counters are
         // stored, as the core's is.
+        let mut due = None;
         let session_work = work_sessions(
             core,
             io,
@@ -2984,7 +3064,25 @@ impl ConsensusModule {
             session_log_position,
             messages_rejected,
             clock,
+            self.snapshot.is_writing(),
+            &mut due,
         );
+        // The snapshot a cluster action asked for begins in the cycle that read the
+        // action, and moves a step in each cycle after it. A snapshot that fails is
+        // counted and is no fault of the member's; only a list that cannot be
+        // written is, returned after the core's own.
+        if let Some(due) = due {
+            self.snapshot_asked_at = self.snapshot_asked_at.max(due.log_position);
+            self.snapshot.begin(&mut self.io.client, due);
+        }
+        let snapshot_work = self
+            .snapshot
+            .do_work(&mut self.io.client, &self.sessions)
+            .map_err(RaftError::Snapshots);
+        // A leader that serves asks for a snapshot when its log has grown by the
+        // snapshot interval since the last one asked for. An action the log does not
+        // take is asked again on a later cycle.
+        let asked = self.ask_snapshot_at_the_interval();
         // The file of the log's recordings is written before the counter names a
         // recording it did not name (`spec/cluster.md`, "The service"; ADR 0103). A
         // file that could not be written leaves the counter at −1, and the next
@@ -3014,10 +3112,97 @@ impl ConsensusModule {
             log_recording_id,
             &self.sessions,
         );
+        self.snapshot.store();
         let work = read + stepped?;
         listed?;
         written?;
-        Ok(work + session_work?)
+        asked?;
+        Ok(work + session_work? + snapshot_work?)
+    }
+
+    /// Appends the cluster action that asks every member for a snapshot when this
+    /// member leads, serves its sessions, and its log has grown by
+    /// [`SNAPSHOT_INTERVAL`] since the last such action it read or appended.
+    fn ask_snapshot_at_the_interval(&mut self) -> Result<(), RaftError> {
+        let serves = self.core.role() == Role::Leader
+            && self.core.election_state() == ElectionState::Closed
+            && self.session_log_position >= self.core.term_base_log_position();
+        if !serves {
+            return Ok(());
+        }
+        let Some(Ok(position)) = self.io.log_publication.as_ref().map(Publication::position) else {
+            return Ok(());
+        };
+        if position.saturating_sub(self.snapshot_asked_at) < SNAPSHOT_INTERVAL {
+            return Ok(());
+        }
+        self.append_snapshot_action(position).map(|_| ())
+    }
+
+    /// Appends the action at `position`, the log publication's, and notes where the
+    /// log then ends. Whether it was appended: not when the core refuses, which a
+    /// leader that serves is never refused but for back pressure.
+    fn append_snapshot_action(&mut self, position: i64) -> Result<bool, RaftError> {
+        let appended = self
+            .core
+            .snapshot(self.clock, position, &mut self.io)?
+            .is_ok();
+        if appended {
+            let end = self
+                .io
+                .log_publication
+                .as_ref()
+                .and_then(|publication| publication.position().ok())
+                .unwrap_or(position);
+            self.snapshot_asked_at = self.snapshot_asked_at.max(end);
+            self.snapshot.count_action();
+        }
+        Ok(appended)
+    }
+
+    /// Asks every member of the cluster for a snapshot, for the leader's own process:
+    /// appends a cluster action to the log, which each member acts on when it is
+    /// committed and the member's read of its log reaches it (`spec/cluster.md`,
+    /// "Snapshots"; ADR 0129). A leader asks by itself each time its log has grown
+    /// by the snapshot interval, so a program calls this only to have a snapshot
+    /// now. A follower, a leader whose election has not closed and a back-pressured
+    /// log are [`RaftError::Offer`], each with what to do, as for
+    /// [`ConsensusModule::offer`].
+    pub fn snapshot(&mut self) -> Result<(), RaftError> {
+        let position = self
+            .io
+            .log_publication
+            .as_ref()
+            .and_then(|publication| publication.position().ok())
+            .unwrap_or(0);
+        let asked = self
+            .core
+            .snapshot(self.clock, position, &mut self.io)?
+            .map_err(RaftError::Offer);
+        if asked.is_ok() {
+            let end = self
+                .io
+                .log_publication
+                .as_ref()
+                .and_then(|publication| publication.position().ok())
+                .unwrap_or(position);
+            self.snapshot_asked_at = self.snapshot_asked_at.max(end);
+            self.snapshot.count_action();
+        }
+        asked
+    }
+
+    /// What this member has counted of its snapshots: the actions it appended as the
+    /// leader, and the snapshots it began, wrote, took and gave up.
+    pub fn snapshot_counts(&self) -> SnapshotCounts {
+        self.snapshot.counts()
+    }
+
+    /// The log position of the newest snapshot of its consensus module that this
+    /// member's snapshots file lists, `None` when it lists none: every entry below
+    /// it is in that snapshot.
+    pub fn snapshot_position(&self) -> Option<i64> {
+        Some(self.snapshot.newest_position()).filter(|position| *position >= 0)
     }
 
     /// Appends `payload` to the cluster's log as a session message of no session, for

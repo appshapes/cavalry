@@ -83,10 +83,17 @@ TEMPLATES = {
     100: ("snapshot-marker", 40, ("snapshot",),
           [("type_id", "q"), ("log_position", "q"), ("leadership_term_id", "q"), ("index", "i"), ("mark", "i"),
            ("time_unit", "i"), ("app_version", "i")], []),
+    103: ("cluster-session", 40, ("snapshot",),
+          [("cluster_session_id", "q"), ("correlation_id", "q"), ("opened_log_position", "q"),
+           ("time_of_last_activity", "q"), ("close_reason", "i"), ("response_stream_id", "i")],
+          [("response_channel", "ascii")]),
+    105: ("consensus-module", 28, ("snapshot",),
+          [("next_session_id", "q"), ("next_service_session_id", "q"), ("log_service_session_id", "q"),
+           ("pending_message_capacity", "i")], []),
 }
 STREAMS = {
     "log": (1, 20, 21, 22, 23, 24, 25), "consensus": tuple(range(50, 58)), "ingress": (1, 3, 4, 5),
-    "egress": (1, 2, 6), "snapshot": (100,),
+    "egress": (1, 2, 6), "snapshot": (100, 103, 105),
 }
 # which fields allow -1 (spec/cluster.md, each table)
 ALLOW_NULL = {
@@ -102,7 +109,7 @@ ENUMS = {
 }
 MEMBER_IDS = {"leader_member_id", "follower_member_id", "candidate_member_id", "member_id"}
 POSITIONS = {"log_position", "term_base_log_position", "next_term_base_log_position", "next_log_position",
-             "commit_position"}
+             "commit_position", "opened_log_position"}
 TERMS = {"leadership_term_id", "log_leadership_term_id", "next_leadership_term_id", "candidate_term_id"}
 
 
@@ -182,6 +189,11 @@ COMMIT = dict(leadership_term_id=3, log_position=98304, leader_member_id=0)
 CATCHUP = dict(leadership_term_id=3, log_position=65536, follower_member_id=2)
 STOP_CATCHUP = dict(leadership_term_id=3, follower_member_id=2)
 SNAPSHOT = dict(type_id=1, log_position=98304, leadership_term_id=3, index=0, mark=0, time_unit=0, app_version=0)
+CLOSE_REASON_NONE = -(1 << 31)  # the null of an enumeration of an i32: a session in a snapshot is open
+CLUSTER_SESSION = dict(cluster_session_id=7, correlation_id=41, opened_log_position=65632,
+                       time_of_last_activity=NULL, close_reason=CLOSE_REASON_NONE, response_stream_id=102)
+CONSENSUS_MODULE = dict(next_session_id=8, next_service_session_id=0, log_service_session_id=0,
+                        pending_message_capacity=0)
 
 VECTORS = [
     message("session-message-log", 1, "log", SESSION_MESSAGE, payload=b"hello"),
@@ -238,6 +250,16 @@ VECTORS = [
     message("snapshot-marker-begin", 100, "snapshot", SNAPSHOT),
     message("snapshot-marker-section", 100, "snapshot", dict(SNAPSHOT, index=2, mark=1)),
     message("snapshot-marker-end", 100, "snapshot", dict(SNAPSHOT, mark=2)),
+    message("cluster-session", 103, "snapshot", CLUSTER_SESSION, {"response_channel": CHANNEL}),
+    # The longest response channel a leader accepts, 280 bytes: the prefix, a host name of 253 bytes, a colon
+    # and five digits. And the fields a reader ignores, with other values than a writer of this version gives.
+    message("cluster-session-longest-channel", 103, "snapshot",
+            dict(CLUSTER_SESSION, opened_log_position=0, time_of_last_activity=TS, close_reason=2),
+            {"response_channel": "cavalry:udp?endpoint=" + "h" * 253 + ":65535"}),
+    message("consensus-module", 105, "snapshot", CONSENSUS_MODULE),
+    message("consensus-module-of-no-session-yet", 105, "snapshot",
+            dict(CONSENSUS_MODULE, next_session_id=0, next_service_session_id=-(1 << 63) + 1,
+                 log_service_session_id=-(1 << 63), pending_message_capacity=4096)),
 ]
 
 # ---- rejections, in the order the checks run ----------------------------------------
@@ -253,6 +275,14 @@ VECTORS += [
     message("reject-template-unknown", 55, "consensus", COMMIT, error="template",
             bytes_=HEADER.pack(20, 9, SCHEMA_ID, VERSION) + bytes(20)),
     message("reject-stream", 55, "log", COMMIT, error="stream", bytes_=commit),
+    message("reject-template-of-a-services-snapshot", 103, "snapshot", CLUSTER_SESSION, error="template",
+            bytes_=HEADER.pack(12, 102, SCHEMA_ID, VERSION) + bytes(20)),
+    message("reject-stream-cluster-session-on-the-log", 103, "log", CLUSTER_SESSION, error="stream",
+            bytes_=encode(103, CLUSTER_SESSION, {"response_channel": CHANNEL})),
+    message("reject-stream-consensus-module-on-the-egress", 105, "egress", CONSENSUS_MODULE, error="stream",
+            bytes_=encode(105, CONSENSUS_MODULE)),
+    message("reject-block-length-consensus-module", 105, "snapshot", CONSENSUS_MODULE, error="block-length",
+            bytes_=encode(105, CONSENSUS_MODULE, block_length=32) + bytes(4)),
     message("reject-block-length", 55, "consensus", COMMIT, error="block-length",
             bytes_=encode(55, COMMIT, block_length=21) + b"\0"),
     message("reject-length-variable-field", 56, "consensus", CATCHUP, error="length",
@@ -285,6 +315,14 @@ VECTORS += [
             error="member-id", bytes_=encode(2, dict(SESSION_EVENT_OK, leader_member_id=-2), {"detail": ""})),
     message("reject-position-negative", 54, "consensus", dict(APPEND, log_position=NULL), error="position"),
     message("reject-position-below-null", 53, "consensus", dict(NEW_TERM, next_log_position=-2), error="position"),
+    message("reject-position-opened-log-position", 103, "snapshot", dict(CLUSTER_SESSION, opened_log_position=NULL),
+            error="position",
+            bytes_=encode(103, dict(CLUSTER_SESSION, opened_log_position=NULL), {"response_channel": CHANNEL})),
+    message("reject-ascii-before-position-in-a-cluster-session", 103, "snapshot", CLUSTER_SESSION, error="ascii",
+            bytes_=encode(103, dict(CLUSTER_SESSION, opened_log_position=NULL),
+                          {"response_channel": CHANNEL}).replace(b"?", b"\x01", 1)),
+    message("reject-length-cluster-session-trailing", 103, "snapshot", CLUSTER_SESSION, error="length",
+            bytes_=encode(103, CLUSTER_SESSION, {"response_channel": CHANNEL}) + bytes(4)),
     message("reject-term", 52, "consensus", dict(VOTE, candidate_term_id=-2), error="term"),
 ]
 

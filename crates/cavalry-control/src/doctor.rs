@@ -54,7 +54,7 @@ use cavalry_shm::counters::generated::{
     CLUSTER_LEADERSHIP_TERM_ID, CLUSTER_LOG_IMAGES_LOST, CLUSTER_LOG_RECORDINGS_FORGOTTEN,
     CLUSTER_LOG_RECORDINGS_UNSYNCED, CLUSTER_LOG_RECORDINGS_UNWRITTEN,
     CLUSTER_LOG_REPLICATIONS_UNAVAILABLE, CLUSTER_MESSAGES_REJECTED, CLUSTER_REPLIES_STALE,
-    CLUSTER_ROLE, CLUSTER_TRUNCATIONS_REFUSED,
+    CLUSTER_ROLE, CLUSTER_SNAPSHOTS_FAILED, CLUSTER_TRUNCATIONS_REFUSED,
 };
 use cavalry_shm::counters::{CounterId, CountersError, CountersReader, Scope};
 
@@ -1010,13 +1010,14 @@ const DOC_CLUSTER: &str = "docs/how-to/run-a-cluster.md#when-it-does-not-work";
 /// in its log directory that it could not write or sync, so that a recording stayed
 /// out of its log, and a recording of its log that it forgot, after which it does
 /// not start again on its log directory (ADR 0108).
-const MEMBER_COUNTS: [CounterId; 6] = [
+const MEMBER_COUNTS: [CounterId; 7] = [
     CLUSTER_MESSAGES_REJECTED,
     CLUSTER_LEADER_HEARTBEAT_TIMEOUTS,
     CLUSTER_LOG_IMAGES_LOST,
     CLUSTER_LOG_RECORDINGS_UNWRITTEN,
     CLUSTER_LOG_RECORDINGS_UNSYNCED,
     CLUSTER_LOG_RECORDINGS_FORGOTTEN,
+    CLUSTER_SNAPSHOTS_FAILED,
 ];
 
 /// Where a cluster session's findings are explained.
@@ -6690,6 +6691,59 @@ mod tests {
         );
         let found: Vec<&str> = findings.iter().map(|finding| finding.check).collect();
         assert_eq!(found, ["cluster-member"], "{findings:?}");
+
+        // A member that gave a snapshot up: the count says that nothing committed is
+        // lost and where to look, and at 0 it is not reported (ADR 0129).
+        let (_, findings) = cluster_findings(
+            "cluster-snapshots-failed",
+            0,
+            &[
+                (CLUSTER_ROLE, 0),
+                (CLUSTER_ELECTION_STATE, 17),
+                (CLUSTER_LEADERSHIP_TERM_ID, 3),
+                (CLUSTER_SNAPSHOTS_FAILED, 2),
+            ],
+        );
+        let found: Vec<&str> = findings.iter().map(|finding| finding.check).collect();
+        assert_eq!(found, ["cluster-member", "cluster.snapshots_failed"]);
+        let finding = &findings[1];
+        assert_eq!(finding.level, Level::Warn);
+        assert_eq!(finding.doc, DOC_CLUSTER);
+        assert!(
+            finding.message.starts_with(
+                "member 0's cluster.snapshots_failed is 2: This member gave up a snapshot."
+            ),
+            "{}",
+            finding.message
+        );
+        // With no counter of the driver above 0 it says what else it is: a slow step,
+        // or a second snapshot asked for while one was being taken, and where that
+        // shows.
+        assert!(
+            finding.message.contains(
+                "a second snapshot was asked for while one was being taken: \
+                 cluster.snapshot_actions on the leader then rose twice within a second"
+            ),
+            "{}",
+            finding.message
+        );
+        assert!(
+            finding.message.contains("nothing committed is lost"),
+            "{}",
+            finding.message
+        );
+        let (_, findings) = cluster_findings(
+            "cluster-snapshots-failed-none",
+            0,
+            &[
+                (CLUSTER_ROLE, 0),
+                (CLUSTER_ELECTION_STATE, 17),
+                (CLUSTER_LEADERSHIP_TERM_ID, 3),
+                (CLUSTER_SNAPSHOTS_FAILED, 0),
+            ],
+        );
+        let found: Vec<&str> = findings.iter().map(|finding| finding.check).collect();
+        assert_eq!(found, ["cluster-member"], "{findings:?}");
     }
 
     #[test]
@@ -6714,7 +6768,7 @@ mod tests {
 
         // A follower that follows: the note alone, with who it is and what it knows.
         let (checks, findings) = cluster_findings("cluster-follower", 1, &follower);
-        assert_eq!(checks, 11);
+        assert_eq!(checks, 12);
         assert_eq!(findings.len(), 1, "{findings:?}");
         assert_eq!(findings[0].check, "cluster-member");
         assert_eq!(findings[0].level, Level::Note);
@@ -6891,7 +6945,7 @@ mod tests {
         let dir = TestDir::new("cluster-session-member");
         let reader = session_file(&dir, 7, 2, Some((1, &follower)));
         let mut findings = Vec::new();
-        assert_eq!(cluster_checks(&reader, true, None, &mut findings), 12);
+        assert_eq!(cluster_checks(&reader, true, None, &mut findings), 13);
         let found: Vec<&str> = findings.iter().map(|finding| finding.check).collect();
         assert_eq!(
             found,

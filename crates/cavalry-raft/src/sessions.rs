@@ -203,6 +203,9 @@ struct Session {
     since_ns: u64,
     /// When the leader last heard from the client, or its election closed.
     activity_ns: u64,
+    /// Open: the position at which the session's session open event begins, which a
+    /// snapshot carries (`spec/cluster.md`, "Cluster session, template 103").
+    opened_position: i64,
     channel: [u8; MAX_RESPONSE_CHANNEL_LENGTH],
     channel_length: usize,
 }
@@ -221,6 +224,7 @@ impl Session {
         closed_owed: false,
         since_ns: 0,
         activity_ns: 0,
+        opened_position: -1,
         channel: [0; MAX_RESPONSE_CHANNEL_LENGTH],
         channel_length: 0,
     };
@@ -266,6 +270,20 @@ enum Outcome {
     Accept,
 }
 
+/// An open session as a snapshot of the consensus module holds it
+/// ([`Sessions::open_session`]).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct OpenSession<'a> {
+    /// The session's id.
+    pub id: i64,
+    /// The correlation id of the session connect that opened it.
+    pub correlation_id: i64,
+    /// The position at which the session's session open event begins.
+    pub opened_log_position: i64,
+    /// The client's response channel.
+    pub response_channel: &'a [u8],
+}
+
 /// One cluster member's sessions. See the module's page for how it is driven.
 #[derive(Debug)]
 pub struct Sessions {
@@ -278,6 +296,14 @@ pub struct Sessions {
     /// The id the next session the leader accepts is given: one more than the
     /// highest it has given or read in a session open event.
     next_session_id: i64,
+    /// One more than the highest cluster session id of a session open event the
+    /// member has read in its committed log, 0 before the first: what a snapshot
+    /// carries as the next session id. Only [`Sessions::on_entry`] moves it, so it
+    /// is a function of the log below the read's position, the same on every
+    /// member. `next_session_id` is not: a leader moves that one at a connect,
+    /// before the session open event is committed, and keeps it when it steps down
+    /// (ADR 0129).
+    committed_next_session_id: i64,
     /// Whether the member led at its last cycle, and in which term.
     led: Option<i64>,
     counts: SessionCounts,
@@ -294,6 +320,7 @@ impl Sessions {
             sessions: [Session::FREE; MAX_SESSIONS],
             answers: [None; MAX_PENDING_ANSWERS],
             next_session_id: 0,
+            committed_next_session_id: 0,
             led: None,
             counts: SessionCounts::default(),
         }
@@ -310,6 +337,50 @@ impl Sessions {
             .iter()
             .filter(|session| session.state == SessionState::Open)
             .count()
+    }
+
+    /// The open session that is `nth` in the order of the sessions' ids, from 0, as
+    /// a snapshot holds it; `None` past the last. A snapshot lists the sessions in
+    /// that order, so that every member's snapshot of one position holds the same
+    /// bytes whatever slot of its table a session has (`spec/cluster.md`,
+    /// "Snapshots"). It allocates nothing: the table holds few sessions, and the
+    /// `nth` is found by counting.
+    pub fn open_session(&self, nth: usize) -> Option<OpenSession<'_>> {
+        let open = || {
+            self.sessions
+                .iter()
+                .filter(|session| session.state == SessionState::Open)
+        };
+        open()
+            .find(|session| open().filter(|other| other.id < session.id).count() == nth)
+            .map(|session| OpenSession {
+                id: session.id,
+                correlation_id: session.correlation_id,
+                opened_log_position: session.opened_position,
+                response_channel: session.channel(),
+            })
+    }
+
+    /// The id the next session a leader accepts is given: one more than the highest
+    /// the member has given or has read in a session open event. A leader gives an
+    /// id at the connect it accepts, before that session's open event is committed,
+    /// and a leader that steps down keeps the id, so that it never gives one twice.
+    /// So on a member that leads, or has led, this can be past what its log says. A
+    /// snapshot carries [`Sessions::committed_next_session_id`] instead.
+    pub const fn next_session_id(&self) -> i64 {
+        self.next_session_id
+    }
+
+    /// One more than the highest cluster session id of a session open event that
+    /// [`Sessions::on_entry`] has been handed, 0 before the first. Every member is
+    /// handed the same committed entries in the same order, so at one position of
+    /// the log every member has the same value, whether it leads, follows or led
+    /// before. That is the next session id a snapshot of the consensus module holds
+    /// (`spec/cluster.md`, "Consensus module, template 105"; ADR 0129). A session
+    /// open event that the table cannot hold moves it as well: it names an id the
+    /// log has given.
+    pub const fn committed_next_session_id(&self) -> i64 {
+        self.committed_next_session_id
     }
 
     /// Whether the session with `id` is open.
@@ -465,6 +536,7 @@ impl Sessions {
     pub fn on_entry<I: SessionIo>(
         &mut self,
         clock: Clock,
+        position: i64,
         entry: &Message<'_>,
         io: &mut I,
     ) -> Result<bool, I::Fault> {
@@ -477,6 +549,9 @@ impl Sessions {
             } => {
                 self.next_session_id = self
                     .next_session_id
+                    .max(cluster_session_id.saturating_add(1));
+                self.committed_next_session_id = self
+                    .committed_next_session_id
                     .max(cluster_session_id.saturating_add(1));
                 if self.is_open(cluster_session_id) {
                     return Ok(false);
@@ -510,6 +585,7 @@ impl Sessions {
                 session.ok_owed = connecting.is_some();
                 session.since_ns = clock.now_ns;
                 session.activity_ns = clock.now_ns;
+                session.opened_position = position;
                 self.counts.opened = self.counts.opened.saturating_add(1);
                 Ok(true)
             }

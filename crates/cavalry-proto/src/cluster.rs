@@ -98,6 +98,15 @@ pub const LOG_REPLAY_STREAM_ID: i32 = 103;
 /// The consensus stream's id.
 pub const CONSENSUS_STREAM_ID: i32 = 108;
 
+/// The snapshot stream's id: the `cavalry:ipc` stream a member's consensus module
+/// writes its snapshot on, which its driver records (`spec/cluster.md`, "Snapshots";
+/// ADR 0129). In Aeron, 107 is the consensus module's snapshot stream.
+pub const SNAPSHOT_STREAM_ID: i32 = 107;
+
+/// The type id of a consensus module's snapshot, which its markers carry
+/// (`spec/cluster.md`, "Snapshot marker, template 100").
+pub const SNAPSHOT_TYPE_ID: i64 = 1;
+
 /// The leader heartbeat interval, in nanoseconds: 200 ms.
 pub const LEADER_HEARTBEAT_INTERVAL_NS: u64 = 200_000_000;
 
@@ -221,7 +230,10 @@ impl Stream {
                 template,
                 Template::SessionMessage | Template::SessionEvent | Template::NewLeaderEvent
             ),
-            Stream::Snapshot => matches!(template, Template::SnapshotMarker),
+            Stream::Snapshot => matches!(
+                template,
+                Template::SnapshotMarker | Template::ClusterSession | Template::ConsensusModule
+            ),
         }
     }
 }
@@ -272,6 +284,10 @@ pub enum Template {
     StopCatchup = 57,
     /// A snapshot's begin, section or end.
     SnapshotMarker = 100,
+    /// An open session in a consensus module's snapshot.
+    ClusterSession = 103,
+    /// The consensus module's own state in its snapshot.
+    ConsensusModule = 105,
 }
 
 impl Template {
@@ -300,6 +316,8 @@ impl Template {
             56 => Template::CatchupPosition,
             57 => Template::StopCatchup,
             100 => Template::SnapshotMarker,
+            103 => Template::ClusterSession,
+            105 => Template::ConsensusModule,
             _ => return None,
         })
     }
@@ -329,7 +347,8 @@ impl Template {
             Template::AppendPosition => 21,
             Template::CommitPosition | Template::CatchupPosition => 20,
             Template::StopCatchup => 12,
-            Template::SnapshotMarker => 40,
+            Template::SnapshotMarker | Template::ClusterSession => 40,
+            Template::ConsensusModule => 28,
         }
     }
 
@@ -357,6 +376,8 @@ impl Template {
             Template::CatchupPosition => "catchup-position",
             Template::StopCatchup => "stop-catchup",
             Template::SnapshotMarker => "snapshot-marker",
+            Template::ClusterSession => "cluster-session",
+            Template::ConsensusModule => "consensus-module",
         }
     }
 }
@@ -938,7 +959,46 @@ pub enum Message<'a> {
         /// The service's version, 0 for none.
         app_version: i32,
     },
+    /// Template 103.
+    ClusterSession {
+        /// The session's id.
+        cluster_session_id: i64,
+        /// The correlation id of the session connect that opened it.
+        correlation_id: i64,
+        /// The position at which the session's session open event begins.
+        opened_log_position: i64,
+        /// Written as [`NULL_VALUE`], as Aeron writes it; a reader ignores it.
+        time_of_last_activity: i64,
+        /// Written as [`CLOSE_REASON_NONE`]: a session in a snapshot is open. A reader
+        /// ignores it.
+        close_reason: i32,
+        /// The client's egress stream id.
+        response_stream_id: i32,
+        /// The client's response channel.
+        response_channel: &'a [u8],
+    },
+    /// Template 105.
+    ConsensusModule {
+        /// One more than the highest cluster session id of a session open event below
+        /// the snapshot's log position, 0 for none: the log's, and not a leader's own
+        /// next session id, which it moves when it accepts a connect, before that
+        /// session open event is committed (`spec/cluster.md`, "Consensus module,
+        /// template 105"; ADR 0129).
+        next_session_id: i64,
+        /// Aeron's, of a service's own messages, which no service sends here: written
+        /// as 0, and a reader ignores it.
+        next_service_session_id: i64,
+        /// Aeron's, as the field before it: written as 0, and a reader ignores it.
+        log_service_session_id: i64,
+        /// Aeron's, as the two fields before it: written as 0, and a reader ignores it.
+        pending_message_capacity: i32,
+    },
 }
+
+/// What a cluster session's `close reason` holds in a snapshot, where every session
+/// is open: the null of an enumeration of an `i32`, −2147483648, which Aeron writes
+/// there (`spec/cluster.md`, "Cluster session, template 103").
+pub const CLOSE_REASON_NONE: i32 = i32::MIN;
 
 /// The catch-up bit of an append position's flags: the follower is in follower
 /// catch-up and on the live log, its append position at or past the position its live
@@ -1143,6 +1203,8 @@ impl<'a> Message<'a> {
             Message::CatchupPosition { .. } => Template::CatchupPosition,
             Message::StopCatchup { .. } => Template::StopCatchup,
             Message::SnapshotMarker { .. } => Template::SnapshotMarker,
+            Message::ClusterSession { .. } => Template::ClusterSession,
+            Message::ConsensusModule { .. } => Template::ConsensusModule,
         }
     }
 
@@ -1603,6 +1665,40 @@ impl<'a> Message<'a> {
                     app_version,
                 }
             }
+            Template::ClusterSession => {
+                let cluster_session_id = reader.i64()?;
+                let correlation_id = reader.i64()?;
+                let opened_log_position = reader.i64()?;
+                let time_of_last_activity = reader.i64()?;
+                let close_reason = reader.i32()?;
+                let response_stream_id = reader.i32()?;
+                let response_channel = reader.variable()?;
+                reader.done()?;
+                ascii("response channel", response_channel)?;
+                position("opened log position", opened_log_position, false)?;
+                Message::ClusterSession {
+                    cluster_session_id,
+                    correlation_id,
+                    opened_log_position,
+                    time_of_last_activity,
+                    close_reason,
+                    response_stream_id,
+                    response_channel,
+                }
+            }
+            Template::ConsensusModule => {
+                let next_session_id = reader.i64()?;
+                let next_service_session_id = reader.i64()?;
+                let log_service_session_id = reader.i64()?;
+                let pending_message_capacity = reader.i32()?;
+                reader.done()?;
+                Message::ConsensusModule {
+                    next_session_id,
+                    next_service_session_id,
+                    log_service_session_id,
+                    pending_message_capacity,
+                }
+            }
         };
         Ok(message)
     }
@@ -1634,6 +1730,9 @@ impl<'a> Message<'a> {
             Message::CatchupPosition {
                 catchup_endpoint, ..
             } => 4 + catchup_endpoint.len(),
+            Message::ClusterSession {
+                response_channel, ..
+            } => 4 + response_channel.len(),
             _ => 0,
         };
         block + variable
@@ -1944,6 +2043,34 @@ impl<'a> Message<'a> {
                 writer.i32(mark.code())?;
                 writer.i32(time_unit.code())?;
                 writer.i32(app_version)?;
+            }
+            Message::ClusterSession {
+                cluster_session_id,
+                correlation_id,
+                opened_log_position,
+                time_of_last_activity,
+                close_reason,
+                response_stream_id,
+                response_channel,
+            } => {
+                writer.i64(cluster_session_id)?;
+                writer.i64(correlation_id)?;
+                writer.i64(opened_log_position)?;
+                writer.i64(time_of_last_activity)?;
+                writer.i32(close_reason)?;
+                writer.i32(response_stream_id)?;
+                writer.variable(response_channel)?;
+            }
+            Message::ConsensusModule {
+                next_session_id,
+                next_service_session_id,
+                log_service_session_id,
+                pending_message_capacity,
+            } => {
+                writer.i64(next_session_id)?;
+                writer.i64(next_service_session_id)?;
+                writer.i64(log_service_session_id)?;
+                writer.i32(pending_message_capacity)?;
             }
         }
         Ok(writer.at)

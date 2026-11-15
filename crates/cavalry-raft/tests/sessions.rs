@@ -246,7 +246,7 @@ fn commit(sessions: &mut Sessions, world: &mut World, ms: u64) -> Vec<bool> {
         .iter()
         .map(|bytes| {
             let entry = Message::parse(Stream::Log, bytes).expect("an entry");
-            let Ok(known) = sessions.on_entry(at(ms), &entry, world);
+            let Ok(known) = sessions.on_entry(at(ms), 0, &entry, world);
             known
         })
         .collect()
@@ -1163,7 +1163,7 @@ fn an_entry_the_table_cannot_hold_is_reported_and_changes_nothing() {
             close_reason: CloseReason::ClientAction,
         },
     ] {
-        let Ok(known) = sessions.on_entry(at(1), &entry, &mut world);
+        let Ok(known) = sessions.on_entry(at(1), 0, &entry, &mut world);
         assert!(!known, "{entry:?}");
     }
     assert_eq!(sessions.open(), MAX_SESSIONS);
@@ -1171,6 +1171,7 @@ fn an_entry_the_table_cannot_hold_is_reported_and_changes_nothing() {
     // An entry that is none of the sessions' is passed.
     let Ok(known) = sessions.on_entry(
         at(1),
+        0,
         &Message::SessionMessage {
             leadership_term_id: 1,
             cluster_session_id: 0,
@@ -1183,6 +1184,7 @@ fn an_entry_the_table_cannot_hold_is_reported_and_changes_nothing() {
     // And the id a later leader gives is past every id the log has named.
     let Ok(_) = sessions.on_entry(
         at(1),
+        0,
         &Message::SessionCloseEvent {
             leadership_term_id: 1,
             cluster_session_id: 0,
@@ -1204,4 +1206,169 @@ fn an_entry_the_table_cannot_hold_is_reported_and_changes_nothing() {
         world.entries(MAX_SESSIONS)
     );
     assert_eq!(EventCode::Ok as i32, 0);
+}
+
+/// What a snapshot of the table holds (`spec/cluster.md`, "Snapshots"; ADR 0129): the
+/// open sessions in the order of their ids, whatever slot each has, each with the
+/// position its session open event began at; and the id the next session is given.
+#[test]
+fn the_open_sessions_are_given_in_the_order_of_their_ids_with_where_each_opened() {
+    let mut sessions = Sessions::new(1, ENDPOINTS);
+    let mut world = World::new();
+    assert_eq!(sessions.open_session(0), None, "no session is open");
+    assert_eq!(sessions.next_session_id(), 0);
+    // A follower reads three session open events, the ids not in the order of the
+    // entries, as a table whose slots a leader before it gave out of order would be.
+    let channels = [channel(30_007), channel(30_002), channel(30_005)];
+    for (id, position, response) in [
+        (7i64, 96i64, &channels[0]),
+        (2, 224, &channels[1]),
+        (5, 352, &channels[2]),
+    ] {
+        let Ok(known) = sessions.on_entry(
+            at(1),
+            position,
+            &Message::SessionOpenEvent {
+                leadership_term_id: 1,
+                correlation_id: 100 + id,
+                cluster_session_id: id,
+                timestamp: TIME,
+                response_stream_id: EGRESS_STREAM_ID,
+                response_channel: response,
+                encoded_principal: &[],
+            },
+            &mut world,
+        );
+        assert!(known, "session {id} opens");
+    }
+    let given: Vec<(i64, i64, i64, Vec<u8>)> = (0..3)
+        .map(|nth| {
+            let session = sessions.open_session(nth).expect("an open session");
+            (
+                session.id,
+                session.correlation_id,
+                session.opened_log_position,
+                session.response_channel.to_vec(),
+            )
+        })
+        .collect();
+    assert_eq!(
+        given,
+        [
+            (2, 102, 224, channels[1].clone()),
+            (5, 105, 352, channels[2].clone()),
+            (7, 107, 96, channels[0].clone()),
+        ]
+    );
+    assert_eq!(sessions.open_session(3), None, "past the last");
+    assert_eq!(
+        sessions.next_session_id(),
+        8,
+        "one past the highest id read"
+    );
+    // A session that closes leaves the order of the others as it was.
+    let Ok(known) = sessions.on_entry(
+        at(2),
+        480,
+        &Message::SessionCloseEvent {
+            leadership_term_id: 1,
+            cluster_session_id: 5,
+            timestamp: TIME,
+            close_reason: CloseReason::ClientAction,
+        },
+        &mut world,
+    );
+    assert!(known);
+    let ids: Vec<i64> = (0..2)
+        .map(|nth| sessions.open_session(nth).expect("an open session").id)
+        .collect();
+    assert_eq!(ids, [2, 7]);
+    assert_eq!(sessions.open_session(2), None);
+    assert_eq!(sessions.next_session_id(), 8);
+}
+
+/// The next session id a snapshot carries is the log's (`spec/cluster.md`, "Consensus
+/// module, template 105"; ADR 0129). A leader gives a session its id at the connect it
+/// accepts, before the session open event is committed, and keeps that id when it
+/// steps down, so that it never gives one twice. The log's id moves only with a
+/// session open event handed to `on_entry`, so a leader, a follower and a member that
+/// led hold the same one after the same committed entries.
+#[test]
+fn the_next_session_id_of_a_snapshot_is_the_logs_on_a_leader_and_after_it_steps_down() {
+    // Member 0 leads term 1 with session 0 open, and member 1 has read the same log.
+    let (mut old, mut old_world) = leading(1);
+    let mut new = Sessions::new(1, ENDPOINTS);
+    let mut new_world = World::new();
+    new_world.log = old_world.log.clone();
+    work(&mut new, &mut new_world, 0, follower(1, 0));
+    assert_eq!(commit(&mut new, &mut new_world, 0), [true]);
+    for sessions in [&old, &new] {
+        assert_eq!(
+            (
+                sessions.next_session_id(),
+                sessions.committed_next_session_id()
+            ),
+            (1, 1)
+        );
+    }
+
+    // A second connect: the leader gives it id 1 and appends its session open event,
+    // which is not committed. Its own id moves, and the log's does not: that is the
+    // id the follower holds, and the one a snapshot of this position carries.
+    let second = channel(20_001);
+    assert_eq!(
+        ingress(&mut old, &mut old_world, 1, leader(1), &connect(7, &second)),
+        Ingress::Taken
+    );
+    assert!(
+        old_world.entries(1)[0].starts_with("open session 1 correlation 7 term 1"),
+        "{:?}",
+        old_world.entries(1)
+    );
+    assert_eq!(old.next_session_id(), 2, "the leader's own");
+    assert_eq!(old.committed_next_session_id(), 1, "the log's");
+    assert_eq!(new.committed_next_session_id(), 1, "the follower's");
+
+    // The leader steps down with the connect never committed, and its log loses the
+    // entry. It gives the connect up and keeps its own id; the log's is the
+    // follower's still.
+    work(&mut old, &mut old_world, 2, follower(2, -1));
+    old_world.log.truncate(1);
+    assert_eq!(old.counts().connects_dropped, 1);
+    assert_eq!(old.next_session_id(), 2, "a member that led keeps its own");
+    assert_eq!(
+        old.committed_next_session_id(),
+        1,
+        "the log's, as member 1 has it"
+    );
+
+    // Member 1 leads term 2, gives id 1 to a connect of its own, and both members
+    // read its session open event: the log's id is 2 on both.
+    let lead = Leadership {
+        leads: true,
+        leadership_term_id: 2,
+        leader_member_id: 1,
+    };
+    work(&mut new, &mut new_world, 3, lead);
+    let third = channel(20_002);
+    ingress(&mut new, &mut new_world, 4, lead, &connect(8, &third));
+    assert!(
+        new_world.entries(1)[0].starts_with("open session 1 correlation 8 term 2"),
+        "{:?}",
+        new_world.entries(1)
+    );
+    assert_eq!(commit(&mut new, &mut new_world, 5), [true]);
+    old_world.log.push(new_world.log[1].clone());
+    work(&mut old, &mut old_world, 5, follower(2, 1));
+    assert_eq!(commit(&mut old, &mut old_world, 5), [true]);
+    for sessions in [&old, &new] {
+        assert_eq!(sessions.open(), 2);
+        assert_eq!(
+            (
+                sessions.next_session_id(),
+                sessions.committed_next_session_id()
+            ),
+            (2, 2)
+        );
+    }
 }

@@ -93,7 +93,7 @@ fn open(sessions: &mut Sessions, io: &mut Counting, ms: u64, id: i64) {
         response_channel: CHANNEL,
         encoded_principal: &[],
     };
-    let Ok(known) = sessions.on_entry(at(ms), &event, io);
+    let Ok(known) = sessions.on_entry(at(ms), 0, &event, io);
     assert!(known, "session {id} opens");
 }
 
@@ -158,7 +158,7 @@ fn main() {
                     CloseReason::Timeout
                 },
             };
-            let Ok(known) = sessions.on_entry(at(ms), &closed, &mut io);
+            let Ok(known) = sessions.on_entry(at(ms), 0, &closed, &mut io);
             assert!(known);
             open(&mut sessions, &mut io, ms, next_id);
             ids[slot] = next_id;

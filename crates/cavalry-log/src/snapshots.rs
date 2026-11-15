@@ -4,7 +4,7 @@
 //!
 //! A snapshot is a recording: the state of a member's consensus module, or of a
 //! service beside the member, as it was at one position of the member's log
-//! (`spec/cluster.md`, "The snapshot marker"). The catalog holds the recording, as it
+//! (`spec/cluster.md`, "Snapshots"). The catalog holds the recording, as it
 //! holds every other, and does not say that it is a snapshot, of whom, or at which
 //! position. It also holds a snapshot whose writer stopped half way. This file says
 //! all of that: a snapshot is one a start may begin from once this file lists it,

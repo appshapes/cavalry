@@ -1593,6 +1593,59 @@ scope = "client"
 doc = "Stale replies one cluster session read and did not hand to its program: each carried a leadership term below the term of a reply the session had handed over before. The service beside a member that led the earlier term sent it, and it reached the client after a reply of the later term, which happens only around a change of leader, while the member that led before still says it leads. A session's program reads replies whose terms never fall (spec/cluster.md, Sessions and Replies; ADR 0121). key: cluster session id (i64), little-endian; label text: the session id in decimal."
 doctor = "A session passed over a reply that came too late: a reply of the term before a change of leader, read after a reply of the term after it. The program reads no answer to a message it sent in the earlier term and sends it again, as it does for any reply that does not come. A few at an election are expected. If it rises while cluster.terms_led rises on no member, a service sends replies with a term that is not its entry's: check that every member's service is of the cluster's version."
 
+# A cluster member's snapshots of its consensus module (spec/cluster.md, "Snapshots"
+# and "Counters"; ADR 0129): the leader logs a cluster action that asks for one, and
+# every member takes one when its read of its own committed log reaches the action.
+# The member adds the counters when it starts, keyed by its id as its others are.
+
+[[counter]]
+id = 159
+name = "cluster.snapshot_position"
+kind = "gauge"
+scope = "client"
+doc = "The log position of the newest snapshot of its consensus module that one cluster member's snapshots file lists: every entry of the log below it is in that snapshot. -1 while the file lists none (spec/cluster.md, Snapshots; spec/durable-log.md, Snapshots). key: member id (i32), little-endian; label text: the member id in decimal."
+doctor = "Read it beside cluster.commit_position: the difference is how much of its log the member's consensus module has not yet in a snapshot. It moves on every member at each snapshot the leader asks for. If it stays behind on one member while it moves on the others, that member's snapshots fail: see cluster.snapshots_failed there."
+
+[[counter]]
+id = 160
+name = "cluster.snapshot_actions"
+kind = "counter"
+scope = "client"
+doc = "Cluster actions asking for a snapshot that one cluster member appended to the log while it led: one each time its log grew by the snapshot interval, 256 MiB, since the action before, and one each time its own process asked (spec/cluster.md, Snapshots and Values). key: member id (i32), little-endian; label text: the member id in decimal."
+doctor = "It rises on the leader alone. Each one is followed on every member by cluster.snapshots_begun, once the member has read the action in its committed log. If it rises and cluster.snapshots_begun does not on some member, that member's commit position does not reach the action: see cluster.commit_position there."
+
+[[counter]]
+id = 161
+name = "cluster.snapshots_begun"
+kind = "counter"
+scope = "client"
+doc = "Snapshots of its consensus module one cluster member began: it read a cluster action asking for one in its committed log and, in that duty cycle, started a recording of its one publication on the snapshot stream, 107, which it added at its start and keeps for its life (spec/cluster.md, Snapshots). key: member id (i32), little-endian; label text: the member id in decimal."
+doctor = "One for each snapshot the leader asked for, on every member. A snapshot begun ends in cluster.snapshots_taken or in cluster.snapshots_failed within about a second. Nothing is to be done while cluster.snapshots_taken follows it."
+
+[[counter]]
+id = 162
+name = "cluster.snapshot_steps"
+kind = "counter"
+scope = "client"
+doc = "Snapshots of its consensus module whose messages one cluster member had all written to the snapshot's publication, so that it asked the recording's stop (spec/cluster.md, Snapshots). key: member id (i32), little-endian; label text: the member id in decimal."
+doctor = "It follows cluster.snapshots_begun by one duty cycle. If it stays below cluster.snapshots_begun while cluster.snapshots_failed rises, the snapshot's publication took no message for a second: the driver's recorder is not reading it, which recording.write_failed and the driver's own counters explain."
+
+[[counter]]
+id = 163
+name = "cluster.snapshots_taken"
+kind = "counter"
+scope = "client"
+doc = "Snapshots of its consensus module one cluster member took and listed in its snapshots file: the recording stopped at the end of what the member wrote, and the list that names it was synced. A snapshot counts from then on (spec/cluster.md, Snapshots; spec/durable-log.md, Snapshots). key: member id (i32), little-endian; label text: the member id in decimal."
+doctor = "One for each snapshot the leader asked for, on every member. Nothing is to be done. cluster.snapshot_position says where the newest one is."
+
+[[counter]]
+id = 164
+name = "cluster.snapshots_failed"
+kind = "counter"
+scope = "client"
+doc = "Snapshots of its consensus module one cluster member gave up: the driver refused the snapshot's recording or its stop, the recording was of another session than the member's publication, the publication took no message or the recording's stop was not announced within a second, the recording stopped short of what was written, a second snapshot was asked for while one was being taken, or the list could not be written. A publication on the snapshot stream that the driver refuses at the member's start is no snapshot that failed: the member does not start. The member's log is whole and the member goes on; the next cluster action asks again (spec/cluster.md, Snapshots). key: member id (i32), little-endian; label text: the member id in decimal."
+doctor = "This member gave up a snapshot. Its log is whole and nothing committed is lost. Check the driver's counters on this host: driver.registry_full for a recording the driver had no room for, recording.start_failed for a recording whose files could not be created, recording.write_failed for a disk that refuses a write or a sync, and free space in the log directory. Where one of them is above 0, this member took no snapshot where the others did, and a start of it reads more of the log than theirs. Where none is, either a step took the driver longer than a second, as on a loaded host or a slow disk, or a second snapshot was asked for while one was being taken: cluster.snapshot_actions on the leader then rose twice within a second, every member counts one snapshot given up, and each still takes the first. The next snapshot is tried by itself."
+
 # A cluster member's role (spec/cluster.md, "Roles and the election"; ADR 0052, feature
 # 3). A member is a candidate (ADR 0077, ADR 0081) from its nomination until it
 # leads, loses its ballot, votes for another, follows another member that won its
@@ -2063,3 +2116,45 @@ machine = "cluster_session"
 from = "connecting"
 to = "closed"
 counter = "cluster.connects_dropped"
+
+
+# A cluster member's snapshot of its consensus module (spec/cluster.md, "Snapshots";
+# ADR 0129): `cavalry_raft`'s `SnapshotState`. A member takes one snapshot at a time.
+# It begins one when it reads the cluster action that asks for it, writes its
+# messages, asks the recording's stop, and lists the snapshot when the recording
+# stopped at the end of what it wrote. A snapshot given up, while it is written or
+# while its stop is awaited, is counted as failed.
+
+[[state_machine]]
+name = "cluster_snapshot"
+states = ["idle", "writing", "stopping"]
+
+[[transition]]
+machine = "cluster_snapshot"
+from = "idle"
+to = "writing"
+counter = "cluster.snapshots_begun"
+
+[[transition]]
+machine = "cluster_snapshot"
+from = "writing"
+to = "stopping"
+counter = "cluster.snapshot_steps"
+
+[[transition]]
+machine = "cluster_snapshot"
+from = "stopping"
+to = "idle"
+counter = "cluster.snapshots_taken"
+
+[[transition]]
+machine = "cluster_snapshot"
+from = "stopping"
+to = "idle"
+counter = "cluster.snapshots_failed"
+
+[[transition]]
+machine = "cluster_snapshot"
+from = "writing"
+to = "idle"
+counter = "cluster.snapshots_failed"
