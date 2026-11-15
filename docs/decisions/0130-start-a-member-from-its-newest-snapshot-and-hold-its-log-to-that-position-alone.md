@@ -61,7 +61,10 @@ reaches that position. The snapshot is of a position the member read from its
 committed log, and a truncation never cuts below a commit position (ADR 0083), so
 a log that ends below it lost recordings at or above the snapshot's position, as
 by a purge of one too many. The start is refused, `listed-recording`, naming the
-first recording gone and both positions. Recordings purged at the head of the
+first recording gone and both positions. A log that the catalog holds whole and
+that ends below that position is refused as well, `log-short`, with both
+positions: its end was cut, as by a `truncate recording`, or the list and the
+catalog are older than the snapshot. Recordings purged at the head of the
 list are no truncation, and `cluster.truncations_finished` does not count them.
 
 ## Alternatives considered
@@ -96,6 +99,15 @@ list are no truncation, and `cluster.truncations_finished` does not count them.
   purged, took its sessions as at 300, ended its log at 256, deleted any term
   based above 256, and counted a truncation finished. It would report a log
   shorter than the one it had read as committed. The start now refuses it.
+- **Refuse a log that ends below the snapshot only where a recording is gone.**
+  Lost, after it was built and a second review named it. A list whose recordings
+  the catalog all holds, the last one cut to below the snapshot's position, or a
+  log directory put back from a copy older than its snapshots file, started the
+  same member: its sessions as at the snapshot, and a log that does not reach it.
+  A member reads its committed log from its own recordings, so in normal running
+  the log always reaches the snapshot, and the refusal takes no member out that
+  ran as it should. It has an error of its own, `RaftError::LogShort`, since no
+  recording is gone for `listed-recording` to name.
 - **Pass over to a snapshot at or below where the log that is left ends.** Lost.
   An older snapshot gives the state at its own position, and the log is still
   shorter than the member reported it: a member with that log is a voter for a
@@ -140,7 +152,12 @@ list are no truncation, and `cluster.truncations_finished` does not count them.
   at 0 and whose newest snapshot's recording was purged starts from the one
   before it and counts one passed over; with both purged it starts from position
   0 and counts two. A member that started from a snapshot counts the sessions it
-  took from it as opened.
+  took from it as opened. A follower whose last recording of its log was cut, by a
+  client's `truncate recording`, to one entry below its snapshot's position is
+  refused, `log-short`, with the cut and the snapshot's position; with that
+  recording then purged it is refused, `listed-recording`, naming the recording;
+  and after each refusal its list of recordings and its list of snapshots are as
+  they were.
 - `crates/cavalry-raft/src/snapshot.rs`, the rule on a list and on a recording's
   messages, with no driver: the newest snapshot of the consensus module is read
   first and no other; each one that cannot be read is passed over and counted, to
@@ -166,7 +183,14 @@ list are no truncation, and `cluster.truncations_finished` does not count them.
   list of which every recording is gone when its floor is that position; a purge
   below a snapshot of 544 with the last two gone as well is refused; and a
   recording still being made before the ones gone is refused after its stop when
-  it stopped below the snapshot, and starts when it stopped above it. The two
+  it stopped below the snapshot, and starts when it stopped above it. With every
+  recording held, recordings from 0 and from 256 under a snapshot of 300: the last
+  one cut to 288, or holding nothing, is refused, `log-short`, naming the end and
+  the snapshot's position, and so is a list that names no recording with its
+  floor at 256, and a purge below the snapshot with what is left cut to 288; a
+  log that ends at the snapshot's position starts, with no truncation counted;
+  and a last recording still being made is refused after its stop at 288 and
+  starts at 300. The two
   tests of the rule as it was pass with the position at 0. The refusal's message
   says nothing of snapshots when none was passed over, and with two it says the
   count and to start the member once more first.

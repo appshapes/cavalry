@@ -17,7 +17,9 @@ use cavalry_proto::cluster::{
     CLOSE_REASON_NONE, EGRESS_STREAM_ID, INGRESS_STREAM_ID, Message, SNAPSHOT_TYPE_ID,
     SnapshotMark, Stream,
 };
-use cavalry_raft::{ConsensusModule, ElectionState, RaftError, Refused, Role, SnapshotCounts};
+use cavalry_raft::{
+    ConsensusModule, ElectionState, ListedFound, RaftError, Refused, Role, SnapshotCounts,
+};
 use cavalry_shm::counters::CountersReader;
 use cavalry_shm::counters::generated::{
     CLUSTER_SESSIONS, CLUSTER_SESSIONS_ACCEPTED, CLUSTER_SESSIONS_CLOSED, CLUSTER_SESSIONS_OPENED,
@@ -1248,6 +1250,22 @@ fn purge(dir: &Path, id: i32, recording_id: i64) {
     driver.close().expect("the driver closes");
 }
 
+/// Truncates stopped recording `recording_id` to `position` in the log directory of
+/// stopped member `id`, as a client's command does on a driver over the member's
+/// directories.
+fn truncate(dir: &Path, id: i32, recording_id: i64, position: i64) {
+    let driver_dir = dir.join(format!("member-{id}"));
+    let log_dir = dir.join(format!("member-{id}-log"));
+    let driver =
+        Driver::start(&driver_dir, &log_dir).expect("a driver on the member's directories");
+    let mut client = Cavalry::connect_to(&driver_dir).expect("a client of it");
+    client
+        .truncate_recording(recording_id, position)
+        .unwrap_or_else(|error| panic!("recording {recording_id} is cut to {position}: {error}"));
+    client.close().expect("the client closes");
+    driver.close().expect("the driver closes");
+}
+
 /// The bytes of the newest snapshot each member lists, which must be of `position`.
 fn newest_bytes(members: &[Member], position: i64) -> Vec<Vec<Vec<u8>>> {
     members
@@ -1433,6 +1451,107 @@ fn a_member_whose_log_was_purged_below_its_snapshot_starts_from_the_snapshot() {
     let text = refused.to_string();
     assert!(text.contains("passed over: 2."), "{text}");
     driver.close().expect("the driver closes");
+    for client in clients {
+        client.close();
+    }
+    for member in members {
+        stop(member);
+    }
+}
+
+/// A member whose log ends below the position of its newest snapshot does not start
+/// (`spec/cluster.md`, "A member's start"; ADR 0130): it read its log to that
+/// position as committed, so a log that ends below it is shorter than the one the
+/// member reported. First the end of the log is cut, the catalog holding every
+/// recording the member's record names; then the record's last recording is purged.
+/// Each start is refused, and changes nothing in the member's log directory.
+#[test]
+fn a_member_whose_log_ends_below_its_snapshot_does_not_start() {
+    let dir = TestDir::new("ends-below");
+    let (members_string, mut members, clients, _) = led_with_two_sessions(&dir);
+    offer_entries(&mut members, 0, 2);
+    let position = snapshot_everywhere(&mut members);
+    offer_entries(&mut members, 2, 2);
+    run_until_settled(&mut members, position + 2 * FRAME);
+
+    let follower = members
+        .iter()
+        .position(|m| m.module.role() != Role::Leader)
+        .expect("a follower");
+    let stopped = members.remove(follower);
+    let log_dir = stopped.log_dir.clone();
+    let id = stop(stopped);
+    let recordings = |log_dir: &Path| -> (i64, Vec<(i64, i64)>) {
+        let record =
+            RecordingsFile::open_kept(log_dir, id).expect("the member's record of its log");
+        (
+            record.floor_position(),
+            record
+                .entries()
+                .iter()
+                .map(|entry| (entry.recording_id, entry.start_position))
+                .collect(),
+        )
+    };
+    let snapshots = |log_dir: &Path| -> Vec<(i64, i64)> {
+        SnapshotsFile::open(log_dir, id)
+            .expect("the member's snapshots file")
+            .entries()
+            .iter()
+            .map(|entry| (entry.recording_id, entry.log_position))
+            .collect()
+    };
+    let (floor, record) = recordings(&log_dir);
+    let listed_snapshots = snapshots(&log_dir);
+    let (last_id, last_start) = *record.last().expect("a recording of the member's log");
+    // The frame of the cluster action that asked for the snapshot begins here.
+    let cut = position - FRAME;
+    assert!(
+        last_start <= cut,
+        "the last recording begins at {last_start}, the cut is at {cut}: {record:?}"
+    );
+    let driver_dir = dir.path().join(format!("member-{id}"));
+    let refused_start = || {
+        let driver = Driver::start(&driver_dir, &log_dir).expect("the driver starts");
+        let refused = ConsensusModule::start(&driver_dir, &log_dir, &members_string, id)
+            .expect_err("a log that ends below the member's snapshot");
+        driver.close().expect("the driver closes");
+        refused
+    };
+
+    // The end of the member's log is cut to one entry below the snapshot's position.
+    truncate(dir.path(), id, last_id, cut);
+    let refused = refused_start();
+    assert!(
+        matches!(
+            &refused,
+            RaftError::LogShort { end_position, from_position }
+                if *end_position == cut && *from_position == position
+        ),
+        "{refused}"
+    );
+    assert_eq!(refused.reason(), "log-short");
+    assert_eq!(recordings(&log_dir), (floor, record.clone()));
+    assert_eq!(snapshots(&log_dir), listed_snapshots);
+
+    // The record's last recording is purged: one recording too many.
+    purge(dir.path(), id, last_id);
+    let refused = refused_start();
+    assert!(
+        matches!(
+            &refused,
+            RaftError::ListedRecording {
+                recording_id,
+                found: ListedFound::EndsBelowSnapshot { end_position, from_position },
+                ..
+            } if *recording_id == last_id && *end_position < position && *from_position == position
+        ),
+        "{refused}"
+    );
+    assert_eq!(refused.reason(), "listed-recording");
+    assert_eq!(recordings(&log_dir), (floor, record));
+    assert_eq!(snapshots(&log_dir), listed_snapshots);
+
     for client in clients {
         client.close();
     }

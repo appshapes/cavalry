@@ -21,8 +21,15 @@
   `cluster.truncations_finished`, which counts a truncation that a member's stop
   cut short
   ([Run a cluster of three members](docs/how-to/run-a-cluster.md#when-it-does-not-work)).
+- A member whose log ends below its newest snapshot with no recording gone, as
+  after a `truncate recording` of its log or a log directory put back from an older
+  copy, does not start either: `cavalry run` refuses it with `member refused
+  (log-short)`, naming both positions
+  ([Run a cluster of three members](docs/how-to/run-a-cluster.md#when-it-does-not-work)).
 - `cavalry-raft`: `ListedFound` gains `EndsBelowSnapshot`, with `end_position` and
-  `from_position`, the refusal of that start.
+  `from_position`, the refusal of a start whose log's last recordings are gone, and
+  `RaftError` gains `LogShort`, with the same two positions, the refusal of one
+  whose recordings are all held.
 - `cavalry-raft`: `RaftError::LogForgotten` gains `from_position`, the position the
   start would read the log from, beside `floor_position`, and
   `snapshots_passed_over`, how many newer snapshots the start could not read. Its

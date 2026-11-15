@@ -296,8 +296,11 @@ commit path runs per message.
   while that is at or above the snapshot's position: a truncation never cuts below
   a commit position, so a log they leave ending below it is refused,
   `ListedFound::EndsBelowSnapshot`, and not taken as shorter than the member
-  reported. A service still reads its member's log from position 0, so the log
-  below a snapshot is purged only where no service reads it from its start.
+  reported. A log that the catalog holds whole and that ends below the snapshot's
+  position is refused as well, `RaftError::LogShort`: its end was cut, or the
+  directory is older than the snapshot. A service still reads its member's log
+  from position 0, so the log below a snapshot is purged only where no service
+  reads it from its start.
 - Holds a member's sessions, the member's side of the session protocol
   (`spec/cluster.md`, "Sessions"; ADR 0115): `Sessions` is plain state, as `Consensus`
   is. Its caller hands it each message of the ingress stream, each entry of the
