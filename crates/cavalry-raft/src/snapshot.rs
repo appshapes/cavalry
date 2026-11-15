@@ -695,8 +695,10 @@ impl ModuleSnapshot {
 /// The position a member's log is needed from (`spec/cluster.md`, "A member's
 /// start"; ADR 0132): the lower of the log positions of the newest snapshot of its
 /// consensus module and of the newest snapshot of a service that it lists, and 0
-/// while it lists none of either. The member's own start reads its log from the
-/// first, and a service that starts from its snapshot from the second.
+/// while it lists no snapshot of one of the two. The member's own start reads its
+/// log from the first, and a service whose program calls `ClusterService::restore`
+/// from the second; a service that never calls it reads from position 0, which
+/// the member cannot know.
 fn purge_position(own: Option<&ListedSnapshot>, service: Option<&ListedSnapshot>) -> i64 {
     match (own, service) {
         (Some(own), Some(service)) => own.log_position.min(service.log_position),

@@ -3547,9 +3547,13 @@ impl ConsensusModule {
 
     /// The position this member's log is needed from, `cluster.log_purge_position`:
     /// the lower of the log positions of the newest snapshot of its consensus module
-    /// and of the newest snapshot of a service that it lists, 0 while it lists none
-    /// of either. A recording of its log that stopped at or below it may be purged
-    /// while the member is stopped (`spec/cluster.md`, "A member's start"; ADR 0132).
+    /// and of the newest snapshot of a service that it lists, 0 while it lists no
+    /// snapshot of one of the two. A recording of its log that stopped at or below it
+    /// may be purged while the member is stopped (`spec/cluster.md`, "A member's
+    /// start"; ADR 0132). The position assumes a service whose program calls
+    /// `ClusterService::restore` at its start. The member cannot tell whether it
+    /// does: a service that takes snapshots and never calls it reads the log from
+    /// position 0, so beside it nothing may be purged.
     pub fn log_purge_position(&self) -> i64 {
         self.snapshot.purge_position()
     }

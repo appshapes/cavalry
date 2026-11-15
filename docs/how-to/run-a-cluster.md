@@ -254,6 +254,10 @@ committed once a quorum, two of three, has it on disk.
   recordings of a member's log that stopped at or below the position its log is
   needed from, which the member's gauge `cluster.log_purge_position` holds while
   it runs: the lower of the positions of its newest snapshot and of its service's.
+  That position assumes a service whose program calls `ClusterService::restore`
+  before its first poll. A service whose program takes snapshots and never calls
+  it reads the member's log from position 0 at every start: beside it, purge
+  nothing, whatever the gauge says. The member cannot tell the two apart.
   Start the member with the log directory it had, whole. If that directory is
   lost, do as for a directory with no file, above.
 - `cavalry run: member refused (log-short)`: the `catalog` in the member's log

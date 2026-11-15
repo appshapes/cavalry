@@ -1111,7 +1111,10 @@ impl ClusterService {
     /// lists (`spec/cluster.md`, "A service's start"; ADR 0132). It is called before
     /// the first poll, by a program that gives its state to
     /// [`snapshot`](Self::snapshot): a program that never calls it reads its
-    /// member's log from position 0. In Aeron, this is the snapshot image of
+    /// member's log from position 0, and needs the whole of it. The member's
+    /// `cluster.log_purge_position`, from which an operator purges, assumes a
+    /// program that calls it: beside a service that takes snapshots and never calls
+    /// it, nothing may be purged. In Aeron, this is the snapshot image of
     /// `ClusteredService.onStart`.
     ///
     /// [`Restored::State`] is the program's state as the program gave it. The

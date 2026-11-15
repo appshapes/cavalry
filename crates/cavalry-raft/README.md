@@ -304,6 +304,9 @@ commit path runs per message.
   positions: `cluster.log_purge_position`, and
   `ConsensusModule::log_purge_position()`. It is 0 while the member lists no
   snapshot of a service, and nothing below a position of 0 is purged (ADR 0132).
+  The position assumes a service whose program calls `ClusterService::restore` at
+  its start, which the member cannot tell: a service that takes snapshots and
+  never calls it reads from position 0, and beside it nothing may be purged.
 - Lists the snapshots of the service beside a member (`spec/cluster.md`, "The
   member's list of a service's snapshots"; ADR 0131). A service writes its own
   snapshot, a recording through the member's driver, and tells the member with a

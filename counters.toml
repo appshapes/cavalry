@@ -1715,8 +1715,8 @@ id = 173
 name = "cluster.log_purge_position"
 kind = "gauge"
 scope = "client"
-doc = "The position one cluster member's log is needed from: the lower of the log positions of the newest snapshot of its consensus module and of the newest snapshot of a service that it lists; 0 while it lists none of either. The member's own start reads its log from the first, and a service that starts from its snapshot from the second, so neither reads below this position (spec/cluster.md, A member's start; ADR 0132). key: member id (i32), little-endian; label text: the member id in decimal."
-doctor = "A recording of this member's log that stopped at or below this position may be purged while the member is stopped; one that reaches above it may not. 0 beside a cluster.snapshot_position above 0 is a member whose service takes no snapshot, or starts from none: its service reads the log from position 0, and nothing may be purged."
+doc = "The position one cluster member's log is needed from: the lower of the log positions of the newest snapshot of its consensus module and of the newest snapshot of a service that it lists; 0 while it lists no snapshot of one of the two. The member's own start reads its log from the first, and a service whose program calls ClusterService::restore at its start from the second, so neither reads below this position. The member cannot tell whether its service's program calls it: a service that takes snapshots and never calls it reads the log from position 0 (spec/cluster.md, A member's start; ADR 0132). key: member id (i32), little-endian; label text: the member id in decimal."
+doctor = "A recording of this member's log that stopped at or below this position may be purged while the member is stopped, when the program of the service beside it calls ClusterService::restore at its start; one that reaches above it may not. A service whose program never calls it reads the log from position 0, and beside it nothing may be purged, whatever this position. 0 beside a cluster.snapshot_position above 0 is a member whose service takes no snapshot: its service reads the log from position 0, and nothing may be purged."
 
 [[counter]]
 id = 174
