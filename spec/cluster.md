@@ -1029,9 +1029,9 @@ and each term it leads.
 
 A service still reads its member's log from position 0 ("The service"). Beside a
 member whose log no longer begins at 0 its replay is refused, as a replay of a
-position the member forgot is, until a service takes snapshots of its own, which is
-out of this version. So an operator purges below a member's snapshot only where no
-service reads that member's log from its start.
+position the member forgot is, until a service starts from a snapshot of its own,
+which is out of this version. So an operator purges below a member's snapshot only
+where no service reads that member's log from its start.
 
 A member does not start, and says why and what to do, in each of these cases. Its
 record of terms holds a term and its log directory holds no log recordings file:
