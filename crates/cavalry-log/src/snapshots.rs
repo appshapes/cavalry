@@ -772,26 +772,51 @@ impl SnapshotsFile {
     /// Lists `snapshot` after the snapshots the file names, and syncs: one write of
     /// the slot the list is not read from, with the next sequence, and one sync. A
     /// crash before the sync has ended leaves the list as it was. A list that
-    /// already names [`MAX_ENTRIES`] snapshots forgets its oldest for the new one;
-    /// the forgotten snapshot's recording stays in the catalog. A snapshot a reader
+    /// already names [`MAX_ENTRIES`] snapshots forgets one for the new one: the
+    /// oldest whose service has a newer snapshot in the list, the new one counted,
+    /// so that the newest snapshot of each service stays listed whatever the others
+    /// are of (ADR 0133). The forgotten snapshot's recording stays in the catalog.
+    /// A snapshot a reader
     /// would refuse in the list is [`SnapshotsError::List`], and nothing is written:
     /// a recording id below 0, a service id below −1, a term below 0, a position that
     /// is no position, or a term or a log position that does not carry on from the
     /// newest snapshot the list names for its service. Nor is anything written to a
     /// file that holds the highest sequence there is ([`SnapshotsError::Sequence`]).
-    /// On an error the list in memory is the one before the call, as the file's is.
+    /// On an error the list in memory is the one before the call. The file's is too,
+    /// but after a write that succeeded and a sync that failed: the slot then holds
+    /// the new list, which a later open may read. That list names a snapshot that is
+    /// whole, as every listed one is, and the next call writes the same slot again.
     pub fn list(&mut self, snapshot: ListedSnapshot) -> Result<(), SnapshotsError> {
         let Some(sequence) = self.sequence.checked_add(1) else {
             return Err(SnapshotsError::Sequence {
                 found: self.sequence,
             });
         };
-        // The list with the snapshot: every snapshot the file names, but the oldest
-        // when the list is full, and then the new one.
-        let from = usize::from(self.entries.len() >= MAX_ENTRIES);
+        // The list with the snapshot: every snapshot the file names and then the new
+        // one. A full list leaves one out: the first whose service has a later
+        // snapshot, in the list or as the new one, so that no service loses its
+        // newest. Where every entry is the only one of its service and the new
+        // snapshot is of yet another, there is none, and the first goes.
+        let out = (self.entries.len() >= MAX_ENTRIES).then(|| {
+            self.entries
+                .iter()
+                .enumerate()
+                .position(|(index, entry)| {
+                    entry.service_id == snapshot.service_id
+                        || self
+                            .entries
+                            .iter()
+                            .skip(index.saturating_add(1))
+                            .any(|later| later.service_id == entry.service_id)
+                })
+                .unwrap_or(0)
+        });
         self.next.clear();
-        self.next
-            .extend_from_slice(self.entries.get(from..).unwrap_or(&[]));
+        for (index, entry) in self.entries.iter().enumerate() {
+            if Some(index) != out {
+                self.next.push(*entry);
+            }
+        }
         self.next.push(snapshot);
         // What a reader would call damage is, in a list not yet written, the
         // writer's fault: the file holds no such thing.
@@ -886,6 +911,73 @@ mod tests {
                 .len(),
             FILE_LENGTH as u64
         );
+        std::fs::remove_dir_all(&dir).expect("the directory is removed");
+    }
+
+    /// A state whose snapshots stop keeps the one it has (ADR 0133). The service
+    /// takes one snapshot and stops; the module goes on for more snapshots than the
+    /// list holds. The service's one entry stays, with the module's newest 63, and it
+    /// is the first of the list: each write left out the oldest of the module's,
+    /// which had a newer one. The same file read back says the same.
+    #[test]
+    fn a_full_list_keeps_the_only_snapshot_of_a_service_whose_snapshots_stopped() {
+        let dir = dir("stopped-service");
+        let mut file = SnapshotsFile::open(&dir, 0).expect("the file is created");
+        let service = listed(0, 0, 320);
+        file.list(service)
+            .expect("the service's snapshot is listed");
+        let modules = MAX_ENTRIES as i64 + 36;
+        for action in 1..=modules {
+            file.list(listed(action, CONSENSUS_MODULE, action * 320))
+                .expect("the module's snapshot is listed");
+        }
+        let check = |file: &SnapshotsFile| {
+            assert_eq!(file.entries().len(), MAX_ENTRIES);
+            assert_eq!(file.entries().first(), Some(&service));
+            assert_eq!(file.newest(0), Some(&service));
+            assert_eq!(
+                file.newest(CONSENSUS_MODULE),
+                Some(&listed(modules, CONSENSUS_MODULE, modules * 320))
+            );
+            // The module's entries are its newest 63, in the order they were listed.
+            let first_kept = modules - (MAX_ENTRIES as i64 - 1) + 1;
+            for (entry, action) in file.entries().iter().skip(1).zip(first_kept..) {
+                assert_eq!(entry, &listed(action, CONSENSUS_MODULE, action * 320));
+            }
+        };
+        check(&file);
+        // The service comes back and takes a snapshot: its older one has a newer one
+        // now, and is the one left out.
+        let again = listed(modules + 1, 0, (modules + 1) * 320);
+        file.list(again).expect("the service's snapshot is listed");
+        assert_eq!(file.entries().len(), MAX_ENTRIES);
+        assert_eq!(file.newest(0), Some(&again));
+        assert!(!file.entries().contains(&service));
+        drop(file);
+        let file = SnapshotsFile::open(&dir, 0).expect("the file opens");
+        assert_eq!(file.newest(0), Some(&again));
+        assert_eq!(file.entries().len(), MAX_ENTRIES);
+        std::fs::remove_dir_all(&dir).expect("the directory is removed");
+    }
+
+    /// The bound of the rule: 64 entries of 64 services, and a snapshot of a
+    /// sixty-fifth. No entry's service has a later one, so the first entry is left
+    /// out, as the page says.
+    #[test]
+    fn a_full_list_of_one_snapshot_for_each_service_forgets_its_first() {
+        let dir = dir("every-service");
+        let mut file = SnapshotsFile::open(&dir, 0).expect("the file is created");
+        for service in 0..MAX_ENTRIES as i32 {
+            file.list(listed(i64::from(service), service, 320))
+                .expect("a service's snapshot is listed");
+        }
+        assert_eq!(file.entries().len(), MAX_ENTRIES);
+        let one_more = listed(MAX_ENTRIES as i64, MAX_ENTRIES as i32, 320);
+        file.list(one_more).expect("one more is listed");
+        assert_eq!(file.entries().len(), MAX_ENTRIES);
+        assert_eq!(file.newest(0), None);
+        assert_eq!(file.entries().first(), Some(&listed(1, 1, 320)));
+        assert_eq!(file.entries().last(), Some(&one_more));
         std::fs::remove_dir_all(&dir).expect("the directory is removed");
     }
 
