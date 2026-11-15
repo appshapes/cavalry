@@ -30,6 +30,7 @@ under `docs/` is listed here; `just lint-docs` fails on one that is not.
 - [Send the weekly release-notes email](how-to/send-the-release-notes.md)
 - [Run a test many times in a row](how-to/run-a-test-many-times.md)
 - [Promote a standby to a voter](how-to/promote-a-standby.md)
+- [Upgrade a cluster one member at a time](how-to/upgrade-a-cluster.md)
 
 # Reference
 
@@ -185,3 +186,4 @@ under `docs/` is listed here; `just lint-docs` fails on one that is not.
 - [0133. Keep the newest snapshot of each state in a member's list](decisions/0133-keep-the-newest-snapshot-of-each-state-in-a-members-list.md)
 - [0134. Mark a standby in the members string, and change one mark at a time](decisions/0134-mark-a-standby-in-the-members-string-and-change-one-mark-at-a-time.md)
 - [0135. Answer no log yet where a member's live recording has not reached the position](decisions/0135-answer-no-log-yet-where-a-members-live-recording-has-not-reached-the-position.md)
+- [0136. Run the versions of one major as one cluster, and upgrade from the last tree of the version before](decisions/0136-run-the-versions-of-one-major-as-one-cluster-and-upgrade-from-the-last-tree-of-the-version-before.md)

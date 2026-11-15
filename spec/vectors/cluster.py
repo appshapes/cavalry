@@ -14,7 +14,10 @@ import json
 import struct
 from pathlib import Path
 
-SCHEMA_ID, VERSION = 1, 0
+SCHEMA_ID, VERSION = 1, 1
+HEADER_VERSION = 0  # every header's, in every version of major 0 ("Versions and the upgrade")
+PROTOCOL_VERSION = VERSION << 8  # this page's version in semantic form, 0.1.0
+LATER_MINOR = (7 << 8) + 3  # 0.7.3, a later minor of major 0, which a reader of this version reads
 HEADER = struct.Struct("<HHHH")  # block length, template id, schema id, version
 NULL = -1
 MAX_MEMBERS, MAX_SESSIONS = 8, 10
@@ -119,7 +122,8 @@ POSITIONS = {"log_position", "term_base_log_position", "next_term_base_log_posit
 TERMS = {"leadership_term_id", "log_leadership_term_id", "next_leadership_term_id", "candidate_term_id"}
 
 
-def encode(template, fields, var=None, payload=b"", block_length=None, schema_id=SCHEMA_ID, version=VERSION):
+def encode(template, fields, var=None, payload=b"", block_length=None, schema_id=SCHEMA_ID,
+           version=HEADER_VERSION):
     """The bytes of one message: header, fixed fields in the template's order, then the variable
     fields each as a u32 length and its bytes, or the payload as it is."""
     name, block, _streams, fixed, variable = TEMPLATES[template]
@@ -167,8 +171,8 @@ CHANNEL = "cavalry:udp?endpoint=10.0.0.9:31000"
 
 SESSION_MESSAGE = dict(leadership_term_id=3, cluster_session_id=7, timestamp=TS)
 SESSION_EVENT_OK = dict(cluster_session_id=7, correlation_id=41, leadership_term_id=3, leader_member_id=0,
-                        code=0, version=0, leader_heartbeat_timeout_ns=LEADER_HEARTBEAT_TIMEOUT_NS)
-SESSION_CONNECT = dict(correlation_id=41, response_stream_id=102, version=0)
+                        code=0, version=PROTOCOL_VERSION, leader_heartbeat_timeout_ns=LEADER_HEARTBEAT_TIMEOUT_NS)
+SESSION_CONNECT = dict(correlation_id=41, response_stream_id=102, version=PROTOCOL_VERSION)
 SESSION_CLOSE = dict(leadership_term_id=3, cluster_session_id=7)
 NEW_LEADER = dict(leadership_term_id=4, cluster_session_id=7, leader_member_id=1)
 TIMER = dict(leadership_term_id=3, correlation_id=99, timestamp=TS)
@@ -181,9 +185,9 @@ NEW_TERM_EVENT = dict(leadership_term_id=3, log_position=65536, timestamp=TS, te
 MEMBERSHIP = dict(leadership_term_id=3, log_position=65536, timestamp=TS, leader_member_id=0, cluster_size=3,
                   change_type=0, member_id=2)
 CANVASS = dict(log_leadership_term_id=2, log_position=65536, leadership_term_id=2, follower_member_id=1,
-               protocol_version=0)
+               protocol_version=PROTOCOL_VERSION)
 REQUEST_VOTE = dict(log_leadership_term_id=2, log_position=65536, candidate_term_id=3, candidate_member_id=1,
-                    protocol_version=0)
+                    protocol_version=PROTOCOL_VERSION)
 VOTE = dict(candidate_term_id=3, log_leadership_term_id=2, log_position=65536, candidate_member_id=1,
             follower_member_id=2, vote=1)
 NEW_TERM = dict(log_leadership_term_id=2, next_leadership_term_id=3, next_term_base_log_position=65536,
@@ -210,6 +214,9 @@ VECTORS = [
             payload=b"hello"),
     message("session-message-egress-empty", 1, "egress", SESSION_MESSAGE, payload=b""),
     message("session-event-ok", 2, "egress", SESSION_EVENT_OK, {"detail": ""}),
+    message("session-event-ok-of-version-0", 2, "egress", dict(SESSION_EVENT_OK, version=0), {"detail": ""}),
+    message("session-event-ok-of-a-later-minor", 2, "egress", dict(SESSION_EVENT_OK, version=LATER_MINOR),
+            {"detail": ""}),
     message("session-event-redirect", 2, "egress",
             dict(SESSION_EVENT_OK, cluster_session_id=NULL, leader_member_id=1, code=2), {"detail": INGRESS}),
     message("session-event-redirect-no-leader", 2, "egress",
@@ -226,6 +233,10 @@ VECTORS = [
             {"response_channel": CHANNEL, "encoded_credentials": b"", "client_info": "quickstart 0.1"}),
     message("session-connect-empty-info", 3, "ingress", SESSION_CONNECT,
             {"response_channel": CHANNEL, "encoded_credentials": b"", "client_info": ""}),
+    message("session-connect-of-version-0", 3, "ingress", dict(SESSION_CONNECT, version=0),
+            {"response_channel": CHANNEL, "encoded_credentials": b"", "client_info": ""}),
+    message("session-connect-of-a-later-minor", 3, "ingress", dict(SESSION_CONNECT, version=LATER_MINOR),
+            {"response_channel": CHANNEL, "encoded_credentials": b"", "client_info": ""}),
     message("session-connect-other-major", 3, "ingress", dict(SESSION_CONNECT, version=65536),
             {"response_channel": CHANNEL, "encoded_credentials": b"", "client_info": ""}),
     message("session-close", 4, "ingress", SESSION_CLOSE),
@@ -239,6 +250,12 @@ VECTORS = [
     message("new-leadership-term-event", 24, "log", NEW_TERM_EVENT),
     message("membership-change-event", 25, "log", MEMBERSHIP, {"cluster_members": MEMBERS}),
     message("canvass-position", 50, "consensus", CANVASS),
+    # The four messages that carry a version, as a writer of version 0 wrote each and as a writer of a
+    # later minor of major 0 would: a reader of this version reads both ("Versions and the upgrade").
+    message("canvass-position-of-version-0", 50, "consensus", dict(CANVASS, protocol_version=0)),
+    message("canvass-position-of-a-later-minor", 50, "consensus", dict(CANVASS, protocol_version=LATER_MINOR)),
+    message("request-vote-of-version-0", 51, "consensus", dict(REQUEST_VOTE, protocol_version=0)),
+    message("request-vote-of-a-later-minor", 51, "consensus", dict(REQUEST_VOTE, protocol_version=LATER_MINOR)),
     message("canvass-position-empty-log", 50, "consensus",
             dict(CANVASS, log_leadership_term_id=NULL, log_position=0, leadership_term_id=NULL)),
     message("request-vote", 51, "consensus", REQUEST_VOTE),
@@ -296,12 +313,12 @@ VECTORS += [
     message("reject-schema", 55, "consensus", COMMIT, error="schema", bytes_=encode(55, COMMIT, schema_id=2)),
     message("reject-version-header", 55, "consensus", COMMIT, error="version", bytes_=encode(55, COMMIT, version=1)),
     message("reject-template-reserved", 55, "consensus", COMMIT, error="template",
-            bytes_=HEADER.pack(16, 7, SCHEMA_ID, VERSION) + bytes(16)),
+            bytes_=HEADER.pack(16, 7, SCHEMA_ID, HEADER_VERSION) + bytes(16)),
     message("reject-template-unknown", 55, "consensus", COMMIT, error="template",
-            bytes_=HEADER.pack(20, 9, SCHEMA_ID, VERSION) + bytes(20)),
+            bytes_=HEADER.pack(20, 9, SCHEMA_ID, HEADER_VERSION) + bytes(20)),
     message("reject-stream", 55, "log", COMMIT, error="stream", bytes_=commit),
     message("reject-template-of-a-snapshots-timer", 103, "snapshot", CLUSTER_SESSION, error="template",
-            bytes_=HEADER.pack(16, 104, SCHEMA_ID, VERSION) + bytes(16)),
+            bytes_=HEADER.pack(16, 104, SCHEMA_ID, HEADER_VERSION) + bytes(16)),
     message("reject-stream-cluster-session-on-the-log", 103, "log", CLUSTER_SESSION, error="stream",
             bytes_=encode(103, CLUSTER_SESSION, {"response_channel": CHANNEL})),
     message("reject-stream-consensus-module-on-the-egress", 105, "egress", CONSENSUS_MODULE, error="stream",
