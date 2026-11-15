@@ -179,3 +179,4 @@ under `docs/` is listed here; `just lint-docs` fails on one that is not.
 - [0130. Start a member from its newest snapshot, and hold its log to that position alone](decisions/0130-start-a-member-from-its-newest-snapshot-and-hold-its-log-to-that-position-alone.md)
 - [0131. Have a service write its own snapshot, and its member list it](decisions/0131-have-a-service-write-its-own-snapshot-and-its-member-list-it.md)
 - [0132. Start a service from the snapshot its member names, when its program asks](decisions/0132-start-a-service-from-the-snapshot-its-member-names-when-its-program-asks.md)
+- [0133. Keep the newest snapshot of each state in a member's list](decisions/0133-keep-the-newest-snapshot-of-each-state-in-a-members-list.md)
