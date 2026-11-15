@@ -25,6 +25,23 @@ It promotes member 3. Then it shows the two changes that replace a lost voter.
   ```
 
   The three voters elect a leader as three members do. The standby follows it.
+- The standby on a host and a link as fast as a voter's. No election waits for a
+  standby, and the commit position waits for none. The leader's log does: the
+  leader sends its log to every member, the standby among them, no faster than
+  the slowest of them takes it. A standby that runs slowly, on a loaded host or
+  over a slow link, holds the leader's log back as a slow follower does. When the
+  log's window is full the leader appends no new entry and reads no more from
+  its clients, whose offers are then back-pressured, until the standby has taken
+  more. A standby that stops answering holds the log for up to 5 s, and the leader
+  then sends without it
+  ([ADR 0134](../decisions/0134-mark-a-standby-in-the-members-string-and-change-one-mark-at-a-time.md),
+  Consequences). `cavalry doctor` on the leader's host reports a member it
+  dropped at the 5 s as `WARN udp-flow-control-receiver-timed-out`. It has no
+  finding for a member that runs slowly. The leader's driver counts each time a
+  publication's sender limit is reached in `sender.flow_control_limited`, which
+  `doctor` does not print: read it from the `counters` file in the driver's
+  directory ([the counters file](../reference/counters-file.md);
+  [counters](../reference/counters.md) says what each counter means).
 - Every member on a version of Cavalry that knows the mark. A member of a version
   before it refuses the string, `members-grammar`, and does not start.
 - `cavalry doctor` on every member that runs prints one `note cluster-member` line,

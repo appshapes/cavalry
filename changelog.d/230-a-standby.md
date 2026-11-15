@@ -1,8 +1,14 @@
 - A cluster can hold a standby: a member that follows the log and has no vote. Mark
   it in the members string with a seventh field, `,standby`, after its five
   endpoints. A standby records the log, takes snapshots and redirects clients, and
-  it never leads and counts toward no quorum, so it delays no election and no
-  commit. A string names at least one voter (`members-voters`). To promote a
+  it never leads and counts toward no quorum, so it delays no election and the
+  commit position waits for no standby. It receives the leader's log as a follower
+  does, so a standby that runs slowly, on a loaded host or over a slow link, holds
+  the leader's log back as a slow follower does, and one that stops answering
+  holds it for up to 5 s before the leader drops it: run a standby on a host and
+  a link as fast as a voter's
+  ([ADR 0134](docs/decisions/0134-mark-a-standby-in-the-members-string-and-change-one-mark-at-a-time.md),
+  Consequences). A string names at least one voter (`members-voters`). To promote a
   standby, or to replace a lost voter with one, change one member's mark in the
   string and start each member again with it, the leader last:
   [Promote a standby to a voter](docs/how-to/promote-a-standby.md). Change one mark

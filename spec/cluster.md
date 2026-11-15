@@ -1053,6 +1053,15 @@ what a standby itself does, and nothing else. That is what lets one member's mar
 differ between the strings of two members while the members are started again with
 a new string, one after another.
 
+No election and no commit position waits for a standby. The pace of the log does. A
+standby's `log` endpoint is a destination of the leader's log publication as a
+voter's is ("Members and streams"), and the publication's `min` flow control counts
+every destination. So a standby that takes the log slowly holds the leader's log
+back as a follower that takes it slowly does, with the leader's claim back-pressured
+and its ingress unread ("Sessions"), and a standby that sends no status message
+holds it for up to the flow control receiver timeout and is then dropped from the
+publication's table (`spec/udp.md`, "The sender").
+
 **Changing a standby's mark.** A standby is promoted, and a voter is made a standby,
 by a change of the members string, which each member takes when it is started with
 it. Nothing else of the string changes while a cluster keeps its log: its members,
