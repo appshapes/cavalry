@@ -10,10 +10,11 @@ use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
 use cavalry_client::{
-    Action, Cavalry, ClusterError, ClusterService, Entry, NULL_LENGTH, NULL_POSITION, Publication,
-    SnapshotCause, Subscription,
+    Action, Cavalry, ClientError, ClusterError, ClusterService, Entry, NULL_LENGTH, NULL_POSITION,
+    Publication, SnapshotCause, Subscription,
 };
 use cavalry_driver::Driver;
+use cavalry_driver::spec::MAX_PUBLICATIONS;
 use cavalry_log::recordings::RecordingsFile;
 use cavalry_log::snapshots::{CONSENSUS_MODULE, ListedSnapshot, SnapshotsFile};
 use cavalry_proto::cluster::{
@@ -2292,6 +2293,140 @@ fn a_service_whose_member_has_stopped_gives_its_snapshot_up() {
     );
     service.close();
     driver.close().expect("the driver closes");
+    for member in members {
+        stop(member);
+    }
+}
+
+/// How many counters of `type_id` whose key begins with `member_id` the counters file
+/// of the driver in `dir` holds.
+fn counters_in(dir: &Path, member_id: i32, type_id: i32) -> usize {
+    let reader = CountersReader::open(dir).expect("the counters file opens");
+    let key = member_id.to_le_bytes();
+    (0..reader.capacity())
+        .filter(|&id| {
+            reader
+                .record(id)
+                .expect("a record")
+                .is_some_and(|record| record.type_id() == type_id && record.key().starts_with(&key))
+        })
+        .count()
+}
+
+#[test]
+fn a_service_counts_a_snapshot_whose_publication_its_driver_refuses() {
+    let dir = TestDir::new("refused");
+    let members_string = members_string();
+    let mut members: Vec<Member> = [1, 0, 2]
+        .into_iter()
+        .map(|id| start_member(dir.path(), &members_string, id))
+        .collect();
+    run_until_led(&mut members, -1);
+    offer_entries(&mut members, 0, 2);
+    // A service beside a follower, whose program gives its state by hand, once every
+    // member lists its own snapshot of the action.
+    let mut service = Service::beside(&members[2]);
+    service.gives = false;
+    ask_snapshot(&mut members);
+    run_with_services(
+        &mut members,
+        std::slice::from_mut(&mut service),
+        "the service has read the action and every member has taken its snapshot",
+        |members, services| {
+            services[0].service.snapshot_due().is_some_and(|due| {
+                members
+                    .iter()
+                    .all(|member| member.module.snapshot_position() == Some(due))
+            })
+        },
+    );
+    let position = service.service.snapshot_due().expect("a snapshot is due");
+    let id = members[2].module.member_id();
+    let driver_dir = members[2].dir.clone();
+
+    // Another client of the follower's driver fills the driver's publications
+    // registry, every member running a duty cycle after each add. Its publication is
+    // one of the shortest term a channel names, 64 KiB, to an endpoint nobody reads:
+    // a client maps and touches a publication's whole log at each add, which is 192
+    // MiB for a `cavalry:ipc` one.
+    let channel = format!(
+        "cavalry:udp?endpoint=127.0.0.1:{}|term-length=64k",
+        free_ports(1)[0]
+    );
+    let mut filler = Cavalry::connect_to(&driver_dir).expect("a client of the follower's driver");
+    let mut held = Vec::new();
+    loop {
+        match filler.add_publication(&channel, REPLAY_STREAM_ID + 1) {
+            Ok(publication) => held.push(publication),
+            Err(ClientError::Refused { .. }) => break,
+            Err(other) => panic!("{other}"),
+        }
+        assert!(held.len() <= MAX_PUBLICATIONS, "the registry is bounded");
+        for member in members.iter_mut() {
+            member.module.do_work().expect("the member's duty cycle");
+        }
+    }
+
+    // At the service's first snapshot the driver refuses its publication: the
+    // snapshot is given up, counted, and still due. A second call is refused alike,
+    // counted again, and adds no counter twice.
+    for failed in 1..=2 {
+        let refused = service
+            .service
+            .snapshot(&mut service.client, &service.state)
+            .expect_err("a snapshot whose publication the driver refuses");
+        assert!(
+            matches!(refused, ClusterError::Client(ClientError::Refused { .. })),
+            "{refused}"
+        );
+        assert_eq!(service.service.snapshot_due(), Some(position));
+        assert_eq!(
+            counter_in(&driver_dir, id, CLUSTER_SERVICE_SNAPSHOTS_FAILED.0),
+            failed
+        );
+        assert_eq!(
+            counter_in(&driver_dir, id, CLUSTER_SERVICE_SNAPSHOTS_TAKEN.0),
+            0
+        );
+    }
+    for type_id in [
+        CLUSTER_SERVICE_SNAPSHOTS_TAKEN.0,
+        CLUSTER_SERVICE_SNAPSHOTS_FAILED.0,
+    ] {
+        assert_eq!(counters_in(&driver_dir, id, type_id), 1);
+    }
+
+    // The registry has room again once the other client has closed, which removes
+    // its publications, and the call after that writes the snapshot, which the
+    // member lists.
+    filler.close().expect("the other client closes");
+    drop(held);
+    let taken = service
+        .service
+        .snapshot(&mut service.client, &service.state)
+        .expect("the service's snapshot");
+    assert!(taken);
+    run_with_services(
+        &mut members,
+        std::slice::from_mut(&mut service),
+        "the follower lists its service's snapshot",
+        |members, _| members[2].module.service_snapshot_position() == Some(position),
+    );
+    assert_eq!(
+        counter_in(&driver_dir, id, CLUSTER_SERVICE_SNAPSHOTS_FAILED.0),
+        2
+    );
+    assert_eq!(
+        counter_in(&driver_dir, id, CLUSTER_SERVICE_SNAPSHOTS_TAKEN.0),
+        1
+    );
+    for type_id in [
+        CLUSTER_SERVICE_SNAPSHOTS_TAKEN.0,
+        CLUSTER_SERVICE_SNAPSHOTS_FAILED.0,
+    ] {
+        assert_eq!(counters_in(&driver_dir, id, type_id), 1);
+    }
+    service.close();
     for member in members {
         stop(member);
     }

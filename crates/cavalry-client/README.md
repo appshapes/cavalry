@@ -208,7 +208,10 @@ The client API implementation, re-exported by the `cavalry` crate. Data plane.
   step that makes no progress for a second ends the snapshot with
   `ClusterError::SnapshotFailed`, which names the step and what to check, counted
   in `cluster.service_snapshots_failed`; nothing committed is lost, and the service
-  reads on. A program that takes no snapshots reads on at an `Entry::Snapshot` as
+  reads on. A command the driver refuses, the service's two publications at its
+  first snapshot among them, is `ClusterError::Client` and is counted there too;
+  the two counters are added first, and a refusal of one of them is the one
+  failure that is not counted. A program that takes no snapshots reads on at an `Entry::Snapshot` as
   it does at an `Entry::Other`, and one that matches every entry by name gives
   `Entry::Snapshot` an arm that does nothing, as
   `crates/cavalry/examples/adder-service.rs` does. A service does not yet
