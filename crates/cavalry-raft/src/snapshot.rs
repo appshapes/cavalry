@@ -591,6 +591,12 @@ fn read_recording(client: &mut Cavalry, recording_id: i64) -> Option<Vec<Vec<u8>
     let deadline = Instant::now() + LOAD_TIMEOUT;
     let mut messages: Vec<Vec<u8>> = Vec::with_capacity(MAX_MESSAGES);
     let mut too_many = false;
+    // How far the replay's image has been read, kept from each poll that still had
+    // the image. The driver withdraws a replay's image once its subscriber has read
+    // it to the end of stream, which can be before `replay stopped` reaches this
+    // client: the image is then gone by the time the end is known
+    // (`spec/client-protocol.md`, "Commands", start replay).
+    let mut reached = 0i64;
     loop {
         let read = subscription
             .poll(
@@ -607,12 +613,16 @@ fn read_recording(client: &mut Cavalry, recording_id: i64) -> Option<Vec<Vec<u8>
                 MAX_MESSAGES,
             )
             .ok()?;
-        // The replay has ended, and its image has been read to where it ended.
+        if let Some(image) = subscription
+            .images()
+            .iter()
+            .find(|image| image.session_id() == session)
+        {
+            reached = reached.max(image.position());
+        }
+        // The replay has ended, and its image was read to where it ended.
         if let Some((end, _)) = replay.ended()
-            && subscription
-                .images()
-                .iter()
-                .any(|image| image.session_id() == session && image.position() >= end)
+            && reached >= end
         {
             break;
         }

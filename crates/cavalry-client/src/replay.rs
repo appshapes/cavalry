@@ -164,6 +164,13 @@ impl Replay {
     /// last frame written, where the subscription's image ends, and the reason;
     /// `None` while the replay lives. The frames up to the position may still be
     /// unread: poll the subscription until its image's position reaches it.
+    ///
+    /// Keep the image's position from each poll, and compare that with the end. The
+    /// driver withdraws a replay's image once every subscriber has read it to the
+    /// end of stream, and `replay stopped` can reach this client after that. A
+    /// reader that has read every frame may therefore see `Some` here when the
+    /// subscription no longer holds the image, and one that waits to see both at
+    /// once waits for ever.
     pub fn ended(&self) -> Option<(i64, Option<ReplayStopReason>)> {
         self.end
             .get()
