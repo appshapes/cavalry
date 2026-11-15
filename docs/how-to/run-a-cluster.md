@@ -391,9 +391,14 @@ committed once a quorum, two of three, has it on disk.
   recording. `recording.start_failed`: the recording's files could not be created
   in the log directory. `recording.write_failed`: a write or a sync to the log
   directory failed. Check that the log directory is writable by the driver's user
-  and that its file system has room. The leader asks for the next snapshot when
-  its log has grown by 256 MiB, and the member takes that one by itself. A count
-  that no longer rises is a fault that has passed.
+  and that its file system has room. If none of the three is above 0, either a
+  step took the driver longer than a second, as on a loaded host or a slow disk, or
+  the leader was asked for a second snapshot while the first was being taken:
+  `cluster.snapshot_actions` on the leader then rose twice within a second, every
+  member counts one snapshot given up, and each still takes the first. The leader
+  asks for the next snapshot when its log has grown by 256 MiB, and the member
+  takes that one by itself. A count that no longer rises is a fault that has
+  passed.
 - `note cluster-commit-waits`: the leader has appended more than a quorum has
   recorded. Each member asks its recorder to sync an entry as soon as it is written,
   so what waits at any moment is what was appended since the syncs now running began.
