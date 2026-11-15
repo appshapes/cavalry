@@ -54,7 +54,8 @@ use cavalry_shm::counters::generated::{
     CLUSTER_LEADERSHIP_TERM_ID, CLUSTER_LOG_IMAGES_LOST, CLUSTER_LOG_RECORDINGS_FORGOTTEN,
     CLUSTER_LOG_RECORDINGS_UNSYNCED, CLUSTER_LOG_RECORDINGS_UNWRITTEN,
     CLUSTER_LOG_REPLICATIONS_UNAVAILABLE, CLUSTER_MESSAGES_REJECTED, CLUSTER_REPLIES_STALE,
-    CLUSTER_ROLE, CLUSTER_SNAPSHOTS_FAILED, CLUSTER_TRUNCATIONS_REFUSED,
+    CLUSTER_ROLE, CLUSTER_SNAPSHOTS_FAILED, CLUSTER_SNAPSHOTS_PASSED_OVER,
+    CLUSTER_TRUNCATIONS_REFUSED,
 };
 use cavalry_shm::counters::{CounterId, CountersError, CountersReader, Scope};
 
@@ -1004,13 +1005,16 @@ const DOC_CLUSTER: &str = "docs/how-to/run-a-cluster.md#when-it-does-not-work";
 /// doctor sentence that says what to do when it is above 0: each is reported by its
 /// name with that sentence, as a static counter is (`counters_checks`), since a client
 /// counter is not in that loop. A peer of another version shows in the first, a leader
-/// gone silent in the second, the leader's log stream lost in the third. The last
+/// gone silent in the second, the leader's log stream lost in the third. The next
 /// three are of the two files a member writes of its log's recordings: the one for
 /// its service in its driver directory that it could not write (ADR 0103), the list
 /// in its log directory that it could not write or sync, so that a recording stayed
-/// out of its log, and a recording of its log that it forgot, after which it does
-/// not start again on its log directory (ADR 0108).
-const MEMBER_COUNTS: [CounterId; 7] = [
+/// out of its log, and a recording of its log that it forgot, after which it starts
+/// again on its log directory only from a snapshot at or above where its log then
+/// begins (ADR 0108, ADR 0130). The last two are of its snapshots: one that it gave
+/// up while it ran (ADR 0129), and one that its start could not read and passed
+/// over for an older one, or for none (ADR 0130).
+const MEMBER_COUNTS: [CounterId; 8] = [
     CLUSTER_MESSAGES_REJECTED,
     CLUSTER_LEADER_HEARTBEAT_TIMEOUTS,
     CLUSTER_LOG_IMAGES_LOST,
@@ -1018,6 +1022,7 @@ const MEMBER_COUNTS: [CounterId; 7] = [
     CLUSTER_LOG_RECORDINGS_UNSYNCED,
     CLUSTER_LOG_RECORDINGS_FORGOTTEN,
     CLUSTER_SNAPSHOTS_FAILED,
+    CLUSTER_SNAPSHOTS_PASSED_OVER,
 ];
 
 /// Where a cluster session's findings are explained.
@@ -6744,6 +6749,48 @@ mod tests {
         );
         let found: Vec<&str> = findings.iter().map(|finding| finding.check).collect();
         assert_eq!(found, ["cluster-member"], "{findings:?}");
+
+        // A member whose start passed a snapshot over: the count says that nothing
+        // committed is lost and what became of the snapshot's recording, and at 0 it
+        // is not reported (ADR 0130).
+        let (_, findings) = cluster_findings(
+            "cluster-snapshots-passed-over",
+            0,
+            &[
+                (CLUSTER_ROLE, 0),
+                (CLUSTER_ELECTION_STATE, 17),
+                (CLUSTER_LEADERSHIP_TERM_ID, 3),
+                (CLUSTER_SNAPSHOTS_PASSED_OVER, 1),
+            ],
+        );
+        let found: Vec<&str> = findings.iter().map(|finding| finding.check).collect();
+        assert_eq!(found, ["cluster-member", "cluster.snapshots_passed_over"]);
+        let finding = &findings[1];
+        assert_eq!(finding.level, Level::Warn);
+        assert_eq!(finding.doc, DOC_CLUSTER);
+        assert!(
+            finding.message.starts_with(
+                "member 0's cluster.snapshots_passed_over is 1: This member started from an \
+                 older snapshot than its newest, or from none"
+            ),
+            "{}",
+            finding.message
+        );
+        for holds in ["Nothing committed is lost", "recording.invalidated"] {
+            assert!(finding.message.contains(holds), "{}", finding.message);
+        }
+        let (_, findings) = cluster_findings(
+            "cluster-snapshots-passed-over-none",
+            0,
+            &[
+                (CLUSTER_ROLE, 0),
+                (CLUSTER_ELECTION_STATE, 17),
+                (CLUSTER_LEADERSHIP_TERM_ID, 3),
+                (CLUSTER_SNAPSHOTS_PASSED_OVER, 0),
+            ],
+        );
+        let found: Vec<&str> = findings.iter().map(|finding| finding.check).collect();
+        assert_eq!(found, ["cluster-member"], "{findings:?}");
     }
 
     #[test]
@@ -6768,7 +6815,7 @@ mod tests {
 
         // A follower that follows: the note alone, with who it is and what it knows.
         let (checks, findings) = cluster_findings("cluster-follower", 1, &follower);
-        assert_eq!(checks, 12);
+        assert_eq!(checks, 13);
         assert_eq!(findings.len(), 1, "{findings:?}");
         assert_eq!(findings[0].check, "cluster-member");
         assert_eq!(findings[0].level, Level::Note);
@@ -6945,7 +6992,7 @@ mod tests {
         let dir = TestDir::new("cluster-session-member");
         let reader = session_file(&dir, 7, 2, Some((1, &follower)));
         let mut findings = Vec::new();
-        assert_eq!(cluster_checks(&reader, true, None, &mut findings), 13);
+        assert_eq!(cluster_checks(&reader, true, None, &mut findings), 14);
         let found: Vec<&str> = findings.iter().map(|finding| finding.check).collect();
         assert_eq!(
             found,

@@ -91,10 +91,11 @@ commit path runs per message.
   record of terms that holds no term, and a catalog that holds anything
   else in place of a listed recording refuse the start, with what to do: a member
   that started with a shorter log than it reported could vote for a candidate that
-  lacks a committed entry. So does a log the member forgot a recording of, one
-  whose list begins above position 0 or names more than 1,024 recordings that hold
-  bytes (`RaftError::LogForgotten`): a start replays the log from position 0, and
-  this version takes no snapshot. The module counts what its list did in four
+  lacks a committed entry. So does a log that does not reach back to where the
+  start reads it from (`RaftError::LogForgotten`): a start reads the log from the
+  position of the newest snapshot it can read, or from position 0 with none, so a
+  list that begins above that position, or whose newest 1,024 recordings do, is a
+  log the member cannot start on (ADR 0130). The module counts what its list did in four
   counters: `cluster.log_recordings_listed`, `cluster.log_recordings_unsynced`,
   `cluster.log_recordings_forgotten` and `cluster.truncations_finished`. It does
   not tell a member whose host lost power from one whose process was ended, and
@@ -277,8 +278,29 @@ commit path runs per message.
   0128). Each step is one duty cycle's work: the longest cycle while a snapshot was
   taken measured 25.44 ms at the most over 50 snapshots on a laptop, and 19.71 ms
   at the median. A step that fails is counted in
-  `cluster.snapshots_failed`, and the member goes on with its log whole. A member
-  does not start from a snapshot yet: it still reads its log from position 0.
+  `cluster.snapshots_failed`, and the member goes on with its log whole.
+- Starts a member from its newest snapshot (`spec/cluster.md`, "A member's start";
+  ADR 0130). The start reads the member's snapshots file, plays the newest
+  snapshot of the consensus module back through the driver, and takes the sessions
+  and the next session id from it; a snapshot whose recording is gone, or does not
+  hold what the list names, or holds sessions the member's table does not take, is
+  passed over for the one before it, counted in `cluster.snapshots_passed_over`: a
+  member never begins at a snapshot's position with another state than that
+  snapshot's. The member's read of its log then begins at the
+  snapshot's position, `cluster.snapshot_start_position`, and not at 0. So the log
+  need be whole from that position alone: a member starts though it forgot the
+  recordings below it, though they were purged, and though its log is in more than
+  1,024 recordings. With no snapshot it starts as before, from position 0. A
+  purge counts as no truncation in `cluster.truncations_finished`, which counts
+  the list's last recordings gone. Those end the log where the ones left end only
+  while that is at or above the snapshot's position: a truncation never cuts below
+  a commit position, so a log they leave ending below it is refused,
+  `ListedFound::EndsBelowSnapshot`, and not taken as shorter than the member
+  reported. A log that the catalog holds whole and that ends below the snapshot's
+  position is refused as well, `RaftError::LogShort`: its end was cut, or the
+  directory is older than the snapshot. A service still reads its member's log
+  from position 0, so the log below a snapshot is purged only where no service
+  reads it from its start.
 - Holds a member's sessions, the member's side of the session protocol
   (`spec/cluster.md`, "Sessions"; ADR 0115): `Sessions` is plain state, as `Consensus`
   is. Its caller hands it each message of the ingress stream, each entry of the

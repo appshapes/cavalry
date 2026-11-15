@@ -1471,8 +1471,8 @@ id = 146
 name = "cluster.log_recordings_forgotten"
 kind = "counter"
 scope = "client"
-doc = "Recordings of its log that one cluster member forgot: it had stopped a recording while its table already held 1,024 stopped ones, and the oldest left the table and the list in the log recordings file, whose floor position rose to where the oldest one left begins. The recording stays in the driver's catalog. The member replays nothing below that position to another member or to a service from then on, and it does not start again on its log directory, since a start replays the log from position 0 (spec/cluster.md, A member's start, and Counters; ADR 0091, ADR 0108); key: member id (i32), little-endian; label text: the member id in decimal."
-doctor = "This member's log is in more recordings than a member keeps, 1,024: it has joined a log, replicated a replay or led a term that many times on this log directory. It runs on. A member that asks it for the log below the oldest recording it kept receives none and counts cluster.log_replications_unavailable when its wait ends, a service that asks is refused by start replay with code 23, and this member will not start again on this log directory: once it stops it stays out, as a member whose log directory was lost does. The cluster goes on while a quorum of the others runs. To have every member again, start the cluster again as a new cluster, every member on a new log directory; never start this member alone on a new one."
+doc = "Recordings of its log that one cluster member forgot: it had stopped a recording while its table already held 1,024 stopped ones, and the oldest left the table and the list in the log recordings file, whose floor position rose to where the oldest one left begins. The recording stays in the driver's catalog. The member replays nothing below that position to another member or to a service from then on, and it starts again on its log directory only from a snapshot of a position at or above where its log then begins, since a start reads the log from its snapshot's position, or from position 0 with none (spec/cluster.md, A member's start, and Counters; ADR 0091, ADR 0108, ADR 0130); key: member id (i32), little-endian; label text: the member id in decimal."
+doctor = "This member's log is in more recordings than a member keeps, 1,024: it has joined a log, replicated a replay or led a term that many times on this log directory. It runs on. A member that asks it for the log below the oldest recording it kept receives none and counts cluster.log_replications_unavailable when its wait ends, and a service that asks is refused by start replay with code 23. This member starts again on this log directory from its newest snapshot when that snapshot is of a position at or above where its log now begins, which is the usual case: a leader asks for a snapshot every 256 MiB of log. If cluster.snapshot_position on this member is -1, or far behind the other members', it has no such snapshot, and this member will not start again on this log directory: once it stops it stays out, as a member whose log directory was lost does, and the cluster goes on while a quorum of the others runs. To have every member again then, start the cluster again as a new cluster, every member on a new log directory; never start this member alone on a new one."
 
 [[counter]]
 id = 147
@@ -1525,7 +1525,7 @@ id = 151
 name = "cluster.sessions_opened"
 kind = "counter"
 scope = "client"
-doc = "Sessions opened on one cluster member by a committed session open event of the log: on the leader, the session it accepted, which it then sends the ok event; on a follower, the same session, which it holds for the day it leads (spec/cluster.md, Sessions). key: member id (i32), little-endian; label text: the member id in decimal."
+doc = "Sessions opened on one cluster member by a committed session open event of the log: on the leader, the session it accepted, which it then sends the ok event; on a follower, the same session, which it holds for the day it leads (spec/cluster.md, Sessions). A session that the member's start took open from a snapshot is counted too, so that this count less cluster.sessions_closed is cluster.sessions (ADR 0130). key: member id (i32), little-endian; label text: the member id in decimal."
 doctor = ""
 
 [[counter]]
@@ -1645,6 +1645,22 @@ kind = "counter"
 scope = "client"
 doc = "Snapshots of its consensus module one cluster member gave up: the driver refused the snapshot's recording or its stop, the recording was of another session than the member's publication, the publication took no message or the recording's stop was not announced within a second, the recording stopped short of what was written, a second snapshot was asked for while one was being taken, or the list could not be written. A publication on the snapshot stream that the driver refuses at the member's start is no snapshot that failed: the member does not start. The member's log is whole and the member goes on; the next cluster action asks again (spec/cluster.md, Snapshots). key: member id (i32), little-endian; label text: the member id in decimal."
 doctor = "This member gave up a snapshot. Its log is whole and nothing committed is lost. Check the driver's counters on this host: driver.registry_full for a recording the driver had no room for, recording.start_failed for a recording whose files could not be created, recording.write_failed for a disk that refuses a write or a sync, and free space in the log directory. Where one of them is above 0, this member took no snapshot where the others did, and a start of it reads more of the log than theirs. Where none is, either a step took the driver longer than a second, as on a loaded host or a slow disk, or a second snapshot was asked for while one was being taken: cluster.snapshot_actions on the leader then rose twice within a second, every member counts one snapshot given up, and each still takes the first. The next snapshot is tried by itself."
+
+[[counter]]
+id = 165
+name = "cluster.snapshot_start_position"
+kind = "gauge"
+scope = "client"
+doc = "The log position of the snapshot that one cluster member's start took its consensus module's state from, which is where the member began to read its log: every entry below it was in the snapshot. -1 when the start took no snapshot and the member read its log from position 0. It does not change while the member runs (spec/cluster.md, A member's start; ADR 0130). key: member id (i32), little-endian; label text: the member id in decimal."
+doctor = "It says how much of its log this member did not have to read when it started. -1 beside a cluster.snapshot_position above 0 on the other members is a member that started before the cluster took its first snapshot, or one whose snapshots could not be read: see cluster.snapshots_passed_over."
+
+[[counter]]
+id = 166
+name = "cluster.snapshots_passed_over"
+kind = "counter"
+scope = "client"
+doc = "Snapshots that one cluster member's start found listed in its snapshots file and did not start from, newer than the one it took: the catalog did not hold the snapshot's recording, stopped and with bytes, on the snapshot stream; the driver did not play it back within 5 s; or the recording did not hold the snapshot the list names, with sessions the member's table takes. The start took the next older one in the list, or none (spec/cluster.md, A member's start; ADR 0130). key: member id (i32), little-endian; label text: the member id in decimal."
+doctor = "This member started from an older snapshot than its newest, or from none, and read more of its log than it need have. Nothing committed is lost. A snapshot's recording was purged or is damaged in this member's log directory, or this host was too loaded to play it back within 5 s: recording.invalidated on this driver counts a recording the driver found damaged. If the member did not start at all, its own refusal says why."
 
 # A cluster member's role (spec/cluster.md, "Roles and the election"; ADR 0052, feature
 # 3). A member is a candidate (ADR 0077, ADR 0081) from its nomination until it

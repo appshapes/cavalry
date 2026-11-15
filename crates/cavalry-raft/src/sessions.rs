@@ -112,7 +112,8 @@ pub struct SessionCounts {
     /// began a session's connection.
     pub accepted: u64,
     /// `cluster.sessions_opened`: a session opened by a committed session open event,
-    /// on the leader and on every follower.
+    /// on the leader and on every follower, or taken open from the snapshot the
+    /// member started from.
     pub opened: u64,
     /// `cluster.sessions_closed`: a session closed by a committed session close
     /// event, on the leader and on every follower.
@@ -381,6 +382,51 @@ impl Sessions {
     /// log has given.
     pub const fn committed_next_session_id(&self) -> i64 {
         self.committed_next_session_id
+    }
+
+    /// Opens `session` in the table of a member that starts from a snapshot
+    /// (`spec/cluster.md`, "A member's start"; ADR 0130): as its committed session
+    /// open event opened it on a follower, with no publication and nothing owed, and
+    /// its timeout counted from `clock`. It is counted as that event's opening is.
+    /// `false`, and nothing done, when the table is full, the id is open already, or
+    /// the channel is longer than a session holds: no snapshot of this version
+    /// holds such a session, and a start passes over a snapshot that does.
+    pub fn restore_session(&mut self, clock: Clock, session: OpenSession<'_>) -> bool {
+        if self.is_open(session.id) {
+            return false;
+        }
+        let Some(index) = self.free_session() else {
+            return false;
+        };
+        let Some(slot) = self.sessions.get_mut(index) else {
+            return false;
+        };
+        *slot = Session::FREE;
+        if !slot.set_channel(session.response_channel) {
+            return false;
+        }
+        slot.id = session.id;
+        slot.correlation_id = session.correlation_id;
+        slot.state = SessionState::Open;
+        slot.since_ns = clock.now_ns;
+        slot.activity_ns = clock.now_ns;
+        slot.opened_position = session.opened_log_position;
+        self.next_session_id = self.next_session_id.max(session.id.saturating_add(1));
+        self.committed_next_session_id = self
+            .committed_next_session_id
+            .max(session.id.saturating_add(1));
+        self.counts.opened = self.counts.opened.saturating_add(1);
+        true
+    }
+
+    /// Takes the next session id from a snapshot's consensus module, which is the
+    /// log's at the snapshot's position (`spec/cluster.md`, "Consensus module,
+    /// template 105"; ADR 0129): both the id the next session is given and the one
+    /// the member's next snapshot writes begin there. Neither is lowered: an id a
+    /// restored session holds is below it already.
+    pub fn restore_next_session_id(&mut self, next_session_id: i64) {
+        self.next_session_id = self.next_session_id.max(next_session_id);
+        self.committed_next_session_id = self.committed_next_session_id.max(next_session_id);
     }
 
     /// Whether the session with `id` is open.
