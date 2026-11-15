@@ -6,6 +6,7 @@ under `docs/` is listed here; `just lint-docs` fails on one that is not.
 # Tutorials
 
 - [Publish and subscribe in ten minutes](tutorials/publish-and-subscribe.md)
+- [Run a cluster in ten minutes](tutorials/run-a-cluster.md)
 
 # Explanation
 
@@ -174,6 +175,7 @@ under `docs/` is listed here; `just lint-docs` fails on one that is not.
 - [0123. Take the C ABI to version 5 with the cluster service, answered from inside the one fragment handler](decisions/0123-take-the-c-abi-to-version-5-with-the-cluster-service-answered-from-inside-the-one-fragment-handler.md)
 - [0124. Give each client a session object and a service object, whose handler's failure aborts its entry](decisions/0124-give-each-client-a-session-object-and-a-service-object-whose-handlers-failure-aborts-its-entry.md)
 - [0127. Measure a claim row with its subscriber held behind the publisher](decisions/0127-measure-a-claim-row-with-its-subscriber-held-behind-the-publisher.md)
+- [0126. Run the cluster tutorial's path in just quickstart](decisions/0126-run-the-cluster-tutorials-path-in-just-quickstart.md)
 - [0128. List a member's snapshots in a file of their own in its log directory](decisions/0128-list-a-members-snapshots-in-a-file-of-their-own-in-its-log-directory.md)
 - [0129. Snapshot a member's sessions when its read of its log reaches the leader's action](decisions/0129-snapshot-a-members-sessions-when-its-read-of-its-log-reaches-the-leaders-action.md)
 - [0130. Start a member from its newest snapshot, and hold its log to that position alone](decisions/0130-start-a-member-from-its-newest-snapshot-and-hold-its-log-to-that-position-alone.md)

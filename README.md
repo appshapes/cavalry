@@ -37,6 +37,7 @@ Not yet: Raft, and a release on crates.io
 | Ask the agent to make a change | [`docs/how-to/ask-the-agent.md`](docs/how-to/ask-the-agent.md) |
 | Implement a feature, from work item to commit | [`docs/how-to/implement-a-feature.md`](docs/how-to/implement-a-feature.md) |
 | Publish and subscribe, in ten minutes | [`docs/tutorials/publish-and-subscribe.md`](docs/tutorials/publish-and-subscribe.md) |
+| Run a cluster of three members with a service and a client, in ten minutes | [`docs/tutorials/run-a-cluster.md`](docs/tutorials/run-a-cluster.md) |
 | Get the week's changes by email, or send them | [`docs/how-to/send-the-release-notes.md`](docs/how-to/send-the-release-notes.md) |
 | Read the documentation as a book | `just docs`, then open `target/book/index.html` |
 
