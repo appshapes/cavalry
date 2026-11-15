@@ -838,8 +838,10 @@ impl SnapshotReader {
 
 /// Plays a service's snapshot back whole, through its member's driver, and reads it:
 /// `None` when the driver refuses the replay for its recording, plays nothing for the
-/// service snapshot load timeout, or the recording holds no service's snapshot. Any
-/// other refusal of the driver's is the error.
+/// service snapshot load timeout, ends the replay before the recording's end, at a
+/// frame that failed, at another client's stop or with no subscriber, or the
+/// recording holds no service's snapshot. Any other refusal of the driver's is the
+/// error.
 fn read_snapshot(client: &mut Cavalry, recording_id: i64) -> Result<Option<Snapshot>, ClientError> {
     // The subscription first: a replay with no subscriber does not move. And on a
     // stream of its own: on the service log stream a service that is not polling
@@ -1154,8 +1156,10 @@ impl ClusterService {
     ///
     /// [`Restored::FromStart`] says that the polls read from position 0: the member
     /// lists no snapshot of a service, or the one it lists could not be taken, its
-    /// recording gone or not played back within 5 s of its last message. That one
-    /// is counted in `cluster.service_snapshots_passed_over`. A member whose log no
+    /// recording gone, not played back within 5 s of its last message, or its
+    /// replay ended before the recording's end, at a frame that failed, at another
+    /// client's stop or with no subscriber. That one is counted in
+    /// `cluster.service_snapshots_passed_over`. A member whose log no
     /// longer begins at 0 then refuses the service its replay, which the poll
     /// reports. [`Restored::NoMember`] says that the driver hosts no member with a
     /// log yet, and the call is made again.

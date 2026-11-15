@@ -494,7 +494,8 @@ committed once a quorum, two of three, has it on disk.
   position 0. Nothing committed is lost. If this member's log no longer begins at
   0, the service's own error says that its replay was refused, and the service
   does not run. Start the service once more first: a snapshot that the driver did
-  not play back within 5 s, as on a loaded host, is one the next start reads. When
+  not play back within 5 s, as on a loaded host, is one the next start reads, and
+  so is one whose replay another client stopped before the recording's end. When
   it is passed over again, the snapshot's recording is gone from the log
   directory, or the driver found it damaged, which `recording.invalidated` on this
   member's driver counts: check the log directory's device. The service takes its
