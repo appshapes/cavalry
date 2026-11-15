@@ -401,10 +401,17 @@ holds, and it is one a start may begin from once that write is synced. The entri
 of one service id are in the order of their log positions, each above the one
 before, and their terms never fall; the entries of two service ids have no order
 between them. The newest snapshot of a service id is the last entry that has it. A
-list names at most 64 snapshots, the newest. A write that would add a sixty-fifth
-leaves out the first entry of the list, the oldest: the member forgets that
-snapshot, and its recording stays in the catalog until a command purges it
-(`spec/client-protocol.md`, "Commands", purge recording). An entry's recording is
+list names at most 64 snapshots. A write that would add a sixty-fifth leaves one
+entry out: the first entry whose service id a later entry of the new list has, the
+new snapshot's among them. So the newest snapshot of every service id the list
+names stays in it, whichever service id the others are of, and a state whose
+snapshots have stopped keeps the one it has (ADR 0133). A list of 64 entries of 64
+service ids, to which a sixty-fifth service id is added, has no such entry, and
+the write leaves out the first. The member forgets the snapshot left out, and its
+recording stays in the catalog until a command purges it
+(`spec/client-protocol.md`, "Commands", purge recording). Which entry a writer
+leaves out is the writer's rule, and a reader reads a list of either rule as the
+checks of this page have it. An entry's recording is
 not checked against the catalog by a reader of this file: whether the catalog still
 holds it, stopped and whole, is the check of the member that starts from it.
 
@@ -621,7 +628,9 @@ whatever the terms file holds. A file shorter than its header, or whose magic is
 zero while each slot either fails its checksum or is the list a creation writes,
 with no entry and sequence 0, was torn while the module created it, and the module
 writes it again; a zero magic over any other slot whose checksum matches is damage,
-refused with `not-ready`. A snapshot is listed by one write and one sync, and a
+refused with `not-ready`, or with `too-short` when the file is also shorter than
+its 6240 bytes, the check that comes first ("What a reader rejects"). A snapshot is
+listed by one write and one sync, and a
 snapshot that a reader would refuse in the list is not written: it is the writer's
 fault, `list`, and the file is left as it was. The recovery pass of this section
 leaves the file alone, as it leaves the two others. A member lists a snapshot of its

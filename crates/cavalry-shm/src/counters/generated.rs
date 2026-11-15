@@ -518,6 +518,18 @@ pub const CLUSTER_SERVICE_SNAPSHOTS_TAKEN: CounterId = CounterId(170);
 /// `cluster.service_snapshots_failed`, a client counter: Snapshots the service beside one cluster member gave up: the driver refused its publication or its recording, the recording was of another session, a publication took no message or the recording's stop was not announced within a second, the recording stopped short of what was written, or the consensus module stream did not take the service ack within a second. The service reports each to its program and reads on. The service adds the counter at its first snapshot (spec/cluster.md, Snapshots; ADR 0131). key: member id (i32), little-endian; label text: the member id in decimal.
 pub const CLUSTER_SERVICE_SNAPSHOTS_FAILED: CounterId = CounterId(171);
 
+/// `cluster.service_snapshot_recording_id`, a client gauge: The id, in the catalog of the member's driver, of the recording of the newest snapshot of a service that one cluster member lists; -1 while it lists none. A service whose program asks it to start from a snapshot reads this counter and plays that recording back. The member stores it before it names a recording of its log in cluster.log_recording_id, so a service that has found the member's log reads no counter's first 0 here (spec/cluster.md, A service's start; ADR 0132). key: member id (i32), little-endian; label text: the member id in decimal.
+pub const CLUSTER_SERVICE_SNAPSHOT_RECORDING_ID: CounterId = CounterId(172);
+
+/// `cluster.log_purge_position`, a client gauge: The position one cluster member's log is needed from: the lower of the log positions of the newest snapshot of its consensus module and of the newest snapshot of a service that it lists; 0 while it lists no snapshot of one of the two. The member's own start reads its log from the first, and a service whose program calls ClusterService::restore at its start from the second, so neither reads below this position. The member cannot tell whether its service's program calls it: a service that takes snapshots and never calls it reads the log from position 0 (spec/cluster.md, A member's start; ADR 0132). key: member id (i32), little-endian; label text: the member id in decimal.
+pub const CLUSTER_LOG_PURGE_POSITION: CounterId = CounterId(173);
+
+/// `cluster.service_snapshot_start_position`, a client gauge: The log position of the snapshot that the service beside one cluster member started from, where its read of the log began; -1 when its member named a snapshot and the service passed it over, and read the log from position 0. The service adds the counter when its program asks it to start from a snapshot and the member names one (spec/cluster.md, A service's start; ADR 0132). key: member id (i32), little-endian; label text: the member id in decimal.
+pub const CLUSTER_SERVICE_SNAPSHOT_START_POSITION: CounterId = CounterId(174);
+
+/// `cluster.service_snapshots_passed_over`, a client counter: Snapshots that the service beside one cluster member was told of at its start and did not start from: the driver refused the replay for the snapshot's recording, which it does not hold as a valid recording, error code 21, or holds no bytes of where the replay starts, code 23; played nothing of it for 5 s; or the recording did not hold a service's snapshot with sessions the service's table takes. The service read the log from position 0. Any other refusal, a registry at its bound, code 10, among them, is the start's error and is not counted here: the service has not started, and its program asks again. The service adds the counter with cluster.service_snapshot_start_position (spec/cluster.md, A service's start; ADR 0132). key: member id (i32), little-endian; label text: the member id in decimal.
+pub const CLUSTER_SERVICE_SNAPSHOTS_PASSED_OVER: CounterId = CounterId(175);
+
 /// Every entry of `counters.toml`, in the file's order.
 pub const COUNTERS: &[CounterDef] = &[
     CounterDef {
@@ -1887,5 +1899,37 @@ pub const COUNTERS: &[CounterDef] = &[
         scope: Scope::Client,
         doc: "Snapshots the service beside one cluster member gave up: the driver refused its publication or its recording, the recording was of another session, a publication took no message or the recording's stop was not announced within a second, the recording stopped short of what was written, or the consensus module stream did not take the service ack within a second. The service reports each to its program and reads on. The service adds the counter at its first snapshot (spec/cluster.md, Snapshots; ADR 0131). key: member id (i32), little-endian; label text: the member id in decimal.",
         doctor: "The service beside this member took no snapshot where its program gave its state. Nothing committed is lost, and the service tries the next snapshot by itself. Check that the member runs: a service whose member is stopped has nobody to tell. Then check the driver's counters on this host: driver.registry_full for a recording or a publication the driver had no room for, recording.start_failed for a recording whose files could not be created, recording.write_failed for a disk that refuses a write or a sync, and free space in the log directory.",
+    },
+    CounterDef {
+        id: CLUSTER_SERVICE_SNAPSHOT_RECORDING_ID,
+        name: "cluster.service_snapshot_recording_id",
+        kind: Kind::Gauge,
+        scope: Scope::Client,
+        doc: "The id, in the catalog of the member's driver, of the recording of the newest snapshot of a service that one cluster member lists; -1 while it lists none. A service whose program asks it to start from a snapshot reads this counter and plays that recording back. The member stores it before it names a recording of its log in cluster.log_recording_id, so a service that has found the member's log reads no counter's first 0 here (spec/cluster.md, A service's start; ADR 0132). key: member id (i32), little-endian; label text: the member id in decimal.",
+        doctor: "",
+    },
+    CounterDef {
+        id: CLUSTER_LOG_PURGE_POSITION,
+        name: "cluster.log_purge_position",
+        kind: Kind::Gauge,
+        scope: Scope::Client,
+        doc: "The position one cluster member's log is needed from: the lower of the log positions of the newest snapshot of its consensus module and of the newest snapshot of a service that it lists; 0 while it lists no snapshot of one of the two. The member's own start reads its log from the first, and a service whose program calls ClusterService::restore at its start from the second, so neither reads below this position. The member cannot tell whether its service's program calls it: a service that takes snapshots and never calls it reads the log from position 0 (spec/cluster.md, A member's start; ADR 0132). key: member id (i32), little-endian; label text: the member id in decimal.",
+        doctor: "A recording of this member's log that stopped at or below this position may be purged while the member is stopped, when the program of the service beside it calls ClusterService::restore at its start; one that reaches above it may not. A service whose program never calls it reads the log from position 0, and beside it nothing may be purged, whatever this position. 0 beside a cluster.snapshot_position above 0 is a member whose service takes no snapshot: its service reads the log from position 0, and nothing may be purged.",
+    },
+    CounterDef {
+        id: CLUSTER_SERVICE_SNAPSHOT_START_POSITION,
+        name: "cluster.service_snapshot_start_position",
+        kind: Kind::Gauge,
+        scope: Scope::Client,
+        doc: "The log position of the snapshot that the service beside one cluster member started from, where its read of the log began; -1 when its member named a snapshot and the service passed it over, and read the log from position 0. The service adds the counter when its program asks it to start from a snapshot and the member names one (spec/cluster.md, A service's start; ADR 0132). key: member id (i32), little-endian; label text: the member id in decimal.",
+        doctor: "",
+    },
+    CounterDef {
+        id: CLUSTER_SERVICE_SNAPSHOTS_PASSED_OVER,
+        name: "cluster.service_snapshots_passed_over",
+        kind: Kind::Counter,
+        scope: Scope::Client,
+        doc: "Snapshots that the service beside one cluster member was told of at its start and did not start from: the driver refused the replay for the snapshot's recording, which it does not hold as a valid recording, error code 21, or holds no bytes of where the replay starts, code 23; played nothing of it for 5 s; or the recording did not hold a service's snapshot with sessions the service's table takes. The service read the log from position 0. Any other refusal, a registry at its bound, code 10, among them, is the start's error and is not counted here: the service has not started, and its program asks again. The service adds the counter with cluster.service_snapshot_start_position (spec/cluster.md, A service's start; ADR 0132). key: member id (i32), little-endian; label text: the member id in decimal.",
+        doctor: "The service beside this member started from position 0 and not from its snapshot, and read the whole log. Nothing committed is lost. If this member's log no longer begins at 0, the service's own error says that its replay was refused: the snapshot's recording was purged or is damaged in this member's log directory, which recording.invalidated on this driver counts, or this host was too loaded to play it back. Start the service once more first.",
     },
 ];

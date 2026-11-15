@@ -8,8 +8,7 @@
   the newest one is, and `cavalry doctor` reports a snapshot that a service gave up,
   `cluster.service_snapshots_failed`, and one that a member could not list,
   `cluster.service_acks_rejected`. A program that takes no snapshots changes
-  nothing. A service does not start from its snapshot yet, and a service written
-  in Python, Node, Go, the JVM or .NET takes none yet
+  nothing. A service written in Python, Node, Go, the JVM or .NET takes none yet
   ([ADR 0131](docs/decisions/0131-have-a-service-write-its-own-snapshot-and-its-member-list-it.md);
   [the cluster protocol](docs/reference/cluster.md)).
 - `cavalry-client`: `ClusterError` gains `NoSnapshotDue`, `SnapshotTooLong` and

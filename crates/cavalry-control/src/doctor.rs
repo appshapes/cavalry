@@ -55,7 +55,8 @@ use cavalry_shm::counters::generated::{
     CLUSTER_LOG_RECORDINGS_UNSYNCED, CLUSTER_LOG_RECORDINGS_UNWRITTEN,
     CLUSTER_LOG_REPLICATIONS_UNAVAILABLE, CLUSTER_MESSAGES_REJECTED, CLUSTER_REPLIES_STALE,
     CLUSTER_ROLE, CLUSTER_SERVICE_ACKS_REJECTED, CLUSTER_SERVICE_SNAPSHOTS_FAILED,
-    CLUSTER_SNAPSHOTS_FAILED, CLUSTER_SNAPSHOTS_PASSED_OVER, CLUSTER_TRUNCATIONS_REFUSED,
+    CLUSTER_SERVICE_SNAPSHOTS_PASSED_OVER, CLUSTER_SNAPSHOTS_FAILED, CLUSTER_SNAPSHOTS_PASSED_OVER,
+    CLUSTER_TRUNCATIONS_REFUSED,
 };
 use cavalry_shm::counters::{CounterId, CountersError, CountersReader, Scope};
 
@@ -1013,11 +1014,12 @@ const DOC_CLUSTER: &str = "docs/how-to/run-a-cluster.md#when-it-does-not-work";
 /// again on its log directory only from a snapshot at or above where its log then
 /// begins (ADR 0108, ADR 0130). The next two are of its snapshots: one that it gave
 /// up while it ran (ADR 0129), and one that its start could not read and passed
-/// over for an older one, or for none (ADR 0130). The last two are of the snapshots
-/// of the service beside it: a service ack for which the member listed nothing, and
-/// a snapshot the service gave up, which the service counts under its member's id
-/// (ADR 0131).
-const MEMBER_COUNTS: [CounterId; 10] = [
+/// over for an older one, or for none (ADR 0130). The last three are of the
+/// snapshots of the service beside it: a service ack for which the member listed
+/// nothing, a snapshot the service gave up (ADR 0131), and a snapshot the service
+/// was told of at its start and passed over (ADR 0132). The service counts the
+/// last two under its member's id.
+const MEMBER_COUNTS: [CounterId; 11] = [
     CLUSTER_MESSAGES_REJECTED,
     CLUSTER_LEADER_HEARTBEAT_TIMEOUTS,
     CLUSTER_LOG_IMAGES_LOST,
@@ -1028,6 +1030,7 @@ const MEMBER_COUNTS: [CounterId; 10] = [
     CLUSTER_SNAPSHOTS_PASSED_OVER,
     CLUSTER_SERVICE_ACKS_REJECTED,
     CLUSTER_SERVICE_SNAPSHOTS_FAILED,
+    CLUSTER_SERVICE_SNAPSHOTS_PASSED_OVER,
 ];
 
 /// Where a cluster session's findings are explained.
@@ -6809,6 +6812,7 @@ mod tests {
                 (CLUSTER_LEADERSHIP_TERM_ID, 3),
                 (CLUSTER_SERVICE_ACKS_REJECTED, 3),
                 (CLUSTER_SERVICE_SNAPSHOTS_FAILED, 1),
+                (CLUSTER_SERVICE_SNAPSHOTS_PASSED_OVER, 1),
             ],
         );
         let found: Vec<&str> = findings.iter().map(|finding| finding.check).collect();
@@ -6817,7 +6821,8 @@ mod tests {
             [
                 "cluster-member",
                 "cluster.service_acks_rejected",
-                "cluster.service_snapshots_failed"
+                "cluster.service_snapshots_failed",
+                "cluster.service_snapshots_passed_over"
             ]
         );
         for (finding, begins, holds) in [
@@ -6832,6 +6837,12 @@ mod tests {
                 "member 0's cluster.service_snapshots_failed is 1: The service beside this \
                  member took no snapshot where its program gave its state",
                 "Check that the member runs",
+            ),
+            (
+                &findings[3],
+                "member 0's cluster.service_snapshots_passed_over is 1: The service beside \
+                 this member started from position 0 and not from its snapshot",
+                "Start the service once more first",
             ),
         ] {
             assert_eq!(finding.level, Level::Warn);
@@ -6853,6 +6864,7 @@ mod tests {
                 (CLUSTER_LEADERSHIP_TERM_ID, 3),
                 (CLUSTER_SERVICE_ACKS_REJECTED, 0),
                 (CLUSTER_SERVICE_SNAPSHOTS_FAILED, 0),
+                (CLUSTER_SERVICE_SNAPSHOTS_PASSED_OVER, 0),
             ],
         );
         let found: Vec<&str> = findings.iter().map(|finding| finding.check).collect();
@@ -6881,7 +6893,7 @@ mod tests {
 
         // A follower that follows: the note alone, with who it is and what it knows.
         let (checks, findings) = cluster_findings("cluster-follower", 1, &follower);
-        assert_eq!(checks, 15);
+        assert_eq!(checks, 16);
         assert_eq!(findings.len(), 1, "{findings:?}");
         assert_eq!(findings[0].check, "cluster-member");
         assert_eq!(findings[0].level, Level::Note);
@@ -7058,7 +7070,7 @@ mod tests {
         let dir = TestDir::new("cluster-session-member");
         let reader = session_file(&dir, 7, 2, Some((1, &follower)));
         let mut findings = Vec::new();
-        assert_eq!(cluster_checks(&reader, true, None, &mut findings), 16);
+        assert_eq!(cluster_checks(&reader, true, None, &mut findings), 17);
         let found: Vec<&str> = findings.iter().map(|finding| finding.check).collect();
         assert_eq!(
             found,

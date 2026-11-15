@@ -28,5 +28,5 @@ pub use error::{ClientError, Closed};
 pub use publication::{Offer, Publication};
 pub use recording::{ArmedRecording, Recording};
 pub use replay::Replay;
-pub use service::{ClusterService, Committed, Entry, Replies, Reply};
+pub use service::{ClusterService, Committed, Entry, Replies, Reply, Restored};
 pub use subscription::{Fault, Image, MAX_IMAGES, Subscription};

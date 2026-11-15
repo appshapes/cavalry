@@ -49,10 +49,11 @@ use cavalry_proto::cluster::{
 };
 use cavalry_shm::counters::CounterId;
 use cavalry_shm::counters::generated::{
-    CLUSTER_SERVICE_ACKS_REJECTED, CLUSTER_SERVICE_SNAPSHOT_POSITION,
-    CLUSTER_SERVICE_SNAPSHOTS_LISTED, CLUSTER_SNAPSHOT_ACTIONS, CLUSTER_SNAPSHOT_POSITION,
-    CLUSTER_SNAPSHOT_START_POSITION, CLUSTER_SNAPSHOT_STEPS, CLUSTER_SNAPSHOTS_BEGUN,
-    CLUSTER_SNAPSHOTS_FAILED, CLUSTER_SNAPSHOTS_PASSED_OVER, CLUSTER_SNAPSHOTS_TAKEN,
+    CLUSTER_LOG_PURGE_POSITION, CLUSTER_SERVICE_ACKS_REJECTED, CLUSTER_SERVICE_SNAPSHOT_POSITION,
+    CLUSTER_SERVICE_SNAPSHOT_RECORDING_ID, CLUSTER_SERVICE_SNAPSHOTS_LISTED,
+    CLUSTER_SNAPSHOT_ACTIONS, CLUSTER_SNAPSHOT_POSITION, CLUSTER_SNAPSHOT_START_POSITION,
+    CLUSTER_SNAPSHOT_STEPS, CLUSTER_SNAPSHOTS_BEGUN, CLUSTER_SNAPSHOTS_FAILED,
+    CLUSTER_SNAPSHOTS_PASSED_OVER, CLUSTER_SNAPSHOTS_TAKEN,
 };
 
 use crate::sessions::Sessions;
@@ -175,9 +176,9 @@ pub(crate) struct ModuleSnapshot {
     /// and kept for its life: the service acks of the services on its driver.
     acks: Subscription,
     /// The member's counters of its snapshots, each with the value it last stored:
-    /// nine in the order of [`ModuleSnapshot::values`], then the two of its start,
+    /// eleven in the order of [`ModuleSnapshot::values`], then the two of its start,
     /// which are stored once.
-    counters: [(Counter, i64); 11],
+    counters: [(Counter, i64); 13],
 }
 
 /// Why a member's snapshots could not be set up at its start.
@@ -204,9 +205,10 @@ impl ModuleSnapshot {
         let newest = file
             .newest(CONSENSUS_MODULE)
             .map_or(NULL_VALUE, |snapshot| snapshot.log_position);
-        let newest_service = file
-            .newest(SERVICE_ID)
-            .map_or(NULL_VALUE, |snapshot| snapshot.log_position);
+        let newest_service = file.newest(SERVICE_ID);
+        let service_recording = newest_service.map_or(NULL_VALUE, |snapshot| snapshot.recording_id);
+        let purge = purge_position(file.newest(CONSENSUS_MODULE), newest_service);
+        let newest_service = newest_service.map_or(NULL_VALUE, |snapshot| snapshot.log_position);
         let mut add = |id: CounterId, name: &str, value: i64| {
             let counter = client.add_counter(
                 id.0,
@@ -243,6 +245,17 @@ impl ModuleSnapshot {
                     CLUSTER_SERVICE_ACKS_REJECTED,
                     "cluster.service_acks_rejected",
                     0,
+                )?,
+                // What a service's start reads, and what an operator may purge.
+                add(
+                    CLUSTER_SERVICE_SNAPSHOT_RECORDING_ID,
+                    "cluster.service_snapshot_recording_id",
+                    service_recording,
+                )?,
+                add(
+                    CLUSTER_LOG_PURGE_POSITION,
+                    "cluster.log_purge_position",
+                    purge,
                 )?,
                 // What the start did, which never changes while the member runs.
                 add(
@@ -287,10 +300,11 @@ impl ModuleSnapshot {
         })
     }
 
-    /// The values of the member's nine counters of its snapshots that move while it
-    /// runs, in the order they were added: its own gauge and counts, then the
-    /// service's gauge and counts.
-    fn values(&self) -> [i64; 9] {
+    /// The values of the member's eleven counters of its snapshots that move while
+    /// it runs, in the order they were added: its own gauge and counts, the
+    /// service's gauge and counts, the recording a service starts from, and the
+    /// position its log is needed from.
+    fn values(&self) -> [i64; 11] {
         let count = |value: u64| i64::try_from(value).unwrap_or(i64::MAX);
         [
             self.newest_position(),
@@ -302,6 +316,10 @@ impl ModuleSnapshot {
             self.newest_service_position(),
             count(self.service_counts.listed),
             count(self.service_counts.rejected),
+            self.file
+                .newest(SERVICE_ID)
+                .map_or(NULL_VALUE, |snapshot| snapshot.recording_id),
+            self.purge_position(),
         ]
     }
 
@@ -333,6 +351,14 @@ impl ModuleSnapshot {
         self.file
             .newest(CONSENSUS_MODULE)
             .map_or(NULL_VALUE, |snapshot| snapshot.log_position)
+    }
+
+    /// The position the member's log is needed from: `cluster.log_purge_position`.
+    pub(crate) fn purge_position(&self) -> i64 {
+        purge_position(
+            self.file.newest(CONSENSUS_MODULE),
+            self.file.newest(SERVICE_ID),
+        )
     }
 
     /// What the member has counted of the snapshots of the service beside it.
@@ -663,6 +689,20 @@ impl ModuleSnapshot {
     #[cfg(test)]
     pub(crate) fn list_behind(&mut self, snapshot: ListedSnapshot) -> Result<(), SnapshotsError> {
         self.file.list(snapshot)
+    }
+}
+
+/// The position a member's log is needed from (`spec/cluster.md`, "A member's
+/// start"; ADR 0132): the lower of the log positions of the newest snapshot of its
+/// consensus module and of the newest snapshot of a service that it lists, and 0
+/// while it lists no snapshot of one of the two. The member's own start reads its
+/// log from the first, and a service whose program calls `ClusterService::restore`
+/// from the second; a service that never calls it reads from position 0, which
+/// the member cannot know.
+fn purge_position(own: Option<&ListedSnapshot>, service: Option<&ListedSnapshot>) -> i64 {
+    match (own, service) {
+        (Some(own), Some(service)) => own.log_position.min(service.log_position),
+        _ => 0,
     }
 }
 

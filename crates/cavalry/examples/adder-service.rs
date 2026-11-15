@@ -24,7 +24,9 @@
 //! this service prints that it was asked and reads on, and a start of it still
 //! reads the log from its start. A service that takes one calls
 //! [`ClusterService::snapshot`](cavalry::ClusterService::snapshot) after the poll
-//! that ended at the request (`crates/cavalry-client/README.md`).
+//! that ended at the request, and starts from it with
+//! [`ClusterService::restore`](cavalry::ClusterService::restore) before its first
+//! poll (`crates/cavalry-client/README.md`).
 //!
 //! The service's state depends on the log alone: it reads no clock but the entry's
 //! cluster time, draws no random number and reads no file. That is what makes the

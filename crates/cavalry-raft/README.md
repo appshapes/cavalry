@@ -298,9 +298,15 @@ commit path runs per message.
   `ListedFound::EndsBelowSnapshot`, and not taken as shorter than the member
   reported. A log that the catalog holds whole and that ends below the snapshot's
   position is refused as well, `RaftError::LogShort`: its end was cut, or the
-  directory is older than the snapshot. A service still reads its member's log
-  from position 0, so the log below a snapshot is purged only where no service
-  reads it from its start.
+  directory is older than the snapshot. A
+  service reads its member's log from its own snapshot's position, or from
+  position 0, so a member's log is needed from the lower of the two snapshots'
+  positions: `cluster.log_purge_position`, and
+  `ConsensusModule::log_purge_position()`. It is 0 while the member lists no
+  snapshot of a service, and nothing below a position of 0 is purged (ADR 0132).
+  The position assumes a service whose program calls `ClusterService::restore` at
+  its start, which the member cannot tell: a service that takes snapshots and
+  never calls it reads from position 0, and beside it nothing may be purged.
 - Lists the snapshots of the service beside a member (`spec/cluster.md`, "The
   member's list of a service's snapshots"; ADR 0131). A service writes its own
   snapshot, a recording through the member's driver, and tells the member with a
@@ -308,13 +314,16 @@ commit path runs per message.
   member reads in every duty cycle, 10 messages at most. The member lists the
   snapshot in its snapshots file, with service id 0, when its catalog holds the
   recording as a stopped recording of the service snapshot stream, the position is
-  above 0 and at or below its commit position, and the position is above the
-  newest it lists for the service. `cluster.service_snapshot_position` holds that
+  above 0 and at or below its commit position, and the position is a multiple of
+  32 above the newest it lists for the service; it does not check that an entry
+  of its log ends there. `cluster.service_snapshot_position` holds that
   position, and an ack that fails a check is counted in
   `cluster.service_acks_rejected` with nothing listed. The member answers no ack
   and waits for none: it does not know its services (ADR 0066), so its own
   snapshot counts without a service's. `ConsensusModule::service_snapshot_position()`
-  and `service_snapshot_counts()` say what it listed.
+  and `service_snapshot_counts()` say what it listed. The member names the newest
+  one's recording in `cluster.service_snapshot_recording_id`, which a service that
+  starts from its snapshot reads (ADR 0132).
 - Holds a member's sessions, the member's side of the session protocol
   (`spec/cluster.md`, "Sessions"; ADR 0115): `Sessions` is plain state, as `Consensus`
   is. Its caller hands it each message of the ingress stream, each entry of the
