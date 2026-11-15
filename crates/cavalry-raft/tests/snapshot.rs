@@ -10,13 +10,14 @@ use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
 use cavalry_client::{
-    Action, Cavalry, ClientError, ClusterError, ClusterService, Entry, NULL_LENGTH, NULL_POSITION,
-    Publication, Restored, SnapshotCause, Subscription,
+    Action, Cavalry, ClientError, ClusterError, ClusterService, Entry, FOLLOW_LENGTH, NULL_LENGTH,
+    NULL_POSITION, Publication, Restored, SnapshotCause, Subscription,
 };
 use cavalry_driver::Driver;
-use cavalry_driver::spec::MAX_PUBLICATIONS;
+use cavalry_driver::spec::{MAX_PUBLICATIONS, MAX_REPLAYS};
 use cavalry_log::recordings::RecordingsFile;
 use cavalry_log::snapshots::{CONSENSUS_MODULE, ListedSnapshot, SnapshotsFile};
+use cavalry_proto::client_protocol::ErrorCode;
 use cavalry_proto::cluster::{
     CLOSE_REASON_NONE, CONSENSUS_MODULE_STREAM_ID, EGRESS_STREAM_ID, INGRESS_STREAM_ID,
     MAX_SERVICE_SNAPSHOT_STATE_LENGTH, Message, SERVICE_SNAPSHOT_TYPE_ID, SNAPSHOT_TYPE_ID,
@@ -2824,6 +2825,157 @@ fn a_service_passes_over_a_snapshot_whose_recording_is_gone_and_reads_from_the_s
     // It met the action again, and its member lists a snapshot of that position,
     // whose recording is gone: it writes none.
     assert_eq!(again.taken, [(position, false)]);
+    again.close();
+    for service in services {
+        service.close();
+    }
+    for member in members {
+        stop(member);
+    }
+}
+
+#[test]
+fn a_service_whose_driver_has_no_room_for_its_replay_has_not_started_and_asks_again() {
+    let dir = TestDir::new("service-replays-full");
+    let members_string = members_string();
+    let mut members: Vec<Member> = [1, 0, 2]
+        .into_iter()
+        .map(|id| start_member(dir.path(), &members_string, id))
+        .collect();
+    run_until_led(&mut members, -1);
+    run_until_settled(&mut members, 0);
+    let mut services: Vec<Service> = members.iter().map(Service::beside).collect();
+    offer_entries(&mut members, 0, 3);
+    let position = snapshot_with_services(&mut members, &mut services);
+    offer_entries(&mut members, 3, 1);
+    let end = run_until_settled(&mut members, position + FRAME);
+    read_to(&mut members, &mut services, end);
+    // The service beside a follower stops.
+    services.pop().expect("the follower's service").close();
+    let id = members[2].module.member_id();
+    let driver_dir = members[2].dir.clone();
+
+    // Another client of the follower's driver holds the driver's replays registry at
+    // its bound, every member running a duty cycle after each start. Each replay
+    // follows a live recording into a subscription of that client, so none ends. The
+    // recording is of a publication of the shortest term a channel names, 64 KiB, to
+    // an endpoint nobody reads: a replay's log has its recording's term, and that of
+    // a `cavalry:ipc` one is 64 MiB.
+    let stream_id = REPLAY_STREAM_ID + 1;
+    let channel = format!(
+        "cavalry:udp?endpoint=127.0.0.1:{}|term-length=64k",
+        free_ports(1)[0]
+    );
+    let mut filler = Cavalry::connect_to(&driver_dir).expect("a client of the follower's driver");
+    let publication = filler
+        .add_publication(&channel, stream_id)
+        .expect("a publication to record");
+    let recording = filler
+        .start_recording(&channel, stream_id)
+        .expect("the publication's recording");
+    let mut subscription = filler
+        .add_subscription("cavalry:ipc", stream_id)
+        .expect("a subscription for the replays");
+    // A poll with a fragment limit of 0 takes the images the driver announced and
+    // withdrew, and reads no frame, so that the subscription's queue of them, 64,
+    // does not fill and close the client.
+    let take_images = |subscription: &mut Subscription| {
+        subscription
+            .poll(|_, _| {}, 0)
+            .expect("the subscription takes its images");
+    };
+    let mut held = Vec::new();
+    loop {
+        match filler.start_replay(
+            recording.recording_id(),
+            NULL_POSITION,
+            FOLLOW_LENGTH,
+            stream_id,
+            "cavalry:ipc",
+        ) {
+            Ok(replay) => held.push(replay),
+            Err(ClientError::Refused {
+                code: Some(ErrorCode::ResourceTemporarilyUnavailable),
+                ..
+            }) => break,
+            Err(other) => panic!("{other}"),
+        }
+        assert!(held.len() <= MAX_REPLAYS, "the registry is bounded");
+        take_images(&mut subscription);
+        for member in members.iter_mut() {
+            member.module.do_work().expect("the member's duty cycle");
+        }
+    }
+    take_images(&mut subscription);
+
+    // A service starts, and its driver has no room for its snapshot's replay. That is
+    // the start's error, with the driver's code, and no snapshot passed over: the
+    // service has not started, and a second call is refused alike, not as too late.
+    let mut again = Service::beside(&members[2]);
+    for _ in 0..2 {
+        match again.service.restore(&mut again.client) {
+            Err(ClusterError::Client(ClientError::Refused {
+                code: Some(ErrorCode::ResourceTemporarilyUnavailable),
+                ..
+            })) => {}
+            other => panic!("a start whose replay the driver has no room for: {other:?}"),
+        }
+        assert_eq!(again.service.position(), 0);
+    }
+    // It counted nothing, and holds no counter of its start once the driver has
+    // taken the removes its refused calls sent.
+    run_until(
+        &mut members,
+        "the driver removes the counters of the refused starts",
+        |_| {
+            counters_in(&driver_dir, id, CLUSTER_SERVICE_SNAPSHOTS_PASSED_OVER.0) == 0
+                && counters_in(&driver_dir, id, CLUSTER_SERVICE_SNAPSHOT_START_POSITION.0) == 0
+        },
+    );
+
+    // One of the other client's replays stops, and the next call takes the snapshot:
+    // the program is given its state at the snapshot's position.
+    let freed = held.pop().expect("a replay");
+    freed.stop(&mut filler).expect("the replay stops");
+    run_until(&mut members, "the stopped replay has ended", |_| {
+        take_images(&mut subscription);
+        freed.ended().is_some()
+    });
+    let restored = again
+        .service
+        .restore(&mut again.client)
+        .expect("the service's start, once the driver has room");
+    assert_eq!(restored, Restored::State(entries(3)));
+    if let Restored::State(state) = restored {
+        again.state = state;
+    }
+    assert_eq!(again.service.position(), position);
+    assert_eq!(
+        counter_in(&driver_dir, id, CLUSTER_SERVICE_SNAPSHOT_START_POSITION.0),
+        position
+    );
+    assert_eq!(
+        counter_in(&driver_dir, id, CLUSTER_SERVICE_SNAPSHOTS_PASSED_OVER.0),
+        0
+    );
+    for type_id in [
+        CLUSTER_SERVICE_SNAPSHOT_START_POSITION.0,
+        CLUSTER_SERVICE_SNAPSHOTS_PASSED_OVER.0,
+    ] {
+        assert_eq!(counters_in(&driver_dir, id, type_id), 1);
+    }
+    // It reads what follows its snapshot, and holds what the others hold.
+    read_to(&mut members, std::slice::from_mut(&mut again), end);
+    assert_eq!(again.state, entries(4));
+
+    // The other client's replays and the client go: the subscription goes first, so
+    // that no withdrawn image waits in its queue.
+    drop(subscription);
+    for replay in &held {
+        replay.stop(&mut filler).expect("the replay stops");
+    }
+    drop(publication);
+    filler.close().expect("the other client closes");
     again.close();
     for service in services {
         service.close();

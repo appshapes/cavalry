@@ -469,7 +469,12 @@ committed once a quorum, two of three, has it on disk.
   it is passed over again, the snapshot's recording is gone from the log
   directory, or the driver found it damaged, which `recording.invalidated` on this
   member's driver counts: check the log directory's device. The service takes its
-  next snapshot by itself, and its next start reads that one.
+  next snapshot by itself, and its next start reads that one. Only a refusal for
+  the recording itself, error code 21 or 23, is counted here. A driver that had no
+  room for the replay, error code 10, which `driver.registry_full` counts, or that
+  refused it for another reason, made `ClusterService::restore` return the
+  driver's error: the service did not start, and the program calls `restore`
+  again.
 - `WARN cluster.service_acks_rejected`: a service beside this member said that it
   took a snapshot, and the member listed nothing for it. Nothing committed is
   lost. A count that rises with every snapshot has one of two causes. More than

@@ -5,7 +5,9 @@
   that does not call it reads the log from position 0, as before. A snapshot that
   the service cannot take is passed over, counted in
   `cluster.service_snapshots_passed_over` and reported by `cavalry doctor`, and the
-  service reads from position 0. The member's counter `cluster.log_purge_position`
+  service reads from position 0. A driver that refuses the start for anything but
+  the snapshot's recording, a registry at its bound among them, makes `restore`
+  return the driver's error, and the program calls it again. The member's counter `cluster.log_purge_position`
   says from which position its log is needed, the lower of its own snapshot's and
   its service's: a recording of its log that stopped at or below it may be purged
   while the member is stopped
