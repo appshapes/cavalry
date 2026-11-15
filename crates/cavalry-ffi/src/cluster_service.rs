@@ -143,7 +143,10 @@ fn values_of(committed: &Committed<'_>) -> cavalry_cluster_entry_values_t {
             leader_member_id,
             false,
         ),
-        Entry::Other => (CAVALRY_CLUSTER_ENTRY_OTHER, -1, -1, false),
+        // The ABI has no kind for the leader's request for a snapshot, and no call
+        // that takes one: a client is handed the entry as it was before a service
+        // took snapshots, and its poll ends after it (ADR 0131).
+        Entry::Snapshot | Entry::Other => (CAVALRY_CLUSTER_ENTRY_OTHER, -1, -1, false),
     };
     cavalry_cluster_entry_values_t {
         position: committed.position,

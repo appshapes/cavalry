@@ -289,6 +289,20 @@ commit path runs per message.
   1,024 recordings. With no snapshot it starts as before, from position 0. A
   service still reads its member's log from position 0, so the log below a
   snapshot is purged only where no service reads it from its start.
+- Lists the snapshots of the service beside a member (`spec/cluster.md`, "The
+  member's list of a service's snapshots"; ADR 0131). A service writes its own
+  snapshot, a recording through the member's driver, and tells the member with a
+  service ack on the consensus module stream, `cavalry:ipc` stream 105, which the
+  member reads in every duty cycle, 10 messages at most. The member lists the
+  snapshot in its snapshots file, with service id 0, when its catalog holds the
+  recording as a stopped recording of the service snapshot stream, the position is
+  above 0 and at or below its commit position, and the position is above the
+  newest it lists for the service. `cluster.service_snapshot_position` holds that
+  position, and an ack that fails a check is counted in
+  `cluster.service_acks_rejected` with nothing listed. The member answers no ack
+  and waits for none: it does not know its services (ADR 0066), so its own
+  snapshot counts without a service's. `ConsensusModule::service_snapshot_position()`
+  and `service_snapshot_counts()` say what it listed.
 - Holds a member's sessions, the member's side of the session protocol
   (`spec/cluster.md`, "Sessions"; ADR 0115): `Sessions` is plain state, as `Consensus`
   is. Its caller hands it each message of the ingress stream, each entry of the

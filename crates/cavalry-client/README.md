@@ -193,6 +193,25 @@ The client API implementation, re-exported by the `cavalry` crate. Data plane.
   `poll` allocates for an entry or a reply, and its commands to the driver are at a
   session's opening, at a change of the term's leader and at a recording's end
   (ADR 0118).
+- Takes a snapshot of a service's state: the leader asks every member for a
+  snapshot with an entry of the log, which a service hands its program as
+  `Entry::Snapshot`. The poll that hands it over ends after it, so the program's
+  state is then its state at that position, the same beside every member, and
+  `ClusterService::snapshot_due()` gives the position.
+  `ClusterService::snapshot(client, state)` takes the program's state as bytes,
+  1 GiB at most, before the next poll. It writes them, with the sessions that are
+  open at that position, to a recording of its own through the member's driver,
+  stops the recording, checks that it stopped at the end of what was written, and
+  tells the member, which lists the snapshot. The call waits for the driver: 31 ms
+  at the median on a laptop, and 51 ms for a state of 64 MiB. `Ok(false)` says that
+  the member already lists a snapshot of that position, and nothing was written. A
+  step that makes no progress for a second ends the snapshot with
+  `ClusterError::SnapshotFailed`, which names the step and what to check, counted
+  in `cluster.service_snapshots_failed`; nothing committed is lost, and the service
+  reads on. A program that takes no snapshots matches nothing new: it reads on at
+  an `Entry::Snapshot` as it does at an `Entry::Other`. A service does not yet
+  start from its snapshot, and a service written through the C ABI takes none yet
+  (ADR 0131).
 - Holds a recording the driver arms: `Cavalry::arm_recording(channel, stream_id)`, on a
   `cavalry:udp` stream with a subscription and no publication or image yet, returns
   an `ArmedRecording`, and `ArmedRecording::poll()` returns the `Recording` once the

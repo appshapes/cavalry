@@ -41,6 +41,7 @@ fn stream(name: &str) -> Stream {
         "ingress" => Stream::Ingress,
         "egress" => Stream::Egress,
         "snapshot" => Stream::Snapshot,
+        "consensus-module" => Stream::ConsensusModule,
         other => panic!("unknown stream {other}"),
     }
 }
@@ -304,6 +305,26 @@ fn fields(message: &Message<'_>) -> Value {
             "next_service_session_id": next_service_session_id,
             "log_service_session_id": log_service_session_id,
             "pending_message_capacity": pending_message_capacity,
+        }),
+        Message::ClientSession {
+            cluster_session_id,
+            response_stream_id,
+            response_channel,
+            encoded_principal,
+        } => json!({
+            "cluster_session_id": cluster_session_id, "response_stream_id": response_stream_id,
+            "response_channel": text(response_channel),
+            "encoded_principal": to_hex(encoded_principal),
+        }),
+        Message::ServiceAck {
+            log_position,
+            timestamp,
+            ack_id,
+            relevant_id,
+            service_id,
+        } => json!({
+            "log_position": log_position, "timestamp": timestamp, "ack_id": ack_id,
+            "relevant_id": relevant_id, "service_id": service_id,
         }),
     }
 }

@@ -40,8 +40,8 @@ are where a member receives:
 | `catchup` | the member, on the log stream | the leader's replay of the log to a member that is behind, from the position it asked for |
 | `archive` | the member | a peer's request to replicate its recording of the log; named here, used by no message of this version |
 
-The streams are `cavalry:udp` streams, but for the service log and the log replay, with these stream ids,
-constants in this version:
+The streams are `cavalry:udp` streams, but for the service log, the log replay and
+the consensus module stream, with these stream ids, constants in this version:
 
 | Stream | Stream id | Publication | Subscriptions |
 | --- | --- | --- | --- |
@@ -51,6 +51,7 @@ constants in this version:
 | egress | 102 | the leader's, one per open session; the service's that answers the term's entries, the one beside the member that led the term, one per open session, for its replies ("Replies"); and any member's, one per connect it answers with a redirect or a refusal, at most the pending answers of "Values" at a time; each on the client's response channel | the client's, on its response channel |
 | service log | 104 | the member's driver's, one for each service: a replay of the member's recording of the log that follows it, on `cavalry:ipc` ("The service") | the service's, on `cavalry:ipc` |
 | log replay | 103 | the member's driver's, one: a replay of the member's recordings of the log that follows them, on `cavalry:ipc`, which the member's own consensus module reads as a service reads the service log, for its sessions ("Sessions"; ADR 0116). A stream of its own, so that this replay and a service's never reach each other's subscription | the consensus module's, on `cavalry:ipc` |
+| consensus module | 105 | a service's, on `cavalry:ipc`, from its first snapshot to its close: the service acks by which it tells the member on its driver of a snapshot it took ("Snapshots"; ADR 0131) | the member's consensus module's, on `cavalry:ipc`, from its start |
 
 The members' ingress endpoints, listed as a redirect lists them ("Session event,
 template 2"), `<id>=<host:port>` for each member separated by `,`, are at most 1,320
@@ -471,15 +472,19 @@ with the term, the session id, the cluster's time and the service's reply.
 
 ## Snapshots
 
-A snapshot is the state of a member's consensus module as it is at one position of the
-log, kept so that a start need read the log after that position only. It is no stream
-of the cluster. It is a recording that the member writes through its own driver, on
-`cavalry:ipc` and the snapshot stream ("Values"), and lists in the snapshots file of
-its log directory (`spec/durable-log.md`, "Snapshots"; ADR 0128, ADR 0129). A reader
-given a snapshot's messages reads them as the `snapshot` stream of the vectors. A
-member that starts takes its state from the newest snapshot it can read, and reads
-its log from that snapshot's position ("A member's start"; ADR 0130). A service takes
-no snapshot yet ("Out of this version").
+A snapshot is the state of a member's consensus module, or of the service beside it,
+as it is at one position of the log, kept so that a start need read the log after
+that position only. It is no stream of the cluster. The consensus module's is a
+recording that the member writes through its own driver, on `cavalry:ipc` and the
+snapshot stream ("Values"), and lists in the snapshots file of its log directory
+(`spec/durable-log.md`, "Snapshots"; ADR 0128, ADR 0129). A service's is a recording
+that the service writes through the same driver, on `cavalry:ipc` and the service
+snapshot stream, and that the member lists for it in the same file ("A service's
+snapshot", below; ADR 0131). A reader given a snapshot's messages reads them as the
+`snapshot` stream of the vectors. A member that starts takes its state from the
+newest snapshot of its consensus module that it can read, and reads its log from
+that snapshot's position ("A member's start"; ADR 0130). A service does not yet
+start from its snapshot ("Out of this version").
 
 **The action.** The leader asks for a snapshot by appending a cluster action whose
 action is snapshot ("Cluster action, template 23"), an entry of its own as a session
@@ -536,18 +541,82 @@ snapshot for an action whose position its newest listed snapshot is at or past. 
 member that started from an older snapshot than its newest listed one, or from
 none, meets such actions in its log.
 
+**A service's snapshot.** A service's read of its member's committed log ("The
+service") ends at a cluster action whose action is snapshot, once its program has
+taken that entry: the entry is the last one of that read. The program's state is
+then its state at the snapshot's log position, the position after the action's
+entry, and it is the same state beside every member. Before the service reads the
+next entry its program may give the service that state, as bytes that mean
+something to the program alone, at most the service snapshot state of "Values". A
+program that gives none and reads on takes no snapshot for that action. A service
+whose member already lists a service's snapshot at or past that position, which
+`cluster.service_snapshot_position` holds, writes none and tells its program so.
+
+Given the state, the service writes a recording through its member's driver. It
+holds one exclusive publication on `cavalry:ipc` and the service snapshot stream
+from its first snapshot to its close, and each snapshot is a recording of a span
+of that publication's stream. It starts a recording of the publication, which must
+be of that publication's session, and writes these messages, each as one message
+of the publication: a snapshot marker whose mark is begin; a client session for
+each session that is open at the snapshot's position, in the order of the
+sessions' ids; a snapshot marker whose mark is section, with index 1; the
+program's bytes in their order, 1,024 to a message and the rest in the last; and
+a snapshot marker whose mark is end. The three markers carry type id 2, the
+snapshot's log position, the leadership term id of the action's entry, time unit 0
+and app version 0, and the begin and end markers index 0. After the section marker
+every message but the recording's last is the program's bytes, whatever they hold:
+a reader takes them by their place and does not read them as messages of this
+page. A state of no bytes has no message there.
+
+When the recorder has written to the end of the last message the service stops the
+recording, and the recording must have stopped at the end of what the service
+wrote. The service then sends its member a service ack on the consensus module
+stream, with the snapshot's log position, the timestamp of the action's entry, the
+recording's id as its relevant id, and service id 0. Each of these ends the
+snapshot: a command that the driver refuses; a recording of another session; a
+message that a publication does not take for the snapshot timeout; a stop that is
+not announced within that timeout; a recording that stopped short of what was
+written; and an ack that the consensus module stream does not take within that
+timeout, which is a member that is not running. The service asks the stop of a
+recording that has not stopped, reports the failure to its program, counts it in
+`cluster.service_snapshots_failed`, and reads on when its program next reads. A
+snapshot whose ack the stream took is counted in `cluster.service_snapshots_taken`.
+
+**The member's list of a service's snapshots.** A member subscribes to the consensus
+module stream on `cavalry:ipc` from its start and reads it in every duty cycle, at
+most 10 messages. For a service ack it lists the snapshot in its snapshots file,
+with the ack's service id, when four things hold. The service id is 0: one service
+beside a member takes snapshots in this version. The catalog of the member's
+driver holds the recording that the relevant id names, of the service snapshot
+stream, stopped and with bytes. The log position is above 0 and at or below the
+member's commit position. And the file takes the entry: its log position is above
+that of the newest snapshot the file lists for the service id
+(`spec/durable-log.md`, "Snapshots"). The entry's leadership term id and term base
+log position are those of the newest term in the member's record of terms whose
+term base log position is below the log position, and its timestamp is the ack's.
+The member counts a snapshot it lists in `cluster.service_snapshots_listed` and
+stores its log position in `cluster.service_snapshot_position`. An ack that fails
+one of the four is counted in `cluster.service_acks_rejected`, and nothing is
+listed. A list that cannot be written ends the member's duty cycle with that
+error, as its own snapshot's list does.
+
+A member answers no ack and waits for none. It does not know which services read
+its log (ADR 0066), so its own snapshot counts without a service's, and a
+service's counts without its own. An ack that the member does not read, because
+it stopped, is a snapshot that is in no list: the next action asks again.
+
 ### Snapshot marker, template 100
 
-Block length 40, no variable fields. The first and last message of a snapshot. A
-marker whose mark is section begins a section of a snapshot, which no snapshot of
-this version has.
+Block length 40, no variable fields. The first and last message of a snapshot. In
+a service's snapshot a marker whose mark is section stands before the program's
+bytes.
 
 | Offset | Size | Field | Type | Meaning |
 | --- | --- | --- | --- | --- |
-| 8 | 8 | type id | i64 | whose snapshot: 1 the consensus module's, the member's own state; 2 a service's, out of this version |
+| 8 | 8 | type id | i64 | whose snapshot: 1 the consensus module's, the member's own state; 2 a service's |
 | 16 | 8 | log position | i64 | the position the snapshot is of, the position after the cluster action's entry: every entry below it is in the state |
 | 24 | 8 | leadership term id | i64 | the term at that position |
-| 32 | 4 | index | i32 | the section's index, 0 for the begin and end markers |
+| 32 | 4 | index | i32 | the section's index: 0 for the begin and end markers, 1 for the section marker of a service's snapshot |
 | 36 | 4 | mark | i32 | 0 begin, 1 section, 2 end |
 | 40 | 4 | time unit | i32 | 0, milliseconds |
 | 44 | 4 | app version | i32 | the service's version in semantic form, 0 for none |
@@ -577,6 +646,32 @@ snapshot, after its sessions.
 | 16 | 8 | next service session id | i64 | written 0; Aeron's, of the messages a service appends to its own cluster's log, which no service does here; a reader ignores it |
 | 24 | 8 | log service session id | i64 | written 0; Aeron's, as the field before it; a reader ignores it |
 | 32 | 4 | pending message capacity | i32 | written 0; Aeron's, as the two fields before it; a reader ignores it |
+
+### Client session, template 102
+
+Block length 12; then the response channel (ASCII) and the encoded principal (data).
+One session that is open at the snapshot's position, in a service's snapshot.
+
+| Offset | Size | Field | Type | Meaning |
+| --- | --- | --- | --- | --- |
+| 8 | 8 | cluster session id | i64 | the session's |
+| 16 | 4 | response stream id | i32 | the client's egress stream id, 102 |
+
+The encoded principal is written with no bytes, since this version has no
+authentication ("Out of this version"), and a reader ignores it.
+
+### Service ack, template 33
+
+Block length 36, no variable fields. On the consensus module stream, from a
+service to the member on its driver: the service took a snapshot.
+
+| Offset | Size | Field | Type | Meaning |
+| --- | --- | --- | --- | --- |
+| 8 | 8 | log position | i64 | 0 or more: the log position of the service's snapshot |
+| 16 | 8 | timestamp | i64 | the cluster's time of the cluster action that asked for it |
+| 24 | 8 | ack id | i64 | written 0; Aeron's count of a service's acks, which a member here does not keep; a reader ignores it |
+| 32 | 8 | relevant id | i64 | the id of the snapshot's recording in the catalog of the member's driver |
+| 40 | 4 | service id | i32 | the service's id, 0 |
 
 ## Roles and the election
 
@@ -1249,7 +1344,9 @@ It reads session messages, timer events,
 session open and close events, cluster actions and new leadership term events in log
 order, each entry once, with the cluster's time as each entry's timestamp field and
 from no clock of its own, so that every member's service reaches the same state at
-the same position, the replay check of invariant 1 (`CLAUDE.md`). The service beside
+the same position, the replay check of invariant 1 (`CLAUDE.md`). A read ends at a
+cluster action whose action is snapshot, where the program may give the service
+its state ("Snapshots", "A service's snapshot"). The service beside
 the member that led an entry's term replies to a session, while that member leads
 the term still, with a session message on the egress stream; the service beside
 every other member reaches the same state and sends nothing ("Replies", below). A service with a version
@@ -1466,13 +1563,18 @@ that a reader of a counters file knows which transition it saw.
 | `cluster.snapshots_failed` | a snapshot the member gave up, for one of the reasons of "A snapshot that fails", or whose list it could not write ("Snapshots") |
 | `cluster.snapshot_start_position` | a gauge: the log position of the snapshot the member's start took its state from, where its read of its log began; −1 when it took none and read from position 0. It does not change while the member runs ("A member's start"; ADR 0130) |
 | `cluster.snapshots_passed_over` | a snapshot that the member's start found listed and could not read whole, so that it took the one listed before it, or none ("A member's start") |
+| `cluster.service_snapshot_position` | a gauge: the log position of the newest snapshot of a service that the member lists, −1 while it lists none ("Snapshots"; ADR 0131) |
+| `cluster.service_snapshots_listed` | a service's snapshot that the member listed for a service ack ("Snapshots") |
+| `cluster.service_acks_rejected` | a service ack for which the member listed nothing: a service id other than 0, a recording the catalog does not hold as a stopped recording of the service snapshot stream with bytes, a log position that is not above 0 or is above the commit position, or a position not above the newest the member lists for the service ("Snapshots") |
+| `cluster.service_snapshots_taken` | a snapshot the service beside the member wrote and sent its service ack for; the service adds the counter, with its member's id as the key ("Snapshots") |
+| `cluster.service_snapshots_failed` | a snapshot the service beside the member gave up, for one of the reasons of "A service's snapshot"; the service adds the counter, with its member's id as the key |
 
 ## Values
 
 | Value | This version |
 | --- | --- |
 | schema id, version | 1, 0 |
-| stream ids | log 100, ingress 101, egress 102, log replay 103, service log 104, snapshot 107, consensus 108; 105 and 106 reserved for Aeron's consensus module stream and a service's snapshot stream, out of this version. In Aeron 104 is the service stream, which carries the consensus module's messages to a service; here it carries the log a service reads ("The service") |
+| stream ids | log 100, ingress 101, egress 102, log replay 103, service log 104, consensus module 105, service snapshot 106, snapshot 107, consensus 108. In Aeron 104 is the service stream, which carries the consensus module's messages to a service; here it carries the log a service reads ("The service") |
 | members | at most 8; a ninth is `members-count` |
 | member id | 0 to 2147483647, unique |
 | leader heartbeat interval | 200 ms: how often the leader sends commit position with nothing to report, and new leadership term during an election |
@@ -1487,9 +1589,11 @@ that a reader of a counters file knows which transition it saw.
 | pending answers | at most 10 redirects or refusals a member has yet to send; a connect beyond them is dropped unanswered and counted |
 | live-add window | the lesser of term length ÷ 4 and 1,048,576 bytes: how close to the leader's position a catching-up follower adds its live subscription |
 | cluster time | milliseconds since 1970-01-01T00:00:00Z, the leader's wall clock, time unit 0 |
-| snapshot type id | 1, the consensus module's; 2, a service's, out of this version |
+| snapshot type id | 1, the consensus module's; 2, a service's |
+| service id | 0: the one service beside a member that takes snapshots |
+| service snapshot state | at most 1,073,741,824 bytes, 1 GiB, of a program's state in one snapshot, written 1,024 bytes to a message ("Snapshots") |
 | snapshot interval | 268,435,456 bytes of the log, 256 MiB: how far past the last cluster action that asked for a snapshot a leader's log grows before the leader appends the next ("Snapshots") |
-| snapshot timeout | 1 s: how long a snapshot being taken may go without its next step, a message its publication takes or its recording's stop announced, before the member gives it up ("Snapshots") |
+| snapshot timeout | 1 s: how long a snapshot being taken may go without its next step, a message its publication takes, its recording's stop announced or, for a service, its ack taken, before the member or the service gives it up ("Snapshots") |
 | snapshot load timeout | 5 s: how long a member's start waits for its driver to play one snapshot's recording back before it passes that snapshot over ("A member's start") |
 
 Timeouts are measured on a monotonic clock of the process that measures them, a
@@ -1510,14 +1614,14 @@ order, reporting the first that fails by name; a rejected message is counted in
 | `too-short` | fewer than 8 bytes, or fewer than 8 + the header's block length |
 | `schema` | the schema id is not 1 |
 | `version` | the version is not 0; and, once the fields are read, between `length` and `enum`, a consensus message's `protocol version` field's major, its value shifted right by 16 bits arithmetic, is not 0, a negative value among those rejected; a session connect's `version` is read whatever its major, for the leader to refuse ("Sessions") |
-| `template` | the template id is not one this version names: 1 to 6, 20 to 25, 50 to 57, 100, 103 or 105; 7, 8 and 102 among those it does not |
-| `stream` | the template is not one the stream carries: the log stream carries 1 and 20 to 25, the consensus stream 50 to 57, the ingress stream 1, 3, 4 and 5, the egress stream 1, 2 and 6, a snapshot 100, 103 and 105 |
+| `template` | the template id is not one this version names: 1 to 6, 20 to 25, 33, 50 to 57, 100, 102, 103 or 105; 7, 8 and 104 among those it does not |
+| `stream` | the template is not one the stream carries: the log stream carries 1 and 20 to 25, the consensus stream 50 to 57, the ingress stream 1, 3, 4 and 5, the egress stream 1, 2 and 6, the consensus module stream 33, a snapshot 100, 102, 103 and 105 |
 | `block-length` | the block length is not the template's |
 | `length` | a variable field's length runs past the end of the message, or bytes remain after the last variable field of a template that has no payload |
 | `enum` | a code, close reason, action, change type, mark, time unit, bool or vote holds a value its table does not name; a `flags` field is never rejected, its reserved bits ignored |
 | `ascii` | an ASCII field holds a byte outside 0x20 to 0x7E |
 | `member-id` | a leader, follower, candidate or changed member id is below 0 where its table allows no −1, or below −1 where it does |
-| `position` | a log, term base, next term base, next log, commit or opened log position is below 0 where its table allows no −1, or below −1 where it does |
+| `position` | a log, term base, next term base, next log, commit or opened log position, a service ack's log position among them, is below 0 where its table allows no −1, or below −1 where it does |
 | `term` | a term id is below −1 |
 
 A members string is checked in this order, each check over the whole string: `members-grammar`
@@ -1589,16 +1693,16 @@ reports the named reason for every invalid one.
 ## Out of this version
 
 Reserved, with their Aeron template ids, for the version that needs them: the
-challenge and challenge response (7, 8), Aeron's authentication; the service control
-protocol of a service in a process of its own, close session, schedule timer, cancel
-timer, service ack, join log and the service termination position (30 to 33, 40, 42)
-and the admin request and response (26, 27); dynamic membership, the cluster members
+challenge and challenge response (7, 8), Aeron's authentication; the rest of the
+service control protocol of a service in a process of its own, close session,
+schedule timer, cancel timer, join log and the service termination position (30 to
+32, 40, 42) and the admin request and response (26, 27); dynamic membership, the cluster members
 query and response, add passive member, cluster members change, join cluster, remove
 member and the snapshot recording messages (34, 35, 41, 43, 70 to 74); termination
 (75, 76); backup, heartbeat and standby snapshot (77 to 81); and what a snapshot of
-this version does not hold, a service's client session, a timer, the cluster's
-members and a service's pending messages (102, 104, 106, 107). A service's snapshot,
-its stream, 106, and the service ack by which it tells its member (33) are the
-feature's that writes it. A member of this version appends no timer event, membership
+this version does not hold, a timer, the cluster's members and a service's pending
+messages (104, 106, 107). A service takes a snapshot and does not yet start from
+one: it reads its member's log from position 0 ("The service"), and a member lists
+a service's snapshots for the version that does. A member of this version appends no timer event, membership
 change event, session close event with the reason service action, or cluster action
 whose action is suspend or resume, and a reader accepts each.

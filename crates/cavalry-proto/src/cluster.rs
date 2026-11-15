@@ -107,6 +107,37 @@ pub const SNAPSHOT_STREAM_ID: i32 = 107;
 /// (`spec/cluster.md`, "Snapshot marker, template 100").
 pub const SNAPSHOT_TYPE_ID: i64 = 1;
 
+/// The consensus module stream's id: the `cavalry:ipc` stream a service sends its
+/// service acks on, to the member on its driver (`spec/cluster.md`, "Snapshots"; ADR
+/// 0131). In Aeron, 105 is the stream of a service's messages to its consensus
+/// module.
+pub const CONSENSUS_MODULE_STREAM_ID: i32 = 105;
+
+/// The service snapshot stream's id: the `cavalry:ipc` stream a service writes its
+/// snapshot on, which its member's driver records (`spec/cluster.md`, "Snapshots";
+/// ADR 0131). In Aeron, 106 is a service's snapshot stream.
+pub const SERVICE_SNAPSHOT_STREAM_ID: i32 = 106;
+
+/// The type id of a service's snapshot, which its markers carry (`spec/cluster.md`,
+/// "Snapshot marker, template 100").
+pub const SERVICE_SNAPSHOT_TYPE_ID: i64 = 2;
+
+/// The id of the one service beside a member that takes snapshots
+/// (`spec/cluster.md`, "Values").
+pub const SERVICE_ID: i32 = 0;
+
+/// The index of the section marker that stands before the program's bytes in a
+/// service's snapshot.
+pub const SERVICE_SNAPSHOT_STATE_INDEX: i32 = 1;
+
+/// The most bytes of a program's state in one snapshot of a service: 1 GiB
+/// (`spec/cluster.md`, "Values").
+pub const MAX_SERVICE_SNAPSHOT_STATE_LENGTH: usize = 1 << 30;
+
+/// How many bytes of a program's state one message of a service's snapshot carries;
+/// the last carries the rest.
+pub const SERVICE_SNAPSHOT_STATE_MESSAGE_LENGTH: usize = 1024;
+
 /// The leader heartbeat interval, in nanoseconds: 200 ms.
 pub const LEADER_HEARTBEAT_INTERVAL_NS: u64 = 200_000_000;
 
@@ -169,6 +200,8 @@ pub enum Stream {
     Egress,
     /// A snapshot's messages, which a recording holds.
     Snapshot,
+    /// A service's messages to the member on its driver, stream id 105.
+    ConsensusModule,
 }
 
 impl Stream {
@@ -180,6 +213,7 @@ impl Stream {
             Stream::Ingress => Some(INGRESS_STREAM_ID),
             Stream::Egress => Some(EGRESS_STREAM_ID),
             Stream::Snapshot => None,
+            Stream::ConsensusModule => Some(CONSENSUS_MODULE_STREAM_ID),
         }
     }
 
@@ -191,6 +225,7 @@ impl Stream {
             Stream::Ingress => "ingress",
             Stream::Egress => "egress",
             Stream::Snapshot => "snapshot",
+            Stream::ConsensusModule => "consensus-module",
         }
     }
 
@@ -232,8 +267,12 @@ impl Stream {
             ),
             Stream::Snapshot => matches!(
                 template,
-                Template::SnapshotMarker | Template::ClusterSession | Template::ConsensusModule
+                Template::SnapshotMarker
+                    | Template::ClientSession
+                    | Template::ClusterSession
+                    | Template::ConsensusModule
             ),
+            Stream::ConsensusModule => matches!(template, Template::ServiceAck),
         }
     }
 }
@@ -288,6 +327,10 @@ pub enum Template {
     ClusterSession = 103,
     /// The consensus module's own state in its snapshot.
     ConsensusModule = 105,
+    /// An open session in a service's snapshot.
+    ClientSession = 102,
+    /// A service's word to its member that it took a snapshot.
+    ServiceAck = 33,
 }
 
 impl Template {
@@ -318,6 +361,8 @@ impl Template {
             100 => Template::SnapshotMarker,
             103 => Template::ClusterSession,
             105 => Template::ConsensusModule,
+            102 => Template::ClientSession,
+            33 => Template::ServiceAck,
             _ => return None,
         })
     }
@@ -349,6 +394,8 @@ impl Template {
             Template::StopCatchup => 12,
             Template::SnapshotMarker | Template::ClusterSession => 40,
             Template::ConsensusModule => 28,
+            Template::ClientSession => 12,
+            Template::ServiceAck => 36,
         }
     }
 
@@ -378,6 +425,8 @@ impl Template {
             Template::SnapshotMarker => "snapshot-marker",
             Template::ClusterSession => "cluster-session",
             Template::ConsensusModule => "consensus-module",
+            Template::ClientSession => "client-session",
+            Template::ServiceAck => "service-ack",
         }
     }
 }
@@ -989,6 +1038,31 @@ pub enum Message<'a> {
         /// Aeron's, as the two fields before it: written as 0, and a reader ignores it.
         pending_message_capacity: i32,
     },
+    /// Template 102.
+    ClientSession {
+        /// The session's id.
+        cluster_session_id: i64,
+        /// The client's egress stream id.
+        response_stream_id: i32,
+        /// The client's response channel.
+        response_channel: &'a [u8],
+        /// Written with no bytes: this version has no authentication. A reader
+        /// ignores it.
+        encoded_principal: &'a [u8],
+    },
+    /// Template 33.
+    ServiceAck {
+        /// The log position of the service's snapshot.
+        log_position: i64,
+        /// The cluster's time of the cluster action that asked for the snapshot.
+        timestamp: i64,
+        /// Aeron's count of a service's acks: written as 0, and a reader ignores it.
+        ack_id: i64,
+        /// The id of the snapshot's recording in the catalog of the member's driver.
+        relevant_id: i64,
+        /// The service's id, [`SERVICE_ID`].
+        service_id: i32,
+    },
 }
 
 /// What a cluster session's `close reason` holds in a snapshot, where every session
@@ -1201,6 +1275,8 @@ impl<'a> Message<'a> {
             Message::SnapshotMarker { .. } => Template::SnapshotMarker,
             Message::ClusterSession { .. } => Template::ClusterSession,
             Message::ConsensusModule { .. } => Template::ConsensusModule,
+            Message::ClientSession { .. } => Template::ClientSession,
+            Message::ServiceAck { .. } => Template::ServiceAck,
         }
     }
 
@@ -1695,6 +1771,36 @@ impl<'a> Message<'a> {
                     pending_message_capacity,
                 }
             }
+            Template::ClientSession => {
+                let cluster_session_id = reader.i64()?;
+                let response_stream_id = reader.i32()?;
+                let response_channel = reader.variable()?;
+                let encoded_principal = reader.variable()?;
+                reader.done()?;
+                ascii("response channel", response_channel)?;
+                Message::ClientSession {
+                    cluster_session_id,
+                    response_stream_id,
+                    response_channel,
+                    encoded_principal,
+                }
+            }
+            Template::ServiceAck => {
+                let log_position = reader.i64()?;
+                let timestamp = reader.i64()?;
+                let ack_id = reader.i64()?;
+                let relevant_id = reader.i64()?;
+                let service_id = reader.i32()?;
+                reader.done()?;
+                position("log position", log_position, false)?;
+                Message::ServiceAck {
+                    log_position,
+                    timestamp,
+                    ack_id,
+                    relevant_id,
+                    service_id,
+                }
+            }
         };
         Ok(message)
     }
@@ -1729,6 +1835,11 @@ impl<'a> Message<'a> {
             Message::ClusterSession {
                 response_channel, ..
             } => 4 + response_channel.len(),
+            Message::ClientSession {
+                response_channel,
+                encoded_principal,
+                ..
+            } => 8 + response_channel.len() + encoded_principal.len(),
             _ => 0,
         };
         block + variable
@@ -2067,6 +2178,30 @@ impl<'a> Message<'a> {
                 writer.i64(next_service_session_id)?;
                 writer.i64(log_service_session_id)?;
                 writer.i32(pending_message_capacity)?;
+            }
+            Message::ClientSession {
+                cluster_session_id,
+                response_stream_id,
+                response_channel,
+                encoded_principal,
+            } => {
+                writer.i64(cluster_session_id)?;
+                writer.i32(response_stream_id)?;
+                writer.variable(response_channel)?;
+                writer.variable(encoded_principal)?;
+            }
+            Message::ServiceAck {
+                log_position,
+                timestamp,
+                ack_id,
+                relevant_id,
+                service_id,
+            } => {
+                writer.i64(log_position)?;
+                writer.i64(timestamp)?;
+                writer.i64(ack_id)?;
+                writer.i64(relevant_id)?;
+                writer.i32(service_id)?;
             }
         }
         Ok(writer.at)

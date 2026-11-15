@@ -170,7 +170,8 @@ pub(crate) fn set_client(error: &ClientError) {
 /// Sets the thread's error from a cluster session's error or a cluster service's:
 /// the session's own four kinds and the service's one on the cluster's codes, the
 /// client's kind as [`set_client`] sets it, and a fault's as [`set_fault`] does
-/// (`spec/c-abi.md`, "Error codes").
+/// (`spec/c-abi.md`, "Error codes"). The three kinds of a service's snapshot are
+/// the generic error: no call of the ABI takes a snapshot, so none raises them.
 pub(crate) fn set_cluster(error: &ClusterError) {
     let code = match error {
         ClusterError::Client(error) => return set_client(error),
@@ -183,6 +184,12 @@ pub(crate) fn set_cluster(error: &ClusterError) {
         ClusterError::Version { .. } => CAVALRY_ERR_CLUSTER_VERSION,
         ClusterError::ConnectTimeout { .. } => CAVALRY_ERR_CLUSTER_CONNECT_TIMEOUT,
         ClusterError::Entry { .. } => CAVALRY_ERR_CLUSTER_ENTRY,
+        // A service's snapshot has no call in the ABI yet (ADR 0131), so no client
+        // is given one of these. Were one to be, it is the generic error, with the
+        // error's own message.
+        ClusterError::NoSnapshotDue
+        | ClusterError::SnapshotTooLong { .. }
+        | ClusterError::SnapshotFailed { .. } => CAVALRY_ERR_GENERIC_ERROR,
     };
     set(code, format_args!("{error}"));
 }

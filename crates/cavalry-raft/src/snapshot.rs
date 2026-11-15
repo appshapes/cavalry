@@ -27,22 +27,32 @@
 //!
 //! Nothing here runs per message of the log: a snapshot is asked for once in a
 //! snapshot interval.
+//!
+//! The service beside the member takes a snapshot of its own for the same action,
+//! when its program gives it its state, and tells the member with a service ack on
+//! the consensus module stream. [`ModuleSnapshot::read_acks`] reads that stream and
+//! [`ModuleSnapshot::list_service`] lists the service's snapshot in the same file
+//! (`spec/cluster.md`, "The member's list of a service's snapshots"; ADR 0131). The
+//! member answers no ack and waits for none.
 
 use std::time::{Duration, Instant};
 
 use cavalry_client::{
-    Cavalry, ClientError, Counter, NULL_LENGTH, NULL_POSITION, Offer, Publication, Recording,
+    Cavalry, ClientError, Counter, Fault, NULL_LENGTH, NULL_POSITION, Offer, Publication,
+    Recording, Subscription,
 };
 use cavalry_log::snapshots::{CONSENSUS_MODULE, ListedSnapshot, SnapshotsError, SnapshotsFile};
 use cavalry_proto::cluster::{
-    CLOSE_REASON_NONE, EGRESS_STREAM_ID, LOG_REPLAY_STREAM_ID, MAX_SESSIONS, Message, NULL_VALUE,
-    SNAPSHOT_STREAM_ID, SNAPSHOT_TYPE_ID, SnapshotMark, Stream, TimeUnit,
+    CLOSE_REASON_NONE, CONSENSUS_MODULE_STREAM_ID, EGRESS_STREAM_ID, LOG_REPLAY_STREAM_ID,
+    MAX_SESSIONS, Message, NULL_VALUE, SERVICE_ID, SNAPSHOT_STREAM_ID, SNAPSHOT_TYPE_ID,
+    SnapshotMark, Stream, TimeUnit,
 };
 use cavalry_shm::counters::CounterId;
 use cavalry_shm::counters::generated::{
-    CLUSTER_SNAPSHOT_ACTIONS, CLUSTER_SNAPSHOT_POSITION, CLUSTER_SNAPSHOT_START_POSITION,
-    CLUSTER_SNAPSHOT_STEPS, CLUSTER_SNAPSHOTS_BEGUN, CLUSTER_SNAPSHOTS_FAILED,
-    CLUSTER_SNAPSHOTS_PASSED_OVER, CLUSTER_SNAPSHOTS_TAKEN,
+    CLUSTER_SERVICE_ACKS_REJECTED, CLUSTER_SERVICE_SNAPSHOT_POSITION,
+    CLUSTER_SERVICE_SNAPSHOTS_LISTED, CLUSTER_SNAPSHOT_ACTIONS, CLUSTER_SNAPSHOT_POSITION,
+    CLUSTER_SNAPSHOT_START_POSITION, CLUSTER_SNAPSHOT_STEPS, CLUSTER_SNAPSHOTS_BEGUN,
+    CLUSTER_SNAPSHOTS_FAILED, CLUSTER_SNAPSHOTS_PASSED_OVER, CLUSTER_SNAPSHOTS_TAKEN,
 };
 
 use crate::sessions::Sessions;
@@ -59,6 +69,25 @@ pub const SNAPSHOT_TIMEOUT: Duration = Duration::from_secs(1);
 /// The longest message of a snapshot: a cluster session with the longest response
 /// channel a leader accepts, 8 + 40 + 4 + 280 bytes, which one frame carries.
 const SCRATCH_LENGTH: usize = 512;
+
+/// How many messages of the consensus module stream a member reads in one duty
+/// cycle (`spec/cluster.md`, "The member's list of a service's snapshots").
+pub(crate) const SERVICE_ACK_LIMIT: usize = 10;
+
+/// A service's word of a snapshot it took: what its service ack carries, less the
+/// field a member does not read.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct ServiceAcked {
+    /// The log position of the service's snapshot.
+    pub(crate) log_position: i64,
+    /// The cluster's time of the cluster action that asked for it.
+    pub(crate) timestamp: i64,
+    /// The snapshot's recording in the catalog of the member's driver: the ack's
+    /// relevant id.
+    pub(crate) recording_id: i64,
+    /// The service's id.
+    pub(crate) service_id: i32,
+}
 
 /// Where in the log a snapshot is: what the cluster action that asked for it gives.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -90,6 +119,17 @@ pub struct SnapshotCounts {
     pub taken: u64,
     /// `cluster.snapshots_failed`: a snapshot given up, at any step.
     pub failed: u64,
+}
+
+/// What a member counts of the snapshots of the service beside it (`counters.toml`,
+/// `cluster.service_snapshots_listed` and `cluster.service_acks_rejected`).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct ServiceSnapshotCounts {
+    /// `cluster.service_snapshots_listed`: a service's snapshot listed for its
+    /// service ack.
+    pub listed: u64,
+    /// `cluster.service_acks_rejected`: a service ack for which nothing was listed.
+    pub rejected: u64,
 }
 
 /// Where a snapshot is in its taking. A member takes one at a time.
@@ -128,10 +168,14 @@ pub(crate) struct ModuleSnapshot {
     deadline: Instant,
     scratch: Box<[u8; SCRATCH_LENGTH]>,
     counts: SnapshotCounts,
+    service_counts: ServiceSnapshotCounts,
+    /// The member's subscription on the consensus module stream, added at its start
+    /// and kept for its life: the service acks of the services on its driver.
+    acks: Subscription,
     /// The member's counters of its snapshots, each with the value it last stored:
-    /// six in the order of [`ModuleSnapshot::values`], then the two of its start,
+    /// nine in the order of [`ModuleSnapshot::values`], then the two of its start,
     /// which are stored once.
-    counters: [(Counter, i64); 8],
+    counters: [(Counter, i64); 11],
 }
 
 /// Why a member's snapshots could not be set up at its start.
@@ -144,9 +188,10 @@ pub(crate) enum OpenError {
 impl ModuleSnapshot {
     /// Takes the member's snapshots file, which its start opened and read, and adds
     /// the member's counters of its snapshots, each holding its value from its first
-    /// store, and its publication on the snapshot stream. `started` is what the start
-    /// took from the file: the position of the snapshot it began from, −1 for none,
-    /// and how many listed snapshots it passed over.
+    /// store, its publication on the snapshot stream, and its subscription on the
+    /// consensus module stream. `started` is what the start took from the file: the
+    /// position of the snapshot it began from, −1 for none, and how many listed
+    /// snapshots it passed over.
     pub(crate) fn open(
         client: &mut Cavalry,
         file: SnapshotsFile,
@@ -156,6 +201,9 @@ impl ModuleSnapshot {
         let (start_position, passed_over) = started;
         let newest = file
             .newest(CONSENSUS_MODULE)
+            .map_or(NULL_VALUE, |snapshot| snapshot.log_position);
+        let newest_service = file
+            .newest(SERVICE_ID)
             .map_or(NULL_VALUE, |snapshot| snapshot.log_position);
         let mut add = |id: CounterId, name: &str, value: i64| {
             let counter = client.add_counter(
@@ -178,6 +226,22 @@ impl ModuleSnapshot {
                 add(CLUSTER_SNAPSHOT_STEPS, "cluster.snapshot_steps", 0)?,
                 add(CLUSTER_SNAPSHOTS_TAKEN, "cluster.snapshots_taken", 0)?,
                 add(CLUSTER_SNAPSHOTS_FAILED, "cluster.snapshots_failed", 0)?,
+                // What the member lists for the service beside it.
+                add(
+                    CLUSTER_SERVICE_SNAPSHOT_POSITION,
+                    "cluster.service_snapshot_position",
+                    newest_service,
+                )?,
+                add(
+                    CLUSTER_SERVICE_SNAPSHOTS_LISTED,
+                    "cluster.service_snapshots_listed",
+                    0,
+                )?,
+                add(
+                    CLUSTER_SERVICE_ACKS_REJECTED,
+                    "cluster.service_acks_rejected",
+                    0,
+                )?,
                 // What the start did, which never changes while the member runs.
                 add(
                     CLUSTER_SNAPSHOT_START_POSITION,
@@ -194,6 +258,9 @@ impl ModuleSnapshot {
         .map_err(OpenError::Client)?;
         let publication = client
             .add_exclusive_publication(SNAPSHOT_CHANNEL, SNAPSHOT_STREAM_ID)
+            .map_err(OpenError::Client)?;
+        let acks = client
+            .add_subscription(SNAPSHOT_CHANNEL, CONSENSUS_MODULE_STREAM_ID)
             .map_err(OpenError::Client)?;
         Ok(Self {
             file,
@@ -212,13 +279,16 @@ impl ModuleSnapshot {
             deadline: Instant::now(),
             scratch: Box::new([0; SCRATCH_LENGTH]),
             counts: SnapshotCounts::default(),
+            service_counts: ServiceSnapshotCounts::default(),
+            acks,
             counters,
         })
     }
 
-    /// The values of the member's six counters of its snapshots, in the order they
-    /// were added: the gauge, then the counts.
-    fn values(&self) -> [i64; 6] {
+    /// The values of the member's nine counters of its snapshots that move while it
+    /// runs, in the order they were added: its own gauge and counts, then the
+    /// service's gauge and counts.
+    fn values(&self) -> [i64; 9] {
         let count = |value: u64| i64::try_from(value).unwrap_or(i64::MAX);
         [
             self.newest_position(),
@@ -227,6 +297,9 @@ impl ModuleSnapshot {
             count(self.counts.steps),
             count(self.counts.taken),
             count(self.counts.failed),
+            self.newest_service_position(),
+            count(self.service_counts.listed),
+            count(self.service_counts.rejected),
         ]
     }
 
@@ -258,6 +331,102 @@ impl ModuleSnapshot {
         self.file
             .newest(CONSENSUS_MODULE)
             .map_or(NULL_VALUE, |snapshot| snapshot.log_position)
+    }
+
+    /// What the member has counted of the snapshots of the service beside it.
+    pub(crate) const fn service_counts(&self) -> ServiceSnapshotCounts {
+        self.service_counts
+    }
+
+    /// The log position of the newest snapshot of a service that the member's file
+    /// lists, −1 when it lists none: `cluster.service_snapshot_position`.
+    pub(crate) fn newest_service_position(&self) -> i64 {
+        self.file
+            .newest(SERVICE_ID)
+            .map_or(NULL_VALUE, |snapshot| snapshot.log_position)
+    }
+
+    /// Reads the consensus module stream, at most [`SERVICE_ACK_LIMIT`] messages: the
+    /// service acks into `acks`, in the order they were read. Returns how many acks
+    /// were read, and how many messages were none: a message the stream does not
+    /// carry, or one a reader rejects (`spec/cluster.md`, "What a reader rejects").
+    pub(crate) fn read_acks(
+        &mut self,
+        acks: &mut [Option<ServiceAcked>; SERVICE_ACK_LIMIT],
+    ) -> Result<(usize, u64), Fault> {
+        let mut read = 0usize;
+        let mut rejected = 0u64;
+        self.acks.poll(
+            |bytes, _| match Message::parse(Stream::ConsensusModule, bytes) {
+                Ok(Message::ServiceAck {
+                    log_position,
+                    timestamp,
+                    relevant_id,
+                    service_id,
+                    ..
+                }) => {
+                    if let Some(slot) = acks.get_mut(read) {
+                        *slot = Some(ServiceAcked {
+                            log_position,
+                            timestamp,
+                            recording_id: relevant_id,
+                            service_id,
+                        });
+                        read += 1;
+                    }
+                }
+                _ => rejected = rejected.saturating_add(1),
+            },
+            SERVICE_ACK_LIMIT,
+        )?;
+        Ok((read, rejected))
+    }
+
+    /// Lists a service's snapshot for its service ack, when it is one the member can
+    /// hold (`spec/cluster.md`, "The member's list of a service's snapshots"; ADR
+    /// 0131). The service id is the one service's. `held` says that the catalog holds
+    /// the ack's recording as a stopped recording of the service snapshot stream,
+    /// with bytes. The log position is above 0 and at or below `commit_position`.
+    /// `term` is the newest term of the member's record of terms whose base is below
+    /// the position, with that base. And the file takes the entry: its position is
+    /// above the newest the file lists for the service. An ack that fails one of
+    /// these is counted and nothing is listed: `Ok(false)`. `Err` is a list that
+    /// could not be written.
+    pub(crate) fn list_service(
+        &mut self,
+        ack: ServiceAcked,
+        held: bool,
+        commit_position: i64,
+        term: Option<(i64, i64)>,
+    ) -> Result<bool, SnapshotsError> {
+        let listable = ack.service_id == SERVICE_ID
+            && held
+            && ack.log_position > 0
+            && ack.log_position <= commit_position;
+        let (true, Some((leadership_term_id, term_base_log_position))) = (listable, term) else {
+            self.service_counts.rejected = self.service_counts.rejected.saturating_add(1);
+            return Ok(false);
+        };
+        match self.file.list(ListedSnapshot {
+            recording_id: ack.recording_id,
+            leadership_term_id,
+            term_base_log_position,
+            log_position: ack.log_position,
+            timestamp: ack.timestamp,
+            service_id: ack.service_id,
+        }) {
+            Ok(()) => {
+                self.service_counts.listed = self.service_counts.listed.saturating_add(1);
+                Ok(true)
+            }
+            // A snapshot the list does not take: at or below the newest it holds
+            // for the service, or with a field no list holds. Nothing was written.
+            Err(SnapshotsError::List { .. }) => {
+                self.service_counts.rejected = self.service_counts.rejected.saturating_add(1);
+                Ok(false)
+            }
+            Err(error) => Err(error),
+        }
     }
 
     /// Whether the snapshot's messages are being written. The module does not read

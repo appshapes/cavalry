@@ -305,7 +305,7 @@ fn kind(entry: &Entry<'_>) -> Kind {
             timed_out,
         } => Kind::Close(session_id, timed_out),
         Entry::NewLeadershipTerm { leader_member_id } => Kind::Term(leader_member_id),
-        Entry::Other => Kind::Other,
+        Entry::Snapshot | Entry::Other => Kind::Other,
     }
 }
 

@@ -626,7 +626,9 @@ snapshot that a reader would refuse in the list is not written: it is the writer
 fault, `list`, and the file is left as it was. The recovery pass of this section
 leaves the file alone, as it leaves the two others. A member lists a snapshot of its
 consensus module when it has taken one (`spec/cluster.md`, "Snapshots"; ADR 0129),
-and no service's snapshot yet.
+and a snapshot of the service beside it, with service id 0, when that service has
+told it of one (`spec/cluster.md`, "The member's list of a service's snapshots";
+ADR 0131).
 
 What the order of a truncation leaves after a crash: before the list is written,
 recordings the list names are gone from the catalog, the last ones it names, since
