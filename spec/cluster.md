@@ -959,15 +959,18 @@ recording begins at or below the furthest end of the ones before it, the floor
 position for the first, and the log ends at the furthest end of them all: the end
 of the contiguous span, as "The log" defines the append position, which is not the
 last recording's end when that recording ends inside one before it. The catalog may
-lack the last recordings the file names, and no others: a truncation purges a
+lack the last recordings the file names, and no others but the first ones, purged
+below a snapshot (below): a truncation purges a
 member's recordings from the last one back, before it cuts any, and writes the file
 after them ("Messages during an election"), so those are a truncation the member's
 stop cut short, and the log ends at the furthest end of the recordings that are
-left. The member then writes the file with the recordings it took, when they are not
+left, when that end is at or above the position the member's read of its log
+begins at (below). The member then writes the file with the recordings it took, when they are not
 the ones it read, one being gone or holding nothing, and deletes from its record of
 terms each term whose base is above the end of its log, as that truncation would
-have; a start that found a recording gone or deleted a term is counted, once, in
-`cluster.truncations_finished`. What
+have; a start that found the file's last recordings gone or deleted a term is
+counted, once, in `cluster.truncations_finished`, and recordings purged at the
+head of the file, below a snapshot, are not. What
 that truncation had not yet cut stays in the member's log, uncommitted, and the
 leader's next new leadership term has the member cut it. Nothing else shortens the
 log a member starts with.
@@ -999,7 +1002,11 @@ hold a snapshot that a member writes: one with a response channel longer than a
 session holds is such a recording. A snapshot that fails one of the three is
 passed over for the one the file lists before it, and counted in
 `cluster.snapshots_passed_over`. A member never begins its read at a snapshot's
-position with another state than that snapshot's.
+position with another state than that snapshot's. The file lists at most 64
+snapshots (`spec/durable-log.md`, "Snapshots"), and a start waits the snapshot load
+timeout for each one whose recording the catalog holds and the driver does not
+play back: 320 s at the most, on a driver that plays none of 64 back, before the
+start reads its log from position 0.
 
 From the snapshot the member takes its sessions and the next session id. Each
 session is open as its committed session open event opened it on a follower
@@ -1020,8 +1027,25 @@ below it were purged (`spec/client-protocol.md`, "Commands", purge recording), t
 start leaves them out, and the file it then writes has that recording's start as
 its floor position. And a file that names more recordings that hold bytes than a
 member keeps, 1,024 (state 0), when the newest 1,024 begin at or below that
-position: the start forgets the others. A member whose log begins above the
-position its read begins at does not start, whichever of the three it is. A member
+position: the start forgets the others, and the file that it then writes, which no
+longer names them, is counted in `cluster.log_recordings_listed`;
+`cluster.log_recordings_forgotten` counts the recordings a member forgets while it
+runs. A member whose log begins above the
+position its read begins at does not start, whichever of the three it is.
+
+Nor does a member whose log ends below that position. The snapshot is of a position
+that the member read from its committed log, which it reads from its own
+recordings, and a truncation never cuts below a commit position ("Messages during
+an election"; ADR 0083). So the log that the member left reaches that position,
+and a log that ends below it has lost its end. Where the catalog lacks the file's
+last recordings, they are then no truncation that the member's stop cut short:
+recordings of its log at or above the snapshot's position were removed, as by a
+purge of one recording too many. Where the catalog holds every recording the file
+names, the end of the log was cut (`spec/client-protocol.md`, "Commands", truncate
+recording), or the file and the catalog are older than the snapshot. A log that
+ends at that position reaches it, and the member starts. Where the log ends is
+known once the recordings still being made are stopped, so the start stops those
+first; it writes no file and deletes no term. A member
 that forgets a recording while it runs goes on, its state in memory, counts it in
 `cluster.log_recordings_forgotten`, and starts again on that log directory only
 from a snapshot of a position at or above where its log then begins. A log
@@ -1046,9 +1070,12 @@ the catalog holds a recording of the log's stream: a member records a term befor
 records an entry, so the record was removed, whatever else the directory holds (ADR
 0104). The file
 fails a check of `spec/durable-log.md`, "What a reader rejects", or names another
-member. Its log begins above the position its read of it begins at, as above. Or
+member. Its log begins above the position its read of it begins at, as above, or
+ends below that position though the catalog holds every recording the file names. Or
 the catalog holds, in place of a recording the file names: no recording, before one
-that it does hold, which is no purge below its snapshot as above; a recording the
+that it does hold, which is no purge below its snapshot as above; no recording, nor
+any that the file names after it, where the recordings before it end below the
+position its read of the log begins at, as above; a recording the
 driver found damaged; a recording that
 begins elsewhere or is of another stream; or a recording that begins past the
 furthest end of the ones before it. In every one of them a start would give the
@@ -1596,7 +1623,7 @@ that a reader of a counters file knows which transition it saw.
 | service snapshot state | at most 1,073,741,824 bytes, 1 GiB, of a program's state in one snapshot, written 1,024 bytes to a message ("Snapshots") |
 | snapshot interval | 268,435,456 bytes of the log, 256 MiB: how far past the last cluster action that asked for a snapshot a leader's log grows before the leader appends the next ("Snapshots") |
 | snapshot timeout | 1 s: how long a snapshot being taken may go without its next step, a message its publication takes, its recording's stop announced or, for a service, its ack taken, before the member or the service gives it up ("Snapshots") |
-| snapshot load timeout | 5 s: how long a member's start waits for its driver to play one snapshot's recording back before it passes that snapshot over ("A member's start") |
+| snapshot load timeout | 5 s: how long a member's start waits for its driver to play one snapshot's recording back before it passes that snapshot over, so 320 s at the most for the 64 snapshots a file lists ("A member's start") |
 
 Timeouts are measured on a monotonic clock of the process that measures them, a
 member's or a client's, nanoseconds that never step back, and on no wall clock: a step

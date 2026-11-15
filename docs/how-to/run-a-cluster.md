@@ -246,6 +246,25 @@ committed once a quorum, two of three, has it on disk.
   truncation of this member's log stopped on a fault part way, and the member then
   led a term, so its file names a recording that begins past the cut. Leave this
   member stopped, as for a directory that is lost.
+  Another names a position `below position` of `the newest snapshot the member can
+  read`: the last recordings of the member's log are gone, and the log that is left
+  ends below the position the member's start would read it from. A truncation
+  never cuts that far, so a recording at or above the snapshot's position was
+  removed, as by a `purge recording` of one recording too many. Purge only the
+  recordings of a member's log that end at or below the position of its newest
+  snapshot, which the member's gauge `cluster.snapshot_position` holds while it
+  runs. Start the member with the log directory it had, whole. If that directory
+  is lost, do as for a directory with no file, above.
+- `cavalry run: member refused (log-short)`: the `catalog` in the member's log
+  directory holds every recording that its `log-recordings` file names, and the
+  log they hold ends below the position of the member's newest snapshot. The
+  message names both positions. The member read its log to the snapshot's position
+  before it took the snapshot, so the end of its log has gone since: a recording of
+  the log was cut, as by a `truncate recording`, or the `log-recordings` file and
+  the `catalog` were put back from a copy older than the `snapshots` file. Never
+  truncate a recording of a member's log. Start the member with the log directory
+  it had, whole. If that directory is lost, do as for a directory with no file,
+  above.
 - `cavalry run: cluster member <id>: member stopped (append)`: the member leads, and
   its log publication refused an entry for a reason that waiting does not mend. The
   message names the reason and says what to do:
@@ -419,7 +438,10 @@ committed once a quorum, two of three, has it on disk.
   directory, as after a `purge recording` of the snapshot itself. The driver found
   the recording damaged, which `recording.invalidated` on this member's driver
   counts: check the log directory's device. Or the driver did not play the
-  recording back within 5 s: check the load of this host. When none of the three
+  recording back within 5 s: check the load of this host. A start waits those 5 s
+  for each snapshot that the driver does not play back, and a member lists 64
+  snapshots at most, so such a start takes up to 320 s before the member runs. When
+  none of the three
   explains the count, the recording holds something that no member writes as a
   snapshot. That is a fault of Cavalry, or a file of the log directory that was
   changed by hand: report it, with the log directory. There is nothing to do for

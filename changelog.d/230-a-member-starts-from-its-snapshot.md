@@ -13,6 +13,23 @@
   starts again from the beginning of the log
   ([ADR 0130](docs/decisions/0130-start-a-member-from-its-newest-snapshot-and-hold-its-log-to-that-position-alone.md);
   [Run a cluster of three members](docs/how-to/run-a-cluster.md#when-it-does-not-work)).
+- A member whose log's last recordings are gone, so that its log ends below the
+  snapshot its start would read from, does not start on the shorter log: `cavalry
+  run` refuses it with `member refused (listed-recording)`, naming the recording
+  gone and both positions, as after a `purge recording` of one recording too many.
+  Recordings purged below a snapshot are not counted in
+  `cluster.truncations_finished`, which counts a truncation that a member's stop
+  cut short
+  ([Run a cluster of three members](docs/how-to/run-a-cluster.md#when-it-does-not-work)).
+- A member whose log ends below its newest snapshot with no recording gone, as
+  after a `truncate recording` of its log or a log directory put back from an older
+  copy, does not start either: `cavalry run` refuses it with `member refused
+  (log-short)`, naming both positions
+  ([Run a cluster of three members](docs/how-to/run-a-cluster.md#when-it-does-not-work)).
+- `cavalry-raft`: `ListedFound` gains `EndsBelowSnapshot`, with `end_position` and
+  `from_position`, the refusal of a start whose log's last recordings are gone, and
+  `RaftError` gains `LogShort`, with the same two positions, the refusal of one
+  whose recordings are all held.
 - `cavalry-raft`: `RaftError::LogForgotten` gains `from_position`, the position the
   start would read the log from, beside `floor_position`, and
   `snapshots_passed_over`, how many newer snapshots the start could not read. Its

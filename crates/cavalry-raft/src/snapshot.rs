@@ -779,21 +779,26 @@ fn read_recording(client: &mut Cavalry, recording_id: i64) -> Option<Vec<Vec<u8>
     // (`spec/client-protocol.md`, "Commands", start replay).
     let mut reached = 0i64;
     loop {
-        let read = subscription
-            .poll(
-                |bytes, header| {
-                    if header.session_id() != session {
-                        return;
-                    }
-                    if messages.len() < MAX_MESSAGES {
-                        messages.push(bytes.to_vec());
-                    } else {
-                        too_many = true;
-                    }
-                },
-                MAX_MESSAGES,
-            )
-            .ok()?;
+        let polled = subscription.poll(
+            |bytes, header| {
+                if header.session_id() != session {
+                    return;
+                }
+                if messages.len() < MAX_MESSAGES {
+                    messages.push(bytes.to_vec());
+                } else {
+                    too_many = true;
+                }
+            },
+            MAX_MESSAGES,
+        );
+        // A poll that fails ends the read, and the replay is stopped as at the
+        // deadline: the driver plays it to nobody otherwise, for as long as the
+        // module's client lives.
+        let Ok(read) = polled else {
+            let _ = replay.stop(client);
+            return None;
+        };
         if let Some(image) = subscription
             .images()
             .iter()
