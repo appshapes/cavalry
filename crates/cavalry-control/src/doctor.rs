@@ -6724,8 +6724,18 @@ mod tests {
         assert_eq!(finding.doc, DOC_CLUSTER);
         assert!(
             finding.message.starts_with(
-                "member 0's cluster.snapshots_failed is 2: This member took no snapshot \
-                 where the others did"
+                "member 0's cluster.snapshots_failed is 2: This member gave up a snapshot."
+            ),
+            "{}",
+            finding.message
+        );
+        // With no counter of the driver above 0 it says what else it is: a slow step,
+        // or a second snapshot asked for while one was being taken, and where that
+        // shows.
+        assert!(
+            finding.message.contains(
+                "a second snapshot was asked for while one was being taken: \
+                 cluster.snapshot_actions on the leader then rose twice within a second"
             ),
             "{}",
             finding.message
