@@ -12,6 +12,9 @@ use cavalry_log::layout::{
 use cavalry_log::recordings::{
     self, ListedRecording, RecordingsHeader, SLOT_LENGTH as RECORDINGS_SLOT_LENGTH, SlotFields,
 };
+use cavalry_log::snapshots::{
+    self, ListedSnapshot, SLOT_LENGTH as SNAPSHOTS_SLOT_LENGTH, SnapshotsHeader,
+};
 use cavalry_log::terms::{
     self, ENTRY_LENGTH as TERMS_ENTRY_LENGTH, HEADER_LENGTH as TERMS_HEADER_LENGTH, TermsEntry,
     TermsHeader,
@@ -89,13 +92,34 @@ fn assert_listed(name: &str, fields: &Value, slot: SlotFields, entries: &[Listed
     assert_eq!(entries, &expected[..], "{name}");
 }
 
+/// Holds a slot of the snapshots file to a vector's `fields`: its sequence and its
+/// entries, each its six fields in the file's order.
+fn assert_snapshots(name: &str, fields: &Value, sequence: i64, entries: &[ListedSnapshot]) {
+    assert_eq!(sequence, int(fields, "sequence"), "{name}");
+    let expected: Vec<ListedSnapshot> = fields["entries"]
+        .as_array()
+        .expect("a list of entries")
+        .iter()
+        .map(|entry| ListedSnapshot {
+            recording_id: entry[0].as_i64().expect("a recording id"),
+            leadership_term_id: entry[1].as_i64().expect("a leadership term id"),
+            term_base_log_position: entry[2].as_i64().expect("a term base log position"),
+            log_position: entry[3].as_i64().expect("a log position"),
+            timestamp: entry[4].as_i64().expect("a timestamp"),
+            service_id: i32::try_from(entry[5].as_i64().expect("a service id"))
+                .expect("a service id is an i32"),
+        })
+        .collect();
+    assert_eq!(entries, &expected[..], "{name}");
+}
+
 #[test]
 fn every_vector_agrees_with_the_layout_layer() {
     let doc: Value = serde_json::from_str(VECTORS).expect("the vectors are JSON");
     assert_eq!(doc["spec"], "durable-log");
     assert_eq!(
-        doc["version"], 3,
-        "the vectors are for the page's version 3"
+        doc["version"], 4,
+        "the vectors are for the page's version 4"
     );
     let mut count = 0;
     for vector in doc["vectors"].as_array().expect("a vector list") {
@@ -305,6 +329,61 @@ fn every_vector_agrees_with_the_layout_layer() {
                         );
                         let chosen = read[slot].expect("the slot chosen passed its checks");
                         assert_listed(name, fields, chosen, &lists[slot]);
+                    }
+                    (Err(found), Some(expected)) => assert_eq!(found.reason(), expected, "{name}"),
+                    (outcome, expected) => panic!("{name}: {outcome:?} against {expected:?}"),
+                }
+            }
+            "snapshots-header" => {
+                let bytes = hex(vector["bytes"].as_str().expect("bytes"));
+                let file_length = vector["file_length"].as_u64().expect("a file length");
+                match (SnapshotsHeader::parse(&bytes, file_length), error) {
+                    (Ok(header), None) => {
+                        assert_eq!(
+                            i64::from(header.member_id),
+                            int(&vector["fields"], "member_id"),
+                            "{name}"
+                        );
+                        assert_eq!(&header.encode()[..], &bytes[..], "{name}");
+                    }
+                    (Err(found), Some(expected)) => assert_eq!(found.reason(), expected, "{name}"),
+                    (outcome, expected) => panic!("{name}: {outcome:?} against {expected:?}"),
+                }
+            }
+            "snapshots-slot" => {
+                let bytes = hex(vector["bytes"].as_str().expect("bytes"));
+                let mut entries = Vec::new();
+                match (snapshots::parse_slot(&bytes, &mut entries), error) {
+                    (Ok(sequence), None) => {
+                        assert_snapshots(name, &vector["fields"], sequence, &entries);
+                        // The sequence and the entries encode to the vector's bytes.
+                        let mut slot = Box::new([0u8; SNAPSHOTS_SLOT_LENGTH]);
+                        let length = snapshots::encode_slot(sequence, &entries, &mut slot)
+                            .expect("a slot a reader takes is one a writer writes");
+                        assert_eq!(&slot[..length], &bytes[..], "{name}");
+                    }
+                    (Err(found), Some(expected)) => assert_eq!(found.reason(), expected, "{name}"),
+                    (outcome, expected) => panic!("{name}: {outcome:?} against {expected:?}"),
+                }
+            }
+            "snapshots-file" => {
+                let slots = vector["slots"].as_array().expect("two slots");
+                assert_eq!(slots.len(), 2, "{name}");
+                let mut lists = [Vec::new(), Vec::new()];
+                let [list_0, list_1] = &mut lists;
+                let slot_0 = snapshots::parse_slot(&hex(slots[0].as_str().expect("hex")), list_0);
+                let slot_1 = snapshots::parse_slot(&hex(slots[1].as_str().expect("hex")), list_1);
+                let read = [slot_0.as_ref().ok().copied(), slot_1.as_ref().ok().copied()];
+                match (snapshots::choose(slot_0, slot_1), error) {
+                    (Ok(slot), None) => {
+                        let fields = &vector["fields"];
+                        assert_eq!(
+                            i64::try_from(slot).expect("0 or 1"),
+                            int(fields, "slot"),
+                            "{name}"
+                        );
+                        let chosen = read[slot].expect("the slot chosen passed its checks");
+                        assert_snapshots(name, fields, chosen, &lists[slot]);
                     }
                     (Err(found), Some(expected)) => assert_eq!(found.reason(), expected, "{name}"),
                     (outcome, expected) => panic!("{name}: {outcome:?} against {expected:?}"),

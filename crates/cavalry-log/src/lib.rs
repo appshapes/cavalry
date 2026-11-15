@@ -7,4 +7,5 @@ pub mod index;
 pub mod layout;
 pub mod recorder;
 pub mod recordings;
+pub mod snapshots;
 pub mod terms;

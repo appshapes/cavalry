@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """Write spec/vectors/durable-log.json: the test vectors for spec/durable-log.md,
-version 3. The reference encoder, standard library only. Run from the repository root:
+version 4. The reference encoder, standard library only. Run from the repository root:
 
     python3 spec/vectors/durable-log.py
 
@@ -10,8 +10,8 @@ descriptor vectors carry one 1024-byte slot and its index; index vectors carry t
 position vectors are arithmetic: from a descriptor's fields and a position, the segment
 file, the offset in it and the frame header fields a reader checks. Log recordings
 vectors carry the file's 64-byte header and the file length; one slot's fields and
-entries; or both slots of a file, for the choice between them. See spec/README.md,
-"Conventions".
+entries; or both slots of a file, for the choice between them. Snapshots vectors carry
+the same three of the snapshots file. See spec/README.md, "Conventions".
 """
 
 import json
@@ -179,6 +179,47 @@ def recordings_slot(sequence, floor_position, entries, count=None, checksum=None
 def recordings_fields(sequence, floor_position, entries, **extra):
     return {"sequence": sequence, "floor_position": floor_position,
             "entries": [list(entry) for entry in entries], **extra}
+
+
+SNAPSHOTS_MAGIC = b"CVLYSNAP"
+SNAPSHOTS_HEADER = struct.Struct("<8siii44s")  # magic, version, slot length, member id, reserved
+# recording id, leadership term id, term base log position, log position, timestamp, service id, reserved
+SNAPSHOTS_ENTRY = struct.Struct("<qqqqqi4s")
+SNAPSHOTS_HEADER_LENGTH, SNAPSHOTS_MAX_ENTRIES = 64, 64
+SNAPSHOTS_SLOT_LENGTH = 16 + SNAPSHOTS_MAX_ENTRIES * SNAPSHOTS_ENTRY.size
+SNAPSHOTS_FILE_LENGTH = SNAPSHOTS_HEADER_LENGTH + 2 * SNAPSHOTS_SLOT_LENGTH
+assert (SNAPSHOTS_HEADER.size, SNAPSHOTS_ENTRY.size) == (SNAPSHOTS_HEADER_LENGTH, 48)
+assert (SNAPSHOTS_SLOT_LENGTH, SNAPSHOTS_FILE_LENGTH) == (3088, 6240)
+CONSENSUS_MODULE = -1  # the service id of the member's own state
+
+
+def snapshots_header(member_id=1, version=0, slot_length=SNAPSHOTS_SLOT_LENGTH, magic=SNAPSHOTS_MAGIC):
+    return {"magic": magic.hex(), "version": version, "slot_length": slot_length, "member_id": member_id}
+
+
+def encode_snapshots_header(h):
+    return SNAPSHOTS_HEADER.pack(bytes.fromhex(h["magic"]), h["version"], h["slot_length"], h["member_id"], b"")
+
+
+def snapshot(recording_id, service_id, log_position, leadership_term_id=0, term_base_log_position=0,
+             timestamp=1_794_700_000_000):
+    """One entry of the snapshots file, its six fields in the file's order."""
+    return (recording_id, leadership_term_id, term_base_log_position, log_position, timestamp, service_id)
+
+
+def snapshots_slot(sequence, entries, count=None, checksum=None):
+    """One slot of the snapshots file, its fields and its entries and no byte after them.
+    The entry count is the number of entries and the checksum the zlib CRC32 of
+    everything after it, unless given."""
+    body = struct.pack("<iq", len(entries) if count is None else count, sequence)
+    body += b"".join(SNAPSHOTS_ENTRY.pack(*entry, b"") for entry in entries)
+    if checksum is None:
+        checksum = zlib.crc32(body) & 0xFFFFFFFF
+    return struct.pack("<I", checksum) + body
+
+
+def snapshots_fields(sequence, entries, **extra):
+    return {"sequence": sequence, "entries": [list(entry) for entry in entries], **extra}
 
 
 def index_header(recording_id=0, version=0, magic=INDEX_MAGIC):
@@ -504,7 +545,132 @@ def main():
     file_vector("recordings-file-a-slot-that-fails-a-check", [two, bad_start], error="position")
     file_vector("recordings-file-a-torn-slot-and-one-that-fails-a-check", [torn, bad_sequence], error="sequence")
     file_vector("recordings-file-order-slot-0-before-slot-1", [bad_start, bad_sequence], error="position")
-    doc = {"spec": "durable-log", "version": 3, "generated_by": "spec/vectors/durable-log.py", "vectors": vectors}
+
+    # Snapshots file (version 4): the header with the file length, then one slot, its
+    # fields and its entries, then both slots of a file.
+    whole = SNAPSHOTS_FILE_LENGTH
+    sh = snapshots_header()
+
+    def invalid_snapshots_header(name, error, h=sh, file_length=whole):
+        vectors.append(invalid(name, "snapshots-header", error, encode_snapshots_header(h), file_length=file_length))
+
+    vectors.append(valid("snapshots-header", "snapshots-header", encode_snapshots_header(sh), sh, file_length=whole))
+    first_member = snapshots_header(member_id=0)
+    vectors.append(valid("snapshots-header-member-0", "snapshots-header", encode_snapshots_header(first_member),
+                         first_member, file_length=whole))
+    invalid_snapshots_header("snapshots-too-short", "too-short", file_length=whole - 1)
+    invalid_snapshots_header("snapshots-length", "length", file_length=whole + 1)
+    invalid_snapshots_header("snapshots-not-ready", "not-ready", snapshots_header(magic=bytes(8)))
+    invalid_snapshots_header("snapshots-magic", "magic", snapshots_header(magic=RECORDINGS_MAGIC))
+    invalid_snapshots_header("snapshots-version", "version", snapshots_header(version=1))
+    invalid_snapshots_header("snapshots-slot-length", "slot-length", snapshots_header(slot_length=3080))
+    invalid_snapshots_header("snapshots-member", "member", snapshots_header(member_id=-1))
+    invalid_snapshots_header("snapshots-order-length-before-magic", "length",
+                             snapshots_header(magic=RECORDINGS_MAGIC), file_length=whole + 48)
+    invalid_snapshots_header("snapshots-order-not-ready-before-version", "not-ready",
+                             snapshots_header(magic=bytes(8), version=1))
+    invalid_snapshots_header("snapshots-order-version-before-slot-length", "version",
+                             snapshots_header(version=1, slot_length=3080))
+    invalid_snapshots_header("snapshots-order-slot-length-before-member", "slot-length",
+                             snapshots_header(slot_length=3080, member_id=-1))
+
+    def valid_snapshots(name, sequence, entries):
+        vectors.append(valid(name, "snapshots-slot", snapshots_slot(sequence, entries), snapshots_fields(sequence, entries)))
+
+    def invalid_snapshots(name, error, raw):
+        vectors.append(invalid(name, "snapshots-slot", error, raw))
+
+    # The member's own state and one service's at the first action; both again in a
+    # later term, the module's at the term's base; a second service that began later;
+    # and a full list, the module and a service at each of 32 actions.
+    module = snapshot(3, CONSENSUS_MODULE, 320)
+    service = snapshot(4, 0, 320)
+    later = [module, service,
+             snapshot(9, CONSENSUS_MODULE, 640, leadership_term_id=2, term_base_log_position=640),
+             snapshot(10, 0, 960, leadership_term_id=2, term_base_log_position=640),
+             snapshot(11, 1, 960, leadership_term_id=2, term_base_log_position=640)]
+    full = [snapshot(i, CONSENSUS_MODULE if i % 2 == 0 else 0, (i // 2 + 1) * 320, timestamp=1_794_700_000_000 + i)
+            for i in range(SNAPSHOTS_MAX_ENTRIES)]
+    valid_snapshots("snapshots-slot-created", 0, [])
+    valid_snapshots("snapshots-slot-the-module", 1, [module])
+    valid_snapshots("snapshots-slot-the-module-and-a-service", 2, [module, service])
+    valid_snapshots("snapshots-slot-a-later-term-and-a-second-service", 5, later)
+    # Two service ids have no order between them: a service's snapshot of an earlier
+    # position, in an earlier term, listed after the module's.
+    valid_snapshots("snapshots-slot-a-service-listed-after-a-later-snapshot-of-the-module", 3,
+                    [snapshot(9, CONSENSUS_MODULE, 640, leadership_term_id=2, term_base_log_position=640), service])
+    valid_snapshots("snapshots-slot-any-timestamp", 4, [snapshot(3, CONSENSUS_MODULE, 320, timestamp=-(1 << 63)),
+                                                        snapshot(5, CONSENSUS_MODULE, 640, timestamp=0)])
+    valid_snapshots("snapshots-slot-a-log-position-of-0", 1, [snapshot(0, CONSENSUS_MODULE, 0)])
+    valid_snapshots("snapshots-slot-full", 2000, full)
+    invalid_snapshots("snapshots-slot-checksum", "checksum", snapshots_slot(2, [module, service], checksum=0xDEADBEEF))
+    # The slot no write has reached: zeros, whose checksum field is not the CRC32 of the rest.
+    invalid_snapshots("snapshots-slot-never-written", "checksum", bytes(16))
+    invalid_snapshots("snapshots-slot-count-negative", "checksum", snapshots_slot(2, [], count=-1))
+    invalid_snapshots("snapshots-slot-count-over-the-bound", "checksum", snapshots_slot(2, full + [snapshot(64, 1, 320)]))
+    invalid_snapshots("snapshots-slot-shorter-than-its-count", "checksum", snapshots_slot(2, [module], count=2))
+    invalid_snapshots("snapshots-slot-sequence", "sequence", snapshots_slot(-1, [module, service]))
+    invalid_snapshots("snapshots-slot-recording", "recording", snapshots_slot(2, [module, snapshot(-1, 0, 320)]))
+    invalid_snapshots("snapshots-slot-service", "service", snapshots_slot(2, [module, snapshot(4, -2, 320)]))
+    invalid_snapshots("snapshots-slot-term-negative", "term", snapshots_slot(2, [snapshot(3, 0, 320, leadership_term_id=-1)]))
+    invalid_snapshots("snapshots-slot-term-below-the-one-before", "term",
+                      snapshots_slot(2, [snapshot(3, 0, 320, leadership_term_id=2), module,
+                                         snapshot(5, 0, 640, leadership_term_id=1)]))
+    invalid_snapshots("snapshots-slot-term-base-negative", "position",
+                      snapshots_slot(2, [snapshot(3, 0, 320, term_base_log_position=-32)]))
+    invalid_snapshots("snapshots-slot-term-base-not-aligned", "position",
+                      snapshots_slot(2, [snapshot(3, 0, 320, term_base_log_position=48)]))
+    invalid_snapshots("snapshots-slot-log-position-not-aligned", "position", snapshots_slot(2, [snapshot(3, 0, 330)]))
+    invalid_snapshots("snapshots-slot-log-position-below-its-term-base", "position",
+                      snapshots_slot(2, [snapshot(3, 0, 320, term_base_log_position=352)]))
+    invalid_snapshots("snapshots-slot-log-position-the-one-before", "position",
+                      snapshots_slot(2, [module, service, snapshot(5, CONSENSUS_MODULE, 320)]))
+    invalid_snapshots("snapshots-slot-log-position-below-the-one-before", "position",
+                      snapshots_slot(2, [module, service, snapshot(5, 0, 288)]))
+    invalid_snapshots("snapshots-slot-order-checksum-before-sequence", "checksum",
+                      snapshots_slot(-1, [module], checksum=0xDEADBEEF))
+    invalid_snapshots("snapshots-slot-order-sequence-before-recording", "sequence",
+                      snapshots_slot(-1, [snapshot(-1, 0, 320)]))
+    invalid_snapshots("snapshots-slot-order-recording-before-service", "recording",
+                      snapshots_slot(2, [snapshot(-1, -2, 320)]))
+    invalid_snapshots("snapshots-slot-order-service-before-term", "service",
+                      snapshots_slot(2, [snapshot(3, -2, 320, leadership_term_id=-1)]))
+    invalid_snapshots("snapshots-slot-order-term-before-position", "term",
+                      snapshots_slot(2, [snapshot(3, 0, 330, leadership_term_id=-1)]))
+    invalid_snapshots("snapshots-slot-order-term-base-before-log-position", "position",
+                      snapshots_slot(2, [snapshot(3, 0, 330, term_base_log_position=48)]))
+    invalid_snapshots("snapshots-slot-order-an-entry-before-the-next", "position",
+                      snapshots_slot(2, [module, snapshot(4, 0, 330), snapshot(-1, 0, 640)]))
+
+    def snapshots_file(name, slots, chosen=None, error=None):
+        vector = {"name": name, "region": "snapshots-file", "slots": [slot.hex() for slot in slots]}
+        if error is None:
+            slot, sequence, entries = chosen
+            vector["fields"] = snapshots_fields(sequence, entries, slot=slot)
+        else:
+            vector["error"] = error
+        vectors.append(vector)
+
+    created = snapshots_slot(0, [])
+    one = snapshots_slot(1, [module])
+    two = snapshots_slot(2, [module, service])
+    torn = snapshots_slot(3, later[:3], checksum=0)
+    snapshots_file("snapshots-file-created", [created, bytes(16)], chosen=(0, 0, []))
+    snapshots_file("snapshots-file-first-write", [created, one], chosen=(1, 1, [module]))
+    snapshots_file("snapshots-file-second-write", [two, one], chosen=(0, 2, [module, service]))
+    # A write a crash tore: the list is the one before it, in the other slot.
+    snapshots_file("snapshots-file-slot-1-torn", [two, torn], chosen=(0, 2, [module, service]))
+    snapshots_file("snapshots-file-slot-0-torn", [torn, one], chosen=(1, 1, [module]))
+    snapshots_file("snapshots-file-neither-slot", [torn, bytes(16)], error="slots")
+    snapshots_file("snapshots-file-one-sequence-twice", [one, snapshots_slot(1, [service])], error="sequence")
+    # A slot whose checksum matches and whose fields fail a check refuses the file,
+    # beside a whole slot, beside a torn one, and slot 0's check first when both fail.
+    bad_position = snapshots_slot(3, [module, snapshot(5, CONSENSUS_MODULE, 320)])
+    bad_sequence = snapshots_slot(-1, [module])
+    snapshots_file("snapshots-file-a-slot-that-fails-a-check", [two, bad_position], error="position")
+    snapshots_file("snapshots-file-a-torn-slot-and-one-that-fails-a-check", [torn, bad_sequence], error="sequence")
+    snapshots_file("snapshots-file-order-slot-0-before-slot-1", [bad_position, bad_sequence], error="position")
+    doc = {"spec": "durable-log", "version": 4, "generated_by": "spec/vectors/durable-log.py", "vectors": vectors}
     out = Path(__file__).resolve().parent / "durable-log.json"
     out.write_text(json.dumps(doc, indent=2) + "\n")
     print(f"durable-log.py: wrote {len(vectors)} vectors to {out}")
