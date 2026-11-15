@@ -590,6 +590,11 @@ written; and an ack that the consensus module stream does not take within that
 timeout, which is a member that is not running. The service asks the stop of a
 recording that has not stopped, reports the failure to its program, counts it in
 `cluster.service_snapshots_failed`, and reads on when its program next reads. A
+service adds its two counters before its two publications, at its first snapshot,
+so that a publication the driver refuses there is counted. A counter that the
+driver refuses is the one failure that is not counted: there is no counter yet to
+count it in, the service reports it to its program, and its next snapshot adds the
+counters again. A
 snapshot whose ack the stream took is counted in `cluster.service_snapshots_taken`.
 
 **The member's list of a service's snapshots.** A member subscribes to the consensus
@@ -599,9 +604,11 @@ with the ack's service id, when four things hold. The service id is 0: one servi
 beside a member takes snapshots in this version. The catalog of the member's
 driver holds the recording that the relevant id names, of the service snapshot
 stream, stopped and with bytes. The log position is above 0 and at or below the
-member's commit position. And the file takes the entry: its log position is above
-that of the newest snapshot the file lists for the service id
-(`spec/durable-log.md`, "Snapshots"). The entry's leadership term id and term base
+member's commit position. And the file takes the entry: its log position is a
+multiple of 32 and above that of the newest snapshot the file lists for the
+service id (`spec/durable-log.md`, "Snapshots"). The member does not check that an
+entry of its log ends at the position: it takes the service's word for the
+position its state is of. The entry's leadership term id and term base
 log position are those of the newest term in the member's record of terms whose
 term base log position is below the log position, and its timestamp is the ack's.
 The member counts a snapshot it lists in `cluster.service_snapshots_listed` and
@@ -1720,7 +1727,7 @@ that a reader of a counters file knows which transition it saw.
 | `cluster.snapshots_passed_over` | a snapshot that the member's start found listed and could not read whole, so that it took the one listed before it, or none ("A member's start") |
 | `cluster.service_snapshot_position` | a gauge: the log position of the newest snapshot of a service that the member lists, −1 while it lists none ("Snapshots"; ADR 0131) |
 | `cluster.service_snapshots_listed` | a service's snapshot that the member listed for a service ack ("Snapshots") |
-| `cluster.service_acks_rejected` | a service ack for which the member listed nothing: a service id other than 0, a recording the catalog does not hold as a stopped recording of the service snapshot stream with bytes, a log position that is not above 0 or is above the commit position, or a position not above the newest the member lists for the service ("Snapshots") |
+| `cluster.service_acks_rejected` | a service ack for which the member listed nothing: a service id other than 0, a recording the catalog does not hold as a stopped recording of the service snapshot stream with bytes, a log position that is not above 0 or is above the commit position, or a position that is not a multiple of 32 or not above the newest the member lists for the service, which the snapshots file does not take ("Snapshots") |
 | `cluster.service_snapshots_taken` | a snapshot the service beside the member wrote and sent its service ack for; the service adds the counter, with its member's id as the key ("Snapshots") |
 | `cluster.service_snapshots_failed` | a snapshot the service beside the member gave up, for one of the reasons of "A service's snapshot"; the service adds the counter, with its member's id as the key |
 | `cluster.service_snapshot_recording_id` | a gauge: the id, in the catalog of the member's driver, of the recording of the newest snapshot of a service that the member lists, −1 while it lists none; a service that starts from a snapshot reads it ("A service's start"; ADR 0132) |
