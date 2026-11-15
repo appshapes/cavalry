@@ -1121,6 +1121,13 @@ impl ClusterService {
     /// member's log, or once it has answered [`Restored::State`] or
     /// [`Restored::FromStart`].
     ///
+    /// A replay that the driver refuses, as it does for a recording it does not
+    /// hold, passes the snapshot over, counted. Any other command of the call that the
+    /// driver refuses, the add of the two counters of the service's start or of its
+    /// subscription, is [`ClusterError::Client`]: the service has not started, has
+    /// counted nothing and holds neither counter, and the call is made again. The
+    /// driver counts a registry at its bound in `driver.registry_full`.
+    ///
     /// ```
     /// use cavalry_client::{Cavalry, Restored};
     ///
