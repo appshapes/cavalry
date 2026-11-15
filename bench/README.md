@@ -192,7 +192,13 @@ nothing depends on it.
   `claim_commit_32_client` and `claim_commit_32_recorded` rows, where 139 ns and
   160 ns stood, and 5,827 ns on its `one_way_32_udp` row, where 20,639 ns stood. Each
   entry also holds the five `_at_tail` rows, reported and never gated. The link's
-  profile stands as it was.
+  profile was re-recorded the same day from the three link processes of that tree,
+  after `master`'s own run there failed `udp_round_trip_32` twice with no line of the
+  link rows changed: the row's tail had risen on the two hosts, to runs of 190,207
+  to 244,863 ns where the entry of 2026-11-04 held 188,671 to 190,591, so the slowest
+  run the gate compares with is 244,863 ns
+  ([ADR 0033](../docs/decisions/0033-record-a-bench-baseline-from-every-process-at-one-tree.md));
+  what widened it is not found (work item 198).
 
 ## What it must never do
 
