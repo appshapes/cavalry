@@ -93,7 +93,12 @@ It promotes member 3. Then it shows the two changes that replace a lost voter.
    complete when `doctor` on every member that runs says `election closed`, exactly
    one says `the leader`, every other says `it follows member` with that leader's
    id, every `note cluster-member` line ends with the same voters, the new string's,
-   and none prints `WARN cluster-voters`. Check every member, on its own host: one
+   and none prints `WARN cluster-voters`. And the members that say so are a quorum
+   of the new string's voters: 3 of the 4 here. A member that is stopped is not
+   one of them, whatever string it had: if fewer than a quorum run, start the
+   others with the new string and wait for them, since the stopped ones may have
+   elected a leader among themselves that the running ones never heard of. Check
+   every member, on its own host: one
    member that says `the leader` is not enough, since a leader that cannot reach
    the others says so for up to 10 s, and longer when its process was stopped. And
    `WARN cluster-voters` alone is not enough: it compares a member with the string
@@ -110,13 +115,15 @@ give the standby that vote, make two changes, each by steps 1 to 6, the first
 complete before the second begins:
 
 1. Make the lost voter a standby: add `,standby` to its entry. The cluster then has
-   two voters, and needs both, as it does now. The lost member does not run, so
+   two voters, and needs both, as it does now: the change is complete when both
+   run and follow one leader, 2 of 2. The lost member does not run, so
    steps 4 and 5 start the three that do. While the one voter that follows is
    stopped in step 4, the leader has no quorum: start that voter again at once. If
    more than 10 s pass, the leader stops leading, and the two voters elect a leader
    when both run again. Nothing committed is lost.
 2. Promote the standby: take `,standby` off its entry. The cluster then has three
-   voters and needs two. The string before this change has two voters, so here too
+   voters and needs two, so the change is complete when at least 2 of the 3 run
+   and follow one leader. The string before this change has two voters, so here too
    the leader has no quorum while the voter that follows is stopped in step 4:
    start that voter again at once.
 
@@ -130,6 +137,8 @@ example, and a test of `cavalry-raft` runs it.
 - `cavalry doctor` on every member, with the new string set, prints one `note
   cluster-member` line with `election closed`, and no `WARN cluster-voters`.
 - Every member's line ends with the same voters, those of the new string.
+- The members that run are a quorum of the new string's voters or more, 3 of 4
+  here: fewer do not make the change complete, however they agree.
 - Exactly one member says `the leader`. Its term is above the term the cluster had
   before the change.
 - Every member reports the same `commit position` once its recorder has synced.

@@ -1069,17 +1069,25 @@ them.
    and 2 and the voters 0, 1 and 3, members 1 and 2 are a quorum of the first, and
    members 0 and 3 a quorum of the second.
 2. A change is complete before the next begins. It is complete when every member
-   that runs was started with the new string, and all of them have closed their
-   elections behind one leader among them (state 17). A member counts by the
-   string it was started with, so a quorum of the new string's voters recorded
-   that leader's term at its log position before its election closed (state 8),
-   and holds every entry committed before that term. And no leader of a later
-   term has committed by the string before: a member that voted in a later term
-   follows no leader of this one ("Messages during an election"). One member that
-   says it leads is not enough: a leader parted from the others says so until its
-   own clock has counted the leader heartbeat timeout, and a process that was
-   stopped counts late. Until a change is complete the string before it is still
-   one of two side by side, and a third would differ from it by two marks.
+   that runs was started with the new string, all of them have closed their
+   elections behind one leader among them (state 17), and a quorum of the new
+   string's voters is among them. A member counts by the string it was started
+   with, so a quorum of the new string's voters recorded that leader's term at its
+   log position before its election closed (state 8), and holds every entry
+   committed before that term. And no leader of a later term has committed by the
+   string before. Such a leader had the votes of a quorum of that string's voters,
+   which shares a voter with the quorum that follows this leader (rule 1), and a
+   member that voted in a later term stored that term and follows no leader of
+   this one ("Messages during an election"). The quorum is what lets the rule
+   leave out the members that do not run. With fewer, the members that are
+   stopped can be a quorum of the string before: they may have elected a leader
+   of a later term among themselves and committed, while the members that run
+   still follow a leader whose process stood still. One member that says it leads
+   is not enough for the same reason: a leader parted from the others says so
+   until its own clock has counted the leader heartbeat timeout, and a process
+   that was stopped counts late. Until a change is complete the string before it
+   is still one of two side by side, and a third would differ from it by two
+   marks.
 3. No member is started with an older string than the newest that a member of the
    cluster was started with.
 

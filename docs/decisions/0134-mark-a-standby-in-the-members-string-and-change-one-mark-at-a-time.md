@@ -53,9 +53,9 @@ leader its own string marks one.
 A mark is changed by starting the members again with a new string, under three
 rules that `spec/cluster.md` states and an operator keeps
 (`docs/how-to/promote-a-standby.md`): one mark at a time; a change complete, every
-running member started with the new string and all of them following one leader
-with their elections closed, before the next begins; and no member started with an
-older string.
+running member started with the new string, all of them following one leader with
+their elections closed, and a quorum of the new string's voters among them,
+before the next begins; and no member started with an older string.
 
 Two gauges say which string a member runs: `cluster.voters`, the voters as one bit
 each in the rising order of the ids, and `cluster.standby`. `cavalry doctor`
@@ -103,9 +103,23 @@ of the string its host is configured with, and reports a member that runs anothe
   leader heartbeat timeout, and a process that was stopped for a while, or a host
   that was paused, counts late. In that time a member that still runs the string
   before can lead a later term and commit by that string, on a quorum that is no
-  quorum of the new one. When every running member follows the one leader, no
-  such term exists: a member that voted in a later term follows no leader of an
-  earlier one. No test runs this one: the cluster in memory has one clock.
+  quorum of the new one. When a quorum of the new string's voters follows the one
+  leader, no such term exists: the quorum that elected its leader shares a voter
+  with them, and a member that voted in a later term follows no leader of an
+  earlier one.
+- **A change complete when every member that runs follows one leader, however few
+  run.** Lost, after it was the rule here and a review of the pull request found
+  its history. Five voters and a standby that is being promoted: three members,
+  started with the new string, follow a leader among them. The three others still
+  run the string before, are parted from them and are a quorum of its five
+  voters: they elect a leader of a later term and commit, while the first three
+  stand still, and then they stop. Every member that runs was started with the
+  new string and follows one leader, so the rule read complete; and the next
+  change, one mark on, had those three, a quorum of its voters, elect a leader
+  without the entry. The members that do not run were the hole: the rule's own
+  reason against one member that says it leads came back through them. A quorum
+  of the new string's voters among the members that follow the leader closes it
+  with no clock, since a quorum of the string before shares a voter with it.
 - **A member checks the rules.** Lost for this version. A member does not know
   another member's string. To carry the string, or a hash of its voters, in a
   consensus message is a change of a layout that is Aeron's, a version of the page
@@ -128,7 +142,7 @@ of the string its host is configured with, and reports a member that runs anothe
 
 ## Evidence
 
-- `crates/cavalry-raft/tests/standby.rs`, sixteen tests, on an Apple M5 Pro laptop,
+- `crates/cavalry-raft/tests/standby.rs`, eighteen tests, on an Apple M5 Pro laptop,
   macOS 26.6.1. Seven drive one core by hand. A standby with both voters' reports
   stays in canvass past the startup canvass timeout, 60 s, where a voter nominates
   itself on its next cycle. It answers two request votes with no vote and no
@@ -160,6 +174,17 @@ of the string its host is configured with, and reports a member that runs anothe
   leader's term, without the entry. With one mark changed, the same three hold two
   votes of four and elect nobody for 70 s, and when the parting ends every member
   holds the entry.
+- The quorum in the second rule,
+  `a_change_is_not_complete_on_fewer_members_than_a_quorum_of_its_voters`: five
+  voters and a standby that is being promoted, members 3, 4 and 5 started with
+  the new string, a member of them leading. Members 0, 1 and 2, parted from them
+  while their processes stand still, elect a leader of a later term by the string
+  before and commit an entry, and then stop. The three that run each say that
+  their election is closed behind the one leader among them, with six voters;
+  started with the next string, member 0 a standby, they elect a leader without
+  the entry. Its control: with member 1 started with the new string as well, four
+  of its six voters follow one leader, members 0 and 2 elect nobody for 62 s, and
+  the leader after the next change holds what the four committed.
 - `crates/cavalry-raft/tests/standby_drivers.rs`, over three drivers on the
   loopback: two voters and a standby with a service beside each; the standby
   records the log, takes the snapshot its leader asks for, with the bytes the

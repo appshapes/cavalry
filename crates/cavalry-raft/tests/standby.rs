@@ -982,3 +982,207 @@ fn one_mark_changed_elects_no_leader_without_the_committed_entry() {
         assert_eq!(cluster.log(id), cluster.log(leader), "member {id}");
     }
 }
+
+/// Steps `cluster` until `done`, for `steps` steps at the most; whether it was.
+fn stepped_until(cluster: &mut Cluster, steps: usize, done: impl Fn(&Cluster) -> bool) -> bool {
+    for _ in 0..steps {
+        if done(cluster) {
+            return true;
+        }
+        cluster.step();
+    }
+    done(cluster)
+}
+
+/// Five voters and a standby, member 5, which is being promoted: members 5, 4 and 3
+/// were started with the new string, of six voters, and members 0, 1 and 2 still
+/// run the string before, as they do in the middle of a change. Returns the cluster
+/// at a seed at which a member that runs the new string leads, every member's
+/// election closed behind it, and that leader's id.
+fn half_promoted() -> (Cluster, i32) {
+    let ids = [0, 1, 2, 3, 4, 5];
+    for seed in 1..=16 {
+        let mut cluster = Cluster::with_standbys(&ids, &[5], seed).expect("six members");
+        assert!(
+            stepped_until(&mut cluster, 62_000, |cluster| settled(cluster, &ids)),
+            "seed {seed}: the members elect a leader"
+        );
+        for member in [5, 4, 3] {
+            cluster.restart_with(member, &[]).expect("a voter is left");
+            assert!(
+                stepped_until(&mut cluster, 62_000, |cluster| settled(cluster, &ids)),
+                "seed {seed}: the members follow one leader once member {member} has started"
+            );
+        }
+        if let Some(leader) = cluster.leader().filter(|leader| *leader >= 3) {
+            return (cluster, leader);
+        }
+    }
+    panic!("no seed of sixteen at which a member that runs the new string leads");
+}
+
+/// What the quorum in rule 2 is for (`spec/cluster.md`, "Changing a standby's mark";
+/// ADR 0134): members that run, were all started with the new string and have
+/// closed their elections behind one leader among them do not make a change
+/// complete when they are fewer than a quorum of that string's voters.
+///
+/// The cluster of [`half_promoted`]. Members 0, 1 and 2 are parted from members 3,
+/// 4 and 5, whose processes stand still, the leader's among them. Members 0, 1 and
+/// 2 are a quorum of their own string's five voters: they elect a leader of a later
+/// term and commit an entry. Then they stop. Members 3, 4 and 5 are now every
+/// member that runs. Each was started with the new string, and each still says
+/// what it said when it stood still: its election closed, behind the one leader
+/// among them. They are three of six voters. The next change, one mark from the
+/// new string, makes member 0 a standby: members 3, 4 and 5, started with it, are a
+/// quorum of its five voters, and elect a leader that lacks the committed entry.
+#[test]
+fn a_change_is_not_complete_on_fewer_members_than_a_quorum_of_its_voters() {
+    let (old_side, new_side) = ([0, 1, 2], [3, 4, 5]);
+    let (mut cluster, stale) = half_promoted();
+    let stale_term = cluster
+        .member(stale)
+        .expect("a member")
+        .leadership_term_id();
+    for a in old_side {
+        for b in new_side {
+            cluster.cut_between(a, b);
+        }
+    }
+    for member in new_side {
+        cluster.stall(member);
+    }
+    // Members 0, 1 and 2 hear nothing of their leader for the leader heartbeat
+    // timeout, elect one of themselves by their own string, and commit.
+    assert!(
+        stepped_until(&mut cluster, 62_000, |cluster| {
+            settled(cluster, &old_side) && cluster.leader().is_some_and(|leader| leader < 3)
+        }),
+        "members 0, 1 and 2 elect a leader"
+    );
+    let later = cluster.leader().expect("a leader");
+    let later_term = cluster
+        .member(later)
+        .expect("a member")
+        .leadership_term_id();
+    assert!(later_term > stale_term);
+    let end = cluster
+        .offer(b"committed by members 0, 1 and 2")
+        .expect("the leader appends");
+    cluster.run_ms(500);
+    assert_eq!(cluster.commit_position(later), Some(end));
+    for member in old_side {
+        cluster.halt(member);
+    }
+
+    // What an operator reads of the members that run: each was started with the
+    // new string, of six voters, and has closed its election behind one leader
+    // among them. Three of six is no quorum of them.
+    for member in new_side {
+        let core = cluster.member(member).expect("a member");
+        assert_eq!(core.voters(), 0b11_1111, "member {member}");
+        assert_eq!(
+            (core.election_state(), core.leader_member_id()),
+            (ElectionState::Closed, stale),
+            "member {member}"
+        );
+    }
+    assert_eq!(cluster.role(stale), Some(Role::Leader));
+
+    // The next change, one mark from the new string: member 0 a standby.
+    for member in new_side {
+        cluster.restart_with(member, &[0]).expect("a voter is left");
+    }
+    let second_leader = |cluster: &Cluster| {
+        new_side
+            .into_iter()
+            .find(|&id| cluster.role(id) == Some(Role::Leader))
+    };
+    assert!(
+        stepped_until(&mut cluster, 62_000, |cluster| second_leader(cluster)
+            .is_some()),
+        "members 3, 4 and 5 elect a leader"
+    );
+    let second = second_leader(&cluster).expect("a leader");
+    // A leader by the rules' three strings, each one mark from the one before it,
+    // that does not hold what a leader before it committed.
+    assert!(holds(
+        &cluster.log(later),
+        b"committed by members 0, 1 and 2"
+    ));
+    assert!(!holds(
+        &cluster.log(second),
+        b"committed by members 0, 1 and 2"
+    ));
+    assert!(
+        cluster
+            .member(second)
+            .expect("a member")
+            .leadership_term_id()
+            <= later_term,
+        "the second leader's term is no later than the term it never heard of"
+    );
+}
+
+/// The same cluster with the quorum that rule 2 asks for. Member 1 is started with
+/// the new string as well, so that members 1, 3, 4 and 5 run it and follow one
+/// leader: four of its six voters, a quorum. Members 0 and 2 are parted from them
+/// and are two of the five voters of the string they run: they elect nobody, for
+/// longer than the startup canvass timeout, so no leader of a later term commits
+/// by the string before. The change is complete, and the next one loses nothing:
+/// with member 0 made a standby, the leader that members 1, 3, 4 and 5 then have
+/// holds the entry they committed.
+#[test]
+fn a_change_is_complete_when_a_quorum_of_its_voters_follows_one_leader() {
+    let (parted, quorum) = ([0, 2], [1, 3, 4, 5]);
+    let (mut cluster, _) = half_promoted();
+    cluster.restart_with(1, &[]).expect("a voter is left");
+    assert!(
+        stepped_until(&mut cluster, 62_000, |cluster| settled(
+            cluster,
+            &[0, 1, 2, 3, 4, 5]
+        )),
+        "the members follow one leader once member 1 has started"
+    );
+    for a in parted {
+        for b in quorum {
+            cluster.cut_between(a, b);
+        }
+    }
+    // The four elect a leader among them when the one they had is parted from
+    // them, and commit by the new string: four of six.
+    assert!(
+        stepped_until(&mut cluster, 62_000, |cluster| {
+            settled(cluster, &quorum)
+                && cluster
+                    .leader()
+                    .is_some_and(|leader| leader != 0 && leader != 2)
+        }),
+        "members 1, 3, 4 and 5 follow one leader among them"
+    );
+    let end = cluster
+        .offer(b"committed by members 1, 3, 4 and 5")
+        .expect("the leader appends");
+    cluster.run_ms(500);
+    let leader = cluster.leader().expect("a leader");
+    assert_eq!(cluster.commit_position(leader), Some(end));
+    // Members 0 and 2, by the string before, are two of five: no leader.
+    for _ in 0..62_000 {
+        cluster.step();
+        for member in parted {
+            assert_ne!(cluster.role(member), Some(Role::Leader), "member {member}");
+        }
+    }
+    // The next change, member 0 a standby, on the four that run.
+    for member in quorum {
+        cluster.restart_with(member, &[0]).expect("a voter is left");
+        assert!(
+            stepped_until(&mut cluster, 62_000, |cluster| settled(cluster, &quorum)),
+            "the four follow one leader once member {member} has started"
+        );
+    }
+    let leader = cluster.leader().expect("a leader");
+    assert!(holds(
+        &cluster.log(leader),
+        b"committed by members 1, 3, 4 and 5"
+    ));
+}
