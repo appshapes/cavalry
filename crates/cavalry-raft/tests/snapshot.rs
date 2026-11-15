@@ -1939,6 +1939,132 @@ fn a_service_takes_the_snapshot_its_leader_asks_for_and_its_member_lists_it() {
 }
 
 #[test]
+fn a_services_poll_ends_at_the_action_and_a_program_that_gives_no_state_reads_on() {
+    let dir = TestDir::new("poll-ends");
+    let members_string = members_string();
+    let mut members: Vec<Member> = [1, 0, 2]
+        .into_iter()
+        .map(|id| start_member(dir.path(), &members_string, id))
+        .collect();
+    run_until_led(&mut members, -1);
+    // Before any service polls, the log holds three entries, the action and three
+    // entries after it, all committed.
+    offer_entries(&mut members, 0, 3);
+    let position = snapshot_everywhere(&mut members);
+    offer_entries(&mut members, 3, 3);
+    let end = run_until_settled(&mut members, position + 3 * FRAME);
+    assert_eq!(end, position + 3 * FRAME);
+    let before: Vec<u8> = (0..3i64).flat_map(i64::to_le_bytes).collect();
+    let all: Vec<u8> = (0..6i64).flat_map(i64::to_le_bytes).collect();
+
+    // The service's replay plays the log into its image: polls that take nothing
+    // until its first entry is there. The driver replays up to 1 MiB of a recording
+    // at once, and the whole log, recorded and synced before the replay began, is
+    // under 1 KiB, so the entries after the action are in the image with it; the
+    // pause is there to make sure of that.
+    let mut service = Service::beside(&members[0]);
+    let mut handed = false;
+    run_until(&mut members, "the service's image holds the log", |_| {
+        service
+            .service
+            .poll(
+                &mut service.client,
+                |_, _| {
+                    handed = true;
+                    Action::Abort
+                },
+                16,
+            )
+            .expect("the service polls");
+        handed
+    });
+    assert_eq!(service.service.position(), 0);
+    std::thread::sleep(Duration::from_millis(100));
+
+    // One poll whose fragment limit reaches past the action ends at the action: the
+    // program's state is its state at the member's own snapshot's position.
+    let mut state = Vec::new();
+    let mut read: Vec<(i64, bool)> = Vec::new();
+    service
+        .service
+        .poll(
+            &mut service.client,
+            |committed, _| {
+                if let Entry::SessionMessage { payload, .. } = committed.entry {
+                    state.extend_from_slice(payload);
+                }
+                read.push((committed.position, committed.entry == Entry::Snapshot));
+                Action::Continue
+            },
+            16,
+        )
+        .expect("the service polls");
+    assert!(read.len() + 3 <= 16, "{read:?}");
+    assert_eq!(read.last(), Some(&(position - FRAME, true)), "{read:?}");
+    assert_eq!(read.iter().filter(|(_, action)| *action).count(), 1);
+    assert_eq!(state, before);
+    assert_eq!(service.service.position(), position);
+    assert_eq!(service.service.snapshot_due(), Some(position));
+
+    // The program gives no state and polls on: the next poll lets the snapshot go,
+    // and reads the entries after the action.
+    let mut after: Vec<bool> = Vec::new();
+    run_until(
+        &mut members,
+        "the service reads the entries after the action",
+        |_| {
+            service
+                .service
+                .poll(
+                    &mut service.client,
+                    |committed, _| {
+                        if let Entry::SessionMessage { payload, .. } = committed.entry {
+                            state.extend_from_slice(payload);
+                        }
+                        after.push(committed.entry == Entry::Snapshot);
+                        Action::Continue
+                    },
+                    16,
+                )
+                .expect("the service polls");
+            assert_eq!(service.service.snapshot_due(), None);
+            service.service.position() == end
+        },
+    );
+    assert_eq!(after, [false, false, false]);
+    assert_eq!(state, all);
+    assert!(matches!(
+        service.service.snapshot(&mut service.client, &state),
+        Err(ClusterError::NoSnapshotDue)
+    ));
+
+    // The service wrote nothing and sent no ack, so no member lists a snapshot of a
+    // service for the action.
+    let settled = Instant::now() + Duration::from_millis(200);
+    run_until(&mut members, "the members run on", |_| {
+        Instant::now() >= settled
+    });
+    for member in &members {
+        assert_eq!(member.module.snapshot_position(), Some(position));
+        assert_eq!(member.module.service_snapshot_position(), None);
+        assert_eq!(
+            member.module.service_snapshot_counts(),
+            ServiceSnapshotCounts {
+                listed: 0,
+                rejected: 0
+            }
+        );
+        assert_eq!(counter(member, CLUSTER_SERVICE_SNAPSHOT_POSITION.0), -1);
+        assert_eq!(counter(member, CLUSTER_SERVICE_SNAPSHOTS_LISTED.0), 0);
+        assert_eq!(listed(member).len(), 1);
+    }
+    service.close();
+    for member in members {
+        stop(member);
+    }
+}
+
+#[test]
 fn a_member_lists_nothing_for_a_service_ack_it_cannot_hold() {
     let dir = TestDir::new("acks");
     let members_string = members_string();
