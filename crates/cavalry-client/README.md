@@ -203,7 +203,9 @@ The client API implementation, re-exported by the `cavalry` crate. Data plane.
   open at that position, to a recording of its own through the member's driver,
   stops the recording, checks that it stopped at the end of what was written, and
   tells the member, which lists the snapshot. The call waits for the driver: 31 ms
-  at the median on a laptop, and 51 ms for a state of 64 MiB. `Ok(false)` says that
+  at the median on a laptop and 74.2 ms at the most, a service's first snapshot,
+  which adds its counters and its publications; for a state of 64 MiB, 51 ms at
+  the median and 60.1 ms at the most. `Ok(false)` says that
   the member already lists a snapshot of that position, and nothing was written. A
   step that makes no progress for a second ends the snapshot with
   `ClusterError::SnapshotFailed`, which names the step and what to check, counted

@@ -73,8 +73,9 @@ const IPC_CHANNEL: &str = "cavalry:ipc";
 /// How long a snapshot may go without its next step: a message a publication does
 /// not take, a recording whose stop the driver does not announce, or a service ack
 /// the consensus module stream does not take (`spec/cluster.md`, "Values", snapshot
-/// timeout). Past it the snapshot is given up.
-const SNAPSHOT_TIMEOUT_NS: i64 = 1_000_000_000;
+/// timeout). Past it the snapshot is given up. It is the one a member's own snapshot
+/// is under.
+const SNAPSHOT_TIMEOUT_NS: i64 = cavalry_proto::cluster::SNAPSHOT_TIMEOUT_NS as i64;
 
 /// How long the service's thread sleeps between two tries of a step of a snapshot
 /// that the driver has not caught up with.

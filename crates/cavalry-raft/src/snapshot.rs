@@ -44,8 +44,8 @@ use cavalry_client::{
 use cavalry_log::snapshots::{CONSENSUS_MODULE, ListedSnapshot, SnapshotsError, SnapshotsFile};
 use cavalry_proto::cluster::{
     CLOSE_REASON_NONE, CONSENSUS_MODULE_STREAM_ID, EGRESS_STREAM_ID, LOG_REPLAY_STREAM_ID,
-    MAX_SESSIONS, Message, NULL_VALUE, SERVICE_ID, SNAPSHOT_STREAM_ID, SNAPSHOT_TYPE_ID,
-    SnapshotMark, Stream, TimeUnit,
+    MAX_SESSIONS, Message, NULL_VALUE, SERVICE_ID, SNAPSHOT_STREAM_ID, SNAPSHOT_TIMEOUT_NS,
+    SNAPSHOT_TYPE_ID, SnapshotMark, Stream, TimeUnit,
 };
 use cavalry_shm::counters::CounterId;
 use cavalry_shm::counters::generated::{
@@ -63,8 +63,9 @@ const SNAPSHOT_CHANNEL: &str = "cavalry:ipc";
 
 /// How long a snapshot may go without its next step: a message the publication does
 /// not take, or a recording whose stop the driver does not announce. Past it the
-/// snapshot is given up and counted.
-pub const SNAPSHOT_TIMEOUT: Duration = Duration::from_secs(1);
+/// snapshot is given up and counted. It is the page's snapshot timeout, 1 s, the one
+/// a service's snapshot is under as well.
+pub const SNAPSHOT_TIMEOUT: Duration = Duration::from_nanos(SNAPSHOT_TIMEOUT_NS);
 
 /// The longest message of a snapshot: a cluster session with the longest response
 /// channel a leader accepts, 8 + 40 + 4 + 280 bytes, which one frame carries.
