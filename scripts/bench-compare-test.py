@@ -477,6 +477,38 @@ class Processes(Update):
                 bench_compare.update([d], baseline, join=True)
         self.assertIn("--join cannot add to timer", str(refused.exception))
 
+    def test_a_row_run_once_a_process_is_written_with_no_list_and_joins(self):
+        # The link pass runs its multi-destination cast rows once a process whatever
+        # `--repeat` is, so their result holds one run where the link rows hold every
+        # run. `--update` wrote no entry from such results; it writes the row as a row
+        # added by hand is, with no list, and a later process joins it.
+        def process(unix, round_trip_runs, mdc):
+            r = result(10, udp_round_trip_32=row(sorted(round_trip_runs)[len(round_trip_runs) // 2], round_trip_runs),
+                       claim_commit_32_udp_mdc=row(mdc, [mdc]))
+            r["repeat"] = 3
+            r["date_unix"] = unix
+            return r
+        results = [process(1793229856, [190, 200, 210], 320), process(1793229956, [191, 205, 244], 310),
+                   process(1793230056, [189, 194, 220], 350)]
+        base = {"schema": 0, "profiles": {}}
+        with tempfile.TemporaryDirectory() as tmp, \
+                mock.patch.object(bench_compare, "BASELINE", Path(tmp) / "baseline.json"):
+            with contextlib.redirect_stdout(io.StringIO()):
+                self.assertEqual(bench_compare.update(results, base), 0)
+            entry = base["profiles"]["test-host"]
+            self.assertEqual(entry["processes"], 3)
+            self.assertEqual(entry["benchmarks"]["udp_round_trip_32"]["p99_99_ns_runs"],
+                             [190, 200, 210, 191, 205, 244, 189, 194, 220])
+            self.assertNotIn("p99_99_ns_runs", entry["benchmarks"]["claim_commit_32_udp_mdc"])
+            self.assertEqual(entry["benchmarks"]["claim_commit_32_udp_mdc"]["p99_99_ns"], 350)
+            with contextlib.redirect_stdout(io.StringIO()):
+                self.assertEqual(bench_compare.update([process(1793230156, [192, 196, 250], 400)], base, join=True), 0)
+            entry = base["profiles"]["test-host"]
+            self.assertEqual(entry["processes"], 4)
+            self.assertEqual(max(entry["benchmarks"]["udp_round_trip_32"]["p99_99_ns_runs"]), 250)
+            self.assertNotIn("p99_99_ns_runs", entry["benchmarks"]["claim_commit_32_udp_mdc"])
+            self.assertEqual(entry["benchmarks"]["claim_commit_32_udp_mdc"]["p99_99_ns"], 400)
+
     def test_main_joins_a_file(self):
         directory = tempfile.TemporaryDirectory()
         self.addCleanup(directory.cleanup)
