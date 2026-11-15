@@ -14,7 +14,9 @@
   line when its member has no log at its position reads `the member has no log
   from position`, where it read `the member's log ended`. Error 23 is still the
   answer for a position that is not a multiple of 32, for one below every recording
-  the member keeps, and for one that a purge of a stopped member's log took
+  the member keeps, for one that a purge of a stopped member's log took, and,
+  beside a member of a version that writes no file of its log's recordings, for
+  one past where its live recording stopped
   ([Read the committed log](docs/how-to/read-the-committed-log.md#when-it-does-not-work);
   [ADR 0135](docs/decisions/0135-answer-no-log-yet-where-a-members-live-recording-has-not-reached-the-position.md);
   work item 352).

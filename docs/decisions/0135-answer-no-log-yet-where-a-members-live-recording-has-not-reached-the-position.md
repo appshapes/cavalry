@@ -125,7 +125,9 @@ recording that the file lists.
   so that the refusal is the difference's. With no file and the live recording
   stopped at 512, the open at 768 is code 23. By a file whose live recording
   begins at 1,024, the open at 768 is code 23. And a position that a listed
-  recording no longer holds, 640 in a recording cut to 512, is code 23. A unit
+  recording no longer holds, 640 in a recording cut to 512, is code 23. The test
+  cuts the recording with `truncate recording`, since a purge takes whole segments
+  and the driver's check of a replay's position is the same after either. A unit
   test in `src/committed_log.rs` holds the two guards for each part of a member's
   log: a listed recording, the live one by a file, and the live one with no file.
 - `crates/cavalry-raft/tests/partition.rs`, three members over three drivers
