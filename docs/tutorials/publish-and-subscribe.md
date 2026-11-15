@@ -141,6 +141,9 @@ decides on, and every state is a counter `doctor` reads.
 
 ## What to read next
 
+- [Run a cluster in ten minutes](run-a-cluster.md): the next tutorial. Three drivers
+  keep one log, a service beside each reads it, and a client is answered while one
+  member is stopped.
 - [Run a driver and read doctor](../how-to/run-the-driver.md): the binary's flags, its
   configuration keys and every `doctor` line.
 - [Record a stream to the durable log](../how-to/record-a-stream.md) and
