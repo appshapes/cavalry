@@ -395,16 +395,22 @@ committed once a quorum, two of three, has it on disk.
   entry says, and never start this member alone on a new log directory.
 - `WARN cluster.snapshots_failed`: the member gave up a snapshot of its sessions
   that the leader's log asked for, and the count says how many times. The member's
-  log is whole, nothing committed is lost, and the member runs on. Until it takes
-  a snapshot, a start of this member reads more of its log than a start of the
-  others does. Read three counters of this member's driver, which the same
-  `doctor` prints when they are above 0. `driver.registry_full`: the driver had no
-  room for the snapshot's recording. `recording.start_failed`: the recording's
-  files could not be created in the log directory. `recording.write_failed`: a
-  write or a sync to the log directory failed. Check that the log directory is
-  writable by the driver's user and that its file system has room. The leader asks
-  for the next snapshot when its log has grown by 256 MiB, and the member takes
-  that one by itself. A count that no longer rises is a fault that has passed.
+  log is whole, nothing committed is lost, and the member runs on. Read three
+  counters of this member's driver, which the same `doctor` prints when they are
+  above 0. `driver.registry_full`: the driver had no room for the snapshot's
+  recording. `recording.start_failed`: the recording's files could not be created
+  in the log directory. `recording.write_failed`: a write or a sync to the log
+  directory failed. Check that the log directory is writable by the driver's user
+  and that its file system has room. Where one of the three is above 0, this
+  member took no snapshot where the others did: until it takes one, a start of
+  this member reads more of its log than a start of the others does. If none of
+  the three is above 0, either a step took the driver longer than a second, as on
+  a loaded host or a slow disk, or the leader was asked for a second snapshot
+  while the first was being taken: `cluster.snapshot_actions` on the leader then
+  rose twice within a second, every member counts one snapshot given up, and each
+  still takes the first. The leader asks for the next snapshot when its log has
+  grown by 256 MiB, and the member takes that one by itself. A count that no
+  longer rises is a fault that has passed.
 - `WARN cluster.snapshots_passed_over`: when this member started, it could not
   read its newest snapshot, and the count says how many snapshots it passed over.
   It started from an older snapshot, or from none, and read more of its log.

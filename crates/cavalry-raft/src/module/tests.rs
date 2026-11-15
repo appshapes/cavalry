@@ -8,6 +8,7 @@ use std::path::PathBuf;
 
 use cavalry_driver::Driver;
 use cavalry_log::catalog::CatalogReader;
+use cavalry_log::snapshots::{CONSENSUS_MODULE, ListedSnapshot};
 
 use super::*;
 
@@ -4536,6 +4537,102 @@ fn a_leader_asks_for_a_snapshot_when_its_log_has_grown_by_the_interval_and_not_b
             },
             "one action for one interval"
         );
+    }
+    for (driver, module) in members {
+        module.close().expect("the member closes");
+        driver.close().expect("the driver closes");
+    }
+}
+
+/// A snapshot whose list is refused stops the member: the cycle that would list it
+/// returns the snapshots file's error from [`ConsensusModule::do_work`], which
+/// `cavalry run` ends the member on, with the failure counted first
+/// (`spec/cluster.md`, "A snapshot that fails"). The leader asks for a snapshot and
+/// begins it when it reads the action. Behind it, its file is made to list a snapshot
+/// of the consensus module at a higher position. The listing is at least two cycles
+/// after the one that began the snapshot, the recording's stop asked and then
+/// announced, so the entry is in the file before it. The two followers take their
+/// snapshots of the same action.
+#[test]
+fn a_snapshot_whose_list_is_refused_stops_the_member_with_the_snapshots_error() {
+    let (_dir, mut members) = three("snapshot-list");
+    let deadline = Instant::now() + Duration::from_secs(20);
+    loop {
+        match members[0].1.snapshot() {
+            Ok(()) => break,
+            Err(RaftError::Offer(Refused::BackPressured)) => run(&mut members, 1),
+            Err(other) => panic!("{other}"),
+        }
+        assert!(Instant::now() < deadline, "the action was not appended");
+    }
+    while members[0].1.snapshot_counts().begun < 1 {
+        assert!(
+            Instant::now() < deadline,
+            "the leader did not read its action"
+        );
+        run(&mut members, 1);
+    }
+    let term = members[0].1.leadership_term_id();
+    members[0]
+        .1
+        .snapshot
+        .list_behind(ListedSnapshot {
+            recording_id: 0,
+            service_id: CONSENSUS_MODULE,
+            leadership_term_id: term,
+            term_base_log_position: 0,
+            log_position: 1 << 30,
+            timestamp: 0,
+        })
+        .expect("the higher snapshot is listed");
+    let error = loop {
+        assert!(
+            Instant::now() < deadline,
+            "the leader's snapshot did not end"
+        );
+        let mut failed = None;
+        for (index, (_, module)) in members.iter_mut().enumerate() {
+            if let Err(error) = module.do_work() {
+                assert_eq!(index, 0, "a follower's duty cycle failed: {error}");
+                failed = Some(error);
+            }
+        }
+        if let Some(error) = failed {
+            break error;
+        }
+    };
+    assert!(
+        matches!(error, RaftError::Snapshots(SnapshotsError::List { .. })),
+        "{error}"
+    );
+    assert_eq!(error.reason(), "snapshots");
+    assert_eq!(
+        members[0].1.snapshot_counts(),
+        SnapshotCounts {
+            actions: 1,
+            begun: 1,
+            steps: 1,
+            taken: 0,
+            failed: 1,
+        }
+    );
+    // The file lists what it listed before, and not the snapshot.
+    assert_eq!(members[0].1.snapshot_position(), Some(1 << 30));
+    // The followers, which read the same action, take their snapshots.
+    while members[1..]
+        .iter()
+        .any(|(_, module)| module.snapshot_counts().taken < 1)
+    {
+        assert!(
+            Instant::now() < deadline,
+            "a follower did not take its snapshot"
+        );
+        for (_, module) in members[1..].iter_mut() {
+            module.do_work().expect("a follower's duty cycle");
+        }
+    }
+    for (_, module) in &members[1..] {
+        assert_eq!(module.snapshot_counts().failed, 0);
     }
     for (driver, module) in members {
         module.close().expect("the member closes");
