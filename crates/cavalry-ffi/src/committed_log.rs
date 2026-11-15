@@ -75,7 +75,9 @@ fn polling(function: &str) {
 /// null and no error set while the driver hosts no member that has a recording of its
 /// log, or while the member is between two recordings, its file of its log's
 /// recordings naming another live recording than its counter does, or there being no
-/// file and its counter no longer holding the id the call read; −1 with the error
+/// file and its counter no longer holding the id the call read, or while `position`
+/// is the member's live recording's and that recording has not reached it, a member
+/// whose catch-up ended ahead of its live log (ADR 0135); −1 with the error
 /// and `*log` null when the driver refuses or the client fails. The handle replays
 /// the first recording in the member's file that holds `position`, and the member's
 /// live recording when none does. A file that fails a check, or that cannot be read,

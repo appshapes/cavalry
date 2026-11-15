@@ -3,18 +3,21 @@
 //! this driver keeps, polled no further than the member's commit position. The
 //! recording is the one that holds the position the log is opened at: the member's
 //! live recording, or one below it that the member's file of its log's recordings
-//! lists (ADR 0103).
+//! lists (ADR 0103). A position that file gives to the live recording, and that the
+//! live recording has not reached, is no log yet (ADR 0135).
 
 use std::io::Read;
 use std::path::Path;
 use std::sync::Arc;
 
-use cavalry_proto::client_protocol::{FOLLOW_LENGTH, ReplayStopReason};
+use cavalry_proto::client_protocol::{ErrorCode, FOLLOW_LENGTH, ReplayStopReason};
 use cavalry_proto::cluster::{
     LOG_RECORDINGS_FILE_PREFIX, LogRecordings, MAX_LOG_RECORDINGS_LENGTH,
 };
-use cavalry_proto::frame::DataFrameHeader;
-use cavalry_shm::counters::generated::{CLUSTER_COMMIT_POSITION, CLUSTER_LOG_RECORDING_ID};
+use cavalry_proto::frame::{DataFrameHeader, FRAME_ALIGNMENT};
+use cavalry_shm::counters::generated::{
+    CLUSTER_COMMIT_POSITION, CLUSTER_LOG_RECORDING_ID, RECORDING_SYNCED_POSITION,
+};
 use cavalry_shm::counters::{CounterId, CounterValue, CountersReader};
 use cavalry_shm::log::Positions;
 
@@ -77,16 +80,97 @@ pub(crate) fn member_with_a_log(counters: &Arc<CountersReader>) -> Option<Member
     Bound::find(counters).map(|bound| bound.member)
 }
 
+/// What a recording that a position is read from is in the member's log.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Part {
+    /// A recording the member's file lists below its live one.
+    Listed,
+    /// The member's live recording, by a file that says where it begins: no recording
+    /// the file lists holds the position.
+    Live {
+        /// The file's live start position.
+        start: i64,
+    },
+    /// The member's live recording, of a member that writes no file.
+    LiveWithNoFile,
+}
+
+impl Part {
+    /// Whether `position` is one that the live recording may not have reached yet,
+    /// at which an open answers no log while that recording's synced position is
+    /// below it (`spec/cluster.md`, "The service"; ADR 0135): a multiple of 32 that
+    /// the file gives to the live recording at or above where that recording
+    /// begins, or that is the live recording's of a member that writes no file.
+    /// Never a position of a recording the file lists, which that recording holds
+    /// or has lost to a purge, and never one below where the live recording
+    /// begins, which the member's log has forgotten: those are the driver's to
+    /// refuse and the caller's to be told.
+    fn may_be_ahead(self, position: i64) -> bool {
+        // A `usize` of 32 widens to an `i64` without loss.
+        position % (FRAME_ALIGNMENT as i64) == 0
+            && match self {
+                Part::Listed => false,
+                Part::Live { start } => position >= start,
+                Part::LiveWithNoFile => true,
+            }
+    }
+
+    /// Whether the driver's code 23 for `position` says that the live recording
+    /// stopped below it, which is no log yet as well: only for a position that
+    /// [`may_be_ahead`](Self::may_be_ahead) by a file that says where the live
+    /// recording begins. With no file the open cannot tell a position above the
+    /// recording's stop from one below its start, and the refusal is the caller's.
+    fn stopped_below(self, position: i64) -> bool {
+        matches!(self, Part::Live { .. }) && self.may_be_ahead(position)
+    }
+}
+
+/// The recording a replay at a position is started of, and what it is in the member's
+/// log.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct Found {
+    recording_id: i64,
+    part: Part,
+}
+
 /// What the member's file of its log's recordings says of a position
 /// ([`recording_at`]).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum FromFile {
     /// The recording the position is read from.
-    Recording(i64),
+    Recording(Found),
     /// The file is of another live recording than the member's counter named.
     Another,
     /// There is no file.
     Absent,
+}
+
+/// What the driver says recording `recording_id` has synced, which is the recording's
+/// extent while it is live (`spec/client-protocol.md`, "Commands"): the value of its
+/// `recording.synced_position`, loaded and then checked to be of a record that is the
+/// recording's, by the record's type and the recording id its key begins with. `None`
+/// when the driver holds no such record: it allocates one before it announces a
+/// recording and frees it when the recording stops, so the recording has stopped. One
+/// scan of the counters' records, made at an open and never in a poll.
+fn synced_position(counters: &CountersReader, recording_id: i64) -> Option<i64> {
+    let key = recording_id.to_le_bytes();
+    let is_recordings = |id: u32| {
+        matches!(
+            counters.record(id),
+            Ok(Some(record))
+                if record.type_id() == RECORDING_SYNCED_POSITION.0
+                    && record.key().starts_with(&key)
+        )
+    };
+    (0..counters.capacity()).find_map(|id| {
+        if !is_recordings(id) {
+            return None;
+        }
+        let synced = counters.value(id).ok()?.load_acquire();
+        // A record that is the recording's after the load was the recording's at the
+        // load: a recording id is never reused.
+        is_recordings(id).then_some(synced)
+    })
 }
 
 /// The recording of the member's log that `position` is read from, by the member's
@@ -149,7 +233,17 @@ fn recording_at(
     }
     match LogRecordings::read(&bytes, member_id) {
         Ok(file) if file.live_recording_id() == live_recording_id => {
-            Ok(FromFile::Recording(file.recording_at(position)))
+            let recording_id = file.recording_at(position);
+            // The live recording is the answer when no recording the file lists holds
+            // the position, and a member lists its live recording nowhere else.
+            let part = if recording_id == live_recording_id {
+                Part::Live {
+                    start: file.live_start_position(),
+                }
+            } else {
+                Part::Listed
+            };
+            Ok(FromFile::Recording(Found { recording_id, part }))
         }
         Ok(_) => Ok(FromFile::Another),
         Err(error) => Err(ClientError::Io {
@@ -234,12 +328,15 @@ impl Bound {
     /// no file and the counter no longer holds the id this bound read. With no file
     /// and the same id, the member is of a version that writes none, and the answer
     /// is its live recording.
-    fn recording_to_replay(&self, dir: &Path, position: i64) -> Result<Option<i64>, ClientError> {
+    fn recording_to_replay(&self, dir: &Path, position: i64) -> Result<Option<Found>, ClientError> {
         Ok(
             match recording_at(dir, self.member, self.recording_id, position)? {
-                FromFile::Recording(recording_id) => Some(recording_id),
+                FromFile::Recording(found) => Some(found),
                 FromFile::Another => None,
-                FromFile::Absent => self.names_its_recording().then_some(self.recording_id),
+                FromFile::Absent => self.names_its_recording().then_some(Found {
+                    recording_id: self.recording_id,
+                    part: Part::LiveWithNoFile,
+                }),
             },
         )
     }
@@ -363,6 +460,22 @@ impl CommittedLog {
     /// than the member's counter names, or there is no file and the counter no longer
     /// holds the id read before the file was looked for: a member between two
     /// recordings, or one that closed meanwhile.
+    ///
+    /// `None` too while the member's live recording has not reached `position`
+    /// (`spec/cluster.md`, "The service"; ADR 0135). The member's log holds the
+    /// position in a recording of a catch-up's replay, which the member's file lists
+    /// with the stop it had when the file was written and which went on past it. The
+    /// position is then the live recording's by the file, at or above where that
+    /// recording begins and above what it has synced, and the live log reaches it
+    /// later. While the driver's counter of the live recording says so, nothing is
+    /// asked of the driver. When the recording has stopped, though the member names
+    /// it still, the driver holds no such counter: the replay is asked for, and the
+    /// driver's refusal with code 23 is that same answer when the file says where
+    /// the live recording begins. A position below where the live recording begins,
+    /// one the member's log no longer holds, stays the driver's code 23 and the
+    /// caller's error, and so do one that is not a multiple of 32, one in a
+    /// recording the file lists, and one past the stop of the live recording of a
+    /// member that writes no file ([`Part::may_be_ahead`], [`Part::stopped_below`]).
     pub(crate) fn open(
         client: &mut Cavalry,
         stream_id: i32,
@@ -374,13 +487,39 @@ impl CommittedLog {
         // The file is read after the counter: a file of the recording the counter
         // named is the member's log as it was while it named it, and with no file the
         // counter is loaded again (`spec/cluster.md`, "The service").
-        let Some(recording_id) = bound.recording_to_replay(client.dir(), position)? else {
+        let Some(found) = bound.recording_to_replay(client.dir(), position)? else {
             return Ok(None);
         };
+        let Found { recording_id, part } = found;
+        // The live recording has not synced to the position: no log there yet, and no
+        // command, so that a caller that asks in every duty cycle costs the driver
+        // nothing while it waits.
+        if part.may_be_ahead(position)
+            && synced_position(&bound.counters, recording_id)
+                .is_some_and(|synced| position > synced)
+        {
+            return Ok(None);
+        }
         // The subscription first: a replay with no subscriber does not move.
         let subscription = client.add_subscription(CHANNEL, stream_id)?;
         let replay =
-            client.start_replay(recording_id, position, FOLLOW_LENGTH, stream_id, CHANNEL)?;
+            match client.start_replay(recording_id, position, FOLLOW_LENGTH, stream_id, CHANNEL) {
+                Ok(replay) => replay,
+                // The driver's code 23 for a position that is a multiple of 32 at or above
+                // where the live recording begins: the recording does not hold the
+                // position, having stopped below it while the member names it still. No
+                // log there now; the member names another recording next, and its file
+                // then lists one that holds the position. Every other refusal, and code 23
+                // for any other position or recording, is the caller's.
+                Err(ClientError::Refused {
+                    code: Some(ErrorCode::PositionOutOfRange),
+                    ..
+                }) if part.stopped_below(position) => {
+                    subscription.close()?;
+                    return Ok(None);
+                }
+                Err(error) => return Err(error),
+            };
         Ok(Some(Self {
             subscription,
             session_id: replay.session_id(),
@@ -985,6 +1124,43 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir_other);
     }
 
+    /// The positions at which an open answers no log yet are the live recording's
+    /// alone (`spec/cluster.md`, "The service"; ADR 0135). A position of a recording
+    /// the file lists, one below where the live recording begins and one that is not
+    /// a multiple of 32 are never among them: the driver's code 23 for each is how a
+    /// caller learns that its member's log no longer holds its position. And with no
+    /// file, the driver's code 23 is never taken for a recording that stopped below
+    /// the position, since the open does not know where that recording begins.
+    #[test]
+    fn an_open_waits_only_at_a_position_the_live_recording_may_reach() {
+        let live = Part::Live { start: 320 };
+        for (part, position, ahead, stopped) in [
+            // At and above where the live recording begins.
+            (live, 320, true, true),
+            (live, 768, true, true),
+            // Below where it begins: forgotten by the member's log.
+            (live, 288, false, false),
+            (live, 0, false, false),
+            // No frame begins there.
+            (live, 784, false, false),
+            (live, 769, false, false),
+            // A recording the file lists holds the position, or held it.
+            (Part::Listed, 768, false, false),
+            (Part::Listed, 0, false, false),
+            // A member that writes no file: the counter's word is taken, the
+            // driver's refusal is not.
+            (Part::LiveWithNoFile, 768, true, false),
+            (Part::LiveWithNoFile, 0, true, false),
+            (Part::LiveWithNoFile, 784, false, false),
+        ] {
+            assert_eq!(
+                (part.may_be_ahead(position), part.stopped_below(position)),
+                (ahead, stopped),
+                "{part:?} at {position}"
+            );
+        }
+    }
+
     /// With no file of the member's log's recordings the counter is loaded again
     /// (`spec/cluster.md`, "The service"; ADR 0103). A member that still names the
     /// recording writes no file, and its live recording is replayed. A member of this
@@ -1025,7 +1201,13 @@ mod tests {
         // A member of a version that writes no file names recording 5 all along.
         recording.store_release(5);
         let bound = found(&counters);
-        assert_eq!(replayed(&bound), Some(5));
+        assert_eq!(
+            replayed(&bound),
+            Some(Found {
+                recording_id: 5,
+                part: Part::LiveWithNoFile
+            })
+        );
 
         // A member of this version closes between the two loads: −1, then no file.
         let bound = found(&counters);
