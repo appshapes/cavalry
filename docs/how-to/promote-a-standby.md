@@ -25,8 +25,9 @@ It promotes member 3. Then it shows the two changes that replace a lost voter.
   ```
 
   The three voters elect a leader as three members do. The standby follows it.
-- The standby on a host and a link as fast as a voter's. No election waits for a
-  standby, and the commit position waits for none. The leader's log does: the
+- The standby on a host and a link as fast as a voter's. Members that run with
+  the same string wait for a standby in no election, and the commit position
+  waits for none. The leader's log does: the
   leader sends its log to every member, the standby among them, no faster than
   the slowest of them takes it. A standby that runs slowly, on a loaded host or
   over a slow link, holds the leader's log back as a slow follower does. When the
@@ -43,7 +44,11 @@ It promotes member 3. Then it shows the two changes that replace a lost voter.
   directory ([the counters file](../reference/counters-file.md);
   [counters](../reference/counters.md) says what each counter means).
 - Every member on a version of Cavalry that knows the mark. A member of a version
-  before it refuses the string, `members-grammar`, and does not start.
+  before it refuses the string, `members-grammar`, and does not start. A client
+  reads the string too, and a client of a version before the mark refuses a
+  string that has it. Move the clients to this version first, or give such a
+  client the string without the marks: it names the same members and endpoints,
+  and a client asks a standby as it asks any member.
 - `cavalry doctor` on every member that runs prints one `note cluster-member` line,
   with `election closed`, and no `WARN` or `FAIL` line whose check begins `cluster-`.
   Every line ends with the same voters: `its members string gives a vote to members
@@ -66,6 +71,12 @@ It promotes member 3. Then it shows the two changes that replace a lost voter.
    Change one mark and no more. Do not add a member, remove one, or change an id or
    an endpoint: a cluster keeps its members for as long as it keeps its log.
 
+   Put the new string in the one place of the Prerequisites now, before step 4.
+   From here on, whatever starts a member, you or a service manager after a crash
+   or a reboot, must start it with the new string and never with the older one.
+   A member that is started early that way has had its turn: of step 4, or of
+   step 5 when it is the leader of step 3.
+
 2. Check the string, and see which members run with the older one:
 
    ```sh
@@ -79,14 +90,17 @@ It promotes member 3. Then it shows the two changes that replace a lost voter.
    with the new string.
 
 3. Find the leader. Run the command of step 2 for each member, with its own id and
-   directories. One `note cluster-member` line says `the leader`. Write down its term,
-   the number after `in term`.
+   directories. One `note cluster-member` line says `the leader`. Write down that
+   member's id and its term, the number after `in term`.
 
-4. Start each member that is not the leader again with the new string, one at a
-   time, the standby first. Stop it with Ctrl-C or SIGTERM, wait for `cavalry run:
-   closed`, and start it with the same id and the same two directories, from a
+4. Start each member other than the leader you wrote down in step 3 again with the
+   new string, one at a time, the standby first. Stop it with Ctrl-C or SIGTERM,
+   wait for `cavalry run: closed`, and start it with the same id and the same two
+   directories, from a
    shell in which `CAVALRY_CLUSTER_MEMBERS` is the new string of step 1. The
-   terminal a member ran in still holds the older one:
+   terminal a member ran in still holds the older one. Where a service manager
+   starts the member, have it start the member again once the place it reads
+   holds the new string:
 
    ```sh
    CAVALRY_CLUSTER_MEMBER_ID=3 target/release/cavalry run --dir /tmp/cavalry-member-3 --log-dir /tmp/cavalry-member-3-log
@@ -103,10 +117,16 @@ It promotes member 3. Then it shows the two changes that replace a lost voter.
    three with one of them lost, the leader has no quorum until that voter runs
    again: start it again at once ("Replace a lost voter with a standby").
 
-5. Start the leader again with the new string, last. The other members hear nothing
-   from it for 10 s, the leader heartbeat timeout, and the members elect a leader.
-   About 11 s after you stopped it, `doctor` on one member says `the leader`, with a
-   term above the one you wrote down in step 3.
+5. Start the leader again with the new string, last. It is the one member that
+   still prints `WARN cluster-voters` when `doctor` is run as in step 2, with the
+   new string: the leader of step 3, whether it still leads or the lead moved to
+   another member during step 4. Stop it, and start it again at once. When no
+   member prints that line, a service manager has started it already: go to
+   step 6. When it still led, the other members hear nothing from it for 10 s, the leader
+   heartbeat timeout, and the members elect a leader: about 11 s after you stopped
+   it, `doctor` on one member says `the leader`, with a term above the one you
+   wrote down in step 3. Where the others are not a quorum without it, no member
+   leads until it runs again.
 
 6. Wait until the change is complete, and make no other change before it is. It is
    complete when `doctor` on every member that runs says `election closed`, exactly
@@ -148,7 +168,9 @@ and it looks the same from the other hosts.
   starting it again until the host holds the cluster's newest string.
 - If its host does not answer, make sure that the member cannot come back
   running: power the host off or terminate its instance, by a means that does not
-  need the host to answer.
+  need the host to answer. A host that is powered on again starts the member
+  with the string it had: before that host runs again, give it the cluster's
+  newest string or disable what starts the member there.
 - If you can do neither, the voter is not lost, and the change waits. Do not
   begin it.
 
@@ -171,7 +193,8 @@ Then the two changes:
    follows is stopped in step 4, the leader has no quorum: start that voter again
    at once. If
    more than 10 s pass, the leader stops leading, and the two voters elect a leader
-   when both run again. Nothing committed is lost.
+   when both run again. Nothing committed is lost. In step 5 the same holds for
+   the leader you stop: no member leads until it runs again.
 2. Promote the standby: take `,standby` off its entry. The cluster then has three
    voters and needs two, so the change is complete when at least 2 of the 3 run
    and follow one leader. The string before this change has two voters, so here too
@@ -197,7 +220,8 @@ example, and a test of `cavalry-raft` runs it.
 - Every member reports the same `commit position` once its recorder has synced.
 - The promoted member votes. To see it, stop the leader: about 11 s later one of the
   members that still run says `the leader`, in a higher term. Of four voters, three
-  must run for that, so the promoted member's vote is one of them.
+  must run for that, so the promoted member's vote is one of them. Then start the
+  member you stopped again, with the new string.
 
 ## When it does not work
 
@@ -230,8 +254,11 @@ example, and a test of `cavalry-raft` runs it.
   names the quorum, such as `3 of 4`. A cluster of four voters needs three. Start the
   members that are stopped, with the new string.
 - A member that was away during the change starts with the string it had. Give it
-  the new string before you start it. It then follows the leader and replicates
-  what it missed.
+  the new string before you start it. On the log directory it kept, it then
+  follows the leader and replicates what it missed. Do not start a voter alone
+  on a new log directory:
+  [Run a cluster of three members](run-a-cluster.md#when-it-does-not-work) says
+  why.
 - A member that you counted as stopped or lost runs again and you did not start
   it, as when a paused host resumes or a parted host reaches the others again.
   Its `note cluster-member` line ends with older voters than the other members'

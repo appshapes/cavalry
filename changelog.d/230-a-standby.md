@@ -1,8 +1,9 @@
 - A cluster can hold a standby: a member that follows the log and has no vote. Mark
   it in the members string with a seventh field, `,standby`, after its five
   endpoints. A standby records the log, takes snapshots and redirects clients, and
-  it never leads and counts toward no quorum, so it delays no election and the
-  commit position waits for no standby. It receives the leader's log as a follower
+  it never leads and counts toward no quorum, so members that run with the same
+  string wait for it in no election, and the commit position waits for no
+  standby. It receives the leader's log as a follower
   does, so a standby that runs slowly, on a loaded host or over a slow link, holds
   the leader's log back as a slow follower does, and one that stops answering
   holds it for up to 5 s before the leader drops it: run a standby on a host and
@@ -12,8 +13,9 @@
   standby, or to replace a lost voter with one, change one member's mark in the
   string and start each member again with it, the leader last:
   [Promote a standby to a voter](docs/how-to/promote-a-standby.md). Change one mark
-  at a time, and make the next change only once every member that runs follows one
-  leader and a quorum of the new voters is among them:
+  at a time, and make the next change only once every member that runs was started
+  with the new string and follows one leader, and a quorum of the new voters is
+  among them:
   two marks changed at once can lose a committed entry, and no member refuses it.
   A member on a host that does not answer may still run, with the older string:
   before you replace a lost voter, make sure that its process has ended and cannot

@@ -478,8 +478,12 @@ committed once a quorum, two of three, has it on disk.
   both sets. A member takes the string when it starts. While a standby is promoted,
   the members are started with the new string one at a time, and each has this line
   until its turn: [Promote a standby to a voter](promote-a-standby.md). With no
-  change under way, correct the variable on this host, or start the member again
-  with it. Do not leave it: two members whose strings differ by more than one
+  change under way, one of the two strings is older. Read the voters at the end of
+  the other members' `note cluster-member` lines: with no change under way they
+  are one set, those of the cluster's newest string. If the variable on this host
+  is the older, correct the variable and start nothing. If the member runs the
+  older, start the member again with the newest. Never start a member with the
+  older one. Do not leave it: two members whose strings differ by more than one
   member's `standby` mark can elect a leader that lacks an entry the cluster
   committed.
 - `WARN cluster.standby_vote_requests`: this member is a standby, and a member

@@ -1053,7 +1053,8 @@ what a standby itself does, and nothing else. That is what lets one member's mar
 differ between the strings of two members while the members are started again with
 a new string, one after another.
 
-No election and no commit position waits for a standby. The pace of the log does. A
+A member waits in an election for no member that its own string marks a standby,
+and no commit position waits for one. The pace of the log does. A
 standby's `log` endpoint is a destination of the leader's log publication as a
 voter's is ("Members and streams"), and the publication's `min` flow control counts
 every destination. So a standby that takes the log slowly holds the leader's log

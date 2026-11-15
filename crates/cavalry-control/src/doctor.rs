@@ -1660,8 +1660,10 @@ fn voters_message(id: i32, runs: i64, cluster: &Cluster) -> String {
     format!(
         "member {id} runs with a members string that gives a vote to {}, and {members} \
          on this host gives one to {}. A member takes its members string when it \
-         starts: start this member again with {members}, or set {members} to the \
-         string the cluster runs with. While a standby's mark is changed, start each \
+         starts, and no member may be started with an older string than the \
+         cluster's newest: if {members} here is the newest, start this member again \
+         with it; if this member runs the newest, set {members} here to it and start \
+         nothing. While a standby's mark is changed, start each \
          member again with the new string, one at a time and the leader last; the \
          change is complete when no member has this finding, every member's \
          cluster-member note names the same voters, every member that runs follows \
@@ -7207,9 +7209,11 @@ mod tests {
             differ.message,
             "member 0 runs with a members string that gives a vote to members 0, 1 and 3, \
              and CAVALRY_CLUSTER_MEMBERS on this host gives one to members 0, 1 and 2. A \
-             member takes its members string when it starts: start this member again with \
-             CAVALRY_CLUSTER_MEMBERS, or set CAVALRY_CLUSTER_MEMBERS to the string the \
-             cluster runs with. While a standby's mark is changed, start each member again \
+             member takes its members string when it starts, and no member may be started \
+             with an older string than the cluster's newest: if CAVALRY_CLUSTER_MEMBERS \
+             here is the newest, start this member again with it; if this member runs the \
+             newest, set CAVALRY_CLUSTER_MEMBERS here to it and start nothing. While a \
+             standby's mark is changed, start each member again \
              with the new string, one at a time and the leader last; the change is complete \
              when no member has this finding, every member's cluster-member note names the \
              same voters, every member that runs follows one leader, and the voters among \

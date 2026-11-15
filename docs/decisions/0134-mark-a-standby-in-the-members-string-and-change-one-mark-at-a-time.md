@@ -204,7 +204,9 @@ of the string its host is configured with, and reports a member that runs anothe
 ## Consequences
 
 - A cluster can hold a member that is ready to take a vote: it has the log, the
-  snapshots and the sessions, and it costs no election a delay.
+  snapshots and the sessions, and no member whose string marks it a standby
+  waits for it in an election. While its mark is changed, a candidate whose
+  string still gives it a vote can wait up to the election timeout for one.
 - A cluster of three voters that lost one can be given its third voter back
   without a stop of the whole cluster, in two changes, where it could only be
   started again as a new cluster before.
