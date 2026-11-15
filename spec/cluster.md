@@ -1559,25 +1559,27 @@ A position the live recording has not reached is no log yet, and no error (ADR
 0135). A follower's catch-up may end with the member's log ending in its recording
 of the replay, above what its live recording has synced ("Roles and the election",
 state 13): the replay is sent to that member alone, and the leader's log
-publication goes no further than a receiver window past its slowest receiver
-(`fc=min`, "Members and streams"). The file lists the replay's recording with the
+publication, which is `fc=min` ("Members and streams"), goes no further than a
+receiver window past its slowest receiver (`spec/udp.md`, "The sender"). The file
+lists the replay's recording with the
 position it had synced when the file was written, so a service that has read that
 recording to where it stopped takes the position it ended at from the live
 recording, by the rule of "The log's recordings", and the live recording does not
-hold it yet. So before a service starts a replay of the live recording, by a file
-or with none, it loads that recording's `recording.synced_position`
-(`spec/client-protocol.md`, "Counters") from a record that is the recording's
-after the load: allocated, of the counter's type, and with the recording id as
-the first eight bytes of its key. While the value is below a position that is a
-multiple of 32, the service starts no replay and sends the driver no command: it
-finds its member's recording again, as it does while the member names none, and
-it reads on once the live recording has synced to the position. When the driver
-holds no such record the recording has stopped, though the member names it still,
-which it does until it has left its log. The service then asks for the replay,
-and when `start replay` refuses with code 23 a position that is a multiple of 32
-and, by the file, at or above the live start position, that is the same answer,
-no log yet: the recording stopped below the position, and the file the member
-writes when it names its next recording lists the recordings that hold it. Every
+hold it yet. So before a service starts a replay of the live recording at a
+position that is a multiple of 32 and, when a file says where that recording
+begins, at or above the live start position, it loads that recording's
+`recording.synced_position` (`spec/client-protocol.md`, "Counters") from a record
+that is the recording's after the load: allocated, of the counter's type, and
+with the recording id as the first eight bytes of its key. While the value is
+below the position, the service starts no replay and sends the driver no command:
+it finds its member's recording again, as it does while the member names none,
+and it reads on once the live recording has synced to the position. When the
+driver holds no such record the recording has stopped, though the member names it
+still, which it does until it has left its log. The service then asks for the
+replay, and when `start replay` refuses such a position with code 23 and a file
+says where the live recording begins, that is the same answer, no log yet: the
+recording stopped below the position, and the file the member writes when it
+names its next recording lists the recordings that hold it. Every
 other refusal is reported to the service's caller, whatever the position, and so
 is code 23 for every other position: one that is not a multiple of 32; one below
 the live start position, as the paragraph before this one says; one of a member
@@ -1591,9 +1593,8 @@ yet for as long as the member names that recording; once the member has left its
 log its file lists the recording, and code 23 is the caller's. An operator purges
 a recording of a member's log while the member is stopped, when it names no
 recording (`counters.toml`, `cluster.log_purge_position`): a service whose
-member's log was purged so, below its position, is told so by code 23 once its
-member names a recording again, and one that is ahead of its member's live
-recording waits.
+position such a purge took is told so by code 23 once its member names a
+recording again, and one that is ahead of its member's live recording waits.
 
 It reads session messages, timer events,
 session open and close events, cluster actions and new leadership term events in log

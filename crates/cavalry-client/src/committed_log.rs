@@ -95,6 +95,36 @@ enum Part {
     LiveWithNoFile,
 }
 
+impl Part {
+    /// Whether `position` is one that the live recording may not have reached yet,
+    /// at which an open answers no log while that recording's synced position is
+    /// below it (`spec/cluster.md`, "The service"; ADR 0135): a multiple of 32 that
+    /// the file gives to the live recording at or above where that recording
+    /// begins, or that is the live recording's of a member that writes no file.
+    /// Never a position of a recording the file lists, which that recording holds
+    /// or has lost to a purge, and never one below where the live recording
+    /// begins, which the member's log has forgotten: those are the driver's to
+    /// refuse and the caller's to be told.
+    fn may_be_ahead(self, position: i64) -> bool {
+        // A `usize` of 32 widens to an `i64` without loss.
+        position % (FRAME_ALIGNMENT as i64) == 0
+            && match self {
+                Part::Listed => false,
+                Part::Live { start } => position >= start,
+                Part::LiveWithNoFile => true,
+            }
+    }
+
+    /// Whether the driver's code 23 for `position` says that the live recording
+    /// stopped below it, which is no log yet as well: only for a position that
+    /// [`may_be_ahead`](Self::may_be_ahead) by a file that says where the live
+    /// recording begins. With no file the open cannot tell a position above the
+    /// recording's stop from one below its start, and the refusal is the caller's.
+    fn stopped_below(self, position: i64) -> bool {
+        matches!(self, Part::Live { .. }) && self.may_be_ahead(position)
+    }
+}
+
 /// The recording a replay at a position is started of, and what it is in the member's
 /// log.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -440,10 +470,12 @@ impl CommittedLog {
     /// later. While the driver's counter of the live recording says so, nothing is
     /// asked of the driver. When the recording has stopped, though the member names
     /// it still, the driver holds no such counter: the replay is asked for, and the
-    /// driver's refusal with code 23 is that same answer. A position below where the
-    /// live recording begins, one the member's log no longer holds, stays the
-    /// driver's code 23 and the caller's error, and so does one that is not a
-    /// multiple of 32.
+    /// driver's refusal with code 23 is that same answer when the file says where
+    /// the live recording begins. A position below where the live recording begins,
+    /// one the member's log no longer holds, stays the driver's code 23 and the
+    /// caller's error, and so do one that is not a multiple of 32, one in a
+    /// recording the file lists, and one past the stop of the live recording of a
+    /// member that writes no file ([`Part::may_be_ahead`], [`Part::stopped_below`]).
     pub(crate) fn open(
         client: &mut Cavalry,
         stream_id: i32,
@@ -459,13 +491,10 @@ impl CommittedLog {
             return Ok(None);
         };
         let Found { recording_id, part } = found;
-        // A `usize` of 32 widens to an `i64` without loss.
-        let aligned = position % (FRAME_ALIGNMENT as i64) == 0;
         // The live recording has not synced to the position: no log there yet, and no
         // command, so that a caller that asks in every duty cycle costs the driver
         // nothing while it waits.
-        if aligned
-            && part != Part::Listed
+        if part.may_be_ahead(position)
             && synced_position(&bound.counters, recording_id)
                 .is_some_and(|synced| position > synced)
         {
@@ -485,7 +514,7 @@ impl CommittedLog {
                 Err(ClientError::Refused {
                     code: Some(ErrorCode::PositionOutOfRange),
                     ..
-                }) if aligned && matches!(part, Part::Live { start } if position >= start) => {
+                }) if part.stopped_below(position) => {
                     subscription.close()?;
                     return Ok(None);
                 }
@@ -1093,6 +1122,43 @@ mod tests {
         assert_eq!(bound.load(), 96);
         let _ = std::fs::remove_dir_all(&dir);
         let _ = std::fs::remove_dir_all(&dir_other);
+    }
+
+    /// The positions at which an open answers no log yet are the live recording's
+    /// alone (`spec/cluster.md`, "The service"; ADR 0135). A position of a recording
+    /// the file lists, one below where the live recording begins and one that is not
+    /// a multiple of 32 are never among them: the driver's code 23 for each is how a
+    /// caller learns that its member's log no longer holds its position. And with no
+    /// file, the driver's code 23 is never taken for a recording that stopped below
+    /// the position, since the open does not know where that recording begins.
+    #[test]
+    fn an_open_waits_only_at_a_position_the_live_recording_may_reach() {
+        let live = Part::Live { start: 320 };
+        for (part, position, ahead, stopped) in [
+            // At and above where the live recording begins.
+            (live, 320, true, true),
+            (live, 768, true, true),
+            // Below where it begins: forgotten by the member's log.
+            (live, 288, false, false),
+            (live, 0, false, false),
+            // No frame begins there.
+            (live, 784, false, false),
+            (live, 769, false, false),
+            // A recording the file lists holds the position, or held it.
+            (Part::Listed, 768, false, false),
+            (Part::Listed, 0, false, false),
+            // A member that writes no file: the counter's word is taken, the
+            // driver's refusal is not.
+            (Part::LiveWithNoFile, 768, true, false),
+            (Part::LiveWithNoFile, 0, true, false),
+            (Part::LiveWithNoFile, 784, false, false),
+        ] {
+            assert_eq!(
+                (part.may_be_ahead(position), part.stopped_below(position)),
+                (ahead, stopped),
+                "{part:?} at {position}"
+            );
+        }
     }
 
     /// With no file of the member's log's recordings the counter is loaded again

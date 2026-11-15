@@ -701,6 +701,86 @@ fn the_log_opened_past_the_stop_of_a_named_live_recording_that_stopped_is_no_log
     member.close();
 }
 
+/// The refusals that stay the caller's beside [`ahead`]'s member (ADR 0135): code 23
+/// is how a service learns that its member's log no longer holds its position, so
+/// none of these is ever answered as no log yet. A member that writes no file, whose
+/// live recording has stopped below the position: the open does not know where that
+/// recording begins. A position that, by the file, is below where the live recording
+/// begins: the member's log has forgotten it. And a position in a recording the file
+/// lists that the recording no longer holds, here cut short as a purge would leave
+/// it. Before each, the answer beside it that is no log yet, so that the refusal is
+/// the difference's and not the setup's.
+#[test]
+fn a_position_the_log_does_not_hold_is_refused_and_never_no_log_yet() {
+    let (mut member, live, replayed_id, live_id) = ahead("ahead-refused");
+    let mut service = Cavalry::connect_to(&member.dir).expect("the service's client connects");
+    let no_log = |service: &mut Cavalry, what: &str| {
+        assert!(
+            service.committed_log(AHEAD).expect("no refusal").is_none(),
+            "{what}"
+        );
+    };
+    let refused = |service: &mut Cavalry, position: i64, what: &str| {
+        let error = service.committed_log(position).expect_err(what);
+        assert!(
+            matches!(
+                error,
+                ClientError::Refused {
+                    code: Some(ErrorCode::PositionOutOfRange),
+                    ..
+                }
+            ),
+            "{what}: {error}"
+        );
+    };
+
+    // A member that writes no file, while its live recording is live: the driver's
+    // counter says that the recording has not reached the position.
+    std::fs::remove_file(member.file()).expect("the file is removed");
+    no_log(
+        &mut service,
+        "no file, and the live recording has synced 512",
+    );
+    // The live recording stops while the member names it. With no file, the
+    // driver's refusal is the caller's.
+    let (_, live_stopped_at) = member.stop(live);
+    assert_eq!(live_stopped_at, 8 * ENTRY);
+    refused(
+        &mut service,
+        AHEAD,
+        "no file, and the live recording stopped below the position",
+    );
+
+    // The file again: the same position is no log yet, and by a file whose live
+    // recording begins above it the position is one the log has forgotten.
+    member.write_file(live_id, 5 * ENTRY, &[(replayed_id, 0, 10 * ENTRY)]);
+    no_log(
+        &mut service,
+        "the live recording begins at 320 and stopped at 512",
+    );
+    member.write_file(live_id, 16 * ENTRY, &[]);
+    refused(
+        &mut service,
+        AHEAD,
+        "a position below where the live recording begins",
+    );
+
+    // A recording the file lists as holding 640 that holds it no more: cut to 512.
+    member
+        .client
+        .truncate_recording(replayed_id, 8 * ENTRY)
+        .expect("the recording is cut");
+    member.write_file(live_id, 5 * ENTRY, &[(replayed_id, 0, AHEAD)]);
+    refused(
+        &mut service,
+        10 * ENTRY,
+        "a position a listed recording no longer holds",
+    );
+
+    service.close().expect("the service's client closes");
+    member.close();
+}
+
 /// How long an open that answers no log yet takes, for ADR 0135's Consequences: the
 /// call a service or a member's consensus module makes in each of its duty cycles
 /// while the live recording has not reached its position. Run it alone, in a release

@@ -62,14 +62,15 @@ answers `None` for it, which the C ABI gives as 0 with a null handle, and the
 caller asks again later, as it does while the member names no recording.
 
 The open decides in two steps, both for a position that is a multiple of 32 and
-that the file gives to the live recording, or for a member that writes no file.
+that the file gives to the live recording at or above the live start position.
 First it loads the live recording's `recording.synced_position` from a record it
 checks to be that recording's after the load. While the value is below the
-position, it answers `None` and sends the driver no command. Second, when the
-driver holds no such counter, the recording has stopped while the member names it
-still. The open then asks for the replay, and when the driver refuses with code 23
-a position that is, by the file, at or above the live start position, it answers
-`None` too: the recording stopped below the position.
+position, it answers `None` and sends the driver no command. It does the same for
+the live recording of a member that writes no file. Second, when the driver holds
+no such counter, the recording has stopped while the member names it still. The
+open then asks for the replay, and when the driver refuses with code 23 and the
+file says where the live recording begins, it answers `None` too: the recording
+stopped below the position.
 
 Every other refusal stays the caller's error, and so does code 23 for every other
 position: one that is not a multiple of 32, one below the live start position, one
@@ -120,6 +121,13 @@ recording that the file lists.
   Three opens at 768 answer `None`, and `replay.start_failed` rises by 3. A
   position that is not a multiple of 32 is code 23. Once the member has stored −1
   and named its next recording, the open gives the entries from 768.
+- The same file, the refusals that stay, each beside an open that answers `None`
+  so that the refusal is the difference's. With no file and the live recording
+  stopped at 512, the open at 768 is code 23. By a file whose live recording
+  begins at 1,024, the open at 768 is code 23. And a position that a listed
+  recording no longer holds, 640 in a recording cut to 512, is code 23. A unit
+  test in `src/committed_log.rs` holds the two guards for each part of a member's
+  log: a listed recording, the live one by a file, and the live one with no file.
 - `crates/cavalry-raft/tests/partition.rs`, three members over three drivers
   through a relay, with no cgroup, in about 2 s. The relay loses the data frames
   sent to one follower's `log` endpoint while the leader appends 2,000 entries,
@@ -165,6 +173,11 @@ recording that the file lists.
   no log yet. `cluster-service --from` with a position that the member has not
   recorded waits where it printed `error 23`. The how-to's "When it does not
   work" says so, and names `cavalry doctor`'s `append position` to compare with.
+- The example `cluster-service` stops at the first `None` after a handle that
+  ended whole, and that `None` no longer means that the member left its log. Its
+  last line said `the member's log ended` and now says `the member has no log
+  from position`, and the how-to gives both causes and the same thing to do:
+  start it again with `--from` that position.
 - A caller that asks in every duty cycle pays the open's cost in each, 8.5 µs at
   p50 and 101.3 µs at p99.99 on the laptop, for as long as the live recording is
   behind. That is
