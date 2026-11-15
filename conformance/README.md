@@ -133,7 +133,11 @@ the newest first-parent commit that moved the first line of `spec/cluster.md` to
 it is now. `CAVALRY_UPGRADE_FROM=<commit>` names another N. N is exported with `git
 archive` and built into `target/upgrade/<N's first 8 hex digits>/`, once: the hash
 names the tree, so the directory is a cache, and N moves only when the page's version
-does. The script needs the whole history, and says so in a shallow clone.
+does. N's build is kept on a host that keeps `target/`, as a laptop does. CI's cache
+drops built programs: `Swatinem/rust-cache` keeps only `build/`, `.fingerprint/` and
+`deps/` of each profile directory under `target/` when it saves, so CI's `gates` job
+builds N on every run and prints `built N in <n> s` each time. The script needs the
+whole history, and says so in a shallow clone.
 
 It starts three members at N on the loopback with `cavalry run`, a service beside
 each, and a client that adds numbers and reads each total back. Then it upgrades one

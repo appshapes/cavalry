@@ -135,8 +135,11 @@ the same bytes.
   message must say when a leader may use it, which this version leaves to it.
 - The header's version no longer follows the page's. It stays 0 until a major.
 - The gate builds a second tree. N changes only when the page's version does, so
-  its build is kept between runs. `just conformance` takes longer by the upgrade,
-  and by that build when it is not kept.
+  its build is kept between runs on a host that keeps `target/`, as a laptop does.
+  CI's cache drops built programs: `Swatinem/rust-cache` keeps only `build/`,
+  `.fingerprint/` and `deps/` of each profile directory under `target/` when it
+  saves, so CI's `gates` job builds N on every run. `just conformance` takes longer
+  by the upgrade, and by that build when it is not kept.
 - A member's version is in no counter yet, so `cavalry doctor` cannot name the
   versions of a cluster, and `cavalry --version` says the crate's version, 0.1.0,
   for every build. Work item 231's second change adds the counters and the

@@ -29,7 +29,11 @@
 # so a directory that holds the three programs is a cache, and N is not built again;
 # remove target/upgrade to build it again. Each build is the binary and two examples,
 # `cavalry`, `adder-service` and `adder-client`, as scripts/run-a-cluster.sh builds
-# them.
+# them. N's build is kept on a host that keeps target/, as a laptop does. CI's cache
+# drops built programs: Swatinem/rust-cache keeps only build/, .fingerprint/ and deps/
+# of each profile directory under target/ when it saves (its src/cleanup.ts,
+# cleanTargetDir), so the three programs are never restored, and CI's gates job builds
+# N on every run and prints `built N in <n> s` each time.
 #
 # The schedule
 #
