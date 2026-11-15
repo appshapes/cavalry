@@ -1665,8 +1665,9 @@ fn voters_message(id: i32, runs: i64, cluster: &Cluster) -> String {
          member again with the new string, one at a time and the leader last; the \
          change is complete when no member has this finding, every member's \
          cluster-member note names the same voters, every member that runs follows \
-         one leader, and those members are a quorum of the new string's voters or \
-         more. Make no second change before that: docs/how-to/promote-a-standby.md",
+         one leader, and the voters among them are a quorum of the new string's \
+         voters; a standby that runs is not one of them. Make no second change before \
+         that: docs/how-to/promote-a-standby.md",
         cluster.voters_text(runs),
         cluster.voters_text(cluster.voters_mask())
     )
@@ -7211,9 +7212,9 @@ mod tests {
              cluster runs with. While a standby's mark is changed, start each member again \
              with the new string, one at a time and the leader last; the change is complete \
              when no member has this finding, every member's cluster-member note names the \
-             same voters, every member that runs follows one leader, and those members are \
-             a quorum of the new string's voters or more. Make no second change before \
-             that: docs/how-to/promote-a-standby.md"
+             same voters, every member that runs follows one leader, and the voters among \
+             them are a quorum of the new string's voters; a standby that runs is not one \
+             of them. Make no second change before that: docs/how-to/promote-a-standby.md"
         );
         // One voter, and a value of another string's.
         assert_eq!(cluster.voters_text(0b0001), "member 0");

@@ -93,11 +93,14 @@ It promotes member 3. Then it shows the two changes that replace a lost voter.
    complete when `doctor` on every member that runs says `election closed`, exactly
    one says `the leader`, every other says `it follows member` with that leader's
    id, every `note cluster-member` line ends with the same voters, the new string's,
-   and none prints `WARN cluster-voters`. And the members that say so are a quorum
-   of the new string's voters: 3 of the 4 here. A member that is stopped is not
-   one of them, whatever string it had: if fewer than a quorum run, start the
-   others with the new string and wait for them, since the stopped ones may have
-   elected a leader among themselves that the running ones never heard of. Check
+   and none prints `WARN cluster-voters`. And the voters among the members that say
+   so are a quorum of the new string's voters: 3 of the 4 here. Count the voters,
+   not the members. A member that is stopped is not one of them, whatever string
+   it had. A standby that runs is not one of them either: the new string gives it
+   no vote, so it is no part of a quorum. If fewer than a quorum of voters run,
+   start the others with the new string and wait for them, since the stopped ones
+   may have elected a leader among themselves that the running ones never heard
+   of. Check
    every member, on its own host: one
    member that says `the leader` is not enough, since a leader that cannot reach
    the others says so for up to 10 s, and longer when its process was stopped. And
@@ -137,8 +140,10 @@ example, and a test of `cavalry-raft` runs it.
 - `cavalry doctor` on every member, with the new string set, prints one `note
   cluster-member` line with `election closed`, and no `WARN cluster-voters`.
 - Every member's line ends with the same voters, those of the new string.
-- The members that run are a quorum of the new string's voters or more, 3 of 4
-  here: fewer do not make the change complete, however they agree.
+- The voters among the members that run are a quorum of the new string's voters,
+  3 of 4 here. Count only the members the new string gives a vote to: a standby
+  that runs is not one of them. Fewer voters do not make the change complete,
+  however the members agree.
 - Exactly one member says `the leader`. Its term is above the term the cluster had
   before the change.
 - Every member reports the same `commit position` once its recorder has synced.
