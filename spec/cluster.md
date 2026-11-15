@@ -1096,9 +1096,15 @@ them.
    until its own clock has counted the leader heartbeat timeout, and a process
    that was stopped counts late. Until a change is complete the string before it
    is still one of two side by side, and a third would differ from it by two
-   marks.
+   marks. A member runs until its process has ended. One that is parted from the
+   others, or whose process stands still, runs, whether any member hears it or
+   not, and while it runs with the string before, the change is not complete. An
+   operator who cannot reach a member's host does not know that its process has
+   ended, and makes sure of it before a change counts that member out.
 3. No member is started with an older string than the newest that a member of the
-   cluster was started with.
+   cluster was started with. The rule reaches a member when it is started. A
+   member that runs on through a change, unheard, is never started and is rule
+   2's.
 
 `cluster.voters` holds which members a member's own string gives a vote, and
 `cluster.standby` whether it marks the member itself, so that which string each

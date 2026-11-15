@@ -210,7 +210,13 @@ of the string its host is configured with, and reports a member that runs anothe
   started again as a new cluster before.
 - The safety of a change rests on three rules that an operator keeps. A string two
   marks from another member's, or a second change begun early, can lose a
-  committed entry, and no member refuses it. `cavalry doctor` shows a member that
+  committed entry, and no member refuses it. A member that the operator cannot
+  reach is one that may run: a change counts a member out only when its process
+  has ended, which the operator makes sure of by the host's power or its instance
+  when the host does not answer. A lost voter that still ran through both changes
+  of its replacement, parted from the others, would hold a string two marks from
+  theirs and never be started with another; the how-to's replacement of a lost
+  voter begins with that step. `cavalry doctor` shows a member that
   runs another string than its host's, and a standby counts a request vote that
   reaches it. Neither sees a host whose configured string is older and whose member
   was started with it: that member agrees with its host, and a standby is asked for

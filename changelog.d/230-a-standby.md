@@ -14,7 +14,10 @@
   [Promote a standby to a voter](docs/how-to/promote-a-standby.md). Change one mark
   at a time, and make the next change only once every member that runs follows one
   leader and a quorum of the new voters is among them:
-  two marks changed at once can lose a committed entry, and no member refuses it
+  two marks changed at once can lose a committed entry, and no member refuses it.
+  A member on a host that does not answer may still run, with the older string:
+  before you replace a lost voter, make sure that its process has ended and cannot
+  come back
   ([ADR 0134](docs/decisions/0134-mark-a-standby-in-the-members-string-and-change-one-mark-at-a-time.md);
   [the cluster protocol](docs/reference/cluster.md)).
 - `cavalry doctor` names a standby as one, counts a quorum over the voters, and
