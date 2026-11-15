@@ -119,3 +119,52 @@ p99.99 and max over 100,000 messages, with the runtime's allocation counters off
 allocations per message on the client's side of the boundary over 10,000 more, counted
 with what the runtime counts, switched on for that round alone (clients/README.md, "What
 every client must pass").
+
+## The upgrade gate
+
+`upgrade/run.sh` is the last thing `just conformance` runs, and the gate of
+`CLAUDE.md`'s invariant 3, "Mixed versions run during an upgrade" (work item 231;
+ADR 0136). It is no client's runner: it holds `spec/cluster.md`, "Versions and the
+upgrade", on a cluster of two builds of Cavalry.
+
+N+1 is the tree under test, built into `target/release`. N is the last tree of the
+cluster protocol's version before this one, read from the history: the first parent of
+the newest first-parent commit that moved the first line of `spec/cluster.md` to what
+it is now. `CAVALRY_UPGRADE_FROM=<commit>` names another N. N is exported with `git
+archive` and built into `target/upgrade/<N's first 8 hex digits>/`, once: the hash
+names the tree, so the directory is a cache, and N moves only when the page's version
+does. N's build is kept on a host that keeps `target/`, as a laptop does. CI's cache
+drops built programs: `Swatinem/rust-cache` keeps only `build/`, `.fingerprint/` and
+`deps/` of each profile directory under `target/` when it saves, so CI's `gates` job
+builds N on every run and prints `built N in <n> s` each time. The script needs the
+whole history, and says so in a shallow clone.
+
+It starts three members at N on the loopback with `cavalry run`, a service beside
+each, and a client that adds numbers and reads each total back. Then it upgrades one
+member at a time, each with its service, on the directories they had: a follower; then
+the leader, so that the two that remain, one of each build, elect a leader in a ballot
+that crosses the two versions; then the last member at N. The client adds numbers
+after every step, from N's build first and from N+1's after the leader's stop.
+
+After every start, stop and client run it asks `cavalry doctor` of each running
+member, from that member's own build: one leader, every other member its follower in
+its term, every election closed, and one position as every member's append position
+and commit position. At the end it holds four things. Every number the cluster
+acknowledged is in the total that every member's service reached. The three services
+were handed the same entries, with the same positions, terms and sessions. A service
+that started at N+1 read the log that N wrote. And each member's log, replayed from
+its log directory in the order its file of recordings gives, is the same bytes as the
+other two, to the commit position the members reported. Every wait is bounded at
+60 s. A failure prints the step, what `doctor` says of each member that runs and each
+program's output, leaves the script's directory, and exits 1.
+
+The script reads lines that both builds print: `cavalry run`'s `started` and
+`closed` lines, the `note cluster-member` line of `cavalry doctor`, and the lines of
+the two adder programs. N prints the lines of its own tree until the page's version
+moves again, so a change that rewords one of them teaches the script the new wording
+beside the old, in the same change.
+
+The script's header says how to run it by hand.
+[Upgrade a cluster one member at a time](../docs/how-to/upgrade-a-cluster.md) is the
+same upgrade for an operator.
+

@@ -95,6 +95,9 @@ pub struct Stub {
     pub last_canvass: Option<(i64, i64, i64)>,
     /// The `is startup` of the last new leadership term sent.
     pub last_startup: Option<bool>,
+    /// The `protocol version` of the last canvass position sent and of the last
+    /// request vote sent: the two consensus messages that carry a version.
+    pub versions_sent: [Option<i32>; 2],
 }
 
 impl Stub {
@@ -129,6 +132,7 @@ impl Stub {
             reads: [0; 2],
             last_canvass: None,
             last_startup: None,
+            versions_sent: [None; 2],
         }
     }
 
@@ -190,6 +194,15 @@ impl Io for Stub {
         }
         if let Message::NewLeadershipTerm { is_startup, .. } = *message {
             self.last_startup = Some(is_startup);
+        }
+        match *message {
+            Message::CanvassPosition {
+                protocol_version, ..
+            } => self.versions_sent[0] = Some(protocol_version),
+            Message::RequestVote {
+                protocol_version, ..
+            } => self.versions_sent[1] = Some(protocol_version),
+            _ => {}
         }
         if let Message::NewLeadershipTerm {
             log_leadership_term_id,

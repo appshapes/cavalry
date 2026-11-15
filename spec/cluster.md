@@ -1,4 +1,4 @@
-# Cluster protocol, version 0
+# Cluster protocol, version 1
 
 The cluster protocol makes three or more drivers one replicated state machine: the
 cluster's log is one stream, written by the member that is the leader and sent to
@@ -16,6 +16,15 @@ the election, the sessions, the timeouts, and what a reader rejects. Nothing her
 changes the transport: every message crosses the wire inside data frames
 (`spec/frame.md`) on a `cavalry:udp` stream, and a reader walks that page first and
 this one second.
+
+Version 1 adds the rule for a cluster whose members are of more than one version of
+this page, and the upgrade that makes such a cluster ("Roles and the election",
+"Versions and the upgrade"; ADR 0136). It adds no message, no field and no entry:
+every layout of version 0 is unchanged and every header's version stays 0, so a
+member of version 0 reads every message of a member of version 1, and the two elect,
+replicate and commit as one cluster. A member and a client of version 1 write 256,
+this version in the semantic form of "Encoding", where those of version 0 wrote 0:
+in canvass position, request vote, session connect and session event.
 
 ## Members and streams
 
@@ -83,7 +92,7 @@ message. The first 8 bytes are the message header:
 | 0 | 2 | block length | u16 | the length of the fixed fields that follow the header, the template's constant below |
 | 2 | 2 | template id | u16 | which message, the ids below |
 | 4 | 2 | schema id | u16 | 1, this page's schema |
-| 6 | 2 | version | u16 | 0, this page's version |
+| 6 | 2 | version | u16 | 0, the version of this page's layouts: every version of this page whose major is 0 writes 0, since none of them changes a layout ("Versions and the upgrade") |
 
 The fixed fields follow at offset 8, in the order each table gives, every field
 present; then the variable fields in the order each table gives, each a 4-byte `u32`
@@ -101,12 +110,15 @@ is 0 or more except where its table allows −1, and a term id is −1 or more. 
 session id, a correlation id, a recording id, a type id and a log session id are any
 value of their type, bounded by nothing on this page, the log session id being the
 random session id of `spec/client-protocol.md`; a reader checks member ids, positions
-and term ids and no other id ("What a reader rejects"). A `protocol version` or
-`version` field holds this page's version in semantic form, major × 65536 + minor ×
-256 + patch: 0 for version 0, the major being the value shifted right by 16 bits,
-arithmetic, so that a negative value has a negative major; a reader rejects a
-consensus message whose major it does not know, and reads a session connect's
-whatever its major, so that the leader can answer it ("Sessions"). A `bool` is an `i32`, 0 false and 1 true. An enumeration is an
+and term ids and no other id ("What a reader rejects"). A `protocol version` field,
+and a `version` field of a message's block, holds its writer's version of this page
+in semantic form, major × 65536 + minor × 256 + patch: 256 for version 1, which is
+0.1.0, and 0 for version 0, this page's version being the minor while the major is
+0; the major is the value shifted right by 16 bits, arithmetic, so that a negative
+value has a negative major; a reader rejects a consensus message whose major it does
+not know, reads one of its own major whatever its minor and its patch ("Versions and
+the upgrade"), and reads a session connect's whatever its major, so that the leader
+can answer it ("Sessions"). A `bool` is an `i32`, 0 false and 1 true. An enumeration is an
 `i32` with the values its table names and no other; a `flags` field is read bit by
 bit, each table naming its bits, and a bit it does not name is ignored.
 
@@ -314,7 +326,7 @@ it has no leader.
 | 16 | 8 | log position | i64 | the sender's append position |
 | 24 | 8 | leadership term id | i64 | the sender's candidate term, the highest term it has voted in, proposed or followed ("The log"), at least its log leadership term id; −1 for none |
 | 32 | 4 | follower member id | i32 | the sender's |
-| 36 | 4 | protocol version | i32 | 0 |
+| 36 | 4 | protocol version | i32 | the sender's version in semantic form, 256; 0 from a member of version 0 |
 
 ### Request vote, template 51
 
@@ -326,7 +338,7 @@ Block length 32, no variable fields. A candidate's request to every other member
 | 16 | 8 | log position | i64 | the candidate's append position |
 | 24 | 8 | candidate term id | i64 | the term the candidate proposes to lead, above every term it has known |
 | 32 | 4 | candidate member id | i32 | the candidate's |
-| 36 | 4 | protocol version | i32 | 0 |
+| 36 | 4 | protocol version | i32 | the sender's version in semantic form, 256; 0 from a member of version 0 |
 
 ### Vote, template 52
 
@@ -430,7 +442,7 @@ operator's eyes, empty allowed).
 | --- | --- | --- | --- | --- |
 | 8 | 8 | correlation id | i64 | the client's, echoed by the answering session event |
 | 16 | 4 | response stream id | i32 | 102, the egress stream; a connect naming another is refused ("Sessions") |
-| 20 | 4 | version | i32 | the client's protocol version in semantic form, 0; a reader reads any major here, and the leader refuses one not its own ("Sessions") |
+| 20 | 4 | version | i32 | the client's protocol version in semantic form, 256, and 0 from a client of version 0; a reader reads any major here, and the leader refuses one not its own ("Sessions") |
 
 ### Session event, template 2
 
@@ -445,7 +457,7 @@ members string's order, separated by `,`.
 | 24 | 8 | leadership term id | i64 | the sender's term |
 | 32 | 4 | leader member id | i32 | the leader's, −1 when the sender knows none |
 | 36 | 4 | code | i32 | 0 ok, 1 error, 2 redirect, 3 authentication rejected (reserved, sent by no member of this version), 4 closed |
-| 40 | 4 | version | i32 | the cluster's protocol version in semantic form, 0 |
+| 40 | 4 | version | i32 | the protocol version of the member that sent the event, in semantic form: 256, and 0 from a member of version 0 |
 | 44 | 8 | leader heartbeat timeout ns | i64 | 10,000,000,000, the leader heartbeat timeout in nanoseconds, so that a client knows how long a silent leader may be |
 
 ### Session close, template 4
@@ -1304,6 +1316,52 @@ version does not hold invariant 1 across that loss, and the check that will, a
 checksum beside the frames or a synced position that the loss leaves, is a change
 to the durable log that is not made yet (ADR 0108, "What a start does not hold").
 
+**Versions and the upgrade.** A cluster's members may be of different versions of
+this page while their major is one, as they are during an upgrade (`CLAUDE.md`,
+invariant 3; ADR 0136). Within a major no version changes the layout of a message
+or of an entry, a template's id, the values of an enumeration, a check of "What a
+reader rejects", or what an entry does to the state that a consensus module or a
+service computes from the log. So a member reads every message of its major by the
+layouts of its own version, the header's version is 0 in every version of major 0,
+and every member's log holds the same bytes at the same positions, whatever the
+versions of the member that wrote it and of the members that recorded it. A version
+that must change one of those is another major. It writes another header version,
+which a reader of major 0 rejects in every message ("What a reader rejects"), and
+its members form no cluster with members of major 0.
+
+A member writes its own version in canvass position and in request vote, a client
+in session connect, and a member in each session event it sends. A member reads the
+`protocol version` of a canvass position and of a request vote for its major alone
+and does nothing else with it: a version is no part of "Logs compared", and a member
+votes for a candidate, follows a leader and counts toward a quorum of any version of
+its major by the rules of this section alone. No other consensus message carries a
+version. A leader refuses a session connect, and a client reads a session event,
+by the major alone ("Sessions"), so a client of either version opens a session with
+a leader of either. Version 1 adds nothing that a member of version 0 must not be
+sent: a leader of either version appends the same entries, and a follower of either
+records them.
+
+A cluster whose every member runs, with its election closed, is upgraded one
+member at a time, with the members string it has, each member on the log directory
+it had. A member is stopped with the service beside it,
+and both are started at the new version on the directories they had ("A member's
+start"): a member's driver, its consensus module and its service are of one build,
+since what passes between them is `spec/client-protocol.md`'s and not this page's.
+The next member is stopped only once the one before leads, or follows the leader
+with its election closed. In a cluster of three voters or more a quorum then runs
+at every step, so the cluster commits throughout but for the election that the
+leader's stop holds, whose candidates and voters may be of both versions; a cluster
+of fewer voters commits nothing while one of them is stopped. No step loses a
+committed entry in either, since a stop in an upgrade is a member's stop as any
+other and each member keeps its log. A member of version 1 starts on the log
+directory that a member of version 0 wrote,
+and a member of version 0 on one that version 1 wrote, since no file of
+`spec/durable-log.md` differs between the two: a member may be stepped back. What
+"A member's start" refuses of a log directory is refused in an upgrade as at any
+start. `conformance/upgrade/` runs this upgrade on the loopback, from the last tree
+of the version before to the tree under test, and holds every acknowledged entry
+to every member's log (`conformance/README.md`).
+
 **The leader's own entries.** Before the sessions of "Sessions" exist, the leader's own
 process appends for itself: once its election has closed it may append a session
 message whose cluster session id is −1, no session's, with its term, the cluster's
@@ -1836,7 +1894,8 @@ that a reader of a counters file knows which transition it saw.
 
 | Value | This version |
 | --- | --- |
-| schema id, version | 1, 0 |
+| schema id, header version | 1, 0 |
+| protocol version | 256, version 1 in semantic form, 0.1.0; a member reads every version whose major is 0 ("Versions and the upgrade") |
 | stream ids | log 100, ingress 101, egress 102, log replay 103, service log 104, consensus module 105, service snapshot 106, snapshot 107, consensus 108, service snapshot replay 109, which is none of Aeron's. In Aeron 104 is the service stream, which carries the consensus module's messages to a service; here it carries the log a service reads ("The service") |
 | members | at most 8, at least one of them a voter; a ninth is `members-count`, and a string of standbys alone `members-voters` |
 | member id | 0 to 2147483647, unique |
@@ -1919,7 +1978,10 @@ encoder. Each vector has a `kind`:
 - `message`: the `stream`, the `bytes` of one message and the `fields` a conforming
   reader decodes, a `payload` or variable field given as hex, or the `error` it
   reports; every template once valid, with its null values where a field allows them,
-  and one vector per rejection in the order the checks run.
+  and one vector per rejection in the order the checks run. The four messages that
+  carry a version are each given twice more, as a writer of version 0 wrote it and
+  as a writer of a later minor of major 0 would, and a conforming reader of this
+  version reads both ("Versions and the upgrade").
 - `members`: a members `string` and the `members` it parses to, each an id and its
   five endpoints as host and port, with `standby`, true, for a member the string
   marks a standby and no such field for a voter, or the `error`.

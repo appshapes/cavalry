@@ -57,13 +57,22 @@ use core::fmt;
 pub const SCHEMA_ID: u16 = 1;
 
 /// The version of `spec/cluster.md` this crate reads and writes.
-pub const VERSION: u16 = 0;
+pub const VERSION: u16 = 1;
+
+/// The version every message's header carries: the version of the page's layouts,
+/// which is 0 in every version of the page whose major is 0, since none of them
+/// changes a layout (`spec/cluster.md`, "Versions and the upgrade"; ADR 0136). A
+/// member of version 0 rejects every message whose header carries another.
+pub const HEADER_VERSION: u16 = 0;
 
 /// The message header's length: block length, template id, schema id and version.
 pub const HEADER_LENGTH: usize = 8;
 
-/// A protocol version field's value for this version, in semantic form.
-pub const PROTOCOL_VERSION: i32 = 0;
+/// A protocol version field's value for this version, in semantic form: the major
+/// times 65536, the minor times 256 and the patch, added. It is 0.1.0, the page's
+/// version being the minor while the major is 0. A reader reads every version of its
+/// major (`spec/cluster.md`, "Encoding").
+pub const PROTOCOL_VERSION: i32 = (VERSION as i32) << 8;
 
 /// An id or a position that is none: Aeron's null value (`spec/cluster.md`, "Encoding").
 pub const NULL_VALUE: i64 = -1;
@@ -662,8 +671,10 @@ impl fmt::Display for ClusterError {
             ClusterError::Version { found } => write!(
                 f,
                 "cluster message rejected (version): version {found}, this reader knows \
-                 {VERSION}; the writer runs another Cavalry version, upgrade the older side; \
-                 see {DOC}"
+                 {HEADER_VERSION} in a message's header and the protocol versions of major \
+                 {}; the writer runs another major of the cluster protocol, and members of \
+                 two majors form no cluster: run every member at one major; see {DOC}",
+                PROTOCOL_VERSION >> 16
             ),
             ClusterError::Template { found } => write!(
                 f,
@@ -1329,7 +1340,7 @@ impl<'a> Message<'a> {
         if schema_id != SCHEMA_ID {
             return Err(ClusterError::Schema { found: schema_id });
         }
-        if version != VERSION {
+        if version != HEADER_VERSION {
             return Err(ClusterError::Version {
                 found: i32::from(version),
             });
@@ -1884,7 +1895,7 @@ impl<'a> Message<'a> {
         writer.put(&template.block_length().to_le_bytes())?;
         writer.put(&template.id().to_le_bytes())?;
         writer.put(&SCHEMA_ID.to_le_bytes())?;
-        writer.put(&VERSION.to_le_bytes())?;
+        writer.put(&HEADER_VERSION.to_le_bytes())?;
         match *self {
             Message::SessionMessage {
                 leadership_term_id,
