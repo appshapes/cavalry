@@ -231,23 +231,31 @@ fn replayed(member: &Member, recording_id: i64) -> Vec<Vec<u8>> {
         .expect("the snapshot's recording replays");
     let mut messages = Vec::new();
     let deadline = Instant::now() + Duration::from_secs(20);
+    // How far the replay's image has been read. The driver withdraws the image once
+    // its one subscriber has read it to the end of stream, which can be before this
+    // client has read `replay stopped` (`spec/client-protocol.md`, "Commands", start
+    // replay). The image is then gone by the time the end is known, so the position
+    // is kept from the polls that still had the image.
+    let mut reached = 0;
     loop {
         let read = subscription
             .poll(|bytes, _| messages.push(bytes.to_vec()), 16)
             .expect("the replay's image is read");
-        // The replay has ended, and the image has been read to where it ended.
+        for image in subscription.images() {
+            reached = reached.max(image.position());
+        }
+        // The replay has ended, and the image was read to where it ended.
         if let Some((end, _)) = replay.ended()
-            && subscription
-                .images()
-                .iter()
-                .any(|image| image.position() >= end)
+            && reached >= end
         {
             break;
         }
         assert!(
             Instant::now() < deadline,
-            "the replay of recording {recording_id} did not end: {} messages read",
-            messages.len()
+            "the replay of recording {recording_id} did not end: {} messages read to \
+             position {reached}, and the replay's end is {:?}",
+            messages.len(),
+            replay.ended()
         );
         if read == 0 {
             std::thread::sleep(Duration::from_micros(200));
