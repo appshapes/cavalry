@@ -1165,9 +1165,10 @@ enum Cataloged {
 /// member does not start: a recording missing before one that is held, which is no
 /// purge below a snapshot, one the driver found damaged, one that begins elsewhere
 /// or is of another stream, and one that begins past where the ones before it end.
-/// A log read back shorter than the member
-/// reported it would let the member vote for a candidate that lacks a committed
-/// entry, so nothing here shortens the log but that one truncation.
+/// A log read back shorter than the member reported it would let the member vote
+/// for a candidate that lacks a committed entry, so nothing here shortens the log
+/// at its end but that one truncation, and that to no position below `from`
+/// (below).
 ///
 /// What each recording is in the catalog, and that none is missing before one that
 /// is held, is checked before any is stopped, so a start refused for that has
@@ -1190,7 +1191,9 @@ enum Cataloged {
 /// table keeps, [`KEPT_RECORDINGS`], forgets the oldest when the ones it keeps
 /// begin at or below `from`, and is [`RaftError::LogForgotten`] when they do not;
 /// that count is known only once the recordings still being made are stopped.
-/// With `from` at 0 a start forgets nothing and takes no purge.
+/// With `from` at 0 a start forgets nothing, and the one purge it takes is of
+/// first recordings gone before a recording that begins at 0, which holds the log
+/// from 0 itself.
 ///
 /// The record's last recordings missing are a truncation cut short only while the
 /// log the ones before them hold reaches `from`. The snapshot is of a position the
