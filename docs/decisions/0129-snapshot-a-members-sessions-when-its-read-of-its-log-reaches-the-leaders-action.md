@@ -187,9 +187,9 @@ log from position 0: the start from a snapshot is the next change.
   ms. The longest cycle with no snapshot in hand: 0.03 ms. With a publication
   added for each snapshot, before the decision above: p50 183.26 ms, p90 212.73
   ms, max 228.47 ms, and 760.85 ms at the median until the three had listed it.
-  The driver's commands took, at the mean: add exclusive publication 110 ms,
-  start recording 102 ms, stop recording 40 ms, and the list's write 14 ms. On
-  macOS a sync is `F_FULLFSYNC`. No Linux host has timed it.
+  Those runs also timed each of the driver's commands, under the design that lost
+  and at the mean alone, so no time of a command is quoted here. On macOS a sync
+  is `F_FULLFSYNC`. No Linux host has timed it.
 - How fast a member reads its log back, timed in a release build on the same
   laptop by the ignored test `a_members_read_of_its_log_at_a_start_timed`: three
   members committed 64 MiB of entries of 1,408 bytes, a follower stopped and
