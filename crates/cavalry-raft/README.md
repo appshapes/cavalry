@@ -267,8 +267,11 @@ commit path runs per message.
   by 256 MiB, and when its own process asks, `ConsensusModule::snapshot()`. Every
   member takes the snapshot when its read of its own committed log reaches the
   action, so the three snapshots are of one position and hold the same bytes: a
-  marker, each open session in the order of the sessions' ids, the id the next
-  session is given, and a marker. A member writes them to its one publication on
+  marker, each open session in the order of the sessions' ids, the next session id
+  that the log below the action gives, and a marker. That id is
+  `Sessions::committed_next_session_id()`, which only a committed session open event
+  moves, and not the leader's own, which moves at a connect it accepts. A member
+  writes them to its one publication on
   the snapshot stream, as a recording of its own, and lists the snapshot in its
   snapshots file once the recording has stopped at the end of what it wrote (ADR
   0128). Each step is one duty cycle's work: the longest cycle while a snapshot was

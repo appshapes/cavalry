@@ -19,8 +19,9 @@ use cavalry_proto::cluster::{
 use cavalry_raft::{ConsensusModule, ElectionState, RaftError, Refused, Role, SnapshotCounts};
 use cavalry_shm::counters::CountersReader;
 use cavalry_shm::counters::generated::{
-    CLUSTER_SNAPSHOT_ACTIONS, CLUSTER_SNAPSHOT_POSITION, CLUSTER_SNAPSHOT_STEPS,
-    CLUSTER_SNAPSHOTS_BEGUN, CLUSTER_SNAPSHOTS_FAILED, CLUSTER_SNAPSHOTS_TAKEN,
+    CLUSTER_SESSIONS_ACCEPTED, CLUSTER_SNAPSHOT_ACTIONS, CLUSTER_SNAPSHOT_POSITION,
+    CLUSTER_SNAPSHOT_STEPS, CLUSTER_SNAPSHOTS_BEGUN, CLUSTER_SNAPSHOTS_FAILED,
+    CLUSTER_SNAPSHOTS_TAKEN,
 };
 
 mod ports;
@@ -59,7 +60,12 @@ impl Drop for TestDir {
 
 /// The members string of three members on the loopback.
 fn members_string() -> String {
-    let ports = free_ports(15);
+    members_string_on(&free_ports(15))
+}
+
+/// The members string of three members on the loopback, on the first 15 of `ports`:
+/// member n's ingress endpoint is the port at 5 n.
+fn members_string_on(ports: &[u16]) -> String {
     (0..3)
         .map(|member| {
             let endpoints: Vec<String> = ports[member * 5..member * 5 + 5]
@@ -750,16 +756,7 @@ impl Client {
 fn a_snapshot_holds_the_open_sessions_in_the_order_of_their_ids_on_every_member() {
     let dir = TestDir::new("sessions");
     let ports = free_ports(17);
-    let members_string = (0..3)
-        .map(|member| {
-            let endpoints: Vec<String> = ports[member * 5..member * 5 + 5]
-                .iter()
-                .map(|port| format!("127.0.0.1:{port}"))
-                .collect();
-            format!("{member},{}", endpoints.join(","))
-        })
-        .collect::<Vec<_>>()
-        .join("|");
+    let members_string = members_string_on(&ports);
     let mut members: Vec<Member> = [1, 0, 2]
         .into_iter()
         .map(|id| start_member(dir.path(), &members_string, id))
@@ -902,6 +899,177 @@ fn a_snapshot_holds_the_open_sessions_in_the_order_of_their_ids_on_every_member(
         "the leader's snapshot and the other follower's"
     );
     for client in clients {
+        client.close();
+    }
+    for member in members {
+        member.module.close().expect("the member closes");
+        member.driver.close().expect("the driver closes");
+    }
+}
+
+/// A connect that the leader accepts after it appended the action, and before its
+/// read of its committed log reached the action, is in no member's snapshot
+/// (`spec/cluster.md`, "Consensus module, template 105"; ADR 0129). The leader gives
+/// the session its id at the connect, and its session open event goes in after the
+/// action. Both followers are held meanwhile, so that the action cannot commit, and no
+/// member can take the snapshot, before the leader has accepted the connect. Every
+/// member's snapshot then holds the one session below the action and the next session
+/// id that the log gives there, 1, and the three hold the same bytes. The client is
+/// then given session 1, as the leader's own next id said.
+#[test]
+fn a_connect_the_leader_accepts_before_it_reads_the_action_is_in_no_members_snapshot() {
+    let dir = TestDir::new("accepted");
+    let ports = free_ports(17);
+    let members_string = members_string_on(&ports);
+    let mut members: Vec<Member> = [1, 0, 2]
+        .into_iter()
+        .map(|id| start_member(dir.path(), &members_string, id))
+        .collect();
+    run_until_led(&mut members, -1);
+    let leader = usize::try_from(members[0].module.member_id()).expect("a member id");
+    let ingress = format!("127.0.0.1:{}", ports[leader * 5]);
+
+    // The first client's session, 0, opened and read by every member.
+    let mut first = Client::start(dir.path(), "client-0", ports[15], &ingress, 41);
+    let mut sent = false;
+    run_until(&mut members, "the first client's session opens", |_| {
+        sent = sent || first.connect();
+        first.poll();
+        first.session_id.is_some()
+    });
+    assert_eq!(first.session_id, Some(0));
+    run_until(
+        &mut members,
+        "every member holds the first session",
+        |members| {
+            let end = members[0].module.append_position();
+            members.iter().all(|m| {
+                m.module.commit_position() == end && m.module.session_log_position() == end
+            })
+        },
+    );
+    // The second client's publication is connected to the leader's ingress endpoint
+    // before the action is asked, so that its connect goes when it is offered.
+    let mut second = Client::start(dir.path(), "client-1", ports[16], &ingress, 42);
+    run_until(
+        &mut members,
+        "the second client's publication is connected",
+        |_| second.ingress.is_connected(),
+    );
+
+    let before = members[0].module.append_position();
+    ask_snapshot(&mut members);
+    let position = before + FRAME;
+    // From here until the leader has accepted the connect, only the leader runs. The
+    // followers report no append position, so the commit position stays at `before`
+    // and no member's read reaches the action.
+    let deadline = Instant::now() + Duration::from_secs(20);
+    while !second.connect() {
+        assert!(
+            Instant::now() < deadline,
+            "the second client's connect is not taken"
+        );
+        std::thread::sleep(Duration::from_micros(200));
+    }
+    while counter(&members[0], CLUSTER_SESSIONS_ACCEPTED.0) < 2 {
+        assert!(
+            Instant::now() < deadline,
+            "the leader did not accept the second connect: {:?}",
+            members[0].module
+        );
+        if members[0]
+            .module
+            .do_work()
+            .expect("the leader's duty cycle")
+            == 0
+        {
+            std::thread::sleep(Duration::from_micros(200));
+        }
+    }
+    assert!(
+        members[0].module.commit_position() < position,
+        "the action was committed before the connect was accepted"
+    );
+    assert_eq!(
+        members[0].module.snapshot_counts().begun,
+        0,
+        "the leader has not read the action"
+    );
+
+    run_until(&mut members, "every member lists its snapshot", |members| {
+        members
+            .iter()
+            .all(|m| m.module.snapshot_position() == Some(position))
+    });
+    let term = members[0].module.leadership_term_id();
+    let marker = |mark| Message::SnapshotMarker {
+        type_id: SNAPSHOT_TYPE_ID,
+        log_position: position,
+        leadership_term_id: term,
+        index: 0,
+        mark,
+        time_unit: cavalry_proto::cluster::TimeUnit::Millis,
+        app_version: 0,
+    };
+    let mut bytes: Vec<Vec<Vec<u8>>> = Vec::new();
+    for member in &members {
+        let id = member.module.member_id();
+        let list = listed(member);
+        assert_eq!(list.len(), 1, "member {id}: {list:?}");
+        let messages = replayed(member, list[0].recording_id);
+        let parsed: Vec<Message<'_>> = messages
+            .iter()
+            .map(|bytes| Message::parse(Stream::Snapshot, bytes).expect("a snapshot's message"))
+            .collect();
+        let Some(&Message::ClusterSession {
+            opened_log_position,
+            ..
+        }) = parsed.get(1)
+        else {
+            panic!("member {id}: {parsed:?}");
+        };
+        // The one session below the action, and the next session id that the log
+        // gives at the snapshot's position: the second connect's id is not in it.
+        assert_eq!(
+            parsed,
+            vec![
+                marker(SnapshotMark::Begin),
+                Message::ClusterSession {
+                    cluster_session_id: 0,
+                    correlation_id: first.correlation_id,
+                    opened_log_position,
+                    time_of_last_activity: -1,
+                    close_reason: CLOSE_REASON_NONE,
+                    response_stream_id: EGRESS_STREAM_ID,
+                    response_channel: first.response_channel.as_bytes(),
+                },
+                Message::ConsensusModule {
+                    next_session_id: 1,
+                    next_service_session_id: 0,
+                    log_service_session_id: 0,
+                    pending_message_capacity: 0,
+                },
+                marker(SnapshotMark::End),
+            ],
+            "member {id}"
+        );
+        assert!(opened_log_position < before, "member {id}");
+        bytes.push(messages);
+    }
+    assert_eq!(bytes[0], bytes[1], "the leader's snapshot and a follower's");
+    assert_eq!(
+        bytes[0], bytes[2],
+        "the leader's snapshot and the other follower's"
+    );
+
+    // The connect the leader accepted is opened by its session open event, after the
+    // action, with the id the leader gave it.
+    run_until(&mut members, "the second client's session opens", |_| {
+        second.poll();
+        second.session_id.is_some()
+    });
+    assert_eq!(second.session_id, Some(1));
+    for client in [first, second] {
         client.close();
     }
     for member in members {

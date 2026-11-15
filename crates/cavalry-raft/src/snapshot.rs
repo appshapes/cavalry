@@ -334,8 +334,11 @@ impl ModuleSnapshot {
             } else if self.next == last {
                 marker(SnapshotMark::End)
             } else if self.next == last - 1 {
+                // The next session id as the log below the snapshot's position gives
+                // it, and not the leader's own, which a connect it accepted moves
+                // before the session open event is committed (ADR 0129).
                 Message::ConsensusModule {
-                    next_session_id: sessions.next_session_id(),
+                    next_session_id: sessions.committed_next_session_id(),
                     next_service_session_id: 0,
                     log_service_session_id: 0,
                     pending_message_capacity: 0,

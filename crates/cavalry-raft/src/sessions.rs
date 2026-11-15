@@ -296,6 +296,14 @@ pub struct Sessions {
     /// The id the next session the leader accepts is given: one more than the
     /// highest it has given or read in a session open event.
     next_session_id: i64,
+    /// One more than the highest cluster session id of a session open event the
+    /// member has read in its committed log, 0 before the first: what a snapshot
+    /// carries as the next session id. Only [`Sessions::on_entry`] moves it, so it
+    /// is a function of the log below the read's position, the same on every
+    /// member. `next_session_id` is not: a leader moves that one at a connect,
+    /// before the session open event is committed, and keeps it when it steps down
+    /// (ADR 0129).
+    committed_next_session_id: i64,
     /// Whether the member led at its last cycle, and in which term.
     led: Option<i64>,
     counts: SessionCounts,
@@ -312,6 +320,7 @@ impl Sessions {
             sessions: [Session::FREE; MAX_SESSIONS],
             answers: [None; MAX_PENDING_ANSWERS],
             next_session_id: 0,
+            committed_next_session_id: 0,
             led: None,
             counts: SessionCounts::default(),
         }
@@ -353,9 +362,25 @@ impl Sessions {
     }
 
     /// The id the next session a leader accepts is given: one more than the highest
-    /// the member has given or has read in a session open event.
+    /// the member has given or has read in a session open event. A leader gives an
+    /// id at the connect it accepts, before that session's open event is committed,
+    /// and a leader that steps down keeps the id, so that it never gives one twice.
+    /// So on a member that leads, or has led, this can be past what its log says. A
+    /// snapshot carries [`Sessions::committed_next_session_id`] instead.
     pub const fn next_session_id(&self) -> i64 {
         self.next_session_id
+    }
+
+    /// One more than the highest cluster session id of a session open event that
+    /// [`Sessions::on_entry`] has been handed, 0 before the first. Every member is
+    /// handed the same committed entries in the same order, so at one position of
+    /// the log every member has the same value, whether it leads, follows or led
+    /// before. That is the next session id a snapshot of the consensus module holds
+    /// (`spec/cluster.md`, "Consensus module, template 105"; ADR 0129). A session
+    /// open event that the table cannot hold moves it as well: it names an id the
+    /// log has given.
+    pub const fn committed_next_session_id(&self) -> i64 {
+        self.committed_next_session_id
     }
 
     /// Whether the session with `id` is open.
@@ -524,6 +549,9 @@ impl Sessions {
             } => {
                 self.next_session_id = self
                     .next_session_id
+                    .max(cluster_session_id.saturating_add(1));
+                self.committed_next_session_id = self
+                    .committed_next_session_id
                     .max(cluster_session_id.saturating_add(1));
                 if self.is_open(cluster_session_id) {
                     return Ok(false);

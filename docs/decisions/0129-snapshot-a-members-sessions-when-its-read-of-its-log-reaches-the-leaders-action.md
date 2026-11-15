@@ -64,7 +64,12 @@ starts a recording of that publication, writes a marker, a cluster session for
 each open session in the order of the sessions' ids, a consensus module and a
 marker, stops the recording once the recorder has written them, and lists the
 snapshot in its snapshots file when the driver has announced a stop at the end of
-what it wrote. Each step is one duty cycle's work, and none waits. While the
+what it wrote. Everything it writes is a function of the committed log below the
+snapshot's position. The consensus module's next session id is one more than the
+highest cluster session id of a session open event below that position, 0 for
+none, which a member keeps beside its table and moves only on a committed session
+open event. It is not the leader's own next session id. Each step is one duty
+cycle's work, and none waits. While the
 messages are written the module does not read its log. A step that fails ends
 the snapshot, counted in `cluster.snapshots_failed`, and the member goes on. The
 two templates are Aeron's, field for field. A member still starts by reading its
@@ -106,6 +111,25 @@ log from position 0: the start from a snapshot is the next change.
   at a connect and a follower at a commit, so two members hold one session in
   different slots, and their snapshots would differ. In the order of the ids the
   three members' recordings hold the same bytes, which a test holds them to.
+- **The leader's own next session id as the consensus module's.** Lost. A leader
+  gives a session its id when it accepts the connect, before the session open
+  event is appended and well before it is committed, and a follower moves its id
+  only on a committed session open event. The leader's read of its log waits for
+  a quorum's sync before it reaches the action, and the leader reads its ingress
+  stream meanwhile, and while a snapshot's publication is back-pressured. So a
+  connect accepted in that window put an id in the leader's snapshot that the
+  followers' did not hold, and replaying the log to the snapshot's position did
+  not give it. A leader that steps down keeps its next id, so that it never gives
+  one twice, and frees the connects it had accepted. Its id then stays above the
+  log's in every snapshot it takes until a committed session open event carries a
+  higher one. The test of a connect accepted in that window failed on it: the
+  leader's snapshot held the next session id 2, where the log below the action
+  gives 1.
+- **Hold the leader's connects from the action until its snapshot is written.**
+  Lost. Each new client then waits at least a quorum's sync and a snapshot's duty
+  cycle for its answer, the session protocol depends on the snapshot's state, and
+  a member that led and stepped down still holds an id above the log's. The id
+  the log gives costs one more `i64` beside the table.
 - **The cluster's time as a session's time of last activity.** Lost. A member
   counts a session's timeout on its own monotonic clock from when its leader
   begins to serve. Aeron writes its null there, and so does this.
@@ -134,12 +158,22 @@ log from position 0: the start from a snapshot is the next change.
   the two cluster sessions in the order of their ids, each with its client's
   channel and the position of its session open event, and the next session id 2,
   the same bytes on the three members. A member that stops and starts again
-  reads the action in its log and takes no second snapshot of it.
+  reads the action in its log and takes no second snapshot of it. A connect that
+  the leader accepts after it appended the action and before its read reached it,
+  with both followers held so that the action cannot commit until then, is in no
+  member's snapshot. The three recordings hold one cluster session and the next
+  session id 1, the same bytes, and the client is then given session 1. With the
+  leader's own next session id written in its place, this test failed: the
+  leader's snapshot held 2.
 - `crates/cavalry-raft/src/module/tests.rs`: a leader appends no action while its
   log is 32 bytes short of the interval since the last, and one at the interval,
   once; every member notes where that action ended.
 - `crates/cavalry-raft/tests/sessions.rs`: the table gives its open sessions in
-  the order of their ids, whatever slot each has, with where each opened.
+  the order of their ids, whatever slot each has, with where each opened. A
+  leader that accepts a connect moves its own next session id and not the log's,
+  and a follower handed the same committed entries holds the same log's id. A
+  leader that steps down with a connect it accepted and never saw committed keeps
+  its own id and holds the log's, as the other members do.
 - `spec/vectors/cluster.json`, 243 vectors, 11 of them new: the two templates,
   the longest response channel, a session's ignored fields with other values, and
   the rejections, for the template of a service's snapshot, the stream, the block
