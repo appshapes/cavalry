@@ -13,8 +13,11 @@
 - `cavalry doctor` names a standby as one, counts a quorum over the voters, and
   reports a member that runs with other voters than the members string on its host
   (`cluster-voters`) and a standby that was asked for a vote
-  (`cluster.standby_vote_requests`). Two gauges say which string a member runs:
-  `cluster.voters` and `cluster.standby`.
+  (`cluster.standby_vote_requests`). Every member's `note cluster-member` line now
+  ends with the members that its own string gives a vote to, `its members string
+  gives a vote to members 0, 1 and 2`: read the lines of all members together to
+  find one that was started with another string. Two gauges say which string a
+  member runs: `cluster.voters` and `cluster.standby`.
 - `cavalry-proto`: `Member::standby`, `STANDBY_MARK` and `MembersError::NoVoter`.
   `cavalry-raft`: `Consensus::with_standbys`, `Consensus::is_standby`,
   `Consensus::voters`, `MembersRefused::NoVoter`, and in its in-memory cluster

@@ -97,7 +97,9 @@ committed once a quorum, two of three, has it on disk.
    election closed`, with the same two positions once their recorders have synced,
    which each member asks its recorder for as soon as an entry is written, and name
    the leader: `; it follows member 2; its last election began because the member
-   started`. The term is 1 or more where two members asked for votes at the same
+   started`. Every line then names the members that the member's own string gives a
+   vote to, `; its members string gives a vote to members 0, 1 and 2`, the same on
+   the three. The term is 1 or more where two members asked for votes at the same
    moment and another ballot was taken. Each line ends with `; see` and the page that
    explains it, as every finding does.
 
@@ -481,9 +483,12 @@ committed once a quorum, two of three, has it on disk.
   member's `standby` mark can elect a leader that lacks an entry the cluster
   committed.
 - `WARN cluster.standby_vote_requests`: this member is a standby, and a member
-  whose string gives it a vote asked it for one. It gave none, and the candidate
-  waited 1 s for it. The two run with strings that differ: find the member that
-  prints `WARN cluster-voters`, as above.
+  whose string gives it a vote asked it for one. It gave none. The two ran with
+  strings that differ. Read the voters at the end of every member's `note
+  cluster-member` line, which are one set where the strings agree, and start the
+  member whose line differs with the cluster's string. A member whose host holds
+  an older string prints no `WARN cluster-voters`. The count stays until this
+  member starts again: [Promote a standby to a voter](promote-a-standby.md).
 - `WARN cluster.service_snapshots_passed_over`: the service beside this member was
   told of a snapshot when it started, and could not take it. It read the log from
   position 0. Nothing committed is lost. If this member's log no longer begins at

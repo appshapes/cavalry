@@ -37,8 +37,10 @@ is allowed here.
   counter the record may hold another, and that is the note `older than doctor`.
 - Explains a cluster member from the counters its consensus module stores, while its
   driver runs: who the member is and what it knows, its role, term, election state,
-  append position and commit position, and from its two gauges who it follows and why
-  its last election began (`cluster-member`, a note; ADR 0102); a member that follows
+  append position and commit position, from its two gauges who it follows and why
+  its last election began, and the members that its own members string gives a vote
+  to, so that the notes of all members show one that was started with another
+  string (`cluster-member`, a note; ADR 0102, ADR 0134); a member that follows
   no leader, with the state its election is in, why it began, and that a quorum of
   the members elects a leader, the quorum by its size when `examine_config` has the
   members string, and of the voters when the string marks a standby

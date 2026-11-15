@@ -59,9 +59,11 @@ older string.
 
 Two gauges say which string a member runs: `cluster.voters`, the voters as one bit
 each in the rising order of the ids, and `cluster.standby`. `cavalry doctor`
-compares the first with the voters of the string its host is configured with, and
-reports a member that runs another (`cluster-voters`). A request vote that reaches a
-standby is counted, `cluster.standby_vote_requests`, and reported.
+names the first by the members' ids in every member's note (`cluster-member`), so
+that an operator holds every member's to one set. It compares it with the voters
+of the string its host is configured with, and reports a member that runs another
+(`cluster-voters`). A request vote that reaches a standby is counted,
+`cluster.standby_vote_requests`, and reported.
 
 ## Alternatives considered
 
@@ -170,7 +172,9 @@ standby is counted, `cluster.standby_vote_requests`, and reported.
 - `crates/cavalry-control`, two tests: a standby is named in its note and told
   what elects its leader, with the quorum as `2 of 3` of four members; and a member
   that runs with other voters than its host's string is reported with both sets by
-  their ids, and one that runs with the same, or holds no such gauge, is not.
+  their ids, and one that runs with the same, or holds no such gauge, is not. Each
+  member's note ends with the voters it runs with, by their ids; a member whose
+  host holds an older string has no finding and names the older voters.
 
 ## Consequences
 
@@ -183,7 +187,13 @@ standby is counted, `cluster.standby_vote_requests`, and reported.
   marks from another member's, or a second change begun early, can lose a
   committed entry, and no member refuses it. `cavalry doctor` shows a member that
   runs another string than its host's, and a standby counts a request vote that
-  reaches it. Neither sees two hosts that are each configured with a wrong string.
+  reaches it. Neither sees a host whose configured string is older and whose member
+  was started with it: that member agrees with its host, and a standby is asked for
+  a vote only when the older string gives one to a member that is a standby by its
+  own. One such host is enough: the next change puts its member two marks from the
+  others. It is seen where the notes of all members are read together, since each
+  names the voters its member runs with, which is what the how-to's last step asks
+  of an operator; no member and no single host sees it.
 - The log publication is `fc=min`: a standby that runs slowly holds the leader's
   log back, as a follower that runs slowly does. One that stops is dropped at the
   receiver timeout.

@@ -1614,6 +1614,11 @@ fn no_leader_message(member: &MemberCounters, state: i64, cluster: Option<&Clust
         ),
         None => format!("a quorum of the members in {members}"),
     };
+    // Who must report and who must run: the voters, where the string marks a standby.
+    let who = match cluster.filter(|cluster| cluster.ids().contains(&id)) {
+        Some(cluster) if cluster.voters() < cluster.count => "voter",
+        _ => "member",
+    };
     let standby = if member.standby == Some(1) {
         " This member is a standby: it casts no vote and nominates nothing, and it \
          follows the leader the voters elect."
@@ -1634,8 +1639,8 @@ fn no_leader_message(member: &MemberCounters, state: i64, cluster: Option<&Clust
          their leader: each canvasses, one that no member which reported is ahead of \
          nominates itself after a delay of up to half a second, and it leads once {of} has \
          voted for it. At its start a member waits in canvass up to {startup} s for every \
-         member to report, and moves to nominate at once when all have. If this member stays \
-         without a leader, fewer than a quorum of the members run or reach each other: run \
+         {who} to report, and moves to nominate at once when all have. If this member stays \
+         without a leader, fewer than a quorum of the {who}s run or reach each other: run \
          doctor on each member's host, and check that each reaches the consensus endpoint \
          of every other, the third field of its entry in {members}.{standby}{replicated}{}",
         election_state_name(state),
@@ -1648,6 +1653,8 @@ fn no_leader_message(member: &MemberCounters, state: i64, cluster: Option<&Clust
 /// configured with (`spec/cluster.md`, "Changing a standby's mark"; ADR 0134). A
 /// member takes its string when it starts, so the finding is a member not yet
 /// started with a new string, or a host whose configuration is not the cluster's.
+/// A member that was started with an older string on a host that still holds it has
+/// no such finding: its `cluster-member` note names the voters it runs with.
 fn voters_message(id: i32, runs: i64, cluster: &Cluster) -> String {
     let members = MEMBERS_KEY.env;
     format!(
@@ -1656,9 +1663,9 @@ fn voters_message(id: i32, runs: i64, cluster: &Cluster) -> String {
          starts: start this member again with {members}, or set {members} to the \
          string the cluster runs with. While a standby's mark is changed, start each \
          member again with the new string, one at a time and the leader last; the \
-         change is complete when no member has this finding and every member follows \
-         one leader. Make no second change before that: \
-         docs/how-to/promote-a-standby.md",
+         change is complete when no member has this finding, every member's \
+         cluster-member note names the same voters, and every member follows one \
+         leader. Make no second change before that: docs/how-to/promote-a-standby.md",
         cluster.voters_text(runs),
         cluster.voters_text(cluster.voters_mask())
     )
@@ -1786,12 +1793,31 @@ fn member_findings(
             election_cause_text(cause)
         )
     });
+    // The members its own string gives a vote to, in every member's note: a member
+    // whose host holds an older string agrees with its host and has no
+    // `cluster-voters`, so it is seen only where the notes of all members are read
+    // together (ADR 0134). By their ids when the string doctor was given names the
+    // member, and by the gauge's value when it does not.
+    let voters = match (
+        member.voters,
+        cluster.filter(|cluster| cluster.ids().contains(&id)),
+    ) {
+        (Some(runs), Some(cluster)) => format!(
+            "; its members string gives a vote to {}",
+            cluster.voters_text(runs)
+        ),
+        (Some(runs), None) => format!(
+            "; cluster.voters is {runs}, a bit for each member its members string gives \
+             a vote to, in the rising order of the ids"
+        ),
+        (None, _) => String::new(),
+    };
     findings.push(Finding {
         check: "cluster-member",
         level: Level::Note,
         message: format!(
             "this driver is cluster member {id}, {} in term {term}, election {}: append \
-             position {append}, commit position {commit}{follows}{began}",
+             position {append}, commit position {commit}{follows}{began}{voters}",
             if leads {
                 "the leader"
             } else if member.standby == Some(1) {
@@ -7044,6 +7070,15 @@ mod tests {
             "{}",
             findings[0].message
         );
+        // With no members string the note gives the gauge as it is.
+        assert!(
+            findings[0].message.ends_with(
+                "; it follows member 1; cluster.voters is 7, a bit for each member its \
+                 members string gives a vote to, in the rising order of the ids"
+            ),
+            "{}",
+            findings[0].message
+        );
         // A voter of the same string is a follower, as before.
         let voter = [
             (CLUSTER_ROLE, 0),
@@ -7091,6 +7126,15 @@ mod tests {
             no_leader.contains(
                 "it leads once a quorum of the voters in CAVALRY_CLUSTER_MEMBERS, 2 of 3, the \
                  members it does not mark `standby`, has voted for it"
+            ),
+            "{no_leader}"
+        );
+        // It is the voters that report in canvass and that make the quorum.
+        assert!(
+            no_leader.contains(
+                "for every voter to report, and moves to nominate at once when all have. If \
+                 this member stays without a leader, fewer than a quorum of the voters run \
+                 or reach each other"
             ),
             "{no_leader}"
         );
@@ -7146,6 +7190,14 @@ mod tests {
             cluster_findings_in("voters-differ", 0, Some(&cluster), &follower(Some(0b1011)));
         let found: Vec<&str> = findings.iter().map(|finding| finding.check).collect();
         assert_eq!(found, ["cluster-member", "cluster-voters"], "{findings:?}");
+        // The note names the voters the member runs with, by their ids.
+        assert!(
+            findings[0].message.ends_with(
+                "; it follows member 1; its members string gives a vote to members 0, 1 and 3"
+            ),
+            "{}",
+            findings[0].message
+        );
         let differ = &findings[1];
         assert_eq!(differ.level, Level::Warn);
         assert_eq!(differ.doc, DOC_CLUSTER);
@@ -7157,8 +7209,9 @@ mod tests {
              CAVALRY_CLUSTER_MEMBERS, or set CAVALRY_CLUSTER_MEMBERS to the string the \
              cluster runs with. While a standby's mark is changed, start each member again \
              with the new string, one at a time and the leader last; the change is complete \
-             when no member has this finding and every member follows one leader. Make no \
-             second change before that: docs/how-to/promote-a-standby.md"
+             when no member has this finding, every member's cluster-member note names the \
+             same voters, and every member follows one leader. Make no second change before \
+             that: docs/how-to/promote-a-standby.md"
         );
         // One voter, and a value of another string's.
         assert_eq!(cluster.voters_text(0b0001), "member 0");
@@ -7168,15 +7221,51 @@ mod tests {
             "members this string does not name (cluster.voters is 23)"
         );
 
-        for (test, id, voters) in [
-            ("voters-same", 0, Some(0b0111)),
-            ("voters-none", 0, None),
-            ("voters-other-member", 9, Some(0b1011)),
+        for (test, id, voters, note_ends) in [
+            (
+                "voters-same",
+                0,
+                Some(0b0111),
+                "; its members string gives a vote to members 0, 1 and 2",
+            ),
+            ("voters-none", 0, None, "; it follows member 1"),
+            (
+                "voters-other-member",
+                9,
+                Some(0b1011),
+                "; cluster.voters is 11, a bit for each member its members string gives a \
+                 vote to, in the rising order of the ids",
+            ),
         ] {
             let (_, findings) = cluster_findings_in(test, id, Some(&cluster), &follower(voters));
             let found: Vec<&str> = findings.iter().map(|finding| finding.check).collect();
             assert_eq!(found, ["cluster-member"], "{test}: {findings:?}");
+            assert!(
+                findings[0].message.ends_with(note_ends),
+                "{test}: {}",
+                findings[0].message
+            );
         }
+        // A member whose host holds an older string agrees with its host: no finding
+        // of its own, and its note names the older voters, which is how it is found
+        // beside the others' notes.
+        let older = Cluster::of(Some(&THREE_VOTERS_AND_A_STANDBY.replace(",standby", "")))
+            .expect("the members string parses");
+        let (_, findings) = cluster_findings_in(
+            "voters-stale-host",
+            0,
+            Some(&older),
+            &follower(Some(0b1111)),
+        );
+        let found: Vec<&str> = findings.iter().map(|finding| finding.check).collect();
+        assert_eq!(found, ["cluster-member"], "{findings:?}");
+        assert!(
+            findings[0]
+                .message
+                .ends_with("; its members string gives a vote to members 0, 1, 2 and 3"),
+            "{}",
+            findings[0].message
+        );
         // With no members string there is nothing to hold the member's voters to.
         let (_, findings) = cluster_findings("voters-no-string", 0, &follower(Some(0b1011)));
         let found: Vec<&str> = findings.iter().map(|finding| finding.check).collect();

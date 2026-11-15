@@ -29,6 +29,8 @@ It promotes member 3. Then it shows the two changes that replace a lost voter.
   before it refuses the string, `members-grammar`, and does not start.
 - `cavalry doctor` on every member that runs prints one `note cluster-member` line,
   with `election closed`, and no `WARN` or `FAIL` line whose check begins `cluster-`.
+  Every line ends with the same voters: `its members string gives a vote to members
+  0, 1 and 2`.
   The standby's line says `a standby, which follows the log and has no vote,` and the
   same `commit position` as the leader's line: it has caught up.
 - One place that holds the members string for every host, such as the file your
@@ -65,7 +67,9 @@ It promotes member 3. Then it shows the two changes that replace a lost voter.
 
 4. Start each member that is not the leader again with the new string, one at a
    time, the standby first. Stop it with Ctrl-C or SIGTERM, wait for `cavalry run:
-   closed`, and start it with the same id and the same two directories:
+   closed`, and start it with the same id and the same two directories, from a
+   shell in which `CAVALRY_CLUSTER_MEMBERS` is the new string of step 1. The
+   terminal a member ran in still holds the older one:
 
    ```sh
    CAVALRY_CLUSTER_MEMBER_ID=3 target/release/cavalry run --dir /tmp/cavalry-member-3 --log-dir /tmp/cavalry-member-3-log
@@ -73,8 +77,12 @@ It promotes member 3. Then it shows the two changes that replace a lost voter.
 
    It prints `cavalry run: cluster member 3 started`. Within a second, `doctor` on it
    says `election closed` and `it follows member`, with the leader's id, and prints no
-   `WARN cluster-voters`. Then do the same for the next member. Do not stop two
-   members at once: with one voter stopped, the others are still a quorum.
+   `WARN cluster-voters`, and its `note cluster-member` line ends with the new
+   voters, `its members string gives a vote to members 0, 1, 2 and 3`. Then do the
+   same for the next member. Do not stop two members at once. When the string
+   before the change has three voters or more, the others are still a quorum while
+   one voter is stopped. When it has two, the leader has no quorum until that voter
+   runs again: start it again at once ("Replace a lost voter with a standby").
 
 5. Start the leader again with the new string, last. The other members hear nothing
    from it for 10 s, the leader heartbeat timeout, and the members elect a leader.
@@ -84,10 +92,15 @@ It promotes member 3. Then it shows the two changes that replace a lost voter.
 6. Wait until the change is complete, and make no other change before it is. It is
    complete when `doctor` on every member that runs says `election closed`, exactly
    one says `the leader`, every other says `it follows member` with that leader's
-   id, and none prints `WARN cluster-voters`. Check every member: one member that
-   says `the leader` is not enough, since a leader that cannot reach the others
-   says so for up to 10 s, and longer when its process was stopped. The member
-   you promoted now says `a follower` or `the leader`, and no longer `a standby`.
+   id, every `note cluster-member` line ends with the same voters, the new string's,
+   and none prints `WARN cluster-voters`. Check every member, on its own host: one
+   member that says `the leader` is not enough, since a leader that cannot reach
+   the others says so for up to 10 s, and longer when its process was stopped. And
+   `WARN cluster-voters` alone is not enough: it compares a member with the string
+   on its own host, so a member that was started with the older string on a host
+   that still holds it prints none. Its line names the older voters, and that is
+   how you find it. The member you promoted now says `a follower` or `the leader`,
+   and no longer `a standby`.
 
 ## Replace a lost voter with a standby
 
@@ -103,7 +116,9 @@ complete before the second begins:
    more than 10 s pass, the leader stops leading, and the two voters elect a leader
    when both run again. Nothing committed is lost.
 2. Promote the standby: take `,standby` off its entry. The cluster then has three
-   voters and needs two.
+   voters and needs two. The string before this change has two voters, so here too
+   the leader has no quorum while the voter that follows is stopped in step 4:
+   start that voter again at once.
 
 Do not make both changes in one string. Two strings that differ by two marks can
 each elect a leader with no voter in common, and the second leader then lacks what
@@ -114,6 +129,7 @@ example, and a test of `cavalry-raft` runs it.
 
 - `cavalry doctor` on every member, with the new string set, prints one `note
   cluster-member` line with `election closed`, and no `WARN cluster-voters`.
+- Every member's line ends with the same voters, those of the new string.
 - Exactly one member says `the leader`. Its term is above the term the cluster had
   before the change.
 - Every member reports the same `commit position` once its recorder has synced.
@@ -128,11 +144,22 @@ example, and a test of `cavalry-raft` runs it.
   have not started again yet. After step 6 it is a member that was started with an
   older string, or a host whose variable is not the cluster's string: correct the
   variable, and start the member again.
+- A `note cluster-member` line that names other voters than the other members'
+  lines, with no `WARN cluster-voters`: that member's host holds an older string,
+  and the member was started with it. Set the variable on that host to the
+  cluster's string and start the member again. Make no other change before that:
+  a second change would put this member two marks from the others.
 - `WARN cluster.standby_vote_requests`: a candidate asked this member for a vote,
-  and this member is a standby by its own string. Two members run with strings that
-  differ. Between step 4 and step 6 that is expected, and the election took 1 s
-  longer for it. With no change under way, find the member that prints `WARN
-  cluster-voters` and start it with the cluster's string.
+  and this member is a standby by its own string, so two members ran with strings
+  that differ. The steps of this page do not cause it: a standby that is promoted
+  is started with the new string first, and the voter that "Replace a lost voter
+  with a standby" makes a standby does not run. It rises when a voter that runs is
+  made a standby and an election falls before every member has the new string. A
+  candidate that had heard this member in that election waited 1 s, the election
+  timeout, for the vote. It is a count, and it stays until this member starts
+  again. If you made no such change since this member started, read the voters in
+  every member's `note cluster-member` line and start the member whose line
+  differs with the cluster's string.
 - `FAIL cluster-members`, with `members-voters`: every member of the string is
   marked `standby`, so no member can lead. Take `,standby` off the members that
   vote.

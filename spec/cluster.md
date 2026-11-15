@@ -1085,7 +1085,12 @@ them.
 
 `cluster.voters` holds which members a member's own string gives a vote, and
 `cluster.standby` whether it marks the member itself, so that which string each
-member runs can be read from its counters ("Counters").
+member runs can be read from its counters ("Counters"). Whether every member that
+runs was started with the new string is read from `cluster.voters` of every one
+of them, which is one value where the strings agree. Nothing on one host shows a
+member that was started with an older string its host still holds, since that
+member agrees with its host; one such member is enough for the next change to put
+two members' strings two marks apart.
 
 **A member's start.** A member starts on a new log directory or on the one it kept
 ("The log"; ADR 0089, ADR 0108). On a new one its record holds no term, its candidate
