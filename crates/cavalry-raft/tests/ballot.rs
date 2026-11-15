@@ -8,7 +8,7 @@
 
 mod common;
 
-use cavalry_proto::cluster::{Message, Template};
+use cavalry_proto::cluster::{Message, PROTOCOL_VERSION, Template};
 use cavalry_raft::{Consensus, ElectionState, Role};
 use common::{Call, Stub, at, canvass_position, new_leadership_term};
 
@@ -28,6 +28,10 @@ fn request_vote(candidate: i32, term: i64, position: i64) -> Message<'static> {
         protocol_version: 0,
     }
 }
+
+/// A version of the page's major 0 that is later than this one's, 0.7.3 in semantic
+/// form, as the `-of-a-later-minor` vectors of `spec/vectors/cluster.json` carry.
+const LATER_MINOR: i32 = (7 << 8) + 3;
 
 /// `voter`'s vote on member 0's ballot for `term`.
 fn vote(voter: i32, term: i64, vote: bool) -> Message<'static> {
@@ -501,4 +505,54 @@ fn a_member_that_elects_follows_the_member_whose_term_it_reads() {
     assert_eq!(member.election_state(), ElectionState::FollowerReplay);
     assert_eq!(member.leader_member_id(), 2);
     assert_eq!(member.leadership_term_id(), 0);
+}
+
+/// A member writes its own version of the page in canvass position and in request
+/// vote, and reads a peer's of any version of its major as it reads its own
+/// (`spec/cluster.md`, "Versions and the upgrade"; ADR 0136). The canvass positions
+/// that make it a candidate are of version 0, as a member of the version before
+/// writes them, and it asks for votes all the same. As a voter it votes for a
+/// candidate of version 0 and for one of a later minor, each by the logs alone.
+#[test]
+fn a_member_writes_its_version_and_reads_every_version_of_its_major() {
+    assert_eq!(PROTOCOL_VERSION, 256, "version 1 in semantic form, 0.1.0");
+
+    // The canvass positions of `common::canvass_position` carry version 0.
+    let mut io = Stub::new();
+    let mut member = elector(1);
+    let ms = to_candidate_ballot(&mut member, &mut io, &[1, 2]);
+    // A candidate asks for the votes in the duty cycle after its ballot begins.
+    member.do_work(at(ms + 1), &mut io).expect("no fault");
+    assert_eq!(sends(&io, Template::RequestVote), 2);
+    assert_eq!(
+        io.versions_sent,
+        [Some(PROTOCOL_VERSION), Some(PROTOCOL_VERSION)],
+        "the member's own version, in its canvass position and its request vote"
+    );
+
+    for (seed, version) in [(5, 0), (6, LATER_MINOR)] {
+        let mut io = Stub::new();
+        io.append_position = 64;
+        let mut voter = elector(seed);
+        voter.do_work(at(1), &mut io).expect("no fault");
+        io.clear();
+        let asked = Message::RequestVote {
+            log_leadership_term_id: -1,
+            log_position: 64,
+            candidate_term_id: 3,
+            candidate_member_id: 1,
+            protocol_version: version,
+        };
+        voter.on_message(at(2), &asked, &mut io).expect("no fault");
+        let counts = voter.counts();
+        assert_eq!(
+            (
+                voter.election_state(),
+                counts.votes_for,
+                counts.votes_against
+            ),
+            (ElectionState::FollowerBallot, 1, 0),
+            "a vote for a candidate of version {version}, whose log is the voter's"
+        );
+    }
 }
