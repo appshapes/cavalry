@@ -68,9 +68,10 @@ pub const HEADER_VERSION: u16 = 0;
 /// The message header's length: block length, template id, schema id and version.
 pub const HEADER_LENGTH: usize = 8;
 
-/// A protocol version field's value for this version, in semantic form, major × 65536
-/// + minor × 256 + patch: 0.1.0, the page's version being the minor while the major
-/// is 0. A reader reads every version of its major (`spec/cluster.md`, "Encoding").
+/// A protocol version field's value for this version, in semantic form: the major
+/// times 65536, the minor times 256 and the patch, added. It is 0.1.0, the page's
+/// version being the minor while the major is 0. A reader reads every version of its
+/// major (`spec/cluster.md`, "Encoding").
 pub const PROTOCOL_VERSION: i32 = (VERSION as i32) << 8;
 
 /// An id or a position that is none: Aeron's null value (`spec/cluster.md`, "Encoding").
