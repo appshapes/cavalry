@@ -291,6 +291,14 @@ commit path runs per message.
   need be whole from that position alone: a member starts though it forgot the
   recordings below it, though they were purged, and though its log is in more than
   1,024 recordings. With no snapshot it starts as before, from position 0. A
+  purge counts as no truncation in `cluster.truncations_finished`, which counts
+  the list's last recordings gone. Those end the log where the ones left end only
+  while that is at or above the snapshot's position: a truncation never cuts below
+  a commit position, so a log they leave ending below it is refused,
+  `ListedFound::EndsBelowSnapshot`, and not taken as shorter than the member
+  reported. A log that the catalog holds whole and that ends below the snapshot's
+  position is refused as well, `RaftError::LogShort`: its end was cut, or the
+  directory is older than the snapshot. A
   service reads its member's log from its own snapshot's position, or from
   position 0, so a member's log is needed from the lower of the two snapshots'
   positions: `cluster.log_purge_position`, and

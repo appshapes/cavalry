@@ -209,9 +209,11 @@ The client API implementation, re-exported by the `cavalry` crate. Data plane.
   step that makes no progress for a second ends the snapshot with
   `ClusterError::SnapshotFailed`, which names the step and what to check, counted
   in `cluster.service_snapshots_failed`; nothing committed is lost, and the service
-  reads on. A program that takes no snapshots matches nothing new: it reads on at
-  an `Entry::Snapshot` as it does at an `Entry::Other`. A service written through
-  the C ABI takes none yet (ADR 0131).
+  reads on. A program that takes no snapshots reads on at an `Entry::Snapshot` as
+  it does at an `Entry::Other`, and one that matches every entry by name gives
+  `Entry::Snapshot` an arm that does nothing, as
+  `crates/cavalry/examples/adder-service.rs` does. A service written through the C
+  ABI takes none yet (ADR 0131).
 - Starts a service from its snapshot: `ClusterService::restore(client)`, called
   before the first poll, asks the member for the newest snapshot of a service that
   it lists, plays its recording back through the member's driver, and answers

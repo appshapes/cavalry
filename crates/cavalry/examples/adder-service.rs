@@ -20,6 +20,14 @@
 //! same total, and it answers no entry that a service before it answered. It runs
 //! until it is stopped, or until its member's driver closes.
 //!
+//! It takes no snapshot of its total. Where the leader asks every member for one,
+//! this service prints that it was asked and reads on, and a start of it still
+//! reads the log from its start. A service that takes one calls
+//! [`ClusterService::snapshot`](cavalry::ClusterService::snapshot) after the poll
+//! that ended at the request, and starts from it with
+//! [`ClusterService::restore`](cavalry::ClusterService::restore) before its first
+//! poll (`crates/cavalry-client/README.md`).
+//!
 //! The service's state depends on the log alone: it reads no clock but the entry's
 //! cluster time, draws no random number and reads no file. That is what makes the
 //! total the same beside every member.
@@ -155,6 +163,13 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
                     Entry::NewLeadershipTerm { leader_member_id } => println!(
                         "adder-service {beside}: position {position}: term {term} began, \
                          led by member {leader_member_id}"
+                    ),
+                    // The leader asks every member for a snapshot here, and the
+                    // poll ends after this entry so that a program can give its
+                    // state as it is at this position. This one gives none.
+                    Entry::Snapshot => println!(
+                        "adder-service {beside}: position {position}, term {term}: the \
+                         leader asked for a snapshot; this service takes none and reads on"
                     ),
                     Entry::Other => {}
                 }

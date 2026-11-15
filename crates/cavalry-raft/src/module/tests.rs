@@ -2927,6 +2927,10 @@ fn stopped(start: i64, stop: i64) -> Cataloged {
 /// and where the log ends, or its refusal.
 type KeptLog = Result<(Vec<Kept>, i64), RaftError>;
 
+/// [`KeptLog`], with whether the record's last recordings were missing from the
+/// catalog: a truncation the member's stop cut short.
+type CountedLog = Result<(Vec<Kept>, i64, bool), RaftError>;
+
 /// A case of a refusal: what it is, the catalog, the recording the refusal names,
 /// and what the catalog holds in its place.
 type Refusal = (&'static str, Vec<(i64, Cataloged)>, i64, ListedFound);
@@ -2952,6 +2956,20 @@ fn read_back_from(
     catalog: &[(i64, Cataloged)],
     live_stop: i64,
 ) -> (KeptLog, Vec<i64>) {
+    let (result, stops) = read_back_counted(floor, from, list, catalog, live_stop);
+    (result.map(|(kept, end, _)| (kept, end)), stops)
+}
+
+/// [`read_back_from`], with whether the start found the record's last recordings
+/// missing from the catalog: a truncation the member's stop cut short, which
+/// `cluster.truncations_finished` counts.
+fn read_back_counted(
+    floor: i64,
+    from: i64,
+    list: &[ListedRecording],
+    catalog: &[(i64, Cataloged)],
+    live_stop: i64,
+) -> (CountedLog, Vec<i64>) {
     let mut stops = Vec::new();
     let result = kept_log(
         floor,
@@ -2969,7 +2987,7 @@ fn read_back_from(
         },
     );
     (
-        result.map(|(kept, end)| (kept.into_iter().collect(), end)),
+        result.map(|(kept, end, cut_short)| (kept.into_iter().collect(), end, cut_short)),
         stops,
     )
 }
@@ -3063,9 +3081,10 @@ fn a_start_ends_the_log_where_a_truncation_cut_short_left_its_recordings() {
         (1, 96, vec![4]),
         (0, 0, vec![]),
     ] {
-        let (read, stops) = read_back(0, &list, &whole[..held], 0);
-        let (kept, read_end) = read.expect("the log is read back");
+        let (read, stops) = read_back_counted(0, 0, &list, &whole[..held], 0);
+        let (kept, read_end, cut_short) = read.expect("the log is read back");
         assert_eq!(read_end, end, "{held} recordings held");
+        assert_eq!(cut_short, held < 3, "{held} recordings held");
         assert_eq!(
             kept.iter()
                 .map(|kept| kept.recording_id)
@@ -3340,11 +3359,13 @@ fn a_start_from_a_snapshot_needs_its_log_from_the_snapshots_position_alone() {
     // lacks them, the third begins at the snapshot's position, and the member
     // starts on it. The table leaves the purged ones out.
     let list = [listed(1, 0), listed(2, 256), listed(3, 512), listed(4, 640)];
+    // A purge is no truncation that a stop cut short, and is not counted as one.
     let purged = [(3, stopped(512, 640)), (4, stopped(640, 768))];
     for from in [512, 544, 768] {
-        let (read, _) = read_back_from(0, from, &list, &purged, 0);
-        let (table, end) = kept(read);
+        let (read, _) = read_back_counted(0, from, &list, &purged, 0);
+        let (table, end, cut_short) = read.expect("the log is read back");
         assert_eq!(end, 768, "from {from}");
+        assert!(!cut_short, "from {from}: a purge below the snapshot");
         assert_eq!(
             table
                 .iter()
@@ -3354,6 +3375,20 @@ fn a_start_from_a_snapshot_needs_its_log_from_the_snapshots_position_alone() {
             "from {from}"
         );
     }
+    // The same purge, and the record's last recording gone as well: the purge is
+    // left out, and the recording gone at the end is a truncation cut short, which
+    // ends the log where the third recording does, at or above the snapshot.
+    let (read, _) = read_back_counted(0, 512, &list, &purged[..1], 0);
+    let (table, end, cut_short) = read.expect("the log is read back");
+    assert_eq!(end, 640);
+    assert!(cut_short, "the record's last recording is gone");
+    assert_eq!(
+        table
+            .iter()
+            .map(|kept| kept.recording_id)
+            .collect::<Vec<_>>(),
+        [3]
+    );
     // The same purge with no snapshot, or with one below what is left, is a
     // recording missing before one that is held, as it was before a member took
     // snapshots: the directory is not as the member left it.
@@ -3423,6 +3458,199 @@ fn a_start_from_a_snapshot_needs_its_log_from_the_snapshots_position_alone() {
         "{text}"
     );
     assert!(stops.is_empty(), "stopped {stops:?}");
+}
+
+/// The record's last recordings gone from the catalog are a truncation that the
+/// member's stop cut short only while the log that is left reaches the position the
+/// start reads from (ADR 0130). That position is a snapshot's, which the member read
+/// from its committed log, and a truncation never cuts below a commit position (ADR
+/// 0083), so a log that ends below it lost recordings at or above the snapshot's
+/// position, and the start is refused: the log would be shorter than the member
+/// reported it. The record names recordings to 256, 512 and 640, and the snapshot is
+/// of 300.
+#[test]
+fn a_start_is_refused_on_a_log_whose_last_recordings_are_gone_below_its_snapshot() {
+    let ends_below = |read: CountedLog, recording: i64, end: i64, from: i64| {
+        let refused = read.expect_err("a log that ends below the snapshot");
+        assert!(
+            matches!(
+                &refused,
+                RaftError::ListedRecording {
+                    recording_id,
+                    found: ListedFound::EndsBelowSnapshot { end_position, from_position },
+                    ..
+                } if *recording_id == recording && *end_position == end && *from_position == from
+            ),
+            "{refused}"
+        );
+        assert_eq!(refused.reason(), "listed-recording");
+        let text = refused.to_string();
+        assert!(
+            text.contains(&format!(
+                "names recording {recording} as part of its log from position"
+            )),
+            "{text}"
+        );
+        assert!(
+            text.contains(&format!(
+                "so the member's log would end at {end}, below position {from} of the \
+                 newest snapshot the member can read"
+            )),
+            "{text}"
+        );
+        assert!(
+            text.contains("Do not start this member alone on a new log directory"),
+            "{text}"
+        );
+    };
+    let list = [listed(1, 0), listed(2, 256), listed(3, 512)];
+    let whole = [
+        (1, stopped(0, 256)),
+        (2, stopped(256, 512)),
+        (3, stopped(512, 640)),
+    ];
+    // The last recording gone: the log ends at 512, above the snapshot, and the
+    // member starts on it, a truncation cut short.
+    let (read, _) = read_back_counted(0, 300, &list, &whole[..2], 0);
+    let (table, end, cut_short) = read.expect("the log is read back");
+    assert_eq!((table.len(), end, cut_short), (2, 512, true));
+    // The last two gone, the log ending at 256; and all three, the log ending at the
+    // floor, 0. Each is refused, naming the first recording gone, and nothing is
+    // stopped.
+    for (held, recording, end) in [(1, 2, 256), (0, 1, 0)] {
+        let (read, stops) = read_back_counted(0, 300, &list, &whole[..held], 0);
+        ends_below(read, recording, end, 300);
+        assert!(stops.is_empty(), "stopped {stops:?}");
+    }
+    // A log that ends at the snapshot's position reaches it: with the snapshot of
+    // 256 the last two gone start the member. So does a record of which every
+    // recording is gone when its floor is the snapshot's position, and with no
+    // snapshot, from 0, every one gone is a truncation cut short to 0, as before.
+    let (read, _) = read_back_counted(0, 256, &list, &whole[..1], 0);
+    assert_eq!(read.expect("the log reaches 256").1, 256);
+    let from_floor = [listed(4, 300), listed(5, 400)];
+    let (read, _) = read_back_counted(300, 300, &from_floor, &[], 0);
+    let (table, end, cut_short) = read.expect("the log reaches 300");
+    assert_eq!((table.len(), end, cut_short), (0, 300, true));
+    let (read, _) = read_back_counted(0, 0, &list, &[], 0);
+    let (_, end, cut_short) = read.expect("a truncation cut short to 0");
+    assert_eq!((end, cut_short), (0, true));
+
+    // A purge below the snapshot and the last recordings gone as well: the purge
+    // is left out, and the log that is left, 256 to 512, ends below a snapshot of
+    // 544.
+    let list = [listed(1, 0), listed(2, 256), listed(3, 512), listed(4, 640)];
+    let (read, stops) = read_back_counted(0, 544, &list, &[(2, stopped(256, 512))], 0);
+    ends_below(read, 3, 512, 544);
+    assert!(stops.is_empty(), "stopped {stops:?}");
+
+    // A recording still being made before the ones gone: where the log ends is
+    // known once it is stopped, and the start is refused after that stop when it
+    // stopped below the snapshot, and starts when it stopped at or above it.
+    let list = [listed(1, 0), listed(2, 256)];
+    let live = [(
+        1,
+        Cataloged::Held {
+            start: 0,
+            stream_id: LOG_STREAM_ID,
+            stop: None,
+        },
+    )];
+    let (read, stops) = read_back_counted(0, 300, &list, &live, 256);
+    ends_below(read, 2, 256, 300);
+    assert_eq!(stops, vec![1], "the recording still being made");
+    let (read, stops) = read_back_counted(0, 300, &list, &live, 320);
+    let (table, end, cut_short) = read.expect("the log reaches 320");
+    assert_eq!((table.len(), end, cut_short), (1, 320, true));
+    assert_eq!(stops, vec![1]);
+}
+
+/// A log that ends below the position the start reads from is refused with no
+/// recording gone as well (ADR 0130). The catalog holds every recording the record
+/// names, and they end below the snapshot. No truncation leaves that, since one
+/// never cuts below a commit position (ADR 0083): the end of the log was cut, as by
+/// a `truncate recording`, or the record is older than the snapshot. The record
+/// names recordings from 0 and from 256, and the snapshot is of 300.
+#[test]
+fn a_start_is_refused_on_a_log_the_catalog_holds_whole_that_ends_below_its_snapshot() {
+    let short = |read: CountedLog, end: i64, from: i64| {
+        let refused = read.expect_err("a log that ends below the snapshot");
+        assert!(
+            matches!(
+                &refused,
+                RaftError::LogShort { end_position, from_position }
+                    if *end_position == end && *from_position == from
+            ),
+            "{refused}"
+        );
+        assert_eq!(refused.reason(), "log-short");
+        let text = refused.to_string();
+        assert!(text.starts_with("member refused (log-short): "), "{text}");
+        assert!(
+            text.contains(&format!(
+                "that log ends at {end}, below position {from} of the newest snapshot \
+                 the member can read"
+            )),
+            "{text}"
+        );
+        assert!(text.contains("as by a `truncate recording`"), "{text}");
+        assert!(
+            text.contains("Do not start this member alone on a new log directory"),
+            "{text}"
+        );
+        assert!(
+            text.ends_with("see docs/reference/durable-log.md#log-recordings"),
+            "{text}"
+        );
+    };
+    let list = [listed(1, 0), listed(2, 256)];
+    let cut = [(1, stopped(0, 256)), (2, stopped(256, 288))];
+    // Both held, the last one cut to 288: refused, and nothing is stopped.
+    let (read, stops) = read_back_counted(0, 300, &list, &cut, 0);
+    short(read, 288, 300);
+    assert!(stops.is_empty(), "stopped {stops:?}");
+    // A log that ends at the snapshot's position reaches it, and the member starts
+    // with no truncation counted. With no snapshot, from 0, it starts as before.
+    let (read, _) = read_back_counted(0, 288, &list, &cut, 0);
+    let (table, end, cut_short) = read.expect("the log reaches 288");
+    assert_eq!((table.len(), end, cut_short), (2, 288, false));
+    let (read, _) = read_back_counted(0, 0, &list, &cut, 0);
+    assert_eq!(read.expect("a start with no snapshot").1, 288);
+    // The last recording holding nothing: the log ends where the first one ends.
+    let nothing = [(1, stopped(0, 256)), (2, stopped(256, 256))];
+    let (read, _) = read_back_counted(0, 300, &list, &nothing, 0);
+    short(read, 256, 300);
+    // A record that names no recording ends its log at its floor position.
+    let (read, _) = read_back_counted(256, 300, &[], &[], 0);
+    short(read, 256, 300);
+    let (read, _) = read_back_counted(300, 300, &[], &[], 0);
+    let (table, end, cut_short) = read.expect("the log reaches 300");
+    assert_eq!((table.len(), end, cut_short), (0, 300, false));
+    // A purge below the snapshot, and the recording that is left cut below it.
+    let (read, stops) = read_back_counted(0, 300, &list, &cut[1..], 0);
+    short(read, 288, 300);
+    assert!(stops.is_empty(), "stopped {stops:?}");
+    // The last recording still being made: where the log ends is known once it is
+    // stopped, and the start is refused after that stop when it stopped below the
+    // snapshot, and goes on when it stopped at the snapshot's position.
+    let live = [
+        (1, stopped(0, 256)),
+        (
+            2,
+            Cataloged::Held {
+                start: 256,
+                stream_id: LOG_STREAM_ID,
+                stop: None,
+            },
+        ),
+    ];
+    let (read, stops) = read_back_counted(0, 300, &list, &live, 288);
+    short(read, 288, 300);
+    assert_eq!(stops, vec![2], "the recording still being made");
+    let (read, stops) = read_back_counted(0, 300, &list, &live, 300);
+    let (table, end, cut_short) = read.expect("the log reaches 300");
+    assert_eq!((table.len(), end, cut_short), (2, 300, false));
+    assert_eq!(stops, vec![2]);
 }
 
 /// The record of a member's log's recordings as its log directory holds it, read
