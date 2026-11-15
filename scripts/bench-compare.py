@@ -29,7 +29,9 @@ at the bottom of that band failed master's own next run with no change behind it
 0033). A row added to an entry by hand holds its percentiles, its slowest run as its
 p99.99 and no runs list (docs/how-to/run-the-bench.md, step 4); a join carries it
 through as such, each percentile the larger of the row's and the new process's and the
-p99.99 the slowest run of both, still with no list (card 221). Only
+p99.99 the slowest run of both, still with no list (card 221). A row the harness runs
+once a process under `--repeat`, as the link pass's `_udp_mdc` rows are, is written with
+no list too, since one run a process cannot line up with the others' lists. Only
 the rows a message passes through, claim_commit_*, one_way_* and udp_round_trip_*, can
 fail the gate, and of those not the *_udp_mdc rows nor the *_at_tail rows; the timer and slot_padding_* rows hold
 no Cavalry code, they probe the host and the clock at 30 to 60 ns, where one 10 ns step of
@@ -234,7 +236,9 @@ def update(results: list[dict], baseline: dict, join: bool = False) -> int:
     row that an earlier process holds with `p99_99_ns_runs` of None, which `joined` gives a
     row the entry holds with no runs list, a row added by hand, is written with no list
     again: each percentile the largest over the processes, and `p99_99_ns` the slowest run
-    over them, the row's own value standing for the runs it does not list."""
+    over them, the row's own value standing for the runs it does not list. A row a result
+    holds with one run where `repeat` is more, which the harness runs once a process (the
+    link pass's `_udp_mdc` rows), is written the same way, with no list."""
     if join:
         results = joined(results, baseline)
     results = sorted(results, key=lambda r: r.get("date_unix") or 0)
@@ -252,6 +256,13 @@ def update(results: list[dict], baseline: dict, join: bool = False) -> int:
     for r in results:
         for name, row in r["benchmarks"].items():
             runs = row.get("p99_99_ns_runs")
+            # A row the harness runs once a process whatever `--repeat` says, as the link
+            # pass's multi-destination cast rows are, has one run where the others have
+            # `repeat`. It cannot line up with their lists, so it is written as a row
+            # added by hand is: no list, each percentile the largest over the processes.
+            if runs is not None and len(runs) == 1 and (r.get("repeat") or 1) > 1:
+                row["p99_99_ns_runs"] = None
+                continue
             if runs is not None and r.get("repeat") and len(runs) != r["repeat"]:
                 sys.exit(f"bench-compare: {name} has {len(runs)} runs where the harness setting is {r['repeat']} "
                          "per process; a row added by hand holds every process's runs or none (ADR 0033).")

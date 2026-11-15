@@ -80,8 +80,9 @@ pub struct SnapshotCounts {
     /// `cluster.snapshot_actions`: a cluster action asking for a snapshot that the
     /// member appended while it led.
     pub actions: u64,
-    /// `cluster.snapshots_begun`: a snapshot whose publication and recording the
-    /// member added.
+    /// `cluster.snapshots_begun`: a snapshot the member began in the cycle that read
+    /// the action, with a recording of its one publication on the snapshot stream.
+    /// The member added that publication at its start and keeps it for its life.
     pub begun: u64,
     /// `cluster.snapshot_steps`: a snapshot whose messages were all written, its
     /// recording's stop asked.
@@ -98,8 +99,8 @@ pub struct SnapshotCounts {
 enum SnapshotState {
     /// No snapshot is being taken.
     Idle,
-    /// The publication and its recording are there, and the messages are being
-    /// written.
+    /// The recording of the member's publication has started, and the messages are
+    /// being written.
     Writing,
     /// Every message is written and the recording's stop is asked.
     Stopping,
@@ -349,8 +350,11 @@ impl ModuleSnapshot {
             } else if self.next == last {
                 marker(SnapshotMark::End)
             } else if self.next == last - 1 {
+                // The next session id as the log below the snapshot's position gives
+                // it, and not the leader's own, which a connect it accepted moves
+                // before the session open event is committed (ADR 0129).
                 Message::ConsensusModule {
-                    next_session_id: sessions.next_session_id(),
+                    next_session_id: sessions.committed_next_session_id(),
                     next_service_session_id: 0,
                     log_service_session_id: 0,
                     pending_message_capacity: 0,

@@ -498,9 +498,11 @@ module's read of its own committed log ("Sessions") reaches the action. The acti
 then committed, and the member has applied every entry before it. The read ends at
 the action's entry in that duty cycle. The snapshot's log position is the position
 after the action's entry. Its leadership term id and its timestamp are the entry's,
-and its term base log position is that term's in the member's record of terms. So the
-snapshots that the members take for one action are of one position and of one state,
-and they hold the same bytes.
+and its term base log position is that term's in the member's record of terms. Every
+field a member writes is a function of the committed log below that position, and
+nothing a leader holds of its own, a connect it has accepted and not yet seen
+committed among them, is written. So the snapshots that the members take for one
+action are of one position and of one state, and they hold the same bytes.
 
 **What a member writes.** A member holds one exclusive publication on the snapshot
 stream from its start to its close, and each snapshot is a recording of a span of
@@ -573,7 +575,7 @@ snapshot, after its sessions.
 
 | Offset | Size | Field | Type | Meaning |
 | --- | --- | --- | --- | --- |
-| 8 | 8 | next session id | i64 | the id the next session a leader accepts is given ("Sessions") |
+| 8 | 8 | next session id | i64 | one more than the highest cluster session id of a session open event below the snapshot's log position, 0 for none: the log's, and not a leader's own next session id, which it moves when it accepts a connect, before that session open event is committed ("Sessions") |
 | 16 | 8 | next service session id | i64 | written 0; Aeron's, of the messages a service appends to its own cluster's log, which no service does here; a reader ignores it |
 | 24 | 8 | log service session id | i64 | written 0; Aeron's, as the field before it; a reader ignores it |
 | 32 | 4 | pending message capacity | i32 | written 0; Aeron's, as the two fields before it; a reader ignores it |
@@ -1460,7 +1462,7 @@ that a reader of a counters file knows which transition it saw.
 | `cluster.truncations_finished` | a start that finished a truncation the member's stop had cut short: the last recordings its file names were gone from the catalog, or its record of terms held a term based above the end of its log ("A member's start"; ADR 0108) |
 | `cluster.snapshot_position` | a gauge: the log position of the newest snapshot of its consensus module that the member's snapshots file lists, −1 while it lists none ("Snapshots"; ADR 0129) |
 | `cluster.snapshot_actions` | a cluster action asking for a snapshot that the member appended while it led, at the snapshot interval or for its own process ("Snapshots") |
-| `cluster.snapshots_begun` | a snapshot the member began: it read the action, added the publication and started its recording ("Snapshots") |
+| `cluster.snapshots_begun` | a snapshot the member began: it read the action and, in that duty cycle, started a recording of its one publication on the snapshot stream, which it added at its start ("Snapshots") |
 | `cluster.snapshot_steps` | a snapshot whose messages the member had all written, so that it asked the recording's stop ("Snapshots") |
 | `cluster.snapshots_taken` | a snapshot the member listed in its snapshots file, which counts from then on ("Snapshots") |
 | `cluster.snapshots_failed` | a snapshot the member gave up, for one of the reasons of "A snapshot that fails", or whose list it could not write ("Snapshots") |

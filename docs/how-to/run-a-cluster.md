@@ -7,7 +7,9 @@ cannot join. What the members say to each other is
 [`spec/cluster.md`](../reference/cluster.md); how they elect a leader is its section
 "Roles and the election", and why the consensus module elects is
 [ADR 0104](../decisions/0104-have-the-consensus-module-elect-its-leader-and-take-the-appointed-leader-out.md).
-In Aeron, this is Cluster ([glossary](../glossary.md)).
+In Aeron, this is Cluster ([glossary](../glossary.md)). To learn what a cluster is by
+running one with a service and a client, take
+[Run a cluster in ten minutes](../tutorials/run-a-cluster.md) first.
 
 A cluster is three or more drivers that keep one log between them. Each driver is a
 member. One member, the leader, writes the log; every member records it; an entry is
