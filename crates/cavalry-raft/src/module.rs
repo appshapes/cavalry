@@ -1156,15 +1156,17 @@ enum Cataloged {
 /// made, the driver having run on while the member was away, and returns where it
 /// stopped, so that a stop is read once and is final.
 ///
-/// The catalog may lack the record's last recordings and no others: a truncation
-/// purges a member's recordings from the last one back and writes the record after
-/// them, so a member that stopped in the middle of one finds them missing, and its
-/// log ends where the recordings the catalog holds end. With all of them missing
-/// that is the floor. Everything else the catalog can hold in place of a recording
-/// the record names is [`RaftError::ListedRecording`], and the member does not
-/// start: a recording missing before one that is held, one the driver found
-/// damaged, one that begins elsewhere or is of another stream, and one that begins
-/// past where the ones before it end. A log read back shorter than the member
+/// The catalog may lack the record's last recordings, and no others but its first
+/// ones, purged below a snapshot (below): a truncation purges a member's recordings
+/// from the last one back and writes the record after them, so a member that
+/// stopped in the middle of one finds them missing, and its log ends where the
+/// recordings the catalog holds end, when that is at or above `from` (below). With
+/// all of them missing that is the floor. Everything else the catalog can hold in
+/// place of a recording the record names is [`RaftError::ListedRecording`], and the
+/// member does not start: a recording missing before one that is held, which is no
+/// purge below a snapshot, one the driver found damaged, one that begins elsewhere
+/// or is of another stream, and one that begins past where the ones before it end.
+/// A log read back shorter than the member
 /// reported it would let the member vote for a candidate that lacks a committed
 /// entry, so nothing here shortens the log but that one truncation.
 ///
