@@ -808,7 +808,7 @@ counter ("Counters").
 | 10 | follower replay | replays its own log, its recordings in position order, from its log position to the lesser of its append position and the commit position it was told, into no state of the consensus module's, whose sessions come from its read of its committed log (state 6; ADR 0116), and into no service ("The service"), recording each term whose new leadership term event it replays, the leader's term already recorded at the base by the new leadership term that sent it here ("The log"), then goes to follower catch-up init when its append position is behind the leader's log position, else to follower log init; a replay that ends short of its append position goes back to canvass |
 | 11 | follower catch-up init | subscribes to the log stream on its `catchup` endpoint and sends catch-up position with that endpoint, tried each duty cycle until its publication to the leader takes it and counted in `cluster.catchups` when it has left (ADR 0088); goes to follower catch-up await once sent, and fails the election when it cannot send within the leader heartbeat timeout |
 | 12 | follower catch-up await | waits for the image of the leader's catch-up replay, the one image of stream 100 on its `catchup` endpoint, whatever its session id, since a replay's publication has a session id of its own (`spec/client-protocol.md`, "Commands", start replay), checks that the image's join position ("The log") is its append position, and goes to follower catch-up when it has joined it; an image that joins elsewhere, a stale replay's among them, fails the election, counted in `cluster.join_position_mismatches`, and so does no image within the leader heartbeat timeout |
-| 13 | follower catch-up | records the catch-up replay, recording each term whose new leadership term event it reads, reporting its append position, the contiguous end, and adds its `log` endpoint's live subscription once its append position is within the live-add window of the leader's position, the greater of the log position and the commit position its leader told it, since the commit position is the one a leader goes on sending (ADR 0088), the window being the lesser of term length ÷ 4 and 1,048,576 bytes; the live image's recording begins at the live recording's start, the position the follower joined the live log at, which lies at or past its append position, so that the two recordings overlap from there and the append position follows the replay until it reaches the live recording's start and the live recording from then; its reports carry the catch-up flag from the one that first reports a position at or past the live recording's start, sent in that duty cycle, and none before, since the replay reads no further than the leader's recording has synced (`spec/client-protocol.md`, "Commands", start replay) and a replay stopped sooner would leave the positions below the live recording's start unfilled (ADR 0088); goes to follower log init once the leader has sent stop catch-up, which it sends for each report with the flag and on which the follower removes its catch-up subscription, and its append position has reached the live recording's start and the commit position it had been told when it read that stop catch-up, a position the leader's later commit positions do not raise, since under a steady load they would hold the follower in the state for as long as the load lasted (ADR 0088); fails the election when the catch-up makes no progress, its append position not having moved, for the leader heartbeat timeout |
+| 13 | follower catch-up | records the catch-up replay, recording each term whose new leadership term event it reads, reporting its append position, the contiguous end, and adds its `log` endpoint's live subscription once its append position is within the live-add window of the leader's position, the greater of the log position and the commit position its leader told it, since the commit position is the one a leader goes on sending (ADR 0088), the window being the lesser of term length ÷ 4 and 1,048,576 bytes; the live image's recording begins at the live recording's start, the position the follower joined the live log at, which lies at or past its append position, so that the two recordings overlap from there and the append position follows the replay until it reaches the live recording's start and the further of the two from then, the end of what the member's recordings hold ("The log"), which is the replay's recording for as long as the replay is ahead of the live log, so that a catch-up may end with the member's log ending above what its live recording has synced ("The service"; ADR 0135); its reports carry the catch-up flag from the one that first reports a position at or past the live recording's start, sent in that duty cycle, and none before, since the replay reads no further than the leader's recording has synced (`spec/client-protocol.md`, "Commands", start replay) and a replay stopped sooner would leave the positions below the live recording's start unfilled (ADR 0088); goes to follower log init once the leader has sent stop catch-up, which it sends for each report with the flag and on which the follower removes its catch-up subscription, and its append position has reached the live recording's start and the commit position it had been told when it read that stop catch-up, a position the leader's later commit positions do not raise, since under a steady load they would hold the follower in the state for as long as the load lasted (ADR 0088); fails the election when the catch-up makes no progress, its append position not having moved, for the leader heartbeat timeout |
 | 14 | follower log init | subscribes to the log stream on its `log` endpoint when it has not, and goes to follower log await; one already subscribed goes to follower ready |
 | 15 | follower log await | waits for the live image by the log session id and for its recording of that image to have started, checks that the image's join position, which is where that recording begins ("Members and streams"; ADR 0093), is its append position, joins it there, records the leader's term at the leader's term base log position when its record lacks the term, which no path of this version into this state leaves lacking ("The log"), and goes to follower ready; an image that joins elsewhere, the leader having appended past the follower's position while it subscribed, fails the election, counted in `cluster.join_position_mismatches`, so that the member canvasses again and catches up, and so does no image within the leader heartbeat timeout |
 | 16 | follower ready | sends append position to the leader and closes the election; fails it when it cannot send within the leader heartbeat timeout |
@@ -1554,6 +1554,46 @@ position that no recording in the file holds and that is below the live recordin
 start is one the member's table has forgotten, past 1,024 recordings: the replay is
 asked of the live recording, and `start replay` refuses it with code 23
 (`spec/client-protocol.md`, "Commands"), which the service reports to its caller.
+
+A position the live recording has not reached is no log yet, and no error (ADR
+0135). A follower's catch-up may end with the member's log ending in its recording
+of the replay, above what its live recording has synced ("Roles and the election",
+state 13): the replay is sent to that member alone, and the leader's log
+publication goes no further than a receiver window past its slowest receiver
+(`fc=min`, "Members and streams"). The file lists the replay's recording with the
+position it had synced when the file was written, so a service that has read that
+recording to where it stopped takes the position it ended at from the live
+recording, by the rule of "The log's recordings", and the live recording does not
+hold it yet. So before a service starts a replay of the live recording, by a file
+or with none, it loads that recording's `recording.synced_position`
+(`spec/client-protocol.md`, "Counters") from a record that is the recording's
+after the load: allocated, of the counter's type, and with the recording id as
+the first eight bytes of its key. While the value is below a position that is a
+multiple of 32, the service starts no replay and sends the driver no command: it
+finds its member's recording again, as it does while the member names none, and
+it reads on once the live recording has synced to the position. When the driver
+holds no such record the recording has stopped, though the member names it still,
+which it does until it has left its log. The service then asks for the replay,
+and when `start replay` refuses with code 23 a position that is a multiple of 32
+and, by the file, at or above the live start position, that is the same answer,
+no log yet: the recording stopped below the position, and the file the member
+writes when it names its next recording lists the recordings that hold it. Every
+other refusal is reported to the service's caller, whatever the position, and so
+is code 23 for every other position: one that is not a multiple of 32; one below
+the live start position, as the paragraph before this one says; one of a member
+that writes no file, whose live recording has stopped; and one in a recording the
+file lists, which that recording no longer holds once it was purged
+(`spec/client-protocol.md`, "Commands", purge segments). A member's live recording
+is never purged while it is live: the driver refuses that with code 24. One that
+has stopped while its member names it still can be, and for a position that such
+a purge took, at or above the live start position, the service's answer is no log
+yet for as long as the member names that recording; once the member has left its
+log its file lists the recording, and code 23 is the caller's. An operator purges
+a recording of a member's log while the member is stopped, when it names no
+recording (`counters.toml`, `cluster.log_purge_position`): a service whose
+member's log was purged so, below its position, is told so by code 23 once its
+member names a recording again, and one that is ahead of its member's live
+recording waits.
 
 It reads session messages, timer events,
 session open and close events, cluster actions and new leadership term events in log

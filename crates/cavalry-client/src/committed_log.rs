@@ -298,11 +298,7 @@ impl Bound {
     /// no file and the counter no longer holds the id this bound read. With no file
     /// and the same id, the member is of a version that writes none, and the answer
     /// is its live recording.
-    fn recording_to_replay(
-        &self,
-        dir: &Path,
-        position: i64,
-    ) -> Result<Option<Found>, ClientError> {
+    fn recording_to_replay(&self, dir: &Path, position: i64) -> Result<Option<Found>, ClientError> {
         Ok(
             match recording_at(dir, self.member, self.recording_id, position)? {
                 FromFile::Recording(found) => Some(found),
@@ -470,35 +466,31 @@ impl CommittedLog {
         // nothing while it waits.
         if aligned
             && part != Part::Listed
-            && synced_position(&bound.counters, recording_id).is_some_and(|synced| position > synced)
+            && synced_position(&bound.counters, recording_id)
+                .is_some_and(|synced| position > synced)
         {
             return Ok(None);
         }
         // The subscription first: a replay with no subscriber does not move.
         let subscription = client.add_subscription(CHANNEL, stream_id)?;
-        let replay = match client.start_replay(
-            recording_id,
-            position,
-            FOLLOW_LENGTH,
-            stream_id,
-            CHANNEL,
-        ) {
-            Ok(replay) => replay,
-            // The driver's code 23 for a position that is a multiple of 32 at or above
-            // where the live recording begins: the recording does not hold the
-            // position, having stopped below it while the member names it still. No
-            // log there now; the member names another recording next, and its file
-            // then lists one that holds the position. Every other refusal, and code 23
-            // for any other position or recording, is the caller's.
-            Err(ClientError::Refused {
-                code: Some(ErrorCode::PositionOutOfRange),
-                ..
-            }) if aligned && matches!(part, Part::Live { start } if position >= start) => {
-                subscription.close()?;
-                return Ok(None);
-            }
-            Err(error) => return Err(error),
-        };
+        let replay =
+            match client.start_replay(recording_id, position, FOLLOW_LENGTH, stream_id, CHANNEL) {
+                Ok(replay) => replay,
+                // The driver's code 23 for a position that is a multiple of 32 at or above
+                // where the live recording begins: the recording does not hold the
+                // position, having stopped below it while the member names it still. No
+                // log there now; the member names another recording next, and its file
+                // then lists one that holds the position. Every other refusal, and code 23
+                // for any other position or recording, is the caller's.
+                Err(ClientError::Refused {
+                    code: Some(ErrorCode::PositionOutOfRange),
+                    ..
+                }) if aligned && matches!(part, Part::Live { start } if position >= start) => {
+                    subscription.close()?;
+                    return Ok(None);
+                }
+                Err(error) => return Err(error),
+            };
         Ok(Some(Self {
             subscription,
             session_id: replay.session_id(),
@@ -1143,7 +1135,13 @@ mod tests {
         // A member of a version that writes no file names recording 5 all along.
         recording.store_release(5);
         let bound = found(&counters);
-        assert_eq!(replayed(&bound), Some(5));
+        assert_eq!(
+            replayed(&bound),
+            Some(Found {
+                recording_id: 5,
+                part: Part::LiveWithNoFile
+            })
+        );
 
         // A member of this version closes between the two loads: −1, then no file.
         let bound = found(&counters);

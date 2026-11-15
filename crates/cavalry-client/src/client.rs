@@ -1311,10 +1311,26 @@ impl Cavalry {
     /// member, which is not a call for a loop that spins. Nothing is sent to the
     /// driver until a member is found.
     ///
+    /// Returns `None` too while the member's live recording has not reached
+    /// `position` (`spec/cluster.md`, "The service"; ADR 0135). A follower that
+    /// caught up through a replay can hold the end of its log in its recording of
+    /// that replay, above what its recording of the live log has synced, as it does
+    /// while the leader's log is paced by a slower member. A service that read the
+    /// replay's recording to its stop is then at a position that the live recording
+    /// reaches later. The call reads the driver's `recording.synced_position` of
+    /// the live recording, sends the driver nothing, and answers `None` until that
+    /// counter has reached `position`. A position past the end of the member's log
+    /// is answered so as well: the call cannot tell it from one the log will reach.
+    /// When the live recording has stopped below `position` and the member names it
+    /// still, the driver is asked and refuses, and the answer is `None` again,
+    /// until the member has named its next recording. The caller asks again after
+    /// a pause, as after any `None`: each call reads the member's file.
+    ///
     /// The refusals are those of [`Cavalry::add_subscription`] and
-    /// [`Cavalry::start_replay`]: a position that is not a multiple of 32, is past
-    /// what the member has recorded, or is below every recording of its log the
-    /// member keeps is [`ClientError::Refused`] with code 23, and a driver whose
+    /// [`Cavalry::start_replay`]: a position that is not a multiple of 32, or is
+    /// below every recording of its log the member keeps, or is one that a
+    /// recording the member lists no longer holds after a purge, is
+    /// [`ClientError::Refused`] with code 23, and a driver whose
     /// replays registry is full, 64 replays, is code 10. The member's file of its
     /// log's recordings that cannot be read, or that fails a check of its page, is
     /// [`ClientError::Io`], which names the file and the check.

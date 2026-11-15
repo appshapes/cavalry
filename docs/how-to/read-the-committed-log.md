@@ -98,7 +98,12 @@ its services read what it appends in the same way.
      one.
    - `None` when the member has closed or left its log, or is between two
      recordings, as it does before a member has a log. A member between two
-     recordings names its next one once its election has closed.
+     recordings names its next one once its election has closed. `None` also when
+     the member's live recording has not reached the position yet. A follower that
+     caught up through a replay can hold the end of its log in its recording of
+     that replay, ahead of its recording of the live log, while a slower member
+     paces the leader. The call gives the live recording's handle once that
+     recording has reached the position.
    - A handle on the same recording, `log.recording_id()` unchanged. When the member
      still names that recording, it has stopped at the handle's position, and the
      new handle is ended at once, with all three `None` and no entry. A follower's
@@ -167,10 +172,18 @@ its services read what it appends in the same way.
   whose line says `election closed` has a log. `WARN cluster-no-leader` and `note
   cluster-joining` are explained in
   [Run a cluster of three members](run-a-cluster.md#when-it-does-not-work).
-- `error 23 (position out of range)`: `--from` is past what this member has recorded,
-  or below every recording of its log that the member keeps. The message gives the
-  extent of the recording the member records into now. When `--from` is past it, use
-  a `next position` that a run on this member printed, or 0. When that recording
+  When the member's line says `election closed` and the program still waits,
+  `--from` is past what the member's live recording holds. Compare `--from` with the
+  `append position` in the member's `note cluster-member` line. A `--from` above it
+  is past the end of this member's log, and the program waits until the log reaches
+  it. Use a `next position` that a run on this member printed, or 0. A `--from` at
+  or below it is a position that the
+  member holds in its recording of a catch-up and that its live recording has not
+  reached yet: the program reads on by itself when it has
+  ([ADR 0135](../decisions/0135-answer-no-log-yet-where-a-members-live-recording-has-not-reached-the-position.md)).
+- `error 23 (position out of range)`: `--from` is not a multiple of 32, or is below
+  every recording of its log that the member keeps. The message gives the bounds of
+  the recording the driver was asked for. When that recording
   begins above `--from`, the member no longer keeps the recording that held that
   position: a member keeps the last 1,024 recordings of its log that it stopped, one
   for each time it joined the log, led a term or caught up through a replay, and

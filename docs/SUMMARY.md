@@ -184,3 +184,4 @@ under `docs/` is listed here; `just lint-docs` fails on one that is not.
 - [0132. Start a service from the snapshot its member names, when its program asks](decisions/0132-start-a-service-from-the-snapshot-its-member-names-when-its-program-asks.md)
 - [0133. Keep the newest snapshot of each state in a member's list](decisions/0133-keep-the-newest-snapshot-of-each-state-in-a-members-list.md)
 - [0134. Mark a standby in the members string, and change one mark at a time](decisions/0134-mark-a-standby-in-the-members-string-and-change-one-mark-at-a-time.md)
+- [0135. Answer no log yet where a member's live recording has not reached the position](decisions/0135-answer-no-log-yet-where-a-members-live-recording-has-not-reached-the-position.md)

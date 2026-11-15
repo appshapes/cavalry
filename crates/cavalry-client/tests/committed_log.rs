@@ -11,6 +11,7 @@ use std::time::{Duration, Instant};
 
 use cavalry_client::{Action, Cavalry, ClientError, CommittedLog, Counter, Publication, Recording};
 use cavalry_driver::Driver;
+use cavalry_proto::client_protocol::ErrorCode;
 use cavalry_proto::cluster::{
     LOG_RECORDINGS_FILE_PREFIX, LogRecording, MAX_LOG_RECORDINGS, MAX_LOG_RECORDINGS_LENGTH,
     write_log_recordings,
@@ -494,40 +495,59 @@ fn a_service_follows_a_recording_still_being_made_to_where_it_stops() {
     member.close();
 }
 
-/// A follower whose catch-up ran ahead of the live log: the leader's replay gave its
-/// recording of the replay 12 entries, to 768, while its recording of the live log,
-/// which begins at 320, has synced 8, to 512, as it does when the leader's sender is
-/// paced by a slower member. A service that read the replay's recording to its stop
-/// opens the log again at 768, which no listed recording holds and the live
-/// recording has not reached: there is no log there yet, and no replay is asked of
-/// the driver. Once the live recording has synced to it, the same call gives the
-/// entries from 768 (work item 352).
-#[test]
-fn the_log_opened_past_what_the_live_recording_has_synced_is_no_log_yet() {
-    let mut member = Member::start("ahead");
+/// Where the log of [`ahead`]'s member ends, in its recording of the replay.
+const AHEAD: i64 = 12 * ENTRY;
+
+/// A follower whose catch-up ran ahead of the live log (work item 352; ADR 0135): the
+/// leader's replay gave its recording of the replay 12 entries, to 768, [`AHEAD`],
+/// where that recording stopped, while its recording of the live log, which begins at
+/// 320, has synced 8, to 512, as it does when the leader's sender is paced by a slower
+/// member. The file lists the replay's recording with what it had synced when the
+/// member named its live recording, 640, and the member's log is committed to the
+/// replay's end. Returns the member, its live recording, and the ids of the replay's
+/// recording and of the live one.
+fn ahead(test: &str) -> (Member, Recorded, i64, i64) {
+    let mut member = Member::start(test);
     let replayed = member.record(71, 12);
     let replayed_id = replayed.recording.recording_id();
-    let mut live = member.record(72, 8);
+    let live = member.record(72, 8);
     let live_id = live.recording.recording_id();
-    // The replay's recording is listed with what it had synced when the member named
-    // its live recording, 640, and the member's log is committed to the replay's end.
-    member.name(
-        live_id,
-        5 * ENTRY,
-        &[(replayed_id, 0, 10 * ENTRY)],
-        12 * ENTRY,
-    );
+    member.name(live_id, 5 * ENTRY, &[(replayed_id, 0, 10 * ENTRY)], AHEAD);
     let (_, stopped_at) = member.stop(replayed);
-    assert_eq!(stopped_at, 12 * ENTRY);
+    assert_eq!(stopped_at, AHEAD);
+    (member, live, replayed_id, live_id)
+}
+
+/// The value of the driver's static counter `counter`.
+fn count(service: &Cavalry, counter: cavalry_shm::counters::CounterId) -> i64 {
+    service
+        .counters()
+        .read(counter.record())
+        .expect("the counter")
+}
+
+/// A service beside [`ahead`]'s member that read the replay's recording to its stop
+/// opens the log again at 768, which no listed recording holds and the live
+/// recording has not reached: there is no log there yet, and no replay is asked of
+/// the driver. A position there that is not a multiple of 32 is the driver's code 23
+/// still. Once the live recording has synced to 768, the same call gives the entries
+/// from it.
+#[test]
+fn the_log_opened_past_what_the_live_recording_has_synced_is_no_log_yet() {
+    let (member, mut live, replayed_id, live_id) = ahead("ahead");
+    let stopped_at = AHEAD;
 
     let mut service = Cavalry::connect_to(&member.dir).expect("the service's client connects");
     let mut log = open(&mut service, 0);
     assert_eq!(log.recording_id(), replayed_id);
     let mut read = Read::new();
-    wait("the handle is ended at the replay's recording's stop", || {
-        poll(&mut log, &mut read);
-        log.is_ended()
-    });
+    wait(
+        "the handle is ended at the replay's recording's stop",
+        || {
+            poll(&mut log, &mut read);
+            log.is_ended()
+        },
+    );
     assert_eq!(log.position(), stopped_at);
     assert_eq!(
         (log.failed_at(), log.withdrawn_at(), log.faulted()),
@@ -535,12 +555,6 @@ fn the_log_opened_past_what_the_live_recording_has_synced_is_no_log_yet() {
     );
     log.close(&mut service).expect("the handle closes");
 
-    let count = |service: &Cavalry, counter: cavalry_shm::counters::CounterId| {
-        service
-            .counters()
-            .read(counter.record())
-            .expect("the counter")
-    };
     let started_before = count(&service, REPLAY_STARTED);
     let failed_before = count(&service, REPLAY_START_FAILED);
     for _ in 0..3 {
@@ -559,6 +573,21 @@ fn the_log_opened_past_what_the_live_recording_has_synced_is_no_log_yet() {
         ),
         (started_before, failed_before),
         "no replay was asked of the driver"
+    );
+    // A position past what the live recording has synced where no frame can begin:
+    // the driver is asked, and its refusal is the caller's.
+    let unaligned = service
+        .committed_log(stopped_at + 16)
+        .expect_err("a position that is not a multiple of 32");
+    assert!(
+        matches!(
+            unaligned,
+            ClientError::Refused {
+                code: Some(ErrorCode::PositionOutOfRange),
+                ..
+            }
+        ),
+        "{unaligned}"
     );
 
     // The live log reaches the position, one entry short of passing it: the log is
@@ -582,6 +611,128 @@ fn the_log_opened_past_what_the_live_recording_has_synced_is_no_log_yet() {
         .collect();
     assert_eq!(read, expected, "every entry once, in order");
     log.close(&mut service).expect("the handle closes");
+    service.close().expect("the service's client closes");
+    member.close();
+}
+
+/// [`ahead`]'s member, whose recording of the live log then stops at 512 while the
+/// member names it still, as a follower's does when its driver retires the image of a
+/// leader it has lost. The driver holds no counter of that recording now, so the open
+/// at 768 asks for the replay, and the driver's code 23 for a position at or above
+/// where the live recording begins is the same answer: no log there now. A position
+/// that is not a multiple of 32 stays the caller's code 23. Once the member has left
+/// its log and named its next recording, which begins where its log ended, the same
+/// call gives the entries from 768 (ADR 0135).
+#[test]
+fn the_log_opened_past_the_stop_of_a_named_live_recording_that_stopped_is_no_log() {
+    let (mut member, live, replayed_id, live_id) = ahead("ahead-stopped");
+    let (_, live_stopped_at) = member.stop(live);
+    assert_eq!(live_stopped_at, 8 * ENTRY);
+
+    let mut service = Cavalry::connect_to(&member.dir).expect("the service's client connects");
+    let started_before = count(&service, REPLAY_STARTED);
+    let failed_before = count(&service, REPLAY_START_FAILED);
+    for _ in 0..3 {
+        assert!(
+            service
+                .committed_log(AHEAD)
+                .expect("a position past the stop of the recording the member names is no refusal")
+                .is_none(),
+            "no log at the position now"
+        );
+    }
+    assert_eq!(
+        (
+            count(&service, REPLAY_STARTED),
+            count(&service, REPLAY_START_FAILED)
+        ),
+        (started_before, failed_before + 3),
+        "the driver was asked each time, and refused"
+    );
+    let unaligned = service
+        .committed_log(AHEAD + 16)
+        .expect_err("a position that is not a multiple of 32");
+    assert!(
+        matches!(
+            unaligned,
+            ClientError::Refused {
+                code: Some(ErrorCode::PositionOutOfRange),
+                ..
+            }
+        ),
+        "{unaligned}"
+    );
+
+    // The member leaves its log, then names its next recording, which begins where
+    // its log ended, with the two it stopped listed below it.
+    member.log_recording_id.store_release(-1).expect("stores");
+    assert!(
+        service
+            .committed_log(AHEAD)
+            .expect("the driver answers")
+            .is_none(),
+        "the member names no recording"
+    );
+    let next = member.record(73, 14);
+    let next_id = next.recording.recording_id();
+    member.name(
+        next_id,
+        AHEAD,
+        &[
+            (replayed_id, 0, AHEAD),
+            (live_id, 5 * ENTRY, live_stopped_at),
+        ],
+        14 * ENTRY,
+    );
+    let mut log = open(&mut service, AHEAD);
+    assert_eq!(log.recording_id(), next_id);
+    let mut read = Read::new();
+    wait("the service read on in the next recording", || {
+        poll(&mut log, &mut read);
+        log.position() == 14 * ENTRY
+    });
+    let expected: Read = vec![(12 * ENTRY, 12, 73), (13 * ENTRY, 13, 73)];
+    assert_eq!(
+        read, expected,
+        "the entries from the position on, each once"
+    );
+    log.close(&mut service).expect("the handle closes");
+    service.close().expect("the service's client closes");
+    member.close();
+}
+
+/// How long an open that answers no log yet takes, for ADR 0135's Consequences: the
+/// call a service or a member's consensus module makes in each of its duty cycles
+/// while the live recording has not reached its position. Run it alone, in a release
+/// build: `cargo test --release -p cavalry-client --test committed_log -- --ignored
+/// --nocapture timed`.
+#[test]
+#[ignore = "a measurement, not a check: run it alone, in a release build"]
+fn an_open_that_answers_no_log_yet_timed() {
+    let (member, _live, _, _) = ahead("ahead-timed");
+    let mut service = Cavalry::connect_to(&member.dir).expect("the service's client connects");
+    let mut nanos: Vec<u128> = (0..10_000)
+        .map(|_| {
+            let asked = Instant::now();
+            let opened = service.committed_log(AHEAD).expect("the driver answers");
+            let took = asked.elapsed().as_nanos();
+            assert!(opened.is_none(), "no log at the position yet");
+            took
+        })
+        .collect();
+    nanos.sort_unstable();
+    // The value that `per_ten_thousand` of every 10,000 calls took no longer than.
+    let at = |per_ten_thousand: usize| {
+        nanos[(nanos.len() * per_ten_thousand / 10_000).saturating_sub(1)]
+    };
+    println!(
+        "an open that answers no log yet, {} calls: p50 {} ns, p99 {} ns, p99.99 {} ns, max {} ns",
+        nanos.len(),
+        at(5_000),
+        at(9_900),
+        at(9_999),
+        nanos[nanos.len() - 1]
+    );
     service.close().expect("the service's client closes");
     member.close();
 }
