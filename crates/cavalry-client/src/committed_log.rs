@@ -69,6 +69,14 @@ pub(crate) fn find(
     })
 }
 
+/// The member on `counters` whose log a service opens: the first that names a
+/// recording of its log, as [`CommittedLog::open`] finds it. `None` while the driver
+/// hosts no such member. A member names a recording only once it has started, so
+/// every counter it adds at its start holds its first value by then.
+pub(crate) fn member_with_a_log(counters: &Arc<CountersReader>) -> Option<MemberKey> {
+    Bound::find(counters).map(|bound| bound.member)
+}
+
 /// What the member's file of its log's recordings says of a position
 /// ([`recording_at`]).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

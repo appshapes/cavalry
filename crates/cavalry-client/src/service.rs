@@ -16,6 +16,9 @@
 //! [`ClusterService::snapshot`] then writes the program's state as it is at that
 //! position, with the sessions that are open there, to a recording of its own, and
 //! tells the member, which lists it (`spec/cluster.md`, "Snapshots"; ADR 0131).
+//! [`ClusterService::restore`], before the first poll, starts the service from the
+//! newest snapshot its member lists: the program is given its state back, and the
+//! polls read the log from that snapshot's position (ADR 0132).
 
 use std::sync::Arc;
 use std::time::Duration;
@@ -23,14 +26,17 @@ use std::time::Duration;
 use cavalry_proto::cluster::{
     CONSENSUS_MODULE_STREAM_ID, CloseReason, ClusterAction, EGRESS_STREAM_ID,
     KEEPALIVE_INTERVAL_NS, MAX_SERVICE_SNAPSHOT_STATE_LENGTH, MAX_SESSIONS, Message, SERVICE_ID,
-    SERVICE_SNAPSHOT_STATE_INDEX, SERVICE_SNAPSHOT_STATE_MESSAGE_LENGTH,
-    SERVICE_SNAPSHOT_STREAM_ID, SERVICE_SNAPSHOT_TYPE_ID, SnapshotMark, Stream, TimeUnit,
+    SERVICE_SNAPSHOT_REPLAY_STREAM_ID, SERVICE_SNAPSHOT_STATE_INDEX,
+    SERVICE_SNAPSHOT_STATE_MESSAGE_LENGTH, SERVICE_SNAPSHOT_STREAM_ID, SERVICE_SNAPSHOT_TYPE_ID,
+    SnapshotMark, Stream, TimeUnit,
 };
 use cavalry_proto::frame::{self, DataFrameHeader, Flags};
 use cavalry_proto::udp::MTU_LENGTH_DEFAULT;
 use cavalry_shm::counters::generated::{
     CLUSTER_APPEND_POSITION, CLUSTER_LEADER_MEMBER_ID, CLUSTER_LEADERSHIP_TERM_ID,
-    CLUSTER_REPLIES_DROPPED, CLUSTER_SERVICE_SNAPSHOT_POSITION, CLUSTER_SERVICE_SNAPSHOTS_FAILED,
+    CLUSTER_REPLIES_DROPPED, CLUSTER_SERVICE_SNAPSHOT_POSITION,
+    CLUSTER_SERVICE_SNAPSHOT_RECORDING_ID, CLUSTER_SERVICE_SNAPSHOT_START_POSITION,
+    CLUSTER_SERVICE_SNAPSHOTS_FAILED, CLUSTER_SERVICE_SNAPSHOTS_PASSED_OVER,
     CLUSTER_SERVICE_SNAPSHOTS_TAKEN,
 };
 use cavalry_shm::counters::{CounterId, CountersReader};
@@ -38,12 +44,13 @@ use cavalry_shm::log::Action;
 
 use crate::client::Cavalry;
 use crate::cluster::{ClusterError, SESSION_MESSAGE_HEADER_LENGTH, SnapshotCause, send};
-use crate::committed_log::{CommittedLog, MemberKey, find, is_members};
+use crate::committed_log::{CommittedLog, MemberKey, find, is_members, member_with_a_log};
 use crate::conductor::nano_time;
 use crate::counter::Counter;
 use crate::error::ClientError;
 use crate::publication::{Offer, Publication};
 use crate::recording::Recording;
+use crate::{NULL_LENGTH, NULL_POSITION};
 
 /// The longest response channel a session has: `cavalry:udp?endpoint=`, a host name
 /// of 253 bytes, `:` and a port of five digits (`spec/cluster.md`, "Sessions").
@@ -84,6 +91,21 @@ const SNAPSHOT_PAUSE: Duration = Duration::from_micros(50);
 /// session with the longest response channel, 8 + 12 + 4 + 280 + 4 bytes. The
 /// program's bytes are offered as they are.
 const SNAPSHOT_SCRATCH_LENGTH: usize = 512;
+
+/// How long a service's start waits for the first message of its snapshot's
+/// recording, and for each message after one, before it passes the snapshot over
+/// (`spec/cluster.md`, "Values", service snapshot load timeout).
+const SNAPSHOT_LOAD_TIMEOUT_NS: i64 = 5_000_000_000;
+
+/// How many messages of its snapshot's recording a service's start reads at once.
+const SNAPSHOT_LOAD_LIMIT: usize = 64;
+
+/// The leader of the term a service started in, from a snapshot: it did not read
+/// that term's new leadership term event. For an entry of that term the service
+/// asks its member's counters alone, which say that the member leads the term
+/// only on the member that the event names (`spec/cluster.md`, "A service's
+/// start"; ADR 0132).
+const ASK_MEMBER: i32 = -2;
 
 /// One entry of the committed log, as what it is.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -138,6 +160,22 @@ pub struct Committed<'a> {
     /// 1970-01-01T00:00:00Z: the one clock a service reads, so that every member's
     /// service reaches the same state.
     pub timestamp: i64,
+}
+
+/// What [`ClusterService::restore`] found for a service to start from.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum Restored {
+    /// The driver hosts no cluster member that has a log yet, so there is nothing to
+    /// start from. Ask again, as a poll that reads nothing is made again.
+    NoMember,
+    /// The member lists no snapshot of a service, or the one it lists could not be
+    /// taken, which `cluster.service_snapshots_passed_over` counts. The service
+    /// reads its member's log from position 0.
+    FromStart,
+    /// The program's state, as the program gave it to the snapshot. The service
+    /// holds the sessions that were open at the snapshot's position, and its polls
+    /// read the log from that position.
+    State(Vec<u8>),
 }
 
 /// What became of a reply ([`Replies::reply`]).
@@ -616,6 +654,229 @@ fn stop_at(client: &mut Cavalry, recording: &Recording, end: i64) -> Result<(), 
     }
 }
 
+/// A service's snapshot as its recording holds it.
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct Snapshot {
+    log_position: i64,
+    leadership_term_id: i64,
+    /// The sessions that were open at that position: each one's id and its response
+    /// channel, in the rising order of the ids.
+    sessions: Vec<(i64, Vec<u8>)>,
+    /// The program's bytes.
+    state: Vec<u8>,
+}
+
+/// Where the reading of a service's snapshot is, message by message.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Reading {
+    /// Nothing is read: the begin marker comes first.
+    Begin,
+    /// The begin marker is read: client sessions, then the section marker.
+    Sessions,
+    /// The section marker is read: the program's bytes, then the end marker, which
+    /// is the last message.
+    Bytes,
+    /// A message was not what its place asks for: the recording is no snapshot.
+    Failed,
+}
+
+/// Reads a service's snapshot from the messages of its recording, in their order
+/// (`spec/cluster.md`, "A service's start"). After the section marker a message is
+/// the program's bytes unless it is the last, which is the end marker: each is kept
+/// until the next one arrives, and the one kept at the end must be that marker.
+struct SnapshotReader {
+    reading: Reading,
+    snapshot: Snapshot,
+    /// The message read last after the section marker.
+    last: Vec<u8>,
+    /// Whether `last` holds a message.
+    held: bool,
+}
+
+impl SnapshotReader {
+    fn new() -> Self {
+        Self {
+            reading: Reading::Begin,
+            snapshot: Snapshot {
+                log_position: 0,
+                leadership_term_id: 0,
+                sessions: Vec::with_capacity(MAX_SESSIONS),
+                state: Vec::new(),
+            },
+            last: Vec::with_capacity(SERVICE_SNAPSHOT_STATE_MESSAGE_LENGTH),
+            held: false,
+        }
+    }
+
+    /// Whether `bytes` are a marker of this snapshot with `mark` and `index`.
+    fn is_marker(&self, bytes: &[u8], expected: SnapshotMark, expected_index: i32) -> bool {
+        matches!(
+            Message::parse(Stream::Snapshot, bytes),
+            Ok(Message::SnapshotMarker {
+                type_id: SERVICE_SNAPSHOT_TYPE_ID,
+                log_position,
+                leadership_term_id,
+                index,
+                mark,
+                ..
+            }) if mark == expected
+                && index == expected_index
+                && log_position == self.snapshot.log_position
+                && leadership_term_id == self.snapshot.leadership_term_id
+        )
+    }
+
+    /// Takes the next message of the recording. `whole` says that it arrived as one
+    /// frame, as every message of a snapshot is written.
+    fn message(&mut self, bytes: &[u8], whole: bool) {
+        if !whole {
+            self.reading = Reading::Failed;
+        }
+        self.reading = match self.reading {
+            Reading::Begin => match Message::parse(Stream::Snapshot, bytes) {
+                Ok(Message::SnapshotMarker {
+                    type_id: SERVICE_SNAPSHOT_TYPE_ID,
+                    log_position,
+                    leadership_term_id,
+                    index: 0,
+                    mark: SnapshotMark::Begin,
+                    ..
+                }) if log_position > 0 => {
+                    self.snapshot.log_position = log_position;
+                    self.snapshot.leadership_term_id = leadership_term_id;
+                    Reading::Sessions
+                }
+                _ => Reading::Failed,
+            },
+            Reading::Sessions => match Message::parse(Stream::Snapshot, bytes) {
+                Ok(Message::ClientSession {
+                    cluster_session_id,
+                    response_channel,
+                    ..
+                }) => {
+                    let above = self
+                        .snapshot
+                        .sessions
+                        .last()
+                        .is_none_or(|(before, _)| *before < cluster_session_id);
+                    if above && self.snapshot.sessions.len() < MAX_SESSIONS {
+                        self.snapshot
+                            .sessions
+                            .push((cluster_session_id, response_channel.to_vec()));
+                        Reading::Sessions
+                    } else {
+                        Reading::Failed
+                    }
+                }
+                Ok(Message::SnapshotMarker { .. })
+                    if self.is_marker(
+                        bytes,
+                        SnapshotMark::Section,
+                        SERVICE_SNAPSHOT_STATE_INDEX,
+                    ) =>
+                {
+                    Reading::Bytes
+                }
+                _ => Reading::Failed,
+            },
+            Reading::Bytes => {
+                // The message kept before this one was not the last: the program's.
+                if self.held {
+                    self.snapshot.state.extend_from_slice(&self.last);
+                }
+                self.last.clear();
+                self.last.extend_from_slice(bytes);
+                self.held = true;
+                if self.snapshot.state.len() > MAX_SERVICE_SNAPSHOT_STATE_LENGTH {
+                    Reading::Failed
+                } else {
+                    Reading::Bytes
+                }
+            }
+            Reading::Failed => Reading::Failed,
+        };
+    }
+
+    /// The snapshot, when the recording held one whole: the last message is its end
+    /// marker.
+    fn finish(self) -> Option<Snapshot> {
+        let whole = self.reading == Reading::Bytes
+            && self.held
+            && self.is_marker(&self.last, SnapshotMark::End, 0);
+        whole.then_some(self.snapshot)
+    }
+}
+
+/// Plays a service's snapshot back whole, through its member's driver, and reads it:
+/// `None` when the driver refuses the replay, plays nothing for the service
+/// snapshot load timeout, or the recording holds no service's snapshot.
+fn read_snapshot(client: &mut Cavalry, recording_id: i64) -> Result<Option<Snapshot>, ClientError> {
+    // The subscription first: a replay with no subscriber does not move. And on a
+    // stream of its own: on the service log stream a service that is not polling
+    // holds every replay there at its own position, and a snapshot longer than the
+    // publication window would wait for it.
+    let mut subscription =
+        client.add_subscription(IPC_CHANNEL, SERVICE_SNAPSHOT_REPLAY_STREAM_ID)?;
+    let replay = match client.start_replay(
+        recording_id,
+        NULL_POSITION,
+        NULL_LENGTH,
+        SERVICE_SNAPSHOT_REPLAY_STREAM_ID,
+        IPC_CHANNEL,
+    ) {
+        Ok(replay) => replay,
+        // A recording the driver does not hold, or holds no bytes of.
+        Err(ClientError::Refused { .. }) => return Ok(None),
+        Err(error) => return Err(error),
+    };
+    let session = replay.session_id();
+    let mut reader = SnapshotReader::new();
+    let mut since_ns = nano_time();
+    // How far the replay's image has been read, kept from each poll that still had
+    // the image: the driver withdraws it once it is read to the end of stream,
+    // which can be before `replay stopped` reaches this client.
+    let mut reached = 0i64;
+    loop {
+        let mut read = 0usize;
+        let polled = subscription.poll(
+            |bytes, header| {
+                // Another service's replay on the stream is read past.
+                if header.session_id() == session {
+                    reader.message(bytes, header.flags().contains(Flags::UNFRAGMENTED));
+                    read += 1;
+                }
+            },
+            SNAPSHOT_LOAD_LIMIT,
+        );
+        if polled.is_err() || reader.reading == Reading::Failed {
+            let _ = replay.stop(client);
+            return Ok(None);
+        }
+        if let Some(image) = subscription
+            .images()
+            .iter()
+            .find(|image| image.session_id() == session)
+        {
+            reached = reached.max(image.position());
+        }
+        // The replay has ended, and its image was read to where it ended.
+        if let Some((end, _)) = replay.ended()
+            && reached >= end
+        {
+            return Ok(reader.finish());
+        }
+        let now = nano_time();
+        if read > 0 {
+            since_ns = now;
+        } else if now.saturating_sub(since_ns) >= SNAPSHOT_LOAD_TIMEOUT_NS {
+            let _ = replay.stop(client);
+            return Ok(None);
+        } else {
+            std::thread::sleep(SNAPSHOT_PAUSE);
+        }
+    }
+}
+
 /// What a service's handler answers a session with: handed to the handler beside each
 /// entry.
 pub struct Replies<'a> {
@@ -763,6 +1024,12 @@ pub struct ClusterService {
     due: Option<Due>,
     /// What the service holds for its snapshots, from the first one it takes.
     snapshots: Option<Snapshots>,
+    /// Whether the service has begun: a poll has opened its member's log, or
+    /// [`ClusterService::restore`] has answered where it starts.
+    started: bool,
+    /// The service's two counters of its start, added when its member named a
+    /// snapshot for it: where it started, and the snapshot it passed over.
+    start: Option<(Counter, Counter)>,
 }
 
 /// The snapshot a cluster action asked for: what its markers and its ack carry.
@@ -798,7 +1065,138 @@ impl ClusterService {
             sessions: Box::new(core::array::from_fn(|_| Session::closed())),
             due: None,
             snapshots: None,
+            started: false,
+            start: None,
         }
+    }
+
+    /// Starts the service from the newest snapshot of a service that its member
+    /// lists (`spec/cluster.md`, "A service's start"; ADR 0132). It is called before
+    /// the first poll, by a program that gives its state to
+    /// [`snapshot`](Self::snapshot): a program that never calls it reads its
+    /// member's log from position 0. In Aeron, this is the snapshot image of
+    /// `ClusteredService.onStart`.
+    ///
+    /// [`Restored::State`] is the program's state as the program gave it. The
+    /// service then holds the sessions that were open at the snapshot's position,
+    /// [`position`](Self::position) is that position, and the next poll hands over
+    /// the entry after it. For the entries of the term the snapshot was taken in,
+    /// the service answers when its member's counters say that the member leads
+    /// that term.
+    ///
+    /// [`Restored::FromStart`] says that the polls read from position 0: the member
+    /// lists no snapshot of a service, or the one it lists could not be taken, its
+    /// recording gone or not played back within 5 s of its last message. That one
+    /// is counted in `cluster.service_snapshots_passed_over`. A member whose log no
+    /// longer begins at 0 then refuses the service its replay, which the poll
+    /// reports. [`Restored::NoMember`] says that the driver hosts no member with a
+    /// log yet, and the call is made again.
+    ///
+    /// The call waits for the driver to play the snapshot's recording back. It is
+    /// refused with [`ClusterError::RestoreTooLate`] once a poll has opened the
+    /// member's log, or once it has answered [`Restored::State`] or
+    /// [`Restored::FromStart`].
+    ///
+    /// ```
+    /// use cavalry_client::{Cavalry, Restored};
+    ///
+    /// # fn main() -> Result<(), Box<dyn std::error::Error>> {
+    /// # let dir = std::env::temp_dir().join(format!("cavalry-doc-restore-{}", std::process::id()));
+    /// # let _ = std::fs::remove_dir_all(&dir);
+    /// # let driver = cavalry_driver::Driver::start(&dir, dir.join("log"))?;
+    /// let mut client = Cavalry::connect_to(&dir)?;
+    /// let mut service = client.cluster_service();
+    /// // The program's state: a count it keeps as eight bytes.
+    /// let mut total = 0u64;
+    /// match service.restore(&mut client)? {
+    ///     // The count as the service's last snapshot held it.
+    ///     Restored::State(state) => total = u64::from_le_bytes(state.as_slice().try_into()?),
+    ///     // No snapshot: the polls read the log from its start.
+    ///     Restored::FromStart => {}
+    ///     // A driver that hosts no cluster member: ask again before the first poll.
+    ///     Restored::NoMember => {}
+    /// }
+    /// assert_eq!((total, service.position()), (0, 0));
+    /// # service.close(&mut client)?;
+    /// # client.close()?;
+    /// # driver.close()?;
+    /// # let _ = std::fs::remove_dir_all(&dir);
+    /// # Ok(())
+    /// # }
+    /// ```
+    pub fn restore(&mut self, client: &mut Cavalry) -> Result<Restored, ClusterError> {
+        if self.started {
+            return Err(ClusterError::RestoreTooLate);
+        }
+        let counters = client.shared_counters();
+        let Some(key) = member_with_a_log(&counters) else {
+            return Ok(Restored::NoMember);
+        };
+        // The member names the recording of its newest snapshot of a service. It
+        // stored that before it named a recording of its log, so the value is no
+        // counter's first 0.
+        let named = load(
+            &counters,
+            &mut None,
+            CLUSTER_SERVICE_SNAPSHOT_RECORDING_ID,
+            key,
+        );
+        let Some(recording_id) = named.filter(|recording_id| *recording_id >= 0) else {
+            self.started = true;
+            return Ok(Restored::FromStart);
+        };
+        let id = i32::from_le_bytes(key);
+        let started_at = client.add_counter(
+            CLUSTER_SERVICE_SNAPSHOT_START_POSITION.0,
+            &key,
+            &format!("cluster.service_snapshot_start_position {id}"),
+        )?;
+        let passed_over = client.add_counter(
+            CLUSTER_SERVICE_SNAPSHOTS_PASSED_OVER.0,
+            &key,
+            &format!("cluster.service_snapshots_passed_over {id}"),
+        )?;
+        let taken = read_snapshot(client, recording_id)?.filter(|snapshot| self.take(snapshot));
+        let restored = match taken {
+            Some(snapshot) => {
+                let _ = started_at.store_release(snapshot.log_position);
+                Restored::State(snapshot.state)
+            }
+            None => {
+                let _ = started_at.store_release(-1);
+                let _ = passed_over.increment();
+                Restored::FromStart
+            }
+        };
+        // From here the service has begun: a call that failed above is made again.
+        self.started = true;
+        self.start = Some((started_at, passed_over));
+        Ok(restored)
+    }
+
+    /// Takes a snapshot's sessions, position and term, when the table holds every
+    /// session: `false`, and nothing taken, when it does not.
+    fn take(&mut self, snapshot: &Snapshot) -> bool {
+        let fits = snapshot.sessions.len() <= MAX_SESSIONS
+            && snapshot
+                .sessions
+                .iter()
+                .all(|(_, channel)| channel.len() <= MAX_RESPONSE_CHANNEL_LENGTH);
+        if !fits {
+            return false;
+        }
+        for (session, (id, channel)) in self.sessions.iter_mut().zip(&snapshot.sessions) {
+            *session = Session::closed();
+            if let Some(held) = session.channel.get_mut(..channel.len()) {
+                held.copy_from_slice(channel);
+                session.channel_length = channel.len();
+                session.id = *id;
+                session.open = true;
+            }
+        }
+        self.position = snapshot.log_position;
+        self.term_leader = (snapshot.leadership_term_id, ASK_MEMBER);
+        true
     }
 
     /// Reads up to `fragment_limit` committed entries, each handed to `handler` with
@@ -864,6 +1262,9 @@ impl ClusterService {
                 }
             }
             self.log = Some(log);
+            // The service reads from where it is: a start from a snapshot is asked
+            // for before this.
+            self.started = true;
         }
         let Self {
             log,
@@ -996,9 +1397,11 @@ impl ClusterService {
                 // service that would answer late, after the next leader's service
                 // answered later entries. Loaded here, after the commit position
                 // that let this entry be read.
-                let answers = !history
-                    && *term_leader == (leadership_term_id, member.id)
-                    && member.leads(leadership_term_id);
+                // A service that started from a snapshot in this term did not read
+                // the term's event, and takes the member's word alone.
+                let named = term_leader.0 == leadership_term_id
+                    && (term_leader.1 == member.id || term_leader.1 == ASK_MEMBER);
+                let answers = !history && named && member.leads(leadership_term_id);
                 if answers != *answering {
                     for session in sessions.iter_mut().filter(|session| session.open) {
                         if !answers {
@@ -1245,6 +1648,10 @@ impl ClusterService {
             snapshots.publication.close()?;
             snapshots.acks.close()?;
         }
+        if let Some((started_at, passed_over)) = self.start.take() {
+            started_at.close();
+            passed_over.close();
+        }
         if let Some(log) = self.log.take() {
             log.close(client)?;
         }
@@ -1259,5 +1666,206 @@ impl core::fmt::Debug for ClusterService {
             .field("answers", &self.answers())
             .field("sessions", &self.sessions())
             .finish()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    const POSITION: i64 = 4_096;
+    const TERM: i64 = 3;
+    const CHANNEL: &[u8] = b"cavalry:udp?endpoint=127.0.0.1:9040";
+
+    fn bytes(message: &Message<'_>) -> Vec<u8> {
+        let mut scratch = [0u8; SNAPSHOT_SCRATCH_LENGTH];
+        let length = message
+            .write(&mut scratch)
+            .expect("a message of a snapshot");
+        scratch[..length].to_vec()
+    }
+
+    fn marker(type_id: i64, log_position: i64, mark: SnapshotMark, index: i32) -> Vec<u8> {
+        bytes(&Message::SnapshotMarker {
+            type_id,
+            log_position,
+            leadership_term_id: TERM,
+            index,
+            mark,
+            time_unit: TimeUnit::Millis,
+            app_version: 0,
+        })
+    }
+
+    fn session(id: i64) -> Vec<u8> {
+        bytes(&Message::ClientSession {
+            cluster_session_id: id,
+            response_stream_id: EGRESS_STREAM_ID,
+            response_channel: CHANNEL,
+            encoded_principal: &[],
+        })
+    }
+
+    /// A service's snapshot as a service writes it: a marker, the sessions, the
+    /// section marker, the state in messages of 1,024 bytes, and a marker.
+    fn snapshot(ids: &[i64], state: &[u8]) -> Vec<Vec<u8>> {
+        let mut messages = vec![marker(
+            SERVICE_SNAPSHOT_TYPE_ID,
+            POSITION,
+            SnapshotMark::Begin,
+            0,
+        )];
+        messages.extend(ids.iter().map(|id| session(*id)));
+        messages.push(marker(
+            SERVICE_SNAPSHOT_TYPE_ID,
+            POSITION,
+            SnapshotMark::Section,
+            SERVICE_SNAPSHOT_STATE_INDEX,
+        ));
+        messages.extend(
+            state
+                .chunks(SERVICE_SNAPSHOT_STATE_MESSAGE_LENGTH)
+                .map(<[u8]>::to_vec),
+        );
+        messages.push(marker(
+            SERVICE_SNAPSHOT_TYPE_ID,
+            POSITION,
+            SnapshotMark::End,
+            0,
+        ));
+        messages
+    }
+
+    fn read(messages: &[Vec<u8>]) -> Option<Snapshot> {
+        let mut reader = SnapshotReader::new();
+        for message in messages {
+            reader.message(message, true);
+        }
+        reader.finish()
+    }
+
+    #[test]
+    fn a_snapshot_as_a_service_writes_it_is_read_back() {
+        let state: Vec<u8> = (0..2_500u32).map(|i| i as u8).collect();
+        let taken = read(&snapshot(&[0, 2, 5], &state)).expect("the snapshot");
+        assert_eq!(taken.log_position, POSITION);
+        assert_eq!(taken.leadership_term_id, TERM);
+        assert_eq!(
+            taken.sessions,
+            [
+                (0, CHANNEL.to_vec()),
+                (2, CHANNEL.to_vec()),
+                (5, CHANNEL.to_vec())
+            ]
+        );
+        assert_eq!(taken.state, state);
+        // No session and no byte: three markers.
+        let empty = read(&snapshot(&[], &[])).expect("the snapshot");
+        assert!(empty.sessions.is_empty() && empty.state.is_empty());
+        // A state whose bytes read as messages of the page is the program's all the
+        // same, by its place: a piece that is a client session, and one that is the
+        // end marker itself.
+        let mut tricky = session(9);
+        tricky.extend_from_slice(&marker(
+            SERVICE_SNAPSHOT_TYPE_ID,
+            POSITION,
+            SnapshotMark::End,
+            0,
+        ));
+        let taken = read(&snapshot(&[1], &tricky)).expect("the snapshot");
+        assert_eq!(taken.sessions.len(), 1);
+        assert_eq!(taken.state, tricky);
+        let marker_only = marker(SERVICE_SNAPSHOT_TYPE_ID, POSITION, SnapshotMark::End, 0);
+        let taken = read(&snapshot(&[], &marker_only)).expect("the snapshot");
+        assert_eq!(taken.state, marker_only);
+    }
+
+    #[test]
+    fn a_recording_that_is_no_services_snapshot_is_not_read() {
+        let state = [7u8; 1_500];
+        let whole = snapshot(&[0, 1], &state);
+        assert!(read(&whole).is_some());
+        // Nothing, and what was written cut short at each message. Cut after a piece
+        // of the state, the piece is taken for the end marker and is none.
+        for kept in 0..whole.len() {
+            assert!(read(&whole[..kept]).is_none(), "{kept} messages");
+        }
+        // A message that arrived as fragments.
+        let mut reader = SnapshotReader::new();
+        for (index, message) in whole.iter().enumerate() {
+            reader.message(message, index != 1);
+        }
+        assert!(reader.finish().is_none());
+        // The consensus module's type id, in the begin marker and in the end marker.
+        let mut modules = whole.clone();
+        modules[0] = marker(1, POSITION, SnapshotMark::Begin, 0);
+        assert!(read(&modules).is_none());
+        let mut modules = whole.clone();
+        *modules.last_mut().expect("a marker") = marker(1, POSITION, SnapshotMark::End, 0);
+        assert!(read(&modules).is_none());
+        // Position 0, and an end marker of another position.
+        let mut zero = whole.clone();
+        zero[0] = marker(SERVICE_SNAPSHOT_TYPE_ID, 0, SnapshotMark::Begin, 0);
+        assert!(read(&zero).is_none());
+        let mut other = whole.clone();
+        *other.last_mut().expect("a marker") = marker(
+            SERVICE_SNAPSHOT_TYPE_ID,
+            POSITION + 32,
+            SnapshotMark::End,
+            0,
+        );
+        assert!(read(&other).is_none());
+        // No section marker: the end marker where the section marker belongs.
+        let mut unsectioned = whole.clone();
+        unsectioned[3] = marker(SERVICE_SNAPSHOT_TYPE_ID, POSITION, SnapshotMark::End, 0);
+        assert!(read(&unsectioned).is_none());
+        // A section marker with the begin marker's index.
+        let mut indexed = whole.clone();
+        indexed[3] = marker(SERVICE_SNAPSHOT_TYPE_ID, POSITION, SnapshotMark::Section, 0);
+        assert!(read(&indexed).is_none());
+        // One session twice, two out of order, and more than the table holds.
+        assert!(read(&snapshot(&[1, 1], &state)).is_none());
+        assert!(read(&snapshot(&[4, 1], &state)).is_none());
+        let eleven: Vec<i64> = (0..11).collect();
+        assert!(read(&snapshot(&eleven, &state)).is_none());
+        let ten: Vec<i64> = (0..10).collect();
+        assert!(read(&snapshot(&ten, &state)).is_some());
+        // A message of the consensus module's snapshot among the sessions.
+        let mut modules = whole;
+        modules[1] = bytes(&Message::ConsensusModule {
+            next_session_id: 2,
+            next_service_session_id: 0,
+            log_service_session_id: 0,
+            pending_message_capacity: 0,
+        });
+        assert!(read(&modules).is_none());
+    }
+
+    #[test]
+    fn a_service_takes_a_snapshots_sessions_position_and_term_when_its_table_holds_them() {
+        let mut service = ClusterService::new();
+        let taken = read(&snapshot(&[3, 8], b"state")).expect("the snapshot");
+        assert!(service.take(&taken));
+        assert_eq!(service.position(), POSITION);
+        assert_eq!(service.sessions(), 2);
+        assert_eq!(service.term_leader, (TERM, ASK_MEMBER));
+        let held: Vec<(i64, &[u8])> = service
+            .sessions
+            .iter()
+            .filter(|session| session.open)
+            .map(|session| (session.id, &session.channel[..session.channel_length]))
+            .collect();
+        assert_eq!(held, [(3, CHANNEL), (8, CHANNEL)]);
+        // A channel longer than a session holds: nothing is taken.
+        let mut service = ClusterService::new();
+        let long = Snapshot {
+            log_position: POSITION,
+            leadership_term_id: TERM,
+            sessions: vec![(0, vec![b'h'; MAX_RESPONSE_CHANNEL_LENGTH + 1])],
+            state: Vec::new(),
+        };
+        assert!(!service.take(&long));
+        assert_eq!((service.position(), service.sessions()), (0, 0));
+        assert_eq!(service.term_leader, (-1, -1));
     }
 }

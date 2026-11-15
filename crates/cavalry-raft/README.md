@@ -287,8 +287,11 @@ commit path runs per message.
   need be whole from that position alone: a member starts though it forgot the
   recordings below it, though they were purged, and though its log is in more than
   1,024 recordings. With no snapshot it starts as before, from position 0. A
-  service still reads its member's log from position 0, so the log below a
-  snapshot is purged only where no service reads it from its start.
+  service reads its member's log from its own snapshot's position, or from
+  position 0, so a member's log is needed from the lower of the two snapshots'
+  positions: `cluster.log_purge_position`, and
+  `ConsensusModule::log_purge_position()`. It is 0 while the member lists no
+  snapshot of a service, and nothing below a position of 0 is purged (ADR 0132).
 - Lists the snapshots of the service beside a member (`spec/cluster.md`, "The
   member's list of a service's snapshots"; ADR 0131). A service writes its own
   snapshot, a recording through the member's driver, and tells the member with a
@@ -302,7 +305,9 @@ commit path runs per message.
   `cluster.service_acks_rejected` with nothing listed. The member answers no ack
   and waits for none: it does not know its services (ADR 0066), so its own
   snapshot counts without a service's. `ConsensusModule::service_snapshot_position()`
-  and `service_snapshot_counts()` say what it listed.
+  and `service_snapshot_counts()` say what it listed. The member names the newest
+  one's recording in `cluster.service_snapshot_recording_id`, which a service that
+  starts from its snapshot reads (ADR 0132).
 - Holds a member's sessions, the member's side of the session protocol
   (`spec/cluster.md`, "Sessions"; ADR 0115): `Sessions` is plain state, as `Consensus`
   is. Its caller hands it each message of the ingress stream, each entry of the

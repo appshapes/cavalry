@@ -40,8 +40,9 @@ are where a member receives:
 | `catchup` | the member, on the log stream | the leader's replay of the log to a member that is behind, from the position it asked for |
 | `archive` | the member | a peer's request to replicate its recording of the log; named here, used by no message of this version |
 
-The streams are `cavalry:udp` streams, but for the service log, the log replay and
-the consensus module stream, with these stream ids, constants in this version:
+The streams are `cavalry:udp` streams, but for the service log, the log replay, the
+consensus module stream and the service snapshot replay, with these stream ids,
+constants in this version:
 
 | Stream | Stream id | Publication | Subscriptions |
 | --- | --- | --- | --- |
@@ -52,6 +53,7 @@ the consensus module stream, with these stream ids, constants in this version:
 | service log | 104 | the member's driver's, one for each service: a replay of the member's recording of the log that follows it, on `cavalry:ipc` ("The service") | the service's, on `cavalry:ipc` |
 | log replay | 103 | the member's driver's, one: a replay of the member's recordings of the log that follows them, on `cavalry:ipc`, which the member's own consensus module reads as a service reads the service log, for its sessions ("Sessions"; ADR 0116). A stream of its own, so that this replay and a service's never reach each other's subscription | the consensus module's, on `cavalry:ipc` |
 | consensus module | 105 | a service's, on `cavalry:ipc`, from its first snapshot to its close: the service acks by which it tells the member on its driver of a snapshot it took ("Snapshots"; ADR 0131) | the member's consensus module's, on `cavalry:ipc`, from its start |
+| service snapshot replay | 109 | the member's driver's, one for each start of a service from a snapshot: a replay of the snapshot's recording, whole, on `cavalry:ipc` ("Snapshots", "A service's start"; ADR 0132). A stream of its own, subscribed to only while a snapshot is read: on the service log stream a service that is not reading would hold the replay at its own position, as it holds another service's | the starting service's, on `cavalry:ipc`, while it reads its snapshot |
 
 The members' ingress endpoints, listed as a redirect lists them ("Session event,
 template 2"), `<id>=<host:port>` for each member separated by `,`, are at most 1,320
@@ -483,8 +485,9 @@ snapshot stream, and that the member lists for it in the same file ("A service's
 snapshot", below; ADR 0131). A reader given a snapshot's messages reads them as the
 `snapshot` stream of the vectors. A member that starts takes its state from the
 newest snapshot of its consensus module that it can read, and reads its log from
-that snapshot's position ("A member's start"; ADR 0130). A service does not yet
-start from its snapshot ("Out of this version").
+that snapshot's position ("A member's start"; ADR 0130). A service whose program
+asks it to starts from the newest snapshot of a service that its member lists, and
+reads the log from that snapshot's position ("A service's start", below; ADR 0132).
 
 **The action.** The leader asks for a snapshot by appending a cluster action whose
 action is snapshot ("Cluster action, template 23"), an entry of its own as a session
@@ -604,6 +607,45 @@ A member answers no ack and waits for none. It does not know which services read
 its log (ADR 0066), so its own snapshot counts without a service's, and a
 service's counts without its own. An ack that the member does not read, because
 it stopped, is a snapshot that is in no list: the next action asks again.
+
+**A service's start.** A service that has read no entry starts from a snapshot when
+its program asks it to, before its first read of the log. A program that does not
+ask reads the log from position 0, as a program of a version before this did. The
+member stores the recording id of the newest snapshot of a service that it lists
+in `cluster.service_snapshot_recording_id`, −1 while it lists none, from its start
+and from each listing on. The service loads that counter from a record that is the
+member's by the test of "The service", and only of a member whose live recording
+it has found: the member adds the counter and stores its value before it stores a
+recording's id in `cluster.log_recording_id`, since a counter holds 0 between its
+allocation and its first store, and 0 is a recording id. With no such member on
+its driver yet it has nothing to start from, and its program asks again. With −1, or a member that has
+no such counter, it reads the log from position 0. Otherwise it plays the
+recording back whole, on `cavalry:ipc` and the service snapshot replay stream
+("Members and streams"), reading its own replay's session, and takes the snapshot
+when three things hold. The driver plays
+the recording to its end, with no more than the service snapshot load timeout
+("Values") before the first message and between two. The messages are a service's
+snapshot: a snapshot marker whose mark is begin, with type id 2, index 0 and a log
+position above 0; a client session for each session, at most 10, in the rising
+order of their cluster session ids; a snapshot marker whose mark is section, with
+index 1 and the begin marker's type id, log position and leadership term id; the
+program's bytes, at most the service snapshot state of "Values"; and, as the
+recording's last message, a snapshot marker whose mark is end, with index 0 and
+the same type id, position and term. And the service's table of sessions takes
+the sessions whole: a response channel longer than a session holds is one it does
+not take. A snapshot that fails one of the three is passed over, counted in
+`cluster.service_snapshots_passed_over`, and the service reads the log from
+position 0. The member's newest is the one snapshot a service is told of.
+
+From the snapshot the service takes its sessions, each open as its session open
+event left it, and the position its read of the log begins at, the snapshot's log
+position, which `cluster.service_snapshot_start_position` holds. It gives its
+program the program's bytes as the program gave them. And it takes the snapshot's
+leadership term id as the term of the last new leadership term event it read,
+without that event's leader: it answers an entry of that term when its member's
+counters say that the member leads the term ("Replies"), which only the member
+that the term's event names says. An entry that its member held when the service
+opened its log is history, as before, and the service answers none.
 
 ### Snapshot marker, template 100
 
@@ -1027,11 +1069,17 @@ directory therefore lasts a member for 1,024 recordings of its log after its new
 snapshot: one for each log it joins, each replay it replicates or catches up by,
 and each term it leads.
 
-A service still reads its member's log from position 0 ("The service"). Beside a
-member whose log no longer begins at 0 its replay is refused, as a replay of a
-position the member forgot is, until a service starts from a snapshot of its own,
-which is out of this version. So an operator purges below a member's snapshot only
-where no service reads that member's log from its start.
+A service reads its member's log from the log position of the snapshot it started
+from, or from position 0 ("A service's start"). Beside a member whose log no
+longer reaches back to that position its replay is refused, as a replay of a
+position the member forgot is. So a member's log is needed from the lower of two
+positions: the log position of the newest snapshot of its consensus module, and
+that of the newest snapshot of a service that it lists. `cluster.log_purge_position`
+holds that position, and 0 while the member lists none of either: the member's own
+start and a service that starts from its newest snapshot read nothing below it. An
+operator purges the recordings of a member's log that stopped at or below it, and
+none above it. Beside a member whose service takes no snapshot the position stays
+0, and nothing is purged.
 
 A member does not start, and says why and what to do, in each of these cases. Its
 record of terms holds a term and its log directory holds no log recordings file:
@@ -1251,7 +1299,8 @@ as the consensus module is. It reads the member's own recordings of the log, one
 time, each through a replay that follows the recording, `start replay` with a length
 of 2^63 − 1 (`spec/client-protocol.md`, "Commands"), into a `cavalry:ipc` subscription
 of its own on the service log stream ("Members and streams"), from the position of an
-entry: 0, or the position after the last entry it applied. The member names its live
+entry: 0, the log position of the snapshot it started from ("Snapshots", "A service's
+start"), or the position after the last entry it applied. The member names its live
 recording in `cluster.log_recording_id` ("Counters"): the one it records the live log into, the
 leader's recording of its log publication (state 5) or a follower's recording of the
 leader's image it joined last (state 15), and never the recording of a span it
@@ -1568,13 +1617,17 @@ that a reader of a counters file knows which transition it saw.
 | `cluster.service_acks_rejected` | a service ack for which the member listed nothing: a service id other than 0, a recording the catalog does not hold as a stopped recording of the service snapshot stream with bytes, a log position that is not above 0 or is above the commit position, or a position not above the newest the member lists for the service ("Snapshots") |
 | `cluster.service_snapshots_taken` | a snapshot the service beside the member wrote and sent its service ack for; the service adds the counter, with its member's id as the key ("Snapshots") |
 | `cluster.service_snapshots_failed` | a snapshot the service beside the member gave up, for one of the reasons of "A service's snapshot"; the service adds the counter, with its member's id as the key |
+| `cluster.service_snapshot_recording_id` | a gauge: the id, in the catalog of the member's driver, of the recording of the newest snapshot of a service that the member lists, −1 while it lists none; a service that starts from a snapshot reads it ("A service's start"; ADR 0132) |
+| `cluster.log_purge_position` | a gauge: the position the member's log is needed from, the lower of the log positions of the newest snapshot of its consensus module and of the newest snapshot of a service that it lists, 0 while it lists none of either; a recording of the log that stopped at or below it may be purged ("A member's start") |
+| `cluster.service_snapshot_start_position` | a gauge: the log position of the snapshot the service beside the member started from, −1 when the member named one and the service passed it over; the service adds the counter, with its member's id as the key, when its program asks it to start from a snapshot and the member names one ("A service's start") |
+| `cluster.service_snapshots_passed_over` | a snapshot that the service beside the member was told of at its start and could not take, so that it reads the log from position 0; the service adds the counter as the one before it ("A service's start") |
 
 ## Values
 
 | Value | This version |
 | --- | --- |
 | schema id, version | 1, 0 |
-| stream ids | log 100, ingress 101, egress 102, log replay 103, service log 104, consensus module 105, service snapshot 106, snapshot 107, consensus 108. In Aeron 104 is the service stream, which carries the consensus module's messages to a service; here it carries the log a service reads ("The service") |
+| stream ids | log 100, ingress 101, egress 102, log replay 103, service log 104, consensus module 105, service snapshot 106, snapshot 107, consensus 108, service snapshot replay 109, which is none of Aeron's. In Aeron 104 is the service stream, which carries the consensus module's messages to a service; here it carries the log a service reads ("The service") |
 | members | at most 8; a ninth is `members-count` |
 | member id | 0 to 2147483647, unique |
 | leader heartbeat interval | 200 ms: how often the leader sends commit position with nothing to report, and new leadership term during an election |
@@ -1595,6 +1648,7 @@ that a reader of a counters file knows which transition it saw.
 | snapshot interval | 268,435,456 bytes of the log, 256 MiB: how far past the last cluster action that asked for a snapshot a leader's log grows before the leader appends the next ("Snapshots") |
 | snapshot timeout | 1 s: how long a snapshot being taken may go without its next step, a message its publication takes, its recording's stop announced or, for a service, its ack taken, before the member or the service gives it up ("Snapshots") |
 | snapshot load timeout | 5 s: how long a member's start waits for its driver to play one snapshot's recording back before it passes that snapshot over ("A member's start") |
+| service snapshot load timeout | 5 s: how long a service's start waits for the first message of its snapshot's recording, and for each message after one, before it passes the snapshot over ("A service's start") |
 
 Timeouts are measured on a monotonic clock of the process that measures them, a
 member's or a client's, nanoseconds that never step back, and on no wall clock: a step
@@ -1701,8 +1755,6 @@ query and response, add passive member, cluster members change, join cluster, re
 member and the snapshot recording messages (34, 35, 41, 43, 70 to 74); termination
 (75, 76); backup, heartbeat and standby snapshot (77 to 81); and what a snapshot of
 this version does not hold, a timer, the cluster's members and a service's pending
-messages (104, 106, 107). A service takes a snapshot and does not yet start from
-one: it reads its member's log from position 0 ("The service"), and a member lists
-a service's snapshots for the version that does. A member of this version appends no timer event, membership
+messages (104, 106, 107). A member of this version appends no timer event, membership
 change event, session close event with the reason service action, or cluster action
 whose action is suspend or resume, and a reader accepts each.

@@ -118,6 +118,14 @@ pub const CONSENSUS_MODULE_STREAM_ID: i32 = 105;
 /// ADR 0131). In Aeron, 106 is a service's snapshot stream.
 pub const SERVICE_SNAPSHOT_STREAM_ID: i32 = 106;
 
+/// The service snapshot replay stream's id: the `cavalry:ipc` stream a service's
+/// start plays its snapshot's recording back on (`spec/cluster.md`, "A service's
+/// start"; ADR 0132). A stream that is subscribed to only while a snapshot is
+/// read, so that no reader that has stopped reading holds the replay back, as a
+/// service that is not polling holds the service log stream's. None of Aeron's
+/// stream ids.
+pub const SERVICE_SNAPSHOT_REPLAY_STREAM_ID: i32 = 109;
+
 /// The type id of a service's snapshot, which its markers carry (`spec/cluster.md`,
 /// "Snapshot marker, template 100").
 pub const SERVICE_SNAPSHOT_TYPE_ID: i64 = 2;

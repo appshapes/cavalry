@@ -113,6 +113,9 @@ pub enum ClusterError {
         /// The step.
         cause: SnapshotCause,
     },
+    /// A service was asked to start from a snapshot after it had begun: a poll has
+    /// opened its member's log, or an earlier call has answered where it starts.
+    RestoreTooLate,
 }
 
 /// The step at which a service gave a snapshot up
@@ -152,7 +155,7 @@ impl SnapshotCause {
 impl ClusterError {
     /// The reason's name: `members`, `client`, `refused`, `version`,
     /// `connect-timeout`, `egress`, `log`, `entry`, `no-snapshot-due`,
-    /// `snapshot-too-long` or `snapshot-failed`.
+    /// `snapshot-too-long`, `snapshot-failed` or `restore-too-late`.
     pub const fn reason(&self) -> &'static str {
         match self {
             ClusterError::Members(_) => "members",
@@ -166,6 +169,7 @@ impl ClusterError {
             ClusterError::NoSnapshotDue => "no-snapshot-due",
             ClusterError::SnapshotTooLong { .. } => "snapshot-too-long",
             ClusterError::SnapshotFailed { .. } => "snapshot-failed",
+            ClusterError::RestoreTooLate => "restore-too-late",
         }
     }
 }
@@ -228,6 +232,13 @@ impl fmt::Display for ClusterError {
                 "cluster service snapshot refused ({reason}): the state is {found} bytes \
                  and one snapshot holds {limit}; give the service a state of at most \
                  {limit} bytes; see {DOC_SNAPSHOTS}"
+            ),
+            ClusterError::RestoreTooLate => write!(
+                f,
+                "cluster service restore refused ({reason}): the service has begun, by a \
+                 poll that opened its member's log or by an earlier restore; call \
+                 `ClusterService::restore` once, before the first poll, and again only \
+                 while it answers `Restored::NoMember`; see {DOC_SNAPSHOTS}"
             ),
             ClusterError::SnapshotFailed { cause } => {
                 write!(

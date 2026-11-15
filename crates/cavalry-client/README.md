@@ -209,9 +209,23 @@ The client API implementation, re-exported by the `cavalry` crate. Data plane.
   `ClusterError::SnapshotFailed`, which names the step and what to check, counted
   in `cluster.service_snapshots_failed`; nothing committed is lost, and the service
   reads on. A program that takes no snapshots matches nothing new: it reads on at
-  an `Entry::Snapshot` as it does at an `Entry::Other`. A service does not yet
-  start from its snapshot, and a service written through the C ABI takes none yet
-  (ADR 0131).
+  an `Entry::Snapshot` as it does at an `Entry::Other`. A service written through
+  the C ABI takes none yet (ADR 0131).
+- Starts a service from its snapshot: `ClusterService::restore(client)`, called
+  before the first poll, asks the member for the newest snapshot of a service that
+  it lists, plays its recording back through the member's driver, and answers
+  `Restored::State(state)`, the program's state as the program gave it. The service
+  then holds the sessions that were open at the snapshot's position, and its polls
+  read the log from that position and no entry below it. `Restored::FromStart` says
+  that the polls read from position 0: the member lists no snapshot of a service,
+  or the service could not take the one it lists, which
+  `cluster.service_snapshots_passed_over` counts. `Restored::NoMember` says that
+  the driver hosts no member with a log yet, and the program asks again. A program
+  that never calls `restore` reads its member's log from position 0, as before,
+  and so does a service written through the C ABI. For the entries of the term its
+  snapshot was taken in, a service that started from one answers on its member's
+  counters alone: a member that says it leads a term is the member that term's
+  first entry names (ADR 0132).
 - Holds a recording the driver arms: `Cavalry::arm_recording(channel, stream_id)`, on a
   `cavalry:udp` stream with a subscription and no publication or image yet, returns
   an `ArmedRecording`, and `ArmedRecording::poll()` returns the `Recording` once the

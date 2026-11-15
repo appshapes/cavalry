@@ -61,8 +61,10 @@ is allowed here.
   a snapshot that its start could not read and passed over for an older one, or
   for none (`cluster.snapshots_passed_over`; ADR 0130), and two of the service
   beside it: a snapshot the service said it took and the member could not list
-  (`cluster.service_acks_rejected`), and a snapshot the service gave up
-  (`cluster.service_snapshots_failed`; ADR 0131). A
+  (`cluster.service_acks_rejected`), a snapshot the service gave up
+  (`cluster.service_snapshots_failed`; ADR 0131), and a snapshot the service was
+  told of at its start and could not take, so that it read the log from position
+  0 (`cluster.service_snapshots_passed_over`; ADR 0132). A
   client's session with a cluster keeps its
   counter on the client's own driver, keyed by the session's id and not by a member's
   (ADR 0121): `doctor` takes it for no member, and reports the stale replies a

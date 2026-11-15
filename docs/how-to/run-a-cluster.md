@@ -429,6 +429,16 @@ committed once a quorum, two of three, has it on disk.
   log directory failed. The service takes the next snapshot by itself, when the
   leader's log has grown by 256 MiB. A count that no longer rises is a fault that
   has passed.
+- `WARN cluster.service_snapshots_passed_over`: the service beside this member was
+  told of a snapshot when it started, and could not take it. It read the log from
+  position 0. Nothing committed is lost. If this member's log no longer begins at
+  0, the service's own error says that its replay was refused, and the service
+  does not run. Start the service once more first: a snapshot that the driver did
+  not play back within 5 s, as on a loaded host, is one the next start reads. When
+  it is passed over again, the snapshot's recording is gone from the log
+  directory, or the driver found it damaged, which `recording.invalidated` on this
+  member's driver counts: check the log directory's device. The service takes its
+  next snapshot by itself, and its next start reads that one.
 - `WARN cluster.service_acks_rejected`: a service beside this member said that it
   took a snapshot, and the member listed nothing for it. Nothing committed is
   lost. A count that rises with every snapshot has one of two causes. More than
