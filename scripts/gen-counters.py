@@ -25,6 +25,12 @@ Checks on counters.toml:
   scope    "static", "instance" or "client"
   doc      a non-empty string
   doctor   a string, empty when there is nothing for an operator to do
+  named    a counter that a doc or doctor sentence names is a [[counter]] of this file:
+           a word that begins with the first part of some counter's name and a dot,
+           `recording.`, is read as a counter's name. A path (`spec/cluster.md`), a
+           file's name (`counters.toml`) and a family written with a star
+           (`receiver.dropped_*`) are not. An operator sent to a counter that does
+           not exist has nothing to read
 
 Checks on the state machines of the data plane, the gate CLAUDE.md names for a state
 transition with no counter (invariant 4; the shape is in counters.toml's header):
@@ -83,6 +89,10 @@ MAX_ID = 2**31 - 1
 MAX_LABEL_LENGTH = 124
 NAME = re.compile(r"^[a-z][a-z0-9_]*(\.[a-z][a-z0-9_]*)+$")
 STATE = re.compile(r"^[a-z][a-z0-9_]*$")
+# A dotted lowercase word in a sentence, whole: nothing of a name before it or after it.
+NAMED = re.compile(r"(?<![a-z0-9_.])[a-z][a-z0-9_]*(?:\.[a-z][a-z0-9_]*)+(?![a-z0-9_])")
+# The last part of a dotted word that is a file's name and no counter's.
+FILE_ENDINGS = ("md", "toml", "rs", "py", "json", "h", "sh")
 MARKER = re.compile(r"^\s*// state machine: ([a-z][a-z0-9_.]*)\s*$")
 EXEMPT = re.compile(r"^\s*// not a state machine:(.*)$")
 ENUM = re.compile(r"^\s*(?:pub(?:\([^)]*\))?\s+)?enum\s+(\w+)")
@@ -250,7 +260,30 @@ def check(doc: dict) -> tuple[list[dict], list[dict]]:
             raise Fail(f"{where}: doc must be one sentence, what a change in the value means")
         if not isinstance(doctor, str):
             raise Fail(f"{where}: doctor must be a string: what an operator does, or \"\"")
+    check_named(counters)
     return counters, check_machines(doc, {c["name"]: c["kind"] for c in counters})
+
+
+def check_named(counters: list[dict]) -> None:
+    """Every counter that a `doc` or a `doctor` sentence names is a counter of the file.
+    `cavalry doctor` prints the doctor sentence to an operator, who then looks for the
+    counters it names."""
+    names = {c["name"] for c in counters}
+    components = {name.split(".")[0] for name in names}
+    for n, c in enumerate(counters, 1):
+        for key in ("doc", "doctor"):
+            text = c[key]
+            for found in NAMED.finditer(text):
+                word = found.group(0)
+                parts = word.split(".")
+                if word in names or parts[0] not in components or parts[-1] in FILE_ENDINGS:
+                    continue
+                if text[:found.start()].endswith("/") or text[found.end():].startswith("*"):
+                    continue
+                raise Fail(f"counters.toml: [[counter]] {n} ({c['name']!r}): its {key} names "
+                           f"`{word}`, and no [[counter]] has that name. Name the counter an "
+                           "operator would read, or write a family of counters with a star, "
+                           "as `receiver.dropped_*`")
 
 
 def const_name(name: str) -> str:

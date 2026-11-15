@@ -1793,7 +1793,7 @@ pub const COUNTERS: &[CounterDef] = &[
         kind: Kind::Counter,
         scope: Scope::Client,
         doc: "Snapshots of its consensus module whose messages one cluster member had all written to the snapshot's publication, so that it asked the recording's stop (spec/cluster.md, Snapshots). key: member id (i32), little-endian; label text: the member id in decimal.",
-        doctor: "It follows cluster.snapshots_begun by one duty cycle. If it stays below cluster.snapshots_begun while cluster.snapshots_failed rises, the snapshot's publication took no message for a second: the driver's recorder is not reading it, which recording.write_failures and the driver's own counters explain.",
+        doctor: "It follows cluster.snapshots_begun by one duty cycle. If it stays below cluster.snapshots_begun while cluster.snapshots_failed rises, the snapshot's publication took no message for a second: the driver's recorder is not reading it, which recording.write_failed and the driver's own counters explain.",
     },
     CounterDef {
         id: CLUSTER_SNAPSHOTS_TAKEN,
@@ -1809,6 +1809,6 @@ pub const COUNTERS: &[CounterDef] = &[
         kind: Kind::Counter,
         scope: Scope::Client,
         doc: "Snapshots of its consensus module one cluster member gave up: the driver refused the snapshot's publication or its recording, the publication took no message or the recording's stop was not announced within a second, the recording stopped short of what was written, a second snapshot was asked for while one was being taken, or the list could not be written. The member's log is whole and the member goes on; the next cluster action asks again (spec/cluster.md, Snapshots). key: member id (i32), little-endian; label text: the member id in decimal.",
-        doctor: "This member took no snapshot where the others did. Its log is whole and nothing committed is lost, but a start of this member reads more of the log than the others'. Check the driver's counters on this host: driver.registry_full for a recording or a publication the driver had no room for, recording.write_failures and recording.sync_failures for a disk that refuses writes, and free space in the log directory. The next snapshot is tried by itself.",
+        doctor: "This member took no snapshot where the others did. Its log is whole and nothing committed is lost, but a start of this member reads more of the log than the others'. Check the driver's counters on this host: driver.registry_full for a recording or a publication the driver had no room for, recording.start_failed for a recording whose files could not be created, recording.write_failed for a disk that refuses a write or a sync, and free space in the log directory. The next snapshot is tried by itself.",
     },
 ];

@@ -381,6 +381,17 @@ committed once a quorum, two of three, has it on disk.
   with `member refused (log-forgotten)`, above, and the cluster goes on with the
   other two. To have three members again, do as that entry says, and never start
   this member alone on a new log directory.
+- `WARN cluster.snapshots_failed`: the member gave up a snapshot of its sessions
+  that the leader's log asked for, and the count says how many times. The member's
+  log is whole, nothing committed is lost, and the member runs on. Read three
+  counters of this member's driver, which the same `doctor` prints when they are
+  above 0. `driver.registry_full`: the driver had no room for the snapshot's
+  recording. `recording.start_failed`: the recording's files could not be created
+  in the log directory. `recording.write_failed`: a write or a sync to the log
+  directory failed. Check that the log directory is writable by the driver's user
+  and that its file system has room. The leader asks for the next snapshot when
+  its log has grown by 256 MiB, and the member takes that one by itself. A count
+  that no longer rises is a fault that has passed.
 - `note cluster-commit-waits`: the leader has appended more than a quorum has
   recorded. Each member asks its recorder to sync an entry as soon as it is written,
   so what waits at any moment is what was appended since the syncs now running began.

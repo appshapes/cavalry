@@ -29,7 +29,8 @@ test *ARGS: test-scripts
 # a fake `gh` (card 215), and the list of what can move the bench, with the reading of a
 # change from its event against a fake GitHub API (ADR 0071), and `just tidy`'s
 # matching of a merged pull request's head to what is here, against a made-up origin
-# and a fake `gh` (card 262). Standard library only, no network.
+# and a fake `gh` (card 262), and the counters lint's reading of the counters that a
+# sentence of counters.toml names (work item 230). Standard library only, no network.
 test-scripts:
     python3 scripts/release-notes-email-test.py
     python3 scripts/release-notes-test.py
@@ -39,6 +40,7 @@ test-scripts:
     python3 scripts/wait-for-partner-job-test.py
     python3 scripts/claude-workflow-test.py
     python3 scripts/tidy-test.py
+    python3 scripts/gen-counters-test.py
     python3 clients/generate-test.py
     python3 clients/lint-test.py
 
@@ -176,7 +178,8 @@ clippy:
 # counters.toml is the single source of every counter and of every data-plane state
 # machine (ADR 0012). gen-counters checks it and writes docs/reference/counters.md and the
 # constants in cavalry-shm from it; lint-counters runs the same checks and fails when
-# either generated file is stale, when a [[transition]] names no counter, when the enum
+# either generated file is stale, when a doc or doctor sentence names a counter that
+# the file does not hold, when a [[transition]] names no counter, when the enum
 # marked `// state machine: <name>` does not have the machine's states as variants, or
 # when an enum named *State, *Status or *Phase has neither that mark nor
 # `// not a state machine: <why>`.
