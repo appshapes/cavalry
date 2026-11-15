@@ -22,7 +22,9 @@
 # - Each program's output goes to a file under the script's directory, and the script
 #   prints it when it checks the step.
 #
-# Every wait is bounded at 60 s.
+# Every wait for a line of a program's output is bounded at 60 s. The wait for a
+# program to end after its SIGTERM has no bound of its own, as in
+# scripts/quickstart.sh: the job's timeout is its bound.
 set -euo pipefail
 
 cd "$(dirname "$0")/.."

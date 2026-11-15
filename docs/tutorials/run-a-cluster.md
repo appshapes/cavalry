@@ -88,8 +88,9 @@ You will see one line from each. One member says that it leads, here member 2:
 
 The other two say `a follower in term 0, election closed` and `it follows member 2`.
 Which member leads is not the same at every start: this page writes 2 for the leader,
-and you read your own leader's id in its place. A term is the time one leader leads; it
-is 0 here, or 1 when two members asked for votes at the same moment and voted again.
+and you read your own leader's id in its place. A term, in full a leadership term,
+is the time one leader leads; it is 0 here, or 1 when two members asked for votes at
+the same moment and voted again.
 The log already holds one entry, the term's first, which is why the positions are 96.
 
 ## 4. Start a service beside each member
@@ -281,18 +282,21 @@ kill '%?member-2'
 kill '%?client'
 ```
 
-In the first terminal, stop the three members and remove the directory:
+In the first terminal, stop the three members, wait until they have closed, and
+remove the directory:
 
 ```sh
 kill '%?member-0'
 kill '%?member-1'
 kill '%?member-2'
+wait
 rm -rf /tmp/cavalry-tutorial
 ```
 
 Each member prints `cavalry run: stopping` and `cavalry run: closed`, and so does the
-client's driver in the second terminal. The shell prints a line for each program that
-ended.
+client's driver in the second terminal. `wait` returns when the three members have
+ended, so that no member is still writing in the directory when it is removed. The
+shell prints a line for each program that ended.
 
 ## What you saw
 
