@@ -913,6 +913,13 @@ fn run_with_the_cluster_keys_starts_a_member_and_three_of_them_elect_a_leader() 
             && !text.contains("it follows member"),
         "{text}"
     );
+    // Every member's note ends with the members that its own string gives a vote to,
+    // by their ids, so that the notes of all members show one started with another
+    // string (ADR 0134).
+    assert!(
+        text.contains("; its members string gives a vote to members 0, 1 and 2; see "),
+        "{text}"
+    );
 
     // SIGTERM stops the member and then the driver, and the exit is clean.
     while let Some(run) = runs.0.pop() {

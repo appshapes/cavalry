@@ -6,6 +6,7 @@
 //! of one position and hold the same bytes, and a member that reads the action again,
 //! after it started again on the log it kept, takes no second snapshot of it.
 
+use std::cell::RefCell;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
@@ -121,6 +122,7 @@ fn start_member(dir: &Path, members: &str, id: i32) -> Member {
 fn run_until(members: &mut [Member], what: &str, mut done: impl FnMut(&[Member]) -> bool) {
     let deadline = Instant::now() + Duration::from_secs(60);
     while !done(members) {
+        keep_sessions_alive(members);
         assert!(
             Instant::now() < deadline,
             "{what}: {:?}",
@@ -137,6 +139,66 @@ fn run_until(members: &mut [Member], what: &str, mut done: impl FnMut(&[Member])
             std::thread::sleep(Duration::from_micros(200));
         }
     }
+}
+
+/// The sessions of this test's clients that the run loop keeps alive: for each, its
+/// cluster session id and a publication to every member's `ingress` endpoint, by
+/// the member's id. A test runs on a thread of its own, so the sessions are its own.
+#[derive(Default)]
+struct KeptAlive {
+    sessions: Vec<(i64, Vec<(i32, Publication)>)>,
+    /// When the keepalives were last sent.
+    sent: Option<Instant>,
+}
+
+thread_local! {
+    static KEPT_ALIVE: RefCell<KeptAlive> = RefCell::new(KeptAlive::default());
+}
+
+/// How often the run loop sends a keepalive for each session: a client's keepalive
+/// interval is 500 ms, and a leader closes a session it has heard nothing of for
+/// the session timeout, 10 s (`spec/cluster.md`, "Sessions").
+const KEEPALIVE_EVERY: Duration = Duration::from_millis(250);
+
+/// Sends a session keepalive for each session of this test's clients to the member
+/// that leads, in its term, as a client that runs does. Without it a test that takes
+/// longer than the session timeout, as on a loaded runner, has its leader close both
+/// sessions, and their two session close events are entries the test did not ask
+/// for. A keepalive that a publication does not take, or that reaches a member which
+/// no longer leads, is sent again at the next turn.
+fn keep_sessions_alive(members: &[Member]) {
+    KEPT_ALIVE.with(|kept| {
+        let mut kept = kept.borrow_mut();
+        if kept.sessions.is_empty()
+            || kept
+                .sent
+                .is_some_and(|sent| sent.elapsed() < KEEPALIVE_EVERY)
+        {
+            return;
+        }
+        let Some(leader) = members.iter().find(|m| {
+            m.module.role() == Role::Leader && m.module.election_state() == ElectionState::Closed
+        }) else {
+            return;
+        };
+        kept.sent = Some(Instant::now());
+        let leader_id = leader.module.member_id();
+        let leadership_term_id = leader.module.leadership_term_id();
+        for (cluster_session_id, publications) in kept.sessions.iter_mut() {
+            let message = Message::SessionKeepalive {
+                leadership_term_id,
+                cluster_session_id: *cluster_session_id,
+            };
+            let mut bytes = [0u8; 64];
+            let length = message.write(&mut bytes).expect("encodes");
+            if let Some((_, publication)) = publications
+                .iter_mut()
+                .find(|(member, _)| *member == leader_id)
+            {
+                let _ = publication.offer(&bytes[..length]);
+            }
+        }
+    });
 }
 
 /// Runs the members until they are led in a term above `above`, then puts the member
@@ -827,7 +889,38 @@ impl Client {
             .expect("the egress polls");
     }
 
+    /// Has the run loop keep this client's session alive, whichever member leads:
+    /// a publication to each member's `ingress` endpoint, on `ports`, the ports the
+    /// members string was made on.
+    fn keep_alive(&mut self, ports: &[u16]) {
+        let cluster_session_id = self.session_id.expect("an open session");
+        let publications = (0..3i32)
+            .map(|member| {
+                let port = ports[usize::try_from(member).expect("a member id") * 5];
+                let publication = self
+                    .cavalry
+                    .add_exclusive_publication(
+                        &format!("cavalry:udp?endpoint=127.0.0.1:{port}"),
+                        INGRESS_STREAM_ID,
+                    )
+                    .expect("a publication to a member's ingress endpoint");
+                (member, publication)
+            })
+            .collect();
+        KEPT_ALIVE.with(|kept| {
+            kept.borrow_mut()
+                .sessions
+                .push((cluster_session_id, publications));
+        });
+    }
+
     fn close(self) {
+        // The keepalives' publications are this client's, and go before it closes.
+        KEPT_ALIVE.with(|kept| {
+            kept.borrow_mut()
+                .sessions
+                .retain(|(id, _)| Some(*id) != self.session_id);
+        });
         drop(self.ingress);
         drop(self.egress);
         self.cavalry.close().expect("the client closes");
@@ -1163,7 +1256,8 @@ fn a_connect_the_leader_accepts_before_it_reads_the_action_is_in_no_members_snap
 
 /// Three members led, with two clients' sessions open, 0 and 1, and every member
 /// holding both: the members with the leader first, the clients, and where the log
-/// then ends.
+/// then ends. The run loop keeps the two sessions alive from here on
+/// ([`keep_sessions_alive`]).
 fn led_with_two_sessions(dir: &TestDir) -> (String, Vec<Member>, Vec<Client>, i64) {
     let ports = free_ports(17);
     let members_string = members_string_on(&ports);
@@ -1190,6 +1284,8 @@ fn led_with_two_sessions(dir: &TestDir) -> (String, Vec<Member>, Vec<Client>, i6
             client.session_id.is_some()
         });
         assert_eq!(client.session_id, Some(index as i64));
+        // The session stays open for as long as the test runs, as a client's does.
+        client.keep_alive(&ports);
         clients.push(client);
     }
     // A client reads its ok event once its session open event is committed, so the
@@ -1253,16 +1349,41 @@ fn stop(member: Member) -> i32 {
 /// Purges `recording_id` from the log directory of stopped member `id`, as an
 /// operator does: a driver on the member's directories, and the client's command.
 fn purge(dir: &Path, id: i32, recording_id: i64) {
+    purge_each(dir, id, &[recording_id]);
+}
+
+/// [`purge`] for several recordings, with one driver.
+fn purge_each(dir: &Path, id: i32, recording_ids: &[i64]) {
     let driver_dir = dir.join(format!("member-{id}"));
     let log_dir = dir.join(format!("member-{id}-log"));
     let driver =
         Driver::start(&driver_dir, &log_dir).expect("a driver on the member's directories");
     let mut client = Cavalry::connect_to(&driver_dir).expect("a client of it");
-    client
-        .purge_recording(recording_id)
-        .unwrap_or_else(|error| panic!("recording {recording_id} is purged: {error}"));
+    for recording_id in recording_ids {
+        client
+            .purge_recording(*recording_id)
+            .unwrap_or_else(|error| panic!("recording {recording_id} is purged: {error}"));
+    }
     client.close().expect("the client closes");
     driver.close().expect("the driver closes");
+}
+
+/// Where the recordings a member's record names divide at `position`: the index of
+/// the last one that begins at or below it. The member's log is needed from that
+/// recording, and an operator may purge every one before it, which is the rule a
+/// member's start holds a purge to (`spec/cluster.md`, "A member's start"). With
+/// the one election a test makes below the position that is the second of two
+/// recordings.
+fn needed_from(recordings: &[(i64, i64)], position: i64) -> usize {
+    let kept = recordings
+        .iter()
+        .rposition(|(_, start)| *start <= position)
+        .expect("a recording that begins at or below the position");
+    assert!(
+        kept >= 1 && recordings[kept].1 > 0,
+        "no recording to purge below {position}: {recordings:?}"
+    );
+    kept
 }
 
 /// Truncates stopped recording `recording_id` to `position` in the log directory of
@@ -1388,15 +1509,12 @@ fn a_member_whose_log_was_purged_below_its_snapshot_starts_from_the_snapshot() {
         .map(|entry| (entry.recording_id, entry.start_position))
         .collect();
     drop(record);
-    assert!(recordings.len() >= 2, "{recordings:?}");
     assert_eq!(recordings[0].1, 0, "{recordings:?}");
-    let (kept_id, kept_start) = recordings[1];
-    assert!(
-        kept_start > 0 && kept_start <= position,
-        "the second recording begins at {kept_start}, the snapshot is of {position}"
-    );
-    // An operator purges the first recording, which the snapshot covers.
-    purge(dir.path(), id, recordings[0].0);
+    let kept = needed_from(&recordings, position);
+    let (kept_id, kept_start) = recordings[kept];
+    // An operator purges the recordings before it, which the snapshot covers.
+    let purged: Vec<i64> = recordings[..kept].iter().map(|(id, _)| *id).collect();
+    purge_each(dir.path(), id, &purged);
 
     // The member starts: from its snapshot, on the log that is left.
     let again = start_member(dir.path(), &members_string, id);
@@ -2712,15 +2830,11 @@ fn a_member_and_its_service_start_from_their_snapshots_on_a_log_purged_below_the
         .map(|entry| (entry.recording_id, entry.start_position))
         .collect();
     drop(record);
-    assert!(recordings.len() >= 2, "{recordings:?}");
-    let (_, kept_start) = recordings[1];
-    assert!(
-        kept_start > 0 && kept_start <= position,
-        "the second recording begins at {kept_start}, the snapshots are of {position}"
-    );
-    // An operator purges the first recording, which stopped below the position the
-    // member's log is needed from.
-    purge(dir.path(), id, recordings[0].0);
+    // An operator purges the recordings before the one the member's log is needed
+    // from, the last that begins at or below the position of both snapshots.
+    let kept = needed_from(&recordings, position);
+    let purged: Vec<i64> = recordings[..kept].iter().map(|(id, _)| *id).collect();
+    purge_each(dir.path(), id, &purged);
 
     // The member starts from its snapshot, on the log that is left, and its service
     // from its own: the program is given its state at the snapshot's position.

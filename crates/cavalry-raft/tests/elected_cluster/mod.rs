@@ -12,7 +12,8 @@ use cavalry_raft::{ElectionState, Role};
 /// has committed are kept, and every later commit of any leader extends them: a
 /// committed entry is never lost and never replaced. A member's own log up to the
 /// commit position it knows is part of them. The leader's commit position is at or
-/// below the append positions of a quorum, no member's commit position falls, and no
+/// below the append positions of a quorum, a quorum of the members the leader's own
+/// members string gives a vote (ADR 0134), no member's commit position falls, and no
 /// two members lead one term, running or stopped.
 pub struct Safety {
     ids: Vec<i32>,
@@ -44,13 +45,19 @@ impl Safety {
         );
         if let Some(leader) = cluster.leader() {
             let commit = cluster.commit_position(leader).expect("the leader");
-            let mut appended: Vec<i64> = self
-                .ids
+            // The voters as the leader counts them: one bit of its `voters` for each
+            // member in the rising order of the ids.
+            let mask = cluster.member(leader).expect("the leader").voters();
+            let mut rising = self.ids.clone();
+            rising.sort_unstable();
+            let mut appended: Vec<i64> = rising
                 .iter()
-                .map(|&id| cluster.append_position(id).expect("a member"))
+                .enumerate()
+                .filter(|(place, _)| mask >> place & 1 == 1)
+                .map(|(_, &id)| cluster.append_position(id).expect("a member"))
                 .collect();
             appended.sort_unstable_by(|a, b| b.cmp(a));
-            let durable_on_a_quorum = appended[quorum(self.ids.len()) - 1];
+            let durable_on_a_quorum = appended[quorum(appended.len()) - 1];
             assert!(
                 commit <= durable_on_a_quorum,
                 "member {leader} leads and commits {commit}, above what a quorum has \
@@ -94,6 +101,19 @@ impl Safety {
     /// every check of it goes on.
     pub fn restart(&mut self, cluster: &mut Cluster, member: i32) {
         cluster.restart(member);
+        if let Some(index) = self.ids.iter().position(|&id| id == member) {
+            self.last_commit[index] = 0;
+        }
+    }
+
+    /// Starts `member` again on the log directory it kept, with a members string that
+    /// marks the members of `standby_ids` its standbys ([`Cluster::restart_with`]):
+    /// one member's step of a promotion. The commit position it knew is forgotten,
+    /// as in [`Safety::restart`].
+    pub fn restart_with(&mut self, cluster: &mut Cluster, member: i32, standby_ids: &[i32]) {
+        cluster
+            .restart_with(member, standby_ids)
+            .expect("the marks leave a voter");
         if let Some(index) = self.ids.iter().position(|&id| id == member) {
             self.last_commit[index] = 0;
         }

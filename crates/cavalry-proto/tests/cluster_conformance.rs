@@ -368,10 +368,16 @@ fn message_vector(name: &str, vector: &Value) {
 fn member_json(member: &Member<'_>) -> Value {
     let endpoint =
         |e: &cavalry_proto::cluster::Endpoint<'_>| json!({"host": text(e.host), "port": e.port});
-    json!({
+    let mut parsed = json!({
         "id": member.id, "ingress": endpoint(&member.ingress), "consensus": endpoint(&member.consensus),
         "log": endpoint(&member.log), "catchup": endpoint(&member.catchup), "archive": endpoint(&member.archive),
-    })
+    });
+    // A vector names `standby` for a member the string marks and has no such field
+    // for a voter (`spec/cluster.md`, "Vectors").
+    if member.standby {
+        parsed["standby"] = json!(true);
+    }
+    parsed
 }
 
 fn members_vector(name: &str, vector: &Value) {

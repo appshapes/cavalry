@@ -30,8 +30,8 @@ use cavalry_shm::counters::generated::{
     CLUSTER_HIGHER_TERMS_SEEN, CLUSTER_JOIN_POSITION_MISMATCHES, CLUSTER_LEADER_HEARTBEAT_TIMEOUTS,
     CLUSTER_LEADER_QUORUM_LOSSES, CLUSTER_LEADER_STEP_DOWNS, CLUSTER_LEADERSHIP_TERMS_IGNORED,
     CLUSTER_LOG_IMAGES_LOST, CLUSTER_LOG_REPLICATIONS, CLUSTER_LOG_REPLICATIONS_UNAVAILABLE,
-    CLUSTER_LOG_TRUNCATIONS, CLUSTER_TERMS_DROPPED, CLUSTER_TERMS_LED, CLUSTER_TRUNCATIONS_REFUSED,
-    CLUSTER_VOTES_AGAINST, CLUSTER_VOTES_FOR,
+    CLUSTER_LOG_TRUNCATIONS, CLUSTER_STANDBY_VOTE_REQUESTS, CLUSTER_TERMS_DROPPED,
+    CLUSTER_TERMS_LED, CLUSTER_TRUNCATIONS_REFUSED, CLUSTER_VOTES_AGAINST, CLUSTER_VOTES_FOR,
 };
 
 /// The cluster session id of a session message of no session: one the leader's own
@@ -394,7 +394,8 @@ pub trait Io {
     fn remove_catchup(&mut self) -> Result<bool, Self::Fault>;
 }
 
-/// Why [`Consensus::with_election`] refused its members. The members are checked in
+/// Why [`Consensus::with_election`] or [`Consensus::with_standbys`] refused its
+/// members. The members are checked in
 /// the order of `spec/cluster.md`, "What a reader rejects", each check over every
 /// member, and each variant is one check, named by [`MembersRefused::reason`].
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
@@ -416,6 +417,11 @@ pub enum MembersRefused {
         /// How many were given.
         found: usize,
     },
+    /// `members-voters`: every member is a standby, so none has a vote (ADR 0134).
+    NoVoter {
+        /// How many members were given, each a standby.
+        standbys: usize,
+    },
     /// `members-self`: the member's own id is not among the members.
     NotAMember {
         /// The id.
@@ -431,6 +437,7 @@ impl MembersRefused {
             MembersRefused::Empty | MembersRefused::Negative { .. } => "members-grammar",
             MembersRefused::Duplicate { .. } => "members-duplicate",
             MembersRefused::Count { .. } => "members-count",
+            MembersRefused::NoVoter { .. } => "members-voters",
             MembersRefused::NotAMember { .. } => "members-self",
         }
     }
@@ -459,6 +466,12 @@ impl core::fmt::Display for MembersRefused {
                 f,
                 "members refused ({reason}): {found} members, and a cluster has at most \
                  {MAX_MEMBERS}; give the members string of the cluster"
+            ),
+            MembersRefused::NoVoter { standbys } => write!(
+                f,
+                "members refused ({reason}): each of the {standbys} members is a standby, \
+                 so no member has a vote and none can lead; take `,standby` off the \
+                 members that vote"
             ),
             MembersRefused::NotAMember { id } => write!(
                 f,
@@ -602,11 +615,15 @@ pub struct Counts {
     /// leader's record lacks, on a new leadership term that named a term below its
     /// own log term (ADR 0096).
     pub terms_dropped: u64,
+    /// `cluster.standby_vote_requests`: a request vote the member read as a standby
+    /// and answered with nothing: the candidate's members string gives this member a
+    /// vote, and the member's own does not (ADR 0134).
+    pub standby_vote_requests: u64,
 }
 
 impl Counts {
     /// How many counts a member keeps: one counter of `counters.toml` each.
-    pub const LEN: usize = 22;
+    pub const LEN: usize = 23;
 
     /// Each count with the id of its counter in `counters.toml`, the constant
     /// `cavalry-shm` generates from it: what the consensus module stores, each as a
@@ -660,6 +677,7 @@ impl Counts {
             ),
             (CLUSTER_CATCHUPS, self.catchups),
             (CLUSTER_TERMS_DROPPED, self.terms_dropped),
+            (CLUSTER_STANDBY_VOTE_REQUESTS, self.standby_vote_requests),
         ]
     }
 }
@@ -889,9 +907,18 @@ const LIVE_ADD_WINDOW: i64 = {
 /// positions it knows. See the module's page for how it is driven.
 #[derive(Debug)]
 pub struct Consensus {
+    /// The members this member's string names: the voters in the first `count`
+    /// places, in the order they were given, and the standbys in the places after
+    /// them, up to `members` (ADR 0134).
     peers: [Peer; MAX_MEMBERS],
+    /// How many members have a vote. Every count of the election is over them: a
+    /// quorum, the quorum position, a leader's active members, a canvassing member's
+    /// candidacy and a ballot (`spec/cluster.md`, "Standbys").
     count: usize,
-    /// This member's place in `peers`.
+    /// How many members there are, voters and standbys: the members this member
+    /// sends to and reads from.
+    members: usize,
+    /// This member's place in `peers`: at or past `count` when it is a standby.
     own: usize,
     /// The member this member leads as or follows: −1 from init until the member
     /// leads a term or takes a leader's new leadership term.
@@ -975,30 +1002,54 @@ impl Consensus {
     /// the replication of a term a member missed (ADR 0085, ADR 0086) and the catch-up
     /// within a leader's term (ADR 0087, ADR 0088), the leader's side of each and the
     /// member's, and a member's start on the log it kept (ADR 0089). It is the one
-    /// constructor: the consensus module builds its core with it (ADR 0100). The
-    /// module refuses a log directory that holds a term, which this core would start
-    /// on: see the crate's README.
+    /// constructor of a member whose string marks no standby: every member votes.
+    /// [`Consensus::with_standbys`] is the one the consensus module builds its core
+    /// with (ADR 0100, ADR 0134). The module refuses a log directory that holds a
+    /// term, which this core would start on: see the crate's README.
     pub fn with_election(
         member_ids: &[i32],
         member_id: i32,
         seed: u64,
     ) -> Result<Self, MembersRefused> {
-        // `spec/cluster.md`, "What a reader rejects": grammar, duplicate, count and self,
-        // in that order, each over every member.
-        if member_ids.is_empty() {
+        Self::with_standbys(member_ids, &[], member_id, seed)
+    }
+
+    /// A member with id `member_id` among the voters with `voter_ids` and the standbys
+    /// with `standby_ids`, as its members string marks them (`spec/cluster.md`,
+    /// "Standbys"; ADR 0134), otherwise as [`Consensus::with_election`] makes it. A
+    /// member whose own id is among `standby_ids` is a standby: it canvasses and
+    /// follows as a voter does, never nominates itself, and answers a request vote
+    /// with nothing. A voter counts the voters alone, for a quorum, for a commit and
+    /// for its ballot, and it sends to every member and reads every member's
+    /// messages, a standby's as a voter's. Members with no voter among them are
+    /// refused, `members-voters`, after the count and before the member's own id.
+    pub fn with_standbys(
+        voter_ids: &[i32],
+        standby_ids: &[i32],
+        member_id: i32,
+        seed: u64,
+    ) -> Result<Self, MembersRefused> {
+        // `spec/cluster.md`, "What a reader rejects": grammar, duplicate, count, voters
+        // and self, in that order, each over every member.
+        let ids = || voter_ids.iter().chain(standby_ids.iter()).copied();
+        if ids().next().is_none() {
             return Err(MembersRefused::Empty);
         }
-        if let Some(&id) = member_ids.iter().find(|&&id| id < 0) {
+        if let Some(id) = ids().find(|&id| id < 0) {
             return Err(MembersRefused::Negative { id });
         }
-        for (index, &id) in member_ids.iter().enumerate() {
-            if member_ids.iter().take(index).any(|&other| other == id) {
+        for (index, id) in ids().enumerate() {
+            if ids().take(index).any(|other| other == id) {
                 return Err(MembersRefused::Duplicate { id });
             }
         }
-        let count = member_ids.len();
-        if count > MAX_MEMBERS {
-            return Err(MembersRefused::Count { found: count });
+        let members = voter_ids.len().saturating_add(standby_ids.len());
+        if members > MAX_MEMBERS {
+            return Err(MembersRefused::Count { found: members });
+        }
+        let count = voter_ids.len();
+        if count == 0 {
+            return Err(MembersRefused::NoVoter { standbys: members });
         }
         let mut peers = [Peer {
             id: -1,
@@ -1009,7 +1060,8 @@ impl Consensus {
             appended: false,
         }; MAX_MEMBERS];
         let mut own = None;
-        for (index, (&id, peer)) in member_ids.iter().zip(peers.iter_mut()).enumerate() {
+        // The voters first, then the standbys: a place below `count` is a voter's.
+        for (index, (id, peer)) in ids().zip(peers.iter_mut()).enumerate() {
             peer.id = id;
             if id == member_id {
                 own = Some(index);
@@ -1021,6 +1073,7 @@ impl Consensus {
         Ok(Self {
             peers,
             count,
+            members,
             own,
             leader_id: -1,
             // A xorshift generator holds at 0, so a seed of 0 is given a state of
@@ -1064,6 +1117,30 @@ impl Consensus {
             catching: None,
             cause: ElectionCause::Started,
         })
+    }
+
+    /// Whether this member's own members string marks it a standby: a member that
+    /// follows the log and has no vote (`spec/cluster.md`, "Standbys"; ADR 0134). It
+    /// is what `cluster.standby` holds, and it does not change while the member runs.
+    pub fn is_standby(&self) -> bool {
+        self.own >= self.count
+    }
+
+    /// The members to which this member's own string gives a vote, as
+    /// `cluster.voters` holds them (`spec/cluster.md`, "Counters"): one bit for each
+    /// member in the rising order of their ids, the lowest id's bit the lowest, set
+    /// for a voter. Members that run one string hold one value.
+    pub fn voters(&self) -> i64 {
+        let all = self.peers.get(..self.members).unwrap_or(&[]);
+        let mut mask = 0i64;
+        for voter in all.iter().take(self.count) {
+            // The voter's place among the ids, lowest first: at most 7.
+            let place = all.iter().filter(|other| other.id < voter.id).count();
+            if let Ok(place) = u32::try_from(place) {
+                mask |= 1i64.checked_shl(place).unwrap_or(0);
+            }
+        }
+        mask
     }
 
     /// This member's id.
@@ -1238,9 +1315,12 @@ impl Consensus {
             } => {
                 // A vote for this member's ballot, kept with the term it answers: the
                 // ballot counts the votes for the candidate's current term alone.
+                // A vote of a member this member's string marks a standby is not
+                // kept: the ballot is the voters' (`spec/cluster.md`, "Standbys").
                 if self.state == ElectionState::CandidateBallot
                     && candidate_member_id == self.member_id()
                     && let Some(index) = self.other(follower_member_id)
+                    && index < self.count
                     && let Some(slot) = self.votes.get_mut(index)
                 {
                     *slot = Some(Vote {
@@ -1649,12 +1729,12 @@ impl Consensus {
         })
     }
 
-    /// The place of another member with `id`, `None` for this member's own id and for
-    /// an id no member has.
+    /// The place of another member with `id`, a voter or a standby, `None` for this
+    /// member's own id and for an id no member has.
     fn other(&self, id: i32) -> Option<usize> {
         self.peers
             .iter()
-            .take(self.count)
+            .take(self.members)
             .position(|peer| peer.id == id)
             .filter(|&index| index != self.own)
     }
@@ -1817,6 +1897,18 @@ impl Consensus {
         io: &mut I,
     ) -> Result<(), I::Fault> {
         if self.other(candidate_member_id).is_none() {
+            return Ok(());
+        }
+        // A standby has no vote. It answers nothing in any state, since a vote
+        // against would end the candidate's ballot, and it keeps its candidate term.
+        // The request reached it because the candidate's members string gives it a
+        // vote, which is counted. With the request's term it does what a voter does
+        // once its election has closed (`spec/cluster.md`, "Standbys"; ADR 0134).
+        if self.is_standby() {
+            count(&mut self.counts.standby_vote_requests);
+            if self.state == ElectionState::Closed && request.candidate_term_id > self.term {
+                self.hold_election_on_higher_term(clock);
+            }
             return Ok(());
         }
         // Its election closed, a member answers no request vote and keeps its candidate
@@ -2014,7 +2106,7 @@ impl Consensus {
         // Every member is served in every cycle: one member's fault, which may last,
         // is kept and returned after the others have had their turn.
         let mut fault = None;
-        for index in 0..self.count {
+        for index in 0..self.members {
             match self.serve_member(index, io) {
                 Ok(served) => work = work.max(served),
                 Err(error) => {
@@ -2113,14 +2205,14 @@ impl Consensus {
         // And it serves no member from here: a replay it runs is stopped, and it
         // asks no more about one it had stopped already. A fault leaves the rest for
         // the next cycle.
-        for index in 0..self.count {
+        for index in 0..self.members {
             if matches!(self.serving(index), Serving::Running) {
                 io.stop_replay(self.peer(index).id)?;
             }
             self.serve(index, Serving::Idle);
         }
         self.candidate_term = self.candidate_term.max(self.log_term);
-        for peer in self.peers.iter_mut().take(self.count) {
+        for peer in self.peers.iter_mut().take(self.members) {
             peer.reported = false;
         }
         // The election begins with no member heard, no vote held and no leader taken.
@@ -2128,9 +2220,11 @@ impl Consensus {
         self.votes = [None; MAX_MEMBERS];
         self.requested = [false; MAX_MEMBERS];
         self.leader_id = -1;
-        // A cluster of one member leads from init, with nobody to canvass. A fault
-        // at its writes leaves it in init with nothing counted.
-        if self.count == 1 {
+        // A cluster of one member leads from init, with nobody to canvass, and so
+        // does the only voter of a string, whose standbys follow it. A standby beside
+        // one voter canvasses, as every standby does. A fault at its writes leaves it
+        // in init with nothing counted.
+        if self.count == 1 && !self.is_standby() {
             let work = self.lead(clock, io)?;
             count(&mut self.counts.elections);
             return Ok(work);
@@ -2168,7 +2262,7 @@ impl Consensus {
             follower_member_id: self.member_id(),
             protocol_version: PROTOCOL_VERSION,
         };
-        for index in 0..self.count {
+        for index in 0..self.members {
             if index != self.own {
                 io.send(self.peer(index).id, &message);
             }
@@ -2210,6 +2304,12 @@ impl Consensus {
     /// then on, which has passed when a follower's election begins for want of that
     /// word. The delay nominate waits is drawn here, up to half the election timeout.
     fn nominate_when_a_candidate(&mut self, clock: Clock) -> usize {
+        // A standby never goes to nominate: it asks for no vote and leads no term
+        // (`spec/cluster.md`, "Standbys"; ADR 0134). It canvasses until a leader
+        // answers it.
+        if self.is_standby() {
+            return 0;
+        }
         let deadline_passed = if self.startup {
             clock.now_ns.saturating_sub(self.state_since_ns) >= STARTUP_CANVASS_TIMEOUT_NS
         } else {
@@ -2475,7 +2575,7 @@ impl Consensus {
             log_position: self.commit_position,
             leader_member_id: self.member_id(),
         };
-        for index in 0..self.count {
+        for index in 0..self.members {
             if index != self.own {
                 io.send(self.peer(index).id, &message);
             }
@@ -2490,7 +2590,7 @@ impl Consensus {
             return 0;
         }
         self.last_heartbeat_ns = Some(clock.now_ns);
-        for index in 0..self.count {
+        for index in 0..self.members {
             if index != self.own {
                 self.announce_to(index, clock, io);
             }
@@ -2768,7 +2868,7 @@ impl Consensus {
         // votes in a term above its leader's. It canvasses with no report, as a
         // member does from init, and its leader answers its canvass position (ADR
         // 0106).
-        for peer in self.peers.iter_mut().take(self.count) {
+        for peer in self.peers.iter_mut().take(self.members) {
             peer.reported = false;
         }
         Ok(self.step(ElectionState::Canvass, clock))

@@ -54,7 +54,8 @@ use cavalry_shm::counters::generated::{
     CLUSTER_ELECTION_STATE, CLUSTER_LEADER_MEMBER_ID, CLUSTER_LEADERSHIP_TERM_ID,
     CLUSTER_LOG_RECORDING_ID, CLUSTER_LOG_RECORDINGS_FORGOTTEN, CLUSTER_LOG_RECORDINGS_LISTED,
     CLUSTER_LOG_RECORDINGS_UNSYNCED, CLUSTER_LOG_RECORDINGS_UNWRITTEN, CLUSTER_MESSAGES_REJECTED,
-    CLUSTER_ROLE, CLUSTER_SESSIONS, CLUSTER_TRUNCATIONS_FINISHED, COUNTERS,
+    CLUSTER_ROLE, CLUSTER_SESSIONS, CLUSTER_STANDBY, CLUSTER_TRUNCATIONS_FINISHED, CLUSTER_VOTERS,
+    COUNTERS,
 };
 
 use crate::consensus::{
@@ -2698,6 +2699,11 @@ struct Counters {
     leader_member_id: Stored,
     /// `cluster.election_cause`: why its last election began (ADR 0102).
     election_cause: Stored,
+    /// `cluster.voters` and `cluster.standby`: which members the member's own string
+    /// gives a vote, and whether it marks the member itself a standby (ADR 0134).
+    /// Stored once, when they are added: a member takes its string when it starts.
+    _voters: Stored,
+    _standby: Stored,
     append_position: Stored,
     /// `cluster.log_recording_id`, added before `cluster.commit_position` and stored
     /// before it (`spec/cluster.md`, "The service").
@@ -2755,6 +2761,12 @@ impl Counters {
                 CLUSTER_ELECTION_CAUSE,
                 "cluster.election_cause",
                 i64::from(core.election_cause().code()),
+            )?,
+            _voters: add(CLUSTER_VOTERS, "cluster.voters", core.voters())?,
+            _standby: add(
+                CLUSTER_STANDBY,
+                "cluster.standby",
+                i64::from(core.is_standby()),
             )?,
             append_position: add(
                 CLUSTER_APPEND_POSITION,
@@ -2974,9 +2986,21 @@ impl ConsensusModule {
         let count = parse_members(members.as_bytes(), &mut parsed, Some(member_id))
             .map_err(RaftError::Members)?;
         let parsed = parsed.get(..count).unwrap_or(&[]);
-        let mut ids = [0i32; MAX_MEMBERS];
-        for (slot, member) in ids.iter_mut().zip(parsed) {
-            *slot = member.id;
+        // The members the string gives a vote, and those it marks standbys, each in
+        // the string's order (`spec/cluster.md`, "Standbys"; ADR 0134).
+        let mut voters = [0i32; MAX_MEMBERS];
+        let mut standbys = [0i32; MAX_MEMBERS];
+        let (mut voting, mut standing) = (0usize, 0usize);
+        for member in parsed {
+            let (ids, held) = if member.standby {
+                (&mut standbys, &mut standing)
+            } else {
+                (&mut voters, &mut voting)
+            };
+            if let Some(slot) = ids.get_mut(*held) {
+                *slot = member.id;
+                *held = held.saturating_add(1);
+            }
         }
         // The seed of the member's nomination delays: the operating system's, through
         // the standard library's `RandomState`, mixed with the member id, so that two
@@ -2987,8 +3011,13 @@ impl ConsensusModule {
             hasher.write_i32(member_id);
             hasher.finish()
         };
-        let core = Consensus::with_election(ids.get(..count).unwrap_or(&[]), member_id, seed)
-            .map_err(RaftError::Member)?;
+        let core = Consensus::with_standbys(
+            voters.get(..voting).unwrap_or(&[]),
+            standbys.get(..standing).unwrap_or(&[]),
+            member_id,
+            seed,
+        )
+        .map_err(RaftError::Member)?;
         let Some(own) = parsed.iter().find(|member| member.id == member_id) else {
             return Err(RaftError::Member(MembersRefused::NotAMember {
                 id: member_id,

@@ -54,7 +54,9 @@ committed once a quorum, two of three, has it on disk.
    ```
 
    Every member must be given the same string. The members elect one of them as the
-   leader; which one is not the same at every start.
+   leader; which one is not the same at every start. A member whose entry ends in a
+   seventh field, `,standby`, is a standby: it follows the log and has no vote, and
+   [Promote a standby to a voter](promote-a-standby.md) gives it one.
 
 2. Check the string before anything starts:
 
@@ -95,7 +97,9 @@ committed once a quorum, two of three, has it on disk.
    election closed`, with the same two positions once their recorders have synced,
    which each member asks its recorder for as soon as an entry is written, and name
    the leader: `; it follows member 2; its last election began because the member
-   started`. The term is 1 or more where two members asked for votes at the same
+   started`. Every line then names the members that the member's own string gives a
+   vote to, `; its members string gives a vote to members 0, 1 and 2`, the same on
+   the three. The term is 1 or more where two members asked for votes at the same
    moment and another ballot was taken. Each line ends with `; see` and the page that
    explains it, as every finding does.
 
@@ -257,7 +261,12 @@ committed once a quorum, two of three, has it on disk.
   That position assumes a service whose program calls `ClusterService::restore`
   before its first poll. A service whose program takes snapshots and never calls
   it reads the member's log from position 0 at every start: beside it, purge
-  nothing, whatever the gauge says. The member cannot tell the two apart.
+  nothing, whatever the gauge says. The member cannot tell the two apart. And the
+  position is of the newest snapshots the member lists: purge by it only while
+  this member's `cluster.snapshots_passed_over` and
+  `cluster.service_snapshots_passed_over` are 0, since a start that passed a
+  snapshot over read its log from an older one, or from position 0, and the next
+  start does so again.
   Start the member with the log directory it had, whole. If that directory is
   lost, do as for a directory with no file, above.
 - `cavalry run: member refused (log-short)`: the `catalog` in the member's log
@@ -464,12 +473,33 @@ committed once a quorum, two of three, has it on disk.
   log directory failed. The service takes the next snapshot by itself, when the
   leader's log has grown by 256 MiB. A count that no longer rises is a fault that
   has passed.
+- `WARN cluster-voters`: this member runs with a members string that gives a vote
+  to other members than `CAVALRY_CLUSTER_MEMBERS` does on its host. The line names
+  both sets. A member takes the string when it starts. While a standby is promoted,
+  the members are started with the new string one at a time, and each has this line
+  until its turn: [Promote a standby to a voter](promote-a-standby.md). With no
+  change under way, one of the two strings is older. Read the voters at the end of
+  the other members' `note cluster-member` lines: with no change under way they
+  are one set, those of the cluster's newest string. If the variable on this host
+  is the older, correct the variable and start nothing. If the member runs the
+  older, start the member again with the newest. Never start a member with the
+  older one. Do not leave it: two members whose strings differ by more than one
+  member's `standby` mark can elect a leader that lacks an entry the cluster
+  committed.
+- `WARN cluster.standby_vote_requests`: this member is a standby, and a member
+  whose string gives it a vote asked it for one. It gave none. The two ran with
+  strings that differ. Read the voters at the end of every member's `note
+  cluster-member` line, which are one set where the strings agree, and start the
+  member whose line differs with the cluster's string. A member whose host holds
+  an older string prints no `WARN cluster-voters`. The count stays until this
+  member starts again: [Promote a standby to a voter](promote-a-standby.md).
 - `WARN cluster.service_snapshots_passed_over`: the service beside this member was
   told of a snapshot when it started, and could not take it. It read the log from
   position 0. Nothing committed is lost. If this member's log no longer begins at
   0, the service's own error says that its replay was refused, and the service
   does not run. Start the service once more first: a snapshot that the driver did
-  not play back within 5 s, as on a loaded host, is one the next start reads. When
+  not play back within 5 s, as on a loaded host, is one the next start reads, and
+  so is one whose replay another client stopped before the recording's end. When
   it is passed over again, the snapshot's recording is gone from the log
   directory, or the driver found it damaged, which `recording.invalidated` on this
   member's driver counts: check the log directory's device. The service takes its
