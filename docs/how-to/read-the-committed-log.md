@@ -181,9 +181,9 @@ its services read what it appends in the same way.
   member holds in its recording of a catch-up and that its live recording has not
   reached yet: the program reads on by itself when it has
   ([ADR 0135](../decisions/0135-answer-no-log-yet-where-a-members-live-recording-has-not-reached-the-position.md)).
-- `error 23 (position out of range)`: `--from` is not a multiple of 32, or is below
-  every recording of its log that the member keeps. The message gives the bounds of
-  the recording the driver was asked for. When that recording
+- `error 23 (position out of range)`: `--from` is below every recording of its log
+  that the member keeps. The message gives the bounds of the recording the driver
+  was asked for. When that recording
   begins above `--from`, the member no longer keeps the recording that held that
   position: a member keeps the last 1,024 recordings of its log that it stopped, one
   for each time it joined the log, led a term or caught up through a replay, and
@@ -232,12 +232,18 @@ its services read what it appends in the same way.
   before it asked the driver.
 - `error 10 (resource temporarily unavailable)`: the driver already plays 64 replays.
   Each service holds one while it runs. Stop the services that are not needed.
-- `cluster-service: the member's log ended`: the member closed or left its log while
-  the service read it, and names no recording now. The service has read every
-  committed entry up to the position in the message: it read on after the member
-  stopped, up to the last commit position it had taken. Start it again with `--from`
-  that position once the member runs. It then reads the recording that holds that
-  position, the one the member left, and goes on in the member's next.
+- `cluster-service: the member has no log from position ... now`, and the program
+  stops: one of two things. The member closed or left its log while the service
+  read it, and names no recording now. The service has read every committed entry
+  up to the position in the message: it read on after the member stopped, up to
+  the last commit position it had taken. Or the member runs, its `doctor` line
+  says `election closed`, and its live recording has not reached that position
+  yet: the member caught up through a replay that ended ahead of its live log, and
+  the service has read that replay's recording to its end
+  ([ADR 0135](../decisions/0135-answer-no-log-yet-where-a-members-live-recording-has-not-reached-the-position.md)).
+  In both cases start it again with `--from` that position. It waits until the
+  member has a log there, then reads the recording that holds that position and
+  goes on in the member's next.
   When the member's driver stopped with it, as `cavalry run` stops both, the program's
   last line is `client closed (driver-closed)` and it exits 1: the position in the
   line before it still holds.

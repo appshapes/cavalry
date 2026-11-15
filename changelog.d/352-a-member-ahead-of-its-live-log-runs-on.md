@@ -10,7 +10,9 @@
   `cavalry_committed_log` answer a service beside it with no log, `None` and a
   null handle, where they returned the refusal. A position past the end of a
   member's log is answered so too, where it was refused with error 23:
-  `cluster-service --from` with such a position now waits. Error 23 is still the
+  `cluster-service --from` with such a position now waits, and the example's last
+  line when its member has no log at its position reads `the member has no log
+  from position`, where it read `the member's log ended`. Error 23 is still the
   answer for a position that is not a multiple of 32, for one below every recording
   the member keeps, and for one that a purge of a stopped member's log took
   ([Read the committed log](docs/how-to/read-the-committed-log.md#when-it-does-not-work);

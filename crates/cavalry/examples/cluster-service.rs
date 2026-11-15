@@ -270,7 +270,7 @@ fn run(args: &Args) -> Result<(), Box<dyn std::error::Error>> {
             // between two recordings, or its live recording has not reached the
             // position yet (ADR 0135). The next run starts here.
             eprintln!(
-                "cluster-service: the member's log ended; read to position {}",
+                "cluster-service: the member has no log from position {} now",
                 log.position()
             );
             break;
