@@ -54,9 +54,12 @@ is allowed here.
   write for its service (`cluster.log_recordings_unwritten`), the list of them in
   its log directory that it could not write or sync
   (`cluster.log_recordings_unsynced`), a recording of its log that it forgot,
-  after which it does not start again on its log directory
-  (`cluster.log_recordings_forgotten`), and a snapshot of its consensus module that
-  it gave up, with nothing committed lost (`cluster.snapshots_failed`; ADR 0129). A
+  after which it starts again on its log directory only from a snapshot at or above
+  where its log then begins
+  (`cluster.log_recordings_forgotten`), a snapshot of its consensus module that
+  it gave up, with nothing committed lost (`cluster.snapshots_failed`; ADR 0129),
+  and a snapshot that its start could not read and passed over for an older one, or
+  for none (`cluster.snapshots_passed_over`; ADR 0130). A
   client's session with a cluster keeps its
   counter on the client's own driver, keyed by the session's id and not by a member's
   (ADR 0121): `doctor` takes it for no member, and reports the stale replies a

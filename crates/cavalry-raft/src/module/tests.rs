@@ -2939,9 +2939,22 @@ fn read_back(
     catalog: &[(i64, Cataloged)],
     live_stop: i64,
 ) -> (KeptLog, Vec<i64>) {
+    read_back_from(floor, 0, list, catalog, live_stop)
+}
+
+/// [`read_back`] for a start that took a snapshot of position `from`, from which it
+/// reads its log; 0 is a start that took none.
+fn read_back_from(
+    floor: i64,
+    from: i64,
+    list: &[ListedRecording],
+    catalog: &[(i64, Cataloged)],
+    live_stop: i64,
+) -> (KeptLog, Vec<i64>) {
     let mut stops = Vec::new();
     let result = kept_log(
         floor,
+        from,
         list,
         |recording_id| {
             Ok(catalog
@@ -3180,7 +3193,7 @@ fn a_start_is_refused_on_a_log_the_member_forgot_a_recording_of() {
         assert!(
             matches!(
                 &refused,
-                RaftError::LogForgotten { floor_position, recordings: named }
+                RaftError::LogForgotten { floor_position, from_position: 0, recordings: named, .. }
                     if *floor_position == floor && *named == recordings
             ),
             "{refused}"
@@ -3229,7 +3242,8 @@ fn a_start_is_refused_on_a_log_the_member_forgot_a_recording_of() {
         .map(|id| (id, stopped(id * 32, id * 32 + 32)))
         .collect();
     let (read, stops) = read_back(0, &list, &catalog, 0);
-    let text = refused(read, 0, cavalry_log::recordings::MAX_ENTRIES);
+    // The 1,024 it would keep begin where the third recording does.
+    let text = refused(read, 64, cavalry_log::recordings::MAX_ENTRIES);
     assert!(
         text.contains("names 1026 recordings that hold a part of its log, and a member keeps 1024"),
         "{text}"
@@ -3249,7 +3263,8 @@ fn a_start_is_refused_on_a_log_the_member_forgot_a_recording_of() {
     let mut list = list;
     list[last].start_position = (count - 2) * 32;
     let (read, stops) = read_back(0, &list, &catalog, count * 32);
-    refused(read, 0, KEPT_RECORDINGS + 1);
+    // The 1,024 it would keep begin where the second recording does.
+    refused(read, 32, KEPT_RECORDINGS + 1);
     assert_eq!(stops, vec![count - 1], "the recording still being made");
 
     // Stopped where it began, it holds nothing: the log is in 1,024 recordings,
@@ -3261,6 +3276,152 @@ fn a_start_is_refused_on_a_log_the_member_forgot_a_recording_of() {
     assert_eq!(kept.first().map(|kept| kept.recording_id), Some(0));
     assert_eq!(kept.last().map(|kept| kept.recording_id), Some(count - 3));
     assert_eq!(stops, vec![count - 1]);
+}
+
+/// A start that took a snapshot reads its log from the snapshot's position, so its
+/// log need be whole from there and no further back (`spec/cluster.md`, "A member's
+/// start"; ADR 0130): a floor at or below that position, recordings purged below it,
+/// and a log in more recordings than a member keeps are each a log the member
+/// starts on, and each is refused when the snapshot is below where the log begins.
+#[test]
+fn a_start_from_a_snapshot_needs_its_log_from_the_snapshots_position_alone() {
+    let kept = |read: KeptLog| read.expect("the log is read back");
+    let forgotten = |read: KeptLog, floor: i64, from: i64, recordings: usize| {
+        let refused = read.expect_err("a log that begins above the snapshot");
+        assert!(
+            matches!(
+                &refused,
+                RaftError::LogForgotten { floor_position, from_position, recordings: named, .. }
+                    if *floor_position == floor && *from_position == from && *named == recordings
+            ),
+            "{refused}"
+        );
+        refused.to_string()
+    };
+    // The member forgot the recordings below 320 while it ran. A snapshot of 320,
+    // or of a position above it, starts the member on the three that are left.
+    let list = [listed(4, 320), listed(5, 416), listed(6, 512)];
+    let catalog = [
+        (4, stopped(320, 416)),
+        (5, stopped(416, 512)),
+        (6, stopped(512, 608)),
+    ];
+    for from in [320, 352, 608] {
+        let (read, _) = read_back_from(320, from, &list, &catalog, 0);
+        let (table, end) = kept(read);
+        assert_eq!(end, 608, "from {from}");
+        assert_eq!(
+            table
+                .iter()
+                .map(|kept| kept.recording_id)
+                .collect::<Vec<_>>(),
+            [4, 5, 6],
+            "from {from}"
+        );
+    }
+    // A snapshot below the floor does not: the log between the two is gone.
+    let (read, stops) = read_back_from(320, 288, &list, &catalog, 0);
+    let text = forgotten(read, 320, 288, 3);
+    assert!(
+        text.contains(
+            "begins at position 320, and the newest snapshot the member can read is of \
+             position 288, below that"
+        ),
+        "{text}"
+    );
+    assert!(
+        text.contains("reads its log from its newest snapshot's position"),
+        "{text}"
+    );
+    assert!(stops.is_empty(), "stopped {stops:?}");
+
+    // The log's first two recordings purged below a snapshot of 512: the catalog
+    // lacks them, the third begins at the snapshot's position, and the member
+    // starts on it. The table leaves the purged ones out.
+    let list = [listed(1, 0), listed(2, 256), listed(3, 512), listed(4, 640)];
+    let purged = [(3, stopped(512, 640)), (4, stopped(640, 768))];
+    for from in [512, 544, 768] {
+        let (read, _) = read_back_from(0, from, &list, &purged, 0);
+        let (table, end) = kept(read);
+        assert_eq!(end, 768, "from {from}");
+        assert_eq!(
+            table
+                .iter()
+                .map(|kept| (kept.recording_id, kept.start))
+                .collect::<Vec<_>>(),
+            [(3, 512), (4, 640)],
+            "from {from}"
+        );
+    }
+    // The same purge with no snapshot, or with one below what is left, is a
+    // recording missing before one that is held, as it was before a member took
+    // snapshots: the directory is not as the member left it.
+    for from in [0, 480] {
+        let (read, stops) = read_back_from(0, from, &list, &purged, 0);
+        let refused = read.expect_err("recordings missing below one that is held");
+        assert!(
+            matches!(
+                &refused,
+                RaftError::ListedRecording {
+                    recording_id: 1,
+                    found: ListedFound::Missing,
+                    ..
+                }
+            ),
+            "from {from}: {refused}"
+        );
+        assert!(stops.is_empty(), "stopped {stops:?}");
+    }
+    // A recording missing between two that are held is never a purge below a
+    // snapshot, whatever the snapshot's position.
+    let hole = [
+        (1, stopped(0, 256)),
+        (3, stopped(512, 640)),
+        (4, stopped(640, 768)),
+    ];
+    let (read, _) = read_back_from(0, 768, &list, &hole, 0);
+    let refused = read.expect_err("a recording missing between two that are held");
+    assert!(
+        matches!(
+            &refused,
+            RaftError::ListedRecording {
+                recording_id: 2,
+                found: ListedFound::Missing,
+                ..
+            }
+        ),
+        "{refused}"
+    );
+
+    // 1,026 recordings that hold bytes, every one stopped. With a snapshot at or
+    // above where the newest 1,024 begin, the start keeps those and forgets two.
+    let count = i64::try_from(cavalry_log::recordings::MAX_ENTRIES).expect("a count");
+    let list: Vec<ListedRecording> = (0..count).map(|id| listed(id, id * 32)).collect();
+    let catalog: Vec<(i64, Cataloged)> = (0..count)
+        .map(|id| (id, stopped(id * 32, id * 32 + 32)))
+        .collect();
+    let (read, stops) = read_back_from(0, 64, &list, &catalog, 0);
+    let (table, end) = kept(read);
+    assert_eq!(end, count * 32);
+    assert_eq!(table.len(), KEPT_RECORDINGS);
+    assert_eq!(
+        table.first().map(|kept| (kept.recording_id, kept.start)),
+        Some((2, 64))
+    );
+    assert_eq!(table.last().map(|kept| kept.recording_id), Some(count - 1));
+    assert!(stops.is_empty(), "stopped {stops:?}");
+    // A snapshot one frame below where they begin does not start the member.
+    let (read, stops) = read_back_from(0, 32, &list, &catalog, 0);
+    let text = forgotten(read, 64, 32, cavalry_log::recordings::MAX_ENTRIES);
+    assert!(
+        text.contains(
+            "names 1026 recordings that hold a part of its log, and a member keeps 1024: the \
+             member would forget the oldest, and the ones it keeps begin at position 64, and \
+             the newest snapshot the member can read is of position 32, below that"
+        ),
+        "{text}"
+    );
+    assert!(stops.is_empty(), "stopped {stops:?}");
 }
 
 /// The record of a member's log's recordings as its log directory holds it, read
@@ -3906,7 +4067,9 @@ fn a_truncation_that_empties_the_table_keeps_where_the_log_ends() {
             &refused,
             RaftError::LogForgotten {
                 floor_position: 128,
-                recordings: 0
+                from_position: 0,
+                recordings: 0,
+                snapshots_passed_over: 0
             }
         ),
         "{refused}"
@@ -3914,6 +4077,25 @@ fn a_truncation_that_empties_the_table_keeps_where_the_log_ends() {
     let text = refused.to_string();
     assert!(
         text.contains("begins at position 128 and not at 0"),
+        "{text}"
+    );
+    // No snapshot was passed over, and the refusal does not speak of one. With some
+    // passed over it says how many and what to do first.
+    assert!(!text.contains("passed over"), "{text}");
+    let text = RaftError::LogForgotten {
+        floor_position: 128,
+        from_position: 64,
+        recordings: 3,
+        snapshots_passed_over: 2,
+    }
+    .to_string();
+    assert!(
+        text.contains(
+            "the newest snapshot the member can read is of position 64, below that. \
+             Snapshots that the start could not read, and passed over: 2. A snapshot \
+             that the driver did not play back within 5 s, as on a loaded host, is one \
+             such: start the member once more before anything else. A member that starts"
+        ),
         "{text}"
     );
     assert_eq!(record_in(&member_log_dir, 1), (128, 1, vec![]));

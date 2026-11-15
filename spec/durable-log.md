@@ -606,9 +606,10 @@ its stop position is the catalog's. A recording the member forgets, its table
 holding 1,024 stopped ones already, is counted in `cluster.log_recordings_forgotten`
 and leaves the list at the next write, whose floor position is where the oldest
 recording left begins; a list at a member's start that still names it, or whose
-floor position is above 0, is a log the member does not start on
-(`spec/cluster.md`, "A member's start"). The recovery pass of this section leaves the
-file alone, as it leaves the terms file.
+floor position is above 0, is a log that the member starts on only from a snapshot
+of a position at or above where the recordings it keeps begin (`spec/cluster.md`,
+"A member's start"; ADR 0130). The recovery pass of this section leaves the file
+alone, as it leaves the terms file.
 
 The snapshots file has one writer as well, a member's consensus module, from the
 same thread (ADR 0128). The module creates the file when there is none, as it

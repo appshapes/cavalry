@@ -5,9 +5,8 @@
   file. The three members' snapshots are of one position and hold the same bytes.
   The member's counter `cluster.snapshot_position` says where its newest snapshot
   is, and `cavalry doctor` reports `cluster.snapshots_failed` above 0, a snapshot
-  that a member gave up with its log whole. A member does not start from a
-  snapshot yet, and a service takes none: the changes that follow in work item 230
-  do ([ADR 0129](docs/decisions/0129-snapshot-a-members-sessions-when-its-read-of-its-log-reaches-the-leaders-action.md);
+  that a member gave up with its log whole. A service takes no snapshot yet: a
+  change that follows in work item 230 gives it one ([ADR 0129](docs/decisions/0129-snapshot-a-members-sessions-when-its-read-of-its-log-reaches-the-leaders-action.md);
   [the cluster protocol](docs/reference/cluster.md)).
 - `cavalry-raft`: `ConsensusModule::snapshot()` asks for a snapshot for the leader's
   own process, and `snapshot_position()` and `snapshot_counts()` say what a member

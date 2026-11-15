@@ -477,8 +477,9 @@ of the cluster. It is a recording that the member writes through its own driver,
 `cavalry:ipc` and the snapshot stream ("Values"), and lists in the snapshots file of
 its log directory (`spec/durable-log.md`, "Snapshots"; ADR 0128, ADR 0129). A reader
 given a snapshot's messages reads them as the `snapshot` stream of the vectors. A
-member of this version takes snapshots and does not yet start from one ("A member's
-start"), and a service takes none yet ("Out of this version").
+member that starts takes its state from the newest snapshot it can read, and reads
+its log from that snapshot's position ("A member's start"; ADR 0130). A service takes
+no snapshot yet ("Out of this version").
 
 **The action.** The leader asks for a snapshot by appending a cluster action whose
 action is snapshot ("Cluster action, template 23"), an entry of its own as a session
@@ -532,7 +533,8 @@ written of it lies in the publication's stream below where the next snapshot's
 recording begins. A list that cannot be written ends the member's duty
 cycle with that error, as a list of its log's recordings does. A member takes no
 snapshot for an action whose position its newest listed snapshot is at or past. A
-member that starts again reads its log from position 0 and meets such actions.
+member that started from an older snapshot than its newest listed one, or from
+none, meets such actions in its log.
 
 ### Snapshot marker, template 100
 
@@ -882,18 +884,59 @@ name is left as it is, stopped or still being made: it is no part of the member'
 log, the driver ends it with its stream, and the member's next join of a log makes a
 new recording.
 
-A member that starts holds none of its consensus module's own state, and its read of
-its committed log, which gives it that state ("Sessions"), begins at position 0:
-a member of this version takes snapshots ("Snapshots") and does not yet begin from one.
-So a member starts only on a log it holds whole from position 0. One whose file's
-floor position is above 0 has forgotten the recordings below it, and one whose file
-names more recordings that hold bytes than a member keeps, 1,024 (state 0), would
-forget the oldest as it started: neither starts. A member that forgets a recording
-while it runs goes on, its state in memory, counts it in
-`cluster.log_recordings_forgotten`, and does not start again on that log directory.
-A log directory therefore lasts a member for 1,024 recordings of its log: one for
-each log it joins, each replay it replicates or catches up by, and each term it
-leads.
+A member that starts takes its consensus module's own state from a snapshot
+("Snapshots"; ADR 0130). It reads its snapshots file (`spec/durable-log.md`,
+"Snapshots") before it reads its log back, and takes the newest snapshot of the
+consensus module, service id −1, that it can read whole. It can read a snapshot whole
+when three things hold. The catalog holds the snapshot's recording, of the snapshot
+stream, stopped and with bytes. The driver plays the recording back, on
+`cavalry:ipc` and the log replay stream, within the snapshot load timeout
+("Values"). And the recording holds the snapshot that the file's entry names: a
+snapshot marker whose mark is begin, with type id 1, the entry's log position and
+the entry's leadership term id; a cluster session for each session, at most 10, in
+the rising order of their cluster session ids, each id 0 or more and below the next
+session id of the consensus module that follows them; that consensus module; and a
+snapshot marker whose mark is end, with the same type id, position and term. A
+member's table of sessions takes those sessions whole, or the recording does not
+hold a snapshot that a member writes: one with a response channel longer than a
+session holds is such a recording. A snapshot that fails one of the three is
+passed over for the one the file lists before it, and counted in
+`cluster.snapshots_passed_over`. A member never begins its read at a snapshot's
+position with another state than that snapshot's.
+
+From the snapshot the member takes its sessions and the next session id. Each
+session is open as its committed session open event opened it on a follower
+("Sessions"): with no publication, nothing owed, and its timeout counted from when
+a leader begins to serve. The member's read of its committed log, which gives it
+the rest of that state, begins at the snapshot's log position, which
+`cluster.snapshot_start_position` holds while the member runs. With no snapshot
+that it can read, the member holds no session, the read begins at position 0, and
+the counter holds −1.
+
+So a member starts on a log that it holds whole from the position its read begins
+at, and it need hold nothing below that position. Three logs follow that a member
+starting from position 0 does not start on. A file whose floor position is at or
+below that position: the member forgot the recordings below the floor while it
+ran. A file whose first recordings are gone from the catalog, when the first
+recording that the catalog holds begins at or below that position: the recordings
+below it were purged (`spec/client-protocol.md`, "Commands", purge recording), the
+start leaves them out, and the file it then writes has that recording's start as
+its floor position. And a file that names more recordings that hold bytes than a
+member keeps, 1,024 (state 0), when the newest 1,024 begin at or below that
+position: the start forgets the others. A member whose log begins above the
+position its read begins at does not start, whichever of the three it is. A member
+that forgets a recording while it runs goes on, its state in memory, counts it in
+`cluster.log_recordings_forgotten`, and starts again on that log directory only
+from a snapshot of a position at or above where its log then begins. A log
+directory therefore lasts a member for 1,024 recordings of its log after its newest
+snapshot: one for each log it joins, each replay it replicates or catches up by,
+and each term it leads.
+
+A service still reads its member's log from position 0 ("The service"). Beside a
+member whose log no longer begins at 0 its replay is refused, as a replay of a
+position the member forgot is, until a service takes snapshots of its own, which is
+out of this version. So an operator purges below a member's snapshot only where no
+service reads that member's log from its start.
 
 A member does not start, and says why and what to do, in each of these cases. Its
 record of terms holds a term and its log directory holds no log recordings file:
@@ -906,9 +949,10 @@ the catalog holds a recording of the log's stream: a member records a term befor
 records an entry, so the record was removed, whatever else the directory holds (ADR
 0104). The file
 fails a check of `spec/durable-log.md`, "What a reader rejects", or names another
-member. Its log does not begin at 0, or is in more recordings than a member keeps,
-as above. Or the catalog holds, in place of a recording the file names: no recording,
-before one that it does hold; a recording the driver found damaged; a recording that
+member. Its log begins above the position its read of it begins at, as above. Or
+the catalog holds, in place of a recording the file names: no recording, before one
+that it does hold, which is no purge below its snapshot as above; a recording the
+driver found damaged; a recording that
 begins elsewhere or is of another stream; or a recording that begins past the
 furthest end of the ones before it. In every one of them a start would give the
 member a log shorter than the one it reported, or a module that does not know its
@@ -992,7 +1036,9 @@ follower holds the open sessions with no publication, so that a member that wins
 election has them. The member's consensus module reads its own committed log for those
 entries as a service reads it, through a replay of its recordings on the log replay
 stream and no further than its commit position ("The service"), in every role and
-every state of its election, from position 0 when it starts (ADR 0116). A member that
+every state of its election, from the log position of the snapshot it started from,
+or from position 0 when it started from none ("A member's start"; ADR 0116, ADR
+0130). A member that
 wins an election serves sessions, which is to accept a connect, append a session's
 message and send the new leader event, from when its election has closed and that read
 has reached its term base log position, which its commit position reaches once a
@@ -1392,9 +1438,9 @@ that a reader of a counters file knows which transition it saw.
 | `cluster.candidacies` | a ballot begun: a member in nominate that stored candidate term + 1, voted for itself and went to candidate ballot, `cluster.role` going to candidate (ADR 0081) |
 | `cluster.ballots_lost` | a ballot that ended with no leader for the member, which canvasses again: a candidate on a vote against its candidate term or once it holds no vote of its own for that term, at once (ADR 0105), or at the election timeout short of a quorum, a member in follower ballot whose candidate's new leadership term did not come within the election timeout, or either that reads a new leadership term for a log term that is not its own, once it has dropped any terms the message says its leader's record lacks ("Messages during an election"; ADR 0096); two members that count one with `cluster.candidacies` each are a split vote (ADR 0081) |
 | `cluster.leadership_terms_ignored` | a new leadership term ignored for its term: below the reader's candidate term in canvass, or not the candidate term in a ballot state |
-| `cluster.sessions` | a gauge: open sessions, on every member, as its log's committed session open and close events left them |
+| `cluster.sessions` | a gauge: open sessions, on every member, as the snapshot it started from and its log's committed session open and close events since left them |
 | `cluster.sessions_accepted` | a session connect the leader accepted: a session id given, and a session open event to append |
-| `cluster.sessions_opened` | a session opened by a committed session open event, on every member |
+| `cluster.sessions_opened` | a session opened by a committed session open event, on every member, or taken open from the snapshot the member started from ("A member's start"), so that this count less `cluster.sessions_closed` is `cluster.sessions` |
 | `cluster.sessions_closed` | a session closed by a committed session close event, on every member, whatever its reason |
 | `cluster.sessions_refused` | a session connect refused, with the version, the response channel or the limit as the detail |
 | `cluster.connects_dropped` | a session connect dropped unanswered: the member's pending answers at their bound, the response channel refused by the driver, the answer unsent at the session connect timeout, or a connect the leader had accepted and gave up, its session open event not taken by the log for that timeout or not committed when the leader stopped leading |
@@ -1410,7 +1456,7 @@ that a reader of a counters file knows which transition it saw.
 | `cluster.messages_rejected` | a message of this page a reader rejected, for any reason of "What a reader rejects"; and, on a member's ingress stream and in its read of its own committed log, a fragment of a message longer than one frame, a session message whose payload is longer than 1,344 bytes, and a session open or close event its table of sessions cannot hold ("Sessions") |
 | `cluster.log_recordings_listed` | a list of the recordings of the member's log written to its log recordings file and synced: the list a creation writes, and each list after it, at the four moments of `spec/durable-log.md`, "The driver" ("The log"; ADR 0108) |
 | `cluster.log_recordings_unsynced` | a duty cycle in which the member could not write or sync its log recordings file, so that the recording it had to list stayed out of its log and its append position did not count it; the next cycle writes again ("The log"; ADR 0108) |
-| `cluster.log_recordings_forgotten` | a recording of its log that the member forgot, its table holding 1,024 stopped ones already: the member replays nothing below its oldest kept recording to a member or a service from then on, and does not start again on its log directory ("A member's start"; ADR 0091, ADR 0108) |
+| `cluster.log_recordings_forgotten` | a recording of its log that the member forgot, its table holding 1,024 stopped ones already: the member replays nothing below its oldest kept recording to a member or a service from then on, and starts again on its log directory only from a snapshot of a position at or above where its log then begins ("A member's start"; ADR 0091, ADR 0108, ADR 0130) |
 | `cluster.truncations_finished` | a start that finished a truncation the member's stop had cut short: the last recordings its file names were gone from the catalog, or its record of terms held a term based above the end of its log ("A member's start"; ADR 0108) |
 | `cluster.snapshot_position` | a gauge: the log position of the newest snapshot of its consensus module that the member's snapshots file lists, −1 while it lists none ("Snapshots"; ADR 0129) |
 | `cluster.snapshot_actions` | a cluster action asking for a snapshot that the member appended while it led, at the snapshot interval or for its own process ("Snapshots") |
@@ -1418,6 +1464,8 @@ that a reader of a counters file knows which transition it saw.
 | `cluster.snapshot_steps` | a snapshot whose messages the member had all written, so that it asked the recording's stop ("Snapshots") |
 | `cluster.snapshots_taken` | a snapshot the member listed in its snapshots file, which counts from then on ("Snapshots") |
 | `cluster.snapshots_failed` | a snapshot the member gave up, for one of the reasons of "A snapshot that fails", or whose list it could not write ("Snapshots") |
+| `cluster.snapshot_start_position` | a gauge: the log position of the snapshot the member's start took its state from, where its read of its log began; −1 when it took none and read from position 0. It does not change while the member runs ("A member's start"; ADR 0130) |
+| `cluster.snapshots_passed_over` | a snapshot that the member's start found listed and could not read whole, so that it took the one listed before it, or none ("A member's start") |
 
 ## Values
 
@@ -1442,6 +1490,7 @@ that a reader of a counters file knows which transition it saw.
 | snapshot type id | 1, the consensus module's; 2, a service's, out of this version |
 | snapshot interval | 268,435,456 bytes of the log, 256 MiB: how far past the last cluster action that asked for a snapshot a leader's log grows before the leader appends the next ("Snapshots") |
 | snapshot timeout | 1 s: how long a snapshot being taken may go without its next step, a message its publication takes or its recording's stop announced, before the member gives it up ("Snapshots") |
+| snapshot load timeout | 5 s: how long a member's start waits for its driver to play one snapshot's recording back before it passes that snapshot over ("A member's start") |
 
 Timeouts are measured on a monotonic clock of the process that measures them, a
 member's or a client's, nanoseconds that never step back, and on no wall clock: a step

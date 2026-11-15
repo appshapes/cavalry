@@ -259,14 +259,21 @@ committed once a quorum, two of three, has it on disk.
 
   `cavalry run` tries the member's cycle again every 100 ms and stops the member
   after 10 s of failures on end. The other two elect a leader meanwhile.
-- `cavalry run: member refused (log-forgotten)`: the member's `log-recordings` file
-  begins above position 0, or names more than 1,024 recordings that hold a part of
-  the log. A member makes one recording each time it joins a log, catches up or
-  leads a term, and it keeps 1,024 of them. Past that it forgets the oldest, which
-  `cluster.log_recordings_forgotten` counts while it runs. A member that starts
-  reads its log from position 0, and this one no longer can, so it does not start.
-  The cluster goes on while the other two run. To have three members again, do as
-  for a directory with no `log-recordings` file, above.
+- `cavalry run: member refused (log-forgotten)`: the member's log no longer reaches
+  back to where its start reads it from. A member that starts takes its sessions
+  from its newest snapshot and reads its log from that snapshot's position, or from
+  position 0 when it has no snapshot it can read. The refusal names where the log
+  begins and which position the start would read from. A log begins above 0 for
+  two reasons. A member makes one recording each time it joins a log, catches up or
+  leads a term, and it keeps 1,024 of them; past that it forgets the oldest, which
+  `cluster.log_recordings_forgotten` counts while it runs. Or the recordings were
+  purged. A leader asks for a snapshot every 256 MiB of log, so the refusal means
+  that this member's snapshots are gone or older than its log: the cluster goes on
+  while the other two run. When the refusal says that the start passed snapshots
+  over, start the member once more first: a snapshot that the driver did not play
+  back within 5 s, as on a loaded host, is one the next start reads. When the
+  member is refused again, or the refusal names no snapshot passed over, do as for
+  a directory with no `log-recordings` file, above, to have three members again.
 - The member's host lost power, or its operating system crashed, while the member
   ran. Do not start the member on that log directory again. Leave it stopped, and
   do as for a directory with no `log-recordings` file, above. Nothing refuses this
@@ -376,22 +383,40 @@ committed once a quorum, two of three, has it on disk.
   do while it runs. Two requests fail meanwhile. A member that asks it for the log
   below the oldest recording it kept receives none, and counts
   `cluster.log_replications_unavailable` when its wait ends. A service that asks
-  for that part of the log is refused by start replay with code 23. The member will
-  not start again on this log directory: once it stops, `cavalry run` refuses it
-  with `member refused (log-forgotten)`, above, and the cluster goes on with the
-  other two. To have three members again, do as that entry says, and never start
-  this member alone on a new log directory.
+  for that part of the log is refused by start replay with code 23. The member
+  starts again on this log directory from its newest snapshot, when that snapshot
+  is of a position at or above where its log now begins. When it is not, `cavalry
+  run` refuses the member with `member refused (log-forgotten)`, above, and the
+  cluster goes on with the other two. To have three members again then, do as that
+  entry says, and never start this member alone on a new log directory.
 - `WARN cluster.snapshots_failed`: the member gave up a snapshot of its sessions
   that the leader's log asked for, and the count says how many times. The member's
-  log is whole, nothing committed is lost, and the member runs on. Read three
-  counters of this member's driver, which the same `doctor` prints when they are
-  above 0. `driver.registry_full`: the driver had no room for the snapshot's
-  recording. `recording.start_failed`: the recording's files could not be created
-  in the log directory. `recording.write_failed`: a write or a sync to the log
-  directory failed. Check that the log directory is writable by the driver's user
-  and that its file system has room. The leader asks for the next snapshot when
-  its log has grown by 256 MiB, and the member takes that one by itself. A count
-  that no longer rises is a fault that has passed.
+  log is whole, nothing committed is lost, and the member runs on. Until it takes
+  a snapshot, a start of this member reads more of its log than a start of the
+  others does. Read three counters of this member's driver, which the same
+  `doctor` prints when they are above 0. `driver.registry_full`: the driver had no
+  room for the snapshot's recording. `recording.start_failed`: the recording's
+  files could not be created in the log directory. `recording.write_failed`: a
+  write or a sync to the log directory failed. Check that the log directory is
+  writable by the driver's user and that its file system has room. The leader asks
+  for the next snapshot when its log has grown by 256 MiB, and the member takes
+  that one by itself. A count that no longer rises is a fault that has passed.
+- `WARN cluster.snapshots_passed_over`: when this member started, it could not
+  read its newest snapshot, and the count says how many snapshots it passed over.
+  It started from an older snapshot, or from none, and read more of its log.
+  Nothing committed is lost. The member's counter `cluster.snapshot_start_position`
+  holds the position it started from, or -1 when it started from none. A start
+  passes a snapshot over
+  for one of three reasons. The snapshot's recording is gone from the log
+  directory, as after a `purge recording` of the snapshot itself. The driver found
+  the recording damaged, which `recording.invalidated` on this member's driver
+  counts: check the log directory's device. Or the driver did not play the
+  recording back within 5 s: check the load of this host. When none of the three
+  explains the count, the recording holds something that no member writes as a
+  snapshot. That is a fault of Cavalry, or a file of the log directory that was
+  changed by hand: report it, with the log directory. There is nothing to do for
+  the member. Its next snapshot is listed after the ones it passed over, and its
+  next start takes that one. The count stays until the member starts again.
 - `note cluster-commit-waits`: the leader has appended more than a quorum has
   recorded. Each member asks its recorder to sync an entry as soon as it is written,
   so what waits at any moment is what was appended since the syncs now running began.

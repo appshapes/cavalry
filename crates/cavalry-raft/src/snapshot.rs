@@ -28,19 +28,21 @@
 //! Nothing here runs per message of the log: a snapshot is asked for once in a
 //! snapshot interval.
 
-use std::path::Path;
 use std::time::{Duration, Instant};
 
-use cavalry_client::{Cavalry, ClientError, Counter, Offer, Publication, Recording};
+use cavalry_client::{
+    Cavalry, ClientError, Counter, NULL_LENGTH, NULL_POSITION, Offer, Publication, Recording,
+};
 use cavalry_log::snapshots::{CONSENSUS_MODULE, ListedSnapshot, SnapshotsError, SnapshotsFile};
 use cavalry_proto::cluster::{
-    CLOSE_REASON_NONE, EGRESS_STREAM_ID, Message, NULL_VALUE, SNAPSHOT_STREAM_ID, SNAPSHOT_TYPE_ID,
-    SnapshotMark, TimeUnit,
+    CLOSE_REASON_NONE, EGRESS_STREAM_ID, LOG_REPLAY_STREAM_ID, MAX_SESSIONS, Message, NULL_VALUE,
+    SNAPSHOT_STREAM_ID, SNAPSHOT_TYPE_ID, SnapshotMark, Stream, TimeUnit,
 };
 use cavalry_shm::counters::CounterId;
 use cavalry_shm::counters::generated::{
-    CLUSTER_SNAPSHOT_ACTIONS, CLUSTER_SNAPSHOT_POSITION, CLUSTER_SNAPSHOT_STEPS,
-    CLUSTER_SNAPSHOTS_BEGUN, CLUSTER_SNAPSHOTS_FAILED, CLUSTER_SNAPSHOTS_TAKEN,
+    CLUSTER_SNAPSHOT_ACTIONS, CLUSTER_SNAPSHOT_POSITION, CLUSTER_SNAPSHOT_START_POSITION,
+    CLUSTER_SNAPSHOT_STEPS, CLUSTER_SNAPSHOTS_BEGUN, CLUSTER_SNAPSHOTS_FAILED,
+    CLUSTER_SNAPSHOTS_PASSED_OVER, CLUSTER_SNAPSHOTS_TAKEN,
 };
 
 use crate::sessions::Sessions;
@@ -126,30 +128,32 @@ pub(crate) struct ModuleSnapshot {
     deadline: Instant,
     scratch: Box<[u8; SCRATCH_LENGTH]>,
     counts: SnapshotCounts,
-    /// The member's six counters of its snapshots, in the order of
-    /// [`ModuleSnapshot::values`], each with the value it last stored.
-    counters: [(Counter, i64); 6],
+    /// The member's counters of its snapshots, each with the value it last stored:
+    /// six in the order of [`ModuleSnapshot::values`], then the two of its start,
+    /// which are stored once.
+    counters: [(Counter, i64); 8],
 }
 
 /// Why a member's snapshots could not be set up at its start.
 #[derive(Debug)]
 pub(crate) enum OpenError {
-    /// The snapshots file could not be opened or read.
-    File(SnapshotsError),
-    /// The driver refused one of the member's counters.
+    /// The driver refused one of the member's counters, or its publication.
     Client(ClientError),
 }
 
 impl ModuleSnapshot {
-    /// Opens the snapshots file of member `member_id` in `log_dir`, which is created
-    /// when there is none, and adds the member's counters of its snapshots, each
-    /// holding its value from its first store.
+    /// Takes the member's snapshots file, which its start opened and read, and adds
+    /// the member's counters of its snapshots, each holding its value from its first
+    /// store, and its publication on the snapshot stream. `started` is what the start
+    /// took from the file: the position of the snapshot it began from, −1 for none,
+    /// and how many listed snapshots it passed over.
     pub(crate) fn open(
         client: &mut Cavalry,
-        log_dir: &Path,
+        file: SnapshotsFile,
         member_id: i32,
+        started: (i64, u64),
     ) -> Result<Self, OpenError> {
-        let file = SnapshotsFile::open(log_dir, member_id).map_err(OpenError::File)?;
+        let (start_position, passed_over) = started;
         let newest = file
             .newest(CONSENSUS_MODULE)
             .map_or(NULL_VALUE, |snapshot| snapshot.log_position);
@@ -174,6 +178,17 @@ impl ModuleSnapshot {
                 add(CLUSTER_SNAPSHOT_STEPS, "cluster.snapshot_steps", 0)?,
                 add(CLUSTER_SNAPSHOTS_TAKEN, "cluster.snapshots_taken", 0)?,
                 add(CLUSTER_SNAPSHOTS_FAILED, "cluster.snapshots_failed", 0)?,
+                // What the start did, which never changes while the member runs.
+                add(
+                    CLUSTER_SNAPSHOT_START_POSITION,
+                    "cluster.snapshot_start_position",
+                    start_position,
+                )?,
+                add(
+                    CLUSTER_SNAPSHOTS_PASSED_OVER,
+                    "cluster.snapshots_passed_over",
+                    i64::try_from(passed_over).unwrap_or(i64::MAX),
+                )?,
             ])
         })()
         .map_err(OpenError::Client)?;
@@ -466,5 +481,423 @@ impl ModuleSnapshot {
     fn release(&mut self) {
         self.recording = None;
         self.state = SnapshotState::Idle;
+    }
+}
+
+/// How long a start waits for the replay of one snapshot's recording. A driver that
+/// does not play a few hundred bytes back in this time does not play them back, and
+/// the snapshot is passed over.
+const LOAD_TIMEOUT: Duration = Duration::from_secs(5);
+
+/// The most messages a consensus module's snapshot holds: two markers, a session for
+/// each slot of the table, and the module's own state.
+const MAX_MESSAGES: usize = MAX_SESSIONS + 3;
+
+/// One session a start takes from a snapshot.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct RestoredSession {
+    pub(crate) id: i64,
+    pub(crate) correlation_id: i64,
+    pub(crate) opened_log_position: i64,
+    pub(crate) response_channel: Vec<u8>,
+}
+
+/// What a start takes from a snapshot of the member's consensus module.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct Restored {
+    /// The snapshot's log position: where the member's read of its log begins.
+    pub(crate) log_position: i64,
+    /// The sessions that were open at that position.
+    pub(crate) sessions: Vec<RestoredSession>,
+    /// The id the next session is given.
+    pub(crate) next_session_id: i64,
+}
+
+/// The newest snapshot of the member's consensus module that `file` lists and that
+/// can be read whole, and how many newer ones were passed over (`spec/cluster.md`, "A
+/// member's start"; ADR 0130). `held` says whether the catalog holds a recording as a
+/// snapshot's: of the snapshot stream, stopped, with bytes. A listed snapshot is
+/// passed over when the catalog does not hold it so, when the driver does not play
+/// it back within [`LOAD_TIMEOUT`], or when what it holds is not the snapshot the
+/// list names: a begin marker of the consensus module's type with the entry's log
+/// position and term, the sessions, the module's state and an end marker. `takes`
+/// is the member's table of sessions: it says whether the table took the snapshot's
+/// state whole, and a snapshot it refuses is passed over as the others are, so
+/// that a member never begins at a snapshot's position with another state than
+/// that snapshot's.
+pub(crate) fn load(
+    client: &mut Cavalry,
+    file: &SnapshotsFile,
+    mut held: impl FnMut(i64) -> bool,
+    takes: impl FnMut(&Restored) -> bool,
+) -> (Option<Restored>, u64) {
+    newest(
+        file.entries(),
+        |listed| {
+            held(listed.recording_id)
+                .then(|| read_recording(client, listed.recording_id))
+                .flatten()
+        },
+        takes,
+    )
+}
+
+/// The rule of [`load`] on a list, with the driver left out: `read` gives the
+/// messages of a listed snapshot's recording, or `None` when it cannot be read. The
+/// newest entry of the consensus module whose messages are the snapshot it names,
+/// and which `takes` takes, is the one a start begins from. Each newer entry of the
+/// consensus module is counted as passed over. An entry of a service is not the
+/// module's: it is not read and not counted.
+fn newest(
+    entries: &[ListedSnapshot],
+    mut read: impl FnMut(&ListedSnapshot) -> Option<Vec<Vec<u8>>>,
+    mut takes: impl FnMut(&Restored) -> bool,
+) -> (Option<Restored>, u64) {
+    let mut passed_over = 0u64;
+    for listed in entries
+        .iter()
+        .rev()
+        .filter(|listed| listed.service_id == CONSENSUS_MODULE)
+    {
+        let restored = read(listed)
+            .and_then(|messages| restore(listed, &messages))
+            .filter(|restored| takes(restored));
+        match restored {
+            Some(restored) => return (Some(restored), passed_over),
+            None => passed_over = passed_over.saturating_add(1),
+        }
+    }
+    (None, passed_over)
+}
+
+/// The messages of a snapshot's recording, played back whole on the log replay
+/// stream, which the module's read of its log uses after it; `None` when the driver
+/// refuses the replay, does not end it within [`LOAD_TIMEOUT`], or plays more
+/// messages than a snapshot holds.
+fn read_recording(client: &mut Cavalry, recording_id: i64) -> Option<Vec<Vec<u8>>> {
+    let mut subscription = client
+        .add_subscription(SNAPSHOT_CHANNEL, LOG_REPLAY_STREAM_ID)
+        .ok()?;
+    let replay = client
+        .start_replay(
+            recording_id,
+            NULL_POSITION,
+            NULL_LENGTH,
+            LOG_REPLAY_STREAM_ID,
+            SNAPSHOT_CHANNEL,
+        )
+        .ok()?;
+    let session = replay.session_id();
+    let deadline = Instant::now() + LOAD_TIMEOUT;
+    let mut messages: Vec<Vec<u8>> = Vec::with_capacity(MAX_MESSAGES);
+    let mut too_many = false;
+    loop {
+        let read = subscription
+            .poll(
+                |bytes, header| {
+                    if header.session_id() != session {
+                        return;
+                    }
+                    if messages.len() < MAX_MESSAGES {
+                        messages.push(bytes.to_vec());
+                    } else {
+                        too_many = true;
+                    }
+                },
+                MAX_MESSAGES,
+            )
+            .ok()?;
+        // The replay has ended, and its image has been read to where it ended.
+        if let Some((end, _)) = replay.ended()
+            && subscription
+                .images()
+                .iter()
+                .any(|image| image.session_id() == session && image.position() >= end)
+        {
+            break;
+        }
+        if too_many || Instant::now() >= deadline {
+            let _ = replay.stop(client);
+            return None;
+        }
+        if read == 0 {
+            std::thread::sleep(Duration::from_micros(50));
+        }
+    }
+    (!too_many).then_some(messages)
+}
+
+/// What the messages of a snapshot's recording give a start, when they are the
+/// snapshot `listed` names; `None` when they are not.
+fn restore(listed: &ListedSnapshot, messages: &[Vec<u8>]) -> Option<Restored> {
+    let is_marker = |bytes: &Vec<u8>, expected: SnapshotMark| {
+        matches!(
+            Message::parse(Stream::Snapshot, bytes),
+            Ok(Message::SnapshotMarker {
+                type_id: SNAPSHOT_TYPE_ID,
+                log_position,
+                leadership_term_id,
+                index: 0,
+                mark,
+                ..
+            }) if mark == expected
+                && log_position == listed.log_position
+                && leadership_term_id == listed.leadership_term_id
+        )
+    };
+    let (first, rest) = messages.split_first()?;
+    let (last, rest) = rest.split_last()?;
+    let (module, sessions) = rest.split_last()?;
+    if !is_marker(first, SnapshotMark::Begin) || !is_marker(last, SnapshotMark::End) {
+        return None;
+    }
+    let Ok(Message::ConsensusModule {
+        next_session_id, ..
+    }) = Message::parse(Stream::Snapshot, module)
+    else {
+        return None;
+    };
+    // A member writes its open sessions in the rising order of their ids, each
+    // below the id the next session is given.
+    let mut restored: Vec<RestoredSession> = Vec::with_capacity(sessions.len());
+    for bytes in sessions {
+        let Ok(Message::ClusterSession {
+            cluster_session_id,
+            correlation_id,
+            opened_log_position,
+            response_channel,
+            ..
+        }) = Message::parse(Stream::Snapshot, bytes)
+        else {
+            return None;
+        };
+        let above = restored
+            .last()
+            .is_none_or(|before| before.id < cluster_session_id);
+        if !above || cluster_session_id < 0 || cluster_session_id >= next_session_id {
+            return None;
+        }
+        restored.push(RestoredSession {
+            id: cluster_session_id,
+            correlation_id,
+            opened_log_position,
+            response_channel: response_channel.to_vec(),
+        });
+    }
+    Some(Restored {
+        log_position: listed.log_position,
+        sessions: restored,
+        next_session_id,
+    })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// One entry of a snapshots file, of the consensus module unless `service_id`
+    /// says otherwise.
+    fn listed(recording_id: i64, service_id: i32, log_position: i64) -> ListedSnapshot {
+        ListedSnapshot {
+            recording_id,
+            leadership_term_id: 3,
+            term_base_log_position: 0,
+            log_position,
+            timestamp: 1_700_000_000_000,
+            service_id,
+        }
+    }
+
+    fn bytes(message: &Message<'_>) -> Vec<u8> {
+        let mut scratch = [0u8; SCRATCH_LENGTH];
+        let length = message
+            .write(&mut scratch)
+            .expect("a message of a snapshot");
+        scratch[..length].to_vec()
+    }
+
+    fn marker(listed: &ListedSnapshot, mark: SnapshotMark) -> Vec<u8> {
+        marker_of(SNAPSHOT_TYPE_ID, listed, mark)
+    }
+
+    fn marker_of(type_id: i64, listed: &ListedSnapshot, mark: SnapshotMark) -> Vec<u8> {
+        bytes(&Message::SnapshotMarker {
+            type_id,
+            log_position: listed.log_position,
+            leadership_term_id: listed.leadership_term_id,
+            index: 0,
+            mark,
+            time_unit: TimeUnit::Millis,
+            app_version: 0,
+        })
+    }
+
+    fn session(id: i64) -> Vec<u8> {
+        bytes(&Message::ClusterSession {
+            cluster_session_id: id,
+            correlation_id: 100 + id,
+            opened_log_position: 32 * id,
+            time_of_last_activity: NULL_VALUE,
+            close_reason: CLOSE_REASON_NONE,
+            response_stream_id: EGRESS_STREAM_ID,
+            response_channel: b"cavalry:udp?endpoint=127.0.0.1:9040",
+        })
+    }
+
+    fn module(next_session_id: i64) -> Vec<u8> {
+        bytes(&Message::ConsensusModule {
+            next_session_id,
+            next_service_session_id: 0,
+            log_service_session_id: 0,
+            pending_message_capacity: 0,
+        })
+    }
+
+    /// A snapshot as a member writes it: a marker, the sessions, the module, a marker.
+    fn snapshot(listed: &ListedSnapshot, ids: &[i64], next_session_id: i64) -> Vec<Vec<u8>> {
+        let mut messages = vec![marker(listed, SnapshotMark::Begin)];
+        messages.extend(ids.iter().map(|id| session(*id)));
+        messages.push(module(next_session_id));
+        messages.push(marker(listed, SnapshotMark::End));
+        messages
+    }
+
+    #[test]
+    fn a_snapshot_as_a_member_writes_it_gives_its_sessions_and_the_next_id() {
+        let entry = listed(7, CONSENSUS_MODULE, 4096);
+        let restored = restore(&entry, &snapshot(&entry, &[0, 2, 5], 6)).expect("the snapshot");
+        assert_eq!(restored.log_position, 4096);
+        assert_eq!(restored.next_session_id, 6);
+        let ids: Vec<i64> = restored.sessions.iter().map(|session| session.id).collect();
+        assert_eq!(ids, [0, 2, 5]);
+        let first = restored.sessions.first().expect("a session");
+        assert_eq!(first.correlation_id, 100);
+        assert_eq!(first.opened_log_position, 0);
+        assert_eq!(
+            first.response_channel,
+            b"cavalry:udp?endpoint=127.0.0.1:9040"
+        );
+        // No session open: the two markers and the module's state.
+        let none = restore(&entry, &snapshot(&entry, &[], 0)).expect("the snapshot");
+        assert!(none.sessions.is_empty());
+        assert_eq!(none.next_session_id, 0);
+    }
+
+    #[test]
+    fn a_recording_that_is_not_the_listed_snapshot_gives_nothing() {
+        let entry = listed(7, CONSENSUS_MODULE, 4096);
+        let whole = snapshot(&entry, &[0, 1], 2);
+        assert!(restore(&entry, &whole).is_some());
+        // Nothing, and what was written cut short at each message.
+        for kept in 0..whole.len() {
+            assert!(restore(&entry, &whole[..kept]).is_none(), "{kept} messages");
+        }
+        // Another position's snapshot, and another term's.
+        let mut other = entry;
+        other.log_position = 8192;
+        assert!(restore(&other, &whole).is_none());
+        let mut other = entry;
+        other.leadership_term_id = 4;
+        assert!(restore(&other, &whole).is_none());
+        // The markers the wrong way round, and markers of a service's type id.
+        let mut swapped = whole.clone();
+        swapped.swap(0, 4);
+        assert!(restore(&entry, &swapped).is_none());
+        let mut services = whole.clone();
+        services[0] = marker_of(2, &entry, SnapshotMark::Begin);
+        services[4] = marker_of(2, &entry, SnapshotMark::End);
+        assert!(restore(&entry, &services).is_none());
+        // The module's state before a session, and no module's state at all.
+        let mut moved = whole.clone();
+        moved.swap(2, 3);
+        assert!(restore(&entry, &moved).is_none());
+        let mut without = whole.clone();
+        without.remove(3);
+        assert!(restore(&entry, &without).is_none());
+        // Bytes that are no message of the snapshot stream.
+        let mut damaged = whole;
+        damaged[1] = vec![0xff; 12];
+        assert!(restore(&entry, &damaged).is_none());
+    }
+
+    #[test]
+    fn sessions_that_a_member_does_not_write_so_give_nothing() {
+        let entry = listed(7, CONSENSUS_MODULE, 4096);
+        // In the rising order of their ids, each below the next session id.
+        assert!(restore(&entry, &snapshot(&entry, &[1, 4], 5)).is_some());
+        // One session twice, and two out of order.
+        assert!(restore(&entry, &snapshot(&entry, &[1, 1], 5)).is_none());
+        assert!(restore(&entry, &snapshot(&entry, &[4, 1], 5)).is_none());
+        // A session whose id the next session would be given, and one above it.
+        assert!(restore(&entry, &snapshot(&entry, &[1, 5], 5)).is_none());
+        assert!(restore(&entry, &snapshot(&entry, &[1, 9], 5)).is_none());
+        // An id no leader gives.
+        assert!(restore(&entry, &snapshot(&entry, &[-1, 1], 5)).is_none());
+    }
+
+    #[test]
+    fn a_start_takes_the_newest_snapshot_it_can_read_and_counts_the_ones_it_passed_over() {
+        let entries = [
+            listed(3, CONSENSUS_MODULE, 1024),
+            listed(5, CONSENSUS_MODULE, 2048),
+            // A service's snapshot, newer than the module's: not the module's to read.
+            listed(6, 0, 2048),
+            listed(8, CONSENSUS_MODULE, 4096),
+        ];
+        let read = |gone: &'static [i64]| {
+            move |listed: &ListedSnapshot| {
+                (!gone.contains(&listed.recording_id)).then(|| snapshot(listed, &[0, 1], 2))
+            }
+        };
+        let position = |taken: &Option<Restored>| taken.as_ref().map(|taken| taken.log_position);
+        let mut asked = Vec::new();
+        let (taken, passed_over) = newest(
+            &entries,
+            |listed| {
+                asked.push(listed.recording_id);
+                read(&[])(listed)
+            },
+            |_| true,
+        );
+        assert_eq!((position(&taken), passed_over), (Some(4096), 0));
+        // The newest is read first and no other is read; the service's is never read.
+        assert_eq!(asked, [8]);
+        // The newest cannot be read: the one before it, and one passed over.
+        let (taken, passed_over) = newest(&entries, read(&[8]), |_| true);
+        assert_eq!((position(&taken), passed_over), (Some(2048), 1));
+        // Nor that one: the oldest, and two.
+        let (taken, passed_over) = newest(&entries, read(&[8, 5]), |_| true);
+        assert_eq!((position(&taken), passed_over), (Some(1024), 2));
+        // None can be read: no snapshot, and three passed over.
+        let (taken, passed_over) = newest(&entries, read(&[8, 5, 3]), |_| true);
+        assert_eq!((position(&taken), passed_over), (None, 3));
+        // No list, and a list of a service's snapshots alone: nothing to pass over.
+        assert_eq!(newest(&[], read(&[]), |_| true), (None, 0));
+        assert_eq!(
+            newest(&[listed(6, 0, 2048)], read(&[]), |_| true),
+            (None, 0)
+        );
+    }
+
+    #[test]
+    fn a_snapshot_the_table_does_not_take_is_passed_over_for_the_one_before_it() {
+        let entries = [
+            listed(3, CONSENSUS_MODULE, 1024),
+            listed(8, CONSENSUS_MODULE, 4096),
+        ];
+        let read = |listed: &ListedSnapshot| Some(snapshot(listed, &[0, 1], 2));
+        // The table refuses the newest: the member begins at the older one, with
+        // that one's state, and never at the newest one's position.
+        let mut offered = Vec::new();
+        let (taken, passed_over) = newest(&entries, read, |restored| {
+            offered.push(restored.log_position);
+            restored.log_position != 4096
+        });
+        assert_eq!(offered, [4096, 1024]);
+        assert_eq!(taken.map(|taken| taken.log_position), Some(1024));
+        assert_eq!(passed_over, 1);
+        // The table refuses both: no snapshot, and the read begins at position 0.
+        let (taken, passed_over) = newest(&entries, read, |_| false);
+        assert_eq!((taken, passed_over), (None, 2));
     }
 }

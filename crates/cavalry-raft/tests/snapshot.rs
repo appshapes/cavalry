@@ -11,6 +11,7 @@ use std::time::{Duration, Instant};
 
 use cavalry_client::{Cavalry, NULL_LENGTH, NULL_POSITION, Publication, Subscription};
 use cavalry_driver::Driver;
+use cavalry_log::recordings::RecordingsFile;
 use cavalry_log::snapshots::{CONSENSUS_MODULE, ListedSnapshot, SnapshotsFile};
 use cavalry_proto::cluster::{
     CLOSE_REASON_NONE, EGRESS_STREAM_ID, INGRESS_STREAM_ID, Message, SNAPSHOT_TYPE_ID,
@@ -19,8 +20,10 @@ use cavalry_proto::cluster::{
 use cavalry_raft::{ConsensusModule, ElectionState, RaftError, Refused, Role, SnapshotCounts};
 use cavalry_shm::counters::CountersReader;
 use cavalry_shm::counters::generated::{
-    CLUSTER_SNAPSHOT_ACTIONS, CLUSTER_SNAPSHOT_POSITION, CLUSTER_SNAPSHOT_STEPS,
-    CLUSTER_SNAPSHOTS_BEGUN, CLUSTER_SNAPSHOTS_FAILED, CLUSTER_SNAPSHOTS_TAKEN,
+    CLUSTER_SESSIONS, CLUSTER_SESSIONS_CLOSED, CLUSTER_SESSIONS_OPENED, CLUSTER_SNAPSHOT_ACTIONS,
+    CLUSTER_SNAPSHOT_POSITION, CLUSTER_SNAPSHOT_START_POSITION, CLUSTER_SNAPSHOT_STEPS,
+    CLUSTER_SNAPSHOTS_BEGUN, CLUSTER_SNAPSHOTS_FAILED, CLUSTER_SNAPSHOTS_PASSED_OVER,
+    CLUSTER_SNAPSHOTS_TAKEN,
 };
 
 mod ports;
@@ -410,7 +413,7 @@ fn every_member_takes_the_snapshot_its_leader_asks_for_and_the_three_hold_the_sa
 }
 
 #[test]
-fn a_member_that_starts_again_reads_the_action_and_takes_no_second_snapshot_of_it() {
+fn a_member_that_starts_again_begins_at_its_snapshot_and_takes_no_second_one_of_it() {
     let dir = TestDir::new("again");
     let members_string = members_string();
     let mut members: Vec<Member> = [1, 0, 2]
@@ -431,7 +434,8 @@ fn a_member_that_starts_again_reads_the_action_and_takes_no_second_snapshot_of_i
     run_until_committed(&mut members, "two more entries are committed", end);
 
     // A follower stops and starts again on the log directory it kept. Its file lists
-    // the snapshot from its first cycle on, and its counter says so.
+    // the snapshot from its first cycle on, its counter says so, and it begins its
+    // read of its log at the snapshot's position (ADR 0130).
     let stopped = members.pop().expect("a follower");
     let id = stopped.module.member_id();
     let before = listed(&stopped);
@@ -440,9 +444,12 @@ fn a_member_that_starts_again_reads_the_action_and_takes_no_second_snapshot_of_i
     let again = start_member(dir.path(), &members_string, id);
     assert_eq!(again.module.snapshot_position(), Some(position));
     assert_eq!(counter(&again, CLUSTER_SNAPSHOT_POSITION.0), position);
+    assert_eq!(again.module.session_log_position(), position);
+    assert_eq!(counter(&again, CLUSTER_SNAPSHOT_START_POSITION.0), position);
+    assert_eq!(counter(&again, CLUSTER_SNAPSHOTS_PASSED_OVER.0), 0);
     members.push(again);
-    // It reads its log from the start, the action among its entries, and catches up
-    // with what the others committed.
+    // It reads what follows the snapshot and catches up with what the others
+    // committed.
     run_until(
         &mut members,
         "the member has read its log again",
@@ -458,7 +465,7 @@ fn a_member_that_starts_again_reads_the_action_and_takes_no_second_snapshot_of_i
     assert_eq!(
         again.module.snapshot_counts(),
         SnapshotCounts::default(),
-        "the action read again begins no snapshot"
+        "a start takes no snapshot"
     );
     assert_eq!(listed(again), before);
     assert_eq!(again.module.snapshot_position(), Some(position));
@@ -611,6 +618,8 @@ fn a_members_read_of_its_log_at_a_start_timed() {
     stopped.driver.close().expect("the driver closes");
     let started = Instant::now();
     members.push(start_member(dir.path(), &members_string, id));
+    // The driver's start and the member's, with no snapshot to read back.
+    let plain_start = started.elapsed();
     // The member reads no further than the commit position it knows, which is 0
     // until its leader tells it one: the read is timed from then.
     let mut bound_known = None;
@@ -636,15 +645,73 @@ fn a_members_read_of_its_log_at_a_start_timed() {
     let reading = from.elapsed().as_secs_f64();
     let mib = |bytes: i64| bytes as f64 / (1 << 20) as f64;
     println!(
-        "a member started again read {:.1} MiB of its log back {whole:.2} s after its start; it \
+        "a member started again, its driver's start and its own taking {:.1} ms, read {:.1} MiB \
+         of its log back {whole:.2} s after its start; it \
          knew the commit position after {:.2} s, having read {:.1} MiB, and read the other \
          {:.1} MiB in {:.3} s: {:.0} MiB/s",
+        plain_start.as_secs_f64() * 1e3,
         mib(end),
         whole - reading,
         mib(read_before),
         mib(end - read_before),
         reading,
         mib(end - read_before) / reading
+    );
+
+    // The same start from a snapshot of the log's end (ADR 0130): the leader asks
+    // for one, the member stops and starts again, and reads what follows it.
+    run_until_led(&mut members, -1);
+    ask_snapshot(&mut members);
+    let deadline = Instant::now() + Duration::from_secs(60);
+    while members
+        .iter()
+        .any(|m| m.module.snapshot_position().is_none_or(|p| p <= end))
+    {
+        assert!(Instant::now() < deadline, "the snapshot was not taken");
+        for member in members.iter_mut() {
+            member.module.do_work().expect("the member's duty cycle");
+        }
+    }
+    let position = members[0].module.snapshot_position().expect("a snapshot");
+    let follower = members
+        .iter()
+        .position(|m| m.module.role() != Role::Leader)
+        .expect("a follower");
+    let stopped = members.remove(follower);
+    let id = stopped.module.member_id();
+    stopped.module.close().expect("the member closes");
+    stopped.driver.close().expect("the driver closes");
+    let driver_dir = dir.path().join(format!("member-{id}"));
+    let log_dir = dir.path().join(format!("member-{id}-log"));
+    let from = Instant::now();
+    let driver = Driver::start(&driver_dir, &log_dir).expect("the driver starts");
+    let module = ConsensusModule::start(&driver_dir, &log_dir, &members_string, id)
+        .expect("the member starts from its snapshot");
+    let start = from.elapsed();
+    assert_eq!(module.session_log_position(), position);
+    members.push(Member {
+        driver,
+        module,
+        dir: driver_dir,
+        log_dir,
+    });
+    let deadline = Instant::now() + Duration::from_secs(60);
+    while {
+        let again = &members.last().expect("the member").module;
+        again.election_state() != ElectionState::Closed || again.commit_position() < position
+    } {
+        assert!(Instant::now() < deadline, "the member did not join again");
+        for member in members.iter_mut() {
+            member.module.do_work().expect("the member's duty cycle");
+        }
+    }
+    println!(
+        "from a snapshot of position {position}, {:.1} MiB into its log: the driver's start \
+         and the member's took {:.1} ms with the snapshot read back, it began its read at \
+         the snapshot, and it had joined again {:.2} s after its start began",
+        mib(position),
+        start.as_secs_f64() * 1e3,
+        from.elapsed().as_secs_f64()
     );
     for member in members {
         member.module.close().expect("the member closes");
@@ -899,5 +966,370 @@ fn a_snapshot_holds_the_open_sessions_in_the_order_of_their_ids_on_every_member(
     for member in members {
         member.module.close().expect("the member closes");
         member.driver.close().expect("the driver closes");
+    }
+}
+
+/// Three members led, with two clients' sessions open, 0 and 1, and every member
+/// holding both: the members with the leader first, the clients, and where the log
+/// then ends.
+fn led_with_two_sessions(dir: &TestDir) -> (String, Vec<Member>, Vec<Client>, i64) {
+    let ports = free_ports(17);
+    let members_string = (0..3)
+        .map(|member| {
+            let endpoints: Vec<String> = ports[member * 5..member * 5 + 5]
+                .iter()
+                .map(|port| format!("127.0.0.1:{port}"))
+                .collect();
+            format!("{member},{}", endpoints.join(","))
+        })
+        .collect::<Vec<_>>()
+        .join("|");
+    let mut members: Vec<Member> = [1, 0, 2]
+        .into_iter()
+        .map(|id| start_member(dir.path(), &members_string, id))
+        .collect();
+    run_until_led(&mut members, -1);
+    let leader = usize::try_from(members[0].module.member_id()).expect("a member id");
+    let ingress = format!("127.0.0.1:{}", ports[leader * 5]);
+    let mut clients = Vec::new();
+    for (index, correlation_id) in [41i64, 42].into_iter().enumerate() {
+        let mut client = Client::start(
+            dir.path(),
+            &format!("client-{index}"),
+            ports[15 + index],
+            &ingress,
+            correlation_id,
+        );
+        let mut sent = false;
+        run_until(&mut members, "the client's session opens", |_| {
+            sent = sent || client.connect();
+            client.poll();
+            client.session_id.is_some()
+        });
+        assert_eq!(client.session_id, Some(index as i64));
+        clients.push(client);
+    }
+    // A client reads its ok event once its session open event is committed, so the
+    // leader's commit position is past both.
+    let committed = members[0].module.commit_position();
+    let end = run_until_settled(&mut members, committed);
+    (members_string, members, clients, end)
+}
+
+/// Runs the members until every election has closed and each has committed, and
+/// read for its sessions, the log to one end that is `at_least` or more: what the
+/// caller knows was appended, which a member's append position does not show
+/// until its recording of it is synced. Returns that end.
+fn run_until_settled(members: &mut [Member], at_least: i64) -> i64 {
+    let mut end = 0;
+    run_until(members, "every member has read the whole log", |members| {
+        end = members
+            .iter()
+            .map(|m| m.module.append_position())
+            .max()
+            .unwrap_or(0);
+        end >= at_least
+            && members.iter().all(|m| {
+                m.module.election_state() == ElectionState::Closed
+                    && m.module.append_position() == end
+                    && m.module.commit_position() == end
+                    && m.module.session_log_position() == end
+            })
+    });
+    end
+}
+
+/// The leader asks for a snapshot, and every member lists one at the same position,
+/// past every snapshot listed before: that position.
+fn snapshot_everywhere(members: &mut [Member]) -> i64 {
+    let before = members
+        .iter()
+        .filter_map(|m| m.module.snapshot_position())
+        .max()
+        .unwrap_or(-1);
+    ask_snapshot(members);
+    let mut position = 0;
+    run_until(members, "every member lists the snapshot", |members| {
+        position = members[0].module.snapshot_position().unwrap_or(-1);
+        position > before
+            && members
+                .iter()
+                .all(|m| m.module.snapshot_position() == Some(position))
+    });
+    position
+}
+
+/// Stops `member`, its module and then its driver, and gives back its id.
+fn stop(member: Member) -> i32 {
+    let id = member.module.member_id();
+    member.module.close().expect("the member closes");
+    member.driver.close().expect("the driver closes");
+    id
+}
+
+/// Purges `recording_id` from the log directory of stopped member `id`, as an
+/// operator does: a driver on the member's directories, and the client's command.
+fn purge(dir: &Path, id: i32, recording_id: i64) {
+    let driver_dir = dir.join(format!("member-{id}"));
+    let log_dir = dir.join(format!("member-{id}-log"));
+    let driver =
+        Driver::start(&driver_dir, &log_dir).expect("a driver on the member's directories");
+    let mut client = Cavalry::connect_to(&driver_dir).expect("a client of it");
+    client
+        .purge_recording(recording_id)
+        .unwrap_or_else(|error| panic!("recording {recording_id} is purged: {error}"));
+    client.close().expect("the client closes");
+    driver.close().expect("the driver closes");
+}
+
+/// The bytes of the newest snapshot each member lists, which must be of `position`.
+fn newest_bytes(members: &[Member], position: i64) -> Vec<Vec<Vec<u8>>> {
+    members
+        .iter()
+        .map(|member| {
+            let list = listed(member);
+            let newest = list.last().expect("a listed snapshot");
+            assert_eq!(
+                newest.log_position,
+                position,
+                "member {}",
+                member.module.member_id()
+            );
+            replayed(member, newest.recording_id)
+        })
+        .collect()
+}
+
+#[test]
+fn a_member_that_starts_again_takes_its_sessions_from_its_snapshot_and_reads_what_follows() {
+    let dir = TestDir::new("restored");
+    let (members_string, mut members, clients, _) = led_with_two_sessions(&dir);
+    let position = snapshot_everywhere(&mut members);
+    offer_entries(&mut members, 0, 3);
+    let end = run_until_settled(&mut members, position + 3 * FRAME);
+    assert_eq!(end, position + 3 * FRAME);
+
+    // A follower stops and starts again. Before its first duty cycle it has read
+    // nothing of its log: it begins at the snapshot's position, and says so.
+    let id = stop(members.pop().expect("a follower"));
+    let again = start_member(dir.path(), &members_string, id);
+    assert_eq!(again.module.session_log_position(), position);
+    assert_eq!(counter(&again, CLUSTER_SNAPSHOT_START_POSITION.0), position);
+    assert_eq!(counter(&again, CLUSTER_SNAPSHOTS_PASSED_OVER.0), 0);
+    members.push(again);
+    // Its table holds the two sessions from its first cycle, before it has a leader
+    // or a commit position, which no read of its log could have given it yet.
+    members[2]
+        .module
+        .do_work()
+        .expect("the member's duty cycle");
+    assert_eq!(counter(&members[2], CLUSTER_SESSIONS.0), 2);
+    assert_eq!(members[2].module.session_log_position(), position);
+    // It reads the three entries that follow and no more.
+    assert_eq!(run_until_settled(&mut members, end), end);
+    assert_eq!(counter(&members[2], CLUSTER_SESSIONS.0), 2);
+    // The two it took from the snapshot count as opened, so that the sessions it
+    // holds are the ones it opened less the ones it closed.
+    assert_eq!(counter(&members[2], CLUSTER_SESSIONS_OPENED.0), 2);
+    assert_eq!(counter(&members[2], CLUSTER_SESSIONS_CLOSED.0), 0);
+
+    // What it holds is what the others hold: the next snapshot's bytes are the same
+    // on the three, the two sessions and the next session id among them.
+    run_until_led(&mut members, -1);
+    let second = snapshot_everywhere(&mut members);
+    let bytes = newest_bytes(&members, second);
+    assert_eq!(
+        bytes[0].len(),
+        5,
+        "two markers, two sessions and the module's state"
+    );
+    assert_eq!(bytes[0], bytes[1]);
+    assert_eq!(bytes[0], bytes[2]);
+    for client in clients {
+        client.close();
+    }
+    for member in members {
+        stop(member);
+    }
+}
+
+#[test]
+fn a_member_whose_log_was_purged_below_its_snapshot_starts_from_the_snapshot() {
+    let dir = TestDir::new("purged");
+    let (members_string, mut members, clients, end) = led_with_two_sessions(&dir);
+    offer_entries(&mut members, 0, 2);
+    let end = run_until_settled(&mut members, end + 2 * FRAME);
+    // The leader stops: the two others elect one of them, and the first term's log
+    // is from then on a recording that each of them has stopped.
+    let first_term = members[0].module.leadership_term_id();
+    let old_leader = stop(members.remove(0));
+    run_until_led(&mut members, first_term);
+    members.push(start_member(dir.path(), &members_string, old_leader));
+    // The next term's first entry is past where the first term's log ended.
+    run_until_settled(&mut members, end + FRAME);
+    run_until_led(&mut members, first_term);
+    offer_entries(&mut members, 2, 2);
+    let position = snapshot_everywhere(&mut members);
+    offer_entries(&mut members, 4, 2);
+    let end = run_until_settled(&mut members, position + 2 * FRAME);
+
+    // The follower that followed in both terms. Its log is in more than one
+    // recording, and the first ends below the snapshot.
+    let follower = members
+        .iter()
+        .position(|m| m.module.role() != Role::Leader && m.module.member_id() != old_leader)
+        .expect("a follower of both terms");
+    let stopped = members.remove(follower);
+    let log_dir = stopped.log_dir.clone();
+    let id = stop(stopped);
+    let record = RecordingsFile::open_kept(&log_dir, id).expect("the member's record of its log");
+    let recordings: Vec<(i64, i64)> = record
+        .entries()
+        .iter()
+        .map(|entry| (entry.recording_id, entry.start_position))
+        .collect();
+    drop(record);
+    assert!(recordings.len() >= 2, "{recordings:?}");
+    assert_eq!(recordings[0].1, 0, "{recordings:?}");
+    let (kept_id, kept_start) = recordings[1];
+    assert!(
+        kept_start > 0 && kept_start <= position,
+        "the second recording begins at {kept_start}, the snapshot is of {position}"
+    );
+    // An operator purges the first recording, which the snapshot covers.
+    purge(dir.path(), id, recordings[0].0);
+
+    // The member starts: from its snapshot, on the log that is left.
+    let again = start_member(dir.path(), &members_string, id);
+    assert_eq!(again.module.session_log_position(), position);
+    assert_eq!(counter(&again, CLUSTER_SNAPSHOT_START_POSITION.0), position);
+    let record = RecordingsFile::open_kept(&log_dir, id).expect("the member's record of its log");
+    assert_eq!(
+        record.floor_position(),
+        kept_start,
+        "the floor is where the log now begins"
+    );
+    assert_eq!(
+        record.entries().first().map(|entry| entry.recording_id),
+        Some(kept_id),
+        "the purged recording has left the record"
+    );
+    drop(record);
+    members.push(again);
+    // Nothing committed is lost: it reads on to the end, holds the two sessions, and
+    // the next snapshot's bytes are the same on the three.
+    assert_eq!(run_until_settled(&mut members, end), end);
+    assert_eq!(counter(&members[2], CLUSTER_SESSIONS.0), 2);
+    run_until_led(&mut members, first_term);
+    let second = snapshot_everywhere(&mut members);
+    let bytes = newest_bytes(&members, second);
+    assert_eq!(
+        bytes[0].len(),
+        5,
+        "two markers, two sessions and the module's state"
+    );
+    assert_eq!(bytes[0], bytes[1]);
+    assert_eq!(bytes[0], bytes[2]);
+
+    // The same member with the recordings of both its snapshots purged as well. It
+    // has no snapshot it can read and its log begins above 0, so it does not
+    // start, and the refusal says how many snapshots the start passed over.
+    let member = members
+        .pop()
+        .expect("the member that started from its snapshot");
+    let snapshots: Vec<i64> = listed(&member)
+        .iter()
+        .map(|entry| entry.recording_id)
+        .collect();
+    assert_eq!(snapshots.len(), 2, "{snapshots:?}");
+    let id = stop(member);
+    for recording_id in snapshots {
+        purge(dir.path(), id, recording_id);
+    }
+    let driver_dir = dir.path().join(format!("member-{id}"));
+    let driver = Driver::start(&driver_dir, &log_dir).expect("the driver starts");
+    let refused = ConsensusModule::start(&driver_dir, &log_dir, &members_string, id)
+        .expect_err("a log that begins above 0, and no snapshot to read");
+    assert!(
+        matches!(
+            &refused,
+            RaftError::LogForgotten {
+                floor_position,
+                from_position: 0,
+                snapshots_passed_over: 2,
+                ..
+            } if *floor_position == kept_start
+        ),
+        "{refused}"
+    );
+    let text = refused.to_string();
+    assert!(text.contains("passed over: 2."), "{text}");
+    driver.close().expect("the driver closes");
+    for client in clients {
+        client.close();
+    }
+    for member in members {
+        stop(member);
+    }
+}
+
+#[test]
+fn a_start_passes_over_a_snapshot_whose_recording_is_gone_for_the_one_before_it() {
+    let dir = TestDir::new("passed-over");
+    let (members_string, mut members, clients, _) = led_with_two_sessions(&dir);
+    let first = snapshot_everywhere(&mut members);
+    offer_entries(&mut members, 0, 2);
+    let second = snapshot_everywhere(&mut members);
+    offer_entries(&mut members, 2, 2);
+    let end = run_until_settled(&mut members, second + 2 * FRAME);
+    assert_eq!(
+        second,
+        first + 3 * FRAME,
+        "two entries and the second action"
+    );
+
+    // A follower stops, and the recording of its newest snapshot is purged.
+    let stopped = members.pop().expect("a follower");
+    let list = listed(&stopped);
+    assert_eq!(
+        list.iter().map(|s| s.log_position).collect::<Vec<_>>(),
+        vec![first, second]
+    );
+    let id = stop(stopped);
+    purge(dir.path(), id, list[1].recording_id);
+
+    // It starts from the snapshot before, says that it passed one over, and reads
+    // the log from there: the second action among its entries, for which it takes
+    // no snapshot, since its list still names one at that position.
+    let again = start_member(dir.path(), &members_string, id);
+    assert_eq!(again.module.session_log_position(), first);
+    assert_eq!(counter(&again, CLUSTER_SNAPSHOT_START_POSITION.0), first);
+    assert_eq!(counter(&again, CLUSTER_SNAPSHOTS_PASSED_OVER.0), 1);
+    assert_eq!(again.module.snapshot_position(), Some(second));
+    members.push(again);
+    assert_eq!(run_until_settled(&mut members, end), end);
+    assert_eq!(counter(&members[2], CLUSTER_SESSIONS.0), 2);
+    assert_eq!(
+        members[2].module.snapshot_counts(),
+        SnapshotCounts::default()
+    );
+
+    // With every snapshot's recording gone it starts from position 0, on a log it
+    // holds whole, and reads all of it.
+    let stopped = members.pop().expect("the member");
+    let id = stop(stopped);
+    purge(dir.path(), id, list[0].recording_id);
+    let again = start_member(dir.path(), &members_string, id);
+    assert_eq!(again.module.session_log_position(), 0);
+    assert_eq!(counter(&again, CLUSTER_SNAPSHOT_START_POSITION.0), -1);
+    assert_eq!(counter(&again, CLUSTER_SNAPSHOTS_PASSED_OVER.0), 2);
+    members.push(again);
+    assert_eq!(run_until_settled(&mut members, end), end);
+    assert_eq!(counter(&members[2], CLUSTER_SESSIONS.0), 2);
+    for client in clients {
+        client.close();
+    }
+    for member in members {
+        stop(member);
     }
 }

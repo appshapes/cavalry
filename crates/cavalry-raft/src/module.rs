@@ -37,14 +37,14 @@ use cavalry_client::{
 use cavalry_log::catalog::{CatalogError, CatalogReader};
 use cavalry_log::layout::State;
 use cavalry_log::recordings::{ListedRecording, RecordingsError, RecordingsFile};
-use cavalry_log::snapshots::SnapshotsError;
+use cavalry_log::snapshots::{SnapshotsError, SnapshotsFile};
 use cavalry_log::terms::{NO_RECORDING, TermsError, TermsFile};
 use cavalry_proto::client_protocol::{ErrorCode, FOLLOW_LENGTH, ReplayStopReason};
 use cavalry_proto::cluster::{
     CONSENSUS_STREAM_ID, ClusterAction, EGRESS_STREAM_ID, EMPTY_MEMBER, Endpoint,
     INGRESS_STREAM_ID, LOG_RECORDINGS_FILE_PREFIX, LOG_RECORDINGS_TMP_SUFFIX, LOG_REPLAY_STREAM_ID,
     LOG_STREAM_ID, LogRecording, LogRecordingsError, MAX_LOG_RECORDINGS_LENGTH, MAX_MEMBERS,
-    MembersError, Message, Stream, parse_members, write_log_recordings,
+    MembersError, Message, SNAPSHOT_STREAM_ID, Stream, parse_members, write_log_recordings,
 };
 use cavalry_proto::udp::UDP_TERM_LENGTH;
 use cavalry_shm::counters::CounterId;
@@ -60,8 +60,9 @@ use crate::consensus::{
     Clock, Consensus, Counts, ElectionState, Io, Log, MembersRefused, Refused, ReplayStopped, Role,
     base_above, term_at_or_below, terms_above,
 };
+use crate::sessions::OpenSession;
 use crate::sessions::{EGRESS_SLOTS, Ingress, Leadership, SessionCounts, SessionIo, Sessions};
-use crate::snapshot::{ModuleSnapshot, OpenError, SnapshotCounts, SnapshotDue};
+use crate::snapshot::{self, ModuleSnapshot, OpenError, SnapshotCounts, SnapshotDue};
 
 /// The longest payload [`ConsensusModule::offer`] takes: what one frame of the log
 /// carries after the frame header and the session message header, at the UDP
@@ -144,16 +145,26 @@ pub enum RaftError {
         /// no `terms` file is there, and that record is not read.
         log_end: i64,
     },
-    /// The member's log does not begin at position 0, or is in more recordings than
-    /// a member keeps (`spec/cluster.md`, "A member's start"; ADR 0108): the member
-    /// forgot a recording of its log while it ran, or would forget one as it
-    /// started. A start replays the log from position 0 into the module's own
-    /// state, since this version takes no snapshot, so the member does not start.
+    /// The member's log does not reach back to where its start reads it from
+    /// (`spec/cluster.md`, "A member's start"; ADR 0108, ADR 0130): the member forgot
+    /// a recording of its log while it ran, or would forget one as it started, or
+    /// the recordings were purged, and no snapshot that the member can read is of a
+    /// position at or above where the log now begins. A start reads the log from
+    /// its newest snapshot's position into the module's own state, from position 0
+    /// with no snapshot, so the member does not start.
     LogForgotten {
-        /// Where the recordings the member's record names begin: its floor position.
+        /// Where the recordings the member would start on begin: the floor position
+        /// of its record, or where the 1,024 newest of them begin.
         floor_position: i64,
+        /// Where the start reads the log from: the log position of the newest
+        /// snapshot it could read, 0 with none.
+        from_position: i64,
         /// How many recordings that hold bytes the record names.
         recordings: usize,
+        /// How many snapshots, newer than the one at `from_position`, the start
+        /// could not read and passed over. Above 0, one of them may be a snapshot
+        /// that the driver did not play back in time, which the next start reads.
+        snapshots_passed_over: u64,
     },
     /// The catalog in the member's log directory does not hold the member's log as
     /// its record of the log's recordings names it (`spec/cluster.md`, "A member's
@@ -345,31 +356,55 @@ impl core::fmt::Display for RaftError {
             }
             RaftError::LogForgotten {
                 floor_position,
+                from_position,
                 recordings,
+                snapshots_passed_over,
             } => {
                 write!(
                     f,
                     "member refused ({reason}): the member's record of its log's \
                      recordings, the `log-recordings` file in its log directory, "
                 )?;
-                if *floor_position > 0 {
-                    write!(
-                        f,
-                        "begins at position {floor_position} and not at 0: the member \
-                         forgot the recordings of its log below it"
-                    )?;
-                } else {
+                if *recordings > KEPT_RECORDINGS {
                     write!(
                         f,
                         "names {recordings} recordings that hold a part of its log, and a \
-                         member keeps {KEPT_RECORDINGS}: the member would forget the oldest"
+                         member keeps {KEPT_RECORDINGS}: the member would forget the \
+                         oldest, and the ones it keeps begin at position {floor_position}"
+                    )?;
+                } else if *from_position > 0 {
+                    write!(f, "begins at position {floor_position}")?;
+                } else {
+                    write!(
+                        f,
+                        "begins at position {floor_position} and not at 0: the recordings \
+                         of its log below it are forgotten or purged"
+                    )?;
+                }
+                if *from_position > 0 {
+                    write!(
+                        f,
+                        ", and the newest snapshot the member can read is of position \
+                         {from_position}, below that"
+                    )?;
+                } else {
+                    write!(f, ", and the member has no snapshot it can read")?;
+                }
+                if *snapshots_passed_over > 0 {
+                    write!(
+                        f,
+                        ". Snapshots that the start could not read, and passed over: \
+                         {snapshots_passed_over}. A snapshot that the driver did not play \
+                         back within 5 s, as on a loaded host, is one such: start the \
+                         member once more before anything else"
                     )?;
                 }
                 write!(
                     f,
-                    ". A member that starts replays its log from position 0, which this \
-                     one cannot, so it does not start: its log directory has held more \
-                     recordings of the log than a member starts on. Leave the member \
+                    ". A member that starts reads its log from its newest snapshot's \
+                     position, or from position 0 with none, which this \
+                     one cannot, so it does not start: its log directory no longer \
+                     holds the log from there. Leave the member \
                      stopped: the cluster goes on while a quorum of the others runs, and \
                      a cluster is brought back to its full count by starting it again as \
                      a new cluster, every member on a new log directory. Do not start \
@@ -606,7 +641,6 @@ impl From<SnapshotsError> for RaftError {
 impl From<OpenError> for RaftError {
     fn from(error: OpenError) -> Self {
         match error {
-            OpenError::File(error) => RaftError::Snapshots(error),
             OpenError::Client(error) => RaftError::Client(error),
         }
     }
@@ -617,6 +651,14 @@ impl From<CatalogError> for RaftError {
         RaftError::Catalog(error)
     }
 }
+
+/// The module's clock where it begins. A session that a start takes from a snapshot
+/// is as old as the member's start: its timeout is counted from here until a leader
+/// begins to serve it, and the cluster's time is not read for it.
+const START_CLOCK: Clock = Clock {
+    now_ns: 0,
+    time_ms: 0,
+};
 
 /// The two clocks of a duty cycle: a monotonic one since the module started, and the
 /// wall clock's milliseconds, the cluster's time.
@@ -1064,13 +1106,21 @@ enum Cataloged {
 /// recording that holds nothing is left out of the table, as a truncation leaves
 /// it out.
 ///
-/// A start forgets nothing. A record whose floor is above 0, or one that names more
-/// recordings that hold bytes than the table keeps, [`KEPT_RECORDINGS`], is a log
-/// the member cannot replay from position 0, which a start does:
-/// [`RaftError::LogForgotten`]. The floor is refused before the catalog is read;
-/// the count is known only once the recordings still being made are stopped.
+/// A start reads the log from `from`, the log position of the snapshot it took the
+/// module's state from, or 0 with none (ADR 0130), so the log must be whole from
+/// there and need not be below it. A record whose floor is above `from` is
+/// [`RaftError::LogForgotten`], refused before the catalog is read. The record's
+/// first recordings may be missing from the catalog when the first one that is
+/// held begins at or below `from`: recordings of the log below the snapshot that
+/// were purged, which a start leaves out of the table as a member that forgot them
+/// would have. And a record that names more recordings that hold bytes than the
+/// table keeps, [`KEPT_RECORDINGS`], forgets the oldest when the ones it keeps
+/// begin at or below `from`, and is [`RaftError::LogForgotten`] when they do not;
+/// that count is known only once the recordings still being made are stopped.
+/// With `from` at 0 a start forgets nothing and takes no purge.
 fn kept_log(
     floor: i64,
+    from: i64,
     listed: &[ListedRecording],
     mut cataloged: impl FnMut(i64) -> Result<Cataloged, RaftError>,
     mut stop: impl FnMut(i64) -> Result<i64, RaftError>,
@@ -1080,17 +1130,21 @@ fn kept_log(
         listed_start: entry.start_position,
         found,
     };
-    if floor > 0 {
+    if floor > from {
         return Err(RaftError::LogForgotten {
             floor_position: floor,
+            from_position: from,
             recordings: listed.len(),
+            snapshots_passed_over: 0,
         });
     }
     // What each recording is, before anything is stopped: `None` from the first
     // one missing.
     let mut stops: Vec<Option<i64>> = Vec::with_capacity(listed.len());
     let mut missing: Option<&ListedRecording> = None;
-    for entry in listed {
+    // How many of the record's first recordings were purged below the snapshot.
+    let mut purged = 0usize;
+    for (index, entry) in listed.iter().enumerate() {
         match cataloged(entry.recording_id)? {
             Cataloged::Missing => {
                 missing.get_or_insert(entry);
@@ -1101,8 +1155,18 @@ fn kept_log(
                 stream_id,
                 stop,
             } => {
-                if let Some(missing) = missing {
-                    return Err(refused(missing, ListedFound::Missing));
+                if let Some(first_missing) = missing {
+                    // Missing before one that is held. With nothing held before
+                    // them, and this one beginning at or below where the start
+                    // reads from, they are the log below the snapshot, purged.
+                    // Anything else is a directory that is not as the member
+                    // left it.
+                    if stops.is_empty() && entry.start_position <= from {
+                        purged = index;
+                        missing = None;
+                    } else {
+                        return Err(refused(first_missing, ListedFound::Missing));
+                    }
                 }
                 if start != entry.start_position || stream_id != LOG_STREAM_ID {
                     return Err(refused(
@@ -1117,21 +1181,38 @@ fn kept_log(
             }
         }
     }
-    // The stopped recordings that hold bytes: more of them than the table keeps is
+    // The recordings the catalog holds, from the first that was not purged.
+    let listed = listed.get(purged..).unwrap_or(&[]);
+    // The stopped recordings that hold bytes: more of them than the table keeps,
+    // with the ones it would keep beginning above where the start reads from, is
     // refused here, before anything is stopped.
-    let stopped_holding = listed
+    let stopped_holding: Vec<i64> = listed
         .iter()
         .zip(&stops)
         .filter(|(entry, stop)| stop.is_some_and(|stop| stop > entry.start_position))
-        .count();
-    if stopped_holding > KEPT_RECORDINGS {
+        .map(|(entry, _)| entry.start_position)
+        .collect();
+    if let Some(first_kept) = stopped_holding
+        .len()
+        .checked_sub(KEPT_RECORDINGS)
+        .filter(|forgotten| *forgotten > 0)
+        .and_then(|forgotten| stopped_holding.get(forgotten))
+        && *first_kept > from
+    {
         return Err(RaftError::LogForgotten {
-            floor_position: floor,
-            recordings: stopped_holding,
+            floor_position: *first_kept,
+            from_position: from,
+            recordings: stopped_holding.len(),
+            snapshots_passed_over: 0,
         });
     }
     let mut kept = VecDeque::with_capacity(KEPT_RECORDINGS);
-    let mut end = floor;
+    // Where the log the catalog holds begins: the floor, or past a purge the first
+    // recording held.
+    let mut end = match listed.first() {
+        Some(first) if purged > 0 => first.start_position,
+        _ => floor,
+    };
     let mut holding = 0usize;
     for (entry, stopped) in listed.iter().zip(stops) {
         if entry.start_position > end {
@@ -1144,19 +1225,26 @@ fn kept_log(
         end = end.max(stop);
         if stop > entry.start_position {
             holding += 1;
-            if kept.len() < KEPT_RECORDINGS {
-                kept.push_back(Kept {
-                    recording_id: entry.recording_id,
-                    start: entry.start_position,
-                    stop,
-                });
+            // The table keeps the newest: one more forgets the oldest.
+            if kept.len() == KEPT_RECORDINGS {
+                kept.pop_front();
             }
+            kept.push_back(Kept {
+                recording_id: entry.recording_id,
+                start: entry.start_position,
+                stop,
+            });
         }
     }
-    if holding > KEPT_RECORDINGS {
+    if holding > KEPT_RECORDINGS
+        && let Some(first) = kept.front()
+        && first.start > from
+    {
         return Err(RaftError::LogForgotten {
-            floor_position: floor,
+            floor_position: first.start,
+            from_position: from,
             recordings: holding,
+            snapshots_passed_over: 0,
         });
     }
     Ok((kept, end))
@@ -1337,10 +1425,10 @@ impl ClientIo {
     /// table forgets its oldest, counted in `cluster.log_recordings_forgotten`: that
     /// recording stays in the driver's catalog, and this member no longer replays it
     /// (ADR 0091). The record of the log's recordings names it until its next write,
-    /// which is of the table as it then is, with a floor above 0. A member does not
-    /// start on a record that still names it, nor on one whose floor is above 0: a
-    /// member that has forgotten a recording runs on and does not start again on its
-    /// log directory ([`RaftError::LogForgotten`]; ADR 0108).
+    /// which is of the table as it then is, with a floor above 0. A member that has
+    /// forgotten a recording runs on, and starts again on its log directory only
+    /// from a snapshot of a position at or above where its log then begins
+    /// ([`RaftError::LogForgotten`] without one; ADR 0108, ADR 0130).
     ///
     /// A recording that holds nothing is kept too, though a start leaves it out:
     /// the record names it until its next write, and a truncation purges what the
@@ -2752,6 +2840,15 @@ impl ConsensusModule {
     /// term ([`RaftError::TermsLost`]), and a catalog that does not hold the
     /// recordings the record names ([`RaftError::ListedRecording`]) are each refused
     /// with what to do, and the member does not start.
+    ///
+    /// The member's own state, its sessions, is taken from the newest snapshot of it
+    /// that the member's snapshots file lists and the driver plays back whole, and
+    /// the member's read of its log begins at that snapshot's position
+    /// ([`ConsensusModule::session_log_position`]); with none, the table is empty and
+    /// the read begins at 0 (ADR 0130). The log need be whole from that position
+    /// alone: recordings below it that the member forgot, or that were purged, do
+    /// not refuse the start, and a log that begins above it is
+    /// [`RaftError::LogForgotten`].
     pub fn start(
         dir: impl AsRef<Path>,
         log_dir: impl AsRef<Path>,
@@ -2835,12 +2932,75 @@ impl ConsensusModule {
         // where they end. Then, in a truncation's order, the record of them as the
         // catalog holds them, and a record of terms that holds no term above that
         // end: a truncation the member's stop cut short ends here.
+        // The newest snapshot of the module that the member's file lists and the
+        // driver plays back whole: the state the start begins from, and where its
+        // read of its log begins. With none, an empty table and position 0. The
+        // log need be whole from that position alone (ADR 0130).
+        // The member's table of sessions is filled as the snapshot is chosen. A
+        // snapshot whose sessions the table does not take whole is passed over, as
+        // one that cannot be read: the member never begins its read at a snapshot's
+        // position with another state than that snapshot's (invariant 1).
+        let snapshots = SnapshotsFile::open(log_dir.as_ref(), member_id)?;
+        let mut sessions = Sessions::new(member_id, ingress_endpoints.as_bytes());
+        let (restored, passed_over) = snapshot::load(
+            &mut client,
+            &snapshots,
+            |recording_id| {
+                matches!(
+                    cataloged(&catalog, recording_id),
+                    Ok(Cataloged::Held {
+                        start,
+                        stream_id: SNAPSHOT_STREAM_ID,
+                        stop: Some(stop),
+                    }) if stop > start
+                )
+            },
+            |restored| {
+                let mut table = Sessions::new(member_id, ingress_endpoints.as_bytes());
+                let whole = restored.sessions.iter().all(|session| {
+                    table.restore_session(
+                        START_CLOCK,
+                        OpenSession {
+                            id: session.id,
+                            correlation_id: session.correlation_id,
+                            opened_log_position: session.opened_log_position,
+                            response_channel: &session.response_channel,
+                        },
+                    )
+                });
+                if whole {
+                    table.restore_next_session_id(restored.next_session_id);
+                    sessions = table;
+                }
+                whole
+            },
+        );
+        let from = restored
+            .as_ref()
+            .map_or(0, |restored| restored.log_position);
         let (kept, stopped_at) = kept_log(
             recordings.floor_position(),
+            from,
             recordings.entries(),
             |recording_id| cataloged(&catalog, recording_id),
             |recording_id| stop_listed(&mut client, &catalog, recording_id),
-        )?;
+        )
+        // The refusal of a log that begins above the snapshot says how many newer
+        // snapshots the start could not read.
+        .map_err(|error| match error {
+            RaftError::LogForgotten {
+                floor_position,
+                from_position,
+                recordings,
+                ..
+            } => RaftError::LogForgotten {
+                floor_position,
+                from_position,
+                recordings,
+                snapshots_passed_over: passed_over,
+            },
+            other => other,
+        })?;
         // A log and no term of it: the record of terms is not the one this log was
         // recorded beside, and the member's votes went with it.
         if stopped_at > 0 && terms.log_leadership_term_id() == -1 {
@@ -2901,20 +3061,30 @@ impl ConsensusModule {
         // Each counter holds the core's value from its add: −1 for the term and the
         // recording, before a duty cycle has run.
         let counters = Counters::add(&mut client, member_id, &core, list_counts)?;
-        // The member's snapshots file, created when the directory has none, and its
-        // counters of its snapshots, after the others (ADR 0128, ADR 0129).
-        let snapshot = ModuleSnapshot::open(&mut client, log_dir.as_ref(), member_id)?;
+        // The member's counters of its snapshots, after the others, with what the
+        // start took from its snapshots file (ADR 0128, ADR 0129, ADR 0130).
+        let snapshot = ModuleSnapshot::open(
+            &mut client,
+            snapshots,
+            member_id,
+            (
+                restored
+                    .as_ref()
+                    .map_or(-1, |restored| restored.log_position),
+                passed_over,
+            ),
+        )?;
         let started = Instant::now();
         Ok(Self {
             core,
             consensus,
-            sessions: Sessions::new(member_id, ingress_endpoints.as_bytes()),
+            sessions,
             ingress,
             held_ingress: None,
             session_log: None,
-            session_log_position: 0,
+            session_log_position: from,
             snapshot,
-            snapshot_asked_at: 0,
+            snapshot_asked_at: from,
             io: ClientIo {
                 client,
                 terms,
@@ -3224,7 +3394,9 @@ impl ConsensusModule {
     }
 
     /// How far this member has read its own committed log for its sessions: the
-    /// position after the last entry it handed them, 0 before the first. It follows
+    /// position after the last entry it handed them, and before the first the log
+    /// position of the snapshot it started from, 0 when it started from none (ADR
+    /// 0130). It follows
     /// the commit position by the member's read through its driver's replayer, and
     /// a leader serves sessions once it has reached its term base log position (ADR
     /// 0116).
