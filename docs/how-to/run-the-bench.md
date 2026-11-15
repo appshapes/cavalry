@@ -618,7 +618,9 @@ shared runner is
    link rows under the profile with `-link` appended, `bench-linux-link` in CI,
    which `just bench-compare` holds to its own baseline once one is recorded from three
    of the job's processes at one tree, as the host's are, and the two `_udp_mdc` rows,
-   reported and never gated; it writes no other row.
+   reported and never gated; it writes no other row. Those two rows run once a
+   process, so `--update` writes them into the entry with no runs list, each
+   percentile the largest over the processes, as it writes a row added by hand.
    `--messages` is the count per run as given, since every message waits for its echo:
    100,000 at about 100 µs is ten seconds a run, after the UDP rows' warm-up of 10,000.
    The one-way row needs the offset
