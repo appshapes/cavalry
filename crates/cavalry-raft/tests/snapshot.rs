@@ -23,7 +23,7 @@ use cavalry_shm::counters::generated::{
     CLUSTER_SESSIONS, CLUSTER_SESSIONS_ACCEPTED, CLUSTER_SESSIONS_CLOSED, CLUSTER_SESSIONS_OPENED,
     CLUSTER_SNAPSHOT_ACTIONS, CLUSTER_SNAPSHOT_POSITION, CLUSTER_SNAPSHOT_START_POSITION,
     CLUSTER_SNAPSHOT_STEPS, CLUSTER_SNAPSHOTS_BEGUN, CLUSTER_SNAPSHOTS_FAILED,
-    CLUSTER_SNAPSHOTS_PASSED_OVER, CLUSTER_SNAPSHOTS_TAKEN,
+    CLUSTER_SNAPSHOTS_PASSED_OVER, CLUSTER_SNAPSHOTS_TAKEN, CLUSTER_TRUNCATIONS_FINISHED,
 };
 
 mod ports;
@@ -1369,6 +1369,8 @@ fn a_member_whose_log_was_purged_below_its_snapshot_starts_from_the_snapshot() {
     let again = start_member(dir.path(), &members_string, id);
     assert_eq!(again.module.session_log_position(), position);
     assert_eq!(counter(&again, CLUSTER_SNAPSHOT_START_POSITION.0), position);
+    // A purge below the snapshot is no truncation that the member's stop cut short.
+    assert_eq!(counter(&again, CLUSTER_TRUNCATIONS_FINISHED.0), 0);
     let record = RecordingsFile::open_kept(&log_dir, id).expect("the member's record of its log");
     assert_eq!(
         record.floor_position(),

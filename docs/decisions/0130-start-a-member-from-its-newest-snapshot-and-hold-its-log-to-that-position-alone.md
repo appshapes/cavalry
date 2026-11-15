@@ -112,7 +112,8 @@ member's log from position 0.
   on the three members. A member whose first recording of its log was purged
   below the snapshot, by a client's `purge recording` on a driver over its
   directories, starts from the snapshot: its list leaves the recording out, the
-  list's floor is where the next one begins, it reads on to the log's end, and
+  list's floor is where the next one begins, it counts no truncation finished in
+  `cluster.truncations_finished`, it reads on to the log's end, and
   the next snapshot's bytes are again the same on the three. With the recordings
   of both its snapshots purged as well, that member is refused, `log-forgotten`,
   and the refusal names the two snapshots passed over. A member whose log begins
@@ -133,7 +134,8 @@ member's log from position 0.
 - `crates/cavalry-raft/src/module/tests.rs`, the start's rule on a list and a
   catalog given as tables: a floor at the snapshot's position and below it
   starts, and one above it is refused with both positions; two purged recordings
-  below a snapshot start, the same purge with no snapshot or an older one is
+  below a snapshot start and are no truncation cut short, and with the list's last
+  recording gone as well that one is; the same purge with no snapshot or an older one is
   refused as a recording missing, and so is a recording missing between two that
   are held, at any position; 1,026 recordings keep the newest 1,024 when those
   begin at the snapshot's position, and are refused one frame below it. The two

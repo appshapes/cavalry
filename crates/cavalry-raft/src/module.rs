@@ -1079,7 +1079,10 @@ enum Cataloged {
 /// The log a member kept, read back at its start (`spec/cluster.md`, "A member's
 /// start"; ADR 0108): the recordings its record names, each carrying the log on from
 /// where the ones before it end, the first from `floor`, the record's floor position.
-/// Returns the table of them and where the log ends. `cataloged` says what the
+/// Returns the table of them, where the log ends, and whether the record's last
+/// recordings were missing from the catalog, a truncation that the member's stop cut
+/// short, which `cluster.truncations_finished` counts; recordings purged below a
+/// snapshot, at the record's head, are not that. `cataloged` says what the
 /// catalog holds under a recording id, and `stop` stops a recording still being
 /// made, the driver having run on while the member was away, and returns where it
 /// stopped, so that a stop is read once and is final.
@@ -1124,7 +1127,7 @@ fn kept_log(
     listed: &[ListedRecording],
     mut cataloged: impl FnMut(i64) -> Result<Cataloged, RaftError>,
     mut stop: impl FnMut(i64) -> Result<i64, RaftError>,
-) -> Result<(VecDeque<Kept>, i64), RaftError> {
+) -> Result<(VecDeque<Kept>, i64, bool), RaftError> {
     let refused = |entry: &ListedRecording, found| RaftError::ListedRecording {
         recording_id: entry.recording_id,
         listed_start: entry.start_position,
@@ -1181,6 +1184,9 @@ fn kept_log(
             }
         }
     }
+    // What is still missing is the record's last recordings, from the first that was
+    // not purged: a truncation the member's stop cut short.
+    let cut_short = missing.is_some();
     // The recordings the catalog holds, from the first that was not purged.
     let listed = listed.get(purged..).unwrap_or(&[]);
     // The stopped recordings that hold bytes: more of them than the table keeps,
@@ -1247,7 +1253,7 @@ fn kept_log(
             snapshots_passed_over: 0,
         });
     }
-    Ok((kept, end))
+    Ok((kept, end, cut_short))
 }
 
 /// What the driver's catalog holds under `recording_id`, for [`kept_log`].
@@ -2978,7 +2984,10 @@ impl ConsensusModule {
         let from = restored
             .as_ref()
             .map_or(0, |restored| restored.log_position);
-        let (kept, stopped_at) = kept_log(
+        // A recording the catalog lacks at the end of the record is a truncation the
+        // member's stop cut short, `cut_short`; one that holds nothing is not, and
+        // neither is one purged below the snapshot, at the record's head.
+        let (kept, stopped_at, cut_short) = kept_log(
             recordings.floor_position(),
             from,
             recordings.entries(),
@@ -3023,14 +3032,6 @@ impl ConsensusModule {
             listed: u64::from(recordings.was_created()),
             ..ListCounts::default()
         };
-        // A recording the catalog lacks at the end of the record is a truncation
-        // the member's stop cut short; one that holds nothing is not.
-        let cut_short = recordings.entries().iter().any(|listed| {
-            matches!(
-                cataloged(&catalog, listed.recording_id),
-                Ok(Cataloged::Missing)
-            )
-        });
         if !unchanged {
             // A list that cannot be written ends the start before a term is deleted.
             write_list(&mut recordings, &kept, [None, None], stopped_at)?;

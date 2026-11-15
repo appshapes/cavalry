@@ -2927,6 +2927,10 @@ fn stopped(start: i64, stop: i64) -> Cataloged {
 /// and where the log ends, or its refusal.
 type KeptLog = Result<(Vec<Kept>, i64), RaftError>;
 
+/// [`KeptLog`], with whether the record's last recordings were missing from the
+/// catalog: a truncation the member's stop cut short.
+type CountedLog = Result<(Vec<Kept>, i64, bool), RaftError>;
+
 /// A case of a refusal: what it is, the catalog, the recording the refusal names,
 /// and what the catalog holds in its place.
 type Refusal = (&'static str, Vec<(i64, Cataloged)>, i64, ListedFound);
@@ -2952,6 +2956,20 @@ fn read_back_from(
     catalog: &[(i64, Cataloged)],
     live_stop: i64,
 ) -> (KeptLog, Vec<i64>) {
+    let (result, stops) = read_back_counted(floor, from, list, catalog, live_stop);
+    (result.map(|(kept, end, _)| (kept, end)), stops)
+}
+
+/// [`read_back_from`], with whether the start found the record's last recordings
+/// missing from the catalog: a truncation the member's stop cut short, which
+/// `cluster.truncations_finished` counts.
+fn read_back_counted(
+    floor: i64,
+    from: i64,
+    list: &[ListedRecording],
+    catalog: &[(i64, Cataloged)],
+    live_stop: i64,
+) -> (CountedLog, Vec<i64>) {
     let mut stops = Vec::new();
     let result = kept_log(
         floor,
@@ -2969,7 +2987,7 @@ fn read_back_from(
         },
     );
     (
-        result.map(|(kept, end)| (kept.into_iter().collect(), end)),
+        result.map(|(kept, end, cut_short)| (kept.into_iter().collect(), end, cut_short)),
         stops,
     )
 }
@@ -3063,9 +3081,10 @@ fn a_start_ends_the_log_where_a_truncation_cut_short_left_its_recordings() {
         (1, 96, vec![4]),
         (0, 0, vec![]),
     ] {
-        let (read, stops) = read_back(0, &list, &whole[..held], 0);
-        let (kept, read_end) = read.expect("the log is read back");
+        let (read, stops) = read_back_counted(0, 0, &list, &whole[..held], 0);
+        let (kept, read_end, cut_short) = read.expect("the log is read back");
         assert_eq!(read_end, end, "{held} recordings held");
+        assert_eq!(cut_short, held < 3, "{held} recordings held");
         assert_eq!(
             kept.iter()
                 .map(|kept| kept.recording_id)
@@ -3340,11 +3359,13 @@ fn a_start_from_a_snapshot_needs_its_log_from_the_snapshots_position_alone() {
     // lacks them, the third begins at the snapshot's position, and the member
     // starts on it. The table leaves the purged ones out.
     let list = [listed(1, 0), listed(2, 256), listed(3, 512), listed(4, 640)];
+    // A purge is no truncation that a stop cut short, and is not counted as one.
     let purged = [(3, stopped(512, 640)), (4, stopped(640, 768))];
     for from in [512, 544, 768] {
-        let (read, _) = read_back_from(0, from, &list, &purged, 0);
-        let (table, end) = kept(read);
+        let (read, _) = read_back_counted(0, from, &list, &purged, 0);
+        let (table, end, cut_short) = read.expect("the log is read back");
         assert_eq!(end, 768, "from {from}");
+        assert!(!cut_short, "from {from}: a purge below the snapshot");
         assert_eq!(
             table
                 .iter()
@@ -3354,6 +3375,20 @@ fn a_start_from_a_snapshot_needs_its_log_from_the_snapshots_position_alone() {
             "from {from}"
         );
     }
+    // The same purge, and the record's last recording gone as well: the purge is
+    // left out, and the recording gone at the end is a truncation cut short, which
+    // ends the log where the third recording does, at or above the snapshot.
+    let (read, _) = read_back_counted(0, 512, &list, &purged[..1], 0);
+    let (table, end, cut_short) = read.expect("the log is read back");
+    assert_eq!(end, 640);
+    assert!(cut_short, "the record's last recording is gone");
+    assert_eq!(
+        table
+            .iter()
+            .map(|kept| kept.recording_id)
+            .collect::<Vec<_>>(),
+        [3]
+    );
     // The same purge with no snapshot, or with one below what is left, is a
     // recording missing before one that is held, as it was before a member took
     // snapshots: the directory is not as the member left it.
