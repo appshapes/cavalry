@@ -1209,7 +1209,11 @@ reads the log from position 0 at every start. Beside a service whose program ask
 an operator purges the recordings of a member's log that stopped at or below the
 position, and none above it; beside one whose program takes snapshots and never
 asks, none. Beside a member whose service takes no snapshot the position stays 0,
-and nothing is purged.
+and nothing is purged. The position is of the newest snapshots the member lists. A
+start that passed a snapshot over, the member's or the service's, read its log from
+an older snapshot or from position 0, and the next start does so again: an
+operator purges by the position only while `cluster.snapshots_passed_over` and
+`cluster.service_snapshots_passed_over` of the member are 0.
 
 A member does not start, and says why and what to do, in each of these cases. Its
 record of terms holds a term and its log directory holds no log recordings file:

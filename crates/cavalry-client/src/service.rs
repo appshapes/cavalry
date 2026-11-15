@@ -23,7 +23,7 @@
 use std::sync::Arc;
 use std::time::Duration;
 
-use cavalry_proto::client_protocol::ErrorCode;
+use cavalry_proto::client_protocol::{ErrorCode, ReplayStopReason};
 use cavalry_proto::cluster::{
     CONSENSUS_MODULE_STREAM_ID, CloseReason, ClusterAction, EGRESS_STREAM_ID,
     KEEPALIVE_INTERVAL_NS, MAX_SERVICE_SNAPSHOT_STATE_LENGTH, MAX_SESSIONS, Message, SERVICE_ID,
@@ -693,10 +693,21 @@ struct SnapshotReader {
     last: Vec<u8>,
     /// Whether `last` holds a message.
     held: bool,
+    /// The longest state the reader takes: the service snapshot state of the page's
+    /// "Values", the bound a service writes with.
+    state_limit: usize,
 }
 
 impl SnapshotReader {
     fn new() -> Self {
+        Self::with_state_limit(MAX_SERVICE_SNAPSHOT_STATE_LENGTH)
+    }
+
+    /// A reader that takes a state of `state_limit` bytes at the most: [`new`]'s
+    /// with the page's bound, and a test's with one it can reach.
+    ///
+    /// [`new`]: SnapshotReader::new
+    fn with_state_limit(state_limit: usize) -> Self {
         Self {
             reading: Reading::Begin,
             snapshot: Snapshot {
@@ -707,6 +718,7 @@ impl SnapshotReader {
             },
             last: Vec::with_capacity(SERVICE_SNAPSHOT_STATE_MESSAGE_LENGTH),
             held: false,
+            state_limit,
         }
     }
 
@@ -789,7 +801,7 @@ impl SnapshotReader {
                 self.last.clear();
                 self.last.extend_from_slice(bytes);
                 self.held = true;
-                if self.snapshot.state.len() > MAX_SERVICE_SNAPSHOT_STATE_LENGTH {
+                if self.snapshot.state.len() > self.state_limit {
                     Reading::Failed
                 } else {
                     Reading::Bytes
@@ -806,6 +818,21 @@ impl SnapshotReader {
             && self.held
             && self.is_marker(&self.last, SnapshotMark::End, 0);
         whole.then_some(self.snapshot)
+    }
+
+    /// The snapshot of a replay that has ended, for `reason`: the one the reader
+    /// holds when the driver played the recording to its end, and none when the
+    /// replay ended another way, at a frame that failed, at another client's stop
+    /// or with no subscriber (`spec/cluster.md`, "A service's start": the driver
+    /// plays the recording to its end). A replay that ended short can end at bytes
+    /// of the program's that read as the end marker, and what it delivered before
+    /// them is no whole state.
+    fn finish_ended(self, reason: Option<ReplayStopReason>) -> Option<Snapshot> {
+        if reason == Some(ReplayStopReason::Ended) {
+            self.finish()
+        } else {
+            None
+        }
     }
 }
 
@@ -873,11 +900,12 @@ fn read_snapshot(client: &mut Cavalry, recording_id: i64) -> Result<Option<Snaps
         {
             reached = reached.max(image.position());
         }
-        // The replay has ended, and its image was read to where it ended.
-        if let Some((end, _)) = replay.ended()
+        // The replay has ended, and its image was read to where it ended. Only a
+        // replay that played the recording to its end gives a snapshot.
+        if let Some((end, reason)) = replay.ended()
             && reached >= end
         {
-            return Ok(reader.finish());
+            return Ok(reader.finish_ended(reason));
         }
         let now = nano_time();
         if read > 0 {
@@ -1849,6 +1877,74 @@ mod tests {
         let marker_only = marker(SERVICE_SNAPSHOT_TYPE_ID, POSITION, SnapshotMark::End, 0);
         let taken = read(&snapshot(&[], &marker_only)).expect("the snapshot");
         assert_eq!(taken.state, marker_only);
+    }
+
+    /// A replay that did not play the recording to its end gives no snapshot,
+    /// whatever its last message reads as. The state here ends in the bytes of the
+    /// snapshot's own end marker, a message of their own, and the replay is cut
+    /// after them: by its place that message is the end marker of a state that is
+    /// short by those bytes, and only how the replay ended tells.
+    #[test]
+    fn a_replay_that_ended_short_of_the_recording_gives_no_snapshot() {
+        let end = marker(SERVICE_SNAPSHOT_TYPE_ID, POSITION, SnapshotMark::End, 0);
+        let mut state = vec![7u8; SERVICE_SNAPSHOT_STATE_MESSAGE_LENGTH];
+        state.extend_from_slice(&end);
+        let whole = snapshot(&[1], &state);
+        let cut = &whole[..whole.len() - 1];
+        assert_eq!(cut.last(), Some(&end), "the state's last message");
+        let reader_of = |messages: &[Vec<u8>]| {
+            let mut reader = SnapshotReader::new();
+            for message in messages {
+                reader.message(message, true);
+            }
+            reader
+        };
+        for reason in [
+            Some(ReplayStopReason::Stopped),
+            Some(ReplayStopReason::NotConnected),
+            Some(ReplayStopReason::Failed),
+            None,
+        ] {
+            assert!(reader_of(cut).finish_ended(reason).is_none(), "{reason:?}");
+            assert!(
+                reader_of(&whole).finish_ended(reason).is_none(),
+                "{reason:?}"
+            );
+        }
+        // What the cut replay would give were the reason not read: a state short by
+        // the marker's bytes.
+        let short = reader_of(cut).finish().expect("a snapshot, by its place");
+        assert_eq!(short.state.len() + end.len(), state.len());
+        // The recording played to its end gives the state whole.
+        let taken = reader_of(&whole)
+            .finish_ended(Some(ReplayStopReason::Ended))
+            .expect("the snapshot");
+        assert_eq!(taken.state, state);
+    }
+
+    /// The reader's bound on a state, at the bound: a state of exactly the bound is
+    /// read, and one byte more is no snapshot. The bound a service reads with is
+    /// the one it writes with, 1 GiB; the test reaches a smaller one.
+    #[test]
+    fn a_state_at_the_readers_bound_is_read_and_one_byte_more_is_not() {
+        let state = vec![3u8; 2 * SERVICE_SNAPSHOT_STATE_MESSAGE_LENGTH + 1];
+        let read_with = |limit: usize| {
+            let mut reader = SnapshotReader::with_state_limit(limit);
+            for message in &snapshot(&[], &state) {
+                reader.message(message, true);
+            }
+            reader.finish()
+        };
+        let taken = read_with(state.len()).expect("a state at the bound");
+        assert_eq!(taken.state, state);
+        assert!(
+            read_with(state.len() - 1).is_none(),
+            "one byte past the bound"
+        );
+        assert_eq!(
+            SnapshotReader::new().state_limit,
+            MAX_SERVICE_SNAPSHOT_STATE_LENGTH
+        );
     }
 
     #[test]

@@ -259,7 +259,12 @@ committed once a quorum, two of three, has it on disk.
   That position assumes a service whose program calls `ClusterService::restore`
   before its first poll. A service whose program takes snapshots and never calls
   it reads the member's log from position 0 at every start: beside it, purge
-  nothing, whatever the gauge says. The member cannot tell the two apart.
+  nothing, whatever the gauge says. The member cannot tell the two apart. And the
+  position is of the newest snapshots the member lists: purge by it only while
+  this member's `cluster.snapshots_passed_over` and
+  `cluster.service_snapshots_passed_over` are 0, since a start that passed a
+  snapshot over read its log from an older one, or from position 0, and the next
+  start does so again.
   Start the member with the log directory it had, whole. If that directory is
   lost, do as for a directory with no file, above.
 - `cavalry run: member refused (log-short)`: the `catalog` in the member's log
