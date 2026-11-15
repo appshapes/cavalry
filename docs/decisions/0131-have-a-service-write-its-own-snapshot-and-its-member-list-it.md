@@ -129,9 +129,12 @@ for a snapshot, and the five clients, are work item 335.
   `cluster.service_acks_rejected` with nothing listed: another service id, a
   recording the catalog does not hold, a recording of the snapshot stream, a
   position above the commit position, position 0, the position already listed,
-  and a position that is no entry's end. A session keepalive on the stream is
-  counted in `cluster.messages_rejected` and is no ack. The ack that differs in
-  nothing is listed.
+  and a position that is not a multiple of 32, which the snapshots file does not
+  take (`spec/durable-log.md`, "Snapshots"). The member does not check that a
+  position is where an entry ends: an ack at a multiple of 32 inside an entry is
+  listed, as the Consequences say. A session keepalive on the stream is counted
+  in `cluster.messages_rejected` and is no ack. The ack that differs in nothing is
+  listed.
 - The same file, a service whose member has stopped while its driver runs. A
   state one byte over 1 GiB is refused before anything is written. The service
   then writes its recording, and gives the snapshot up at the ack after the

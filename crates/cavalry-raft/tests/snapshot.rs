@@ -2142,7 +2142,8 @@ fn a_member_lists_nothing_for_a_service_ack_it_cannot_hold() {
             ack(position, services, 0),
         ),
         (
-            "of a position that is no entry's end",
+            "of a position that is not a multiple of 32, which the snapshots file \
+             does not take",
             ack(above + 8, services, 0),
         ),
     ];
