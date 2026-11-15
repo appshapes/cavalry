@@ -55,6 +55,15 @@ the refusal says how many snapshots the start passed over: one that the driver
 did not play back in time is read by the next start. A service still reads its
 member's log from position 0.
 
+A list whose last recordings are gone from the catalog is a truncation that the
+member's stop cut short, as before (ADR 0108), only while the log the others hold
+reaches that position. The snapshot is of a position the member read from its
+committed log, and a truncation never cuts below a commit position (ADR 0083), so
+a log that ends below it lost recordings at or above the snapshot's position, as
+by a purge of one too many. The start is refused, `listed-recording`, naming the
+first recording gone and both positions. Recordings purged at the head of the
+list are no truncation, and `cluster.truncations_finished` does not count them.
+
 ## Alternatives considered
 
 - **Refuse the start when the newest listed snapshot cannot be read.** Lost. The
@@ -81,6 +90,17 @@ member's log from position 0.
   report a log shorter than the member had reported (ADR 0108). Only recordings at
   the head of the list, below a recording that begins at or below the snapshot's
   position, are a purge.
+- **Take the list's last recordings gone as a truncation, wherever the log they
+  leave ends.** Lost, after it was built and a review found it. A start on a list
+  of recordings to 256, 512 and 640, with a snapshot of 300 and the last two
+  purged, took its sessions as at 300, ended its log at 256, deleted any term
+  based above 256, and counted a truncation finished. It would report a log
+  shorter than the one it had read as committed. The start now refuses it.
+- **Pass over to a snapshot at or below where the log that is left ends.** Lost.
+  An older snapshot gives the state at its own position, and the log is still
+  shorter than the member reported it: a member with that log is a voter for a
+  candidate that lacks a committed entry (ADR 0108). A refusal leaves the
+  directory as it was for an operator who has the purged recording elsewhere.
 - **Have the member purge its log below its snapshot by itself.** Lost for now. It
   is a retention policy, which ADR 0031 leaves to an operator's commands, and a
   service beside the member still reads the log from position 0. The Revisit names
@@ -138,7 +158,15 @@ member's log from position 0.
   recording gone as well that one is; the same purge with no snapshot or an older one is
   refused as a recording missing, and so is a recording missing between two that
   are held, at any position; 1,026 recordings keep the newest 1,024 when those
-  begin at the snapshot's position, and are refused one frame below it. The two
+  begin at the snapshot's position, and are refused one frame below it. With a
+  snapshot of 300 over recordings to 256, 512 and 640, the last one gone starts
+  the member, its log ending at 512; the last two gone, or all three, are refused,
+  `listed-recording`, naming the first recording gone, the end and the snapshot's
+  position; a log left ending at the snapshot's position starts, and so does a
+  list of which every recording is gone when its floor is that position; a purge
+  below a snapshot of 544 with the last two gone as well is refused; and a
+  recording still being made before the ones gone is refused after its stop when
+  it stopped below the snapshot, and starts when it stopped above it. The two
   tests of the rule as it was pass with the position at 0. The refusal's message
   says nothing of snapshots when none was passed over, and with two it says the
   count and to start the member once more first.
@@ -201,6 +229,8 @@ member's log from position 0.
   the snapshots file and the snapshot;
   [ADR 0108](0108-list-the-recordings-of-a-members-log-in-its-log-directory-and-start-a-member-on-the-log-it-kept.md),
   a member's start on the log it kept;
+  [ADR 0083](0083-truncate-to-the-next-terms-base-and-never-below-the-commit-position.md),
+  a truncation never below the commit position;
   [ADR 0115](0115-keep-a-clusters-sessions-on-every-member-opened-and-closed-by-the-log.md)
   and
   [ADR 0116](0116-read-a-members-sessions-from-its-committed-log-and-serve-them-from-its-terms-base.md),

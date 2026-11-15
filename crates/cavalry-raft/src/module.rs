@@ -278,6 +278,18 @@ pub enum ListedFound {
         /// Where the recordings before it end.
         end_position: i64,
     },
+    /// No recording, and none of the ones the record names after it either, where
+    /// the recordings before it end below the position the start reads its log from,
+    /// that of the snapshot it took its state from (ADR 0130). The member read its
+    /// log to that position as committed, and a truncation never cuts a committed
+    /// entry, so this is no truncation that a stop cut short: recordings of the
+    /// member's log at or above the snapshot's position were removed.
+    EndsBelowSnapshot {
+        /// Where the recordings before it end.
+        end_position: i64,
+        /// The log position of the snapshot the start took its state from.
+        from_position: i64,
+    },
 }
 
 impl RaftError {
@@ -445,6 +457,19 @@ impl core::fmt::Display for RaftError {
                         f,
                         "the recordings before it ending at {end_position}, below where \
                          it begins: part of the member's log is gone"
+                    )?,
+                    ListedFound::EndsBelowSnapshot {
+                        end_position,
+                        from_position,
+                    } => write!(
+                        f,
+                        "no such recording, and none of the ones the record names after \
+                         it, so the member's log would end at {end_position}, below \
+                         position {from_position} of the newest snapshot the member can \
+                         read. The member had read its log to that position as \
+                         committed, and a truncation never cuts a committed entry: a \
+                         recording of the member's log at or above its snapshot's \
+                         position was removed, as by a `purge recording` of one too many"
                     )?,
                 }
                 write!(
@@ -1121,6 +1146,16 @@ enum Cataloged {
 /// begin at or below `from`, and is [`RaftError::LogForgotten`] when they do not;
 /// that count is known only once the recordings still being made are stopped.
 /// With `from` at 0 a start forgets nothing and takes no purge.
+///
+/// The record's last recordings missing are a truncation cut short only while the
+/// log the ones before them hold reaches `from`. The snapshot is of a position the
+/// member read from its committed log, and a truncation never cuts below a commit
+/// position (ADR 0083), so a log that ends below `from` lost recordings of its own
+/// at or above the snapshot's position, as by a purge of one too many:
+/// [`ListedFound::EndsBelowSnapshot`], refused once the recordings still being
+/// made are stopped, since where the log ends is known only then. A start that
+/// passed over to an older snapshot would not mend it: the log would still be
+/// shorter than the member reported it.
 fn kept_log(
     floor: i64,
     from: i64,
@@ -1241,6 +1276,21 @@ fn kept_log(
                 stop,
             });
         }
+    }
+    // The record's last recordings missing, and the ones before them ending below
+    // where the start reads from: the snapshot is of a position the member read
+    // from its committed log, and a truncation never cuts below a commit position
+    // (ADR 0083), so this is no truncation the member's stop cut short.
+    if let Some(first_missing) = missing
+        && end < from
+    {
+        return Err(refused(
+            first_missing,
+            ListedFound::EndsBelowSnapshot {
+                end_position: end,
+                from_position: from,
+            },
+        ));
     }
     if holding > KEPT_RECORDINGS
         && let Some(first) = kept.front()
@@ -2853,8 +2903,10 @@ impl ConsensusModule {
     /// ([`ConsensusModule::session_log_position`]); with none, the table is empty and
     /// the read begins at 0 (ADR 0130). The log need be whole from that position
     /// alone: recordings below it that the member forgot, or that were purged, do
-    /// not refuse the start, and a log that begins above it is
-    /// [`RaftError::LogForgotten`].
+    /// not refuse the start, a log that begins above it is
+    /// [`RaftError::LogForgotten`], and a log whose last recordings are gone so that
+    /// it ends below it is [`RaftError::ListedRecording`] with
+    /// [`ListedFound::EndsBelowSnapshot`].
     pub fn start(
         dir: impl AsRef<Path>,
         log_dir: impl AsRef<Path>,

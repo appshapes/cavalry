@@ -246,6 +246,15 @@ committed once a quorum, two of three, has it on disk.
   truncation of this member's log stopped on a fault part way, and the member then
   led a term, so its file names a recording that begins past the cut. Leave this
   member stopped, as for a directory that is lost.
+  Another names a position `below position` of `the newest snapshot the member can
+  read`: the last recordings of the member's log are gone, and the log that is left
+  ends below the position the member's start would read it from. A truncation
+  never cuts that far, so a recording at or above the snapshot's position was
+  removed, as by a `purge recording` of one recording too many. Purge only the
+  recordings of a member's log that end at or below the position of its newest
+  snapshot, which the member's gauge `cluster.snapshot_position` holds while it
+  runs. Start the member with the log directory it had, whole. If that directory
+  is lost, do as for a directory with no file, above.
 - `cavalry run: cluster member <id>: member stopped (append)`: the member leads, and
   its log publication refused an entry for a reason that waiting does not mend. The
   message names the reason and says what to do:

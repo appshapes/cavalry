@@ -291,8 +291,13 @@ commit path runs per message.
   need be whole from that position alone: a member starts though it forgot the
   recordings below it, though they were purged, and though its log is in more than
   1,024 recordings. With no snapshot it starts as before, from position 0. A
-  service still reads its member's log from position 0, so the log below a
-  snapshot is purged only where no service reads it from its start.
+  purge counts as no truncation in `cluster.truncations_finished`, which counts
+  the list's last recordings gone. Those end the log where the ones left end only
+  while that is at or above the snapshot's position: a truncation never cuts below
+  a commit position, so a log they leave ending below it is refused,
+  `ListedFound::EndsBelowSnapshot`, and not taken as shorter than the member
+  reported. A service still reads its member's log from position 0, so the log
+  below a snapshot is purged only where no service reads it from its start.
 - Holds a member's sessions, the member's side of the session protocol
   (`spec/cluster.md`, "Sessions"; ADR 0115): `Sessions` is plain state, as `Consensus`
   is. Its caller hands it each message of the ingress stream, each entry of the
