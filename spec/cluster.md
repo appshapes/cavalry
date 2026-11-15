@@ -558,6 +558,8 @@ then its state at the snapshot's log position, the position after the action's
 entry, and it is the same state beside every member. Before the service reads the
 next entry its program may give the service that state, as bytes that mean
 something to the program alone, at most the service snapshot state of "Values". A
+longer state is refused before anything is written: the service tells its program,
+counts nothing, and the snapshot stays due until the next read. A
 program that gives none and reads on takes no snapshot for that action. A service
 whose member already lists a service's snapshot at or past that position, which
 `cluster.service_snapshot_position` holds, writes none and tells its program so.
@@ -649,7 +651,12 @@ the same type id, position and term. And the service's table of sessions takes
 the sessions whole: a response channel longer than a session holds is one it does
 not take. A snapshot that fails one of the three is passed over, counted in
 `cluster.service_snapshots_passed_over`, and the service reads the log from
-position 0. The member's newest is the one snapshot a service is told of.
+position 0. The member's newest is the one snapshot a service is told of. A replay
+that the driver refuses, as it does for a recording it does not hold, passes the
+snapshot over. Any other command of the start that the driver refuses, the add of
+the service's two counters of its start or of its subscription, is no snapshot
+passed over: the service reports it to its program, has not started and has
+counted nothing, and its program asks again.
 
 From the snapshot the service takes its sessions, each open as its session open
 event left it, and the position its read of the log begins at, the snapshot's log

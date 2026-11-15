@@ -311,8 +311,9 @@ commit path runs per message.
   member reads in every duty cycle, 10 messages at most. The member lists the
   snapshot in its snapshots file, with service id 0, when its catalog holds the
   recording as a stopped recording of the service snapshot stream, the position is
-  above 0 and at or below its commit position, and the position is above the
-  newest it lists for the service. `cluster.service_snapshot_position` holds that
+  above 0 and at or below its commit position, and the position is a multiple of
+  32 above the newest it lists for the service; it does not check that an entry
+  of its log ends there. `cluster.service_snapshot_position` holds that
   position, and an ack that fails a check is counted in
   `cluster.service_acks_rejected` with nothing listed. The member answers no ack
   and waits for none: it does not know its services (ADR 0066), so its own
