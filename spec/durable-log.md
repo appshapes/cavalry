@@ -1,4 +1,4 @@
-# The durable log, version 3
+# The durable log, version 4
 
 The on-disk record of a stream: what the driver writes when it records a publication,
 and what `cavalry replay` and `just replay-check` read back. A directory, the driver's
@@ -17,7 +17,10 @@ not name. Version 3 adds the log recordings file, a cluster member's record of w
 recordings in the directory hold its log, which the consensus module writes before
 the member reports a position a recording holds and reads when the member starts on
 the directory again (ADR 0108); a directory with no cluster member has none, and a
-reader of version 2 ignores one.
+reader of version 2 ignores one. Version 4 adds the snapshots file, a cluster
+member's record of which recordings in the directory are snapshots that a start may
+begin from (ADR 0128); a directory with no cluster member has none, and a reader of
+version 3 ignores one.
 
 Integers are little-endian; offsets and lengths are in bytes; signed fields are two's
 complement; a timestamp is nanoseconds since the Unix epoch as an i64. A position is
@@ -33,6 +36,7 @@ from the start of the stream, a multiple of 32.
 | `<recording id>.idx` | The time index: one (timestamp, position) entry at the start of the recording and then at most once per millisecond while the position moves. |
 | `terms` | A cluster member's record of recorded terms and its candidate term ("Terms"); absent on a driver that is no member. |
 | `log-recordings` | A cluster member's record of the recordings that hold its log ("Log recordings"); absent on a driver that is no member. |
+| `snapshots` | A cluster member's record of the snapshots a start may begin from ("Snapshots"); absent on a driver that is no member. |
 
 A recording id and a segment base position are written in decimal with no sign and no
 leading zeros. Nothing else lives in the directory; a reader ignores files it does not
@@ -329,6 +333,81 @@ wholly in recordings the member has forgotten, which a truncation below every
 recording it kept leaves: the floor position is then where the log ends, the
 position the member truncated to.
 
+## Snapshots
+
+A cluster member's record of the snapshots in this directory that a start may begin
+from. A snapshot is a recording that holds the state of the member's consensus
+module, or of a service beside the member, as that state was at one position of the
+member's log (`spec/cluster.md`, "The snapshot marker"). The catalog holds the
+recording as it holds every other. It does not say that the recording is a
+snapshot, whose state it holds or at which position, and it also holds a snapshot
+whose writer stopped before it was whole. This file says those things: a snapshot is
+one a start may begin from once this file lists it, and not before (ADR 0128). In
+Aeron, this is the snapshot entries of the recording log
+([glossary](../docs/glossary.md)). The file is `snapshots` in the log directory: a
+64-byte header and two slots of 3088 bytes, 6240 bytes in all, a length that never
+changes.
+
+| Offset | Size | Field | Type | Bound |
+| --- | --- | --- | --- | --- |
+| 0 | 8 | magic | bytes | the bytes `43 56 4C 59 53 4E 41 50` (`CVLYSNAP`), written last when the file is created; eight zero bytes until then |
+| 8 | 4 | version | i32 | 0 |
+| 12 | 4 | slot length | i32 | 3088 |
+| 16 | 4 | member id | i32 | 0 or more: the member whose snapshots the file lists |
+| 20 | 44 | reserved | bytes | written as 0, never read |
+
+Slot s, 0 or 1, is at 64 + s × 3088. A slot holds one whole list:
+
+| Offset | Size | Field | Type | Bound |
+| --- | --- | --- | --- | --- |
+| 0 | 4 | checksum | u32 | the zlib CRC32 of the slot's bytes 4 to 16 + 48 × entry count |
+| 4 | 4 | entry count | i32 | 0 to 64 |
+| 8 | 8 | sequence | i64 | 0 or more: 0 in the list a creation writes, and in every list after it one above the sequence of the list before |
+| 16 | 48 × entry count | entries | | the snapshots, in the order they were listed, the newest last |
+
+The bytes of a slot after its last entry are not read. Entry i is at 16 + i × 48 of
+its slot:
+
+| Offset | Size | Field | Type | Bound |
+| --- | --- | --- | --- | --- |
+| 0 | 8 | recording id | i64 | 0 or more: the snapshot's recording in this directory's catalog |
+| 8 | 8 | leadership term id | i64 | 0 or more: the term at the log position; at least the term of the entry before it that has its service id |
+| 16 | 8 | term base log position | i64 | 0 or more, a multiple of 32: where that term begins in the log |
+| 24 | 8 | log position | i64 | a multiple of 32, at least the term base log position: the position of the log the state is of, with every entry below it in the state and none at or above it; above the log position of the entry before it that has its service id |
+| 32 | 8 | timestamp | i64 | any value: the cluster's time when the snapshot was asked for, milliseconds since 1970-01-01T00:00:00Z (`spec/cluster.md`, "Values", cluster time) |
+| 40 | 4 | service id | i32 | −1 or more: −1 for the consensus module's own state, and 0 or more for the state of the service with that id |
+| 44 | 4 | reserved | bytes | written as 0, never read |
+
+The fields are those of a snapshot entry of Aeron's recording log, in its order,
+without its entry type: a term has its own file here ("Terms"), so every entry of
+this one is a snapshot. A snapshot of the consensus module and a snapshot of a
+service are separate entries, and separate recordings, though they are of one log
+position.
+
+The list is kept in two slots, as the list of the log recordings file is, so that a
+write a crash tears reads as the list before it. The list is the one in the slot
+whose checksum matches, and of two such slots the one with the higher sequence. A
+write puts the whole list into the other slot, the one the list is not read from,
+under a sequence one above the list it replaces, and syncs once. A slot whose
+checksum does not match is the write a crash tore, or the slot no write has reached
+yet, whose bytes are zero, and it is not read. A crash tears at most one slot, so a
+file in which neither checksum matches is damaged, and the reader refuses it with
+`slots`. A slot whose checksum matches holds what a writer wrote, so one that fails
+another check is damage too, as are two slots of one sequence, and the reader
+refuses the file with that check's name.
+
+A snapshot is listed by a write that adds its entry after the entries the list
+holds, and it is one a start may begin from once that write is synced. The entries
+of one service id are in the order of their log positions, each above the one
+before, and their terms never fall; the entries of two service ids have no order
+between them. The newest snapshot of a service id is the last entry that has it. A
+list names at most 64 snapshots, the newest. A write that would add a sixty-fifth
+leaves out the first entry of the list, the oldest: the member forgets that
+snapshot, and its recording stays in the catalog until a command purges it
+(`spec/client-protocol.md`, "Commands", purge recording). An entry's recording is
+not checked against the catalog by a reader of this file: whether the catalog still
+holds it, stopped and whole, is the check of the member that starts from it.
+
 ## The driver
 
 The driver is the directory's only writer; how it keeps a second driver out is its own
@@ -531,6 +610,23 @@ floor position is above 0, is a log the member does not start on
 (`spec/cluster.md`, "A member's start"). The recovery pass of this section leaves the
 file alone, as it leaves the terms file.
 
+The snapshots file has one writer as well, a member's consensus module, from the
+same thread (ADR 0128). The module creates the file when there is none, as it
+creates the log recordings file: every field after the magic, slot 0 as the list of
+no entry with sequence 0 under its checksum, the file extended to its length, and a
+sync, then the magic and a sync, then a sync of the log directory. A log directory
+with no snapshots file lists no snapshot, so the file is created at any start,
+whatever the terms file holds. A file shorter than its header, or whose magic is
+zero while each slot either fails its checksum or is the list a creation writes,
+with no entry and sequence 0, was torn while the module created it, and the module
+writes it again; a zero magic over any other slot whose checksum matches is damage,
+refused with `not-ready`. A snapshot is listed by one write and one sync, and a
+snapshot that a reader would refuse in the list is not written: it is the writer's
+fault, `list`, and the file is left as it was. The recovery pass of this section
+leaves the file alone, as it leaves the two others. No member of version 0 of
+`spec/cluster.md` takes a snapshot ("Out of this version" there), so no member lists
+one yet: this version gives the file a snapshot is listed in.
+
 What the order of a truncation leaves after a crash: before the list is written,
 recordings the list names are gone from the catalog, the last ones it names, since
 the module purges from the last recording back and cuts no recording before it has
@@ -657,6 +753,43 @@ checks are damage to a file; and `sequence`, when a write is asked of a file who
 list holds the sequence 9223372036854775807, which no count of writes reaches and
 above which there is none, and that write writes nothing either.
 
+The snapshots file, with the file's length:
+
+| Check | Reported when |
+| --- | --- |
+| `too-short` | The file is shorter than 6240 bytes. |
+| `length` | The file is longer than 6240 bytes. |
+| `not-ready` | The magic is eight zero bytes: the creator has not finished. |
+| `magic` | The magic is any other value than `CVLYSNAP`. |
+| `version` | The version is not 0. |
+| `slot-length` | The slot length is not 3088. |
+| `member` | The member id is below 0; or, for the member that opens the file, it is not that member's id: the directory is another member's. A header vector pins the first half alone. |
+
+A slot of it, its fields and then its entries in order, each entry's four checks
+before the next entry's:
+
+| Check | Reported when |
+| --- | --- |
+| `checksum` | The entry count is not 0 to 64, fewer bytes were given than the count needs, or the checksum is not the zlib CRC32 of bytes 4 to 16 + 48 × entry count. For one slot of the two this is not a failure of the file's: that slot is the write a crash tore or the slot never written, and the list is the other slot's. |
+| `sequence` | The sequence is below 0. |
+| `recording` | An entry's recording id is below 0. |
+| `service` | An entry's service id is below −1. |
+| `term` | An entry's leadership term id is below 0, or below the leadership term id of the entry before it that has its service id. |
+| `position` | An entry's term base log position is below 0 or not a multiple of 32; or its log position is not a multiple of 32, is below its term base log position, or is not above the log position of the entry before it that has its service id. |
+
+The two slots together, slot 0's checks and then slot 1's, are checked as the two
+slots of the log recordings file are: `slots` when neither passes `checksum`; a
+slot's own check when it passes `checksum` and fails a later one, slot 0's before
+slot 1's; and `sequence` when both pass every check and hold the same sequence.
+
+A member that lists a snapshot reports two more, which no vector pins since neither
+is a property of the bytes a reader is given: `list`, when the snapshot is one that a
+reader would refuse in the list with `recording`, `service`, `term` or `position`,
+which writes nothing and is the writer's fault, where those four checks are damage
+to a file; and `sequence`, when the file's list holds the sequence
+9223372036854775807, above which there is none, and that write writes nothing
+either.
+
 ## Vectors
 
 `spec/vectors/durable-log.json`, written by `spec/vectors/durable-log.py`: catalog header
@@ -672,6 +805,10 @@ file length, slot vectors that carry a slot's fields and its entries and no byte
 after them, a valid vector's `fields` naming the sequence, the floor position and
 each entry as its recording id and its start position, and file vectors that carry
 both slots as `slots` and name in `fields` the slot that holds the list, 0 or 1,
-beside that list, under version 3; and position
+beside that list, under version 3; snapshots header vectors with the file length,
+slot vectors that carry a slot's fields and its entries and no byte after them, a
+valid vector's `fields` naming the sequence and each entry as its six fields in
+their order, and file vectors that carry both slots as `slots` and name in `fields`
+the slot that holds the list beside that list, under version 4; and position
 vectors, arithmetic, from a descriptor's fields and a position to the segment file name,
 the segment base position, the offset in the segment, the term id and the term offset.

@@ -16,6 +16,13 @@ The durable log: recording and replay. Data plane.
   the log directory. The file is never created for a
   member whose terms file holds a term: such a member holds a log, and an empty list
   would say that it holds none (`spec/durable-log.md`, "Log recordings"; ADR 0108).
+- Keeps a cluster member's snapshots file, `snapshots::SnapshotsFile`, the list of
+  the snapshots a start may begin from: for each, its recording, the position of the
+  log its state is of, the term there, and whose state it is, the member's own or a
+  service's. A snapshot counts once the file lists it. The list is written whole
+  into one of two slots and synced once, as the log recordings file is, and names
+  the newest 64: one more forgets the oldest. No member writes the file yet
+  (`spec/durable-log.md`, "Snapshots"; ADR 0128).
 - Holds the log directory for the driver: `dir::LogDir` opens it under an exclusive
   advisory lock on the catalog, so two drivers never write one directory, and runs the
   recovery pass of the spec before any recording is added, reporting every action for

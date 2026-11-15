@@ -12,6 +12,11 @@ use cavalry_log::recordings::{
     self, FILE_LENGTH as RECORDINGS_FILE_LENGTH, HEADER_LENGTH as RECORDINGS_HEADER_LENGTH,
     RecordingsHeader, SLOT_HEADER_LENGTH, SLOT_LENGTH,
 };
+use cavalry_log::snapshots::{
+    self, ENTRY_LENGTH as SNAPSHOTS_ENTRY_LENGTH, FILE_LENGTH as SNAPSHOTS_FILE_LENGTH,
+    HEADER_LENGTH as SNAPSHOTS_HEADER_LENGTH, SLOT_HEADER_LENGTH as SNAPSHOTS_SLOT_HEADER_LENGTH,
+    SLOT_LENGTH as SNAPSHOTS_SLOT_LENGTH, SnapshotsHeader,
+};
 use cavalry_log::terms::{
     self, ENTRY_LENGTH as TERMS_ENTRY_LENGTH, HEADER_LENGTH as TERMS_HEADER_LENGTH, MAX_ENTRIES,
     TermsEntry, TermsHeader,
@@ -34,7 +39,7 @@ impl XorShift {
     }
 }
 
-const REASONS: [&str; 28] = [
+const REASONS: [&str; 29] = [
     "too-short",
     "not-ready",
     "magic",
@@ -63,6 +68,7 @@ const REASONS: [&str; 28] = [
     "member",
     "sequence",
     "slots",
+    "service",
 ];
 
 fn named(reason: &str) {
@@ -400,5 +406,157 @@ fn recordings_headers_and_slots_never_panic() {
     assert!(
         taken > 5_000,
         "{taken} slots were taken: the generator is off"
+    );
+}
+
+/// A slot of the snapshots file for [`snapshots_headers_and_slots_never_panic`]: random
+/// bytes, or entries a reader takes with now and then a field that it does not, under
+/// a checksum that matches two times in three.
+fn snapshots_slot(random: &mut XorShift, round: u64) -> Vec<u8> {
+    const HEAD: usize = SNAPSHOTS_SLOT_HEADER_LENGTH;
+    const ENTRY: usize = SNAPSHOTS_ENTRY_LENGTH;
+    let count = (random.next() % 6) as usize;
+    let whole = HEAD + count * ENTRY;
+    let length = if round.is_multiple_of(7) {
+        (random.next() % 400) as usize
+    } else {
+        whole
+    };
+    let mut slot = random.bytes(length);
+    if round.is_multiple_of(2) && slot.len() >= 8 {
+        slot[4..8].copy_from_slice(&(count as i32).to_le_bytes());
+    }
+    if !round.is_multiple_of(4) && slot.len() >= whole {
+        slot[4..8].copy_from_slice(&(count as i32).to_le_bytes());
+        let sequence = (random.next() % 1_000) as i64;
+        slot[8..16].copy_from_slice(&sequence.to_le_bytes());
+        // Two states, the member's own and one service's, each at a position above
+        // its last, in a term that never falls, from a base at or below the position.
+        let mut positions = [0i64; 2];
+        let mut terms = [0i64; 2];
+        for entry in 0..count {
+            let at = HEAD + entry * ENTRY;
+            let whose = (random.next() % 2) as usize;
+            positions[whose] += (1 + (random.next() % 4) as i64) * 32;
+            terms[whose] += (random.next() % 2) as i64;
+            let base = positions[whose] - ((random.next() % 2) as i64) * 32;
+            let fields = [
+                (random.next() % 1_000) as i64,
+                terms[whose],
+                base,
+                positions[whose],
+                random.next() as i64,
+            ];
+            for (index, field) in fields.iter().enumerate() {
+                slot[at + index * 8..at + index * 8 + 8].copy_from_slice(&field.to_le_bytes());
+            }
+            slot[at + 40..at + 44].copy_from_slice(&(whose as i32 - 1).to_le_bytes());
+            // The reserved bytes, written as 0: a slot a reader takes is then one a
+            // writer writes, byte for byte.
+            slot[at + 44..at + ENTRY].fill(0);
+        }
+        // One field in five rounds is whatever the generator gives: a sequence, or a
+        // field of an entry that a reader may refuse.
+        if round.is_multiple_of(5) {
+            let at = 8 + 8 * (random.next() as usize % (1 + 6 * count));
+            if at + 8 <= slot.len() && (at < HEAD || (at - HEAD) % ENTRY != 40) {
+                slot[at..at + 8].copy_from_slice(&(random.next() as i64 >> 40).to_le_bytes());
+            } else if at + 4 <= slot.len() {
+                slot[at..at + 4].copy_from_slice(&((random.next() as i32) >> 28).to_le_bytes());
+            }
+        }
+    }
+    if !round.is_multiple_of(3) && slot.len() >= whole && slot.len() >= HEAD {
+        let count = i32::from_le_bytes([slot[4], slot[5], slot[6], slot[7]]);
+        if let Ok(count) = usize::try_from(count)
+            && slot.len() >= HEAD + count * ENTRY
+        {
+            let crc = crc32(&slot[4..HEAD + count * ENTRY]);
+            slot[..4].copy_from_slice(&crc.to_le_bytes());
+        }
+    }
+    slot
+}
+
+#[test]
+fn snapshots_headers_and_slots_never_panic() {
+    let mut random = XorShift(0xD6E8_FEB8_6659_FD93);
+    let mut taken = 0;
+    let mut refused = 0;
+    for round in 0..20_000 {
+        let length = if round % 4 == 0 {
+            (random.next() % 100) as usize
+        } else {
+            SNAPSHOTS_HEADER_LENGTH
+        };
+        let mut bytes = random.bytes(length);
+        if round % 3 == 0 && bytes.len() >= 16 {
+            bytes[..8].copy_from_slice(b"CVLYSNAP");
+            bytes[8..12].copy_from_slice(&0i32.to_le_bytes());
+            bytes[12..16].copy_from_slice(&(SNAPSHOTS_SLOT_LENGTH as i32).to_le_bytes());
+        }
+        if round % 2 == 0 && bytes.len() >= 20 {
+            let member_id = (random.next() % 8) as i32 - 1;
+            bytes[16..20].copy_from_slice(&member_id.to_le_bytes());
+        }
+        // Lengths around the file's own as well as its own.
+        let file_length = if round % 5 == 0 {
+            SNAPSHOTS_FILE_LENGTH as u64 - 2 + random.next() % 5
+        } else {
+            SNAPSHOTS_FILE_LENGTH as u64
+        };
+        match SnapshotsHeader::parse(&bytes, file_length) {
+            Ok(header) => {
+                let again = SnapshotsHeader::parse(&header.encode(), file_length)
+                    .expect("encoded bytes parse");
+                assert_eq!(again, header);
+            }
+            Err(error) => named(error.reason()),
+        }
+
+        let slots = [
+            snapshots_slot(&mut random, round),
+            snapshots_slot(&mut random, round / 2),
+        ];
+        let mut lists = [Vec::new(), Vec::new()];
+        let [list_0, list_1] = &mut lists;
+        let read = [
+            snapshots::parse_slot(&slots[0], list_0),
+            snapshots::parse_slot(&slots[1], list_1),
+        ];
+        for ((slot, list), bytes) in read.iter().zip(&lists).zip(&slots) {
+            match slot {
+                Ok(sequence) => {
+                    // A slot a reader takes is one a writer writes: the same entries,
+                    // and the same bytes but for the reserved four of each entry,
+                    // which a writer writes as 0 and a reader never reads.
+                    let mut out = Box::new([0u8; SNAPSHOTS_SLOT_LENGTH]);
+                    let length = snapshots::encode_slot(*sequence, list, &mut out)
+                        .expect("the sequence and entries a reader took encode");
+                    let mut again = Vec::new();
+                    assert_eq!(
+                        snapshots::parse_slot(&out[..length], &mut again).ok(),
+                        Some(*sequence)
+                    );
+                    assert_eq!(&again, list);
+                    assert_eq!(length, SNAPSHOTS_SLOT_HEADER_LENGTH + list.len() * 48);
+                    assert!(bytes.len() >= length);
+                    taken += 1;
+                }
+                Err(error) => {
+                    named(error.reason());
+                    refused += 1;
+                }
+            }
+        }
+        let [slot_0, slot_1] = read;
+        match snapshots::choose(slot_0, slot_1) {
+            Ok(slot) => assert!(slot < 2),
+            Err(error) => named(error.reason()),
+        }
+    }
+    assert!(
+        taken > 5_000 && refused > 5_000,
+        "{taken} slots were taken and {refused} refused: the generator is off"
     );
 }

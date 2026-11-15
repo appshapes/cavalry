@@ -176,3 +176,4 @@ under `docs/` is listed here; `just lint-docs` fails on one that is not.
 - [0124. Give each client a session object and a service object, whose handler's failure aborts its entry](decisions/0124-give-each-client-a-session-object-and-a-service-object-whose-handlers-failure-aborts-its-entry.md)
 - [0127. Measure a claim row with its subscriber held behind the publisher](decisions/0127-measure-a-claim-row-with-its-subscriber-held-behind-the-publisher.md)
 - [0126. Run the cluster tutorial's path in just quickstart](decisions/0126-run-the-cluster-tutorials-path-in-just-quickstart.md)
+- [0128. List a member's snapshots in a file of their own in its log directory](decisions/0128-list-a-members-snapshots-in-a-file-of-their-own-in-its-log-directory.md)
