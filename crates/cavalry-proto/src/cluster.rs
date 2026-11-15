@@ -671,8 +671,10 @@ impl fmt::Display for ClusterError {
             ClusterError::Version { found } => write!(
                 f,
                 "cluster message rejected (version): version {found}, this reader knows \
-                 {HEADER_VERSION}; the writer runs another Cavalry version, upgrade the older \
-                 side; see {DOC}"
+                 {HEADER_VERSION} in a message's header and the protocol versions of major \
+                 {}; the writer runs another major of the cluster protocol, and members of \
+                 two majors form no cluster: run every member at one major; see {DOC}",
+                PROTOCOL_VERSION >> 16
             ),
             ClusterError::Template { found } => write!(
                 f,

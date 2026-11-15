@@ -154,6 +154,12 @@ other two, to the commit position the members reported. Every wait is bounded at
 60 s. A failure prints the step, what `doctor` says of each member that runs and each
 program's output, leaves the script's directory, and exits 1.
 
+The script reads lines that both builds print: `cavalry run`'s `started` and
+`closed` lines, the `note cluster-member` line of `cavalry doctor`, and the lines of
+the two adder programs. N prints the lines of its own tree until the page's version
+moves again, so a change that rewords one of them teaches the script the new wording
+beside the old, in the same change.
+
 The script's header says how to run it by hand.
 [Upgrade a cluster one member at a time](../docs/how-to/upgrade-a-cluster.md) is the
 same upgrade for an operator.

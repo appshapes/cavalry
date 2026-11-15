@@ -70,8 +70,8 @@ has why.
    Nothing is committed in those seconds. A client's session moves to the new
    leader by itself. The member you stopped starts as a follower of that leader.
    Upgrading the leader last costs the cluster one election. In any other order it
-   can cost two, since the member that wins the first may be one you still have to
-   stop.
+   can cost up to three: each stop of a member that leads at that moment holds
+   one, and the member that wins an election may be one you still have to stop.
 
 To step back to the older build, do the same steps with the older build's binary.
 No file that a member keeps differs between version 0 and version 1.
@@ -83,9 +83,11 @@ No file that a member keeps differs between version 0 and version 1.
   in term` with the same term, and all three give the same `commit position` once
   nothing is being appended.
 - No line of `doctor` is a `WARN` or a `FAIL` whose check begins `cluster-`. The
-  two members that elected at step 6 each print `WARN
-  cluster.leader_heartbeat_timeouts`, once: that is the leader you stopped, and
-  the upgrade's one election.
+  two members that elected at step 6 each print one warning for the leader you
+  stopped, once: `WARN cluster.leader_heartbeat_timeouts`, or `WARN
+  cluster.log_images_lost` from a member that noticed the loss as its image of the
+  leader's log going. Both mean that the leader was gone, and that is the
+  upgrade's one election.
 - A client that held a session through the upgrade still has its answers: a
   message it sent before a step was answered once, and its session is open with
   the leader of the last term.

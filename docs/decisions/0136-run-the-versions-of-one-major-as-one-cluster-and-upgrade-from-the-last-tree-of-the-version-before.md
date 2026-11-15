@@ -50,9 +50,10 @@ form, the page's version being the minor while the major is 0. A member and a
 client of version 1 write 256 in the four fields that carry a version and 0 in
 every header. Version 1 adds no message, field or entry: its content is this rule.
 
-A cluster is upgraded one member at a time on the log directories it has. A member
-is stopped with its service and both are started at the new version, and the next
-is stopped only once that one leads, or follows with its election closed. A
+A cluster whose every member runs is upgraded one member at a time on the log
+directories it has. A member is stopped with its service and both are started at
+the new version, and the next is stopped only once that one leads, or follows with
+its election closed. With three voters or more a quorum runs at every step. A
 member may be stepped back, since no file's format differs between the two
 versions.
 
@@ -117,8 +118,13 @@ the same bytes.
   and `crates/cavalry-raft/src/consensus.rs` drops the field on receipt. So the
   tree before this decision, which is N, reads version 1.
 - `conformance/upgrade/run.sh` on the loopback: the upgrade above, from the tree
-  before this decision to this one. The pull request's body has its run on the
-  laptop and on each of CI's runners.
+  before this decision, b82fb555, to this one, on a laptop, which is macOS. The two
+  members that remained when the leader was stopped, one of each version, elected
+  the one of version 1 in term 1. The three services reached the client's total,
+  124, from the same 18 entries, and the three logs replayed to the same bytes, to
+  position 1856. The upgrade took 18 s and the run 21 s, with N's build kept. The
+  pull request's body has that run and the run of CI's Linux runner; `master`'s
+  own run is the first on CI's macOS runner (ADR 0073).
 
 ## Consequences
 
@@ -144,7 +150,10 @@ the same bytes.
   decision leaves it as it found it.
 - Revisit: at the first release, for released versions as N (ADR 0061); when a
   version adds an entry or a message, for when a leader may use it; when a major
-  is needed, for how a cluster crosses one.
+  is needed, for how a cluster crosses one and what a member of the later major
+  does with a log directory that major 0 wrote; when a line that the gate reads
+  of both builds is reworded, since N prints the older line until the version
+  moves.
 
 ## References
 
