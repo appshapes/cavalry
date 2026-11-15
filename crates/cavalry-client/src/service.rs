@@ -80,8 +80,9 @@ const IPC_CHANNEL: &str = "cavalry:ipc";
 /// How long a snapshot may go without its next step: a message a publication does
 /// not take, a recording whose stop the driver does not announce, or a service ack
 /// the consensus module stream does not take (`spec/cluster.md`, "Values", snapshot
-/// timeout). Past it the snapshot is given up.
-const SNAPSHOT_TIMEOUT_NS: i64 = 1_000_000_000;
+/// timeout). Past it the snapshot is given up. It is the one a member's own snapshot
+/// is under.
+const SNAPSHOT_TIMEOUT_NS: i64 = cavalry_proto::cluster::SNAPSHOT_TIMEOUT_NS as i64;
 
 /// How long the service's thread sleeps between two tries of a step of a snapshot
 /// that the driver has not caught up with.
@@ -486,7 +487,7 @@ fn load(
 /// no list, and is no snapshot.
 fn write_snapshot(
     client: &mut Cavalry,
-    snapshots: &mut Snapshots,
+    snapshots: &mut SnapshotPublications,
     sessions: &[Session; MAX_SESSIONS],
     due: Due,
     state: &[u8],
@@ -1022,8 +1023,13 @@ pub struct ClusterService {
     sessions: Box<[Session; MAX_SESSIONS]>,
     /// The snapshot the last poll's last entry asked for, until the next poll.
     due: Option<Due>,
-    /// What the service holds for its snapshots, from the first one it takes.
-    snapshots: Option<Snapshots>,
+    /// The two counters of the service's snapshots, from the first call of
+    /// [`snapshot`](Self::snapshot) that writes one.
+    snapshot_counters: Option<SnapshotCounters>,
+    /// The two publications of the service's snapshots, from the first call whose
+    /// adds the driver took: held apart from the counters, so that a refused add is
+    /// counted, and a call after it adds no counter twice.
+    snapshot_publications: Option<SnapshotPublications>,
     /// Whether the service has begun: a poll has opened its member's log, or
     /// [`ClusterService::restore`] has answered where it starts.
     started: bool,
@@ -1043,14 +1049,31 @@ struct Due {
     timestamp: i64,
 }
 
-/// What a service keeps for its snapshots, from its first to its close: the
-/// publication each snapshot is a recording of a span of, the publication its
-/// service acks go to the member on, and its two counters.
-struct Snapshots {
-    publication: Publication,
-    acks: Publication,
+/// The two counters of a service's snapshots, kept from the first snapshot it writes
+/// to its close: `cluster.service_snapshots_taken` and
+/// `cluster.service_snapshots_failed`.
+struct SnapshotCounters {
     taken: Counter,
     failed: Counter,
+}
+
+/// The two publications of a service's snapshots, kept from the first snapshot whose
+/// adds the driver took to the service's close: the publication each snapshot is a
+/// recording of a span of, and the publication its service acks go to the member on.
+struct SnapshotPublications {
+    publication: Publication,
+    acks: Publication,
+}
+
+impl SnapshotPublications {
+    /// Adds both: two commands to the driver. A refusal of the second gives the
+    /// first back.
+    fn add(client: &mut Cavalry) -> Result<Self, ClientError> {
+        let publication =
+            client.add_exclusive_publication(IPC_CHANNEL, SERVICE_SNAPSHOT_STREAM_ID)?;
+        let acks = client.add_exclusive_publication(IPC_CHANNEL, CONSENSUS_MODULE_STREAM_ID)?;
+        Ok(Self { publication, acks })
+    }
 }
 
 impl ClusterService {
@@ -1064,7 +1087,8 @@ impl ClusterService {
             answering: false,
             sessions: Box::new(core::array::from_fn(|_| Session::closed())),
             due: None,
-            snapshots: None,
+            snapshot_counters: None,
+            snapshot_publications: None,
             started: false,
             start: None,
         }
@@ -1524,6 +1548,16 @@ impl ClusterService {
     /// state longer than 1 GiB is refused, [`ClusterError::SnapshotTooLong`], and a
     /// call where no snapshot is due is [`ClusterError::NoSnapshotDue`].
     ///
+    /// A snapshot written is counted in `cluster.service_snapshots_taken`, and one
+    /// given up in `cluster.service_snapshots_failed`, the driver's refusal of a
+    /// command among them. At the first snapshot that refusal can be of the
+    /// service's two publications, which the call returns as
+    /// [`ClusterError::Client`]. The service's two counters are added before
+    /// anything else, at the first call that writes a snapshot, and a refusal of
+    /// either is the one failure that is not counted: there is no counter yet to
+    /// count it in. The call returns it as [`ClusterError::Client`], and the next
+    /// call adds them again.
+    ///
     /// ```
     /// use cavalry_client::{Action, Cavalry, ClusterError, Entry};
     ///
@@ -1581,40 +1615,46 @@ impl ClusterService {
             self.due = None;
             return Ok(false);
         }
-        if self.snapshots.is_none() {
-            let key = member.key;
-            let id = member.id;
-            let publication =
-                client.add_exclusive_publication(IPC_CHANNEL, SERVICE_SNAPSHOT_STREAM_ID)?;
-            let acks = client.add_exclusive_publication(IPC_CHANNEL, CONSENSUS_MODULE_STREAM_ID)?;
-            let taken = client.add_counter(
-                CLUSTER_SERVICE_SNAPSHOTS_TAKEN.0,
-                &key,
-                &format!("cluster.service_snapshots_taken {id}"),
-            )?;
-            let failed = client.add_counter(
-                CLUSTER_SERVICE_SNAPSHOTS_FAILED.0,
-                &key,
-                &format!("cluster.service_snapshots_failed {id}"),
-            )?;
-            self.snapshots = Some(Snapshots {
-                publication,
-                acks,
-                taken,
-                failed,
-            });
-        }
-        let Some(snapshots) = self.snapshots.as_mut() else {
-            return Err(ClusterError::NoSnapshotDue);
+        // The two counters first, so that every step after them that fails is
+        // counted, the driver's refusal of a publication among them.
+        let counters = match self.snapshot_counters.take() {
+            Some(counters) => counters,
+            None => {
+                let key = member.key;
+                let id = member.id;
+                let taken = client.add_counter(
+                    CLUSTER_SERVICE_SNAPSHOTS_TAKEN.0,
+                    &key,
+                    &format!("cluster.service_snapshots_taken {id}"),
+                )?;
+                let failed = client.add_counter(
+                    CLUSTER_SERVICE_SNAPSHOTS_FAILED.0,
+                    &key,
+                    &format!("cluster.service_snapshots_failed {id}"),
+                )?;
+                SnapshotCounters { taken, failed }
+            }
         };
-        match write_snapshot(client, snapshots, &self.sessions, due, state) {
+        let counters = &*self.snapshot_counters.insert(counters);
+        let publications = match self.snapshot_publications.take() {
+            Some(publications) => publications,
+            None => match SnapshotPublications::add(client) {
+                Ok(publications) => publications,
+                Err(error) => {
+                    let _ = counters.failed.increment();
+                    return Err(error.into());
+                }
+            },
+        };
+        let publications = self.snapshot_publications.insert(publications);
+        match write_snapshot(client, publications, &self.sessions, due, state) {
             Ok(()) => {
-                let _ = snapshots.taken.increment();
+                let _ = counters.taken.increment();
                 self.due = None;
                 Ok(true)
             }
             Err(error) => {
-                let _ = snapshots.failed.increment();
+                let _ = counters.failed.increment();
                 Err(error)
             }
         }
@@ -1642,11 +1682,13 @@ impl ClusterService {
         if let Some(member) = self.member.take() {
             member.dropped.close();
         }
-        if let Some(snapshots) = self.snapshots.take() {
-            snapshots.taken.close();
-            snapshots.failed.close();
-            snapshots.publication.close()?;
-            snapshots.acks.close()?;
+        if let Some(counters) = self.snapshot_counters.take() {
+            counters.taken.close();
+            counters.failed.close();
+        }
+        if let Some(publications) = self.snapshot_publications.take() {
+            publications.publication.close()?;
+            publications.acks.close()?;
         }
         if let Some((started_at, passed_over)) = self.start.take() {
             started_at.close();

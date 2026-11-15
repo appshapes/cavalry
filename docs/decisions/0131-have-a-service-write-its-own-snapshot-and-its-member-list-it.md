@@ -129,14 +129,33 @@ for a snapshot, and the five clients, are work item 335.
   `cluster.service_acks_rejected` with nothing listed: another service id, a
   recording the catalog does not hold, a recording of the snapshot stream, a
   position above the commit position, position 0, the position already listed,
-  and a position that is no entry's end. A session keepalive on the stream is
-  counted in `cluster.messages_rejected` and is no ack. The ack that differs in
-  nothing is listed.
+  and a position that is not a multiple of 32, which the snapshots file does not
+  take (`spec/durable-log.md`, "Snapshots"). The member does not check that a
+  position is where an entry ends: an ack at a multiple of 32 inside an entry is
+  listed, as the Consequences say. A session keepalive on the stream is counted
+  in `cluster.messages_rejected` and is no ack. The ack that differs in nothing is
+  listed.
 - The same file, a service whose member has stopped while its driver runs. A
   state one byte over 1 GiB is refused before anything is written. The service
   then writes its recording, and gives the snapshot up at the ack after the
   snapshot timeout, counted in `cluster.service_snapshots_failed`, with an error
   that says to check that the member runs.
+- The same file, a log with entries after the action. Before any service polls,
+  the members commit three entries, the action and three more. One poll of a
+  service, with a fragment limit that reaches past the action, ends at the
+  action: its position and `snapshot_due()` are the member's own snapshot's
+  position, and the program's state holds the three entries before it. The
+  program gives no state and polls on: nothing is due, the three entries after
+  the action are read, `snapshot` is refused, and no member lists a snapshot of a
+  service. With the poll's stop taken out the test fails.
+- The same file, a driver with no room for a publication. A second client fills
+  the driver's publications registry while a snapshot is due. Two calls of
+  `snapshot` are refused, and each is counted in
+  `cluster.service_snapshots_failed`, with one counter of each kind for the
+  member; once there is room, the next call writes the snapshot and the member
+  lists it. A service adds its two counters before its two publications for
+  this, and a counter that the driver refuses is the one failure that no counter
+  counts.
 - The 258 vectors of `spec/vectors/cluster.json`, 15 of them new, agree with the
   Rust reader, and every valid one encodes back to its bytes.
 - How long `snapshot` takes, timed in a release build on an Apple M5 Pro laptop,

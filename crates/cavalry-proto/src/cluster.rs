@@ -170,6 +170,11 @@ pub const KEEPALIVE_INTERVAL_NS: u64 = 500_000_000;
 /// The session connect timeout, in nanoseconds: 5 s.
 pub const SESSION_CONNECT_TIMEOUT_NS: u64 = 5_000_000_000;
 
+/// The snapshot timeout, in nanoseconds: 1 s. How long a snapshot being taken, a
+/// member's or a service's, may go without its next step before it is given up
+/// (`spec/cluster.md`, "Values").
+pub const SNAPSHOT_TIMEOUT_NS: u64 = 1_000_000_000;
+
 /// The live-add window's cap, in bytes: a catching-up follower adds its live
 /// subscription within the lesser of this and term length ÷ 4 of the leader's position.
 pub const LIVE_ADD_MAX_WINDOW: i64 = 1_048_576;

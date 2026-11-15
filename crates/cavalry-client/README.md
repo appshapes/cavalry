@@ -203,12 +203,17 @@ The client API implementation, re-exported by the `cavalry` crate. Data plane.
   open at that position, to a recording of its own through the member's driver,
   stops the recording, checks that it stopped at the end of what was written, and
   tells the member, which lists the snapshot. The call waits for the driver: 31 ms
-  at the median on a laptop, and 51 ms for a state of 64 MiB. `Ok(false)` says that
+  at the median on a laptop and 74.2 ms at the most, a service's first snapshot,
+  which adds its counters and its publications; for a state of 64 MiB, 51 ms at
+  the median and 60.1 ms at the most. `Ok(false)` says that
   the member already lists a snapshot of that position, and nothing was written. A
   step that makes no progress for a second ends the snapshot with
   `ClusterError::SnapshotFailed`, which names the step and what to check, counted
   in `cluster.service_snapshots_failed`; nothing committed is lost, and the service
-  reads on. A program that takes no snapshots reads on at an `Entry::Snapshot` as
+  reads on. A command the driver refuses, the service's two publications at its
+  first snapshot among them, is `ClusterError::Client` and is counted there too;
+  the two counters are added first, and a refusal of one of them is the one
+  failure that is not counted. A program that takes no snapshots reads on at an `Entry::Snapshot` as
   it does at an `Entry::Other`, and one that matches every entry by name gives
   `Entry::Snapshot` an arm that does nothing, as
   `crates/cavalry/examples/adder-service.rs` does. A service written through the C

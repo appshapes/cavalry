@@ -10,10 +10,11 @@ use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
 use cavalry_client::{
-    Action, Cavalry, ClusterError, ClusterService, Entry, NULL_LENGTH, NULL_POSITION, Publication,
-    Restored, SnapshotCause, Subscription,
+    Action, Cavalry, ClientError, ClusterError, ClusterService, Entry, NULL_LENGTH, NULL_POSITION,
+    Publication, Restored, SnapshotCause, Subscription,
 };
 use cavalry_driver::Driver;
+use cavalry_driver::spec::MAX_PUBLICATIONS;
 use cavalry_log::recordings::RecordingsFile;
 use cavalry_log::snapshots::{CONSENSUS_MODULE, ListedSnapshot, SnapshotsFile};
 use cavalry_proto::cluster::{
@@ -1959,6 +1960,132 @@ fn a_service_takes_the_snapshot_its_leader_asks_for_and_its_member_lists_it() {
 }
 
 #[test]
+fn a_services_poll_ends_at_the_action_and_a_program_that_gives_no_state_reads_on() {
+    let dir = TestDir::new("poll-ends");
+    let members_string = members_string();
+    let mut members: Vec<Member> = [1, 0, 2]
+        .into_iter()
+        .map(|id| start_member(dir.path(), &members_string, id))
+        .collect();
+    run_until_led(&mut members, -1);
+    // Before any service polls, the log holds three entries, the action and three
+    // entries after it, all committed.
+    offer_entries(&mut members, 0, 3);
+    let position = snapshot_everywhere(&mut members);
+    offer_entries(&mut members, 3, 3);
+    let end = run_until_settled(&mut members, position + 3 * FRAME);
+    assert_eq!(end, position + 3 * FRAME);
+    let before: Vec<u8> = (0..3i64).flat_map(i64::to_le_bytes).collect();
+    let all: Vec<u8> = (0..6i64).flat_map(i64::to_le_bytes).collect();
+
+    // The service's replay plays the log into its image: polls that take nothing
+    // until its first entry is there. The driver replays up to 1 MiB of a recording
+    // at once, and the whole log, recorded and synced before the replay began, is
+    // under 1 KiB, so the entries after the action are in the image with it; the
+    // pause is there to make sure of that.
+    let mut service = Service::beside(&members[0]);
+    let mut handed = false;
+    run_until(&mut members, "the service's image holds the log", |_| {
+        service
+            .service
+            .poll(
+                &mut service.client,
+                |_, _| {
+                    handed = true;
+                    Action::Abort
+                },
+                16,
+            )
+            .expect("the service polls");
+        handed
+    });
+    assert_eq!(service.service.position(), 0);
+    std::thread::sleep(Duration::from_millis(100));
+
+    // One poll whose fragment limit reaches past the action ends at the action: the
+    // program's state is its state at the member's own snapshot's position.
+    let mut state = Vec::new();
+    let mut read: Vec<(i64, bool)> = Vec::new();
+    service
+        .service
+        .poll(
+            &mut service.client,
+            |committed, _| {
+                if let Entry::SessionMessage { payload, .. } = committed.entry {
+                    state.extend_from_slice(payload);
+                }
+                read.push((committed.position, committed.entry == Entry::Snapshot));
+                Action::Continue
+            },
+            16,
+        )
+        .expect("the service polls");
+    assert!(read.len() + 3 <= 16, "{read:?}");
+    assert_eq!(read.last(), Some(&(position - FRAME, true)), "{read:?}");
+    assert_eq!(read.iter().filter(|(_, action)| *action).count(), 1);
+    assert_eq!(state, before);
+    assert_eq!(service.service.position(), position);
+    assert_eq!(service.service.snapshot_due(), Some(position));
+
+    // The program gives no state and polls on: the next poll lets the snapshot go,
+    // and reads the entries after the action.
+    let mut after: Vec<bool> = Vec::new();
+    run_until(
+        &mut members,
+        "the service reads the entries after the action",
+        |_| {
+            service
+                .service
+                .poll(
+                    &mut service.client,
+                    |committed, _| {
+                        if let Entry::SessionMessage { payload, .. } = committed.entry {
+                            state.extend_from_slice(payload);
+                        }
+                        after.push(committed.entry == Entry::Snapshot);
+                        Action::Continue
+                    },
+                    16,
+                )
+                .expect("the service polls");
+            assert_eq!(service.service.snapshot_due(), None);
+            service.service.position() == end
+        },
+    );
+    assert_eq!(after, [false, false, false]);
+    assert_eq!(state, all);
+    assert!(matches!(
+        service.service.snapshot(&mut service.client, &state),
+        Err(ClusterError::NoSnapshotDue)
+    ));
+
+    // The service wrote nothing and sent no ack, so no member lists a snapshot of a
+    // service for the action.
+    let settled = Instant::now() + Duration::from_millis(200);
+    run_until(&mut members, "the members run on", |_| {
+        Instant::now() >= settled
+    });
+    for member in &members {
+        assert_eq!(member.module.snapshot_position(), Some(position));
+        assert_eq!(member.module.service_snapshot_position(), None);
+        assert_eq!(
+            member.module.service_snapshot_counts(),
+            ServiceSnapshotCounts {
+                listed: 0,
+                rejected: 0
+            }
+        );
+        assert_eq!(counter(member, CLUSTER_SERVICE_SNAPSHOT_POSITION.0), -1);
+        assert_eq!(counter(member, CLUSTER_SERVICE_SNAPSHOTS_LISTED.0), 0);
+        assert_eq!(listed(member).len(), 1);
+    }
+    service.close();
+    for member in members {
+        stop(member);
+    }
+}
+
+#[test]
 fn a_member_lists_nothing_for_a_service_ack_it_cannot_hold() {
     let dir = TestDir::new("acks");
     let members_string = members_string();
@@ -2035,7 +2162,8 @@ fn a_member_lists_nothing_for_a_service_ack_it_cannot_hold() {
             ack(position, services, 0),
         ),
         (
-            "of a position that is no entry's end",
+            "of a position that is not a multiple of 32, which the snapshots file \
+             does not take",
             ack(above + 8, services, 0),
         ),
     ];
@@ -2186,6 +2314,140 @@ fn a_service_whose_member_has_stopped_gives_its_snapshot_up() {
     );
     service.close();
     driver.close().expect("the driver closes");
+    for member in members {
+        stop(member);
+    }
+}
+
+/// How many counters of `type_id` whose key begins with `member_id` the counters file
+/// of the driver in `dir` holds.
+fn counters_in(dir: &Path, member_id: i32, type_id: i32) -> usize {
+    let reader = CountersReader::open(dir).expect("the counters file opens");
+    let key = member_id.to_le_bytes();
+    (0..reader.capacity())
+        .filter(|&id| {
+            reader
+                .record(id)
+                .expect("a record")
+                .is_some_and(|record| record.type_id() == type_id && record.key().starts_with(&key))
+        })
+        .count()
+}
+
+#[test]
+fn a_service_counts_a_snapshot_whose_publication_its_driver_refuses() {
+    let dir = TestDir::new("refused");
+    let members_string = members_string();
+    let mut members: Vec<Member> = [1, 0, 2]
+        .into_iter()
+        .map(|id| start_member(dir.path(), &members_string, id))
+        .collect();
+    run_until_led(&mut members, -1);
+    offer_entries(&mut members, 0, 2);
+    // A service beside a follower, whose program gives its state by hand, once every
+    // member lists its own snapshot of the action.
+    let mut service = Service::beside(&members[2]);
+    service.gives = false;
+    ask_snapshot(&mut members);
+    run_with_services(
+        &mut members,
+        std::slice::from_mut(&mut service),
+        "the service has read the action and every member has taken its snapshot",
+        |members, services| {
+            services[0].service.snapshot_due().is_some_and(|due| {
+                members
+                    .iter()
+                    .all(|member| member.module.snapshot_position() == Some(due))
+            })
+        },
+    );
+    let position = service.service.snapshot_due().expect("a snapshot is due");
+    let id = members[2].module.member_id();
+    let driver_dir = members[2].dir.clone();
+
+    // Another client of the follower's driver fills the driver's publications
+    // registry, every member running a duty cycle after each add. Its publication is
+    // one of the shortest term a channel names, 64 KiB, to an endpoint nobody reads:
+    // a client maps and touches a publication's whole log at each add, which is 192
+    // MiB for a `cavalry:ipc` one.
+    let channel = format!(
+        "cavalry:udp?endpoint=127.0.0.1:{}|term-length=64k",
+        free_ports(1)[0]
+    );
+    let mut filler = Cavalry::connect_to(&driver_dir).expect("a client of the follower's driver");
+    let mut held = Vec::new();
+    loop {
+        match filler.add_publication(&channel, REPLAY_STREAM_ID + 1) {
+            Ok(publication) => held.push(publication),
+            Err(ClientError::Refused { .. }) => break,
+            Err(other) => panic!("{other}"),
+        }
+        assert!(held.len() <= MAX_PUBLICATIONS, "the registry is bounded");
+        for member in members.iter_mut() {
+            member.module.do_work().expect("the member's duty cycle");
+        }
+    }
+
+    // At the service's first snapshot the driver refuses its publication: the
+    // snapshot is given up, counted, and still due. A second call is refused alike,
+    // counted again, and adds no counter twice.
+    for failed in 1..=2 {
+        let refused = service
+            .service
+            .snapshot(&mut service.client, &service.state)
+            .expect_err("a snapshot whose publication the driver refuses");
+        assert!(
+            matches!(refused, ClusterError::Client(ClientError::Refused { .. })),
+            "{refused}"
+        );
+        assert_eq!(service.service.snapshot_due(), Some(position));
+        assert_eq!(
+            counter_in(&driver_dir, id, CLUSTER_SERVICE_SNAPSHOTS_FAILED.0),
+            failed
+        );
+        assert_eq!(
+            counter_in(&driver_dir, id, CLUSTER_SERVICE_SNAPSHOTS_TAKEN.0),
+            0
+        );
+    }
+    for type_id in [
+        CLUSTER_SERVICE_SNAPSHOTS_TAKEN.0,
+        CLUSTER_SERVICE_SNAPSHOTS_FAILED.0,
+    ] {
+        assert_eq!(counters_in(&driver_dir, id, type_id), 1);
+    }
+
+    // The registry has room again once the other client has closed, which removes
+    // its publications, and the call after that writes the snapshot, which the
+    // member lists.
+    filler.close().expect("the other client closes");
+    drop(held);
+    let taken = service
+        .service
+        .snapshot(&mut service.client, &service.state)
+        .expect("the service's snapshot");
+    assert!(taken);
+    run_with_services(
+        &mut members,
+        std::slice::from_mut(&mut service),
+        "the follower lists its service's snapshot",
+        |members, _| members[2].module.service_snapshot_position() == Some(position),
+    );
+    assert_eq!(
+        counter_in(&driver_dir, id, CLUSTER_SERVICE_SNAPSHOTS_FAILED.0),
+        2
+    );
+    assert_eq!(
+        counter_in(&driver_dir, id, CLUSTER_SERVICE_SNAPSHOTS_TAKEN.0),
+        1
+    );
+    for type_id in [
+        CLUSTER_SERVICE_SNAPSHOTS_TAKEN.0,
+        CLUSTER_SERVICE_SNAPSHOTS_FAILED.0,
+    ] {
+        assert_eq!(counters_in(&driver_dir, id, type_id), 1);
+    }
+    service.close();
     for member in members {
         stop(member);
     }
