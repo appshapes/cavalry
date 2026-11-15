@@ -58,8 +58,11 @@ is allowed here.
   where its log then begins
   (`cluster.log_recordings_forgotten`), a snapshot of its consensus module that
   it gave up, with nothing committed lost (`cluster.snapshots_failed`; ADR 0129),
-  and a snapshot that its start could not read and passed over for an older one, or
-  for none (`cluster.snapshots_passed_over`; ADR 0130). A
+  a snapshot that its start could not read and passed over for an older one, or
+  for none (`cluster.snapshots_passed_over`; ADR 0130), and two of the service
+  beside it: a snapshot the service said it took and the member could not list
+  (`cluster.service_acks_rejected`), and a snapshot the service gave up
+  (`cluster.service_snapshots_failed`; ADR 0131). A
   client's session with a cluster keeps its
   counter on the client's own driver, keyed by the session's id and not by a member's
   (ADR 0121): `doctor` takes it for no member, and reports the stale replies a

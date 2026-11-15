@@ -90,10 +90,16 @@ TEMPLATES = {
     105: ("consensus-module", 28, ("snapshot",),
           [("next_session_id", "q"), ("next_service_session_id", "q"), ("log_service_session_id", "q"),
            ("pending_message_capacity", "i")], []),
+    102: ("client-session", 12, ("snapshot",),
+          [("cluster_session_id", "q"), ("response_stream_id", "i")],
+          [("response_channel", "ascii"), ("encoded_principal", "data")]),
+    33: ("service-ack", 36, ("consensus-module",),
+         [("log_position", "q"), ("timestamp", "q"), ("ack_id", "q"), ("relevant_id", "q"),
+          ("service_id", "i")], []),
 }
 STREAMS = {
     "log": (1, 20, 21, 22, 23, 24, 25), "consensus": tuple(range(50, 58)), "ingress": (1, 3, 4, 5),
-    "egress": (1, 2, 6), "snapshot": (100, 103, 105),
+    "egress": (1, 2, 6), "snapshot": (100, 102, 103, 105), "consensus-module": (33,),
 }
 # which fields allow -1 (spec/cluster.md, each table)
 ALLOW_NULL = {
@@ -194,6 +200,8 @@ CLUSTER_SESSION = dict(cluster_session_id=7, correlation_id=41, opened_log_posit
                        time_of_last_activity=NULL, close_reason=CLOSE_REASON_NONE, response_stream_id=102)
 CONSENSUS_MODULE = dict(next_session_id=8, next_service_session_id=0, log_service_session_id=0,
                         pending_message_capacity=0)
+CLIENT_SESSION = dict(cluster_session_id=7, response_stream_id=102)
+SERVICE_ACK = dict(log_position=98304, timestamp=TS, ack_id=0, relevant_id=12, service_id=0)
 
 VECTORS = [
     message("session-message-log", 1, "log", SESSION_MESSAGE, payload=b"hello"),
@@ -260,6 +268,23 @@ VECTORS = [
     message("consensus-module-of-no-session-yet", 105, "snapshot",
             dict(CONSENSUS_MODULE, next_session_id=0, next_service_session_id=-(1 << 63) + 1,
                  log_service_session_id=-(1 << 63), pending_message_capacity=4096)),
+    # A service's snapshot: its markers carry type id 2, and the section marker, index 1, stands before
+    # the program's bytes, which are no message of this page and have no vector.
+    message("snapshot-marker-of-a-service-begin", 100, "snapshot", dict(SNAPSHOT, type_id=2)),
+    message("snapshot-marker-of-a-service-section", 100, "snapshot", dict(SNAPSHOT, type_id=2, index=1, mark=1)),
+    message("snapshot-marker-of-a-service-end", 100, "snapshot", dict(SNAPSHOT, type_id=2, mark=2)),
+    message("client-session", 102, "snapshot", CLIENT_SESSION,
+            {"response_channel": CHANNEL, "encoded_principal": b""}),
+    # The longest response channel, and a principal, which a writer of this version does not give and a
+    # reader ignores.
+    message("client-session-longest-channel", 102, "snapshot", dict(CLIENT_SESSION, cluster_session_id=0),
+            {"response_channel": "cavalry:udp?endpoint=" + "h" * 253 + ":65535",
+             "encoded_principal": bytes(range(4))}),
+    message("service-ack", 33, "consensus-module", SERVICE_ACK),
+    # The fields a reader checks nothing of, with other values than a writer of this version gives: a
+    # member lists nothing for such an ack, and the message is read all the same.
+    message("service-ack-fields-a-reader-ignores", 33, "consensus-module",
+            dict(SERVICE_ACK, log_position=0, timestamp=-1, ack_id=5, relevant_id=-1, service_id=3)),
 ]
 
 # ---- rejections, in the order the checks run ----------------------------------------
@@ -275,14 +300,23 @@ VECTORS += [
     message("reject-template-unknown", 55, "consensus", COMMIT, error="template",
             bytes_=HEADER.pack(20, 9, SCHEMA_ID, VERSION) + bytes(20)),
     message("reject-stream", 55, "log", COMMIT, error="stream", bytes_=commit),
-    message("reject-template-of-a-services-snapshot", 103, "snapshot", CLUSTER_SESSION, error="template",
-            bytes_=HEADER.pack(12, 102, SCHEMA_ID, VERSION) + bytes(20)),
+    message("reject-template-of-a-snapshots-timer", 103, "snapshot", CLUSTER_SESSION, error="template",
+            bytes_=HEADER.pack(16, 104, SCHEMA_ID, VERSION) + bytes(16)),
     message("reject-stream-cluster-session-on-the-log", 103, "log", CLUSTER_SESSION, error="stream",
             bytes_=encode(103, CLUSTER_SESSION, {"response_channel": CHANNEL})),
     message("reject-stream-consensus-module-on-the-egress", 105, "egress", CONSENSUS_MODULE, error="stream",
             bytes_=encode(105, CONSENSUS_MODULE)),
+    message("reject-stream-service-ack-on-the-consensus-stream", 33, "consensus", SERVICE_ACK, error="stream",
+            bytes_=encode(33, SERVICE_ACK)),
+    message("reject-stream-service-ack-in-a-snapshot", 33, "snapshot", SERVICE_ACK, error="stream",
+            bytes_=encode(33, SERVICE_ACK)),
+    message("reject-stream-client-session-on-the-consensus-module-stream", 102, "consensus-module",
+            CLIENT_SESSION, error="stream",
+            bytes_=encode(102, CLIENT_SESSION, {"response_channel": CHANNEL, "encoded_principal": b""})),
     message("reject-block-length-consensus-module", 105, "snapshot", CONSENSUS_MODULE, error="block-length",
             bytes_=encode(105, CONSENSUS_MODULE, block_length=32) + bytes(4)),
+    message("reject-block-length-service-ack", 33, "consensus-module", SERVICE_ACK, error="block-length",
+            bytes_=encode(33, SERVICE_ACK, block_length=40) + bytes(4)),
     message("reject-block-length", 55, "consensus", COMMIT, error="block-length",
             bytes_=encode(55, COMMIT, block_length=21) + b"\0"),
     message("reject-length-variable-field", 56, "consensus", CATCHUP, error="length",
@@ -323,6 +357,18 @@ VECTORS += [
                           {"response_channel": CHANNEL}).replace(b"?", b"\x01", 1)),
     message("reject-length-cluster-session-trailing", 103, "snapshot", CLUSTER_SESSION, error="length",
             bytes_=encode(103, CLUSTER_SESSION, {"response_channel": CHANNEL}) + bytes(4)),
+    # A client session whose principal's length runs past the message's end, and a service ack with a
+    # byte after its fields.
+    message("reject-length-client-session-principal", 102, "snapshot", CLIENT_SESSION, error="length",
+            bytes_=encode(102, CLIENT_SESSION, {"response_channel": CHANNEL, "encoded_principal": b""})[:-4]
+            + (5).to_bytes(4, "little") + bytes(4)),
+    message("reject-length-service-ack-trailing", 33, "consensus-module", SERVICE_ACK, error="length",
+            bytes_=encode(33, SERVICE_ACK) + bytes(1)),
+    message("reject-ascii-client-session", 102, "snapshot", CLIENT_SESSION, error="ascii",
+            bytes_=encode(102, CLIENT_SESSION, {"response_channel": CHANNEL, "encoded_principal": b""})
+            .replace(b"?", b"\x01", 1)),
+    message("reject-position-service-ack", 33, "consensus-module", dict(SERVICE_ACK, log_position=NULL),
+            error="position", bytes_=encode(33, dict(SERVICE_ACK, log_position=NULL))),
     message("reject-term", 52, "consensus", dict(VOTE, candidate_term_id=-2), error="term"),
 ]
 

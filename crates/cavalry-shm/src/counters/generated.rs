@@ -503,6 +503,21 @@ pub const CLUSTER_SNAPSHOT_START_POSITION: CounterId = CounterId(165);
 /// `cluster.snapshots_passed_over`, a client counter: Snapshots that one cluster member's start found listed in its snapshots file and did not start from, newer than the one it took: the catalog did not hold the snapshot's recording, stopped and with bytes, on the snapshot stream; the driver did not play it back within 5 s; or the recording did not hold the snapshot the list names, with sessions the member's table takes. The start took the next older one in the list, or none (spec/cluster.md, A member's start; ADR 0130). key: member id (i32), little-endian; label text: the member id in decimal.
 pub const CLUSTER_SNAPSHOTS_PASSED_OVER: CounterId = CounterId(166);
 
+/// `cluster.service_snapshot_position`, a client gauge: The log position of the newest snapshot of a service that one cluster member lists in its snapshots file, the position after the cluster action that asked for it; -1 while it lists none. A service's snapshot is the service's own recording, which the member lists when the service tells it of one with a service ack (spec/cluster.md, Snapshots; ADR 0131). key: member id (i32), little-endian; label text: the member id in decimal.
+pub const CLUSTER_SERVICE_SNAPSHOT_POSITION: CounterId = CounterId(167);
+
+/// `cluster.service_snapshots_listed`, a client counter: Snapshots of a service that one cluster member listed in its snapshots file, each for a service ack that named a stopped recording of the service snapshot stream in the member's catalog, at a log position above the newest it listed for the service and at or below its commit position (spec/cluster.md, Snapshots; ADR 0131). key: member id (i32), little-endian; label text: the member id in decimal.
+pub const CLUSTER_SERVICE_SNAPSHOTS_LISTED: CounterId = CounterId(168);
+
+/// `cluster.service_acks_rejected`, a client counter: Service acks for which one cluster member listed no snapshot: the service id was not 0, the catalog did not hold the recording as a stopped recording of the service snapshot stream with bytes, the log position was not above 0 or was above the member's commit position, the member already listed a snapshot of the service at or past that position, or the snapshots file did not take the entry, whose log position was not a multiple of 32 (spec/cluster.md, Snapshots; spec/durable-log.md, Snapshots; ADR 0131). The member does not check that the position is where an entry ends: it takes a service at its word. key: member id (i32), little-endian; label text: the member id in decimal.
+pub const CLUSTER_SERVICE_ACKS_REJECTED: CounterId = CounterId(169);
+
+/// `cluster.service_snapshots_taken`, a client counter: Snapshots the service beside one cluster member wrote and told the member of: the recording stopped at the end of what the service wrote, and the consensus module stream took the service ack. The service adds the counter at its first snapshot (spec/cluster.md, Snapshots; ADR 0131). key: member id (i32), little-endian; label text: the member id in decimal.
+pub const CLUSTER_SERVICE_SNAPSHOTS_TAKEN: CounterId = CounterId(170);
+
+/// `cluster.service_snapshots_failed`, a client counter: Snapshots the service beside one cluster member gave up: the driver refused its publication or its recording, the recording was of another session, a publication took no message or the recording's stop was not announced within a second, the recording stopped short of what was written, or the consensus module stream did not take the service ack within a second. The service reports each to its program and reads on. The service adds the counter at its first snapshot (spec/cluster.md, Snapshots; ADR 0131). key: member id (i32), little-endian; label text: the member id in decimal.
+pub const CLUSTER_SERVICE_SNAPSHOTS_FAILED: CounterId = CounterId(171);
+
 /// Every entry of `counters.toml`, in the file's order.
 pub const COUNTERS: &[CounterDef] = &[
     CounterDef {
@@ -1832,5 +1847,45 @@ pub const COUNTERS: &[CounterDef] = &[
         scope: Scope::Client,
         doc: "Snapshots that one cluster member's start found listed in its snapshots file and did not start from, newer than the one it took: the catalog did not hold the snapshot's recording, stopped and with bytes, on the snapshot stream; the driver did not play it back within 5 s; or the recording did not hold the snapshot the list names, with sessions the member's table takes. The start took the next older one in the list, or none (spec/cluster.md, A member's start; ADR 0130). key: member id (i32), little-endian; label text: the member id in decimal.",
         doctor: "This member started from an older snapshot than its newest, or from none, and read more of its log than it need have. Nothing committed is lost. A snapshot's recording was purged or is damaged in this member's log directory, or this host was too loaded to play it back within 5 s: recording.invalidated on this driver counts a recording the driver found damaged. If the member did not start at all, its own refusal says why.",
+    },
+    CounterDef {
+        id: CLUSTER_SERVICE_SNAPSHOT_POSITION,
+        name: "cluster.service_snapshot_position",
+        kind: Kind::Gauge,
+        scope: Scope::Client,
+        doc: "The log position of the newest snapshot of a service that one cluster member lists in its snapshots file, the position after the cluster action that asked for it; -1 while it lists none. A service's snapshot is the service's own recording, which the member lists when the service tells it of one with a service ack (spec/cluster.md, Snapshots; ADR 0131). key: member id (i32), little-endian; label text: the member id in decimal.",
+        doctor: "It follows cluster.snapshot_position where the program of the service beside this member gives its state at each snapshot. -1, or a position that stays behind cluster.snapshot_position, is a service whose program takes no snapshot, a service that is not running, or one whose snapshots fail: see cluster.service_snapshots_failed and cluster.service_acks_rejected.",
+    },
+    CounterDef {
+        id: CLUSTER_SERVICE_SNAPSHOTS_LISTED,
+        name: "cluster.service_snapshots_listed",
+        kind: Kind::Counter,
+        scope: Scope::Client,
+        doc: "Snapshots of a service that one cluster member listed in its snapshots file, each for a service ack that named a stopped recording of the service snapshot stream in the member's catalog, at a log position above the newest it listed for the service and at or below its commit position (spec/cluster.md, Snapshots; ADR 0131). key: member id (i32), little-endian; label text: the member id in decimal.",
+        doctor: "",
+    },
+    CounterDef {
+        id: CLUSTER_SERVICE_ACKS_REJECTED,
+        name: "cluster.service_acks_rejected",
+        kind: Kind::Counter,
+        scope: Scope::Client,
+        doc: "Service acks for which one cluster member listed no snapshot: the service id was not 0, the catalog did not hold the recording as a stopped recording of the service snapshot stream with bytes, the log position was not above 0 or was above the member's commit position, the member already listed a snapshot of the service at or past that position, or the snapshots file did not take the entry, whose log position was not a multiple of 32 (spec/cluster.md, Snapshots; spec/durable-log.md, Snapshots; ADR 0131). The member does not check that the position is where an entry ends: it takes a service at its word. key: member id (i32), little-endian; label text: the member id in decimal.",
+        doctor: "A service beside this member said it took a snapshot that the member could not list. Nothing committed is lost, and the next snapshot is listed by itself. A count that rises with every snapshot is more than one service that takes snapshots beside this member, where one does in this version, or a service of another version: run one service beside each member, of the member's version. recording.invalidated on this driver counts a recording the driver found damaged.",
+    },
+    CounterDef {
+        id: CLUSTER_SERVICE_SNAPSHOTS_TAKEN,
+        name: "cluster.service_snapshots_taken",
+        kind: Kind::Counter,
+        scope: Scope::Client,
+        doc: "Snapshots the service beside one cluster member wrote and told the member of: the recording stopped at the end of what the service wrote, and the consensus module stream took the service ack. The service adds the counter at its first snapshot (spec/cluster.md, Snapshots; ADR 0131). key: member id (i32), little-endian; label text: the member id in decimal.",
+        doctor: "",
+    },
+    CounterDef {
+        id: CLUSTER_SERVICE_SNAPSHOTS_FAILED,
+        name: "cluster.service_snapshots_failed",
+        kind: Kind::Counter,
+        scope: Scope::Client,
+        doc: "Snapshots the service beside one cluster member gave up: the driver refused its publication or its recording, the recording was of another session, a publication took no message or the recording's stop was not announced within a second, the recording stopped short of what was written, or the consensus module stream did not take the service ack within a second. The service reports each to its program and reads on. The service adds the counter at its first snapshot (spec/cluster.md, Snapshots; ADR 0131). key: member id (i32), little-endian; label text: the member id in decimal.",
+        doctor: "The service beside this member took no snapshot where its program gave its state. Nothing committed is lost, and the service tries the next snapshot by itself. Check that the member runs: a service whose member is stopped has nobody to tell. Then check the driver's counters on this host: driver.registry_full for a recording or a publication the driver had no room for, recording.start_failed for a recording whose files could not be created, recording.write_failed for a disk that refuses a write or a sync, and free space in the log directory.",
     },
 ];

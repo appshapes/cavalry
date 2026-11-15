@@ -48,12 +48,13 @@ const MEMBERS_REASONS: [&str; 4] = [
     "members-count",
     "members-self",
 ];
-const STREAMS: [Stream; 5] = [
+const STREAMS: [Stream; 6] = [
     Stream::Log,
     Stream::Consensus,
     Stream::Ingress,
     Stream::Egress,
     Stream::Snapshot,
+    Stream::ConsensusModule,
 ];
 
 fn check(bytes: &[u8]) {

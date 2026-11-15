@@ -644,6 +644,108 @@
     },
     {
       "kind": "message",
+      "name": "snapshot-marker-of-a-service-begin",
+      "stream": "snapshot",
+      "bytes": "280064000100000002000000000000000080010000000000030000000000000000000000000000000000000000000000",
+      "template": "snapshot-marker",
+      "fields": {
+        "type_id": 2,
+        "log_position": 98304,
+        "leadership_term_id": 3,
+        "index": 0,
+        "mark": 0,
+        "time_unit": 0,
+        "app_version": 0
+      }
+    },
+    {
+      "kind": "message",
+      "name": "snapshot-marker-of-a-service-section",
+      "stream": "snapshot",
+      "bytes": "280064000100000002000000000000000080010000000000030000000000000001000000010000000000000000000000",
+      "template": "snapshot-marker",
+      "fields": {
+        "type_id": 2,
+        "log_position": 98304,
+        "leadership_term_id": 3,
+        "index": 1,
+        "mark": 1,
+        "time_unit": 0,
+        "app_version": 0
+      }
+    },
+    {
+      "kind": "message",
+      "name": "snapshot-marker-of-a-service-end",
+      "stream": "snapshot",
+      "bytes": "280064000100000002000000000000000080010000000000030000000000000000000000020000000000000000000000",
+      "template": "snapshot-marker",
+      "fields": {
+        "type_id": 2,
+        "log_position": 98304,
+        "leadership_term_id": 3,
+        "index": 0,
+        "mark": 2,
+        "time_unit": 0,
+        "app_version": 0
+      }
+    },
+    {
+      "kind": "message",
+      "name": "client-session",
+      "stream": "snapshot",
+      "bytes": "0c0066000100000007000000000000006600000023000000636176616c72793a7564703f656e64706f696e743d31302e302e302e393a333130303000000000",
+      "template": "client-session",
+      "fields": {
+        "cluster_session_id": 7,
+        "response_stream_id": 102,
+        "response_channel": "cavalry:udp?endpoint=10.0.0.9:31000",
+        "encoded_principal": ""
+      }
+    },
+    {
+      "kind": "message",
+      "name": "client-session-longest-channel",
+      "stream": "snapshot",
+      "bytes": "0c0066000100000000000000000000006600000018010000636176616c72793a7564703f656e64706f696e743d686868686868686868686868686868686868686868686868686868686868686868686868686868686868686868686868686868686868686868686868686868686868686868686868686868686868686868686868686868686868686868686868686868686868686868686868686868686868686868686868686868686868686868686868686868686868686868686868686868686868686868686868686868686868686868686868686868686868686868686868686868686868686868686868686868686868686868686868686868686868686868686868686868686868686868686868686868686868686868686868686868686868686868686868683a36353533350400000000010203",
+      "template": "client-session",
+      "fields": {
+        "cluster_session_id": 0,
+        "response_stream_id": 102,
+        "response_channel": "cavalry:udp?endpoint=hhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhh:65535",
+        "encoded_principal": "00010203"
+      }
+    },
+    {
+      "kind": "message",
+      "name": "service-ack",
+      "stream": "consensus-module",
+      "bytes": "240021000100000000800100000000000010e49aa101000000000000000000000c0000000000000000000000",
+      "template": "service-ack",
+      "fields": {
+        "log_position": 98304,
+        "timestamp": 1793600000000,
+        "ack_id": 0,
+        "relevant_id": 12,
+        "service_id": 0
+      }
+    },
+    {
+      "kind": "message",
+      "name": "service-ack-fields-a-reader-ignores",
+      "stream": "consensus-module",
+      "bytes": "24002100010000000000000000000000ffffffffffffffff0500000000000000ffffffffffffffff03000000",
+      "template": "service-ack",
+      "fields": {
+        "log_position": 0,
+        "timestamp": -1,
+        "ack_id": 5,
+        "relevant_id": -1,
+        "service_id": 3
+      }
+    },
+    {
+      "kind": "message",
       "name": "reject-too-short-header",
       "stream": "consensus",
       "bytes": "14003700010000",
@@ -693,9 +795,9 @@
     },
     {
       "kind": "message",
-      "name": "reject-template-of-a-services-snapshot",
+      "name": "reject-template-of-a-snapshots-timer",
       "stream": "snapshot",
-      "bytes": "0c006600010000000000000000000000000000000000000000000000",
+      "bytes": "100068000100000000000000000000000000000000000000",
       "error": "template"
     },
     {
@@ -714,9 +816,37 @@
     },
     {
       "kind": "message",
+      "name": "reject-stream-service-ack-on-the-consensus-stream",
+      "stream": "consensus",
+      "bytes": "240021000100000000800100000000000010e49aa101000000000000000000000c0000000000000000000000",
+      "error": "stream"
+    },
+    {
+      "kind": "message",
+      "name": "reject-stream-service-ack-in-a-snapshot",
+      "stream": "snapshot",
+      "bytes": "240021000100000000800100000000000010e49aa101000000000000000000000c0000000000000000000000",
+      "error": "stream"
+    },
+    {
+      "kind": "message",
+      "name": "reject-stream-client-session-on-the-consensus-module-stream",
+      "stream": "consensus-module",
+      "bytes": "0c0066000100000007000000000000006600000023000000636176616c72793a7564703f656e64706f696e743d31302e302e302e393a333130303000000000",
+      "error": "stream"
+    },
+    {
+      "kind": "message",
       "name": "reject-block-length-consensus-module",
       "stream": "snapshot",
       "bytes": "20006900010000000800000000000000000000000000000000000000000000000000000000000000",
+      "error": "block-length"
+    },
+    {
+      "kind": "message",
+      "name": "reject-block-length-service-ack",
+      "stream": "consensus-module",
+      "bytes": "280021000100000000800100000000000010e49aa101000000000000000000000c000000000000000000000000000000",
       "error": "block-length"
     },
     {
@@ -886,6 +1016,34 @@
       "stream": "snapshot",
       "bytes": "2800670001000000070000000000000029000000000000006000010000000000ffffffffffffffff000000806600000023000000636176616c72793a7564703f656e64706f696e743d31302e302e302e393a333130303000000000",
       "error": "length"
+    },
+    {
+      "kind": "message",
+      "name": "reject-length-client-session-principal",
+      "stream": "snapshot",
+      "bytes": "0c0066000100000007000000000000006600000023000000636176616c72793a7564703f656e64706f696e743d31302e302e302e393a33313030300500000000000000",
+      "error": "length"
+    },
+    {
+      "kind": "message",
+      "name": "reject-length-service-ack-trailing",
+      "stream": "consensus-module",
+      "bytes": "240021000100000000800100000000000010e49aa101000000000000000000000c000000000000000000000000",
+      "error": "length"
+    },
+    {
+      "kind": "message",
+      "name": "reject-ascii-client-session",
+      "stream": "snapshot",
+      "bytes": "0c0066000100000007000000000000006600000023000000636176616c72793a75647001656e64706f696e743d31302e302e302e393a333130303000000000",
+      "error": "ascii"
+    },
+    {
+      "kind": "message",
+      "name": "reject-position-service-ack",
+      "stream": "consensus-module",
+      "bytes": "2400210001000000ffffffffffffffff0010e49aa101000000000000000000000c0000000000000000000000",
+      "error": "position"
     },
     {
       "kind": "message",

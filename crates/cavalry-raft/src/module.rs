@@ -44,7 +44,8 @@ use cavalry_proto::cluster::{
     CONSENSUS_STREAM_ID, ClusterAction, EGRESS_STREAM_ID, EMPTY_MEMBER, Endpoint,
     INGRESS_STREAM_ID, LOG_RECORDINGS_FILE_PREFIX, LOG_RECORDINGS_TMP_SUFFIX, LOG_REPLAY_STREAM_ID,
     LOG_STREAM_ID, LogRecording, LogRecordingsError, MAX_LOG_RECORDINGS_LENGTH, MAX_MEMBERS,
-    MembersError, Message, SNAPSHOT_STREAM_ID, Stream, parse_members, write_log_recordings,
+    MembersError, Message, SERVICE_SNAPSHOT_STREAM_ID, SNAPSHOT_STREAM_ID, Stream, parse_members,
+    write_log_recordings,
 };
 use cavalry_proto::udp::UDP_TERM_LENGTH;
 use cavalry_shm::counters::CounterId;
@@ -62,7 +63,10 @@ use crate::consensus::{
 };
 use crate::sessions::OpenSession;
 use crate::sessions::{EGRESS_SLOTS, Ingress, Leadership, SessionCounts, SessionIo, Sessions};
-use crate::snapshot::{self, ModuleSnapshot, OpenError, SnapshotCounts, SnapshotDue};
+use crate::snapshot::{
+    self, ModuleSnapshot, OpenError, SERVICE_ACK_LIMIT, ServiceSnapshotCounts, SnapshotCounts,
+    SnapshotDue,
+};
 
 /// The longest payload [`ConsensusModule::offer`] takes: what one frame of the log
 /// carries after the frame header and the session message header, at the UDP
@@ -1151,17 +1155,20 @@ enum Cataloged {
 /// made, the driver having run on while the member was away, and returns where it
 /// stopped, so that a stop is read once and is final.
 ///
-/// The catalog may lack the record's last recordings and no others: a truncation
-/// purges a member's recordings from the last one back and writes the record after
-/// them, so a member that stopped in the middle of one finds them missing, and its
-/// log ends where the recordings the catalog holds end. With all of them missing
-/// that is the floor. Everything else the catalog can hold in place of a recording
-/// the record names is [`RaftError::ListedRecording`], and the member does not
-/// start: a recording missing before one that is held, one the driver found
-/// damaged, one that begins elsewhere or is of another stream, and one that begins
-/// past where the ones before it end. A log read back shorter than the member
-/// reported it would let the member vote for a candidate that lacks a committed
-/// entry, so nothing here shortens the log but that one truncation.
+/// The catalog may lack the record's last recordings, and no others but its first
+/// ones, purged below a snapshot (below): a truncation purges a member's recordings
+/// from the last one back and writes the record after them, so a member that
+/// stopped in the middle of one finds them missing, and its log ends where the
+/// recordings the catalog holds end, when that is at or above `from` (below). With
+/// all of them missing that is the floor. Everything else the catalog can hold in
+/// place of a recording the record names is [`RaftError::ListedRecording`], and the
+/// member does not start: a recording missing before one that is held, which is no
+/// purge below a snapshot, one the driver found damaged, one that begins elsewhere
+/// or is of another stream, and one that begins past where the ones before it end.
+/// A log read back shorter than the member reported it would let the member vote
+/// for a candidate that lacks a committed entry, so nothing here shortens the log
+/// at its end but that one truncation, and that to no position below `from`
+/// (below).
 ///
 /// What each recording is in the catalog, and that none is missing before one that
 /// is held, is checked before any is stopped, so a start refused for that has
@@ -1184,7 +1191,9 @@ enum Cataloged {
 /// table keeps, [`KEPT_RECORDINGS`], forgets the oldest when the ones it keeps
 /// begin at or below `from`, and is [`RaftError::LogForgotten`] when they do not;
 /// that count is known only once the recordings still being made are stopped.
-/// With `from` at 0 a start forgets nothing and takes no purge.
+/// With `from` at 0 a start forgets nothing, and the one purge it takes is of
+/// first recordings gone before a recording that begins at 0, which holds the log
+/// from 0 itself.
 ///
 /// The record's last recordings missing are a truncation cut short only while the
 /// log the ones before them hold reaches `from`. The snapshot is of a position the
@@ -3354,6 +3363,10 @@ impl ConsensusModule {
         // snapshot interval since the last one asked for. An action the log does not
         // take is asked again on a later cycle.
         let asked = self.ask_snapshot_at_the_interval();
+        // What the service beside this member says of the snapshots it took, read
+        // and listed here. Its error, a stream that stopped or a list that could
+        // not be written, is returned after the core's own.
+        let acks_work = self.work_service_acks();
         // The file of the log's recordings is written before the counter names a
         // recording it did not name (`spec/cluster.md`, "The service"; ADR 0103). A
         // file that could not be written leaves the counter at −1, and the next
@@ -3388,7 +3401,50 @@ impl ConsensusModule {
         listed?;
         written?;
         asked?;
-        Ok(work + session_work? + snapshot_work?)
+        Ok(work + session_work? + snapshot_work? + acks_work?)
+    }
+
+    /// Reads the consensus module stream, at most [`SERVICE_ACK_LIMIT`] messages a
+    /// duty cycle, and lists a service's snapshot for each service ack that names
+    /// one the member can hold (`spec/cluster.md`, "The member's list of a service's
+    /// snapshots"; ADR 0131). A message that is no service ack is counted as
+    /// rejected. The member answers nothing: a service does not wait for it.
+    ///
+    /// Nothing here runs for a message of the log. A cycle that reads no ack costs
+    /// the poll of an empty stream, and an ack costs a read of the catalog and a
+    /// write and a sync of the snapshots file, once in a snapshot interval.
+    fn work_service_acks(&mut self) -> Result<usize, RaftError> {
+        let mut acks = [None; SERVICE_ACK_LIMIT];
+        let (read, rejected) = self
+            .snapshot
+            .read_acks(&mut acks)
+            .map_err(RaftError::Poll)?;
+        self.messages_rejected = self.messages_rejected.saturating_add(rejected);
+        let commit_position = self.core.commit_position();
+        for ack in acks.iter().flatten() {
+            let held = matches!(
+                cataloged(&self.io.catalog, ack.recording_id)?,
+                Cataloged::Held {
+                    start,
+                    stream_id: SERVICE_SNAPSHOT_STREAM_ID,
+                    stop: Some(stop),
+                } if stop > start
+            );
+            // The term the snapshot's position is in: the newest whose base is below
+            // it. A snapshot is of the position after an entry, and a term's base is
+            // where its first entry begins.
+            let term = self.io.terms.terms().fold(None, |found, term| {
+                if term.term_base_log_position < ack.log_position {
+                    Some((term.leadership_term_id, term.term_base_log_position))
+                } else {
+                    found
+                }
+            });
+            self.snapshot
+                .list_service(*ack, held, commit_position, term)
+                .map_err(RaftError::Snapshots)?;
+        }
+        Ok(read)
     }
 
     /// Appends the cluster action that asks every member for a snapshot when this
@@ -3474,6 +3530,19 @@ impl ConsensusModule {
     /// it is in that snapshot.
     pub fn snapshot_position(&self) -> Option<i64> {
         Some(self.snapshot.newest_position()).filter(|position| *position >= 0)
+    }
+
+    /// What this member has counted of the snapshots of the service beside it: the
+    /// ones it listed for a service ack, and the acks it listed nothing for
+    /// (`spec/cluster.md`, "The member's list of a service's snapshots"; ADR 0131).
+    pub fn service_snapshot_counts(&self) -> ServiceSnapshotCounts {
+        self.snapshot.service_counts()
+    }
+
+    /// The log position of the newest snapshot of a service that this member's
+    /// snapshots file lists, `None` when it lists none.
+    pub fn service_snapshot_position(&self) -> Option<i64> {
+        Some(self.snapshot.newest_service_position()).filter(|position| *position >= 0)
     }
 
     /// Appends `payload` to the cluster's log as a session message of no session, for

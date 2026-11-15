@@ -447,6 +447,27 @@ committed once a quorum, two of three, has it on disk.
   changed by hand: report it, with the log directory. There is nothing to do for
   the member. Its next snapshot is listed after the ones it passed over, and its
   next start takes that one. The count stays until the member starts again.
+- `WARN cluster.service_snapshots_failed`: the service beside this member gave up
+  a snapshot of its program's state, and the count says how many times. Nothing
+  committed is lost, and the service reads on. The service's own error names the
+  step. Check first that the member runs: a service whose member is stopped writes
+  its recording and has nobody to tell. Then read three counters of this member's
+  driver, which the same `doctor` prints when they are above 0.
+  `driver.registry_full`: the driver had no room for the snapshot's publication or
+  its recording. `recording.start_failed`: the recording's files could not be
+  created in the log directory. `recording.write_failed`: a write or a sync to the
+  log directory failed. The service takes the next snapshot by itself, when the
+  leader's log has grown by 256 MiB. A count that no longer rises is a fault that
+  has passed.
+- `WARN cluster.service_acks_rejected`: a service beside this member said that it
+  took a snapshot, and the member listed nothing for it. Nothing committed is
+  lost. A count that rises with every snapshot has one of two causes. More than
+  one service beside this member takes snapshots, where one does in this version:
+  run one. Or the service is of another version than the member: run
+  `cavalry --version` on the host and start both on one version. A count that
+  rose once is a service's snapshot whose recording the driver found damaged,
+  which `recording.invalidated` on this member's driver counts: check the log
+  directory's device.
 - `note cluster-commit-waits`: the leader has appended more than a quorum has
   recorded. Each member asks its recorder to sync an entry as soon as it is written,
   so what waits at any moment is what was appended since the syncs now running began.

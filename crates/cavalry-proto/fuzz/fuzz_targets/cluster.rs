@@ -11,7 +11,14 @@ use cavalry_proto::cluster::{
 use libfuzzer_sys::fuzz_target;
 
 fuzz_target!(|data: &[u8]| {
-    for stream in [Stream::Log, Stream::Consensus, Stream::Ingress, Stream::Egress, Stream::Snapshot] {
+    for stream in [
+        Stream::Log,
+        Stream::Consensus,
+        Stream::Ingress,
+        Stream::Egress,
+        Stream::Snapshot,
+        Stream::ConsensusModule,
+    ] {
         let _ = Message::parse(stream, data);
     }
     let mut members = [EMPTY_MEMBER; MAX_MEMBERS];

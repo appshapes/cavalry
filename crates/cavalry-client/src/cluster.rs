@@ -34,6 +34,9 @@ use crate::subscription::{Fault, Subscription};
 /// Where every message of this module is explained.
 const DOC: &str = "docs/reference/cluster.md#sessions";
 
+/// Where a service's snapshot is explained.
+const DOC_SNAPSHOTS: &str = "docs/reference/cluster.md#snapshots";
+
 /// How long [`Cavalry::connect_cluster`] goes on trying the members before it gives
 /// up: the leader heartbeat timeout, which is how long a cluster that has lost its
 /// leader takes to notice, and the session connect timeout twice, for the connect
@@ -92,11 +95,64 @@ pub enum ClusterError {
         /// The position the entry begins at.
         position: i64,
     },
+    /// A service was asked for a snapshot where none is due: the last entry of its
+    /// last poll was not an [`Entry::Snapshot`](crate::Entry::Snapshot) that the
+    /// handler took, or a poll has been made since.
+    NoSnapshotDue,
+    /// The state a program gave a service's snapshot is longer than one snapshot
+    /// holds.
+    SnapshotTooLong {
+        /// The state's length in bytes.
+        found: usize,
+        /// The most a snapshot holds: 1 GiB.
+        limit: usize,
+    },
+    /// A service gave a snapshot up at one of its steps. The service is as it was,
+    /// and no snapshot is listed for it.
+    SnapshotFailed {
+        /// The step.
+        cause: SnapshotCause,
+    },
+}
+
+/// The step at which a service gave a snapshot up
+/// ([`ClusterError::SnapshotFailed`]; `spec/cluster.md`, "A service's snapshot").
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum SnapshotCause {
+    /// The recording the driver started is of another publication's session: a
+    /// second service beside the member writes snapshots, where one does.
+    Recording,
+    /// A message was not written: the snapshot's publication took none for a
+    /// second, or the recorder wrote none of what it took for a second.
+    Write,
+    /// The driver refused the recording's stop, or did not announce it within a
+    /// second.
+    Stop,
+    /// The recording stopped short of what was written: a write or a sync of the
+    /// recorder's failed.
+    Short,
+    /// The consensus module stream did not take the service ack within a second:
+    /// the member is not running.
+    Ack,
+}
+
+impl SnapshotCause {
+    /// The cause's name: `recording`, `write`, `stop`, `short` or `ack`.
+    pub const fn name(self) -> &'static str {
+        match self {
+            SnapshotCause::Recording => "recording",
+            SnapshotCause::Write => "write",
+            SnapshotCause::Stop => "stop",
+            SnapshotCause::Short => "short",
+            SnapshotCause::Ack => "ack",
+        }
+    }
 }
 
 impl ClusterError {
     /// The reason's name: `members`, `client`, `refused`, `version`,
-    /// `connect-timeout`, `egress`, `log` or `entry`.
+    /// `connect-timeout`, `egress`, `log`, `entry`, `no-snapshot-due`,
+    /// `snapshot-too-long` or `snapshot-failed`.
     pub const fn reason(&self) -> &'static str {
         match self {
             ClusterError::Members(_) => "members",
@@ -107,6 +163,9 @@ impl ClusterError {
             ClusterError::Egress(_) => "egress",
             ClusterError::Log(_) => "log",
             ClusterError::Entry { .. } => "entry",
+            ClusterError::NoSnapshotDue => "no-snapshot-due",
+            ClusterError::SnapshotTooLong { .. } => "snapshot-too-long",
+            ClusterError::SnapshotFailed { .. } => "snapshot-failed",
         }
     }
 }
@@ -157,6 +216,61 @@ impl fmt::Display for ClusterError {
                  member's driver says whether its recording is damaged; see \
                  docs/reference/cluster.md#the-service"
             ),
+            ClusterError::NoSnapshotDue => write!(
+                f,
+                "cluster service snapshot refused ({reason}): no snapshot is due; call \
+                 `ClusterService::snapshot` after a poll whose last entry was \
+                 `Entry::Snapshot`, when `ClusterService::snapshot_due` is `Some`, and \
+                 before the next poll; see {DOC_SNAPSHOTS}"
+            ),
+            ClusterError::SnapshotTooLong { found, limit } => write!(
+                f,
+                "cluster service snapshot refused ({reason}): the state is {found} bytes \
+                 and one snapshot holds {limit}; give the service a state of at most \
+                 {limit} bytes; see {DOC_SNAPSHOTS}"
+            ),
+            ClusterError::SnapshotFailed { cause } => {
+                write!(
+                    f,
+                    "cluster service snapshot failed ({reason}, {}): ",
+                    cause.name()
+                )?;
+                match cause {
+                    SnapshotCause::Recording => write!(
+                        f,
+                        "the driver recorded another publication of the service snapshot \
+                         stream; run one service that takes snapshots beside each member"
+                    ),
+                    SnapshotCause::Write => write!(
+                        f,
+                        "the snapshot's messages were not written within a second of one \
+                         another; `cavalry doctor` on the member's driver says whether its \
+                         recorder writes, by `recording.write_failed` and the log \
+                         directory's free space"
+                    ),
+                    SnapshotCause::Stop => write!(
+                        f,
+                        "the driver did not stop the snapshot's recording within a second; \
+                         `cavalry doctor` on the member's driver says why"
+                    ),
+                    SnapshotCause::Short => write!(
+                        f,
+                        "the snapshot's recording stopped short of what was written; a write \
+                         or a sync to the log directory failed, which `cavalry doctor` on the \
+                         member's driver reports as `recording.write_failed`"
+                    ),
+                    SnapshotCause::Ack => write!(
+                        f,
+                        "the member did not take the service's word of the snapshot within a \
+                         second; check that the cluster member runs on this driver"
+                    ),
+                }?;
+                write!(
+                    f,
+                    ". No snapshot is listed, nothing committed is lost, and the service \
+                     reads on: the next snapshot is asked for by itself; see {DOC_SNAPSHOTS}"
+                )
+            }
         }
     }
 }
@@ -817,5 +931,71 @@ impl fmt::Debug for ClusterSession {
             .field("stale_replies", &self.stale_replies())
             .field("closed", &self.closed())
             .finish()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A snapshot's three errors each say what happened, what to do, and where it
+    /// is explained; a snapshot that failed names its step and says that nothing is
+    /// lost.
+    #[test]
+    fn a_snapshots_errors_say_what_to_do() {
+        let none = ClusterError::NoSnapshotDue;
+        assert_eq!(none.reason(), "no-snapshot-due");
+        let text = none.to_string();
+        assert!(
+            text.starts_with("cluster service snapshot refused (no-snapshot-due)"),
+            "{text}"
+        );
+        assert!(
+            text.contains("after a poll whose last entry was `Entry::Snapshot`"),
+            "{text}"
+        );
+        assert!(text.ends_with(DOC_SNAPSHOTS), "{text}");
+
+        let long = ClusterError::SnapshotTooLong {
+            found: 1_073_741_825,
+            limit: 1_073_741_824,
+        };
+        assert_eq!(long.reason(), "snapshot-too-long");
+        let text = long.to_string();
+        assert!(
+            text.contains("the state is 1073741825 bytes and one snapshot holds 1073741824"),
+            "{text}"
+        );
+        assert!(text.ends_with(DOC_SNAPSHOTS), "{text}");
+
+        for (cause, name, says) in [
+            (
+                SnapshotCause::Recording,
+                "recording",
+                "run one service that takes snapshots beside each member",
+            ),
+            (SnapshotCause::Write, "write", "`recording.write_failed`"),
+            (SnapshotCause::Stop, "stop", "`cavalry doctor`"),
+            (SnapshotCause::Short, "short", "`recording.write_failed`"),
+            (
+                SnapshotCause::Ack,
+                "ack",
+                "check that the cluster member runs on this driver",
+            ),
+        ] {
+            let failed = ClusterError::SnapshotFailed { cause };
+            assert_eq!(failed.reason(), "snapshot-failed");
+            assert_eq!(cause.name(), name);
+            let text = failed.to_string();
+            assert!(
+                text.starts_with(&format!(
+                    "cluster service snapshot failed (snapshot-failed, {name}): "
+                )),
+                "{text}"
+            );
+            assert!(text.contains(says), "{text}");
+            assert!(text.contains("nothing committed is lost"), "{text}");
+            assert!(text.ends_with(DOC_SNAPSHOTS), "{text}");
+        }
     }
 }

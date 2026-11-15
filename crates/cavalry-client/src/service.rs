@@ -11,28 +11,39 @@
 //! egress publication to each open session's response channel, and
 //! [`Replies::reply`] answers a session through one. A service beside a follower
 //! runs the same code on the same entries, reaches the same state and sends nothing.
+//!
+//! A poll ends at an [`Entry::Snapshot`], the leader's request for a snapshot, and
+//! [`ClusterService::snapshot`] then writes the program's state as it is at that
+//! position, with the sessions that are open there, to a recording of its own, and
+//! tells the member, which lists it (`spec/cluster.md`, "Snapshots"; ADR 0131).
 
 use std::sync::Arc;
+use std::time::Duration;
 
 use cavalry_proto::cluster::{
-    CloseReason, EGRESS_STREAM_ID, KEEPALIVE_INTERVAL_NS, MAX_SESSIONS, Message, Stream,
+    CONSENSUS_MODULE_STREAM_ID, CloseReason, ClusterAction, EGRESS_STREAM_ID,
+    KEEPALIVE_INTERVAL_NS, MAX_SERVICE_SNAPSHOT_STATE_LENGTH, MAX_SESSIONS, Message, SERVICE_ID,
+    SERVICE_SNAPSHOT_STATE_INDEX, SERVICE_SNAPSHOT_STATE_MESSAGE_LENGTH,
+    SERVICE_SNAPSHOT_STREAM_ID, SERVICE_SNAPSHOT_TYPE_ID, SnapshotMark, Stream, TimeUnit,
 };
 use cavalry_proto::frame::{self, DataFrameHeader, Flags};
 use cavalry_proto::udp::MTU_LENGTH_DEFAULT;
 use cavalry_shm::counters::generated::{
     CLUSTER_APPEND_POSITION, CLUSTER_LEADER_MEMBER_ID, CLUSTER_LEADERSHIP_TERM_ID,
-    CLUSTER_REPLIES_DROPPED,
+    CLUSTER_REPLIES_DROPPED, CLUSTER_SERVICE_SNAPSHOT_POSITION, CLUSTER_SERVICE_SNAPSHOTS_FAILED,
+    CLUSTER_SERVICE_SNAPSHOTS_TAKEN,
 };
 use cavalry_shm::counters::{CounterId, CountersReader};
 use cavalry_shm::log::Action;
 
 use crate::client::Cavalry;
-use crate::cluster::{ClusterError, SESSION_MESSAGE_HEADER_LENGTH, send};
+use crate::cluster::{ClusterError, SESSION_MESSAGE_HEADER_LENGTH, SnapshotCause, send};
 use crate::committed_log::{CommittedLog, MemberKey, find, is_members};
 use crate::conductor::nano_time;
 use crate::counter::Counter;
 use crate::error::ClientError;
 use crate::publication::{Offer, Publication};
+use crate::recording::Recording;
 
 /// The longest response channel a session has: `cavalry:udp?endpoint=`, a host name
 /// of 253 bytes, `:` and a port of five digits (`spec/cluster.md`, "Sessions").
@@ -54,6 +65,26 @@ const REPLY_TIMEOUT_NS: i64 = KEEPALIVE_INTERVAL_NS as i64;
 /// How many times one reply is offered again at once when the term of the session's
 /// publication rotated under it: a rotation is over by the next offer.
 const ROTATIONS: usize = 2;
+
+/// The channel a service's snapshot and its service ack are written on: streams of
+/// the member's driver alone.
+const IPC_CHANNEL: &str = "cavalry:ipc";
+
+/// How long a snapshot may go without its next step: a message a publication does
+/// not take, a recording whose stop the driver does not announce, or a service ack
+/// the consensus module stream does not take (`spec/cluster.md`, "Values", snapshot
+/// timeout). Past it the snapshot is given up. It is the one a member's own snapshot
+/// is under.
+const SNAPSHOT_TIMEOUT_NS: i64 = cavalry_proto::cluster::SNAPSHOT_TIMEOUT_NS as i64;
+
+/// How long the service's thread sleeps between two tries of a step of a snapshot
+/// that the driver has not caught up with.
+const SNAPSHOT_PAUSE: Duration = Duration::from_micros(50);
+
+/// The longest message of a service's snapshot that the service encodes: a client
+/// session with the longest response channel, 8 + 12 + 4 + 280 + 4 bytes. The
+/// program's bytes are offered as they are.
+const SNAPSHOT_SCRATCH_LENGTH: usize = 512;
 
 /// One entry of the committed log, as what it is.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -83,9 +114,15 @@ pub enum Entry<'a> {
         /// The member that leads it.
         leader_member_id: i32,
     },
+    /// The leader asks every member for a snapshot here: a cluster action whose
+    /// action is snapshot. The poll that hands it over ends after it, so the
+    /// program's state is then its state at the snapshot's position, the position
+    /// after this entry, and [`ClusterService::snapshot`] takes that state before
+    /// the next poll. A program that takes no snapshots reads on.
+    Snapshot,
     /// An entry of the page that no leader of this version appends, and that a
-    /// service of this version does nothing with: a timer event, a cluster action or
-    /// a membership change event.
+    /// service of this version does nothing with: a timer event, a cluster action
+    /// that suspends or resumes, or a membership change event.
     Other,
 }
 
@@ -295,6 +332,8 @@ struct Member {
     /// record no longer the member's.
     leader_record: Option<u32>,
     term_record: Option<u32>,
+    /// The record `cluster.service_snapshot_position` was last found in.
+    service_snapshot_record: Option<u32>,
     /// `cluster.replies_dropped`, which the service adds.
     dropped: Counter,
 }
@@ -328,8 +367,22 @@ impl Member {
             append_position,
             leader_record: None,
             term_record,
+            service_snapshot_record: None,
             dropped,
         }))
+    }
+
+    /// The log position of the newest snapshot of a service that the member lists,
+    /// −1 while it lists none: its `cluster.service_snapshot_position`. `None` when
+    /// the member has no such counter: it closed, or it is of a version that lists
+    /// no service's snapshot.
+    fn service_snapshot_position(&mut self) -> Option<i64> {
+        load(
+            &self.counters,
+            &mut self.service_snapshot_record,
+            CLUSTER_SERVICE_SNAPSHOT_POSITION,
+            self.key,
+        )
     }
 
     /// Whether the member says, now, that it leads `leadership_term_id`: its
@@ -387,6 +440,181 @@ fn load(
     let value = read(id)?;
     *record = Some(id);
     Some(value)
+}
+
+/// Writes one snapshot of a service: a recording of a span of the service's
+/// publication on the service snapshot stream, stopped at the end of what was
+/// written, and then the service ack to the member (`spec/cluster.md`, "A service's
+/// snapshot"). A recording that has begun and is given up is asked to stop: it is in
+/// no list, and is no snapshot.
+fn write_snapshot(
+    client: &mut Cavalry,
+    snapshots: &mut SnapshotPublications,
+    sessions: &[Session; MAX_SESSIONS],
+    due: Due,
+    state: &[u8],
+) -> Result<(), ClusterError> {
+    // The driver records the stream's first publication that is not yet recorded
+    // (`spec/client-protocol.md`, "Commands", start recording). One service beside a
+    // member writes on this stream, so that is this service's; a recording of another
+    // session is not this snapshot's.
+    let recording = client.start_recording(IPC_CHANNEL, SERVICE_SNAPSHOT_STREAM_ID)?;
+    if recording.session_id() != snapshots.publication.session_id() {
+        let _ = recording.stop(client);
+        return Err(ClusterError::SnapshotFailed {
+            cause: SnapshotCause::Recording,
+        });
+    }
+    let written = write_messages(&mut snapshots.publication, sessions, due, state)
+        .and_then(|end| stop_at(client, &recording, end));
+    if let Err(cause) = written {
+        if recording.stop_position().is_none() {
+            // Asked once and not awaited.
+            let _ = recording.stop(client);
+        }
+        return Err(ClusterError::SnapshotFailed { cause });
+    }
+    let mut scratch = [0u8; SNAPSHOT_SCRATCH_LENGTH];
+    let ack = Message::ServiceAck {
+        log_position: due.log_position,
+        timestamp: due.timestamp,
+        ack_id: 0,
+        relevant_id: recording.recording_id(),
+        service_id: SERVICE_ID,
+    };
+    offer_within(&mut snapshots.acks, encoded(&ack, &mut scratch)?)
+        .map(|_| ())
+        .map_err(|()| ClusterError::SnapshotFailed {
+            cause: SnapshotCause::Ack,
+        })
+}
+
+/// The messages of a service's snapshot, in order, each one message of the
+/// publication: a marker, the open sessions by their ids, a marker, the program's
+/// bytes and a marker. Returns the position after the last.
+fn write_messages(
+    publication: &mut Publication,
+    sessions: &[Session; MAX_SESSIONS],
+    due: Due,
+    state: &[u8],
+) -> Result<i64, SnapshotCause> {
+    let mut scratch = [0u8; SNAPSHOT_SCRATCH_LENGTH];
+    let marker = |mark, index| Message::SnapshotMarker {
+        type_id: SERVICE_SNAPSHOT_TYPE_ID,
+        log_position: due.log_position,
+        leadership_term_id: due.leadership_term_id,
+        index,
+        mark,
+        time_unit: TimeUnit::Millis,
+        app_version: 0,
+    };
+    let mut offer = |message: &Message<'_>| -> Result<i64, SnapshotCause> {
+        let bytes = encoded(message, &mut scratch).map_err(|_| SnapshotCause::Write)?;
+        offer_within(publication, bytes).map_err(|()| SnapshotCause::Write)
+    };
+    offer(&marker(SnapshotMark::Begin, 0))?;
+    // The open sessions in the rising order of their ids: the order is the same
+    // beside every member, whatever slot of the table a session is in.
+    let mut after = i64::MIN;
+    while let Some(session) = sessions
+        .iter()
+        .filter(|session| session.open && session.id >= after)
+        .min_by_key(|session| session.id)
+    {
+        offer(&Message::ClientSession {
+            cluster_session_id: session.id,
+            response_stream_id: EGRESS_STREAM_ID,
+            response_channel: session.channel.get(..session.channel_length).unwrap_or(&[]),
+            encoded_principal: &[],
+        })?;
+        let Some(next) = session.id.checked_add(1) else {
+            break;
+        };
+        after = next;
+    }
+    offer(&marker(SnapshotMark::Section, SERVICE_SNAPSHOT_STATE_INDEX))?;
+    // The program's bytes as they are: no message of the page, and read by none.
+    for piece in state.chunks(SERVICE_SNAPSHOT_STATE_MESSAGE_LENGTH) {
+        offer_within(publication, piece).map_err(|()| SnapshotCause::Write)?;
+    }
+    let bytes =
+        encoded(&marker(SnapshotMark::End, 0), &mut scratch).map_err(|_| SnapshotCause::Write)?;
+    offer_within(publication, bytes).map_err(|()| SnapshotCause::Write)
+}
+
+/// `message` as its bytes in `scratch`.
+fn encoded<'a>(message: &Message<'_>, scratch: &'a mut [u8]) -> Result<&'a [u8], ClusterError> {
+    let length = message
+        .write(scratch)
+        .map_err(|_| ClusterError::SnapshotFailed {
+            cause: SnapshotCause::Write,
+        })?;
+    scratch.get(..length).ok_or(ClusterError::SnapshotFailed {
+        cause: SnapshotCause::Write,
+    })
+}
+
+/// Offers `bytes` until the publication takes them, and gives the position after
+/// them. `Err` when the publication takes nothing for the snapshot timeout, or
+/// refuses the message for good. The clock is read only while it refuses.
+fn offer_within(publication: &mut Publication, bytes: &[u8]) -> Result<i64, ()> {
+    let mut refusing_since_ns = 0i64;
+    loop {
+        match publication.offer(bytes) {
+            Ok(position) => return Ok(position),
+            // A recording connects the publication and gives it its limit a moment
+            // after it starts, and the member's subscription connects the acks'.
+            Err(Offer::BackPressured | Offer::NotConnected | Offer::AdminAction) => {
+                let now = nano_time();
+                if refusing_since_ns == 0 {
+                    refusing_since_ns = now;
+                } else if now.saturating_sub(refusing_since_ns) >= SNAPSHOT_TIMEOUT_NS {
+                    return Err(());
+                }
+                std::thread::sleep(SNAPSHOT_PAUSE);
+            }
+            Err(Offer::MaxPositionExceeded | Offer::Closed | Offer::TooLong { .. }) => {
+                return Err(());
+            }
+        }
+    }
+}
+
+/// Stops the recording once the recorder has written to `end`, and checks that it
+/// stopped there: the driver answers a stop once the catalog's stop is written and
+/// synced, so a snapshot whose ack is sent is one a power loss leaves whole.
+fn stop_at(client: &mut Cavalry, recording: &Recording, end: i64) -> Result<(), SnapshotCause> {
+    let mut since_ns = nano_time();
+    let mut reached = recording.position();
+    while reached < end {
+        if recording.stop_position().is_some() {
+            return Err(SnapshotCause::Short);
+        }
+        let now = nano_time();
+        let position = recording.position();
+        if position > reached {
+            reached = position;
+            since_ns = now;
+        } else if now.saturating_sub(since_ns) >= SNAPSHOT_TIMEOUT_NS {
+            return Err(SnapshotCause::Write);
+        }
+        std::thread::sleep(SNAPSHOT_PAUSE);
+    }
+    recording.stop(client).map_err(|_| SnapshotCause::Stop)?;
+    let since_ns = nano_time();
+    loop {
+        if let Some(stop) = recording.stop_position() {
+            return if stop == end {
+                Ok(())
+            } else {
+                Err(SnapshotCause::Short)
+            };
+        }
+        if nano_time().saturating_sub(since_ns) >= SNAPSHOT_TIMEOUT_NS {
+            return Err(SnapshotCause::Stop);
+        }
+        std::thread::sleep(SNAPSHOT_PAUSE);
+    }
 }
 
 /// What a service's handler answers a session with: handed to the handler beside each
@@ -532,6 +760,53 @@ pub struct ClusterService {
     /// publications while it does.
     answering: bool,
     sessions: Box<[Session; MAX_SESSIONS]>,
+    /// The snapshot the last poll's last entry asked for, until the next poll.
+    due: Option<Due>,
+    /// The two counters of the service's snapshots, from the first call of
+    /// [`snapshot`](Self::snapshot) that writes one.
+    snapshot_counters: Option<SnapshotCounters>,
+    /// The two publications of the service's snapshots, from the first call whose
+    /// adds the driver took: held apart from the counters, so that a refused add is
+    /// counted, and a call after it adds no counter twice.
+    snapshot_publications: Option<SnapshotPublications>,
+}
+
+/// The snapshot a cluster action asked for: what its markers and its ack carry.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct Due {
+    /// The position after the action's entry.
+    log_position: i64,
+    /// The leadership term of the action's entry.
+    leadership_term_id: i64,
+    /// The cluster's time of the action's entry.
+    timestamp: i64,
+}
+
+/// The two counters of a service's snapshots, kept from the first snapshot it writes
+/// to its close: `cluster.service_snapshots_taken` and
+/// `cluster.service_snapshots_failed`.
+struct SnapshotCounters {
+    taken: Counter,
+    failed: Counter,
+}
+
+/// The two publications of a service's snapshots, kept from the first snapshot whose
+/// adds the driver took to the service's close: the publication each snapshot is a
+/// recording of a span of, and the publication its service acks go to the member on.
+struct SnapshotPublications {
+    publication: Publication,
+    acks: Publication,
+}
+
+impl SnapshotPublications {
+    /// Adds both: two commands to the driver. A refusal of the second gives the
+    /// first back.
+    fn add(client: &mut Cavalry) -> Result<Self, ClientError> {
+        let publication =
+            client.add_exclusive_publication(IPC_CHANNEL, SERVICE_SNAPSHOT_STREAM_ID)?;
+        let acks = client.add_exclusive_publication(IPC_CHANNEL, CONSENSUS_MODULE_STREAM_ID)?;
+        Ok(Self { publication, acks })
+    }
 }
 
 impl ClusterService {
@@ -544,6 +819,9 @@ impl ClusterService {
             term_leader: (-1, -1),
             answering: false,
             sessions: Box::new(core::array::from_fn(|_| Session::closed())),
+            due: None,
+            snapshot_counters: None,
+            snapshot_publications: None,
         }
     }
 
@@ -566,6 +844,11 @@ impl ClusterService {
     /// answered. An entry appended while no service ran beside its leader is
     /// answered by none, and a client is ready for that.
     ///
+    /// A poll ends after an [`Entry::Snapshot`] that the handler took, whatever
+    /// `fragment_limit` is, so that [`snapshot`](Self::snapshot) can take the
+    /// program's state as it is at that position. The next poll reads on, with or
+    /// without a snapshot taken.
+    ///
     /// The poll is the service's duty cycle. It opens the member's log when the
     /// member has one, and again at the next recording when one ends. From the first
     /// entry it answers it holds an egress publication to each open session's
@@ -583,6 +866,8 @@ impl ClusterService {
     where
         F: FnMut(&Committed<'_>, &mut Replies<'_>) -> Action,
     {
+        // A program that reads on has let the snapshot go.
+        self.due = None;
         if self.log.is_none() {
             let Some(log) = client.committed_log(self.position)? else {
                 return Ok(0);
@@ -616,6 +901,8 @@ impl ClusterService {
             return Ok(0);
         };
         let mut failure: Option<ClusterError> = None;
+        // The term and the time of a snapshot action the handler took.
+        let mut asked: Option<(i64, i64)> = None;
         let polled = log.controlled_poll(
             |bytes: &[u8], header: &DataFrameHeader, position: i64| {
                 // An entry is one frame: no leader appends a longer one.
@@ -681,6 +968,12 @@ impl ClusterService {
                             timestamp,
                         )
                     }
+                    Some(Message::ClusterAction {
+                        leadership_term_id,
+                        timestamp,
+                        action: ClusterAction::Snapshot,
+                        ..
+                    }) => (Entry::Snapshot, leadership_term_id, timestamp),
                     Some(
                         Message::TimerEvent {
                             leadership_term_id,
@@ -786,11 +1079,22 @@ impl ClusterService {
                 {
                     *session = Session::closed();
                 }
+                // The read ends at a snapshot action that was taken: the program's
+                // state is then its state at the position after this entry.
+                if action != Action::Abort && entry == Entry::Snapshot {
+                    asked = Some((leadership_term_id, timestamp));
+                    return Action::Break;
+                }
                 action
             },
             fragment_limit,
         );
         self.position = log.position();
+        self.due = asked.map(|(leadership_term_id, timestamp)| Due {
+            log_position: self.position,
+            leadership_term_id,
+            timestamp,
+        });
         // A handle that has ended, at its recording's stop, is closed: the next poll
         // opens the log again where this one stopped.
         if (polled.is_err() || log.is_ended())
@@ -807,6 +1111,150 @@ impl ClusterService {
     /// The position after the last entry the handler took, 0 before the first.
     pub fn position(&self) -> i64 {
         self.position
+    }
+
+    /// The log position of the snapshot the leader has asked for, when the last
+    /// entry of the last poll was an [`Entry::Snapshot`] that the handler took:
+    /// [`position`](Self::position) then. `None` otherwise, and from the next poll on.
+    pub fn snapshot_due(&self) -> Option<i64> {
+        self.due.map(|due| due.log_position)
+    }
+
+    /// Takes a snapshot of the program's `state`, as it is at
+    /// [`snapshot_due`](Self::snapshot_due): the bytes are the program's own, and
+    /// the service reads nothing in them. It is called after a poll whose last entry
+    /// was an [`Entry::Snapshot`], and before the next poll (`spec/cluster.md`,
+    /// "Snapshots"; ADR 0131). In Aeron, this is `ClusteredService.onTakeSnapshot`.
+    ///
+    /// The service writes a recording through its member's driver: a marker, the
+    /// sessions that are open at that position, a marker, `state`, 1,024 bytes to a
+    /// message, and a marker. It stops the recording, checks that it stopped at the
+    /// end of what was written, and tells the member with a service ack. The member
+    /// lists the snapshot in its snapshots file. `Ok(true)` says that the ack is on
+    /// its way: a member that stops before it reads it lists nothing, and the next
+    /// snapshot is asked for by itself.
+    ///
+    /// `Ok(false)` says that nothing was written, because the member already lists a
+    /// snapshot of a service at or past this position: a service that reads its
+    /// member's log again from the start meets the actions it met before.
+    ///
+    /// The call waits for the driver: each step is a command or an offer, and a step
+    /// that makes no progress for a second ends the snapshot with
+    /// [`ClusterError::SnapshotFailed`], which names the step. The service is as it
+    /// was, and the program polls on, or calls again while no poll has been made. A
+    /// state longer than 1 GiB is refused, [`ClusterError::SnapshotTooLong`], and a
+    /// call where no snapshot is due is [`ClusterError::NoSnapshotDue`].
+    ///
+    /// A snapshot written is counted in `cluster.service_snapshots_taken`, and one
+    /// given up in `cluster.service_snapshots_failed`, the driver's refusal of a
+    /// command among them. At the first snapshot that refusal can be of the
+    /// service's two publications, which the call returns as
+    /// [`ClusterError::Client`]. The service's two counters are added before
+    /// anything else, at the first call that writes a snapshot, and a refusal of
+    /// either is the one failure that is not counted: there is no counter yet to
+    /// count it in. The call returns it as [`ClusterError::Client`], and the next
+    /// call adds them again.
+    ///
+    /// ```
+    /// use cavalry_client::{Action, Cavalry, ClusterError, Entry};
+    ///
+    /// # fn main() -> Result<(), Box<dyn std::error::Error>> {
+    /// # let dir = std::env::temp_dir().join(format!("cavalry-doc-snapshot-{}", std::process::id()));
+    /// # let _ = std::fs::remove_dir_all(&dir);
+    /// # let driver = cavalry_driver::Driver::start(&dir, dir.join("log"))?;
+    /// let mut client = Cavalry::connect_to(&dir)?;
+    /// let mut service = client.cluster_service();
+    /// // The program's state: how many bytes its sessions have sent.
+    /// let mut total = 0u64;
+    /// service.poll(
+    ///     &mut client,
+    ///     |committed, _replies| {
+    ///         if let Entry::SessionMessage { payload, .. } = committed.entry {
+    ///             total += payload.len() as u64;
+    ///         }
+    ///         Action::Continue
+    ///     },
+    ///     10,
+    /// )?;
+    /// // The poll ended at the leader's request for a snapshot: give the state.
+    /// if service.snapshot_due().is_some() {
+    ///     service.snapshot(&mut client, &total.to_le_bytes())?;
+    /// }
+    /// // A driver that hosts no cluster member has no log, and no snapshot is due.
+    /// assert_eq!(service.snapshot_due(), None);
+    /// assert!(matches!(
+    ///     service.snapshot(&mut client, &total.to_le_bytes()),
+    ///     Err(ClusterError::NoSnapshotDue)
+    /// ));
+    /// # service.close(&mut client)?;
+    /// # client.close()?;
+    /// # driver.close()?;
+    /// # let _ = std::fs::remove_dir_all(&dir);
+    /// # Ok(())
+    /// # }
+    /// ```
+    pub fn snapshot(&mut self, client: &mut Cavalry, state: &[u8]) -> Result<bool, ClusterError> {
+        let (Some(due), Some(member)) = (self.due, self.member.as_mut()) else {
+            return Err(ClusterError::NoSnapshotDue);
+        };
+        if state.len() > MAX_SERVICE_SNAPSHOT_STATE_LENGTH {
+            return Err(ClusterError::SnapshotTooLong {
+                found: state.len(),
+                limit: MAX_SERVICE_SNAPSHOT_STATE_LENGTH,
+            });
+        }
+        // The member lists one at or past this position already: an action that this
+        // service, or one before it, took a snapshot for.
+        if member
+            .service_snapshot_position()
+            .is_some_and(|listed| listed >= due.log_position)
+        {
+            self.due = None;
+            return Ok(false);
+        }
+        // The two counters first, so that every step after them that fails is
+        // counted, the driver's refusal of a publication among them.
+        let counters = match self.snapshot_counters.take() {
+            Some(counters) => counters,
+            None => {
+                let key = member.key;
+                let id = member.id;
+                let taken = client.add_counter(
+                    CLUSTER_SERVICE_SNAPSHOTS_TAKEN.0,
+                    &key,
+                    &format!("cluster.service_snapshots_taken {id}"),
+                )?;
+                let failed = client.add_counter(
+                    CLUSTER_SERVICE_SNAPSHOTS_FAILED.0,
+                    &key,
+                    &format!("cluster.service_snapshots_failed {id}"),
+                )?;
+                SnapshotCounters { taken, failed }
+            }
+        };
+        let counters = &*self.snapshot_counters.insert(counters);
+        let publications = match self.snapshot_publications.take() {
+            Some(publications) => publications,
+            None => match SnapshotPublications::add(client) {
+                Ok(publications) => publications,
+                Err(error) => {
+                    let _ = counters.failed.increment();
+                    return Err(error.into());
+                }
+            },
+        };
+        let publications = self.snapshot_publications.insert(publications);
+        match write_snapshot(client, publications, &self.sessions, due, state) {
+            Ok(()) => {
+                let _ = counters.taken.increment();
+                self.due = None;
+                Ok(true)
+            }
+            Err(error) => {
+                let _ = counters.failed.increment();
+                Err(error)
+            }
+        }
     }
 
     /// Whether the service answered the last entry it read: its member led that
@@ -830,6 +1278,14 @@ impl ClusterService {
         }
         if let Some(member) = self.member.take() {
             member.dropped.close();
+        }
+        if let Some(counters) = self.snapshot_counters.take() {
+            counters.taken.close();
+            counters.failed.close();
+        }
+        if let Some(publications) = self.snapshot_publications.take() {
+            publications.publication.close()?;
+            publications.acks.close()?;
         }
         if let Some(log) = self.log.take() {
             log.close(client)?;
