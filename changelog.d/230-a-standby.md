@@ -6,8 +6,8 @@
   standby, or to replace a lost voter with one, change one member's mark in the
   string and start each member again with it, the leader last:
   [Promote a standby to a voter](docs/how-to/promote-a-standby.md). Change one mark
-  at a time, and let the members elect a leader before the next change: two marks
-  changed at once can lose a committed entry, and no member refuses it
+  at a time, and make the next change only once every member follows one leader:
+  two marks changed at once can lose a committed entry, and no member refuses it
   ([ADR 0134](docs/decisions/0134-mark-a-standby-in-the-members-string-and-change-one-mark-at-a-time.md);
   [the cluster protocol](docs/reference/cluster.md)).
 - `cavalry doctor` names a standby as one, counts a quorum over the voters, and

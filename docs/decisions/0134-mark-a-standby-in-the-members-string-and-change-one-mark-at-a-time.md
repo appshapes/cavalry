@@ -53,8 +53,9 @@ leader its own string marks one.
 A mark is changed by starting the members again with a new string, under three
 rules that `spec/cluster.md` states and an operator keeps
 (`docs/how-to/promote-a-standby.md`): one mark at a time; a change complete, every
-running member started with the new string and a leader's election closed after
-that, before the next begins; and no member started with an older string.
+running member started with the new string and all of them following one leader
+with their elections closed, before the next begins; and no member started with an
+older string.
 
 Two gauges say which string a member runs: `cluster.voters`, the voters as one bit
 each in the rising order of the ids, and `cluster.standby`. `cavalry doctor`
@@ -94,6 +95,15 @@ standby is counted, `cluster.standby_vote_requests`, and reported.
   leader of the second has carried it to a quorum of the second's voters. An
   election closed in the second string is that: its leader's term is recorded at
   its log position by a quorum of that string's voters (state 8).
+- **A change complete when a leader that was started with the new string has
+  closed its election.** Lost: its safety would rest on clocks. A leader that is
+  parted from the others says that it leads until its own clock has counted the
+  leader heartbeat timeout, and a process that was stopped for a while, or a host
+  that was paused, counts late. In that time a member that still runs the string
+  before can lead a later term and commit by that string, on a quorum that is no
+  quorum of the new one. When every running member follows the one leader, no
+  such term exists: a member that voted in a later term follows no leader of an
+  earlier one. No test runs this one: the cluster in memory has one clock.
 - **A member checks the rules.** Lost for this version. A member does not know
   another member's string. To carry the string, or a hash of its voters, in a
   consensus message is a change of a layout that is Aeron's, a version of the page

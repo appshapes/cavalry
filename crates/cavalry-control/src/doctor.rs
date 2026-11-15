@@ -1656,8 +1656,8 @@ fn voters_message(id: i32, runs: i64, cluster: &Cluster) -> String {
          starts: start this member again with {members}, or set {members} to the \
          string the cluster runs with. While a standby's mark is changed, start each \
          member again with the new string, one at a time and the leader last; the \
-         change is complete when no member has this finding and the members have a \
-         leader. Make no second change before that: \
+         change is complete when no member has this finding and every member follows \
+         one leader. Make no second change before that: \
          docs/how-to/promote-a-standby.md",
         cluster.voters_text(runs),
         cluster.voters_text(cluster.voters_mask())
@@ -7147,8 +7147,8 @@ mod tests {
              CAVALRY_CLUSTER_MEMBERS, or set CAVALRY_CLUSTER_MEMBERS to the string the \
              cluster runs with. While a standby's mark is changed, start each member again \
              with the new string, one at a time and the leader last; the change is complete \
-             when no member has this finding and the members have a leader. Make no second \
-             change before that: docs/how-to/promote-a-standby.md"
+             when no member has this finding and every member follows one leader. Make no \
+             second change before that: docs/how-to/promote-a-standby.md"
         );
         // One voter, and a value of another string's.
         assert_eq!(cluster.voters_text(0b0001), "member 0");

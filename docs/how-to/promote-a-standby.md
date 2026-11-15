@@ -82,9 +82,12 @@ It promotes member 3. Then it shows the two changes that replace a lost voter.
    term above the one you wrote down in step 3.
 
 6. Wait until the change is complete, and make no other change before it is. It is
-   complete when `doctor` on every member says `election closed`, exactly one says
-   `the leader`, and none prints `WARN cluster-voters`. The member you promoted now
-   says `a follower` or `the leader`, and no longer `a standby`.
+   complete when `doctor` on every member that runs says `election closed`, exactly
+   one says `the leader`, every other says `it follows member` with that leader's
+   id, and none prints `WARN cluster-voters`. Check every member: one member that
+   says `the leader` is not enough, since a leader that cannot reach the others
+   says so for up to 10 s, and longer when its process was stopped. The member
+   you promoted now says `a follower` or `the leader`, and no longer `a standby`.
 
 ## Replace a lost voter with a standby
 
