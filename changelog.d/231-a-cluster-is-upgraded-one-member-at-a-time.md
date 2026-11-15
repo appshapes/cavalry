@@ -1,5 +1,5 @@
-- A cluster can be upgraded one member at a time, without stopping it. The cluster
-  protocol moves to version 1, and `spec/cluster.md` now has the rule it lacked:
+- A cluster can be upgraded one member at a time, and one of three voters or more
+  without stopping it. The cluster protocol moves to version 1, and `spec/cluster.md` now has the rule it lacked:
   the versions of one major form one cluster, and no version of a major changes a
   message's layout or what an entry does. Version 1 adds no message, field or
   entry. A member and a client of version 1 write 256, their version in semantic

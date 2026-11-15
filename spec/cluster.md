@@ -1341,8 +1341,9 @@ a leader of either. Version 1 adds nothing that a member of version 0 must not b
 sent: a leader of either version appends the same entries, and a follower of either
 records them.
 
-A cluster whose every member runs is upgraded one member at a time, with the
-members string it has, each member on the log directory it had. A member is stopped with the service beside it,
+A cluster whose every member runs, with its election closed, is upgraded one
+member at a time, with the members string it has, each member on the log directory
+it had. A member is stopped with the service beside it,
 and both are started at the new version on the directories they had ("A member's
 start"): a member's driver, its consensus module and its service are of one build,
 since what passes between them is `spec/client-protocol.md`'s and not this page's.
@@ -1352,8 +1353,8 @@ at every step, so the cluster commits throughout but for the election that the
 leader's stop holds, whose candidates and voters may be of both versions; a cluster
 of fewer voters commits nothing while one of them is stopped. No step loses a
 committed entry in either, since a stop in an upgrade is a member's stop as any
-other and each member keeps its log. A
-member of version 1 starts on the log directory that a member of version 0 wrote,
+other and each member keeps its log. A member of version 1 starts on the log
+directory that a member of version 0 wrote,
 and a member of version 0 on one that version 1 wrote, since no file of
 `spec/durable-log.md` differs between the two: a member may be stepped back. What
 "A member's start" refuses of a log directory is refused in an upgrade as at any

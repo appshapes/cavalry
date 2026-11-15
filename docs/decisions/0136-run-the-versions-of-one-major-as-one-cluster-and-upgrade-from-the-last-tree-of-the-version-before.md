@@ -50,8 +50,8 @@ form, the page's version being the minor while the major is 0. A member and a
 client of version 1 write 256 in the four fields that carry a version and 0 in
 every header. Version 1 adds no message, field or entry: its content is this rule.
 
-A cluster whose every member runs is upgraded one member at a time on the log
-directories it has. A member is stopped with its service and both are started at
+A cluster whose every member runs, with its election closed, is upgraded one
+member at a time on the log directories it has. A member is stopped with its service and both are started at
 the new version, and the next is stopped only once that one leads, or follows with
 its election closed. With three voters or more a quorum runs at every step. A
 member may be stepped back, since no file's format differs between the two
