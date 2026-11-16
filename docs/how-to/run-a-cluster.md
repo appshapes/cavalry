@@ -388,8 +388,8 @@ committed once a quorum, two of three, has it on disk.
 - `WARN cluster.messages_rejected`: the member rejected consensus messages it cannot
   read, and acted on none of them. Members of one major of the cluster protocol read
   each other, whatever their versions, as during an upgrade. So a rejected consensus
-  message is from a member of another major, and the member may canvass with no
-  leader for as long as that member runs. `cavalry doctor` on each member names the
+  message is usually from a member of another major, and the member may canvass with
+  no leader for as long as that member runs. `cavalry doctor` on each member names the
   version that member runs, in its `note cluster-member` line: `it runs version 1 of
   the cluster protocol, 0.1.0`, where the major is the first number of `0.1.0`. Of
   a member that has no `cluster.protocol_version` counter, `doctor` says that `it

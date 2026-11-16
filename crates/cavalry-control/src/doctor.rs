@@ -1109,7 +1109,11 @@ impl MemberCounters {
 /// counters hold no such gauge runs a build older than the counter, which is every
 /// build of version 0 and the first build of version 1, the tree before ADR 0137:
 /// the clause says that, and does not say which of the two versions it is, since
-/// nothing in the counters file tells them apart.
+/// nothing in the counters file tells them apart. A gauge that holds 0 is not stored
+/// yet: a member adds the counter and stores its version straight after, and a
+/// counter holds 0 between its allocation and its first store, so a doctor that runs
+/// between the two reads 0, which no build stores. The clause says that, and names
+/// no version 0.
 /// The members of a cluster may be of different versions of one major, as they are
 /// during an upgrade, so the clause is said of every member and is no finding.
 fn protocol_version_text(version: Option<i64>) -> String {
@@ -1118,6 +1122,12 @@ fn protocol_version_text(version: Option<i64>) -> String {
                 counter: version 0 of the cluster protocol, or the first build of version 1"
             .to_string();
     };
+    // The 0 of the counter's allocation, before the member's one store.
+    if value == 0 {
+        return "; its cluster.protocol_version is not stored yet, as for a moment while a \
+                member starts"
+            .to_string();
+    }
     // A version is an i32 that is not negative (`spec/cluster.md`, "Encoding").
     match i32::try_from(value) {
         Ok(version) if version >= 0 => {
@@ -7362,9 +7372,12 @@ mod tests {
     /// 0, as 256 is version 1, 0.1.0, and a later minor by the same rule. A member
     /// whose counters hold no such gauge is said to run a build older than the
     /// counter, version 0 or the first build of version 1, and is not said to be of
-    /// either. None of the three has a finding for it: the members of a cluster may
-    /// be of different versions of one major, as they are during an upgrade, and
-    /// doctor of one build reads a member of another (ADR 0137).
+    /// either. A gauge that holds 0 is one its member has added and not stored yet,
+    /// which a doctor that runs while a member starts can read: it is said to be
+    /// that, and never version 0, which no build stores. None of the four has a
+    /// finding for it: the members of a cluster may be of different versions of one
+    /// major, as they are during an upgrade, and doctor of one build reads a member
+    /// of another (ADR 0137).
     #[test]
     fn a_members_note_ends_with_the_version_of_the_cluster_protocol_it_runs() {
         let cluster = Cluster::of(Some(THREE_MEMBERS)).expect("the members string parses");
@@ -7403,6 +7416,13 @@ mod tests {
                 Some(1795),
                 "; its members string gives a vote to members 0, 1 and 2; it runs version 7 \
                  of the cluster protocol, 0.7.3",
+            ),
+            (
+                "version-not-stored",
+                Some(0),
+                "; its members string gives a vote to members 0, 1 and 2; its \
+                 cluster.protocol_version is not stored yet, as for a moment while a member \
+                 starts",
             ),
         ] {
             let (_, findings) = cluster_findings_in(test, 0, Some(&cluster), &follower(version));

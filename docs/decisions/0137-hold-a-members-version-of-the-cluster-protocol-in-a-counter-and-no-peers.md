@@ -4,10 +4,12 @@
 - **Date:** 2026-11-16
 - **Invariants affected:** 3, 4, 6
 - **Supersedes:** none. Decides the second change of work item 231, which ADR 0136's
-  Consequences left to it: `cavalry doctor` naming the versions in a cluster. Changes
-  `spec/cluster.md`: one row of "Counters", which `counters.toml` gains as id 179,
-  and a sentence of "Versions and the upgrade". The page's version stays 1: a
-  counter's row moves no version, as ADR 0132 and ADR 0134 added rows without
+  Consequences left to it: `cavalry doctor` naming the versions in a cluster. It
+  narrows what those Consequences forecast for this change, "the counters and the
+  finding": it adds one counter and a clause of the member's note, and no finding.
+  Changes `spec/cluster.md`: one row of "Counters", which `counters.toml` gains as
+  id 179, and a sentence of "Versions and the upgrade". The page's version stays
+  1: a counter's row moves no version, as ADR 0132 and ADR 0134 added rows without
   moving it. No message's layout changes, no file's format and no function of the
   C ABI.
 
@@ -83,11 +85,13 @@ gauge, and to the clause of a member with none when it has not.
   0.1.0`; of one with no such gauge the note says `it has no
   cluster.protocol_version, so it runs a build older than that counter: version 0
   of the cluster protocol, or the first build of version 1`; and one at 1795, a
-  later minor, is named `it runs version 7 of the cluster protocol, 0.7.3`. None
-  of the three has a finding
-  besides its note. Six tests of the note that were written before this decision
-  hold the clause at the note's end, after the voters, and
-  `a_member_count_with_a_doctor_sentence_is_reported_with_it` holds
+  later minor, is named `it runs version 7 of the cluster protocol, 0.7.3`. A
+  gauge that reads 0, as it does between a member's add and its store, is said as
+  `its cluster.protocol_version is not stored yet, as for a moment while a member
+  starts`, and never as a version 0, which no build stores. None of the four has
+  a finding besides its note. Six tests of the note that were
+  written before this decision hold the clause at the note's end, after the
+  voters, and `a_member_count_with_a_doctor_sentence_is_reported_with_it` holds
   `cluster.messages_rejected`'s new sentence.
 - `crates/cavalry/tests/cli.rs`: three members that `cavalry run` started on the
   loopback. `cavalry doctor` on the leader prints a line that holds `; its members

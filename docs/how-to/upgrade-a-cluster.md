@@ -20,14 +20,17 @@ has why.
 - The newer build on every host: the `cavalry` binary, and the program of the
   service beside each member, built against the same tree. A member's driver, its
   consensus module and its service are of one build.
-- Both builds of a version of the cluster protocol whose major is 0. `cavalry
-  doctor` names the version that each running member is of, at the end of its
-  `note cluster-member` line: `it runs version 1 of the cluster protocol, 0.1.0`.
-  The major is the first number of `0.1.0`. Of a member that has no
-  `cluster.protocol_version` counter, the newer build's `doctor` says that `it runs
-  a build older than that counter: version 0 of the cluster protocol, or the first
-  build of version 1`. An older build's own `doctor` prints no such clause at all,
-  for any member, so ask the newer build's. Version 0 and version 1 are both of
+- Both builds of a version of the cluster protocol whose major is 0. The newer
+  build's `cavalry doctor` names the version that each running member is of, at
+  the end of the member's `note cluster-member` line: for example, `it runs
+  version 1 of the cluster protocol, 0.1.0`. The major is the first number of
+  `0.1.0`. A member that still runs the older build is named at the older build's
+  version, which is below the newer build's unless the two builds are of one
+  version. When the older build is older than the counter
+  `cluster.protocol_version`, the line says instead that the member has none: `it
+  runs a build older than that counter: version 0 of the cluster protocol, or the
+  first build of version 1`. An older build's own `doctor` names nothing that it
+  does not know, so ask the newer build's. Version 0 and version 1 are both of
   major 0, and form one cluster.
 - Each member's command of [Run a cluster of three members](run-a-cluster.md),
   step 3, unchanged: the same `CAVALRY_CLUSTER_MEMBERS`, the same
@@ -98,9 +101,12 @@ No file that a member keeps differs between version 0 and version 1.
   message it sent before a step was answered once, and its session is open with
   the leader of the last term.
 - The newer build's `cavalry doctor` on each member's directory names the newer
-  version at the end of the member's `note cluster-member` line: `it runs version
-  1 of the cluster protocol, 0.1.0`. A member whose line says `it has no
-  cluster.protocol_version` still runs the older build: do steps 2 to 4 for it.
+  build's version at the end of the member's `note cluster-member` line: for
+  example, `it runs version 1 of the cluster protocol, 0.1.0`. A member that is
+  named at a version below that one, or as having no `cluster.protocol_version`,
+  still runs the older build: do steps 2 to 4 for it. When the two builds are of
+  one version of the cluster protocol, every member is named at that version
+  before the upgrade and after it, and the next check tells the builds apart.
 - Each `cavalry run` process is the newer build's: its command line names the
   newer binary.
 
