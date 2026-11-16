@@ -99,9 +99,10 @@ committed once a quorum, two of three, has it on disk.
    the leader: `; it follows member 2; its last election began because the member
    started`. Every line then names the members that the member's own string gives a
    vote to, `; its members string gives a vote to members 0, 1 and 2`, the same on
-   the three. The term is 1 or more where two members asked for votes at the same
-   moment and another ballot was taken. Each line ends with `; see` and the page that
-   explains it, as every finding does.
+   the three, and the version of the cluster protocol that the member runs, `; it
+   runs version 1 of the cluster protocol, 0.1.0`. The term is 1 or more where two
+   members asked for votes at the same moment and another ballot was taken. Each
+   line ends with `; see` and the page that explains it, as every finding does.
 
 5. Stop a follower with Ctrl-C or SIGTERM. It prints `cavalry run: stopping` and
    `cavalry run: closed`. The other two are a quorum and go on.
@@ -385,10 +386,17 @@ committed once a quorum, two of three, has it on disk.
   again. Check that two members run and that each reaches the leader's consensus
   endpoint.
 - `WARN cluster.messages_rejected`: the member rejected consensus messages it cannot
-  read, and acted on none of them. Another member sends them from another version of
-  Cavalry, as during an upgrade, and the member may canvass with no leader for as long
-  as that lasts. Run `cavalry --version` on every member's host and start every member
-  on the same version.
+  read, and acted on none of them. Members of one major of the cluster protocol read
+  each other, whatever their versions, as during an upgrade. So a rejected consensus
+  message is from a member of another major, and the member may canvass with no
+  leader for as long as that member runs. `cavalry doctor` on each member names the
+  version that member runs, in its `note cluster-member` line: `it runs version 1 of
+  the cluster protocol, 0.1.0`, where the major is the first number of `0.1.0`. Of
+  a member that has no `cluster.protocol_version` counter, `doctor` says that `it
+  runs a build older than that counter: version 0 of the cluster protocol, or the
+  first build of version 1`. Both are of major 0. Start every member on one major:
+  [Upgrade a cluster one member at a time](upgrade-a-cluster.md) has what to do when
+  two builds are not of one major.
 - `WARN cluster.leader_heartbeat_timeouts`: the follower heard nothing from its leader
   for 10 s and began its election again. Check that the leader runs, that `doctor` on
   the leader's host shows no `cluster-quorum-lost`, and that this host reaches the
@@ -478,7 +486,7 @@ committed once a quorum, two of three, has it on disk.
   both sets. A member takes the string when it starts. While a standby is promoted,
   the members are started with the new string one at a time, and each has this line
   until its turn: [Promote a standby to a voter](promote-a-standby.md). With no
-  change under way, one of the two strings is older. Read the voters at the end of
+  change under way, one of the two strings is older. Read the voters in
   the other members' `note cluster-member` lines: with no change under way they
   are one set, those of the cluster's newest string. If the variable on this host
   is the older, correct the variable and start nothing. If the member runs the
@@ -488,7 +496,7 @@ committed once a quorum, two of three, has it on disk.
   committed.
 - `WARN cluster.standby_vote_requests`: this member is a standby, and a member
   whose string gives it a vote asked it for one. It gave none. The two ran with
-  strings that differ. Read the voters at the end of every member's `note
+  strings that differ. Read the voters in every member's `note
   cluster-member` line, which are one set where the strings agree, and start the
   member whose line differs with the cluster's string. A member whose host holds
   an older string prints no `WARN cluster-voters`. The count stays until this

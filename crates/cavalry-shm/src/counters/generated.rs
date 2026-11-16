@@ -539,6 +539,9 @@ pub const CLUSTER_STANDBY: CounterId = CounterId(177);
 /// `cluster.standby_vote_requests`, a client counter: Request votes one cluster member read while its own members string marks it a standby, each answered with nothing: the candidate's string gives this member a vote, and the member's own does not (spec/cluster.md, Standbys; ADR 0134). key and label as cluster.elections.
 pub const CLUSTER_STANDBY_VOTE_REQUESTS: CounterId = CounterId(178);
 
+/// `cluster.protocol_version`, a client gauge: One cluster member's version of the cluster protocol in semantic form, the major times 65536, the minor times 256 and the patch, added: 256 for version 1, 0.1.0. A member stores it when it starts, and it does not change while the member runs. A member of a build older than this counter has none: every member of version 0, and one of the first build of version 1 (spec/cluster.md, Versions and the upgrade; ADR 0137). key and label as cluster.elections.
+pub const CLUSTER_PROTOCOL_VERSION: CounterId = CounterId(179);
+
 /// Every entry of `counters.toml`, in the file's order.
 pub const COUNTERS: &[CounterDef] = &[
     CounterDef {
@@ -1539,7 +1542,7 @@ pub const COUNTERS: &[CounterDef] = &[
         kind: Kind::Counter,
         scope: Scope::Client,
         doc: "Messages one cluster member rejected: of the consensus stream, for any reason of spec/cluster.md, What a reader rejects; of the ingress stream, a fragment, and a session message longer than 1,344 bytes of payload that arrived in one frame; and of its read of its own committed log, a fragment, and a session open or close event its table of sessions cannot hold (spec/cluster.md, Sessions; ADR 0116). Nothing of a rejected message is acted on; key: member id (i32), little-endian; label text: the member id in decimal.",
-        doctor: "Another member sends consensus messages this member cannot read, or a client sends session messages no entry of the log holds: check that every member and every cluster client runs the same version, and that a client sends at most 1,344 bytes in a message.",
+        doctor: "Another member sends consensus messages this member cannot read, or a client sends session messages no entry of the log holds: check that every member and every cluster client runs the same major of the cluster protocol, which the cluster-member note of cavalry doctor names on each member, and that a client sends at most 1,344 bytes in a message.",
     },
     CounterDef {
         id: CLUSTER_LOG_RECORDING_ID,
@@ -1964,5 +1967,13 @@ pub const COUNTERS: &[CounterDef] = &[
         scope: Scope::Client,
         doc: "Request votes one cluster member read while its own members string marks it a standby, each answered with nothing: the candidate's string gives this member a vote, and the member's own does not (spec/cluster.md, Standbys; ADR 0134). key and label as cluster.elections.",
         doctor: "A candidate asked this member for a vote, and this member is a standby by its own members string, so it gave none: the two members ran with strings that differ. It rises while a voter that runs is being made a standby, when an election falls before every member has the new string; a candidate that had heard this member in that election waited the election timeout, 1 s, for the vote. It is a count and does not fall: it stays above 0 until this member starts again. If no such change was made since this member started, a member runs with another string: read the voters in the cluster-member note of cavalry doctor on every member, which are one set where the strings agree, and start the member that differs with the cluster's string (docs/how-to/promote-a-standby.md).",
+    },
+    CounterDef {
+        id: CLUSTER_PROTOCOL_VERSION,
+        name: "cluster.protocol_version",
+        kind: Kind::Gauge,
+        scope: Scope::Client,
+        doc: "One cluster member's version of the cluster protocol in semantic form, the major times 65536, the minor times 256 and the patch, added: 256 for version 1, 0.1.0. A member stores it when it starts, and it does not change while the member runs. A member of a build older than this counter has none: every member of version 0, and one of the first build of version 1 (spec/cluster.md, Versions and the upgrade; ADR 0137). key and label as cluster.elections.",
+        doctor: "The members of a cluster may be of different versions of one major while the cluster is upgraded, one member at a time (docs/how-to/upgrade-a-cluster.md). Members of two majors form no cluster, and each rejects the other's messages, counted in cluster.messages_rejected.",
     },
 ];

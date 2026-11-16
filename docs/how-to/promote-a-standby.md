@@ -51,7 +51,7 @@ It promotes member 3. Then it shows the two changes that replace a lost voter.
   and a client asks a standby as it asks any member.
 - `cavalry doctor` on every member that runs prints one `note cluster-member` line,
   with `election closed`, and no `WARN` or `FAIL` line whose check begins `cluster-`.
-  Every line ends with the same voters: `its members string gives a vote to members
+  Every line names the same voters: `its members string gives a vote to members
   0, 1 and 2`.
   The standby's line says `a standby, which follows the log and has no vote,` and the
   same `commit position` as the leader's line: it has caught up.
@@ -108,7 +108,7 @@ It promotes member 3. Then it shows the two changes that replace a lost voter.
 
    It prints `cavalry run: cluster member 3 started`. Within a second, `doctor` on it
    says `election closed` and `it follows member`, with the leader's id, and prints no
-   `WARN cluster-voters`, and its `note cluster-member` line ends with the new
+   `WARN cluster-voters`, and its `note cluster-member` line names the new
    voters, `its members string gives a vote to members 0, 1, 2 and 3`. Then do the
    same for the next member. Do not stop two members at once. While one voter is
    stopped, the leader keeps its quorum when the voters that still run, the leader
@@ -131,7 +131,7 @@ It promotes member 3. Then it shows the two changes that replace a lost voter.
 6. Wait until the change is complete, and make no other change before it is. It is
    complete when `doctor` on every member that runs says `election closed`, exactly
    one says `the leader`, every other says `it follows member` with that leader's
-   id, every `note cluster-member` line ends with the same voters, the new string's,
+   id, every `note cluster-member` line names the same voters, the new string's,
    and none prints `WARN cluster-voters`. And the voters among the members that say
    so are a quorum of the new string's voters: 3 of the 4 here. Count the voters,
    not the members. A member that is stopped is not one of them, whatever string
@@ -210,7 +210,7 @@ example, and a test of `cavalry-raft` runs it.
 
 - `cavalry doctor` on every member, with the new string set, prints one `note
   cluster-member` line with `election closed`, and no `WARN cluster-voters`.
-- Every member's line ends with the same voters, those of the new string.
+- Every member's line names the same voters, those of the new string.
 - The voters among the members that run are a quorum of the new string's voters,
   3 of 4 here. Count only the members the new string gives a vote to: a standby
   that runs is not one of them. Fewer voters do not make the change complete,
@@ -261,7 +261,7 @@ example, and a test of `cavalry-raft` runs it.
   why.
 - A member that you counted as stopped or lost runs again and you did not start
   it, as when a paused host resumes or a parted host reaches the others again.
-  Its `note cluster-member` line ends with older voters than the other members'
+  Its `note cluster-member` line names older voters than the other members'
   lines. Stop it at once and wait for `cavalry run: closed`. Set
   `CAVALRY_CLUSTER_MEMBERS` on its host to the cluster's newest string, and start
   it. Make no other change before that. While it runs with the older string, an
