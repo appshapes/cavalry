@@ -108,8 +108,11 @@ jobs:
     # On 2026-11-15 the jobs took 13 min 18 s (macOS) and 10 min 51 s (Linux) on run
     # 43766622479, with the cluster's tests and the six conformance runners that the
     # fifth slice added, and `just conformance` then gained conformance/upgrade/, which
-    # builds a second tree of Cavalry when the cache does not hold it (work item 231;
-    # ADR 0136). Twice the slowest of those is under 27 minutes, so the bound is 30.
+    # builds a second tree of Cavalry on every run: the cache never holds that tree's
+    # programs, since Swatinem/rust-cache drops built programs when it saves. That
+    # build took 10 s on Linux in run 43773022696, where the job took 11 min 19 s (work
+    # item 231; ADR 0136). Twice the slowest of those is under 27 minutes, so the
+    # bound is 30.
     timeout-minutes: 30
     strategy:
       fail-fast: false

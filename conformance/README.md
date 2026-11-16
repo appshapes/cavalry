@@ -132,9 +132,10 @@ cluster protocol's version before this one, read from the history: the first par
 the newest first-parent commit that moved the first line of `spec/cluster.md` to what
 it is now. `CAVALRY_UPGRADE_FROM=<commit>` names another N. N is exported with `git
 archive` and built into `target/upgrade/<N's first 8 hex digits>/`, once: the hash
-names the tree, so the directory is a cache, and N moves only when the page's version
-does. N's build is kept on a host that keeps `target/`, as a laptop does. CI's cache
-drops built programs: `Swatinem/rust-cache` keeps only `build/`, `.fingerprint/` and
+names the tree, so the directory, with the exported tree in `src/` and the three
+programs, is a cache, and N moves only when the page's version does. N's build is
+kept on a host that keeps `target/`, as a laptop does. CI's cache drops built
+programs: `Swatinem/rust-cache` keeps only `build/`, `.fingerprint/` and
 `deps/` of each profile directory under `target/` when it saves, so CI's `gates` job
 builds N on every run and prints `built N in <n> s` each time. The script needs the
 whole history, and says so in a shallow clone.
@@ -149,7 +150,21 @@ after every step, from N's build first and from N+1's after the leader's stop.
 After every start, stop and client run it asks `cavalry doctor` of each running
 member, from that member's own build: one leader, every other member its follower in
 its term, every election closed, and one position as every member's append position
-and commit position. At the end it holds four things. Every number the cluster
+and commit position. At the same moments it asks the newer build's `cavalry doctor`
+of each running member, whatever build the member is of, and holds what the end of
+the member's `note cluster-member` line says of the member's
+`cluster.protocol_version` to the build the script started the member from (ADR
+0137). A member at N+1 is named `it runs version 1 of the cluster protocol, 0.1.0`,
+the number read from the first line of this tree's `spec/cluster.md`. Whether a
+member at N has the counter is read from N's `counters.toml` alone, in N's exported
+tree, and not from the version of N's page: every tree of version 0 lacks it, and so
+does the first tree of version 1. When N's `counters.toml` holds no such counter,
+`doctor` must say `it has no cluster.protocol_version, so it runs a build older
+than that counter: version 0 of the cluster protocol, or the first build of version
+1`. When it holds it, a member at N is named as one at N+1 is, by the first line of
+the page in N's exported tree. Each step's line says what `doctor` named, as
+`doctor of N+1 names member 1 at version 1 and members 0 and 2 with no
+cluster.protocol_version`. At the end it holds four things. Every number the cluster
 acknowledged is in the total that every member's service reached. The three services
 were handed the same entries, with the same positions, terms and sessions. A service
 that started at N+1 read the log that N wrote. And each member's log, replayed from
@@ -162,7 +177,8 @@ The script reads lines that both builds print: `cavalry run`'s `started` and
 `closed` lines, the `note cluster-member` line of `cavalry doctor`, and the lines of
 the two adder programs. N prints the lines of its own tree until the page's version
 moves again, so a change that rewords one of them teaches the script the new wording
-beside the old, in the same change.
+beside the old, in the same change. The clause that names a member's version is the
+newer build's alone: the script asks no other build's `doctor` for it.
 
 The script's header says how to run it by hand.
 [Upgrade a cluster one member at a time](../docs/how-to/upgrade-a-cluster.md) is the
