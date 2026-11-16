@@ -53,10 +53,11 @@ use cavalry_shm::counters::generated::{
     CLUSTER_LEADER_HEARTBEAT_TIMEOUTS, CLUSTER_LEADER_MEMBER_ID, CLUSTER_LEADER_QUORUM_LOSSES,
     CLUSTER_LEADERSHIP_TERM_ID, CLUSTER_LOG_IMAGES_LOST, CLUSTER_LOG_RECORDINGS_FORGOTTEN,
     CLUSTER_LOG_RECORDINGS_UNSYNCED, CLUSTER_LOG_RECORDINGS_UNWRITTEN,
-    CLUSTER_LOG_REPLICATIONS_UNAVAILABLE, CLUSTER_MESSAGES_REJECTED, CLUSTER_REPLIES_STALE,
-    CLUSTER_ROLE, CLUSTER_SERVICE_ACKS_REJECTED, CLUSTER_SERVICE_SNAPSHOTS_FAILED,
-    CLUSTER_SERVICE_SNAPSHOTS_PASSED_OVER, CLUSTER_SNAPSHOTS_FAILED, CLUSTER_SNAPSHOTS_PASSED_OVER,
-    CLUSTER_STANDBY, CLUSTER_STANDBY_VOTE_REQUESTS, CLUSTER_TRUNCATIONS_REFUSED, CLUSTER_VOTERS,
+    CLUSTER_LOG_REPLICATIONS_UNAVAILABLE, CLUSTER_MESSAGES_REJECTED, CLUSTER_PROTOCOL_VERSION,
+    CLUSTER_REPLIES_STALE, CLUSTER_ROLE, CLUSTER_SERVICE_ACKS_REJECTED,
+    CLUSTER_SERVICE_SNAPSHOTS_FAILED, CLUSTER_SERVICE_SNAPSHOTS_PASSED_OVER,
+    CLUSTER_SNAPSHOTS_FAILED, CLUSTER_SNAPSHOTS_PASSED_OVER, CLUSTER_STANDBY,
+    CLUSTER_STANDBY_VOTE_REQUESTS, CLUSTER_TRUNCATIONS_REFUSED, CLUSTER_VOTERS,
 };
 use cavalry_shm::counters::{CounterId, CountersError, CountersReader, Scope};
 
@@ -1005,7 +1006,7 @@ const DOC_CLUSTER: &str = "docs/how-to/run-a-cluster.md#when-it-does-not-work";
 /// A member's counts that no other check of a member reads, each with a `counters.toml`
 /// doctor sentence that says what to do when it is above 0: each is reported by its
 /// name with that sentence, as a static counter is (`counters_checks`), since a client
-/// counter is not in that loop. A peer of another version shows in the first, a leader
+/// counter is not in that loop. A peer of another major shows in the first, a leader
 /// gone silent in the second, the leader's log stream lost in the third. The next
 /// three are of the two files a member writes of its log's recordings: the one for
 /// its service in its driver directory that it could not write (ADR 0103), the list
@@ -1080,6 +1081,11 @@ struct MemberCounters {
     /// `cluster.standby`: 1 when the member's own string marks it a standby; `None`
     /// as above.
     standby: Option<i64>,
+    /// `cluster.protocol_version`: the member's own version of `spec/cluster.md`, in
+    /// semantic form (ADR 0137); `None` while the counters file holds no such record,
+    /// as for a member of a build older than the counter: every build of version 0,
+    /// and the first build of version 1.
+    protocol_version: Option<i64>,
     /// The values of [`MEMBER_COUNTS`], in its order.
     counts: [i64; MEMBER_COUNTS.len()],
 }
@@ -1091,6 +1097,44 @@ impl MemberCounters {
         self.leader
             .and_then(|leader| i32::try_from(leader).ok())
             .filter(|&leader| leader >= 0 && leader != self.id)
+    }
+}
+
+/// What `cluster.protocol_version` says, as the last clause of a member's note: the
+/// version of the cluster protocol the member runs (`spec/cluster.md`, "Versions and
+/// the upgrade"; ADR 0137). The gauge holds the version in semantic form, the major
+/// times 65536, the minor times 256 and the patch, added. While the major is 0 the
+/// page's version is the minor, so the clause names it first and the semantic form
+/// after it: 256 is `version 1 of the cluster protocol, 0.1.0`. A member whose
+/// counters hold no such gauge runs a build older than the counter, which is every
+/// build of version 0 and the first build of version 1, the tree before ADR 0137:
+/// the clause says that, and does not say which of the two versions it is, since
+/// nothing in the counters file tells them apart.
+/// The members of a cluster may be of different versions of one major, as they are
+/// during an upgrade, so the clause is said of every member and is no finding.
+fn protocol_version_text(version: Option<i64>) -> String {
+    let Some(value) = version else {
+        return "; it has no cluster.protocol_version, so it runs a build older than that \
+                counter: version 0 of the cluster protocol, or the first build of version 1"
+            .to_string();
+    };
+    // A version is an i32 that is not negative (`spec/cluster.md`, "Encoding").
+    match i32::try_from(value) {
+        Ok(version) if version >= 0 => {
+            let (major, minor, patch) = (version >> 16, (version >> 8) & 0xff, version & 0xff);
+            if major == 0 {
+                format!(
+                    "; it runs version {minor} of the cluster protocol, \
+                     {major}.{minor}.{patch}"
+                )
+            } else {
+                format!("; it runs {major}.{minor}.{patch} of the cluster protocol")
+            }
+        }
+        _ => format!(
+            "; its cluster.protocol_version is {value}, which this doctor does not read as \
+             a version of the cluster protocol: run the doctor of the driver's own version"
+        ),
     }
 }
 
@@ -1293,8 +1337,10 @@ fn election_state_name(code: i64) -> String {
 /// The cluster member this driver is, when it is one, from the counters its consensus
 /// module added (`spec/cluster.md`, "Counters"; ADR 0062): who it is and what it knows,
 /// with who it follows and why its last election began, from its two gauges (ADR
-/// 0102), a note (`cluster-member`); a member that follows no leader, with where its
-/// election stands and what elects a leader (`cluster-no-leader`); a member that has
+/// 0102), the members its own string gives a vote (ADR 0134) and the version of the
+/// cluster protocol it runs (ADR 0137), a note (`cluster-member`); a member that
+/// follows no leader, with where its election stands and what elects a leader
+/// (`cluster-no-leader`); a member that has
 /// taken its leader and joins its log, with what its election's state waits for and
 /// the path that needs, a note (`cluster-joining`); a leader that lost its quorum
 /// (`cluster-quorum-lost`); a commit position behind the leader's own append position
@@ -1403,6 +1449,8 @@ fn cluster_checks(
             member.voters = Some(value);
         } else if type_id == CLUSTER_STANDBY.0 {
             member.standby = Some(value);
+        } else if type_id == CLUSTER_PROTOCOL_VERSION.0 {
+            member.protocol_version = Some(value);
         } else if let Some(count) = MEMBER_COUNTS
             .iter()
             .position(|counter| counter.0 == type_id)
@@ -1816,12 +1864,15 @@ fn member_findings(
         ),
         (None, _) => String::new(),
     };
+    // The version of the cluster protocol it runs, last: the versions of a cluster
+    // are read from the notes of all its members, as its voters are (ADR 0137).
+    let version = protocol_version_text(member.protocol_version);
     findings.push(Finding {
         check: "cluster-member",
         level: Level::Note,
         message: format!(
             "this driver is cluster member {id}, {} in term {term}, election {}: append \
-             position {append}, commit position {commit}{follows}{began}{voters}",
+             position {append}, commit position {commit}{follows}{began}{voters}{version}",
             if leads {
                 "the leader"
             } else if member.standby == Some(1) {
@@ -3438,6 +3489,7 @@ mod tests {
     use super::*;
     use cavalry_log::catalog::CatalogWriter;
     use cavalry_log::layout::{CatalogHeader, Recording};
+    use cavalry_proto::cluster::PROTOCOL_VERSION;
     use cavalry_shm::command_ring::CommandRing;
     use cavalry_shm::counters::CountersFile;
     use cavalry_shm::counters::generated::{CLIENT_TIMED_OUT, RUN_MEMBER_GIVEN_UP};
@@ -5918,6 +5970,7 @@ mod tests {
             (CLUSTER_LEADERSHIP_TERM_ID, 3),
             (CLUSTER_LEADER_MEMBER_ID, -1),
             (CLUSTER_ELECTION_CAUSE, 1),
+            (CLUSTER_PROTOCOL_VERSION, 256),
         ];
         let (_, findings) = cluster_findings_in("elects-no-leader", 2, Some(&cluster), &canvass);
         let found: Vec<&str> = findings.iter().map(|finding| finding.check).collect();
@@ -5925,7 +5978,8 @@ mod tests {
         assert!(
             findings[0].message.ends_with(
                 "; it has no leader; its last election began because its leader said \
-                 nothing for the leader heartbeat timeout"
+                 nothing for the leader heartbeat timeout; it runs version 1 of the \
+                 cluster protocol, 0.1.0"
             ),
             "{}",
             findings[0].message
@@ -6156,6 +6210,7 @@ mod tests {
             (CLUSTER_LEADER_MEMBER_ID, 1),
             (CLUSTER_ELECTION_CAUSE, 3),
             (CLUSTER_LEADER_QUORUM_LOSSES, 2),
+            (CLUSTER_PROTOCOL_VERSION, 256),
         ];
         let (_, findings) = cluster_findings_in("elects-quorum-lost", 1, None, &lost);
         let found: Vec<&str> = findings.iter().map(|finding| finding.check).collect();
@@ -6163,7 +6218,7 @@ mod tests {
         assert!(
             findings[0].message.ends_with(
                 "; its last election began because it led and its active members fell \
-                 below a quorum"
+                 below a quorum; it runs version 1 of the cluster protocol, 0.1.0"
             ),
             "{}",
             findings[0].message
@@ -6195,6 +6250,7 @@ mod tests {
                 (CLUSTER_LEADERSHIP_TERM_ID, 4),
                 (CLUSTER_LEADER_MEMBER_ID, 1),
                 (CLUSTER_ELECTION_CAUSE, 4),
+                (CLUSTER_PROTOCOL_VERSION, 256),
             ];
             let (_, findings) = cluster_findings_in(test, 2, cluster, &values);
             let found: Vec<&str> = findings.iter().map(|finding| finding.check).collect();
@@ -6203,7 +6259,8 @@ mod tests {
             assert!(
                 findings[0].message.ends_with(
                     "; it follows member 1; its last election began because a message \
-                     carried a term above its own"
+                     carried a term above its own; it runs version 1 of the cluster \
+                     protocol, 0.1.0"
                 ),
                 "{}",
                 findings[0].message
@@ -6414,7 +6471,7 @@ mod tests {
     }
 
     /// A leader whose election has closed has the note alone: it names no member it
-    /// follows, and ends with why its last election began.
+    /// follows, and ends with why its last election began and the version it runs.
     #[test]
     fn a_leader_whose_election_closed_has_the_note_alone() {
         let cluster = Cluster::of(Some(THREE_MEMBERS)).expect("the members string parses");
@@ -6424,14 +6481,16 @@ mod tests {
             (CLUSTER_LEADERSHIP_TERM_ID, 0),
             (CLUSTER_LEADER_MEMBER_ID, 0),
             (CLUSTER_ELECTION_CAUSE, 0),
+            (CLUSTER_PROTOCOL_VERSION, 256),
         ];
         let (_, findings) = cluster_findings_in("elects-leader", 0, Some(&cluster), &leader);
         let found: Vec<&str> = findings.iter().map(|finding| finding.check).collect();
         assert_eq!(found, ["cluster-member"]);
         assert!(
-            findings[0]
-                .message
-                .ends_with("commit position 0; its last election began because the member started"),
+            findings[0].message.ends_with(
+                "commit position 0; its last election began because the member started; it \
+                 runs version 1 of the cluster protocol, 0.1.0"
+            ),
             "{}",
             findings[0].message
         );
@@ -6732,7 +6791,7 @@ mod tests {
     }
 
     /// The member's counts with a doctor sentence of their own are reported by their
-    /// name and that sentence when above 0: a peer of another version, whose consensus
+    /// name and that sentence when above 0: a peer of another major, whose consensus
     /// messages the member rejects, beside the `cluster-no-leader` it causes; a follower
     /// that lost its leader's heartbeat and its log image, its election closed again;
     /// and a member that could not write the two files of its log's recordings, or
@@ -6769,7 +6828,9 @@ mod tests {
             "member 1's cluster.messages_rejected is 12: Another member sends consensus \
              messages this member cannot read, or a client sends session messages no entry \
              of the log holds: check that every member and every cluster client runs the \
-             same version, and that a client sends at most 1,344 bytes in a message."
+             same major of the cluster protocol, which the cluster-member note of cavalry \
+             doctor names on each member, and that a client sends at most 1,344 bytes in a \
+             message."
         );
         assert_eq!(rejected.doc, DOC_CLUSTER);
 
@@ -7061,6 +7122,7 @@ mod tests {
             (CLUSTER_LEADER_MEMBER_ID, 1),
             (CLUSTER_VOTERS, 0b0111),
             (CLUSTER_STANDBY, 1),
+            (CLUSTER_PROTOCOL_VERSION, 256),
             (CLUSTER_STANDBY_VOTE_REQUESTS, 0),
         ];
         let (_, findings) = cluster_findings("standby-follows", 3, &standby);
@@ -7074,11 +7136,13 @@ mod tests {
             "{}",
             findings[0].message
         );
-        // With no members string the note gives the gauge as it is.
+        // With no members string the note gives the gauge as it is, and then the
+        // version the member runs.
         assert!(
             findings[0].message.ends_with(
                 "; it follows member 1; cluster.voters is 7, a bit for each member its \
-                 members string gives a vote to, in the rising order of the ids"
+                 members string gives a vote to, in the rising order of the ids; it runs \
+                 version 1 of the cluster protocol, 0.1.0"
             ),
             "{}",
             findings[0].message
@@ -7171,7 +7235,8 @@ mod tests {
     /// reported, with both sets by their ids and what to do: a member takes its string
     /// when it starts. A member that runs with the string's voters has no such
     /// finding, nor one whose counters hold no `cluster.voters`, as a member of a
-    /// version before it, nor one the string does not name (ADR 0134).
+    /// version before it, which holds no `cluster.protocol_version` either, nor one
+    /// the string does not name (ADR 0134).
     #[test]
     fn a_member_that_runs_with_other_voters_than_the_hosts_string_is_reported() {
         let cluster =
@@ -7186,6 +7251,7 @@ mod tests {
             if let Some(voters) = voters {
                 values.push((CLUSTER_VOTERS, voters));
                 values.push((CLUSTER_STANDBY, 0));
+                values.push((CLUSTER_PROTOCOL_VERSION, 256));
             }
             values
         };
@@ -7194,10 +7260,12 @@ mod tests {
             cluster_findings_in("voters-differ", 0, Some(&cluster), &follower(Some(0b1011)));
         let found: Vec<&str> = findings.iter().map(|finding| finding.check).collect();
         assert_eq!(found, ["cluster-member", "cluster-voters"], "{findings:?}");
-        // The note names the voters the member runs with, by their ids.
+        // The note names the voters the member runs with, by their ids, and then the
+        // version it runs.
         assert!(
             findings[0].message.ends_with(
-                "; it follows member 1; its members string gives a vote to members 0, 1 and 3"
+                "; it follows member 1; its members string gives a vote to members 0, 1 and \
+                 3; it runs version 1 of the cluster protocol, 0.1.0"
             ),
             "{}",
             findings[0].message
@@ -7233,15 +7301,24 @@ mod tests {
                 "voters-same",
                 0,
                 Some(0b0111),
-                "; its members string gives a vote to members 0, 1 and 2",
+                "; its members string gives a vote to members 0, 1 and 2; it runs version 1 \
+                 of the cluster protocol, 0.1.0",
             ),
-            ("voters-none", 0, None, "; it follows member 1"),
+            (
+                "voters-none",
+                0,
+                None,
+                "; it follows member 1; it has no cluster.protocol_version, so it runs a \
+                 build older than that counter: version 0 of the cluster protocol, or the \
+                 first build of version 1",
+            ),
             (
                 "voters-other-member",
                 9,
                 Some(0b1011),
                 "; cluster.voters is 11, a bit for each member its members string gives a \
-                 vote to, in the rising order of the ids",
+                 vote to, in the rising order of the ids; it runs version 1 of the cluster \
+                 protocol, 0.1.0",
             ),
         ] {
             let (_, findings) = cluster_findings_in(test, id, Some(&cluster), &follower(voters));
@@ -7267,9 +7344,10 @@ mod tests {
         let found: Vec<&str> = findings.iter().map(|finding| finding.check).collect();
         assert_eq!(found, ["cluster-member"], "{findings:?}");
         assert!(
-            findings[0]
-                .message
-                .ends_with("; its members string gives a vote to members 0, 1, 2 and 3"),
+            findings[0].message.ends_with(
+                "; its members string gives a vote to members 0, 1, 2 and 3; it runs version \
+                 1 of the cluster protocol, 0.1.0"
+            ),
             "{}",
             findings[0].message
         );
@@ -7277,6 +7355,89 @@ mod tests {
         let (_, findings) = cluster_findings("voters-no-string", 0, &follower(Some(0b1011)));
         let found: Vec<&str> = findings.iter().map(|finding| finding.check).collect();
         assert_eq!(found, ["cluster-member"], "{findings:?}");
+    }
+
+    /// A member's note ends with the version of the cluster protocol the member runs,
+    /// from its own gauge: the page's version and its semantic form while the major is
+    /// 0, as 256 is version 1, 0.1.0, and a later minor by the same rule. A member
+    /// whose counters hold no such gauge is said to run a build older than the
+    /// counter, version 0 or the first build of version 1, and is not said to be of
+    /// either. None of the three has a finding for it: the members of a cluster may
+    /// be of different versions of one major, as they are during an upgrade, and
+    /// doctor of one build reads a member of another (ADR 0137).
+    #[test]
+    fn a_members_note_ends_with_the_version_of_the_cluster_protocol_it_runs() {
+        let cluster = Cluster::of(Some(THREE_MEMBERS)).expect("the members string parses");
+        let follower = |version: Option<i64>| {
+            let mut values = vec![
+                (CLUSTER_ROLE, 0),
+                (CLUSTER_ELECTION_STATE, 17),
+                (CLUSTER_LEADERSHIP_TERM_ID, 2),
+                (CLUSTER_LEADER_MEMBER_ID, 1),
+                (CLUSTER_ELECTION_CAUSE, 0),
+                (CLUSTER_VOTERS, 0b0111),
+                (CLUSTER_STANDBY, 0),
+            ];
+            if let Some(version) = version {
+                values.push((CLUSTER_PROTOCOL_VERSION, version));
+            }
+            values
+        };
+        for (test, version, note_ends) in [
+            (
+                "version-1",
+                Some(256),
+                "; it follows member 1; its last election began because the member started; \
+                 its members string gives a vote to members 0, 1 and 2; it runs version 1 of \
+                 the cluster protocol, 0.1.0",
+            ),
+            (
+                "version-none",
+                None,
+                "; its members string gives a vote to members 0, 1 and 2; it has no \
+                 cluster.protocol_version, so it runs a build older than that counter: \
+                 version 0 of the cluster protocol, or the first build of version 1",
+            ),
+            (
+                "version-later-minor",
+                Some(1795),
+                "; its members string gives a vote to members 0, 1 and 2; it runs version 7 \
+                 of the cluster protocol, 0.7.3",
+            ),
+        ] {
+            let (_, findings) = cluster_findings_in(test, 0, Some(&cluster), &follower(version));
+            let found: Vec<&str> = findings.iter().map(|finding| finding.check).collect();
+            assert_eq!(found, ["cluster-member"], "{test}: {findings:?}");
+            assert_eq!(findings[0].level, Level::Note, "{test}");
+            assert!(
+                findings[0].message.ends_with(note_ends),
+                "{test}: {}",
+                findings[0].message
+            );
+        }
+        // The value this build's members store is the one the note reads as version 1.
+        assert_eq!(
+            protocol_version_text(Some(i64::from(PROTOCOL_VERSION))),
+            "; it runs version 1 of the cluster protocol, 0.1.0"
+        );
+        // Another major is named in semantic form alone: its page's version is no
+        // longer the minor.
+        assert_eq!(
+            protocol_version_text(Some(65536 + 2 * 256 + 3)),
+            "; it runs 1.2.3 of the cluster protocol"
+        );
+        // A value that is no version, as a version is an i32 that is not negative, is
+        // given as it is.
+        for value in [-1, i64::from(i32::MAX) + 1] {
+            assert_eq!(
+                protocol_version_text(Some(value)),
+                format!(
+                    "; its cluster.protocol_version is {value}, which this doctor does not \
+                     read as a version of the cluster protocol: run the doctor of the \
+                     driver's own version"
+                )
+            );
+        }
     }
 
     #[test]

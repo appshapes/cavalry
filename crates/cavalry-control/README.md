@@ -38,9 +38,15 @@ is allowed here.
 - Explains a cluster member from the counters its consensus module stores, while its
   driver runs: who the member is and what it knows, its role, term, election state,
   append position and commit position, from its two gauges who it follows and why
-  its last election began, and the members that its own members string gives a vote
+  its last election began, the members that its own members string gives a vote
   to, so that the notes of all members show one that was started with another
-  string (`cluster-member`, a note; ADR 0102, ADR 0134); a member that follows
+  string, and last the version of the cluster protocol that the member runs, from
+  its gauge `cluster.protocol_version`, as `it runs version 1 of the cluster
+  protocol, 0.1.0`, so that the notes of all members give the versions of a
+  cluster during an upgrade; of a member that holds no such gauge the note says
+  `it has no cluster.protocol_version, so it runs a build older than that
+  counter`, which is version 0 or the first build of version 1
+  (`cluster-member`, a note; ADR 0102, ADR 0134, ADR 0137); a member that follows
   no leader, with the state its election is in, why it began, and that a quorum of
   the members elects a leader, the quorum by its size when `examine_config` has the
   members string, and of the voters when the string marks a standby

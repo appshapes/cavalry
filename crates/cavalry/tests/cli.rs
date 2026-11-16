@@ -915,9 +915,13 @@ fn run_with_the_cluster_keys_starts_a_member_and_three_of_them_elect_a_leader() 
     );
     // Every member's note ends with the members that its own string gives a vote to,
     // by their ids, so that the notes of all members show one started with another
-    // string (ADR 0134).
+    // string (ADR 0134), and then with the version of the cluster protocol the member
+    // runs, from the gauge it stored when it started (ADR 0137).
     assert!(
-        text.contains("; its members string gives a vote to members 0, 1 and 2; see "),
+        text.contains(
+            "; its members string gives a vote to members 0, 1 and 2; it runs version 1 of \
+             the cluster protocol, 0.1.0; see "
+        ),
         "{text}"
     );
 
