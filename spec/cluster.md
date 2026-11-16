@@ -1335,11 +1335,13 @@ in session connect, and a member in each session event it sends. A member reads 
 and does nothing else with it: a version is no part of "Logs compared", and a member
 votes for a candidate, follows a leader and counts toward a quorum of any version of
 its major by the rules of this section alone. No other consensus message carries a
-version. A leader refuses a session connect, and a client reads a session event,
-by the major alone ("Sessions"), so a client of either version opens a session with
-a leader of either. Version 1 adds nothing that a member of version 0 must not be
-sent: a leader of either version appends the same entries, and a follower of either
-records them.
+version. A member holds its own version in `cluster.protocol_version` ("Counters"),
+and holds no peer's: `cavalry doctor` on each member names the version that member
+runs (ADR 0137). A leader refuses a session connect, and a client reads a session
+event, by the major alone ("Sessions"), so a client of either version opens a
+session with a leader of either. Version 1 adds nothing that a member of version 0
+must not be sent: a leader of either version appends the same entries, and a
+follower of either records them.
 
 A cluster whose every member runs, with its election closed, is upgraded one
 member at a time, with the members string it has, each member on the log directory
@@ -1852,6 +1854,7 @@ that a reader of a counters file knows which transition it saw.
 | `cluster.voters` | a gauge: the members to which the member's own string gives a vote, one bit for each member of the string in the rising order of their ids, the lowest id's bit the lowest, set for a voter: 7 for a string of four members whose highest id is a standby. It does not change while the member runs ("Standbys"; ADR 0134) |
 | `cluster.standby` | a gauge: 1 when the member's own string marks it a standby, 0 when it gives it a vote. It does not change while the member runs ("Standbys") |
 | `cluster.standby_vote_requests` | a request vote that the member read as a standby and answered with nothing: the candidate's string gives this member a vote, and the member's own does not ("Standbys", "Changing a standby's mark") |
+| `cluster.protocol_version` | a gauge: the member's own version of this page in semantic form, 256 for version 1. It does not change while the member runs. A member of a build older than this counter has none: every member of version 0, and one of the first build of version 1 ("Versions and the upgrade"; ADR 0137) |
 | `cluster.sessions` | a gauge: open sessions, on every member, as the snapshot it started from and its log's committed session open and close events since left them |
 | `cluster.sessions_accepted` | a session connect the leader accepted: a session id given, and a session open event to append |
 | `cluster.sessions_opened` | a session opened by a committed session open event, on every member, or taken open from the snapshot the member started from ("A member's start"), so that this count less `cluster.sessions_closed` is `cluster.sessions` |

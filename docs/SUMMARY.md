@@ -187,3 +187,4 @@ under `docs/` is listed here; `just lint-docs` fails on one that is not.
 - [0134. Mark a standby in the members string, and change one mark at a time](decisions/0134-mark-a-standby-in-the-members-string-and-change-one-mark-at-a-time.md)
 - [0135. Answer no log yet where a member's live recording has not reached the position](decisions/0135-answer-no-log-yet-where-a-members-live-recording-has-not-reached-the-position.md)
 - [0136. Run the versions of one major as one cluster, and upgrade from the last tree of the version before](decisions/0136-run-the-versions-of-one-major-as-one-cluster-and-upgrade-from-the-last-tree-of-the-version-before.md)
+- [0137. Hold a member's version of the cluster protocol in a counter, and no peer's](decisions/0137-hold-a-members-version-of-the-cluster-protocol-in-a-counter-and-no-peers.md)

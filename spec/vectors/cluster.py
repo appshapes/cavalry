@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Write spec/vectors/cluster.json: the test vectors for spec/cluster.md, version 0.
+"""Write spec/vectors/cluster.json: the test vectors for spec/cluster.md, version 1.
 The reference encoder, standard library only. Run from the repository root:
 
     python3 spec/vectors/cluster.py

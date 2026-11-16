@@ -22,7 +22,7 @@ use cavalry_driver::Driver;
 use cavalry_log::catalog::CatalogReader;
 use cavalry_proto::cluster::{
     LOG_RECORDINGS_FILE_PREFIX, LOG_RECORDINGS_TMP_SUFFIX, LogRecordings, Message,
-    SERVICE_LOG_STREAM_ID, Stream,
+    PROTOCOL_VERSION, SERVICE_LOG_STREAM_ID, Stream,
 };
 use cavalry_raft::{ConsensusModule, Counts, ElectionState, NO_SESSION, RaftError, Refused, Role};
 use cavalry_shm::counters::CountersReader;
@@ -30,7 +30,8 @@ use cavalry_shm::counters::generated::{
     CLUSTER_APPEND_POSITION, CLUSTER_COMMIT_POSITION, CLUSTER_ELECTION_CAUSE,
     CLUSTER_ELECTION_STATE, CLUSTER_ELECTION_STEPS, CLUSTER_ELECTIONS, CLUSTER_ELECTIONS_CLOSED,
     CLUSTER_LEADER_MEMBER_ID, CLUSTER_LEADERSHIP_TERM_ID, CLUSTER_LOG_RECORDING_ID,
-    CLUSTER_LOG_RECORDINGS_UNWRITTEN, CLUSTER_ROLE, CLUSTER_TERMS_LED, SUBSCRIPTION_POSITION,
+    CLUSTER_LOG_RECORDINGS_UNWRITTEN, CLUSTER_PROTOCOL_VERSION, CLUSTER_ROLE, CLUSTER_TERMS_LED,
+    SUBSCRIPTION_POSITION,
 };
 
 struct TestDir(PathBuf);
@@ -284,6 +285,13 @@ fn three_members_replicate_a_hundred_thousand_entries_and_their_recordings_are_e
         // It names no leader, and the cause of its election is its start (ADR 0102).
         assert_eq!(counter(member, CLUSTER_LEADER_MEMBER_ID.0), -1);
         assert_eq!(counter(member, CLUSTER_ELECTION_CAUSE.0), 0);
+        // It holds its own version of the cluster protocol from its start, in
+        // semantic form: 256 for version 1, 0.1.0 (ADR 0137).
+        assert_eq!(
+            counter(member, CLUSTER_PROTOCOL_VERSION.0),
+            i64::from(PROTOCOL_VERSION)
+        );
+        assert_eq!(counter(member, CLUSTER_PROTOCOL_VERSION.0), 256);
         // No member adds a counter of type 113, which was
         // `cluster.appointed_leader_behind` until it was retired (ADR 0107).
         assert!(

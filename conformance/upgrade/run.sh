@@ -26,14 +26,14 @@
 #
 # N's tree is exported with `git archive` to target/upgrade/<N's first 8 hex
 # digits>/src and built into target/upgrade/<the same>/target. The hash names the tree,
-# so a directory that holds the three programs is a cache, and N is not built again;
-# remove target/upgrade to build it again. Each build is the binary and two examples,
-# `cavalry`, `adder-service` and `adder-client`, as scripts/run-a-cluster.sh builds
-# them. N's build is kept on a host that keeps target/, as a laptop does. CI's cache
-# drops built programs: Swatinem/rust-cache keeps only build/, .fingerprint/ and deps/
-# of each profile directory under target/ when it saves (its src/cleanup.ts,
-# cleanTargetDir), so the three programs are never restored, and CI's gates job builds
-# N on every run and prints `built N in <n> s` each time.
+# so a directory that holds the exported tree and the three programs is a cache, and N
+# is not exported or built again; remove target/upgrade to build it again. Each build
+# is the binary and two examples, `cavalry`, `adder-service` and `adder-client`, as
+# scripts/run-a-cluster.sh builds them. N's build is kept on a host that keeps target/,
+# as a laptop does. CI's cache drops built programs: Swatinem/rust-cache keeps only
+# build/, .fingerprint/ and deps/ of each profile directory under target/ when it saves
+# (its src/cleanup.ts, cleanTargetDir), so the three programs are never restored, and
+# CI's gates job builds N on every run and prints `built N in <n> s` each time.
 #
 # The schedule
 #
@@ -65,6 +65,20 @@
 #   every other says `a follower in term <t>, election closed` and `it follows member
 #   <the leader>`, and all report one position as append position and commit position.
 #   A follower's start moves neither the leader nor the term.
+# - At the same moments, `cavalry doctor` of N+1 on each running member, whatever build
+#   the member is of: the `note cluster-member` line ends with what the member's own
+#   counter `cluster.protocol_version` gives (ADR 0137), and the script holds that to
+#   the build it started the member from. A member at N+1 is named `it runs version
+#   <n> of the cluster protocol, 0.<n>.0`, where <n> is read from the first line of
+#   this tree's spec/cluster.md. Whether a member at N has the counter is read from
+#   N's counters.toml alone, in N's exported tree, target/upgrade/<hash>/src, and not
+#   from the version of N's page: every tree of version 0 lacks it, and so does the
+#   first tree of version 1. When N's counters.toml holds no such counter, doctor
+#   must say `it has no cluster.protocol_version, so it runs a build older than that
+#   counter: version 0 of the cluster protocol, or the first build of version 1`.
+#   When it holds it, a member at N is named as one at N+1 is, by the first line of
+#   the page in N's exported tree. Each step's line says what doctor named, and `with
+#   no cluster.protocol_version` of a member that has none.
 # - After every run of the client: the cluster answered each number with the running
 #   total, which the script keeps; the service beside every running member printed that
 #   number with that total; and the leader's service alone replied.
@@ -160,6 +174,22 @@ forget() {
 doctor() {
     CAVALRY_CLUSTER_MEMBERS=$members CAVALRY_CLUSTER_MEMBER_ID=$1 "$(program "${member_build[$1]}" cavalry)" doctor \
         --dir "$root/member-$1" --log-dir "$root/member-$1-log" 2>&1 || true
+}
+# What `cavalry doctor` of N+1 says of member `$1`, whole, whatever build the member
+# runs: the doctor that names a member's version of the cluster protocol (ADR 0137).
+doctor_newer() {
+    CAVALRY_CLUSTER_MEMBERS=$members CAVALRY_CLUSTER_MEMBER_ID=$1 "$(program newer cavalry)" doctor \
+        --dir "$root/member-$1" --log-dir "$root/member-$1-log" 2>&1 || true
+}
+# `member 1`, `members 0 and 2` or `members 0, 1 and 2`, for the ids `$1`.
+members_text() {
+    # shellcheck disable=SC2086  # the ids are split into words on purpose
+    set -- $1
+    case $# in
+        1) echo "member $1" ;;
+        2) echo "members $1 and $2" ;;
+        *) echo "members $1, $2 and $3" ;;
+    esac
 }
 
 # At any exit. After a failure: the step, when nothing said it yet, doctor on each
@@ -280,8 +310,8 @@ cargo build --release -p cavalry --bin cavalry --example adder-service --example
 say "built N+1 in $(( $(date +%s) - at )) s, into target/release"
 
 step="2 (build N, $short)"
-if [ -x "$(program older cavalry)" ] && [ -x "$(program older adder-service)" ] && [ -x "$(program older adder-client)" ]; then
-    say "N is built: target/upgrade/$short/target holds its three programs, and the hash names the tree, so they are not built again (0 s)"
+if [ -d "$older/src" ] && [ -x "$(program older cavalry)" ] && [ -x "$(program older adder-service)" ] && [ -x "$(program older adder-client)" ]; then
+    say "N is built: target/upgrade/$short holds its exported tree and its three programs, and the hash names the tree, so they are not built again (0 s)"
 else
     at=$(date +%s)
     rm -rf "$older/src"
@@ -295,6 +325,38 @@ else
     done
     say "built N in $(( $(date +%s) - at )) s, from target/upgrade/$short/src into target/upgrade/$short/target"
 fi
+
+step="2 (what doctor of N+1 must say of a member of each build)"
+# What doctor of N+1 must say of a member of each build, at the end of the member's
+# `note cluster-member` line, and what a step's line calls it (ADR 0137). A member
+# stores its version in `cluster.protocol_version` when its tree has that counter, and
+# doctor names it: version <n>, the number in the first line of the tree's page, `#
+# Cluster protocol, version <n>`, which is 0.<n>.0 in semantic form, since the page's
+# version is the minor while the major is 0. Of a member with no such counter doctor
+# says that it runs a build older than the counter. Whether N's members have the
+# counter is read from N's counters.toml alone, in N's exported tree, and not from
+# the version of N's page: every tree whose page is version 0 lacks the counter, and
+# so does the first tree of version 1, the one before ADR 0137.
+page_version() { sed -n '1s/^# Cluster protocol, version \([0-9][0-9]*\)$/\1/p'; }
+newer_version=$(page_version <spec/cluster.md)
+[ -n "$newer_version" ] \
+    || fail "the first line of spec/cluster.md is \`$(sed -n 1p spec/cluster.md)\`, and the script reads this tree's version from a line of the form \`# Cluster protocol, version <n>\`; when the page's title changes, teach page_version in conformance/upgrade/run.sh the new form"
+newer_clause="it runs version $newer_version of the cluster protocol, 0.$newer_version.0"
+newer_called="at version $newer_version"
+if grep -q '^name = "cluster.protocol_version"$' "$older/src/counters.toml" 2>/dev/null; then
+    older_version=""
+    if [ -f "$older/src/spec/cluster.md" ]; then older_version=$(page_version <"$older/src/spec/cluster.md"); fi
+    [ -n "$older_version" ] \
+        || fail "N, $short, has cluster.protocol_version in its counters.toml, and its exported tree, target/upgrade/$short/src, has no spec/cluster.md whose first line is of the form \`# Cluster protocol, version <n>\`, so the script cannot say which version doctor must name N's members; name another N with CAVALRY_UPGRADE_FROM, or teach page_version in conformance/upgrade/run.sh the form of N's title"
+    older_clause="it runs version $older_version of the cluster protocol, 0.$older_version.0"
+    older_called="at version $older_version"
+    say "N's counters.toml, in target/upgrade/$short/src, has cluster.protocol_version, so a member at N stores its version"
+else
+    older_clause="it has no cluster.protocol_version, so it runs a build older than that counter: version 0 of the cluster protocol, or the first build of version 1"
+    older_called="with no cluster.protocol_version"
+    say "N's counters.toml, in target/upgrade/$short/src, has no cluster.protocol_version, so a member at N stores no version"
+fi
+say "doctor of N+1 must say of a member at N+1 \`$newer_clause\` and of a member at N \`$older_clause\`"
 
 # The three members of one cluster, each with five loopback ports, and one more port
 # for the client's response channel, counted as conformance/c/run.sh counts its own:
@@ -400,11 +462,43 @@ settled() {
     done
     return 1
 }
+# What doctor of N+1 named the members at the last rest, for a step's line.
+versions=""
+# Holds what doctor of N+1 names each member of `$1` to the build the script started
+# the member from: the member's `note cluster-member` line must end with that build's
+# clause, after a `; ` and before the `; see ` and the page that every finding ends
+# with. Sets `versions`. A member whose election has closed added its counters before
+# that, the version's among them, and the counter never moves, so nothing is waited
+# for.
+named_versions() {
+    local id said note want at_newer="" at_older=""
+    for id in $1; do
+        said=$(doctor_newer "$id")
+        note=$(sed -n 's/.*note cluster-member  *\(this driver is cluster member .*\)/\1/p' <<<"$said")
+        if [ "${member_build[$id]}" = newer ]; then
+            want=$newer_clause
+            at_newer="${at_newer:+$at_newer }$id"
+        else
+            want=$older_clause
+            at_older="${at_older:+$at_older }$id"
+        fi
+        case "$note" in
+            *"; $want; see "*) ;;
+            *) fail "doctor of N+1 does not say of member $id, which the script started at $(named "${member_build[$id]}"), what a member of that build holds in cluster.protocol_version: its \`note cluster-member\` line must end with \`; $want; see \` and the page that explains it, and the line is \`${note:-absent}\`; a member whose tree has the counter stores its version there when it starts, and doctor reads it there (docs/decisions/0137-hold-a-members-version-of-the-cluster-protocol-in-a-counter-and-no-peers.md); doctor of N+1 said: $said" ;;
+        esac
+    done
+    versions=""
+    if [ -n "$at_newer" ]; then versions="$(members_text "$at_newer") $newer_called"; fi
+    if [ -n "$at_older" ]; then versions="${versions:+$versions and }$(members_text "$at_older") $older_called"; fi
+    versions="doctor of N+1 names $versions"
+}
 # Waits for the members `$1` to be one cluster at rest, whose leader's term is above
-# `$2`, and sets `leading`, `term` and `position`; `$3` is what the wait is for.
+# `$2`, and sets `leading`, `term` and `position`; `$3` is what the wait is for. Then
+# holds what doctor of N+1 names each of them, and sets `versions`.
 rest() {
     read -r leading term position < <(settled "$1" "$2") \
         || fail "waited 60 s for $3: doctor on members $1 must show one of them as the leader of a term above $2 with its election closed, every other as a follower of it in that term with its election closed, and one position as append position and commit position on all of them"
+    named_versions "$1"
 }
 # Fails unless member `$1` still leads term `$2`; `$3` is what happened since.
 same_lead() {
@@ -478,7 +572,7 @@ was_leading=$leading
 was_term=$term
 rest "0 1 2" $((term - 1)) "three members at N to hold what the client added"
 same_lead "$was_leading" "$was_term" "the client's run"
-say "a. $(builds): member $leading leads term $term and the two others follow it, elections closed; N's adder-client added 5 and 7 and read $total; every service holds $total; commit position $position on all three"
+say "a. $(builds): member $leading leads term $term and the two others follow it, elections closed; N's adder-client added 5 and 7 and read $total; every service holds $total; commit position $position on all three; $versions"
 
 step="b (upgrade a follower)"
 upgraded=""
@@ -497,7 +591,7 @@ add older 11 13
 applied "0 1 2" "$leading"
 rest "0 1 2" $((term - 1)) "two members at N and one at N+1 to hold what the client added"
 same_lead "$was_leading" "$was_term" "the client's run"
-say "b. $(builds): member $upgraded follows member $leading in term $term, election closed, and its service, at N+1, read the log N wrote to the total $read_before; N's adder-client added 11 and 13 and read $total; every service holds $total; commit position $position on all three"
+say "b. $(builds): member $upgraded follows member $leading in term $term, election closed, and its service, at N+1, read the log N wrote to the total $read_before; N's adder-client added 11 and 13 and read $total; every service holds $total; commit position $position on all three; $versions"
 
 step="c (stop the leader, at N)"
 stopped=$leading
@@ -517,7 +611,7 @@ add newer 17 19
 applied "$remaining" "$leading"
 rest "$remaining" $((term - 1)) "one member at N and one at N+1 to hold what the client added"
 same_lead "$was_leading" "$was_term" "the client's run"
-say "c. $(builds): members ${remaining/ / and }, one at each build, elected member $leading, at $(named "${member_build[$leading]}"), in term $term; N+1's adder-client added 17 and 19 and read $total; both services hold $total; commit position $position on both"
+say "c. $(builds): members ${remaining/ / and }, one at each build, elected member $leading, at $(named "${member_build[$leading]}"), in term $term; N+1's adder-client added 17 and 19 and read $total; both services hold $total; commit position $position on both; $versions"
 
 step="c (start the stopped member at N+1)"
 start_member "$stopped" newer
@@ -526,7 +620,7 @@ start_service "$stopped"
 rest "0 1 2" $((term - 1)) "member $stopped, started at N+1, to follow member $was_leading"
 same_lead "$was_leading" "$was_term" "member $stopped's start at N+1"
 applied "$stopped" ""
-say "c. $(builds): member $stopped follows member $leading in term $term, election closed, and its service read the log to $total; commit position $position on all three"
+say "c. $(builds): member $stopped follows member $leading in term $term, election closed, and its service read the log to $total; commit position $position on all three; $versions"
 
 step="d (upgrade the last member at N)"
 stop_member "$last_older"
@@ -548,7 +642,7 @@ add newer 23 29
 applied "0 1 2" "$leading"
 rest "0 1 2" $((term - 1)) "three members at N+1 to hold what the client added"
 same_lead "$was_leading" "$was_term" "the client's run"
-say "d. $(builds): member $last_older was upgraded, and $elected, elections closed; N+1's adder-client added 23 and 29 and read $total; every service holds $total; commit position $position on all three"
+say "d. $(builds): member $last_older was upgraded, and $elected, elections closed; N+1's adder-client added 23 and 29 and read $total; every service holds $total; commit position $position on all three; $versions"
 
 step="e (nothing committed is lost and the logs are one log)"
 digest() { if command -v sha256sum >/dev/null; then sha256sum "$1" | cut -d' ' -f1; else shasum -a 256 "$1" | cut -d' ' -f1; fi; }
