@@ -112,13 +112,16 @@ gauge, and to the clause of a member with none when it has not.
   "doctor of N+1 names member 0 at version 1 and member 1 with no
   cluster.protocol_version"; "doctor of N+1 names members 0 and 2 at version 1 and
   member 1 with no cluster.protocol_version"; and "doctor of N+1 names members 0,
-  1 and 2 at version 1". Two runs in a row passed: the upgrade took 19 s and 18 s,
-  and the whole runs 22 s, with N+1 built in 3 s, and 18 s. In both the member at
-  N+1 won the ballot that crosses the two versions, in term 1. With the clause for
-  a member with no gauge worded another way, four runs before them passed, and in
-  three the member at N won that ballot: its own upgrade then held one more
-  election, which waits the leader heartbeat timeout, 10 s, and those upgrades
-  took 28 s to 34 s.
+  1 and 2 at version 1". Two runs in a row passed. In the first, the upgrade took
+  19 s and the whole run 22 s, 3 s of them to build N+1. In the second, the upgrade
+  took 18 s and the whole run 18 s. Four runs before those two passed as well, with
+  the clause for a member with no gauge worded another way. Which member wins the
+  ballot that crosses the two versions varies from run to run, and the clause's
+  wording has no part in it: `doctor` reads a member's counters and sends the
+  member nothing. In both of the last two runs the member at N+1 won that ballot,
+  in term 1. In three of the four before them the member at N won it, and its own
+  upgrade then held one more election, which waits the leader heartbeat timeout,
+  10 s: those upgrades took 28 s to 34 s.
 
 ## Consequences
 
