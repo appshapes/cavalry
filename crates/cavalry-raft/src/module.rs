@@ -44,8 +44,8 @@ use cavalry_proto::cluster::{
     CONSENSUS_STREAM_ID, ClusterAction, EGRESS_STREAM_ID, EMPTY_MEMBER, Endpoint,
     INGRESS_STREAM_ID, LOG_RECORDINGS_FILE_PREFIX, LOG_RECORDINGS_TMP_SUFFIX, LOG_REPLAY_STREAM_ID,
     LOG_STREAM_ID, LogRecording, LogRecordingsError, MAX_LOG_RECORDINGS_LENGTH, MAX_MEMBERS,
-    MembersError, Message, SERVICE_SNAPSHOT_STREAM_ID, SNAPSHOT_STREAM_ID, Stream, parse_members,
-    write_log_recordings,
+    MembersError, Message, PROTOCOL_VERSION, SERVICE_SNAPSHOT_STREAM_ID, SNAPSHOT_STREAM_ID,
+    Stream, parse_members, write_log_recordings,
 };
 use cavalry_proto::udp::UDP_TERM_LENGTH;
 use cavalry_shm::counters::CounterId;
@@ -54,8 +54,8 @@ use cavalry_shm::counters::generated::{
     CLUSTER_ELECTION_STATE, CLUSTER_LEADER_MEMBER_ID, CLUSTER_LEADERSHIP_TERM_ID,
     CLUSTER_LOG_RECORDING_ID, CLUSTER_LOG_RECORDINGS_FORGOTTEN, CLUSTER_LOG_RECORDINGS_LISTED,
     CLUSTER_LOG_RECORDINGS_UNSYNCED, CLUSTER_LOG_RECORDINGS_UNWRITTEN, CLUSTER_MESSAGES_REJECTED,
-    CLUSTER_ROLE, CLUSTER_SESSIONS, CLUSTER_STANDBY, CLUSTER_TRUNCATIONS_FINISHED, CLUSTER_VOTERS,
-    COUNTERS,
+    CLUSTER_PROTOCOL_VERSION, CLUSTER_ROLE, CLUSTER_SESSIONS, CLUSTER_STANDBY,
+    CLUSTER_TRUNCATIONS_FINISHED, CLUSTER_VOTERS, COUNTERS,
 };
 
 use crate::consensus::{
@@ -2704,6 +2704,11 @@ struct Counters {
     /// Stored once, when they are added: a member takes its string when it starts.
     _voters: Stored,
     _standby: Stored,
+    /// `cluster.protocol_version`: the version of `spec/cluster.md` this member is
+    /// of, in semantic form, [`PROTOCOL_VERSION`] (ADR 0137). Stored once, when it is
+    /// added: a member's build does not change while it runs. The member holds no
+    /// peer's version.
+    _protocol_version: Stored,
     append_position: Stored,
     /// `cluster.log_recording_id`, added before `cluster.commit_position` and stored
     /// before it (`spec/cluster.md`, "The service").
@@ -2767,6 +2772,11 @@ impl Counters {
                 CLUSTER_STANDBY,
                 "cluster.standby",
                 i64::from(core.is_standby()),
+            )?,
+            _protocol_version: add(
+                CLUSTER_PROTOCOL_VERSION,
+                "cluster.protocol_version",
+                i64::from(PROTOCOL_VERSION),
             )?,
             append_position: add(
                 CLUSTER_APPEND_POSITION,

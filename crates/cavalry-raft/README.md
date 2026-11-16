@@ -130,6 +130,9 @@ commit path runs per message.
   `cluster.role`, `cluster.election_state`, `cluster.leadership_term_id`,
   `cluster.leader_member_id`, the member it leads as or follows and −1 while it has
   none, `cluster.election_cause`, why its last election began (ADR 0102),
+  `cluster.protocol_version`, the version of the cluster protocol the member is of,
+  256 for version 1, which it stores once and which `cavalry doctor` names; it
+  holds no peer's version (ADR 0137),
   `cluster.append_position`, `cluster.commit_position`, `cluster.messages_rejected`,
   `cluster.log_recording_id`, the recording that holds its log, which its service
   replays, the four counts of its list of its log's recordings (ADR 0108), and the
@@ -385,6 +388,16 @@ commit path runs per message.
   member checks, and `docs/how-to/promote-a-standby.md` the steps. A test runs
   what the rules prevent: two marks changed at once elect a leader that lacks a
   committed entry (ADR 0134).
+- Runs beside members of another version of its major, as the members of a cluster
+  do while it is upgraded one member at a time (`spec/cluster.md`, "Versions and
+  the upgrade"; ADR 0136; work item 231). A member writes its own version, 256 for
+  version 1, in canvass position and in request vote, reads a peer's for its major
+  alone, and votes for a candidate, follows a leader and counts toward a quorum of
+  any version of its major. It holds its own version in
+  `cluster.protocol_version`, and no peer's (ADR 0137). `conformance/upgrade/`
+  runs the upgrade on the loopback, from the last tree of the version before to
+  the tree under test, and `docs/how-to/upgrade-a-cluster.md` has an operator's
+  steps.
 - Built on it since, in other crates (work item 229): the cluster client and the
   service's replies, `Cavalry::connect_cluster` with `ClusterSession` and
   `Cavalry::cluster_service` with `ClusterService` in `cavalry-client`
@@ -396,10 +409,9 @@ commit path runs per message.
   ([ADR 0124](../../docs/decisions/0124-give-each-client-a-session-object-and-a-service-object-whose-handlers-failure-aborts-its-entry.md));
   and the tutorial that runs three members, a service and a client,
   [Run a cluster in ten minutes](../../docs/tutorials/run-a-cluster.md).
-- To come, each with its work item: mixed versions in a rolling upgrade (work item
-  231), the gate across three hosts (work item 232), a service's snapshot through
-  the C ABI and the five clients (work item 335), and a member that lost its log
-  directory (work item 286).
+- To come, each with its work item: the gate across three hosts (work item 232), a
+  service's snapshot through the C ABI and the five clients (work item 335), and a
+  member that lost its log directory (work item 286).
 
 In Aeron, this is Cluster, with Cluster Standby as a paid component
 ([glossary](../../docs/glossary.md)).
