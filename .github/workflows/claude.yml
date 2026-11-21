@@ -185,7 +185,7 @@ jobs:
         # For `just docs`, which the writer runs before every push (.claude/agents/developer.md).
         # The same pin as ci.yml (ADR 0006); bump both together.
         if: github.event_name != 'pull_request_review' || !startsWith(github.event.review.user.login, 'claude') || steps.fix_gate.outputs.proceed == 'true'
-        uses: taiki-e/install-action@cfdb7ed4ccc7c7dce37759eae89dc5674b469b39 # v2.90.3
+        uses: taiki-e/install-action@75a7c0f87bd666af3cdb75c5b9e9d03ab6044e6f # v2.90.6
         with:
           tool: mdbook@0.5.4
       - name: Restore the Rust cache
@@ -218,7 +218,7 @@ jobs:
         # a model with repository write access. Re-resolve the current `v1` when bumping:
         #   gh api repos/anthropics/claude-code-action/git/ref/tags/v1 --jq '.object.sha'
         #   (an annotated tag needs one more hop: gh api .../git/tags/<sha> --jq '.object.sha')
-        uses: anthropics/claude-code-action@4fa93a88de49bbef68b10eb15aabedf28ca0e1ed # v1.0.271
+        uses: anthropics/claude-code-action@5a856893345e332afa621934082d8c660c26d689 # v1.0.282
         with:
           # EXACTLY ONE login, explicit, never '*': claude, the Claude GitHub App, the actor of
           # the fixer's own push and of the changes-requested review that arms this job. Pull

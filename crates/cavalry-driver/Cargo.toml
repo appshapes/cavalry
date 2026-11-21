@@ -26,7 +26,7 @@ cavalry-log = { path = "../cavalry-log" }
 # `uio` the message calls and their preallocated headers, `net` the address types the
 # receiver (card 181) reads a datagram's source from; none allocates per call. It
 # carries the `unsafe` the calls need, so this crate carries none.
-nix = { version = "0.31", default-features = false, features = ["socket", "uio", "net"] }
+nix = { version = "0.32", default-features = false, features = ["socket", "uio", "net"] }
 
 # Inherits unsafe_code = "deny" (CLAUDE.md, "Unsafe").
 [lints]
