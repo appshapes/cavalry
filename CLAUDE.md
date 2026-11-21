@@ -9,7 +9,7 @@ Aeron (github.com/aeron-io/aeron) is the reference competitor. Where its behavio
 When two conflict, the higher one wins. Never trade down.
 
 1. **Never lie about delivery.** A stream is ordered. A message is delivered once, or its absence is reported to the subscriber. Replaying the same log produces the same state, byte for byte. A bug here blocks release; nothing else does automatically.
-2. **Tail latency is a budget.** The data plane is judged at p99.99 and max, never at mean or p50. Per message on the data plane: no heap allocation, no lock, no syscall, no `await`, no panic path. A measured regression fails CI.
+2. **Tail latency is a budget.** The data plane is judged at p99.99 and max, never at mean or p50. Per message on the data plane: no heap allocation, no lock, no syscall, no `await`, no panic path. A measured regression fails the latency gate, which runs each night (ADR 0139).
 3. **Bounded everything.** Every queue, buffer, map and retry has a fixed bound and a documented behaviour when full. Back-pressure is explicit and returned to the caller, never absorbed by growth. The driver degrades under cgroup CPU throttling, shm pressure or packet loss; it does not fall over. Mixed versions run during an upgrade.
 4. **Explainable from counters.** Every state transition increments a counter in the shared-memory counters file. `cavalry doctor` can explain any latency or loss problem from counters alone. Logs and traces live on the control plane and are zero-cost when disabled.
 5. **Correct by default.** `cavalry` with no arguments works on a laptop and on a cloud VM. A new configuration key needs a written reason why the default cannot be right, plus a `doctor` check that fires when it is set wrong.
@@ -24,7 +24,7 @@ This file is context, not enforcement. The gates below are the enforcement. If a
 | Invariant | Gate |
 | --- | --- |
 | 1 Delivery | `conformance/` runs every client against `spec/`. `just replay-check` replays a recorded log twice and diffs state, and diffs the replays of three cluster members' recordings of one log and what each member's service read of it. Frame parsers are fuzzed. `cavalry-shm` passes `loom` and Miri. |
-| 2 Latency | `just bench` writes HdrHistogram p50 / p99 / p99.99 / max to `bench/results/`. CI diffs against `bench/baseline.json` and fails on a p99.99 regression over 5% and over one clock step. An allocation-counting test asserts zero allocations per message. A workspace lint denies `async` and `std::sync::Mutex` in data-plane crates. |
+| 2 Latency | `just bench` writes HdrHistogram p50 / p99 / p99.99 / max to `bench/results/`. Each night CI measures `master` on the bench hosts, diffs against `bench/baseline.json` and fails on a p99.99 regression over 50% and over one clock step: a coarse check, at 5% again when the slice after the beta arms it (ADR 0139). In every pull request, an allocation-counting test asserts zero allocations per message, and a workspace lint denies `async` and `std::sync::Mutex` in data-plane crates. |
 | 3 Bounded | Every collection in the driver is built with explicit capacity and has a test at capacity. Fault-injection tests cover loss, reordering, CPU throttling and shm exhaustion. `conformance/upgrade/` runs N and N+1 together. |
 | 4 Counters | Counters are generated from `counters.toml`. `just lint-counters` fails on a state transition with no counter. Each known pathology has a `doctor` test. |
 | 5 Defaults | `just quickstart` runs the README's ten-minute path end to end in CI, on Linux for every pull request and on Linux and macOS for every commit on `master` (ADR 0073). Config keys live in `config.toml` with a non-empty `why_not_default` field, linted. |
@@ -38,7 +38,7 @@ The `justfile` is the single entry point. `cargo` works, but `just` sets the fla
 just build          # workspace build, release profile for driver and bench
 just test           # unit + integration, excluding bench and conformance
 just bench          # latency and throughput harness; prints histograms; writes bench/results/
-just bench-compare  # diff latest results against bench/baseline.json (what CI runs)
+just bench-compare  # diff latest results against bench/baseline.json (what the nightly bench runs)
 just conformance    # wire-spec suite against every client in clients/
 just replay-check   # deterministic replay test
 just quickstart     # the README path, timed
@@ -49,7 +49,7 @@ just doctor         # run cavalry doctor against the local driver
 just tidy           # retire branches whose work is on master, locally and on origin; `just tidy <branch>` for a named one
 ```
 
-Run `just bench` before and after any change under a data-plane crate and put both histograms in the commit message. A performance claim without a histogram is not a claim.
+A change under a data-plane crate that adds work per message says what and why in its commit message. No change waits on a bench host: the nightly bench measures `master` (ADR 0139). A performance claim without a histogram is not a claim.
 
 ## Repository map
 

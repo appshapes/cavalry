@@ -189,3 +189,4 @@ under `docs/` is listed here; `just lint-docs` fails on one that is not.
 - [0136. Run the versions of one major as one cluster, and upgrade from the last tree of the version before](decisions/0136-run-the-versions-of-one-major-as-one-cluster-and-upgrade-from-the-last-tree-of-the-version-before.md)
 - [0137. Hold a member's version of the cluster protocol in a counter, and no peer's](decisions/0137-hold-a-members-version-of-the-cluster-protocol-in-a-counter-and-no-peers.md)
 - [0138. Draw the finish line at a beta that is an alternative to Aeron, and build it sixth in twelve features](decisions/0138-draw-the-finish-line-at-a-beta-that-is-an-alternative-to-aeron-and-build-it-sixth.md)
+- [0139. Run the latency gate each night as a coarse check, until the slice that measures Cavalry against Aeron](decisions/0139-run-the-latency-gate-each-night-as-a-coarse-check.md)

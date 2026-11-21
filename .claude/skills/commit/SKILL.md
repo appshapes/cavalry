@@ -61,8 +61,9 @@ commit and fix later.
   README. A user-visible change needs its changelog entry, a file of its own under
   `changelog.d/` (`changelog.d/README.md`; ADR 0075), and no line in `CHANGELOG.md`. A
   message that says "docs to follow" gets reverted.
-- A change under a data-plane crate needs `just bench` before and after, and both
-  histograms go in the commit message. A performance claim without a histogram is not
+- A change under a data-plane crate that adds work per message says what and why in
+  the commit message. It owes no histogram and waits on no bench host: the nightly
+  bench measures `master` (ADR 0139). A performance claim without a histogram is not
   a claim.
 - A new dependency in a data-plane crate needs a justification in the commit message.
 - A change to `spec/`, the on-disk log format or the C ABI needs an accepted ADR in
@@ -109,7 +110,8 @@ a dead or overlapping arm shows only elsewhere.
   to (`brigade work-item show <number>`; ADR 0113). A number is never invented: with
   none given, the subject has no prefix.
 - Body: the review record. What changed. Which invariant it serves, by number. The
-  evidence: the gate results, both histograms for a data-plane change, the ADR number,
+  evidence: the gate results, the ADR number, for a data-plane change the sentence on
+  what work it adds per message,
   and the `just conformance` and `just replay-check` results when the change claims
   correctness.
 - Wrap the body at 72 characters. Backticks and quotes are safe inside the quoted

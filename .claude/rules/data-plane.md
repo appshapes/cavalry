@@ -65,7 +65,10 @@ below and say so in the commit message.
 
 ## Evidence in the commit message
 
-1. `just bench-compare` output: p50, p99, p99.99, max, before and after.
+1. When the change adds work that a message passes through: one sentence saying what
+   and why. No histogram is owed, and no change waits on a bench host: the nightly
+   bench measures `master` (ADR 0139). A claim that the change is faster carries
+   `just bench-compare` output, p50, p99, p99.99 and max, before and after.
 2. `just test -p <crate>` and `just conformance` green.
 3. For `cavalry-shm`: `loom` and Miri output.
 4. One sentence on which invariant in `CLAUDE.md` this change serves. If the answer

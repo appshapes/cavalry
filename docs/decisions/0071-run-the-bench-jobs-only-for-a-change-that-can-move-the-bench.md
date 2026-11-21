@@ -1,6 +1,6 @@
 # 0071. Run the bench jobs only for a change that can move the bench
 
-- **Status:** Accepted
+- **Status:** Superseded by 0139
 - **Date:** 2026-11-10
 - **Invariants affected:** 2, 5, 6
 - **Supersedes:** none. Amends the "when" of ADR 0016's Decision, "on pushes to

@@ -4,12 +4,17 @@ A how-to page: one task, turning a Linux machine into the host that runs the lat
 gate, `just bench` and `just bench-compare`, as a self-hosted GitHub Actions runner. Why
 the gate runs on a dedicated host and not on a shared runner is
 [ADR 0016](../decisions/0016-run-the-latency-gate-on-a-dedicated-host.md); how to run
-the harness and read its table is [Run the bench](run-the-bench.md).
+the harness and read its table is [Run the bench](run-the-bench.md). The gate takes
+the host each night and on demand, and for no pull request and no push
+([ADR 0139](../decisions/0139-run-the-latency-gate-each-night-as-a-coarse-check.md)).
 
 ## Prerequisites
 
-- A machine that will do nothing else. The gate is a 5 percent rule on p99.99, and one
-  other process on the measured cores moves p99.99 by more than that. An 8-core desktop
+- A machine that will do nothing else. The gate is a rule on p99.99, and one other
+  process on the measured cores moves p99.99 by more than 5 percent. That was the size
+  of the rule until ADR 0139, and it is the size again once that ADR's Revisit sets it
+  back; until then the size is 50 percent ([Run the bench](run-the-bench.md), step 3).
+  The host is kept as quiet for either size. An 8-core desktop
   part is enough; the first host, `bench`, is an AMD Ryzen 7 2700X with 60 GiB, and
   the second, `grip`, a Dell with an Intel Core i7-10700, eight cores under one L3,
   and 16 GB. `kip`, a Minisforum MS-01 with an Intel Core i9-13900H and 64 GB, whose
@@ -19,7 +24,8 @@ the harness and read its table is [Run the bench](run-the-bench.md).
 - Ubuntu Server, 24.04 LTS or later, installed with one administrative user and SSH.
   The scripts use systemd, GRUB and apt and have run on 26.04.1.
 - Administrator rights on the GitHub organization, to register a runner and put it in
-  a runner group, and on the repository, to add the job to the required checks.
+  a runner group. The host's job is no required check since ADR 0139, so the
+  repository's branch protection is not changed (step 6).
 
 ## Steps
 
@@ -133,27 +139,36 @@ the harness and read its table is [Run the bench](run-the-bench.md).
    so a host that lost its tuning fails the job before it produces a number.
 
 5. Give the runner a toolchain. The bench job installs a stable toolchain and `just` on
-   every run through the same actions as the other jobs, and installs `rustup` when the
+   every run through the same actions as the `gates` job of `ci.yml`, and installs
+   `rustup` when the
    runner has none. A C linker is the one thing the actions do not bring; the setup
    script installs `build-essential` for it. Installing `rustup` for the `runner` user
    once and putting `/home/runner/.cargo/bin` first in the runner's `.path` file saves
    the install on every job.
 
-6. Point the job at the host. The `bench (linux)` job in `.github/workflows/ci.yml`
+6. Point the job at the host. The `bench (linux)` job in `.github/workflows/bench.yml`
    runs on `[self-hosted, bench-linux]` and pins to the CPUs from step 4; change the
-   `--pin` list and the `check.sh` list together when the host's sets differ. Then add
-   `bench (linux)` to the required checks of `master` in the repository's branch
-   protection, beside `gates (linux)`. The second host, `grip`, has
-   a job of its own in the same file, `bench (grip)`, on `[self-hosted, grip-linux]`
+   `--pin` list and the `check.sh` list together when the host's sets differ. That
+   workflow, named `bench`, runs each night at 07:17 UTC for `master` and on demand
+   for a branch, and its result is no required check and no check of a pull request
+   ([Run the bench](run-the-bench.md), step 3). So a host's job joins no required check,
+   and no pull request and no push waits on a host. Branch protection on `master`
+   requires `gates (linux)` alone, so a new host adds no name to the protection rule.
+   The second host, `grip`, has
+   a job of its own in `bench.yml`, `bench (grip)`, on `[self-hosted, grip-linux]`
    with its own lists, `4,5,6,7`, and its own profiles, `grip-linux` and
-   `grip-linux-unchecked`, and is a required check too since ADR 0034's acceptance on
+   `grip-linux-unchecked`. Its job was a required check from ADR 0034's acceptance on
    2026-10-31, after it had been green over three pushes to `master` with its
-   baselines in place; `bench (kip)`, the job of the host that left the gate, went
-   from the file in the same change, and `kip`'s baselines stay in
+   baselines in place, until ADR 0139; `bench (kip)`, the job of the host that left
+   the gate, went from the workflow in the change of that acceptance, and `kip`'s
+   baselines stay in
    `bench/baseline.json` as its record, compared by nothing
    ([ADR 0034](../decisions/0034-run-the-gate-on-grip-and-the-soak-on-kip.md)).
 
-7. Record the baselines. The first run of the host's job reports every benchmark as
+7. Record the baselines. Start a run of the workflow for `master` with
+   `gh workflow run bench.yml`, or wait for the nightly run
+   ([Run the bench](run-the-bench.md#measure-a-branch)). The first run of the host's
+   job reports every benchmark as
    `no baseline` and passes. A host's baselines are recorded from every process it has
    run at one tree, three at least
    ([ADR 0033](../decisions/0033-record-a-bench-baseline-from-every-process-at-one-tree.md)):
@@ -179,12 +194,14 @@ the harness and read its table is [Run the bench](run-the-bench.md).
 - `cat /proc/interrupts` on the host shows the isolated CPUs' `LOC` column in the
   hundreds while the housekeeping CPUs' is in the hundreds of thousands.
 - The organization's runner page shows the runner Idle after a reboot of the host.
-- A push to `master` runs the host's job on it, `bench (linux)` on `bench` and
-  `bench (grip)` on `grip`, and the run's log opens with the state `check.sh` printed,
+- A run of the `bench` workflow, the nightly one or one that `gh workflow run bench.yml`
+  starts, runs the host's job on it, `bench (linux)` on `bench` and
+  `bench (grip)` on `grip`, and the job's log opens with the state `check.sh` printed,
   then the harness's line `pinned to CPUs 8,10,12,14` on `bench` or
-  `pinned to CPUs 4,5,6,7` on `grip`. Once both are done, `bench (udp)` on `bench` and
-  `bench (udp peer)` on `grip` run the link rows across the cable
-  ([Run the bench](run-the-bench.md), step 5).
+  `pinned to CPUs 4,5,6,7` on `grip`. Once both have passed, `bench (udp)` on `bench`
+  and `bench (udp peer)` on `grip` run the link rows across the cable
+  ([Run the bench](run-the-bench.md), step 5). No push and no pull request starts
+  these jobs.
 
 ## Further hosts: the roles, the direct link and the clock
 
@@ -352,6 +369,10 @@ baselines are re-recorded from the job's next three runs after it in either case
 
 ## When it does not work
 
+A job of the `bench` workflow that fails at its `bench/host/check.sh` step has one of
+the `check.sh` findings below in its log. The host lost its tuning, and the job stopped
+before it measured; no row is red.
+
 - `check.sh` reports `CPU N is not isolated`: the kernel command line did not apply.
   `cat /proc/cmdline` on the host; if `isolcpus` is missing, run `sudo update-grub`
   and reboot, and look for `90-cavalry-bench.cfg` under `/etc/default/grub.d/`.
@@ -380,6 +401,9 @@ baselines are re-recorded from the job's next three runs after it in either case
 - The job never starts and shows "Waiting for a runner": the runner is offline, or the
   runner group does not include this repository, or the job's labels do not match the
   runner's. The organization's runner page shows all three.
-- The job runs on a pull request from a fork: it must not. The job's `if` line
-  restricts it to pushes and to pull requests from this repository; a self-hosted runner
+- The job runs for a pull request, or for a commit that no branch of this repository
+  holds: it must not. The `bench` workflow has no `pull_request` trigger, and its
+  `tree` job takes the name of a branch of this repository and nothing else, so the
+  hosts check out only a commit that such a branch holds
+  ([Run the bench](run-the-bench.md#measure-a-branch)); a self-hosted runner
   on a public repository must never run a stranger's code.

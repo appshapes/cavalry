@@ -725,7 +725,7 @@ jobs:
           # started: thirteen looks ten seconds apart, two minutes, approving whatever is held,
           # and done after two quiet looks once the head's ci run is known. Only the head's
           # runs: a run held on an earlier head of the same cycle would test a superseded tree
-          # and queue on the single-tenant bench hosts, and the step above has deleted it. Each
+          # for nothing, and the step above has deleted it. Each
           # line of a listing is `<id> <workflow file> <status> <conclusion>`, and what is held
           # and what is ci's is chosen here in awk, not in a listing's filter.
           row='"\(.id) \(.path) \(.status) \(.conclusion // "")"'

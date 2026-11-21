@@ -217,7 +217,7 @@ class Ends(Base):
     def test_a_wrong_partner_name_ends_after_a_minute_and_lists_the_names(self):
         self.jobs(self.RUN, pair(self.RUN, "in_progress", "queued"))
         self.fails("'bench (udp peers)' is not a job of run 200 after 60 s", f"'{PEER}' (queued",
-                   "`name:` from .github/workflows/ci.yml", partner="bench (udp peers)")
+                   "`name:` from .github/workflows/bench.yml", partner="bench (udp peers)")
         self.assertEqual(self.clock.now, 60)
 
     def test_a_job_that_cannot_find_itself_ends_after_a_minute(self):
@@ -465,10 +465,10 @@ class Wrapper(Base):
 
 
 class Workflow(unittest.TestCase):
-    """ci.yml's two udp jobs each pass the other's `name:`, with the token the script reads."""
+    """bench.yml's two udp jobs each pass the other's `name:`, with the token the script reads."""
 
     def test_each_udp_job_waits_for_the_other(self):
-        text = (ROOT / ".github" / "workflows" / "ci.yml").read_text(encoding="utf-8")
+        text = (ROOT / ".github" / "workflows" / "bench.yml").read_text(encoding="utf-8")
         jobs = re.split(r"\n  (?=[a-z][a-z0-9-]*:\n)", text.split("\njobs:\n", 1)[1])
         names, waits = {}, {}
         for block in jobs:

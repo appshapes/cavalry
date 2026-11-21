@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# The udp pair's wait for each other (card 212). The two udp jobs of .github/workflows/ci.yml
+# The udp pair's wait for each other (card 212). The two udp jobs of .github/workflows/bench.yml
 # call this name; the wait is scripts/wait-for-partner-job.py, which says why it exists and
 # when it ends, and is Python so that scripts/wait-for-partner-job-test.py can test it
 # against a fake API.

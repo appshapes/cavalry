@@ -1188,7 +1188,7 @@ const STEP_ADVANCES: usize = 4096;
 /// taken and their advances counted, with the counts on the stack, since a heap
 /// allocation here moved the raw rows' tail by 60 ns on the bench host, and
 /// `step_ticks` reads the step off the counts. `bench-compare` fails a gated row only
-/// beyond one step as well as beyond 5 percent (ADR 0029), and the first line prints
+/// beyond one step as well as beyond its tolerance (ADR 0029), and the first line prints
 /// both numbers, so the log shows which clock the harness is on.
 fn clock_step() -> (u64, u64) {
     // How often each advance below STEP_ADVANCES ticks occurred; the rest are outliers.
@@ -3810,9 +3810,16 @@ fn bench_slot(options: &Options, spacing: usize) -> Result<(Summary, Summary), S
     Ok((summarize(&hist, elapsed), stores))
 }
 
+/// The commit the result names. `CAVALRY_BENCH_GIT` comes first: the bench workflow
+/// measures the head of a branch it names, which is not the commit the workflow itself
+/// runs for, `GITHUB_SHA`, the head of `master` (ADR 0139). Then `GITHUB_SHA`, for a
+/// job that checks out the commit it runs for, and then the checkout's own head.
 fn git_sha() -> String {
-    if let Ok(sha) = std::env::var("GITHUB_SHA") {
-        return sha;
+    for key in ["CAVALRY_BENCH_GIT", "GITHUB_SHA"] {
+        match std::env::var(key) {
+            Ok(sha) if !sha.is_empty() => return sha,
+            _ => {}
+        }
     }
     std::process::Command::new("git")
         .args(["rev-parse", "--short", "HEAD"])

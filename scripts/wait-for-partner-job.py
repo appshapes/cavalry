@@ -185,7 +185,7 @@ def refusal_hint(error, run_id):
                 f"{when}; {rerun_failed(run_id, 'it has reset and ')}")
     if error.code == 401:
         return "the token was refused; the step must set `GH_TOKEN: ${{ github.token }}`"
-    return ("the job's token needs `actions: read` (the job's `permissions` in .github/workflows/ci.yml), "
+    return ("the job's token needs `actions: read` (the job's `permissions` in .github/workflows/bench.yml), "
             "and GITHUB_REPOSITORY and GITHUB_RUN_ID must name this run")
 
 
@@ -348,7 +348,7 @@ class Wait:
             return (f"no job of run {self.run_id} is in progress on runner {self.runner!r} after {waited} s, "
                     f"so this job cannot find itself; the run's jobs are {listed or 'none'}")
         return (f"{self.partner!r} is not a job of run {self.run_id} after {waited} s, and the pair's two "
-                f"jobs are created together; pass the other job's `name:` from .github/workflows/ci.yml. "
+                f"jobs are created together; pass the other job's `name:` from .github/workflows/bench.yml. "
                 f"The run's jobs are {listed or 'none'}")
 
 

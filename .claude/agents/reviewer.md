@@ -46,8 +46,8 @@ and `--request-changes` in place of `--approve` for findings.
   of it begins with `#`, as a Markdown heading does, and nobody is there to allow it
   (card 247).
 - **Do not wait for CI.** The review starts when the head is pushed, as CI does, so
-  `gh pr checks <n>` usually shows checks still queued or running, and a bench check can
-  be an hour from its end. This session is one turn: when it ends nothing brings it back,
+  `gh pr checks <n>` usually shows checks still queued or running, and `gates (linux)`
+  can be a quarter of an hour from its end. This session is one turn: when it ends nothing brings it back,
   no watch, no monitor, no background command, and a session that ends to wait has
   submitted nothing (card 247). Read the checks once, when your verdict on the change is
   ready, and submit. Two things you may find there are blockers, and no other state of
@@ -112,11 +112,13 @@ and `--request-changes` in place of `--approve` for findings.
   `docs/decisions/` and a change to `spec/` first.
 - **Latency (2).** Under a data-plane crate (the seven in `.claude/rules/data-plane.md`), the
   per-message path has no heap allocation, no lock, no syscall, no `await`, no panic path, no
-  `tracing` or `log`. A data-plane change carries `just bench` histograms before and after in
-  the pull request body; a performance claim without a histogram is not a claim. While
-  `just bench` prints `not built yet`, the body must say so instead of claiming a number.
+  `tracing` or `log`. A data-plane change that adds work per message says what and why in
+  the pull request body. It owes no histogram, and no check of a pull request measures
+  it: the latency gate runs each night on `master`, in a workflow of its own (ADR 0139).
+  Do not ask for a bench table. A performance claim without a
+  histogram is not a claim.
   `bench/baseline.json` is never changed by the loop's writer or fixer; a re-record by a
-  person or a person's session is judged against ADR 0033, ADR 0050 and ADR 0110.
+  person or a person's session is judged against ADR 0033, ADR 0110 and ADR 0139.
 - **Bounded (3).** Every queue, buffer, map and retry has an explicit capacity and a stated
   behaviour when full. Back-pressure is returned to the caller, never absorbed by growth.
 - **Counters (4).** Every state transition increments a counter. A log line on the data plane

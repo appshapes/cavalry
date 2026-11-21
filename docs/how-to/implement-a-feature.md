@@ -87,8 +87,13 @@ feature that followed this page, commit by commit.
    6. If a gate prints `not built yet` and would check this change, building it is
       part of this commit. ADR 0007 names which feature builds which gate.
    7. One crate per commit; data plane and control plane in separate commits. Under a
-      data-plane crate, run `just bench` before and after and put both histograms in
-      the message; while `just bench` prints `not built yet`, write that instead.
+      data-plane crate, a change that adds work per message says what and why in the
+      message. It owes no histogram and waits on no bench host: the latency gate runs
+      each night on `master`
+      ([ADR 0139](../decisions/0139-run-the-latency-gate-each-night-as-a-coarse-check.md)).
+      A change whose decision needs a number takes one measurement of its branch
+      ([Run the bench](run-the-bench.md), "Measure a branch") and records it in its
+      ADR.
    8. One pull request per crate and per plane as well, when the work goes through the
       review loop, and none over about a thousand changed lines, generated and recorded
       files aside. The reviewer reads a pull request whole and the fixer applies every
@@ -105,8 +110,8 @@ feature that followed this page, commit by commit.
      or touches a `cfg(target_os = "linux")` block, or its `not` twin, is type-checked
      for Linux with `cargo check --workspace --all-targets --target
      x86_64-unknown-linux-gnu`, after `rustup target add x86_64-unknown-linux-gnu`
-     once. It prints `Finished` and exits 0, or the errors `gates (linux)` and both
-     bench hosts would find; a check needs no linker.
+     once. It prints `Finished` and exits 0, or the errors `gates (linux)` would find;
+     a check needs no linker.
    - A `cfg(target_os)` ladder with more than two arms is checked on a third target as
      well, `cargo check -p <crate> --target x86_64-unknown-freebsd`, since on Linux and
      macOS exactly one arm is live and an arm that is dead or doubled there shows only
@@ -114,8 +119,8 @@ feature that followed this page, commit by commit.
    - A person: `/commit <work item>` runs the four gates, then `git add`, `git commit`,
      `git pull --no-edit` and `git push` to `master`. The message is the review record.
      Subject: `<work item>: <Imperative subject>`. Body: what changed, which invariant by
-     number, and the evidence: the gate output, the ADR number, both histograms or the
-     words `just bench` is not built yet. Merges only, never a rebase.
+     number, and the evidence: the gate output, the ADR number, and for a data-plane
+     change the sentence on what work it adds per message. Merges only, never a rebase.
    - The agent: open an issue with the work item's title and body and label it `claude`;
      [Ask the agent to make a change](ask-the-agent.md) says what happens next.
    - A Claude Code session on a branch: `/pr <work item>` runs the four gates one command
@@ -152,7 +157,7 @@ feature that followed this page, commit by commit.
 - If that run reads `cancelled` and `gh run view <run id>` lists no jobs, nothing
   failed: another commit landed on `master` while your run waited. Runs on `master`
   go one at a time with one waiting, and a newer push takes the waiting run's place
-  ([Run the bench](run-the-bench.md), step 3, "When the bench jobs run"). Read the
+  (`concurrency` in `.github/workflows/ci.yml`). Read the
   next run on `master` that started instead. In `gh run list --branch master
   --workflow ci --limit 5` it is the oldest run newer than yours that does not read
   `cancelled`. Its commit is later on `master`, so its tree holds yours. When it is

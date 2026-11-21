@@ -36,6 +36,13 @@ to `master` while this one runs.
 
 - `git fetch --quiet origin`, then `git log --oneline -30 origin/master`.
 - `gh run list --branch master --workflow ci.yml --limit 1`: CI at `master`'s head.
+- `gh run list --workflow bench.yml --event schedule --limit 3`: the latency gate's
+  last nights (ADR 0139). It runs each night on the bench hosts as a coarse check. It
+  is no run of `ci` and no required check, so a red night is not a red `master`.
+  `--event schedule` leaves out the runs a person started to measure a branch, which
+  are reports and never fail on a comparison. For a failed night, `gh run view <run id>
+  --log-failed` has `bench-compare`'s lines, where a row that failed reads
+  `REGRESSION`.
 - `gh pr list --state open` and `gh issue list --state open`: work in flight through
   `docs/how-to/ask-the-agent.md`.
 - `brigade work-item list --tag cavalry --all`: Cavalry's open work items on the team's
@@ -61,6 +68,12 @@ to `master` while this one runs.
   through ADR 0113's table), and the gates each feature
   builds. When its Revisit clause has fired (`just quickstart` passes on both runners),
   the slice is done, and until the next slice's ADR is Accepted, writing it is the task.
+  The slice in hand is the sixth, the beta release:
+  `docs/decisions/0138-draw-the-finish-line-at-a-beta-that-is-an-alternative-to-aeron-and-build-it-sixth.md`.
+  Its Decision names twelve features, each with its work item's number, and three
+  chains in which they run side by side: 3, 4, 5 and then 9; 6 and then 7; 2, 10 and
+  then 11. Feature 1 comes before all, feature 8 fits anywhere, and feature 12 waits
+  for all.
 - For every feature of the slice and every open work item:
   `git log --oneline origin/master --grep '^<n>:'`. A commit before 5bbd2ad8 names a
   Trello card by its number, so for the five work items ADR 0113 renumbered, grep the
@@ -92,14 +105,24 @@ Highest first. Within one rule, the slice ADR's order, then the work item's list
    conflicting, or at the fix cap; an issue labelled `claude` whose run failed. The
    "When it does not work" section of `docs/how-to/ask-the-agent.md` says what each
    needs.
-3. **The first feature of the slice that is not done.** With a work item: the work
+3. **Two red nights of the latency gate on one row.** The last two completed scheduled
+   runs of `bench.yml` both failed, and `bench-compare` reads `REGRESSION` on the same
+   row in both. The task is to find the change between the last green night and
+   the first red one, by measuring branches at chosen commits, and to remove the cost
+   (ADR 0139, Decision 5; `docs/how-to/run-the-bench.md`, "When the nightly run is
+   red"). Its title names the row. One red night is not a task: name it in the footer.
+4. **The first feature of the slice that is not done.** With a work item: the work
    item, titled `<n>: <work item title>`, and when commits with its prefix exist, the
    description says which of the work item's commits is next. Without a work item: the
    feature, titled in the imperative from the slice ADR's words, and the description
    says that step 1 of `docs/how-to/implement-a-feature.md`, writing the work item, is
    the first move. The
    features after it follow in the slice's order, each waiting on the one before.
-4. **A decision whose ruling or evidence now exists.** An open work item tagged
+   Where the slice ADR gives chains, as ADR 0138 does, a feature waits only on the
+   one before it in its chain and on the orders the ADR names across chains: the first
+   feature not done of each chain is a candidate, in the slice's order, and a feature
+   that an active session's line names is that session's.
+5. **A decision whose ruling or evidence now exists.** An open work item tagged
    `decision` and `cavalry` says what it waits on. When the ruling is a comment on
    it, or the evidence it names is on `master`, writing its ADR with the change it
    explains is a task. When neither is there, the decision is not a task; when the
@@ -111,11 +134,13 @@ Highest first. Within one rule, the slice ADR's order, then the work item's list
    the member who asked, closes the ask with `brigade decision --close <the ask's
    id>`, the ruling as its outcome on stdin in a quoted heredoc; a session of
    another member that receives the answer records it and tells the asker.
-5. **A fired Revisit clause.** The trigger has happened on `master`, the action it names
+6. **A fired Revisit clause.** The trigger has happened on `master`, the action it names
    has not, and no open work item lists it. Cite the trigger and the evidence that it
    fired. The first move is the work item that carries it, tagged `decision` and
    `cavalry`.
-6. **Every other open work item**, Doing before Wanting, then by number.
+7. **Every other open work item**, Doing before Wanting, then by number. A work item
+   that a feature's work item names as one of its parts is worked in that feature's
+   order, and is listed here only when its feature is done or it waits on nothing.
 
 A task in flight in another session is reported in one line as taken, with the
 session's name, and does not count toward N. A task in flight on a pull request or an
@@ -140,8 +165,8 @@ For each task, in order:
   code block, and at most one path per sentence.
 
 After the list, one footer line beginning `Read:` with what was consulted: `origin/master`'s
-head and its CI state, the counts of open pull requests, issues and work items, the slice's
-done count out of its total, the decisions that wait on the board, and the active sessions. A source that
+head and its CI state, the latency gate's last night, the counts of open pull requests,
+issues and work items, the slice's done count out of its total, the decisions that wait on the board, and the active sessions. A source that
 could not be read is named here.
 
 End with the one command that starts the top task: `/work-item-start <n>` when it has a

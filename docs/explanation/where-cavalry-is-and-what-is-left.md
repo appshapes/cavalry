@@ -94,8 +94,8 @@ dedicated hosts (ADR 0016, ADR 0034, ADR 0044), a weekly email of the changes (A
 - **CI.** `gates (linux)` on every pull request and `gates (macos)` on every commit
   of `master`, about 11 and 13 minutes. `just conformance` in them runs ten vector
   suites, six runners with a cluster of three on the loopback, and an upgrade of a
-  cluster one member at a time. Three bench jobs on two dedicated hosts are required
-  checks today; feature 1 below changes that.
+  cluster one member at a time. At this commit three bench jobs on two dedicated hosts
+  are required checks; feature 1 below changed that on 2026-11-21.
 
 ## The latency rows, and why none is a condition
 
@@ -128,9 +128,9 @@ reading behind that ruling:
   host by their subject, 53 name a re-record of a baseline in their message, and 14
   changed `bench/baseline.json`. In all, 217 name the bench, since every change
   under a data-plane crate carries its histograms.
-- A pull request under `crates/` takes both bench hosts at every push, about 16
-  minutes, one run at a time across every session, and its merge waits on three bench
-  checks. On 2026-11-10 one commit took 81 minutes from its push to its last check
+- At this commit, a pull request under `crates/` takes both bench hosts at every push,
+  about 16 minutes, one run at a time across every session, and its merge waits on
+  three bench checks. On 2026-11-10 one commit took 81 minutes from its push to its last check
   for 21 minutes of work on the hosts (ADR 0071).
 - The gate fails with no instruction changed. Six of eight processes at one head
   failed a row by 5.6% to 8.1% with the same instructions on the message path (ADR
@@ -241,7 +241,7 @@ slice, whose seven features took 98 commits.
 
 | # | Feature | Work item | Takes in | Size | Chain |
 | --- | --- | --- | --- | --- | --- |
-| 1 | Run the latency gate each night as a coarse check | 361 | Parks work item 198 beside 358 | 2 | First |
+| 1 | Run the latency gate each night as a coarse check. **Done on 2026-11-21** | 361 | Parks work item 198 beside 358 | 2 | First |
 | 2 | Hold what Brigade's server runs | 362 | | 3 | Release |
 | 3 | Hold invariant 1 through the faults that an operator's rule holds today | 363 | Work items 287, 286, 277, 288, 282, 281 | 13 | Cluster |
 | 4 | Replace a leader however it stops | 364 | Work items 280, 343, 355 | 11 | Cluster |
@@ -253,6 +253,19 @@ slice, whose seven features took 98 commits.
 | 10 | Freeze the surfaces and package the release | 369 | | 13 | Release |
 | 11 | Write for the stranger who comes from Aeron | 370 | | 8 | Release |
 | 12 | Cut the candidate, soak it, and release 0.1.0 | 371 | | 5 | Last |
+
+What has landed:
+
+- **Feature 1, on 2026-11-21**
+  ([ADR 0139](../decisions/0139-run-the-latency-gate-each-night-as-a-coarse-check.md)).
+  No change takes a bench host. The gate runs in `.github/workflows/bench.yml` at
+  07:17 UTC each day and on demand for a branch, and fails a row whose p99.99 is more
+  than 50 percent above the slowest run recorded. Branch protection on `master`
+  requires `gates (linux)` alone: the owner dropped the three bench names from the
+  rule with this change. What was found: the coarse check does not see a regression
+  under half again, and may not see one added system call on a row of 500 ns. The
+  lints and the allocation tests hold those rules by reading the code, and the slice
+  after the line measures what they cannot.
 
 How the order was chosen:
 
@@ -297,7 +310,7 @@ Everything else on this page a session does on its own, and records.
 
 | What | For | When |
 | --- | --- | --- |
-| The owner's leave to change the bench's workflows and rules | Feature 1 | Given on 2026-11-21. The change lands from a person's session: the review loop does not approve a change that weakens a gate |
+| The owner's leave to change the bench's workflows and rules | Feature 1 | Given on 2026-11-21, and used: feature 1 is on `master`, and the owner dropped the three bench names from branch protection the same day |
 | A ruling on work item 340, whether the review loop's fixer may write `spec/` | Every feature that changes `spec/` | Ruled on 2026-11-21: it may, when the pull request's branch holds an Accepted ADR that names the page. The workflow's change lands from a person's session, beside feature 1 |
 | An account, a name and a publishing credential on crates.io, PyPI, npm, Maven Central and NuGet, stored as secrets of the repository | Feature 10 | At its start: the names are reserved first, and Maven Central asks for a verified namespace |
 | The setting that publishes the book, and a contact address for `SECURITY.md` | Feature 11 | At its start |

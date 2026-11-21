@@ -26,8 +26,9 @@ conflict: a conflict is resolved in place, as step 4 says.
    `git log --oneline origin/master..HEAD`, `git diff` and `git diff --cached`. The branch
    is `<work item>-<slug>`; a change sitting on `master` moves to one first with
    `git switch -c <work item>-<slug>`. Check the diff against CLAUDE.md as `/commit` does
-   (one crate per commit, docs in the same commit, histograms for a data-plane change, a
-   dependency's justification, an ADR for `spec/`), and scan every added line for a
+   (one crate per commit, docs in the same commit, for a data-plane change the sentence
+   on what work it adds per message, a dependency's justification, an ADR for `spec/`),
+   and scan every added line for a
    secret. A diff over about a thousand changed lines, generated and recorded files
    aside, is more than one pull request: split it by crate and by plane as
    `docs/how-to/implement-a-feature.md`, step 3.8, says, so that the first review's
@@ -51,7 +52,8 @@ conflict: a conflict is resolved in place, as step 4 says.
 
    The laptop's gates compile the laptop's platform alone. A change that adds or
    touches a `cfg(target_os = "linux")` block, or its `not` twin, is type-checked for
-   Linux before the push, because the Linux gates and both bench hosts build it:
+   Linux before the push, because the Linux gates build it, and so do both bench hosts
+   in the night's run:
 
    ```
    cargo check --workspace --all-targets --target x86_64-unknown-linux-gnu; echo "check exit $?"
@@ -68,9 +70,9 @@ conflict: a conflict is resolved in place, as step 4 says.
 
 3. **Commit.** The message is the review record, as `/commit` writes it: subject
    `<work item>: <Imperative subject>` under 72 characters; body with what changed, which
-   invariant by number, and the evidence (the gate results, the ADR number, both
-   histograms for a change under a data-plane crate, the `just conformance` and `just
-   replay-check` results when the change claims correctness). Several commits on the
+   invariant by number, and the evidence (the gate results, the ADR number, for a change
+   under a data-plane crate the sentence on what work it adds per message, the `just
+   conformance` and `just replay-check` results when the change claims correctness). Several commits on the
    branch are fine; the squash merge takes the pull request's title and body as the
    commit on `master` (`auto-merge.yml`), so the branch's messages are drafts of that.
 
@@ -98,8 +100,9 @@ conflict: a conflict is resolved in place, as step 4 says.
    inline: it is the commit message on `master`, so it is the review record in full,
    built from the branch's commit messages the way the loop's `open-pr` job builds it
    from the agent's: what changed, which invariant by number, the evidence, and what CI
-   does not check (the bench figures from the host's job for a data-plane change, the
-   `just fuzz` result after a parser change). End it with `Closes #<issue>` when an
+   does not check (the `just fuzz` result after a parser change). A bench table is not
+   owed: no change takes a bench host, and the latency gate runs each night on `master`
+   (ADR 0139). End it with `Closes #<issue>` when an
    issue exists. Then:
 
    ```
@@ -122,10 +125,8 @@ conflict: a conflict is resolved in place, as step 4 says.
 
 Read the state in one go, then wait. A review lands up to thirty minutes after a push,
 most inside fifteen, the longest on an ADR with reviews behind it, and its run is
-cancelled at sixty (card 213); a fix run takes up to thirty minutes; the `bench (linux)` and `bench (grip)` jobs each
-have their host, `bench` and `grip`, to themselves, and take it only for a change
-that can move the bench: for a page or an ADR they pass in seconds on a hosted runner
-(ADR 0071). Poll no more often than every five
+cancelled at sixty (card 213); a fix run takes up to thirty minutes; no change takes a bench host (ADR 0139), so a
+pull request's one required check is `gates (linux)`. Poll no more often than every five
 minutes, and touch nothing a rule below does not name. Every wait here is the loop's own work in progress; the stalls are the rules.
 
 ```
@@ -190,11 +191,10 @@ gh pr checks <number>
 - **`CONFLICTING`.** `master` moved under the branch; GitHub starts no run on a
   conflicting pull request. Step 4, step 2, push.
 
-- **A red check.** `gh run view <run id> --log-failed`. `bench (linux)` runs on the host
-  `bench` and `bench (grip)` on `grip`: never run a bench on either while its job may be
-  running (`gh run list` shows it `in_progress` or `queued`; `pgrep -a cavalry-bench` on
-  the host), and a gate failure there is read from `bench-compare`'s own lines before
-  anything is changed.
+- **A red check.** `gh run view <run id> --log-failed`. A pull request's check is
+  `gates (linux)`: no bench job runs for a change (ADR 0139). The bench hosts, `bench` and `grip`, run the nightly `bench` workflow:
+  never run a bench on either while one of its jobs may be running (`gh run list
+  --workflow bench.yml` shows it `in_progress` or `queued`).
 
 - **Approved.** `auto-merge.yml` arms the merge on an approval whose `commit_id` is the
   current head; an approval of an older head arms nothing, and the newer head gets its
@@ -218,7 +218,7 @@ gh pr checks <number>
   pull request is not done until a run on `master` whose commit holds the squash is
   green. That is the squash's own run unless another change landed while it waited: runs on
   `master` go one at a time with one waiting, and a newer landing takes the waiting
-  one's place (`docs/how-to/run-the-bench.md`, "When the bench jobs run"). The
+  one's place (`docs/how-to/implement-a-feature.md`, "How to verify it worked"). The
   squash's run then reads `cancelled` with no job run, and the run to watch is the
   next one on `master` that starts, `gh run list --branch master --workflow ci
   --limit 5`, whose tree holds the squash; its tree, which holds the commits before
@@ -229,8 +229,7 @@ gh pr checks <number>
   yours. The run is the first of
   `gates (macos)` for the change, which a pull request does not have (ADR 0073): a
   red one there is yours to fix forward, before the work item and before any other work.
-  Its bench jobs report in seconds when the pull request's own run measured the same
-  tree (ADR 0074). Then comment the commit hash and the run on the work item (`brigade
+  It has no bench job (ADR 0139). Then comment the commit hash and the run on the work item (`brigade
   work-item comment <number>`, the text on stdin), and run `just tidy`: it retires the
   branch locally, with its worktree, and GitHub has already deleted it on origin. The
   work item moves to Done only when this was its last pull request and every "Done

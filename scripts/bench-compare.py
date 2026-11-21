@@ -1,24 +1,29 @@
 #!/usr/bin/env python3
 """bench-compare: the latency gate CLAUDE.md names for invariant 2 (ADR 0015).
 
+The size of the rule below is `TOLERANCE`. It was 5 percent from ADR 0016 until ADR
+0139, and it is 50 percent now: the gate runs each night as a coarse check and paces no
+pull request, until the slice that measures Cavalry against Aeron arms it again and
+sets the size back. The rule is the same at either size, and the tests hold it at both.
+
 Reads the newest result `just bench` wrote under bench/results/, finds the baseline for
 its profile in bench/baseline.json, and fails when any benchmark's p99.99 is more than
-5 percent above the baseline's and more than one step of the harness's clock above it:
+the tolerance above the baseline's and more than one step of the harness's clock above it:
 the result carries the step, `clock_step_ns`, which the harness measures once at start
 (10 ns on the bench host, whose counter advances in tens), and a row whose percentiles
 sit at 150 to 170 ns moves 6 percent in one step on an unchanged commit (ADR 0029). The
 baseline's entry carries the step its recording measured, once `--update` has written
 one, and the floor is the smaller of the two: a change to the harness that over-read its
 step would otherwise widen the gate by itself. A result without the field is judged by
-the 5 percent rule alone. Max is printed beside the p99.99 but does not fail the gate: one
-descheduling on a shared runner moves max, and the 5 percent rule on p99.99 is what
+the tolerance alone. Max is printed beside the p99.99 but does not fail the gate: one
+descheduling on a shared runner moves max, and a rule on p99.99 is what
 CLAUDE.md's gate table promises. A result made with `--repeat N` carries each
 benchmark's median run by p99.99 as its p99.99 and lists every run's; the list is
 printed as its lowest and highest, so the run-to-run band is beside the number the gate
 reads. When the baseline has such a list, the gate compares the result's median with the
 slowest run of the baseline: on the bench host one row's p99.99 moves by a fifth between
 two processes of the same binary while the others hold within 2 percent, and a rule that
-reads the baseline's band is the 5 percent rule on the rows the host can measure and
+reads the baseline's band is the tolerance's rule on the rows the host can measure and
 says so on the row it cannot, instead of failing an unchanged commit (ADR 0016). A
 bench host's baseline is recorded from every process the host has run at the baseline's
 tree, three at least, and the slowest run is the slowest over all of them; a later
@@ -73,7 +78,9 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parent.parent
 RESULTS = ROOT / "bench" / "results"
 BASELINE = ROOT / "bench" / "baseline.json"
-TOLERANCE = 0.05
+# The coarse size (ADR 0139). 0.05 is the size ADR 0016 set and the one the armed gate
+# returns to; scripts/bench-compare-test.py holds the rule at both.
+TOLERANCE = 0.50
 # The floor under the tolerance: a row within one step of the clock above the baseline's
 # slowest run has not moved by what the harness can measure (ADR 0029).
 STEP_FIELD = "clock_step_ns"
@@ -203,7 +210,7 @@ def floor_step(result: dict, base) -> tuple:
     now = clock_step(result)
     then = clock_step(base or {})
     if now is None:
-        return None, "clock step unknown, the 5 percent rule alone"
+        return None, f"clock step unknown, the {round(TOLERANCE * 100)} percent rule alone"
     if then is None:
         return now, f"clock step {now} ns, none in the baseline"
     if now == then:

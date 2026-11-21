@@ -126,22 +126,32 @@ nothing depends on it.
 - Runs the measured loops under a counting allocator and fails the run when they
   allocate, a reallocation included, naming the benchmark whose loops did and
   printing the backtrace of the first allocation it saw (ADR 0047): the
-  zero-allocations-per-message assertion of the gate.
+  zero-allocations-per-message assertion of the gate. The assertion holds in every
+  pull request: the `gates (linux)` job runs the harness on a hosted runner, where
+  nothing compares its numbers and an allocation in a measured loop fails the job
+  ([ADR 0139](../docs/decisions/0139-run-the-latency-gate-each-night-as-a-coarse-check.md)).
 - Writes `bench/results/<profile>-<unix time>.json`, the clock's step included;
-  `scripts/bench-compare.py` fails a p99.99 regression over 5 percent and over one clock
+  `scripts/bench-compare.py` fails a p99.99 regression over 50 percent and over one clock
   step, the smaller of the result's and the baseline's, against `bench/baseline.json`
-  for the profile, on the `claim_commit`, `one_way` and `udp_round_trip` rows ([ADR 0029](../docs/decisions/0029-fail-a-gated-row-only-beyond-one-clock-step.md)); the `timer` and `slot_padding` rows are host
+  for the profile, on the `claim_commit`, `one_way` and `udp_round_trip` rows ([ADR 0029](../docs/decisions/0029-fail-a-gated-row-only-beyond-one-clock-step.md)).
+  The size is coarse on purpose: it was 5 percent until ADR 0139, and it is 5 percent
+  again when that ADR's Revisit sets it back, after the beta release, version 0.1.0.
+  The `timer` and `slot_padding` rows are host
   probes and are reported, never failed (ADR 0017), and so is `udp_one_way`, which
   carries two clocks' offset (ADR 0044), and so are the `_udp_mdc` rows,
   `claim_commit_32_udp_mdc` and `one_way_32_udp_mdc`, until a host change gives them
   cores (ADR 0052, feature 1). The bench hosts' profiles have
   baselines, `bench-linux` and `grip-linux` with their `-unchecked` twins, grip's
   recorded on 2026-10-31 at 0782ec5 from four of its job's processes at the tree, and
-  CI runs the gate on each host, as `bench (linux)` and `bench (grip)`
+  the `bench` workflow, `.github/workflows/bench.yml`, runs the gate on each host, as
+  `bench (linux)` and `bench (grip)`
   ([ADR 0034](../docs/decisions/0034-run-the-gate-on-grip-and-the-soak-on-kip.md),
   Accepted 2026-10-31), and the link rows as `bench (udp)` on `bench` with its peer
   `bench (udp peer)` on `grip`, against `bench-linux-link`
-  ([ADR 0044](../docs/decisions/0044-gate-udp-on-the-two-bench-hosts.md)); `kip-linux`'s pair stays in the file as the record of kip's
+  ([ADR 0044](../docs/decisions/0044-gate-udp-on-the-two-bench-hosts.md)). The workflow
+  runs each night at 07:17 UTC for `master`, and on demand for a branch. No pull
+  request and no push takes a host, and the result of a run is no required check and
+  no check of a pull request (ADR 0139). `kip-linux`'s pair stays in the file as the record of kip's
   run as the second host, 2026-10-29 to 2026-10-31, compared by nothing: a shared
   runner's run is a report. The `_recorded` rows repeat the client
   rows with the driver's recorder writing the stream to the durable log under the bench
@@ -198,7 +208,11 @@ nothing depends on it.
   to 244,863 ns where the entry of 2026-11-04 held 188,671 to 190,591, so the slowest
   run the gate compares with is 244,863 ns
   ([ADR 0033](../docs/decisions/0033-record-a-bench-baseline-from-every-process-at-one-tree.md));
-  what widened it is not found (work item 198).
+  what widened it is not found (work item 198). The entries stand as they were
+  recorded on 2026-11-15. Since ADR 0139 no re-record follows the tree: the nightly
+  run compares `master` with them, and one case is left in which a change re-records one
+  ([`docs/how-to/run-the-bench.md`](../docs/how-to/run-the-bench.md#when-the-nightly-run-is-red),
+  "When the nightly run is red").
 
 ## What it must never do
 
@@ -230,12 +244,16 @@ second compares the newest result with the baseline for the profile and ends wit
 ## What to read next
 
 - [`docs/how-to/run-the-bench.md`](../docs/how-to/run-the-bench.md): running it,
-  reading the table, recording a baseline, what to do on a regression.
+  reading the table, recording a baseline, measuring a branch on the hosts, what to
+  do on a regression and what a red nightly run asks.
 - [ADR 0015](../docs/decisions/0015-measure-in-process-with-per-runner-baselines.md):
   why the harness is in process, why HdrHistogram and one baseline per runner, and
   [ADR 0028](../docs/decisions/0028-stamp-bench-samples-with-the-time-stamp-counter.md),
   why the clock is the time stamp counter; [ADR 0016](../docs/decisions/0016-run-the-latency-gate-on-a-dedicated-host.md):
-  why the gate fails only on the dedicated bench hosts, and
+  why the gate fails only on the dedicated bench hosts;
+  [ADR 0139](../docs/decisions/0139-run-the-latency-gate-each-night-as-a-coarse-check.md):
+  why the gate runs each night as a coarse check, and why no pull request waits on
+  it; and
   [`docs/how-to/set-up-a-bench-host.md`](../docs/how-to/set-up-a-bench-host.md), how
   that host is built from `bench/host/`.
 - [`scripts/bench-compare.py`](../scripts/bench-compare.py), the gate's second half, and

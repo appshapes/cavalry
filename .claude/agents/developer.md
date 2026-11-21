@@ -69,9 +69,9 @@ line.
 A recipe that prints `not built yet` is a gate that does not exist yet, not a pass. If your
 change touches what that gate would check, building the gate is part of the change
 (CLAUDE.md, "Gates"); if you cannot build it, stop and say so in the pull request body. A
-change under a data-plane crate needs `just bench` before and after, with both histograms in
-the pull request body; while `just bench` prints `not built yet`, write that in the body.
-Never invent a number.
+change under a data-plane crate that adds work per message says what and why in the pull
+request body. It owes no histogram: the latency gate runs each night on `master`, and no
+change takes a bench host (ADR 0139). Never invent a number.
 
 ## Committing and pushing
 
@@ -79,8 +79,8 @@ Never invent a number.
   your branch. **Never run the `/commit` skill**: it is the developer's sequence for
   `master`, it stages every untracked file and it merges `origin` mid-run.
 - The commit message is the review record: an imperative subject, then what changed, which
-  invariant it serves, and the evidence (the gate output, both histograms for a data-plane
-  change, the ADR number). The workflow builds the pull request body from these messages,
+  invariant it serves, and the evidence (the gate output, the ADR number, and for a
+  data-plane change the sentence on what work it adds per message). The workflow builds the pull request body from these messages,
   and the squash merge takes the pull request title and body as the commit on `master`
   (ADR 0004). After a fix that pushed, bring the body up to date with `gh pr edit <n>
   --body-file`; without a push, edit the body only for a blocker that is in the body.

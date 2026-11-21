@@ -1,6 +1,6 @@
 # 0074. Do not run the bench on master for a tree its pull request measured
 
-- **Status:** Accepted
+- **Status:** Superseded by 0139
 - **Date:** 2026-11-11
 - **Invariants affected:** 2, 6
 - **Supersedes:** none. Amends ADR 0071's Decision for a push: a push whose files can

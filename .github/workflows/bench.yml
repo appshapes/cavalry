@@ -1,0 +1,281 @@
+# The latency gate, each night and on demand (CLAUDE.md, gate 2; ADR 0139).
+#
+# No pull request and no push takes a bench host. This workflow measures `master` once a
+# day on the two dedicated bench hosts, bench and grip, self-hosted runners (ADR 0016,
+# ADR 0034), and across the direct cable between them (ADR 0039, ADR 0044), and compares
+# each result with bench/baseline.json for its profile. Until the slice that measures
+# Cavalry against Aeron arms the gate again, the comparison is coarse: a gated row fails
+# when its p99.99 is more than 50 percent, and more than one step of the clock, above the
+# slowest run recorded (scripts/bench-compare.py; ADR 0139). An allocation in a measured
+# loop fails here as it does in every pull request's `gates` job.
+#
+# Its result is no required check and no check of a pull request: a red night turns no
+# pull request and no run of `ci` red. It shows on the commit that was master's head when
+# the run started, as any workflow's result does. One red night asks nothing of anyone.
+# Two scheduled nights in a row that are red on one row are a task ahead of the features,
+# and `/next-task` reads this workflow's last scheduled runs for that
+# (docs/how-to/run-the-bench.md, "When the nightly run is red").
+#
+# By hand, `gh workflow run bench.yml -f branch=<name>` measures a branch of this
+# repository: for a change whose decision needs one number, which its ADR then records.
+# A self-hosted runner on a public repository must never run a stranger's code, so the
+# input is a branch's name and nothing else: the `tree` job resolves it in this
+# repository, where a stranger can make no branch, and every job below checks out the
+# commit it found and names it to the harness as CAVALRY_BENCH_GIT, so that a result
+# says which commit it measured. A pull request's ref and a commit id are refused there.
+# A run by hand is a report: its comparisons are printed and do not fail the run, since
+# the run is attached to master's head and a branch that reads slow is no fault of that
+# commit. Whoever started it reads the tables.
+#
+# Every action is pinned to a full commit SHA with its version in a trailing comment, as
+# in ci.yml.
+#
+# The job names are the ones the hosts' how-to and the baselines' records use. The two
+# udp jobs pass each other's name to scripts/wait-for-partner-job.sh (card 212), and the
+# `Workflow` test of scripts/wait-for-partner-job-test.py fails on a missed rename.
+name: bench
+
+on:
+  schedule:
+    # 07:17 UTC each day. Not on the hour, when GitHub's schedules are most delayed.
+    - cron: '17 7 * * *'
+  workflow_dispatch:
+    inputs:
+      branch:
+        description: 'A branch of this repository to measure'
+        required: true
+        default: master
+
+permissions:
+  contents: read
+
+# One run at a time holds the hosts, and one more waits behind it: a run by hand queues
+# behind the night's and is not cancelled. A run that starts while another already waits
+# takes the waiting run's place, and GitHub cancels the one that waited.
+concurrency:
+  group: bench
+  cancel-in-progress: false
+
+jobs:
+  # The commit every job below measures: the head of the named branch of this repository,
+  # read once, so that the four jobs measure one tree though the branch moves meanwhile.
+  tree:
+    name: tree
+    runs-on: blacksmith-4vcpu-ubuntu-2404
+    timeout-minutes: 5          # one read of the repository's refs; not a p90, a floor
+    outputs:
+      sha: ${{ steps.resolve.outputs.sha }}
+    steps:
+      - id: resolve
+        # `shell: bash` for its `pipefail`: a read of the refs that fails ends the step
+        # with git's own message, where the default shell would go on with no answer and
+        # report a branch that is there as missing.
+        shell: bash
+        env:
+          BRANCH: ${{ inputs.branch || 'master' }}
+          REPOSITORY: ${{ github.server_url }}/${{ github.repository }}
+        run: |
+          # `git ls-remote` reads its argument as a pattern, so `mast*` would find
+          # `master`. A name with a pattern's characters is refused, and of what is
+          # listed only the ref that equals the name is taken.
+          case "$BRANCH" in
+            ''|*[!A-Za-z0-9._/-]*)
+              echo "bench: '$BRANCH' is not a branch's name here: letters, digits, '.', '_', '/' and '-' only (docs/how-to/run-the-bench.md, 'Measure a branch')" >&2
+              exit 1
+              ;;
+          esac
+          sha=$(git ls-remote --heads "$REPOSITORY" "refs/heads/$BRANCH" | awk -v ref="refs/heads/$BRANCH" '$2 == ref { print $1 }')
+          if [ -z "$sha" ]; then
+            echo "bench: this repository has no branch named '$BRANCH'. Name a branch that is pushed here, as 'gh workflow run bench.yml -f branch=<name>'; a pull request's ref and a commit id are refused, so that the bench hosts run no stranger's code (docs/how-to/run-the-bench.md, 'Measure a branch')" >&2
+            exit 1
+          fi
+          echo "sha=$sha" >> "$GITHUB_OUTPUT"
+          echo "bench: measuring $BRANCH at $sha"
+
+  # The harness pinned to the four isolated cores of the dedicated bench host, the fourth
+  # for the UDP rows' receiver (ADR 0044), then the comparison with bench/baseline.json
+  # for the host's profiles. docs/how-to/set-up-a-bench-host.md is the host.
+  bench:
+    name: bench (linux)
+    needs: tree
+    runs-on: [self-hosted, bench-linux]
+    # The build is incremental on the persistent runner, so this bounds a hung host, not
+    # a build: the first run compiled the workspace in release in under three minutes.
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ needs.tree.outputs.sha }}
+      - uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8 # v1
+        with:
+          toolchain: stable
+      - uses: extractions/setup-just@53165ef7e734c5c07cb06b3c8e7b647c5aa16db3 # v4.0.0
+      # No cache action: the runner keeps its target directory between runs, and the
+      # bench host is not to spend its run uploading it.
+      # The host's state opens every log, and a host that lost its tuning fails here.
+      - run: bench/host/check.sh 8,10,12,14
+      # Twenty-one runs per benchmark: the comparison reads each one's median p99.99, and
+      # the result keeps all twenty-one (ADR 0016).
+      - run: just bench --messages 5000000 --repeat 21 --pin 8,10,12,14
+        id: bench
+        env:
+          CAVALRY_BENCH_PROFILE: bench-linux
+          CAVALRY_BENCH_GIT: ${{ needs.tree.outputs.sha }}
+      - run: just bench-compare
+        continue-on-error: ${{ github.event_name == 'workflow_dispatch' }}
+      # The same run with the checks built out, so that ADR 0010's cost is measured each
+      # night; its profile is bench-linux-unchecked, with a baseline of its own. It runs
+      # when the checked comparison failed too, so that every run yields both profiles'
+      # results; it does not run after a failed check.sh or a failed checked bench, whose
+      # host or harness is not one to record from. Its comparison runs only when it wrote
+      # a result, or `bench-compare` would judge the checked result twice.
+      - run: just bench-unchecked --messages 5000000 --repeat 21 --pin 8,10,12,14
+        id: unchecked
+        if: ${{ !cancelled() && steps.bench.outcome == 'success' }}
+        env:
+          CAVALRY_BENCH_PROFILE: bench-linux
+          CAVALRY_BENCH_GIT: ${{ needs.tree.outputs.sha }}
+      - run: just bench-compare
+        continue-on-error: ${{ github.event_name == 'workflow_dispatch' }}
+        if: ${{ !cancelled() && steps.unchecked.outcome == 'success' }}
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        if: always()
+        with:
+          name: bench-results-bench-linux
+          path: bench/results/
+          if-no-files-found: ignore
+
+  # The same on the second bench host, grip (docs/how-to/set-up-a-bench-host.md,
+  # "Further hosts"; ADR 0034), against its own baselines, grip-linux and
+  # grip-linux-unchecked.
+  bench-grip:
+    name: bench (grip)
+    needs: tree
+    runs-on: [self-hosted, grip-linux]
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ needs.tree.outputs.sha }}
+      - uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8 # v1
+        with:
+          toolchain: stable
+      - uses: extractions/setup-just@53165ef7e734c5c07cb06b3c8e7b647c5aa16db3 # v4.0.0
+      - run: bench/host/check.sh 4,5,6,7
+      - run: just bench --messages 5000000 --repeat 21 --pin 4,5,6,7
+        id: bench
+        env:
+          CAVALRY_BENCH_PROFILE: grip-linux
+          CAVALRY_BENCH_GIT: ${{ needs.tree.outputs.sha }}
+      - run: just bench-compare
+        continue-on-error: ${{ github.event_name == 'workflow_dispatch' }}
+      # Both profiles on every run whose checked bench ran, as above.
+      - run: just bench-unchecked --messages 5000000 --repeat 21 --pin 4,5,6,7
+        id: unchecked
+        if: ${{ !cancelled() && steps.bench.outcome == 'success' }}
+        env:
+          CAVALRY_BENCH_PROFILE: grip-linux
+          CAVALRY_BENCH_GIT: ${{ needs.tree.outputs.sha }}
+      - run: just bench-compare
+        continue-on-error: ${{ github.event_name == 'workflow_dispatch' }}
+        if: ${{ !cancelled() && steps.unchecked.outcome == 'success' }}
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        if: always()
+        with:
+          name: bench-results-grip-linux
+          path: bench/results/
+          if-no-files-found: ignore
+
+  # The link rows (ADR 0039, ADR 0044): udp_round_trip_32, measured on bench's clock
+  # alone and compared with its own profile, bench-linux-link, and udp_one_way_32,
+  # reported beside it with the offset between the two hosts' clocks, which this job
+  # prints after the run from `chronyc tracking` on bench, since bench serves its cooked
+  # time and grip stands at bench's raw clock plus that line. The harness on bench
+  # publishes across the direct cable to a peer mode of the harness on grip, the job
+  # below, which echoes every message back; the two jobs are one pair, started together
+  # once both single-host bench jobs have passed, so that neither host runs a bench while
+  # the other measures the link, and each waits for the other.
+  bench-udp:
+    name: bench (udp)
+    needs: [tree, bench, bench-grip]
+    runs-on: [self-hosted, bench-linux]
+    # The pair's wait for each other, up to 45 minutes, plus the run (card 212).
+    timeout-minutes: 60
+    permissions:
+      contents: read
+      actions: read             # the run's jobs, for the wait below
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ needs.tree.outputs.sha }}
+      - uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8 # v1
+        with:
+          toolchain: stable
+      - uses: extractions/setup-just@53165ef7e734c5c07cb06b3c8e7b647c5aa16db3 # v4.0.0
+      - run: bench/host/check.sh 8,10,12,14
+      # Each end of the pair queues on its own host once `bench` and `bench-grip` end,
+      # and the harness waits ten minutes for the other end; a partner queued behind
+      # another run's job for longer than that left the first end dead (card 212). So
+      # each job waits here, doing nothing, until the run's other job is in progress.
+      - run: scripts/wait-for-partner-job.sh "bench (udp peer)"
+        env:
+          GH_TOKEN: ${{ github.token }}
+      # One message in flight at a time, so a run is its messages times the round trip:
+      # 100,000 at about 100 µs is ten seconds a run, twenty-one runs, after the UDP
+      # rows' warm-up of 10,000 each. bench-link and grip-link are the cable's ends in
+      # both hosts' /etc/hosts (docs/how-to/set-up-a-bench-host.md, "Further hosts").
+      - run: just bench --link-here bench-link:40182 --link-peer grip-link:40183 --messages 100000 --repeat 21 --pin 8,10,12,14
+        env:
+          CAVALRY_BENCH_PROFILE: bench-linux
+          CAVALRY_BENCH_GIT: ${{ needs.tree.outputs.sha }}
+      - run: just bench-compare
+        continue-on-error: ${{ github.event_name == 'workflow_dispatch' }}
+      # The offset the one-way row carries is this host's: chronyd serves its cooked
+      # time, the system clock plus the residual it has still to apply against its
+      # internet sources, and grip follows that, so grip's clock stands at bench's raw
+      # clock plus the "System time" line below, hundreds of microseconds that move with
+      # the pools, while grip's own error against bench-link is nanoseconds
+      # (docs/how-to/set-up-a-bench-host.md, "Further hosts", the clock).
+      - run: chronyc tracking
+        if: always()
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        if: always()
+        with:
+          name: bench-results-bench-linux-link
+          path: bench/results/
+          if-no-files-found: ignore
+
+  # The other end of the pair: the harness on grip in its echo mode, which subscribes on
+  # grip's end of the cable, claims every message it receives on a publication back to
+  # bench with grip's wall clock stamped in, and ends when the stream does. It writes no
+  # result; the one-way row is on bench's side. After it, grip's view of the clock: it
+  # follows bench over the cable with hardware timestamps, selecting bench-link alone,
+  # and `chronyc sourcestats` names its error against bench-link, nanoseconds; the
+  # offset the one-way row carries is on bench's side, printed by its own job, since
+  # bench serves its cooked time and grip stands at bench's raw clock plus bench's
+  # residual (card 182).
+  bench-udp-peer:
+    name: bench (udp peer)
+    needs: [tree, bench, bench-grip]
+    runs-on: [self-hosted, grip-linux]
+    # The pair's wait for each other, up to 45 minutes, plus the run (card 212).
+    timeout-minutes: 60
+    permissions:
+      contents: read
+      actions: read             # the run's jobs, for the wait below
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ needs.tree.outputs.sha }}
+      - uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8 # v1
+        with:
+          toolchain: stable
+      - uses: extractions/setup-just@53165ef7e734c5c07cb06b3c8e7b647c5aa16db3 # v4.0.0
+      - run: bench/host/check.sh 4,5,6,7
+      # The same wait as bench (udp)'s, for it (card 212).
+      - run: scripts/wait-for-partner-job.sh "bench (udp)"
+        env:
+          GH_TOKEN: ${{ github.token }}
+      - run: just bench --echo --link-here grip-link:40183 --link-peer bench-link:40182 --pin 4,5,6,7
+      - run: chronyc sourcestats -v && chronyc sources -v && chronyc tracking
+        if: always()

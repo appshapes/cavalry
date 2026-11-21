@@ -1,6 +1,6 @@
 # 0050. Re-record a bench baseline at a tree where pull requests read red while master passes
 
-- **Status:** Accepted
+- **Status:** Superseded by 0139
 - **Date:** 2026-11-05
 - **Invariants affected:** 2, 6
 - **Supersedes:** none; adds a second case to the trigger ADR 0033 gives for re-recording

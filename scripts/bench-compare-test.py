@@ -5,7 +5,10 @@ step and the baseline's (ADR 0029); the probe rows, the link's one-way row and t
 multi-destination cast rows are reported (ADR 0017, ADR 0044, ADR 0052); `--update` writes the step
 into the baseline and the next comparison reads it back; a bench host's baseline from
 every process at one tree holds every process's runs, a later process of the tree joins
-it with `--join`, and the gate compares with the slowest over all of them (ADR 0033). Standard library only; `just test-scripts` runs it.
+it with `--join`, and the gate compares with the slowest over all of them (ADR 0033). The
+rule's tests hold it at 5 percent, the size ADR 0016 set and the one the armed gate
+returns to; `Coarse` holds the size the script ships with since ADR 0139, 50 percent.
+Standard library only; `just test-scripts` runs it.
 
     python3 scripts/bench-compare-test.py
 """
@@ -22,6 +25,18 @@ HERE = Path(__file__).resolve().parent
 spec = importlib.util.spec_from_file_location("bench_compare", HERE / "bench-compare.py")
 bench_compare = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(bench_compare)
+
+# The size the script ships with (ADR 0139), read before the tests set the fine one.
+SHIPPED = bench_compare.TOLERANCE
+FINE = 0.05
+
+
+def setUpModule():
+    bench_compare.TOLERANCE = FINE
+
+
+def tearDownModule():
+    bench_compare.TOLERANCE = SHIPPED
 
 
 def row(p99_99, runs=None):
@@ -184,6 +199,53 @@ class Rule(unittest.TestCase):
         code, out = run(res, baseline(step=10, one_way_32_client=row(300)))
         self.assertEqual(code, 1, out)
         self.assertIn("neither", out)
+
+
+class Coarse(unittest.TestCase):
+    """The size the script ships with since ADR 0139: a gated row fails when it is more than
+    50 percent above the baseline's slowest run. The step's floor, the reported rows and
+    the allocation rule are as at any size."""
+
+    def setUp(self):
+        patcher = mock.patch.object(bench_compare, "TOLERANCE", SHIPPED)
+        patcher.start()
+        self.addCleanup(patcher.stop)
+
+    def test_the_shipped_size_is_fifty_percent(self):
+        self.assertEqual(SHIPPED, 0.50)
+
+    def test_forty_percent_up_passes(self):
+        code, out = run(result(1, one_way_32_client=row(700)), baseline(1, one_way_32_client=row(500)))
+        self.assertEqual(code, 0, out)
+        self.assertIn("+40.0%", out)
+        self.assertNotIn("REGRESSION", out)
+
+    def test_sixty_percent_up_fails(self):
+        code, out = run(result(1, one_way_32_client=row(800)), baseline(1, one_way_32_client=row(500)))
+        self.assertEqual(code, 1, out)
+        self.assertIn("+60.0% REGRESSION", out)
+        self.assertIn("more than 50%", out)
+
+    def test_fifty_percent_is_above_the_slowest_run_recorded_not_the_median(self):
+        # The baseline's median is 500 and its slowest run 600: 850 is +70% on the median and
+        # +41.7% on the slowest run, which is the number compared (ADR 0033).
+        code, out = run(result(1, one_way_32_client=row(850)),
+                        baseline(1, one_way_32_client=row(500, runs=[480, 500, 600])))
+        self.assertEqual(code, 0, out)
+        self.assertIn("+41.7%", out)
+
+    def test_an_allocation_fails_at_any_size(self):
+        res = result(1, one_way_32_client=row(500))
+        res["allocations"], res["allocations_per_message"] = 1, 0.001
+        code, out = run(res, baseline(1, one_way_32_client=row(500)))
+        self.assertEqual(code, 1, out)
+
+    def test_a_result_without_the_step_names_the_size(self):
+        res = result(1, one_way_32_client=row(500))
+        del res["clock_step_ns"]
+        code, out = run(res, baseline(1, one_way_32_client=row(500)))
+        self.assertEqual(code, 0, out)
+        self.assertIn("clock step unknown, the 50 percent rule alone", out)
 
 
 class Floor(unittest.TestCase):

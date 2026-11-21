@@ -6,7 +6,10 @@ invariant 2 and the gates table; why the harness measures what it measures is
 [ADR 0015](../decisions/0015-measure-in-process-with-per-runner-baselines.md), and why
 the gate fails only on the dedicated bench hosts, `bench` and `grip`, and never on a
 shared runner is
-[ADR 0016](../decisions/0016-run-the-latency-gate-on-a-dedicated-host.md).
+[ADR 0016](../decisions/0016-run-the-latency-gate-on-a-dedicated-host.md). The gate is
+the comparison of step 3. It runs on the hosts each night for `master` and on demand
+for a branch, as a coarse check, and no pull request waits on it; why is
+[ADR 0139](../decisions/0139-run-the-latency-gate-each-night-as-a-coarse-check.md).
 
 ## Prerequisites
 
@@ -14,10 +17,18 @@ shared runner is
 - An idle machine with at least three free cores, five for the UDP rows. The harness
   runs a publisher, a subscriber and a conductor thread, each spinning, and the UDP rows
   the driver's sender and receiver beside them; a browser or a build in the background
-  moves p99.99 by more than the 5 percent the gate allows. The numbers that gate a
-  commit come from the two bench hosts, `bench` and `grip`, each with four cores
-  isolated for this ([Set up a bench host](set-up-a-bench-host.md)).
+  moves p99.99 by more than 5 percent. The numbers the gate judges come from the two
+  bench hosts, `bench` and `grip`, each with four cores isolated for this
+  ([Set up a bench host](set-up-a-bench-host.md)). A host is idle when no job of the
+  `bench` workflow holds it or waits for it. Never run a bench by hand on either host
+  while one of its jobs may be running: `gh run list --workflow bench.yml` shows such
+  a run as `in_progress`, `queued` or `pending`, and the schedule starts one at 07:17
+  UTC each day (step 3).
 - Python 3 for `just bench-compare`.
+- The GitHub CLI, `gh`, signed in with write access to this repository, for the two
+  sections that start or read a run on the hosts:
+  [Measure a branch](#measure-a-branch) and
+  [When the nightly run is red](#when-the-nightly-run-is-red).
 
 ## Steps
 
@@ -40,7 +51,10 @@ shared runner is
    run were the whole p99.99 on the bench host. It prints one table and writes one
    file, `bench/results/<profile>-<unix time>.json`. The profile is
    `$CAVALRY_BENCH_PROFILE` when set, as CI sets `bench-linux`, `grip-linux`, `linux`
-   or `macos`, and `local-<os>-<arch>` otherwise. Pass arguments after the recipe:
+   or `macos`, and `local-<os>-<arch>` otherwise. The commit the file names, its `git`,
+   is `$CAVALRY_BENCH_GIT` when set, as the `bench` workflow sets it to the commit it
+   checked out, then `$GITHUB_SHA`, then the checkout's own head. Pass arguments after
+   the recipe:
    `just bench --messages 5000000` runs longer and makes p99.99 steadier (at most
    100,000,000: a message row's subscriber has room for its samples, 8 bytes a
    message and 16 in the link rows, until its loop is over),
@@ -182,11 +196,19 @@ shared runner is
    It takes the newest file under `bench/results/`, finds the profile in
    `bench/baseline.json` and prints each benchmark's p99.99 against the baseline's,
    with the lowest and highest run beside it when the result has several. A p99.99
-   more than 5 percent above the baseline, and more than one step of the harness's
+   more than 50 percent above the baseline, and more than one step of the harness's
    clock above it, is a regression and the recipe exits 1; when the baseline was
    recorded with `--repeat`, the baseline's slowest run is the number compared, so a
-   commit fails when its median tail is slower than anything the baseline measured, by
-   more than 5 percent and by more than one clock step. A bench host's baseline holds
+   result fails when its median tail is slower than anything the baseline measured, by
+   more than 50 percent and by more than one clock step. The size is coarse on
+   purpose: the gate runs each night, and no change waits on it. The size was 5
+   percent until
+   [ADR 0139](../decisions/0139-run-the-latency-gate-each-night-as-a-coarse-check.md),
+   and it is 5 percent again when the gate is armed again. That ADR's Revisit leaves
+   the arming, which sets the size back, to the slice after the beta release, version
+   0.1.0; a slice is a set of features that one ADR orders. The size is `TOLERANCE` in
+   `scripts/bench-compare.py`, and the recipe judges the same on a laptop as on a
+   host. A bench host's baseline holds
    the runs of every process the host has run at the baseline's tree, three at least,
    so "anything the baseline measured" spans processes as well as runs: on kip a row's
    median moves by a tenth, and by half on the exclusive claim row, from one process
@@ -197,18 +219,21 @@ shared runner is
    clock's step at start, prints it in its first line in nanoseconds and in the
    counter's own ticks (`clock step 10 ns (37 ticks)` on `bench`, whose counter
    moves by 37 ticks every 10 ns, `clock step 1 ns (2 ticks)` on `kip`, where one
-   step is below 5 percent of every gated row and the 5 percent rule decides alone,
+   step is below 5 percent of every gated row and the percent rule decides alone,
    and `clock step 41 ns (41 ticks)` on an Apple silicon laptop, whose counter moves
    less often than the harness reads it and whose step is therefore the jump it makes,
    [ADR 0037](../decisions/0037-read-a-coarse-counters-step-from-its-jump.md))
    and writes it into the result as `clock_step_ns`; a
-   row over 5 percent but within one step is printed `within a step` and passes
-   ([ADR 0029](../decisions/0029-fail-a-gated-row-only-beyond-one-clock-step.md)). The
+   row over 50 percent but within one step is printed `within a step` and passes
+   ([ADR 0029](../decisions/0029-fail-a-gated-row-only-beyond-one-clock-step.md)). At
+   50 percent that takes a row whose baseline is under two steps, and no gated row on
+   the two hosts is that small. At 5 percent it takes a row under twenty steps, which
+   is 200 ns on `bench`. The
    baseline's entry carries the step its recording measured, and the floor is the
    smaller of the two steps, so a change to the harness that over-read its step cannot
    widen the gate by itself; when they differ, the first line says which it took. A
-   result from before the field is printed `clock step unknown` and judged by the 5
-   percent rule alone. On the bench host that is the rule on every row.
+   result from before the field is printed `clock step unknown` and judged by the 50
+   percent rule alone. On the bench host the rule holds on every row.
    Until ADR 0022 one row escaped it: `claim_commit_32_exclusive` landed anywhere
    between 270 and 430 ns at p99.99 from one process to the next, which was the
    harness's own conductor loading the publisher's tail on every spin; with that load at
@@ -218,8 +243,10 @@ shared runner is
    within 2.5 percent across processes, and the baseline is recorded from that harness.
    The rule stays with the slowest run rather than the median because at these numbers
    every row's 21 runs spread 10 to 20 percent inside one process, which a 5 percent
-   rule on medians would fail on an unchanged commit; the slowest run leaves about 20
-   percent between a row's median and its failing number. Only the rows a message passes
+   rule on medians would fail on an unchanged commit; at 5 percent the slowest run
+   leaves about 20 percent between a row's median and its failing number, and at 50
+   percent the failing number is one and a half times the slowest run. Only the rows a
+   message passes
    through, `claim_commit_*`, `one_way_*` and `udp_round_trip_*`, can fail; the `timer`
    and `slot_padding_*` rows run no Cavalry code and sit where one 10 ns step of the
    clock is 15 to 33 percent, so their change is printed and marked `reported`
@@ -233,56 +260,56 @@ shared runner is
    Max is shown but does not fail the gate. A profile with no baseline is reported and
    passes: a laptop has none unless you record one, and the shared CI runners have
    none on purpose, because their own noise moved p99.99 by 40 to 100 percent between
-   two runs of the same commit; CI compares on the bench hosts only, `bench` in the
-   `bench (linux)` job and `grip` in the `bench (grip)` job
+   two runs of the same commit; the gate compares on the bench hosts only, `bench` in
+   the `bench (linux)` job and `grip` in the `bench (grip)` job
    ([ADR 0034](../decisions/0034-run-the-gate-on-grip-and-the-soak-on-kip.md)), each
    against its own profile's baseline (ADR 0016).
 
-   **When the bench jobs run.** The four bench jobs take their hosts for a change
-   that can move the bench, and for no other
-   ([ADR 0071](../decisions/0071-run-the-bench-jobs-only-for-a-change-that-can-move-the-bench.md)).
-   CI's first job, `changes`, lists the change's files, a pull request's against its
-   base and a push's between the commit before it and the commit after, and
-   `scripts/bench-needed.py` answers `bench=false` only when every one of them is on
-   its list of paths known not to matter: `docs/`, `spec/`, `.claude/`, `.github/`
-   other than `ci.yml`, `scripts/` other than the scripts the bench jobs and the
-   decision run, `clients/`, `conformance/`, `changelog.d/`
-   ([ADR 0075](../decisions/0075-keep-each-changes-changelog-entry-in-a-file-of-its-own.md)),
-   and the root's markdown. Then
-   `bench (linux)`, `bench (grip)`, `bench (udp)` and `bench (udp peer)` keep their
-   names, run on a hosted runner, print `bench-needed answered bench=false for this
-   change` and pass in seconds, and the `changes` job's log names each file with its
-   reason. Every other file runs the bench as before: anything under `crates/` or
-   `bench/`, a manifest or the lock, `counters.toml`, `config.toml`, the `justfile`,
-   `ci.yml`, and a path nobody listed. A push to `master` has one more condition:
-   the commit before it must have a completed, successful run of its own on `master`.
-   Runs of one branch go one at a time with one waiting, and a newer push takes the
-   waiting run's place, so a commit whose run was replaced that way, or whose bench
-   failed, has none, and the push after it runs the bench over both, pages or not;
-   the `changes` job's log says `the commit before the push, <commit>, has no
-   completed, successful run`.
+   **When the bench jobs run.** No pull request and no push to `master` takes a bench
+   host
+   ([ADR 0139](../decisions/0139-run-the-latency-gate-each-night-as-a-coarse-check.md)).
+   The gate runs in a workflow of its own, `.github/workflows/bench.yml`, whose name
+   is `bench`. Its schedule starts it at 07:17 UTC each day for `master`, and this
+   page calls that run the nightly run; GitHub can start a scheduled run some minutes
+   late. The workflow also runs on demand, for a branch of this repository
+   ([Measure a branch](#measure-a-branch)). It has five jobs:
 
-   A push to `master` whose files can move the bench also reports without the hosts
-   when its tree was measured already
-   ([ADR 0074](../decisions/0074-do-not-run-the-bench-on-master-for-a-tree-its-pull-request-measured.md)):
-   the pushed commit is the merge of one pull request from a branch of this
-   repository, the pull request's head has the same tree and holds the commit
-   `master` had before the merge, no other pull request from that branch has another
-   base, and a run of the head passed `bench (linux)`, `bench (grip)` and
-   `bench (udp)` on the hosts. A landing then takes the hosts once. The `changes` job's log on `master` says `the
-   push is the merge of pull request <number>, whose head <commit> has this commit's
-   tree and whose run <run id> passed its bench jobs on the hosts`. That run holds
-   the figures of `master`'s tree: when a pull request body compares against `master`
-   and `master`'s own bench jobs printed none, read the "before" from the run that
-   line names, `gh run view <run id> --log`. A pull request that was behind `master`
-   when it merged has a tree of its own, so `master`'s run takes the hosts for it.
+   - `tree` reads the head of the branch once, so that the four jobs after it measure
+     one commit though the branch moves meanwhile. Its log names that commit.
+   - `bench (linux)` on the host `bench` and `bench (grip)` on the host `grip` each run
+     `bench/host/check.sh`, then the harness and `just bench-compare`, then
+     `just bench-unchecked` and `just bench-compare` for it (step 2).
+   - `bench (udp)` on `bench` and `bench (udp peer)` on `grip` are one pair. They
+     measure the link once both jobs before them have passed (step 5).
 
-   `python3 scripts/bench-needed.py --files <path>...`
-   prints the answer for the paths you give it. To run the bench at a commit whose
-   change it was skipped for, start the workflow by hand, which always runs it:
-   `gh workflow run ci.yml --ref <branch>`. On `master` such a run takes the waiting
-   place like a push, so start it when `gh run list --branch master --workflow ci.yml`
-   shows none waiting, or the next push takes its place.
+   Each job that measures uploads its result files as an artifact named
+   `bench-results-<profile>`: `bench-results-bench-linux` and
+   `bench-results-grip-linux`, each with its host's checked and unchecked results, and
+   `bench-results-bench-linux-link`. One run holds the hosts at a time, and a second
+   run waits for it (`concurrency` in `bench.yml`).
+
+   The run's result is no required check and no check of a pull request. A red night,
+   which is a scheduled run that failed, turns no pull request and no run of the `ci`
+   workflow red, and no change waits on it. It shows on the commit that was `master`'s
+   head when the run started.
+   [When the nightly run is red](#when-the-nightly-run-is-red) says what a red night
+   asks. A run that a person started is a report: it prints its comparisons and does
+   not fail on them ([Measure a branch](#measure-a-branch)).
+
+   `.github/workflows/ci.yml` has no bench job, and branch protection on `master`
+   requires `gates (linux)` alone. A pull request therefore waits on that job. What holds
+   invariant 2 for every pull request needs no quiet host and runs in that job: the
+   allocation tests of `just test`, the lints of `just lint`, and the harness itself.
+   The job runs `just bench --messages 5000000` on its hosted runner. Nothing compares
+   the numbers of that run, and an allocation in a measured loop fails it as it fails
+   a host's job (step 2).
+
+   A commit message and a pull request body carry no histogram and no bench table. A
+   change under a data-plane crate that adds work per message says in one sentence
+   what it adds and why. A claim that a change is faster still needs
+   `just bench-compare`'s output before and after: `CLAUDE.md` says "A performance
+   claim without a histogram is not a claim". The one other message that holds
+   numbers is that of a commit which records a baseline (step 4).
 
 4. To record a baseline for a machine, run `just bench` on it when it is idle and then
    `python3 scripts/bench-compare.py --update`, which writes the newest result's git,
@@ -294,14 +321,20 @@ shared runner is
    `git diff --stat <first> <later> -- crates/ bench/src bench/host bench/Cargo.toml
    Cargo.toml Cargo.lock justfile` prints nothing, so a dependency bump, a change to
    the recipes that build the harness or to the host check ends a tree as a code
-   change does; a run of master's job at the tree is a process of it, and so is a run
-   of a pull request whose head is at the tree. A change the bench jobs report for
-   without their hosts (step 3, "When the bench jobs run") touches none of those
-   paths, so it is at its base's tree and adds no process to it. A push gives the first run, and
+   change does. A run of the `bench` workflow at a commit of the tree is a process of
+   the tree, one for each profile the run measured: the nightly run, a run started by
+   hand for `master`, and a run for a branch whose head is at the tree. A run for a
+   branch that changes the tree's paths is at a tree of its own.
+   [Measure a branch](#measure-a-branch) says how to start a run, how many runs can
+   wait, and which commit a result file names. To take the next process at the same
+   commit, start the workflow again for a branch that has not moved. A job's re-run is
+   a process as well:
    `gh run rerun <run id> --job <job id>`, or the job's re-run button on the run's
    page, gives the next at the same commit whether the first passed or failed; for the
    link rows, whose two jobs re-run together only with the whole run, it is
-   `gh run rerun <run id>` (step 5). Download each attempt's artifact before the next
+   `gh run rerun <run id>` (step 5). A new run has artifacts of its own, one of each
+   name, and `gh run download <run id>` takes them. A re-run puts its artifact in the
+   same run, so download each attempt's artifact before the next
    re-run, `bench-results-bench-linux` from `bench (linux)` for `bench`,
    `bench-results-grip-linux` from `bench (grip)` for `grip` or
    `bench-results-bench-linux-link` from `bench (udp)` for the link. After a re-run of
@@ -335,189 +368,63 @@ shared runner is
    whether or not the run passed, so a run that failed after a change to the host is
    one to record from ([Set up a bench host](set-up-a-bench-host.md#updating-the-host)).
 
-   When a later run at the baseline's tree fails a row, it has measured a part of the
-   host's band the baseline did not hold, since nothing the gate measures changed:
+   When a later run at the baseline's tree reads a row above the baseline's slowest
+   run, it has measured a part of the host's band the baseline did not hold, since
+   nothing the gate measures changed:
    download its artifact and add the process with
    `python3 scripts/bench-compare.py --join <that profile's result file>`, which
    appends its runs to the entry and raises the slowest run where it read higher, in a
    commit whose message names the run and the row. A run at another tree never joins:
-   a pull request that changes the tree's paths is judged, and a red there is a
-   change. Nor does a run whose row moved as a whole: when the row's p50 and p99 moved
+   a row that it reads above the baseline is a change's, and
+   [When the nightly run is red](#when-the-nightly-run-is-red) says what a red row
+   asks there. Nor does a run whose row moved as a whole: when the row's p50 and p99
+   moved
    with its p99.99 and its rate fell against the other processes at the tree, the
    host was disturbed during the run (the troubleshooting list below); re-run the job,
    or for a link row the whole run (step 5), and name the disturbance where the host's
-   journal shows it.
+   journal shows it. The two hosts' entries were recorded on 2026-11-15 at the tree of
+   6e4cc7b, and `master` has left that tree, so no nightly run joins them.
 
-   A baseline is re-recorded at a new tree when master's own run fails or brushes the
-   gate there with no data-plane change behind it, from the tree's first three
-   processes and every one after them; the commit lists every gated row's slowest run
-   before and after and names the cause of every row that loosens by more than 5
-   percent, or the work item that will find it. It is re-recorded at a new tree as well
-   after a change to the harness under `bench/`, with no data-plane crate changed,
-   when that change's Accepted ADR asks for it in its Consequences, as
-   [ADR 0090](../decisions/0090-keep-a-subscribers-samples-out-of-the-histogram-until-its-loop-is-over.md)
-   did: from every process each host has run at the change's tree, three at least, in
-   a change of its own, with the same commit message and the harness change named in
-   it ([ADR 0110](../decisions/0110-let-a-persons-session-re-record-a-bench-baseline-after-telling-the-person.md)).
-   It is re-recorded at master's tree as well
-   when pull requests at that tree read red while master's own runs there pass,
-   against an entry recorded at an older tree, and no commit on the guard's paths,
-   item 4 below, lies between the entry's tree and master's
-   ([ADR 0050](../decisions/0050-re-record-at-a-tree-where-pull-requests-read-red.md)).
-   Four rules decide which reds count:
+   Until the gate is armed again, a change in the repository re-records a bench host's
+   baseline in one case
+   ([ADR 0139](../decisions/0139-run-the-latency-gate-each-night-as-a-coarse-check.md),
+   Decision 5). Two nightly runs in a row were red on one row, and the change that
+   added the cost added it on purpose and has its ADR
+   ([When the nightly run is red](#when-the-nightly-run-is-red)). Each profile in which
+   the row was red is then re-recorded once, at the tree `master` is at, from every
+   process the host has run at that tree, three at least. The commit lists every gated
+   row's slowest run before and after and names the cause of every row that loosens by
+   more than 5 percent, or the work item that will find it. Three runs for `master`
+   hold the hosts for 48 minutes or more. A commit on the tree's paths that lands on
+   `master` meanwhile ends the tree, so agree the time with the sessions that land
+   changes.
 
-   - A pull request at master's tree is one that changes none of the tree's paths. A
-     red at a pull request's own tree is a change and does not count.
-   - A disturbed run, whose row moved as a whole, does not count. Re-run it as above,
-     and record it in no entry.
-   - Count the reds on one row of one profile. A red on another row, or in the host's
-     other profile, starts a count of its own.
-   - A red counts once master has a passing run at the tree. A red read before
-     master's own run there waits for it: a master run that fails or brushes the gate
-     is ADR 0033's own case, above, and the red counts nothing; a passing one makes
-     the red count from then. Record it at once all the same; a record the other case
-     overtakes stays where it is.
+   The cases that re-recorded a baseline until ADR 0139 are gone: `master`'s own run
+   failing or brushing the gate at a new tree, a red on a pull request at `master`'s
+   tree
+   ([ADR 0050](../decisions/0050-re-record-at-a-tree-where-pull-requests-read-red.md)),
+   and a change to the harness whose ADR asked for a re-record. The baselines no
+   longer follow the tree: the nightly run compares `master` with the entries as they
+   stand. What follows a change to a host itself, an update of its packages or its
+   kernel or a change under `bench/host/`, is in
+   [Set up a bench host](set-up-a-bench-host.md#updating-the-host).
 
-   Record each red that counts before you do anything else about it: the first before
-   its re-run, the second before the re-record or the work item. The second red can come
-   days later, on another pull request and in another session, and the re-record
-   needs the first red's process. After a re-run, each attempt's artifact is under the
-   same name and is taken by its id, and the artifact expires after seven days. So the
-   record is a
-   comment on the pull request that carries the attempt's result files. A file
-   downloaded into a CI workspace, where the writer and the fixer run, is gone when
-   the job ends.
-
-   1. **Download.** Download the red attempt's artifact by its id into a new directory,
-      with the three commands above.
-   2. **Find the tree.** The result's `git` is the run's merge of the pull request
-      with master, and its first parent is master's commit. The tree's first commit is
-      the newest commit in that commit's history that changed the tree's paths. For
-      pull request 111's red:
-
-      ```sh
-      # ignore: needs gh signed in and master fetched; the commit is the red result's `git`
-      gh api repos/appshapes/cavalry/commits/ab9cf24b84c159f37e5cccae506aeede7a5175ee --jq '.parents[0].sha'
-      git log -1 --format='%H %cI' 72486215fbb884cedfd5866839ed93e49d1dedef -- crates/ bench/src bench/host bench/Cargo.toml Cargo.toml Cargo.lock justfile
-      ```
-
-      The first command prints master's commit,
-      `72486215fbb884cedfd5866839ed93e49d1dedef`. The second, given that commit,
-      prints the tree's first commit and its date,
-      `72486215fbb884cedfd5866839ed93e49d1dedef 2026-11-04T14:53:53Z`.
-   3. **Look for an earlier red** on the same row of the same profile at the tree,
-      with the date and the commit that **Find the tree** printed:
-
-      ```sh
-      # ignore: needs gh signed in; the date, profile, row and commit are the red's
-      gh api --method GET --paginate repos/appshapes/cavalry/issues/comments -f since=2026-11-04T14:53:53Z -f per_page=100 --jq '.[] | select(.body | startswith("ADR 0050 red: grip-linux-unchecked claim_commit_32_client at the tree of 72486215fbb884cedfd5866839ed93e49d1dedef")) | .html_url'
-      ```
-
-      It reads every comment on the repository's issues and pull requests since the
-      tree began, and prints the address of each record of a red on that row there.
-      If it prints nothing, your red is the first. If it prints one address, your red
-      is the second. If it prints two or more, your red is a later one: record it as
-      a second red, linking the record before it, and do not re-run it. Its pull
-      request waits on the re-record or the work item the second red already has; nothing
-      is re-recorded twice, and no second work item is opened.
-   4. **List the changes**, at a second red only: the changes behind the band. These
-      are the commits on master after the entry's tree, up to master's commit from
-      **Find the tree**, on the tree's paths except `crates/cavalry-control` and
-      `crates/cavalry`, the two crates CLAUDE.md does not mark data plane. The list
-      keeps, on purpose, the data-plane crates the harness does not build yet,
-      `crates/cavalry-ffi` and `crates/cavalry-raft`, and test files, which it never
-      compiles: the guard errs toward a work item. Start the range at
-      one of the entry's `git` commits that is on master (`git merge-base
-      --is-ancestor <commit> origin/master` exits 0 for one), or, for a pull request's
-      merge commit, at its first parent, read as in **Find the tree**. For a second
-      red at 7248621's tree, against the entry of 2026-10-31,
-      whose commits are 0782ec5, on master, and 11be900, a pull request's merge commit
-      whose first parent is 0782ec5:
-
-      ```sh
-      # ignore: needs master fetched; the range runs from the entry's commit to master's commit
-      git log --oneline 0782ec5c7f44465a38c65d7cf31eae9b45611268..72486215fbb884cedfd5866839ed93e49d1dedef -- crates/ bench/src bench/host bench/Cargo.toml Cargo.toml Cargo.lock justfile ':!crates/cavalry-control' ':!crates/cavalry'
-      ```
-
-      It prints eighteen commits, from b6fc3ed back to e5943f9, with pull request
-      102's 06e3ccc among them.
-   5. **Post the record.** Write the record to a file and post it with `gh pr comment
-      <number> --body-file <file>`, as a comment of its own, so that the key is its
-      first line. An agent's session writes the file with its file tools. Pull
-      request 111's red would have read:
-
-      ````text
-      ADR 0050 red: grip-linux-unchecked claim_commit_32_client at the tree of 72486215fbb884cedfd5866839ed93e49d1dedef
-
-      First red. Run 41853288029, attempt 1, job 126655372604, pull request 111 at 1545bab, git ab9cf24.
-      p99.99 127 ns (runs 119 to 134) against the entry's 119 ns, +6.7%. p50 21 ns, 14,589,196 claims a second.
-
-      ~~~json grip-linux-<time>.json
-      <the attempt's grip-linux result file, whole>
-      ~~~
-
-      ~~~json grip-linux-unchecked-<time>.json
-      <the attempt's grip-linux-unchecked result file, whole>
-      ~~~
-      ````
-
-      The key is `ADR 0050 red:`, the profile, the row, and `at the tree of` with the
-      full hash of the tree's first commit. Each result file goes in a `~~~json` fence
-      that names the file. A `grip` result file is about 5 KB, and a comment holds
-      65,536 characters. A second red's record says `Second red.`, links the first's,
-      and carries what **List the changes** printed; a later red's says `Third red.`,
-      and so on, and links the record before it.
-
-   After a first red, a person's session re-runs the job, or for a link row the whole
-   run (step 5); an agent's session cannot,
-   as below. After a second red or a later one, nobody re-runs. What a second red does
-   depends on what **List the changes** printed:
-
-   - **Nothing.** The second red re-records that profile's entry at the tree from
-     every process at it whose artifact is still kept and from every red's record,
-     so that the red runs are among them, in the form above, in a commit that names
-     the reds by run, attempt and row.
-   - **One commit or more.** The second red re-records nothing. The band may have
-     risen with those changes rather than with the host, and one process at each
-     change's own tree could not tell the two apart. A person's session opens a work item
-     that names the two reds and the commits on the row's path. The pull request
-     waits until the work item's answer is on master. The answer is either a fix, which
-     begins a new tree, or a re-record, made as below, whose message says why each row
-     loosened, by any amount, as `REGRESSION` on a p99.99 under
-     [When it does not work](#when-it-does-not-work) says.
-
-   A re-record takes each red's result files from its record, one file at a time,
-   with the comment's id (the number after `issuecomment-` in its address) and the
-   file's name from its fence:
-
-   ```sh
-   # ignore: needs gh signed in; the comment id and the file name are the record's
-   gh api repos/appshapes/cavalry/issues/comments/<comment id> --jq '.body | gsub("\r"; "") | split("\n~~~json grip-linux-unchecked-<time>.json\n")[1] | split("\n~~~")[0]' > grip-linux-unchecked-<time>.json
-   ```
-
-   The re-record, in any of the three cases above, is made by a person or by a person's
-   session, a Claude Code session that works a work item for that person, on a branch of its
-   own through the review loop.
-   A session tells the person before it starts, which case this is, at which tree and
-   how long it holds the hosts, and does not wait for an answer
+   The re-record is made by a person or by a person's session, a Claude Code session
+   that works a work item for that person, on a branch of its own through the review
+   loop. A session tells the repository's owner before it starts: the row, the change
+   and its ADR, the tree, and how long it holds the hosts. It does not wait for an
+   answer
    ([ADR 0110](../decisions/0110-let-a-persons-session-re-record-a-bench-baseline-after-telling-the-person.md)).
-   The re-run of a first red is theirs as well: an agent's job can read runs and
-   start none. The agent's session that
-   holds a red is the fixer, when the reviewer blocked on a red bench job at the head
-   before it; the writer's session ends before its pull request's first run. The
-   fixer records the red as above, re-runs nothing, changes no `bench/baseline.json`
-   and opens no work item, and its run ends with no push, which fails as
-   `.claude/agents/developer.md` designs it. A person's session then re-runs the job
-   after a first red, and after a second makes the re-record or opens the work item. The
-   pull request that holds the second red waits, and its job is not re-run: its next
-   run is the one that a merge of master into the branch starts once the re-record or
-   the work item's answer is on master, judged against the entry master then holds.
-   A re-record outside the three cases is the owner's to rule, on a work item tagged
+   The writer and the fixer of the agent's review loop
+   ([Ask the agent to make a change](ask-the-agent.md)) change no
+   `bench/baseline.json`: their runs are denied the write.
+   A re-record in any other case is the owner's to rule, on a work item tagged
    `decision`.
    [ADR 0125](../decisions/0125-re-record-grips-checked-profile-at-pull-request-280s-tree-on-the-owners-ruling-and-again-when-work-item-316-reports.md)
-   is one: a red that held at a pull request's own tree, re-recorded in that pull
-   request from eight processes at its head, with the work item that will find the
-   cause named as the condition for recording the profile again.
+   is one from before ADR 0139: a red that held at a pull request's own tree,
+   re-recorded in that pull request from eight processes at its head, with the work
+   item that will find the cause named as the condition for recording the profile
+   again.
 
    A new row joins a baseline that already exists by adding its entry from the tree's
    processes that have it and leaving the other rows as they were recorded, in a
@@ -530,10 +437,12 @@ shared runner is
    larger of the row's and the new process's, `p99_99_ns` the slowest run of both,
    still with no list, so the gate goes on comparing with `p99_99_ns`.
 
-5. Measure the link between the two bench hosts, which the `bench (udp)` job does for
-   every push whose change can move the bench (step 3) with its peer job
+5. Measure the link between the two bench hosts, which the `bench (udp)` job does in
+   every run of the `bench` workflow (step 3) with its peer job
    `bench (udp peer)`
-   ([ADR 0044](../decisions/0044-gate-udp-on-the-two-bench-hosts.md)). On `grip`, the
+   ([ADR 0044](../decisions/0044-gate-udp-on-the-two-bench-hosts.md)). To measure it
+   by hand, first see that no job of the workflow holds either host or waits for one
+   (Prerequisites). On `grip`, the
    peer, in one terminal:
 
    ```sh
@@ -554,7 +463,8 @@ shared runner is
    Each side subscribes on its own end and publishes to the other's, and waits up to
    ten minutes for the other to connect, so the order does not matter.
 
-   In CI each job first runs `scripts/wait-for-partner-job.sh`, which waits until the
+   In the workflow each job of the pair first runs `scripts/wait-for-partner-job.sh`,
+   which waits until the
    run's other job is in progress, reading the run's jobs every 20 s for up to 45
    minutes. Each host's runner takes jobs from its own queue, so without the wait the
    two ends of one run started minutes apart: the harness's ten minutes ended one of
@@ -567,13 +477,21 @@ shared runner is
    created, which is an attempt that re-ran this end alone; the partner did not start
    within the 45 minutes; the partner is not one of the run's jobs after a minute, which
    is a wrong name; an API that refuses the job's token or goes unanswered three times
-   in a row. Each waiting job holds its host, so two runs' pairs can hold one host each
-   and wait on each other. While the partner is queued, the wait looks every three
+   in a row. Each waiting job holds its host. When pushes and pull requests started
+   pairs, two runs' pairs could hold one host each and wait on each other. So while
+   the partner
+   is queued, the wait looks every three
    minutes at the job that holds the partner's host, and prints it. When that job is
    the end of another run's pair whose own partner is queued behind this job, the end
-   in the newer run fails at once and names the older run, whose pair then meets.
+   in the newer run fails at once and names the older run, whose pair then meets. One
+   run of the `bench` workflow holds the hosts at a time (step 3), so today no other
+   run's pair is there to meet, and the look stays as a guard.
    `scripts/wait-for-partner-job.py` lists the runs that showed each hazard (card 212).
 
+   A red nightly run needs no re-run
+   ([When the nightly run is red](#when-the-nightly-run-is-red)). Re-run a pair when
+   you need its measurement, for a branch's number or for a baseline's process, or
+   start a new run for the branch instead ([Measure a branch](#measure-a-branch)).
    To re-run the pair, re-run both of its jobs in one attempt. GitHub re-runs one job
    (`gh run rerun <run id> --job <job id>`, or the job's re-run button), the failed
    jobs (`gh run rerun <run id> --failed`, or "Re-run failed jobs") or the whole run
@@ -597,9 +515,14 @@ shared runner is
      says, `bench-results-bench-linux-link` from `bench (udp)` among them. Then run
      `gh run rerun <run id>`.
 
-   So the link baseline's next process at a tree (step 4) is a whole run, and each such
-   attempt is one process of `bench-linux-link` and one each of `bench-linux` and
-   `grip-linux`.
+   A re-run of the whole run runs `tree` again, and `tree` reads the head of the
+   branch as it stands then: for `master` that is a later commit once a change has
+   landed. A re-run of some jobs keeps the outputs of the jobs it does not re-run, so
+   it measures the commit that the first attempt's `tree` found.
+
+   So the link baseline's next process at a tree (step 4) is a whole run, a new one or
+   a re-run of every job, and each is one process of `bench-linux-link` and one each of
+   `bench-linux` and `grip-linux`.
 
    The peer prints
    `the stream from <address> is connected, echoing`, then, when `bench`'s run ends the
@@ -642,6 +565,9 @@ shared runner is
   expected.
 - The table's last line reads `allocations per message: 0`.
 - `just bench-compare` ends with `bench-compare: ok`.
+- For a run on the hosts ([Measure a branch](#measure-a-branch)): `gh run view <run id>`
+  lists the five jobs as passed, and every `just bench-compare` step in the log ends
+  with `bench-compare: ok`.
 - On a Linux host, every Cavalry mapping is resident and no measured thread took a
   page fault in one. While a benchmark runs, every mapping under its directory,
   `/dev/shm/cavalry-bench-<pid>-<benchmark>`, has `Rss` equal to `Size` in the
@@ -684,7 +610,207 @@ shared runner is
   grep page_fault_user $T/trace > faults.txt
   ```
 
+## Measure a branch
+
+The `bench` workflow measures a branch of this repository on the two bench hosts, on
+demand. Use it when the decision of a change needs a number: the number goes into the
+ADR of that change. Use it as well for the search in
+[When the nightly run is red](#when-the-nightly-run-is-red). No pull request needs it,
+since no change waits on a bench host (step 3 of [Steps](#steps)).
+
+1. Push the branch to this repository. Then look at the workflow's runs:
+
+   ```sh
+   # ignore: needs gh signed in
+   gh run list --workflow bench.yml --limit 5
+   ```
+
+   One run holds the hosts at a time. One more run can wait for it, and the list shows
+   that run as `pending`. A run that is started while another waits takes its place,
+   and GitHub cancels the run that waited. So start yours when the list shows no run
+   waiting. The nightly run starts at 07:17 UTC.
+
+2. Start the workflow with the name of the branch:
+
+   ```sh
+   # ignore: needs gh signed in with write access; the name is the branch's
+   gh workflow run bench.yml -f branch=<name>
+   ```
+
+   The workflow file is the one on `master`, and the hosts check out the branch that
+   you name. With no `-f`, the branch is `master`. The list of the step before now
+   shows the run and its id, with the event `workflow_dispatch`.
+
+3. Watch the run until it ends:
+
+   ```sh
+   # ignore: needs gh signed in; the run id is from the list
+   gh run watch <run id> --exit-status
+   ```
+
+   It shows the workflow's five jobs (Steps, step 3). A run that a person started
+   does not fail on a comparison, so its status says that the hosts measured, not that
+   the rows held: read the tables (step 4). The first job, `tree`, prints
+   `bench: measuring <name> at <commit>`. That commit is the head of the branch at
+   that moment, and every later job checks it out. A push to the branch after that
+   line is not measured. A run whose jobs all
+   pass holds the hosts for 16 minutes at the least: 11.3 minutes of `bench (linux)`
+   beside 5.2 minutes of `bench (grip)`, then 4.9 minutes of the pair (ADR 0073's
+   figures of 2026-11-11).
+
+4. Read `bench-compare`'s tables in the log, once the run has ended:
+
+   ```sh
+   # ignore: needs gh signed in; the run id is from the list
+   gh run view <run id> --log
+   ```
+
+   Each `just bench-compare` step of a job prints one table (Steps, step 3).
+   `bench (linux)` prints two, for the profiles `bench-linux` and
+   `bench-linux-unchecked`. `bench (grip)` prints two, for `grip-linux` and
+   `grip-linux-unchecked`. `bench (udp)` prints one, for `bench-linux-link`. The line
+   above a table names its profile, as in
+   `bench-compare: bench-linux, 5000000 messages, git <commit>, clock step 10 ns`, and
+   the table ends with `bench-compare: ok` or with its findings. The hosts check out
+   the commit whole, so its own harness, its own `bench/baseline.json` and its own
+   `scripts/bench-compare.py` judge it: a branch cut before ADR 0139 compares at 5
+   percent.
+
+   The commit measured is the one in the `tree` job's line, and the `git` in the line
+   above a table, and in a result file, is that commit: the workflow names it to the
+   harness in `CAVALRY_BENCH_GIT`. A branch cut before ADR 0139 has a harness that does
+   not read that name, and its result names `master`'s head instead: trust the `tree`
+   job's line.
+
+5. Download the result files:
+
+   ```sh
+   # ignore: needs gh signed in; the directory is a new one
+   gh run download <run id> --dir <a new directory>
+   ```
+
+   It writes one directory for each artifact, `bench-results-bench-linux`,
+   `bench-results-grip-linux` and `bench-results-bench-linux-link`, with the result
+   files that the harness wrote in each (Steps, step 1). An artifact expires seven days
+   after its run began.
+
+6. Put the numbers into the ADR of the change that needed them, in its Evidence: each
+   row with its p50, p99, p99.99 and max in nanoseconds, the profile, the commit
+   measured and the id of the run.
+
+The input of the workflow is the name of a branch of this repository and nothing else.
+The `tree` job looks the name up among the branches here. When there is none, the job
+fails with `bench: this repository has no branch named '<name>'`, and no host starts.
+So the workflow refuses a pull request's ref, such as `refs/pull/123/head`, a tag and a
+commit id. The hosts are self-hosted runners on a public repository, and such a runner
+must not run a stranger's code. A pull request's ref or a commit id can name the code
+of a fork, and a stranger can make no branch here.
+
+To measure a commit that has no branch, push a branch at it, measure the branch, and
+delete the branch when the run has ended:
+
+```sh
+# ignore: needs gh signed in with write access; the commit is in your clone, and no branch has the name yet
+git push origin <sha>:refs/heads/<name>
+gh workflow run bench.yml -f branch=<name>
+# when the run has ended:
+git push origin --delete <name>
+```
+
+## When the nightly run is red
+
+The nightly run is no required check and no check of a pull request, so no pull
+request shows its result. List the last nightly runs, the newest first:
+
+```sh
+# ignore: needs gh signed in
+gh run list --workflow bench.yml --event schedule --limit 3
+```
+
+The `/next-task` skill reads the same three lines before it names a task. `--event
+schedule` lists the nightly runs alone: a run that a person started has the event
+`workflow_dispatch`, is a report, and counts as no night. For a run that failed, read the failed steps:
+
+```sh
+# ignore: needs gh signed in; the run id is the failed run's
+gh run view <run id> --log-failed
+```
+
+A failed `just bench-compare` step holds its table, and a gated row that failed reads
+`REGRESSION` in the last column of the table (step 3 of [Steps](#steps)). What a red
+night asks depends on what failed, and on the night before:
+
+- **One red night asks nothing.** Read the log and continue with your work. Start no
+  re-run, open no work item and change no baseline. The next night measures `master`
+  again.
+- **Two nights in a row that are red on the same row are a task ahead of the
+  features.** `REGRESSION` is on that row in `bench-compare`'s lines of both runs.
+  `/next-task` then names the task before the next feature. It becomes one work item
+  on the Brigade Board ([Implement a feature](implement-a-feature.md), Prerequisites),
+  with the row in its title. Two red nights on two different rows are two single
+  nights.
+- **A job that failed at `bench/host/check.sh` is the host's tuning, not a row.** The
+  host lost a setting, and the job stopped before it measured.
+  [Set up a bench host](set-up-a-bench-host.md#when-it-does-not-work) has each
+  finding.
+- **Any other failure** has its message in Steps, step 5, for the wait of the pair, or
+  under [When it does not work](#when-it-does-not-work).
+
+The task finds the change and removes its cost:
+
+1. Find the commit of the last green night and the commit of the first red night. A
+   green run is one that passed. List the nightly runs alone, and read the `tree` job
+   of each of the two runs:
+
+   ```sh
+   # ignore: needs gh signed in; run the second command once for each of the two run ids
+   gh run list --workflow bench.yml --event schedule --limit 10
+   gh run view <run id> --log | grep -E 'bench: measuring master at [0-9a-f]{40}'
+   ```
+
+   The second command prints the line that holds the commit which the run measured.
+
+2. List the commits between the two that can move the bench. They are the commits on
+   the paths that make a tree (Steps, step 4):
+
+   ```sh
+   # ignore: needs master fetched; the two commits are the ones that the step before printed
+   git log --oneline <green commit>..<red commit> -- crates/ bench/src bench/host bench/Cargo.toml Cargo.toml Cargo.lock justfile
+   ```
+
+   The change is among the commits that it prints, the newest first. If it prints
+   nothing, no commit between the two nights can have moved the row. The cause is then
+   the host or the compiler, since the jobs install the current `stable` toolchain;
+   the `REGRESSION` entries under [When it does not work](#when-it-does-not-work) say
+   how to read a host that was disturbed.
+
+3. Measure chosen commits, each as [Measure a branch](#measure-a-branch) says for a
+   commit that has no branch. Start with the commit in the middle of the list. When
+   the row reads there as it read on the green night, the change is among the newer
+   commits. When it reads as it read on the red night, the change is that commit or an
+   older one. Halve the list in this way until one commit is left: seven commits take
+   three runs, and each run holds the hosts for 16 minutes at the least. Delete each
+   branch when its run has ended.
+
+4. Remove the cost. Change the code so that the row reads as it did, and land the
+   change as any change lands ([Implement a feature](implement-a-feature.md)). The
+   nightly run after the landing shows the row with no `REGRESSION`.
+
+When the change added the cost on purpose, and the change has its ADR, the cost stays
+and the baseline is raised to hold it. That is the one case left in which a change
+re-records a baseline
+([ADR 0139](../decisions/0139-run-the-latency-gate-each-night-as-a-coarse-check.md),
+Decision 5): each profile in which the row was red, once, by a person or by a person's
+session after it has told the owner of the repository
+([ADR 0110](../decisions/0110-let-a-persons-session-re-record-a-bench-baseline-after-telling-the-person.md)).
+Steps, step 4, has the way to record it, from every process that the host has run at
+the tree, three at least
+([ADR 0033](../decisions/0033-record-a-bench-baseline-from-every-process-at-one-tree.md)).
+No other red row re-records a baseline, and no red row holds a pull request.
+
 ## When it does not work
+
+A step number in this list is a step of [Steps](#steps).
 
 - `allocations per message` is not 0: a measured loop allocated. The gate has done its
   job; the `allocations by benchmark` line above it names the benchmark whose run
@@ -790,11 +916,15 @@ shared runner is
   leaves a quarter of the publication window at the most, which is under 64 only
   when `--term-length` and `--body` put fewer than 256 frames in half a term. Run the
   default term.
-- `within a step` beside a gated row: the row is over 5 percent above the baseline's
-  slowest run but by no more than one step of the clock, which on `bench` is
-  10 ns of a 160 ns row; the gate cannot tell that from an unchanged commit and passes
+- `within a step` beside a gated row: the row is over 50 percent above the baseline's
+  slowest run but by no more than one step of the clock; the gate cannot tell that
+  from an unchanged commit and passes
   it ([ADR 0029](../decisions/0029-fail-a-gated-row-only-beyond-one-clock-step.md)).
-  Two steps fail. On `kip` the step is 1 ns, so the line never appears there.
+  At 50 percent the line takes a row whose baseline is under two steps: under 82 ns
+  on a laptop whose step is 41 ns, and no gated row on the two hosts, where the step
+  of `bench` is 10 ns and no gated row's baseline is under 160 ns. At 5 percent it was
+  10 ns of a 160 ns row on `bench`, and two steps failed. On `kip` the step is 1 ns,
+  so the line never appears there.
 - `clock step 41 ns (41 ticks)` or another step of tens of nanoseconds on a laptop:
   the machine's counter moves less often than the harness reads it, and the step is
   the jump it makes when it moves, not a divisor of its readings
@@ -802,7 +932,7 @@ shared runner is
   percentiles there resolve to that step, and a row's move below it is not a move. Such
   a machine is a report, not a gate; it has no baseline unless you record one.
 - `clock step unknown` in `bench-compare`'s first line: the result was written by a
-  harness from before the step was measured, so the 5 percent rule alone applies,
+  harness from before the step was measured, so the 50 percent rule alone applies,
   whatever step the baseline carries; the failure line says so in place of a step, and
   `--update` writes no step from it. Run `just bench` again; every result the harness
   writes now carries the step.
@@ -811,10 +941,12 @@ shared runner is
   the floor, so a harness that over-reads its step gains nothing. If the host's clock
   changed, re-record the baseline (step 4 above); if the harness's measurement changed,
   that change is the one to look at.
-- `REGRESSION` on a p99.99: measure again on an idle machine before you believe either
-  number; if it holds, the change under a data-plane crate is slower at the tail and
-  does not merge until it is not, or the baseline is raised in a commit whose message
-  says why. Both histograms go in the commit message either way. On a bench host a
+- `REGRESSION` on a p99.99: the row is more than 50 percent, and more than one clock
+  step, above the slowest run that its baseline holds. Measure again on an idle
+  machine before you believe either number. A red row holds no pull request and raises
+  no baseline. When the nightly run reads it,
+  [When the nightly run is red](#when-the-nightly-run-is-red) says what one red night
+  asks and what two ask. On a bench host a
   row's p99.99 moves between processes of one tree with no change behind it. On `kip`
   the concurrent and client claim rows' medians move by a tenth and the exclusive
   row's by half, 102 to 148 ns over the eight processes at the tree of 4a09b6e (card
@@ -822,7 +954,10 @@ shared runner is
   processes at the same tree the checked `one_way_32_exclusive` row read 210 to 230
   with its p50 at 140 in every one, and the unchecked `claim_commit_32_exclusive` row
   read 120 to 150. So a `REGRESSION` on a bench host is one of four things. On a
-  changed tree it is a change. On the baseline's tree, with the row's p50 and its rate
+  changed tree it is a change, which at 50 percent is the usual case: the reds that
+  were recorded with no change behind them reached a fifth
+  ([ADR 0139](../decisions/0139-run-the-latency-gate-each-night-as-a-coarse-check.md)).
+  On the baseline's tree, with the row's p50 and its rate
   where the other processes read them, it is a part of the host's band the baseline
   did not hold, and the process joins the baseline with step 4's `--join` on either
   host. A row whose p50 and p99 moved with its p99.99 is the next
@@ -834,11 +969,15 @@ shared runner is
   on `bench` on 2026-10-30 the unchecked `claim_commit_32_concurrent` row read p50 90,
   p99 120 and p99.99 170 at 8.17 million claims a second in one process, where the
   six other processes of the same tree read 80, 90 to 100 and 150 at 9.35 to 9.45
-  million, and the next run read 80, 100 and 150 again. Re-run the job with
+  million, and the next run read 80, 100 and 150 again. A change that adds work per
+  message moves the whole row as well, so a second process at the same commit
+  decides. When the row reads there as it read before the red run, the host was
+  disturbed. When it reads high again, the change moved it. Re-run the job with
   `gh run rerun <run id> --job <job id>`, or for a link row the whole run with
   `gh run rerun <run id>` (step 5), read the host's journal for the bench's
-  window (`journalctl --since <start> --until <end>` on the host) and name what it
-  shows in the re-run's record; such a process joins no baseline
+  window (`journalctl --since <start> --until <end>` on the host) and, when the red
+  belongs to a task, name what the journal shows on the task's work item; such a
+  process joins no baseline
   ([ADR 0033](../decisions/0033-record-a-bench-baseline-from-every-process-at-one-tree.md)).
 - `REGRESSION` after a change to `bench/` only, with no data-plane crate changed: the
   tail moved with the harness, not with the log. What a spinning harness thread does on
@@ -847,10 +986,11 @@ shared runner is
   measured, while the `_client` rows, whose driver reads its clock once per duty cycle,
   did not move. Before believing one run, run the same binary in several
   processes on the host and compare their medians, since one process lands in one mode
-  ([ADR 0016](../decisions/0016-run-the-latency-gate-on-a-dedicated-host.md)). Step 4
-  says whether the baseline is re-recorded from that run and who makes the re-record,
-  a person or a person's session; its commit's message names the harness change and
-  carries both histograms. A change to the
+  ([ADR 0016](../decisions/0016-run-the-latency-gate-on-a-dedicated-host.md)). A
+  change to the harness re-records no baseline for that reason alone. Until ADR 0139
+  it did, when its own ADR asked for the re-record. Step 4 has the one case that is
+  left, and says who makes the re-record, a person or a person's session. A change to
+  the
   harness's code can also move the raw rows through the compiler alone: 60 ns at p99.99
   and 20 ns at p50 on the `one_way` rows, blamed on a 16 KiB heap allocation at startup,
   was `TermReader::poll` compiled out of line in one binary and inlined into the
@@ -860,6 +1000,16 @@ shared runner is
   the host: `nm -C target/release/cavalry-bench | grep 'TermReader>::poll'` prints the
   symbol only when it is out of line, and the publisher's `try_claim` and `commit` are
   out of line in every build.
+- `bench: this repository has no branch named '<name>'` in the `tree` job: the input of
+  the run was not the name of a branch that is pushed to this repository. Push the
+  branch, or push one at the commit, and start the workflow again
+  ([Measure a branch](#measure-a-branch)).
+- A run of the `bench` workflow reads `cancelled` and lists no job: another run was
+  started while yours waited, and it took the waiting place. Nothing failed. Start
+  yours again when `gh run list --workflow bench.yml` shows no run waiting.
+- `bench (udp)` and `bench (udp peer)` read `skipped`: one of `bench (linux)` and
+  `bench (grip)` failed, and the pair runs only once both have passed. Read the job
+  that failed.
 - A fault in `faults.txt` whose address lies in a Cavalry mapping, or a mapping whose
   `Rss` is below its `Size`: a mapping was not pre-touched, which is a bug in
   `cavalry-shm`, where every `create` and `open` pre-touches before it hands the
@@ -980,7 +1130,7 @@ shared runner is
   running left`, before the table: not a failure. Each row keeps its files in
   `/dev/shm/cavalry-bench-<pid>-<benchmark>`, with a `.log` and a `.probe` directory
   beside it for some rows, and removes them when it ends, passed or failed. A process
-  that is killed first, a CI job cancelled by a newer push or stopped at its timeout,
+  that is killed first, a CI job that was cancelled or stopped at its timeout,
   or a run stopped with Ctrl-C, leaves them, and on `/dev/shm` they are memory. So
   every run begins by removing its own user's entries whose process no longer runs.
   An entry of a running process is never removed, so two runs on one host do not
