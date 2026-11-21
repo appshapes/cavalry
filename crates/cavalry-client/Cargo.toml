@@ -37,7 +37,7 @@ stats_alloc = "0.1"
 # the host gave, which `std::net::UdpSocket` cannot: it has no NAK, so what the sender
 # puts on the wire before the test reads it must fit the buffer (ADR 0041). The version
 # and features the driver already takes, so nothing new enters the lock. Dev only.
-nix = { version = "0.31", default-features = false, features = ["socket"] }
+nix = { version = "0.32", default-features = false, features = ["socket"] }
 
 # What the allocation tests count, held as a program with no test harness: a counting
 # region sees every thread of its process, and the harness's own thread allocates while
