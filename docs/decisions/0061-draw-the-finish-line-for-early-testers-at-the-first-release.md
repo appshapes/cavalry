@@ -1,6 +1,6 @@
 # 0061. Draw the finish line for early testers at the first release, after the fifth slice
 
-- **Status:** Accepted
+- **Status:** Superseded by 0138
 - **Date:** 2026-11-09
 - **Invariants affected:** 1, 2, 3, 4, 5, 6
 - **Supersedes:** none; ADR 0052's Revisit names two candidates for the sixth slice,

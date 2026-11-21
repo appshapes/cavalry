@@ -12,7 +12,7 @@ under `docs/` is listed here; `just lint-docs` fails on one that is not.
 
 - [Why Cavalry, and why not Aeron](explanation/why-cavalry.md)
 - [Should ZigBolt's design inform Cavalry's?](explanation/should-zigbolt-inform-cavalry.md)
-- [Where is Cavalry, and what is left before early testers?](explanation/where-cavalry-is-and-what-is-left.md)
+- [Where is Cavalry, and what is left before the beta?](explanation/where-cavalry-is-and-what-is-left.md)
 
 # How-to
 
@@ -188,3 +188,4 @@ under `docs/` is listed here; `just lint-docs` fails on one that is not.
 - [0135. Answer no log yet where a member's live recording has not reached the position](decisions/0135-answer-no-log-yet-where-a-members-live-recording-has-not-reached-the-position.md)
 - [0136. Run the versions of one major as one cluster, and upgrade from the last tree of the version before](decisions/0136-run-the-versions-of-one-major-as-one-cluster-and-upgrade-from-the-last-tree-of-the-version-before.md)
 - [0137. Hold a member's version of the cluster protocol in a counter, and no peer's](decisions/0137-hold-a-members-version-of-the-cluster-protocol-in-a-counter-and-no-peers.md)
+- [0138. Draw the finish line at a beta that is an alternative to Aeron, and build it sixth in twelve features](decisions/0138-draw-the-finish-line-at-a-beta-that-is-an-alternative-to-aeron-and-build-it-sixth.md)

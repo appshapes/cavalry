@@ -1,43 +1,50 @@
-# Where is Cavalry, and what is left before early testers?
+# Where is Cavalry, and what is left before the beta?
 
 This page answers one question: where is Cavalry now, measured from where it started,
-and what work is left before a person outside AppShapes can be handed it. It was
-written for AppShapes Trello card 234 on 2026-11-09, against `master` at commit
-d5909f3. Every state on this page is the state at that commit. The line itself is
-decided in
-[ADR 0061](../decisions/0061-draw-the-finish-line-for-early-testers-at-the-first-release.md);
+and what work is left before a team can use it in place of Aeron. It was read again
+for work item 360 on 2026-11-21, against `master` at commit 20741de3. Every state on
+this page is the state at that commit. The line itself is decided in
+[ADR 0138](../decisions/0138-draw-the-finish-line-at-a-beta-that-is-an-alternative-to-aeron-and-build-it-sixth.md);
 this page is the reading of the repository behind that decision, and the order of the
-work that reaches the line.
+work that reaches the line. The page was first written on 2026-11-09 for the line of
+[ADR 0061](../decisions/0061-draw-the-finish-line-for-early-testers-at-the-first-release.md),
+which ADR 0138 supersedes.
 
 Three terms. A *slice* is a part of the product that works from end to end, decided
-by one ADR, with its own acceptance test. An *early tester* is an engineer outside
-AppShapes who installs Cavalry on their own machines, runs their own workload on it,
-and reports what they find, with nobody to ask. The *finish line* is the state in
-which Cavalry is ready for early testers; it is also what this project means by MVP.
+by one ADR, with its own acceptance test. A *beta user* is a team that would otherwise
+run Aeron: it installs Cavalry on its own hosts, writes its service in one of six
+languages, runs it for weeks on a network it trusts, and reports what it finds, with
+nobody to ask. The *finish line* is the state in which Cavalry is ready for beta
+users: version 0.1.0, published.
 
 ## Answer
 
 - **Where it started.** On 2026-10-10 the repository held a brief, six invariants and
   nine empty crates. Nothing ran.
-- **Where it is.** Thirty days and 218 commits later, four of the five slices that
-  the product's first sentence names work and are gated in CI: publish and subscribe
-  over shared memory, the durable log and replay, UDP between hosts, and the C ABI
-  with clients in five languages. The fifth, Raft replication, has two of its eight
-  features on `master` and the third in progress.
-- **The finish line.** Version 0.1.0, published, with six conditions that a gate or
-  a record proves (ADR 0061). In short: all five slices work, a tester installs from
-  a registry and never clones, no known defect lies about delivery, the frozen
-  surfaces are named and an upgrade across two published versions has run, a cluster
-  has run for a week, and the README says what is not built.
-- **What is left.** Three pieces of work: the rest of the fifth slice, six cards; the
-  debts a tester would meet, six items; and a sixth slice, the first release, which
-  ends with a week of soak on a release candidate.
-- **When.** An estimate, not a gate: five to seven weeks from 2026-11-09, so 0.1.0
-  between about 2026-12-14 and 2026-12-28. One of those weeks is the soak and cannot
-  be made shorter.
-- **What waits on a person.** Three things: the third lab host's runner and network,
-  an account and a publishing credential on each package registry, and the choice of
-  whom to invite.
+- **Where it is.** Forty-two days and 364 commits later, the five slices that the
+  product's first sentence names work and are gated in CI: publish and subscribe over
+  shared memory, the durable log and replay, UDP between hosts, the C ABI with
+  clients in five languages, and Raft replication, which is gated on one host's
+  loopback so far. The fifth slice has seven of its eight features. The eighth, a
+  gate across three hosts, has not started.
+- **The finish line.** Version 0.1.0 as a beta, with nine conditions under three
+  milestones (ADR 0138): it is an alternative to Aeron, its cluster is highly
+  available and fails over by itself, and Brigade's server keeps working.
+- **What is left.** Twelve features, about 115 pull requests. Two protect what
+  exists, the latency gate's change and a gate for what Brigade's server runs. Three
+  close the cluster's faults. Two give a team that comes from Aeron what it reaches
+  for first. One clears debts. One proves the cluster under faults. Three are the
+  release itself.
+- **When.** An estimate, not a gate: three to five weeks from the day work starts.
+  From 2026-11-23 that is 0.1.0 between about 2026-12-14 and 2026-12-28. One of
+  those weeks is the soak, a run of seven days on the release candidate that shows
+  what a test of seconds cannot, and it cannot be made shorter.
+- **What waits on a person.** A runner on the third lab host, an account and a
+  credential on each package registry, a restart of one server, and the choice of
+  whom to invite. The table below has each.
+- **What the plan no longer does.** It measures no pull request on the bench hosts.
+  The latency gate runs each night as a coarse check until the slice after the line,
+  in which Cavalry is measured against Aeron.
 
 ## Where it started
 
@@ -61,187 +68,228 @@ was left for later.
 | --- | --- | --- | --- | --- |
 | 1. Publish and subscribe over shared memory | ADR 0007, 2026-10-11 | 2026-10-13, at 2a3d9cb | One [driver](../glossary.md) per host, a Rust client, the `cavalry:ipc` channel, claim and commit, back-pressure returned to the caller, a counter for every transition, `cavalry doctor` | `just quickstart` on Linux and macOS |
 | 2. The durable log and replay | ADR 0023, 2026-10-13 | 2026-10-31 | The driver records a stream and replays it into a subscription; truncate, purge and delete; replay is deterministic | `just replay-check`; the ten-minute path records and replays |
-| 3. UDP between hosts | ADR 0039, 2026-10-31 | 2026-11-04, at 61fbfdd | `cavalry:udp` unicast on the same API, a sender thread and a receiver thread, loss recovered by the receiver, replay over UDP | `bench (udp)` a required check; the ten-minute path over UDP |
+| 3. UDP between hosts | ADR 0039, 2026-10-31 | 2026-11-04, at 61fbfdd | `cavalry:udp` unicast on the same API, a sender thread and a receiver thread, loss recovered by the receiver, replay over UDP | The ten-minute path over UDP; the UDP rows of the bench |
 | 4. The C ABI and the clients | ADR 0046, 2026-11-05 | 2026-11-06, at f7e1014 | `cavalry-ffi` and its header; Python, Node, Go, JVM and .NET clients generated from the header | `just conformance` passes for all five on both runners |
-| 5. Raft on the durable log | ADR 0052, 2026-11-06 | Open: two of eight features | One publication sent to several destinations (card 225); the cluster protocol specified, with its messages read and written in `cavalry-proto` (card 226); a publication created at a position and a recording armed before its stream arrives (card 227, part) | The `cluster (hosts)` job green across three hosts, with a rolling upgrade in it |
+| 5. Raft on the durable log | ADR 0052, 2026-11-06 | Seven of eight features, at 20741de3 | One publication sent to several destinations; the cluster protocol; the replicated log; election in under a second after the timeout; sessions and services in six languages; catch-up, snapshots and a standby; an upgrade one member at a time | Changed by ADR 0138: the job across three hosts runs each night and for the release candidate, and is feature 9 of the sixth slice |
 
 Beside the slices, the project built the way it works: agents on branches with a
 review loop (ADR 0004, ADR 0005), the documentation gate (ADR 0006), a latency gate on
-dedicated hosts (ADR 0016, ADR 0034, ADR 0044), and a weekly email of the changes
-(ADR 0026).
+dedicated hosts (ADR 0016, ADR 0034, ADR 0044), a weekly email of the changes (ADR
+0026), and its work on the Brigade Board (ADR 0113).
 
 ## What the gates hold today
 
-- **Decisions.** 59 ADRs, 0001 to 0059, all Accepted but one that a later one
+- **Decisions.** 137 ADRs, 0001 to 0137, all Accepted but four that later ones
   superseded.
-- **Specification.** Ten pages under `spec/`, each with a version, and 814 test
-  vectors under `spec/vectors/` that every implementation must agree with.
-- **Code.** 56,083 lines of Rust under `crates/*/src`, unit tests included, and 494
-  test functions. `cavalry-raft` is two lines: its first public item is card 227's.
-- **Counters.** 109 counters, and 7 state machines with 37 transitions, each
+- **Specification.** Ten pages under `spec/`, each with a version. The client
+  protocol is at version 10, the C ABI at 5, the durable log and the UDP transport at
+  4, and the cluster protocol at 1.
+- **Code.** 97,279 lines of Rust under `crates/*/src`, unit tests included, and 969
+  test functions under `crates/`. `cavalry-raft` is 15,851 lines; on 2026-11-09 it
+  was two.
+- **Counters.** 179 counters, and 11 state machines with 113 transitions, each
   transition with a counter, in `counters.toml`.
-- **Configuration.** Three keys in `config.toml`. Zero configuration is the supported
-  default.
-- **CI.** Six jobs, which report seven checks on a push to `master` and six on a pull
-  request, which has no `gates (macos)`. Four are required checks of `master`:
-  `gates (linux)`, `bench (linux)`, `bench (grip)` and `bench (udp)`.
+- **Configuration.** Five keys in `config.toml`. Zero configuration is the supported
+  default, and the two cluster keys have no default a host could guess.
+- **CI.** `gates (linux)` on every pull request and `gates (macos)` on every commit
+  of `master`, about 11 and 13 minutes. `just conformance` in them runs ten vector
+  suites, six runners with a cluster of three on the loopback, and an upgrade of a
+  cluster one member at a time. Three bench jobs on two dedicated hosts are required
+  checks today; feature 1 below changes that.
 
-The latency gate's baselines are in `bench/baseline.json`. The rows below are 32-byte
-messages on `grip`, an Intel Core i7-10700 with isolated cores. A sample is the time
-from the publisher's timestamp to the subscriber's handler. The five rows were
-recorded on 2026-11-12 from 8 processes, each of 21 runs, and each of their numbers is
-the largest the host measured over those processes, so a number is the slow edge of
-the host's band and not a typical run. The gate compares a row with the slowest of
-the 168 runs, which the file lists (ADR 0033).
+## The latency rows, and why none is a condition
+
+The rows below are 32-byte messages on `grip`, an Intel Core i7-10700 with isolated
+cores. A sample is the time from the publisher's timestamp to the subscriber's
+handler. The rows were recorded on 2026-11-15 at 6e4cc7ba from 8 processes, each of 21
+runs, and each number is the largest the host measured over those processes, so a
+number is the slow edge of the host's band and not a typical run.
 
 | Row | Path | p50 | p99 | p99.99 | max |
 | --- | --- | --- | --- | --- | --- |
-| `one_way_32_exclusive` | Shared memory, in one process | 89 ns | 137 ns | 400 ns | 614 ns |
-| `one_way_32_client` | Shared memory, through the client API | 116 ns | 188 ns | 465 ns | 770 ns |
-| `one_way_32_ffi` | The same, through the C ABI | 127 ns | 223 ns | 466 ns | 1,407 ns |
-| `one_way_32_recorded` | The same, while the driver records the stream | 109 ns | 184 ns | 494 ns | 1,035 ns |
-| `one_way_32_udp` | UDP on the loopback, through the sender and the receiver | 2,499 ns | 2,661 ns | 5,783 ns | 7,247 ns |
+| `one_way_32_exclusive` | Shared memory, in one process | 90 ns | 136 ns | 398 ns | 711 ns |
+| `one_way_32_client` | Shared memory, through the client API | 122 ns | 194 ns | 473 ns | 938 ns |
+| `one_way_32_ffi` | The same, through the C ABI | 124 ns | 222 ns | 479 ns | 1,393 ns |
+| `one_way_32_recorded` | The same, while the driver records the stream | 110 ns | 187 ns | 495 ns | 1,090 ns |
+| `one_way_32_udp` | UDP on the loopback, through the sender and the receiver | 2,475 ns | 2,683 ns | 5,747 ns | 6,591 ns |
 
 Across the cable between the two bench hosts, at 1 Gb/s, the round trip
-`udp_round_trip_32` reads p50 111,679 ns, p99 122,815 ns, p99.99 189,567 ns and max
-262,911 ns, measured from `bench`, an AMD Ryzen 7 2700X, on 2026-11-04 from 3
-processes.
+`udp_round_trip_32` reads p50 111,807 ns, p99 161,535 ns, p99.99 207,231 ns and max
+421,631 ns, measured from `bench`, an AMD Ryzen 7 2700X, on 2026-11-15 from 3
+processes. Work item 358 holds the evidence that most of that round trip is the two
+network cards' interrupt moderation and not Cavalry's path; it is parked.
 
-## What was promised and is not built
+No condition of the line names one of these numbers, and none compares them with
+Aeron's. The owner ruled on 2026-11-15 and again on 2026-11-21 that features come
+first and that the numbers are worked on when Cavalry must meet or beat Aeron's. The
+reading behind that ruling:
 
-The README's first paragraph and the brief's table promise more than the five slices.
-This table places each promise against the finish line.
+- Of the 253 commits since 2026-10-28, 29 are about the bench, a baseline or a bench
+  host by their subject, 53 name a re-record of a baseline in their message, and 14
+  changed `bench/baseline.json`. In all, 217 name the bench, since every change
+  under a data-plane crate carries its histograms.
+- A pull request under `crates/` takes both bench hosts at every push, about 16
+  minutes, one run at a time across every session, and its merge waits on three bench
+  checks. On 2026-11-10 one commit took 81 minutes from its push to its last check
+  for 21 minutes of work on the hosts (ADR 0071).
+- The gate fails with no instruction changed. Six of eight processes at one head
+  failed a row by 5.6% to 8.1% with the same instructions on the message path (ADR
+  0125). A re-record takes two hours of both hosts (ADR 0110).
 
-| Promise | State at d5909f3 | Lands |
+What holds invariant 2 in every pull request meanwhile needs no quiet host: the
+allocation tests in `just test`, the bench's own refusal of an allocation in a
+measured loop, which `gates (linux)` runs on a hosted runner, and the lints of `just
+lint` for `async`, locks, the dependency allowlist and the padded slots.
+
+## What a team that comes from Aeron would find
+
+Read on 2026-11-21 against Aeron's open-source Transport, Archive and Cluster. "Feature
+n" is a feature of the roadmap below. "Out" is the list in ADR 0138 of what is after
+the line.
+
+| What the team reaches for | State at 20741de3 | Lands |
 | --- | --- | --- |
-| Raft replication; highly available | Two of eight features | Fifth slice, before the line |
-| A standby member in the open core | Not started | Card 230, before the line |
-| Mixed versions run during an upgrade | The gate `conformance/upgrade/` does not exist | Card 231, then the sixth slice over published versions, before the line |
-| `cargo install cavalry`; clients on five registries | Every crate is `publish = false`; a client needs a checkout | Sixth slice, the line itself |
-| Wire encryption, on by default | None; `spec/udp.md` reserves the frame types | After the line; recommended first |
-| OpenTelemetry export and a console | `cavalry doctor` only; the `console` command says it is not built | After the line |
-| Discovery, topics, request and reply | None, and no ADR | After the line; an ADR decides whether they belong in the API |
-| A Kubernetes operator and a Helm chart | None | After the line |
-| Kernel bypass | None | After the line, when ADR 0039's Revisit fires |
-| Multicast | A multicast address is refused; one publication to several destinations exists | After the line, when a user needs it |
-| Retention policy tooling | The truncate, purge and delete commands exist; no policy drives them | After the line |
-| A benchmark page against the reference competitor | Cavalry's own rows only | After the line |
+| Shared memory and UDP unicast on one API | Works | Done |
+| One publication to several destinations | Works in manual control mode, 64 destinations; the dynamic control mode is refused | Done; the rest is out |
+| Multicast | A multicast address is refused | Out |
+| Claim and commit; an offer that fragments | Works; an offer carries up to the lesser of a term ÷ 8 and 16 MiB | Done |
+| A whole message handed to the subscriber | Absent: the handler is handed fragments | Feature 7 |
+| Channel parameters | Ten keys are read; any other is refused with error code 1; `cavalry:ipc` takes none, and its publication holds three terms of 64 MiB | Feature 7 |
+| Flow control | `max` and `min`; `tagged` is refused | Out |
+| Loss recovered by the receiver | Works | Done |
+| A tool that prints every counter | Absent; `cavalry doctor` explains, and prints only what it finds | Feature 7 |
+| An embedded driver | Works in Rust; `cavalry run` elsewhere | Done |
+| Record and replay | Works: from a position or an instant, bounded, following a live recording, onto shared memory or UDP | Done |
+| List and describe recordings | `cavalry doctor` lists the live ones; no call and no command lists the stopped ones, and the id of one is what `cavalry record` printed | Feature 7 |
+| Truncate, purge and delete | Works on a stopped recording, by command | Done |
+| A checksum beside recorded frames | None; a power loss can leave a frame whose body is damaged | Feature 3 |
+| A client that drives a remote driver's recordings; a replay that merges into a live stream | Absent | Out |
+| Election and a commit by quorum | Works; the membership is a string of up to 8 members | Done |
+| Sessions in six languages | Work: connect, redirect, follow the leader, keepalive, close. At most 10 sessions; a message of at most 1,344 bytes | Feature 6 |
+| A service in six languages | Works: session open and close, message, new term, the cluster's time, replies. No timer | Feature 6 |
+| A service's snapshot | Rust alone | Feature 6 |
+| Catch-up, a restart on the log a member kept, a start from its own snapshot | Work | Done |
+| A start from a peer's snapshot | Absent | Feature 5 |
+| A standby | Works: marked in the members string, promoted by restarts | Done |
+| An upgrade one member at a time | Works within one major version, gated on the loopback | Done |
+| Commands that show a cluster or ask for a snapshot | Absent | Feature 5 |
+| A log purged below a snapshot | By hand, with the member stopped | Feature 5 |
+| Dynamic membership, authentication, suspend and resume | Absent | Out |
+| Encryption, a metrics export, a console, discovery, Kubernetes, kernel bypass, Windows | Absent | Out |
+| Packages | None: every crate is `publish = false`, and a client is used from a checkout | Feature 10 |
+
+## What the cluster does when something fails
+
+| Fault | Today | The line asks | Feature |
+| --- | --- | --- | --- |
+| The leader's process ends, or its host is lost | Replaced in about 11 s: a timeout of 10 s, then an election of under 1 s. Tests over three drivers on the loopback | The bound stated, and held with processes ended | 4, 9 |
+| The leader is stopped on purpose | The same 11 s | It hands the lead over at once | 4 |
+| The leader's consensus module is silent while its driver runs | Replaced after 10.3 s to 52.2 s in 17 runs (work item 280) | Within the bound | 4 |
+| The leader's service is gone, or its recorder cannot sync | Nothing detects a service that is gone (ADR 0118), and no test holds what a member does whose recorder cannot sync | It gives the lead up | 4 |
+| A follower is cut off or started again | It rejoins about 10 s after the cut is mended; tests over drivers | As today | Done |
+| A member takes the log slowly | It paces the whole cluster under `fc=min`; `doctor` has no finding | `doctor` names the member | 4 |
+| A host loses power | An operator's rule: do not start that member on its directory again | A check at the start | 3 |
+| A member's log directory is lost | An operator's rule: never start one member alone on a new directory | The member comes back with no vote on what it forgot | 3 |
+| Members are started with different members strings | Three rules that no member checks (ADR 0134) | Members tell each other, and `doctor` names the one | 5 |
+| A member is lost after the logs were purged | It cannot be replaced: no member starts from a peer's snapshot | Replaced on a new host while the cluster runs | 5 |
+| A client has messages in flight at a leader change | Its session follows the next leader. A message in an entry that was cut is lost, and the client is not told which | Specified, and held in six languages | 6 |
+
+No cluster test crosses hosts and none runs for days. Feature 9 and the release
+candidate's soak are those two.
+
+## What Brigade's server runs
+
+Brigade's server is a Rust process that embeds the driver. Its ordered log, the
+feed, is one recorded publication. It depends on Cavalry by a git dependency pinned
+at 620a2e29, `master` of 2026-11-12, and two teams' servers run that build in
+production, each on a log directory it keeps.
+
+- It uses the embedded driver, an exclusive publication in manual control mode
+  created at a position, a subscription to its own feed, a recording for each run, a
+  sync before each answer, a replay of the earlier recordings, and a purge of what
+  its snapshots cover. It uses no cluster call.
+- It reads the catalog through `cavalry-log`, because the client lists no
+  recordings. Feature 7 gives it that call.
+- The durable log's format has moved from version 2 to 4 since its pin. Each version
+  added a file for cluster members and changed nothing a server's directory holds, so
+  such a directory should open under `master`. No test holds that. Feature 2 does.
+- Its standby, work item 312, waits on Cavalry's cluster. Condition 9 of the line
+  ends by telling the owner that the cluster is ready for the second node.
 
 ## The finish line
 
-ADR 0061 gives the six conditions in full, with the gate or the record that proves
+ADR 0138 gives the nine conditions in full, with the gate or the record that proves
 each. Their state today:
 
-| Condition | State at d5909f3 |
+| Condition | State at 20741de3 |
 | --- | --- |
-| 1. The first sentence works | Four of five slices |
-| 2. Installed, not cloned | Not started |
-| 3. Nothing known lies about delivery | Issues 14, 16 and 17 are open; cards 197, 223, 233 and 235, four known flakes, are open |
-| 4. The frozen surfaces are named and an upgrade across them has run | Not started; card 231 builds the gate |
-| 5. Bounded for days, as a cluster | One driver ran a week on the soak host, from 2026-10-31 to 2026-11-07; its close-out comment on card 159 is owed; no cluster has soaked |
-| 6. Honest and explainable to a stranger | The README's status says "Not yet: Raft, and a release on crates.io" and does not name encryption; the cluster tutorial is card 229's; there is no page for reporting a problem, no `SECURITY.md` and no generated page of the latency numbers |
+| 1. Installed, not cloned | Not started |
+| 2. What an Aeron user reaches for first is there, or is named as absent | The table above: ten rows wait on features 5, 6 and 7; no page for the reader who comes from Aeron |
+| 3. Nothing known lies about delivery | Work items 286 and 287 are open, both invariant 1; issues 14, 16 and 17 are open; issues 245, 252 and 274 and work items 334 and 338 are tests that failed with no cause found yet |
+| 4. The frozen surfaces are named and an upgrade across them has run | The upgrade gate runs a cluster across two trees; nothing is frozen, and a client and a driver of different builds have never met |
+| 5. Honest and explainable to a stranger | The README's status is corrected with this page; no page for reporting a problem, no `SECURITY.md`, no generated latency page; errors name pages by a path in the repository |
+| 6. No fault is left to an operator's rule where a check can hold it | Five faults are held by rules: work items 277, 286, 287 and 288, and the members string |
+| 7. A leader that stops, in any way, is replaced within a stated bound | Two of six ways are held by tests; a planned stop costs 11 s; work item 280 is open |
+| 8. Redundancy is restored while the cluster runs, and the cluster runs for days | Not started: no start from a peer's snapshot, no purge while running, no job across hosts, no cluster soak |
+| 9. What Brigade's server runs is a gate here, and the release carries its data | Not started |
 
 ## The roadmap
 
-### 1. Finish the fifth slice
+Twelve features, in ADR 0138's order. Each is one work item on the Brigade Board,
+whose number the table gives, and several pull requests. The size is a count of pull requests, read from the fifth
+slice, whose seven features took 98 commits.
 
-Six cards, in ADR 0052's order. Each is one feature and several pull requests.
+| # | Feature | Work item | Takes in | Size | Chain |
+| --- | --- | --- | --- | --- | --- |
+| 1 | Run the latency gate each night as a coarse check | 361 | Parks work item 198 beside 358 | 2 | First |
+| 2 | Hold what Brigade's server runs | 362 | | 3 | Release |
+| 3 | Hold invariant 1 through the faults that an operator's rule holds today | 363 | Work items 287, 286, 277, 288, 282, 281 | 13 | Cluster |
+| 4 | Replace a leader however it stops | 364 | Work items 280, 343, 355 | 11 | Cluster |
+| 5 | Restore a cluster's redundancy while it runs | 365 | | 13 | Cluster |
+| 6 | Finish the service and the session in every language | 366 | Work items 335, 322, 325 | 18 | Client |
+| 7 | Give an Aeron user what they reach for first | 367 | | 12 | Client |
+| 8 | Clear the debts a beta user would meet | 368 | Issues 14, 16, 17, 238, 245, 252, 274; work items 279, 283, 285, 334, 338 | 10 | Any |
+| 9 | Prove the cluster under faults, on one host and across three | 232 | The gate across three hosts of ADR 0052, changed | 6 | Cluster |
+| 10 | Freeze the surfaces and package the release | 369 | | 13 | Release |
+| 11 | Write for the stranger who comes from Aeron | 370 | | 8 | Release |
+| 12 | Cut the candidate, soak it, and release 0.1.0 | 371 | | 5 | Last |
 
-1. **Card 227, the replicated log.** On `master`: ADR 0059 and the driver's half
-   (fc81ec1, 8264a0c). Open: pull request 159, the record of terms in the durable
-   log. Left: the consensus module as the driver's sixth thread, the committed log
-   fed to a service through the client API and the ABI, `cavalry run` in a member's
-   role, and `just replay-check` over a cluster of three on the loopback.
-2. **Card 228, election.** A leader elected in under a second, and the fault
-   injection for a cluster: a lost leader, a partitioned member, a throttled member.
-3. **Card 229, the cluster client.** The session protocol in the client, the ABI and
-   the five clients, and the tutorial a stranger runs a cluster from.
-4. **Card 230, catch-up, snapshots and standby.**
-5. **Card 231, a rolling upgrade.** It builds `conformance/upgrade/`.
-6. **Card 232, the gate across three hosts.** The slice's acceptance test. It starts
-   when card 159's close-out is written and card 228 is on `master`, and it runs
-   beside cards 229 to 231. It is the one card of the slice that needs a person's
-   hand.
+How the order was chosen:
 
-### 2. Clear the debts a tester would meet
+- **Feature 1 is first** because every later change under `crates/` is paced by the
+  bench hosts until it lands. After it, a pull request waits on `gates (linux)`
+  alone, and the three chains run side by side.
+- **Feature 2 is second** because feature 3 changes the log's format, and two
+  servers hold their teams' data in the format before it. A driver must open such a
+  directory in place, with no step by an operator.
+- **Feature 3 leads the cluster chain** because invariant 1 outranks the others: a
+  defect there blocks a release, and nothing else does automatically.
+- **Features 6 and 7 are a chain of their own** because each moves the C ABI's
+  version and generates the five clients again, one change at a time. Feature 10's
+  freeze waits for both.
+- **Features 10 and 11 start early.** The package names are reserved first, and one
+  client's package with the native library inside is built before the others. Five
+  registries are the largest unknown of the slice.
+- **Feature 12 is last** and holds the one fixed cost in wall-clock time, the soak.
 
-None of these is on a slice's list. ADR 0061's third and fifth conditions put the
-first five before the release.
+## After the line
 
-1. **Issue 17.** A starting driver removes any directory whose command ring is
-   missing, so a mistyped `CAVALRY_DIR` can remove a directory that is not Cavalry's.
-   The fix changes `spec/client-protocol.md`, so it needs an ADR.
-2. **Issues 14 and 16.** Two behaviours `spec/client-protocol.md` does not state.
-   Unspecified behaviour is a bug in the spec, and the release freezes the page.
-3. **Cards 223, 233 and 235.** One race in the conformance runners. Done on
-   2026-11-10: the round polled once after ten offers, and a publication can accept
-   an offer before the subscription holds its image, so the poll could deliver
-   nothing. No message was lost. The five language runners now wait for the image
-   first.
-4. **Card 197, issue 112.** The test that sends a stream through a lossy, reordering
-   path failed about one laptop run in five. It is the proof of the receive path's
-   delivery, so the card had to say whether the test or the product was wrong. Done
-   on 2026-11-10: the test was. Reproduced, it failed 16 runs of 100 beside a running
-   `just test` and 5 of 100 on a quieter laptop, and every failure was one assertion
-   at the end: a read of the counter `image.removed` made the moment the client saw
-   the image go. The conductor tells the client first and counts after it has
-   unlinked the image's log, so on a loaded machine the read could come first. Every
-   message arrived once and in order in every run. The test now waits for the
-   counter.
-5. **Card 159.** The soak week's close-out: the first and the last counters samples,
-   and every `doctor` finding explained or carded.
-6. **Card 211.** The client's allocation tests did not count a reallocation. Done
-   on 2026-11-10: the two tests over the UDP send path and the UDP receive path read
-   the allocator's count of allocations alone, so a buffer grown past a capacity it
-   already had was not counted. They now fail on either, as the bench's gate does,
-   and `just lint` refuses a test that reads one count without the other. The send
-   path and the receive path made no reallocation.
+ADR 0138 recommends the first two items and decides none. The others keep the order
+this page gave under ADR 0061. Each item is a slice with its own ADR, written when
+the one before it ends.
 
-Five more open cards are debts too, but not a tester's, so they are not on the path
-to the line. Cards 177, 198 and 219 are the bench harness's and the bench hosts'.
-Cards 212 and 215 are the review loop's. They cost the project time, not a tester.
-
-### 3. The sixth slice: the first release
-
-Its ADR is written when the fifth slice ends, and orders its own features. What it
-must hold comes from the Revisit clauses of ADR 0003, ADR 0046, ADR 0051, ADR 0052
-and ADR 0057, and from ADR 0061's conditions:
-
-- `publish` set to true, and the crate family published to crates.io in dependency
-  order.
-- The five clients published: PyPI, npm, Maven Central and NuGet each take a package
-  with the native library inside it for the two platforms CI gates on; the Go module
-  is published by a tag on the repository.
-- A release workflow in CI that builds, checks and publishes from a tag.
-- The version the C ABI freezes at, and the version of every `spec/` page that 0.1.0
-  ships.
-- The README's ten-minute path starting from an install, with `just quickstart`
-  running it from the published artefacts.
-- A release candidate, then 0.1.0, so that `conformance/upgrade/` runs a cluster from
-  one published version to the next.
-- The candidate's soak: a cluster of three for seven days on the soak host.
-- The pages of condition 6: how to report a problem, `SECURITY.md`, the generated
-  latency page, and a status paragraph that names what is not built.
-- `CHANGELOG.md`'s Unreleased section, more than 1,600 lines today, becoming the
-  entry for 0.1.0.
-
-### 4. After the line
-
-ADR 0061 recommends an order and does not decide it. Each item is a slice with its
-own ADR, written when the one before it ends.
-
-1. **Wire encryption, on by default.** It is the largest promise the release does
-   not keep, and it is what moves a tester from a lab network to a real one. It
-   changes the wire, so every version published before it is one more version it
-   must negotiate with.
-2. **`cavalry-control`: the OpenTelemetry export, the console and discovery.** With
+1. **Meet or beat Aeron's numbers.** The latency gate is armed again, with what work
+   items 198 and 358 found about the two hosts settled first. Cavalry and Aeron are
+   measured on the same hardware, and the result is the public benchmark page.
+2. **Wire encryption and authentication, on by default.** It is the largest promise
+   the release does not keep, and it is what moves a beta user from a network it
+   trusts to a real one.
+3. **`cavalry-control`: the OpenTelemetry export, the console and discovery.** With
    the ADR that decides whether topics and request and reply belong in the API.
-3. **Kubernetes: the operator and the Helm chart.** They package a release.
-4. **The public benchmark page and the launch.** The brief asks for one customer
-   running Cavalry before a public launch. That customer comes from the testers.
-5. **The clauses that wait on a user.** Kernel bypass, multicast, tagged flow
-   control, dynamic cluster membership, authentication. Nine Revisit clauses in
-   `docs/decisions/` begin "when a user". Testers are how those clauses fire.
+4. **Kubernetes: the operator and the Helm chart.** They package a release.
+5. **The clauses that wait on a user.** Multicast, the dynamic control mode, tagged
+   flow control, dynamic cluster membership, kernel bypass, Windows. Beta users are
+   how those clauses fire.
 
 ## What needs a person's hand
 
@@ -249,9 +297,13 @@ Everything else on this page a session does on its own, and records.
 
 | What | For | When |
 | --- | --- | --- |
-| A runner on `kip` with its own label, and the three hosts' addresses on the lab's network | Card 232 | When card 228 is on `master`. ADR 0052 sends the request on that card |
-| An account and a publishing credential on crates.io, PyPI, npm, Maven Central and NuGet, stored as secrets of the repository | The sixth slice | Before its release workflow first runs. Maven Central also asks for a verified namespace |
-| Whom to invite as testers, and how | The finish line | Any time before 0.1.0 |
+| The owner's leave to change the bench's workflows and rules | Feature 1 | Given on 2026-11-21. The change lands from a person's session: the review loop does not approve a change that weakens a gate |
+| A ruling on work item 340, whether the review loop's fixer may write `spec/` | Every feature that changes `spec/` | Ruled on 2026-11-21: it may, when the pull request's branch holds an Accepted ADR that names the page. The workflow's change lands from a person's session, beside feature 1 |
+| An account, a name and a publishing credential on crates.io, PyPI, npm, Maven Central and NuGet, stored as secrets of the repository | Feature 10 | At its start: the names are reserved first, and Maven Central asks for a verified namespace |
+| The setting that publishes the book, and a contact address for `SECURITY.md` | Feature 11 | At its start |
+| A runner on `kip` with its own label, and the three hosts' addresses on the lab's network | Feature 9 | Before feature 9, which follows feature 5. Asked for early: a runner's registration has a lead time |
+| A stop and a start of AppShapes' own Brigade server on the candidate's build | Feature 12 | When the candidate is cut |
+| Whom to invite as beta users, and how | The finish line | Any time before 0.1.0 |
 
 The repository is public today, so a person can find Cavalry before the line. The
 line is when the project invites them.
@@ -259,51 +311,56 @@ line is when the project invites them.
 ## The estimate, and what it rests on
 
 The estimate is a reading of the pace so far. It is not a gate, and no date is a
-condition of ADR 0061.
+condition of ADR 0138.
 
-- From 2026-10-31 to 2026-11-09, `master` took 91 commits in ten days, two of them
-  idle. Card 227, the first card with consensus in it, merged two pull requests in
-  its first two days.
-- The fifth slice has about 29 pull requests left, if card 227 needs six more, cards
-  228 to 231 five each and card 232 three. At one and a half to two a day, that is
-  15 to 20 days.
-- The debts are about six pull requests. They fit between reviews.
-- The sixth slice is about twelve pull requests, six to eight days, and then the
-  seven days of soak.
-- The sum is 28 to 35 days if nothing waits: at most five weeks, so 2026-12-14.
-  Seven weeks, so 2026-12-28, if the review loop or a person's hand costs days, or if
-  the first candidate's soak finds a defect and a second candidate soaks again.
+- From 2026-11-09 to 2026-11-15, `master` took 147 commits in seven days, about 20 a
+  day, while every change under `crates/` waited on the bench hosts. The page's
+  first estimate, of 2026-11-09, gave the rest of the fifth slice 15 to 20 days. All
+  of it but the gate across hosts took seven.
+- The twelve features are about 115 pull requests. At half that pace they are
+  twelve days of landings. The estimate allows two to four weeks, for what the count
+  leaves out: a feature that grows, the review loop's cycles, and the hands in the
+  table above.
+- Then the seven days of soak.
+- The sum is three to five weeks: 0.1.0 between about 2026-12-14 and 2026-12-28 if
+  work starts on 2026-11-23, and into January if a second candidate must soak or a
+  registry refuses a package's shape.
 
 ## What could move the line
 
-- **The size of cards 228 to 231.** No slice before the fifth had a feature as large
-  as election or catch-up. ADR 0052 says the slice "is larger than any before it".
+- **The size of features 5 and 6.** A start from a peer's snapshot and a session
+  message longer than one frame each change the cluster protocol. Timers add an
+  entry to the log, and the first version that does so must say when a leader may
+  use it (ADR 0136, Revisit).
+- **Work item 287.** It changes the on-disk format, and its ADR asks for the cost on
+  the recorder's thread before it chooses.
 - **The native library in five package formats.** Nothing in the repository has
-  tried it. It is the largest unknown of the sixth slice.
-- **The hosts.** After card 232 every push runs member jobs on the two bench hosts
-  and on `kip`, after the latency jobs. A push waits on the slowest.
+  tried it.
+- **A package name that is taken.** Feature 10 finds out first.
 - **The review loop.** The reviewer and the fixer have stopped for a night before on
-  a usage limit.
+  a usage limit, and a blocker under `spec/` costs every fix cycle until work item
+  340's change lands.
 - **A finding in the soak.** That is what the week is for.
-- **A tester who needs encryption before they can start.** ADR 0061's Revisit names
-  this case: a new ADR supersedes it and moves the line.
+- **A beta user who needs encryption before they can start.** ADR 0138 keeps ADR
+  0061's answer: a new ADR supersedes it and moves the line.
 
 ## How this page stays true
 
-The work item that closes an item of "The roadmap" marks the item done on this page in
-the same commit, with the date and what was found, as the work item that lands a slice's
-last feature edits the README's status paragraph. The sections above "The roadmap" stay the
-reading at the commit the first paragraph names; they are read again, and the date and
-the commit moved, when a slice ends. When 0.1.0 is published and the six conditions
-hold, ADR 0061's Revisit fires, and this page becomes the survey for the slice after
-it.
+The work item that lands a feature of "The roadmap" marks the feature done on this
+page in the same change, with the date and what was found. The sections above "The
+finish line" stay the reading at the commit the first paragraph names; they are read
+again, and the date and the commit moved, when the candidate is cut. When 0.1.0 is
+published and the nine conditions hold, ADR 0138's Revisit fires, and this page
+becomes the survey for the slice after it.
 
 ## Decisions behind this page
 
+- [ADR 0138](../decisions/0138-draw-the-finish-line-at-a-beta-that-is-an-alternative-to-aeron-and-build-it-sixth.md),
+  the finish line and the sixth slice.
 - [ADR 0061](../decisions/0061-draw-the-finish-line-for-early-testers-at-the-first-release.md),
-  the finish line.
+  the first finish line, superseded.
 - [ADR 0052](../decisions/0052-build-raft-on-the-durable-log-fifth.md), the fifth
-  slice and what follows it.
+  slice.
 - [ADR 0003](../decisions/0003-lay-out-the-workspace.md), why nothing is published
   yet.
 - [ADR 0007](../decisions/0007-build-ipc-pub-sub-first.md),

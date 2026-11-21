@@ -9,26 +9,36 @@ replication, written in Rust. One daemon per host; clients map shared-memory log
 buffers; IPC and UDP share one API. Encrypted, observable and highly available in the
 open core, with first-class clients in every language.
 
-**Status:** the first four slices work. `cavalry run` starts a driver; a Rust client
-publishes and subscribes over shared memory on one host and over UDP between hosts,
-on one API, with back-pressure returned to the caller; the driver records a stream to
-the durable log and replays it; `cavalry doctor` explains the driver from its
-counters; a C ABI over the client, `cavalry-ffi`, carries the same API to Python,
-Node, Go, the JVM and .NET, each client generated from the header and run against a
-driver by `just conformance`; the ten-minute path below runs in CI on Linux and macOS,
-and the latency gate runs on two dedicated hosts and across the cable between them.
-Not yet: Raft, and a release on crates.io
+**Status:** the five slices work, the cluster on one host so far, and nothing is
+released yet. `cavalry run` starts a driver; a Rust client publishes and subscribes over shared memory on one
+host and over UDP between hosts, on one API, with back-pressure returned to the
+caller; the driver records a stream to the durable log and replays it; `cavalry
+doctor` explains the driver from its counters; a C ABI over the client,
+`cavalry-ffi`, carries the same API to Python, Node, Go, the JVM and .NET, each client
+generated from the header and run against a driver by `just conformance`; three
+drivers, each started as a member, form a cluster over Raft: they elect a leader,
+replicate one log, serve sessions and services in the six languages, catch a member
+up, take snapshots, run a standby and upgrade one member at a time, gated on one
+host's loopback; the ten-minute path below runs in CI on Linux and macOS, and the
+latency gate runs on two dedicated hosts and across the cable between them. Not yet:
+a release on any registry, a cluster gated across hosts, wire encryption and
+authentication, an export of metrics, a console and discovery. The first release is
+a beta, version 0.1.0, and
+[what is left before it](docs/explanation/where-cavalry-is-and-what-is-left.md) is
+twelve features
 ([ADR 0007](docs/decisions/0007-build-ipc-pub-sub-first.md),
 [ADR 0023](docs/decisions/0023-build-the-durable-log-second.md),
 [ADR 0039](docs/decisions/0039-build-udp-between-hosts-third.md),
-[ADR 0046](docs/decisions/0046-build-the-c-abi-and-the-clients-fourth.md)).
+[ADR 0046](docs/decisions/0046-build-the-c-abi-and-the-clients-fourth.md),
+[ADR 0052](docs/decisions/0052-build-raft-on-the-durable-log-fifth.md),
+[ADR 0138](docs/decisions/0138-draw-the-finish-line-at-a-beta-that-is-an-alternative-to-aeron-and-build-it-sixth.md)).
 
 ## Start here
 
 | If you want to | Read |
 | --- | --- |
 | Understand why Cavalry exists and what it must beat | [`docs/explanation/why-cavalry.md`](docs/explanation/why-cavalry.md) |
-| Know what works today, what is left, and when early testers can start | [`docs/explanation/where-cavalry-is-and-what-is-left.md`](docs/explanation/where-cavalry-is-and-what-is-left.md) |
+| Know what works today, and what is left before the beta | [`docs/explanation/where-cavalry-is-and-what-is-left.md`](docs/explanation/where-cavalry-is-and-what-is-left.md) |
 | Work on the code, human or agent | [`CLAUDE.md`](CLAUDE.md), the invariants and gates |
 | Know what a word means | [`docs/glossary.md`](docs/glossary.md) |
 | Know what each crate does and must never do | [`crates/*/README.md`](crates/) |
