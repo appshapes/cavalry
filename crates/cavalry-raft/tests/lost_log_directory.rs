@@ -102,6 +102,91 @@ fn a_member_that_lost_its_log_votes_no_leader_in_that_lacks_what_it_had_acknowle
     }
 }
 
+/// A follower loses its log directory and starts again on an empty one while the leader
+/// and the other follower run on, as `docs/how-to/run-a-cluster.md` brings a member
+/// back. Neither of the two holds an election: the leader stays quorate with the other
+/// follower, whose election is closed, so it sends no canvass position of its own. It
+/// answers the new member's canvass position, whose log is empty, with its own
+/// (`spec/cluster.md`, "A member that lost its log", "Taking a leader"; ADR 0145). With
+/// that answer the new member has heard every voter, none naming a term above the
+/// leader's, and it takes the leader's new leadership term. Its vote floor is the end of
+/// the leader's log, it catches up, and a commit made while the other follower is cut
+/// counts its acknowledgement.
+#[test]
+fn a_follower_that_lost_its_log_follows_the_leader_while_the_other_two_run_on() {
+    let ids = [0, 1, 2];
+    let mut safety = Safety::new(&ids);
+    let (mut cluster, leader) = elected(5, &mut safety);
+    let others = followers(&ids, leader);
+    let (wiped, other) = (others[0], others[1]);
+    let committed = offer(&mut cluster, &mut safety, 0, 20);
+    safety.run(&mut cluster, 1_000);
+    for &id in &ids {
+        assert_eq!(cluster.commit_position(id), Some(committed), "member {id}");
+    }
+    let term = cluster
+        .member(leader)
+        .expect("a member")
+        .leadership_term_id();
+    let elections = |cluster: &Cluster| {
+        [leader, other].map(|id| cluster.counts(id).expect("a member").elections)
+    };
+    let before = elections(&cluster);
+
+    safety.wipe(&mut cluster, wiped);
+    safety.run_until(
+        &mut cluster,
+        5_000,
+        "the member that lost its log follows the leader and holds what was committed",
+        |cluster| settled(cluster, &ids) && cluster.append_position(wiped) >= Some(committed),
+    );
+    assert_eq!(cluster.leader(), Some(leader));
+    assert_eq!(
+        elections(&cluster),
+        before,
+        "neither of the two held an election"
+    );
+    assert_eq!(
+        cluster
+            .member(leader)
+            .expect("a member")
+            .leadership_term_id(),
+        term,
+        "the same term"
+    );
+    let floor = cluster.member(wiped).expect("a member").vote_floor();
+    assert!(
+        floor >= committed,
+        "the floor {floor} holds every entry committed before it came back, {committed}"
+    );
+    assert_eq!(
+        cluster.log_to(wiped, committed),
+        cluster.log_to(leader, committed)
+    );
+
+    // With the other follower cut, the leader commits only with the acknowledgement of
+    // the member that lost its log.
+    cluster.cut(other);
+    let next = offer(&mut cluster, &mut safety, 20, 5);
+    safety.run(&mut cluster, 1_000);
+    assert_eq!(cluster.commit_position(leader), Some(next));
+    assert!(cluster.append_position(other) < Some(next));
+    assert_eq!(cluster.commit_position(wiped), Some(next));
+    cluster.heal(other);
+    safety.run_until(
+        &mut cluster,
+        5_000,
+        "the three hold the next entries",
+        |cluster| {
+            settled(cluster, &ids)
+                && ids
+                    .iter()
+                    .all(|&id| cluster.commit_position(id) == Some(next))
+        },
+    );
+    assert_eq!(elections(&cluster), before, "still no election");
+}
+
 /// Two of three lose their log directories while the third holds the whole log: both
 /// are down long enough for the leader to lose its quorum and hold an election, and
 /// both come back on empty log directories. They hear all three voters, and the

@@ -216,6 +216,23 @@ catch up and withholds until a start from a peer's snapshot is built (work item
     it committed. Without the rule of "Taking a leader" it fails at the check of
     every step: `member 1 leads with a log that differs from what was committed`.
     That is the draft of this decision before the review, on db85cd0b.
+  - `a_follower_that_lost_its_log_follows_the_leader_while_the_other_two_run_on` is
+    the path of `docs/how-to/run-a-cluster.md`. Twenty entries reach all three
+    members. A follower starts again on an empty log directory while the leader and
+    the other follower run on. Neither of the two holds an election, so the member
+    hears the other follower only by its answer to the member's canvass position.
+    The member takes the leader in the same term, its floor at or past what was
+    committed, and catches up. With the other follower cut, the leader then commits
+    five more entries on the member's acknowledgement. With the answer removed, the
+    member has not settled behind the leader after 5 s, and the test fails.
+- `crates/cavalry-raft/tests/canvass_answer.rs`, one core driven by hand, pins the
+  answer to a canvass position whose log is empty. A follower whose election has
+  closed and whose log holds term 0 sends one canvass position, of its own log, its
+  candidate term and its own id, to that member alone. It answers no canvass
+  position that holds a log. A member whose own log is empty answers none. A member
+  in canvass or nominate sends nothing beyond its own canvass position, once each
+  interval. With the answer removed, the first of the four tests fails. With any one
+  of the answer's three conditions dropped, one of the other three fails.
 - `spec/vectors/cluster.json`: sixteen arithmetic vectors, five `withholds`, five
   `withheld-vote` and six `takes-leader`, read by
   `crates/cavalry-proto/tests/cluster_conformance.rs`.

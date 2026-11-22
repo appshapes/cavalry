@@ -96,6 +96,9 @@ pub struct Stub {
     /// The last canvass position sent: its log leadership term id, its log position
     /// and its leadership term id, the sender's candidate term.
     pub last_canvass: Option<(i64, i64, i64)>,
+    /// The follower member id of the last canvass position sent: the member that
+    /// sent it, by its own account.
+    pub last_canvass_from: Option<i32>,
     /// The `is startup` of the last new leadership term sent.
     pub last_startup: Option<bool>,
     /// The `protocol version` of the last canvass position sent and of the last
@@ -135,6 +138,7 @@ impl Stub {
             log_term: -1,
             reads: [0; 2],
             last_canvass: None,
+            last_canvass_from: None,
             last_startup: None,
             versions_sent: [None; 2],
         }
@@ -191,10 +195,12 @@ impl Io for Stub {
             log_leadership_term_id,
             log_position,
             leadership_term_id,
+            follower_member_id,
             ..
         } = *message
         {
             self.last_canvass = Some((log_leadership_term_id, log_position, leadership_term_id));
+            self.last_canvass_from = Some(follower_member_id);
         }
         if let Message::NewLeadershipTerm { is_startup, .. } = *message {
             self.last_startup = Some(is_startup);
