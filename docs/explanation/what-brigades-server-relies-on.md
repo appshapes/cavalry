@@ -149,8 +149,9 @@ depends on which of two threads is first.
 
 Both exist, and they answer different questions.
 
-- The copy runs in every pull request, in about one second, and fails at the call that
-  broke. It needs nothing but this repository. It can go stale: it is the server's file
+- The copy runs in every pull request, in about 1 s for `feed_shape.rs` and 13 s for
+  `feed_held_still.rs`, which holds its processes still for 12 s. It fails at the call
+  that broke. It needs nothing but this repository. It can go stale: it is the server's file
   as it was at Brigade's commit 5ddacc75. `git log 5ddacc75.. --
   server/crates/brigade-log/src/feed.rs` in Brigade's repository lists what changed
   since.
