@@ -538,6 +538,10 @@ committed once a quorum, two of three, has it on disk.
   catch up: start the cluster again as a new cluster, every member on a new log
   directory
   ([ADR 0145](../decisions/0145-withhold-the-vote-of-a-member-that-lost-its-log-until-it-holds-what-the-cluster-held.md)).
+  A standby that starts on an empty log directory stores a vote floor too, and
+  `cavalry doctor` prints no line for it: a standby has no vote to withhold. Once
+  it is promoted to a voter ([Promote a standby to a voter](promote-a-standby.md)),
+  the line applies to it as written.
 - `WARN cluster.votes_withheld`: this member, below its vote floor or with its log
   empty, answered a candidate's request with no vote, and the count says how many
   times. A vote from it could have elected a leader that lacks an entry the cluster

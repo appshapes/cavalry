@@ -1974,8 +1974,11 @@ fn member_findings(
     }
     // A member below its vote floor withholds its vote (ADR 0145): the gauge's text,
     // with where its log is and how far it has to go, while it lasts, and nothing once
-    // its log has reached the floor.
-    if let Some(floor) = member.vote_floor
+    // its log has reached the floor. A standby that starts on an empty log directory
+    // stores a floor too, which applies once it is promoted, but it has no vote to
+    // withhold and its catch-up costs the cluster no tolerance (ADR 0134): nothing.
+    if member.standby != Some(1)
+        && let Some(floor) = member.vote_floor
         && floor >= 0
         && append < floor
         && let Some(def) = COUNTERS.iter().find(|def| def.id == CLUSTER_VOTE_FLOOR)
@@ -7197,7 +7200,8 @@ mod tests {
     /// (ADR 0145). Once its log reaches the floor, doctor says nothing of it. One that
     /// has taken no leader yet, waiting to hear a voter, is reported with the leaders
     /// it passed over and what to start; once it has a leader, or its log holds
-    /// anything, in a later election too, those are history and are not reported.
+    /// anything, in a later election too, those are history and are not reported. A
+    /// standby below a floor is not named: it has no vote to withhold.
     #[test]
     fn a_member_below_its_vote_floor_is_named_and_its_withheld_votes_explained() {
         let below = [
@@ -7318,6 +7322,28 @@ mod tests {
         let found: Vec<&str> = findings.iter().map(|finding| finding.check).collect();
         assert!(!found.contains(&"cluster.leaders_withheld"), "{findings:?}");
         assert!(found.contains(&"cluster-no-leader"), "{findings:?}");
+
+        // A standby that catches up from an empty log directory stores a floor too,
+        // and has no vote to withhold: its note says what it is, and nothing more.
+        let standby = [
+            (CLUSTER_ROLE, 0),
+            (CLUSTER_ELECTION_STATE, 17),
+            (CLUSTER_LEADERSHIP_TERM_ID, 2),
+            (CLUSTER_LEADER_MEMBER_ID, 1),
+            (CLUSTER_STANDBY, 1),
+            (CLUSTER_APPEND_POSITION, 4096),
+            (CLUSTER_VOTE_FLOOR, 1 << 20),
+        ];
+        let (_, findings) = cluster_findings("vote-floor-standby", 3, &standby);
+        let found: Vec<&str> = findings.iter().map(|finding| finding.check).collect();
+        assert_eq!(found, ["cluster-member"], "{findings:?}");
+        assert!(
+            findings[0]
+                .message
+                .contains("a standby, which follows the log and has no vote,"),
+            "{}",
+            findings[0].message
+        );
     }
 
     const THREE_VOTERS_AND_A_STANDBY: &str = "0,127.0.0.1:9000,127.0.0.1:9001,127.0.0.1:9002,127.0.0.1:9003,127.0.0.1:9004\
