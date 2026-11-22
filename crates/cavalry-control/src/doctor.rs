@@ -7001,13 +7001,21 @@ mod tests {
             "{}",
             finding.message
         );
-        // With no counter of the driver above 0 it says what else it is: a slow step,
-        // or a second snapshot asked for while one was being taken, and where that
-        // shows.
+        // With no counter of the driver above 0 it says what else it is: a slow step, a
+        // member's log the recorder did not sync to the snapshot's position in time
+        // (ADR 0143), or a second snapshot asked for while one was being taken, and
+        // where that shows.
+        assert!(
+            finding
+                .message
+                .contains("the recorder took longer than 2 s to sync this member's log"),
+            "{}",
+            finding.message
+        );
         assert!(
             finding.message.contains(
                 "a second snapshot was asked for while one was being taken: \
-                 cluster.snapshot_actions on the leader then rose twice within a second"
+                 cluster.snapshot_actions on the leader then rose twice within a few seconds"
             ),
             "{}",
             finding.message

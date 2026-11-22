@@ -1620,7 +1620,7 @@ name = "cluster.snapshots_begun"
 kind = "counter"
 scope = "client"
 doc = "Snapshots of its consensus module one cluster member began: it read a cluster action asking for one in its committed log and, in that duty cycle, started a recording of its one publication on the snapshot stream, 107, which it added at its start and keeps for its life (spec/cluster.md, Snapshots). key: member id (i32), little-endian; label text: the member id in decimal."
-doctor = "One for each snapshot the leader asked for, on every member. A snapshot begun ends in cluster.snapshots_taken or in cluster.snapshots_failed within about a second. Nothing is to be done while cluster.snapshots_taken follows it."
+doctor = "One for each snapshot the leader asked for, on every member. A snapshot begun ends in cluster.snapshots_taken or in cluster.snapshots_failed within about a second, and within 3 s at the most when the member's log is slow to sync. Nothing is to be done while cluster.snapshots_taken follows it."
 
 [[counter]]
 id = 162
@@ -1635,7 +1635,7 @@ id = 163
 name = "cluster.snapshots_taken"
 kind = "counter"
 scope = "client"
-doc = "Snapshots of its consensus module one cluster member took and listed in its snapshots file: the recording stopped at the end of what the member wrote, and the list that names it was synced. A snapshot counts from then on (spec/cluster.md, Snapshots; spec/durable-log.md, Snapshots). key: member id (i32), little-endian; label text: the member id in decimal."
+doc = "Snapshots of its consensus module one cluster member took and listed in its snapshots file: the recording stopped at the end of what the member wrote, the member's own log had synced to the snapshot's log position (ADR 0143), and the list that names it was synced. A snapshot counts from then on (spec/cluster.md, Snapshots; spec/durable-log.md, Snapshots). key: member id (i32), little-endian; label text: the member id in decimal."
 doctor = "One for each snapshot the leader asked for, on every member. Nothing is to be done. cluster.snapshot_position says where the newest one is."
 
 [[counter]]
@@ -1643,8 +1643,8 @@ id = 164
 name = "cluster.snapshots_failed"
 kind = "counter"
 scope = "client"
-doc = "Snapshots of its consensus module one cluster member gave up: the driver refused the snapshot's recording or its stop, the recording was of another session than the member's publication, the publication took no message or the recording's stop was not announced within a second, the recording stopped short of what was written, a second snapshot was asked for while one was being taken, or the list could not be written. A publication on the snapshot stream that the driver refuses at the member's start is no snapshot that failed: the member does not start. The member's log is whole and the member goes on; the next cluster action asks again (spec/cluster.md, Snapshots). key: member id (i32), little-endian; label text: the member id in decimal."
-doctor = "This member gave up a snapshot. Its log is whole and nothing committed is lost. Check the driver's counters on this host: driver.registry_full for a recording the driver had no room for, recording.start_failed for a recording whose files could not be created, recording.write_failed for a disk that refuses a write or a sync, and free space in the log directory. Where one of them is above 0, this member took no snapshot where the others did, and a start of it reads more of the log than theirs. Where none is, either a step took the driver longer than a second, as on a loaded host or a slow disk, or a second snapshot was asked for while one was being taken: cluster.snapshot_actions on the leader then rose twice within a second, every member counts one snapshot given up, and each still takes the first. The next snapshot is tried by itself."
+doc = "Snapshots of its consensus module one cluster member gave up: the driver refused the snapshot's recording or its stop, the recording was of another session than the member's publication, the publication took no message or the recording's stop was not announced within a second, the recording stopped short of what was written, the member's own log had not synced to the snapshot's log position within 2 s of the stop (ADR 0143), a second snapshot was asked for while one was being taken, or the list could not be written. A publication on the snapshot stream that the driver refuses at the member's start is no snapshot that failed: the member does not start. The member's log is whole and the member goes on; the next cluster action asks again (spec/cluster.md, Snapshots). key: member id (i32), little-endian; label text: the member id in decimal."
+doctor = "This member gave up a snapshot. Its log is whole and nothing committed is lost. Check the driver's counters on this host: driver.registry_full for a recording the driver had no room for, recording.start_failed for a recording whose files could not be created, recording.write_failed for a disk that refuses a write or a sync, and free space in the log directory. Where one of them is above 0, this member took no snapshot where the others did, and a start of it reads more of the log than theirs. Where none is, either a step took the driver longer than a second, or the recorder took longer than 2 s to sync this member's log, as on a loaded host or a slow disk, or a second snapshot was asked for while one was being taken: cluster.snapshot_actions on the leader then rose twice within a few seconds, every member counts one snapshot given up, and each still takes the first. The next snapshot is tried by itself."
 
 [[counter]]
 id = 165
@@ -2250,8 +2250,9 @@ counter = "cluster.connects_dropped"
 # ADR 0129): `cavalry_raft`'s `SnapshotState`. A member takes one snapshot at a time.
 # It begins one when it reads the cluster action that asks for it, writes its
 # messages, asks the recording's stop, and lists the snapshot when the recording
-# stopped at the end of what it wrote. A snapshot given up, while it is written or
-# while its stop is awaited, is counted as failed.
+# stopped at the end of what it wrote and the member's log has synced to the
+# snapshot's position (ADR 0143). A snapshot given up, while it is written or while
+# its stop or that sync is awaited, is counted as failed.
 
 [[state_machine]]
 name = "cluster_snapshot"

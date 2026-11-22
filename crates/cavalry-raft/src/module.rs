@@ -3396,7 +3396,11 @@ impl ConsensusModule {
         }
         let snapshot_work = self
             .snapshot
-            .do_work(&mut self.io.client, &self.sessions)
+            .do_work(
+                &mut self.io.client,
+                &self.sessions,
+                self.core.append_position(),
+            )
             .map_err(RaftError::Snapshots);
         // A leader that serves asks for a snapshot when its log has grown by the
         // snapshot interval since the last one asked for. An action the log does not
