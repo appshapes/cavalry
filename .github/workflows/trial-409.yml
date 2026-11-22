@@ -13,7 +13,7 @@ name: trial 409
 # whose review and ci runs are cancelled at once and which is closed unmerged.
 on:
   pull_request:
-    types: [opened, reopened]
+    types: [opened, reopened, synchronize]
 
 permissions:
   contents: read
@@ -44,6 +44,9 @@ jobs:
         uses: anthropics/claude-code-action@5a856893345e332afa621934082d8c660c26d689 # v1.0.282
         with:
           claude_code_oauth_token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
+          # The job's token, so the action skips its exchange for the Claude app's token,
+          # which it refuses for a workflow file that differs from the default branch's.
+          github_token: ${{ github.token }}
           claude_args: "--model claude-opus-5-5 --effort xhigh --max-turns 20"
           show_full_output: false
           prompt: |
@@ -105,6 +108,9 @@ jobs:
         uses: anthropics/claude-code-action@5a856893345e332afa621934082d8c660c26d689 # v1.0.282
         with:
           claude_code_oauth_token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
+          # The job's token, so the action skips its exchange for the Claude app's token,
+          # which it refuses for a workflow file that differs from the default branch's.
+          github_token: ${{ github.token }}
           claude_args: "--model claude-opus-5-5 --effort xhigh --max-turns 20"
           show_full_output: false
           prompt: |
