@@ -50,7 +50,12 @@ binary's `main`.
   not print when the replay's log went before it had read to the end (ADR 0030), or,
   with `--channel <uri>` naming a `cavalry:udp` channel and `--stream <id>`, plays it to
   a subscriber on that channel's endpoint, on this host or another, and prints the
-  summary alone, exit 1 when no subscriber answered (ADR 0043);
+  summary alone, exit 1 when no subscriber answered (ADR 0043); `snapshot` asks the
+  cluster member on the driver, which must lead its cluster, for a snapshot, and
+  prints the snapshot's log position once that member lists its own, exit 1 with
+  what to do when the member does not lead, names the leader when there is one, or
+  lists no snapshot within 10 s
+  ([Ask a cluster for a snapshot](../../docs/how-to/ask-for-a-snapshot.md); ADR 0147);
   `cavalry::index` is the lookup behind an instant; `console` arrives with its feature.
 - Control-plane and command-line dependencies sit behind the `cli` feature, on by
   default so that `cargo install cavalry` needs no flag. `cargo add cavalry --no-

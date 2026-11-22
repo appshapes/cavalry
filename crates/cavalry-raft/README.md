@@ -305,7 +305,8 @@ commit path runs per message.
   toggle at most once, and none whose id is at or below the last it took: a toggle
   that stays is not taken again and holds no other back, and one with a lower id
   than the last taken is answered by that one's snapshot. The command is the toggle's one
-  writer; the member writes nothing in it.
+  writer; the member writes nothing in it. `cavalry snapshot` is that command
+  ([Ask a cluster for a snapshot](../../docs/how-to/ask-for-a-snapshot.md)).
 - Starts a member from its newest snapshot (`spec/cluster.md`, "A member's start";
   ADR 0130). The start reads the member's snapshots file, plays the newest
   snapshot of the consensus module back through the driver, and takes the sessions

@@ -1099,3 +1099,169 @@ fn a_member_id_of_minus_one_written_out_is_no_member() {
     );
     assert!(!other.0.exists(), "nothing was started");
 }
+
+/// `cavalry snapshot` asks the member that leads for a snapshot and prints the log
+/// position once that member lists it; every member then lists a snapshot at that
+/// position. Beside a follower it asks nothing and names the leader, and on a driver
+/// that hosts no member it says so (`spec/cluster.md`, "The control toggle"; ADR
+/// 0147).
+#[test]
+fn snapshot_asks_the_leader_names_it_beside_a_follower_and_finds_no_member_on_a_plain_driver() {
+    const CLUSTER_SNAPSHOT_POSITION: &str = "cluster.snapshot_position";
+    const CLUSTER_SNAPSHOT_ACTIONS: &str = "cluster.snapshot_actions";
+
+    let ports = loopback_ports(15);
+    let members = (0..3)
+        .map(|member| {
+            let endpoints: Vec<String> = ports[member * 5..member * 5 + 5]
+                .iter()
+                .map(|port| format!("127.0.0.1:{port}"))
+                .collect();
+            format!("{member},{}", endpoints.join(","))
+        })
+        .collect::<Vec<_>>()
+        .join("|");
+    let dirs: Vec<TestDir> = (0..3)
+        .map(|member| TestDir::new(&format!("snapshot-{member}")))
+        .collect();
+    let start = |member: usize| {
+        cavalry()
+            .args(["run", "--dir", &dirs[member].arg()])
+            .args(["--log-dir", &format!("{}-log", dirs[member].arg())])
+            .env("CAVALRY_CLUSTER_MEMBERS", &members)
+            .env("CAVALRY_CLUSTER_MEMBER_ID", member.to_string())
+            .stderr(Stdio::piped())
+            .spawn()
+            .expect("run starts")
+    };
+    let mut runs = Runs((0..3).map(start).collect());
+    for (member, run) in runs.0.iter_mut().enumerate() {
+        wait_until_running(run, || {
+            let mut c = cavalry();
+            c.args(["doctor", "--dir", &dirs[member].arg()]);
+            c
+        });
+    }
+    wait("every member's election closed", || {
+        dirs.iter()
+            .all(|dir| cluster_counter(&dir.0, CLUSTER_ELECTION_STATE) == Some(17))
+    });
+    let leader = dirs
+        .iter()
+        .position(|dir| cluster_counter(&dir.0, CLUSTER_ROLE) == Some(2))
+        .expect("one member leads");
+    let follower = (leader + 1) % 3;
+    let snapshot = |dir: &TestDir| {
+        cavalry()
+            .args(["snapshot", "--dir", &dir.arg()])
+            .output()
+            .expect("snapshot runs")
+    };
+
+    // Beside a follower: nothing is asked, and the message names the leader.
+    let refused = snapshot(&dirs[follower]);
+    let stderr = String::from_utf8_lossy(&refused.stderr);
+    assert_eq!(refused.status.code(), Some(1), "{stderr}");
+    assert!(
+        stderr.starts_with(&format!(
+            "cavalry snapshot: member {follower} does not lead, so nothing was asked: member \
+             {leader} leads. Run `cavalry snapshot` on member {leader}'s host"
+        )) && stderr
+            .trim_end()
+            .ends_with("; see docs/how-to/ask-for-a-snapshot.md#when-it-does-not-work"),
+        "{stderr}"
+    );
+    for dir in &dirs {
+        assert_eq!(cluster_counter(&dir.0, CLUSTER_SNAPSHOT_ACTIONS), Some(0));
+        assert_eq!(
+            cluster_counter(&dir.0, "cluster.control_toggle"),
+            None,
+            "no request was added beside a member that does not lead"
+        );
+    }
+
+    // Beside the leader: one action, and the position it prints is the one every
+    // member lists its snapshot at.
+    let asked = snapshot(&dirs[leader]);
+    let stdout = String::from_utf8_lossy(&asked.stdout);
+    assert_eq!(
+        asked.status.code(),
+        Some(0),
+        "{}",
+        String::from_utf8_lossy(&asked.stderr)
+    );
+    let position: i64 = stdout
+        .strip_prefix(&format!(
+            "member {leader} lists a snapshot of log position "
+        ))
+        .and_then(|rest| rest.split(':').next())
+        .and_then(|position| position.parse().ok())
+        .unwrap_or_else(|| panic!("the command prints the position: {stdout}"));
+    assert!(position > 0, "{stdout}");
+    assert_eq!(
+        cluster_counter(&dirs[leader].0, CLUSTER_SNAPSHOT_POSITION),
+        Some(position),
+        "the leader lists its snapshot before the command returns"
+    );
+    wait("every member lists the snapshot", || {
+        dirs.iter()
+            .all(|dir| cluster_counter(&dir.0, CLUSTER_SNAPSHOT_POSITION) == Some(position))
+    });
+    assert_eq!(
+        cluster_counter(&dirs[leader].0, CLUSTER_SNAPSHOT_ACTIONS),
+        Some(1)
+    );
+    // The command's toggle is gone: the driver frees it once it has taken the
+    // command's remove, or its close.
+    wait("the command's toggle is gone", || {
+        cluster_counter(&dirs[leader].0, "cluster.control_toggle").is_none()
+    });
+
+    // A second request is a second snapshot, one entry later.
+    let again = snapshot(&dirs[leader]);
+    assert_eq!(
+        again.status.code(),
+        Some(0),
+        "{}",
+        String::from_utf8_lossy(&again.stderr)
+    );
+    assert_eq!(
+        cluster_counter(&dirs[leader].0, CLUSTER_SNAPSHOT_ACTIONS),
+        Some(2)
+    );
+    assert!(
+        cluster_counter(&dirs[leader].0, CLUSTER_SNAPSHOT_POSITION) > Some(position),
+        "a later position"
+    );
+
+    while let Some(run) = runs.0.pop() {
+        terminate(run);
+    }
+    for dir in &dirs {
+        let _ = std::fs::remove_dir_all(format!("{}-log", dir.arg()));
+    }
+
+    // A driver that hosts no member: nobody to ask.
+    let plain = TestDir::new("snapshot-plain");
+    let mut run = cavalry()
+        .args(["run", "--dir", &plain.arg()])
+        .args(["--log-dir", &format!("{}-log", plain.arg())])
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("run starts");
+    wait_until_running(&mut run, || {
+        let mut c = cavalry();
+        c.args(["doctor", "--dir", &plain.arg()]);
+        c
+    });
+    let nobody = snapshot(&plain);
+    let stderr = String::from_utf8_lossy(&nobody.stderr);
+    assert_eq!(nobody.status.code(), Some(1), "{stderr}");
+    assert!(
+        stderr.starts_with("cavalry snapshot: the driver in ")
+            && stderr.contains("hosts no cluster member, so there is nobody to ask"),
+        "{stderr}"
+    );
+    terminate(run);
+    let _ = std::fs::remove_dir_all(format!("{}-log", plain.arg()));
+}

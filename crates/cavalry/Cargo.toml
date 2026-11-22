@@ -24,6 +24,11 @@ cavalry-log = { path = "../cavalry-log" }
 cavalry-raft = { path = "../cavalry-raft" }
 # `cavalry doctor`, control plane, behind `cli`.
 cavalry-control = { path = "../cavalry-control", optional = true }
+# `cavalry snapshot` finds a member's counters by their ids in `counters.toml` and
+# writes the control toggle's key and value as `spec/cluster.md` gives them, named once
+# in these two crates (ADR 0147). Behind `cli`: the library build needs neither.
+cavalry-shm = { path = "../cavalry-shm", optional = true }
+cavalry-proto = { path = "../cavalry-proto", optional = true }
 # `cavalry run` stops on SIGINT, SIGTERM and SIGHUP: the handler std does not have.
 # Behind `cli`, on the control plane, never on the data plane.
 ctrlc = { version = "3.5.2", features = ["termination"], optional = true }
@@ -33,7 +38,7 @@ ctrlc = { version = "3.5.2", features = ["termination"], optional = true }
 # is the lean library build (ADR 0002).
 [features]
 default = ["cli"]
-cli = ["dep:cavalry-control", "dep:ctrlc"]
+cli = ["dep:cavalry-control", "dep:cavalry-proto", "dep:cavalry-shm", "dep:ctrlc"]
 
 [[bin]]
 name = "cavalry"
