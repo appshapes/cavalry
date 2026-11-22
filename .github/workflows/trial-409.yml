@@ -1,0 +1,134 @@
+# A trial for work item 409, on a throwaway branch only, never on master: how the fixer's
+# session runs a gate that outruns the Bash tool's default bound. Two sessions of the same
+# action, model and settings as claude.yml's fixer, each told to run `just test` with no
+# timeout. One runs as the fixer does today; the other with the bounds work item 409
+# proposes. A step after each reads the session's record and prints only what it says of
+# the Bash tool: the program names, the timeout passed, whether a result said it was moved
+# to the background, and the session's duration. No text the model or a command wrote is
+# printed: the repository is public.
+name: trial 409
+
+on:
+  push:
+    branches: [409-trial-fixer-bash-timeout]
+
+permissions:
+  contents: read
+  id-token: write
+
+jobs:
+  as-today:
+    runs-on: blacksmith-4vcpu-ubuntu-2404
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+      - uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8 # v1
+        with:
+          toolchain: stable
+          components: clippy, rustfmt
+      - uses: extractions/setup-just@53165ef7e734c5c07cb06b3c8e7b647c5aa16db3 # v4.0.0
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
+        with:
+          shared-key: gates
+          save-if: false
+      - name: Code
+        id: claude
+        continue-on-error: true
+        uses: anthropics/claude-code-action@5a856893345e332afa621934082d8c660c26d689 # v1.0.282
+        with:
+          claude_code_oauth_token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
+          claude_args: "--model claude-opus-5-5 --effort xhigh --max-turns 20"
+          show_full_output: false
+          prompt: |
+            Run exactly one command with the Bash tool: `just test`. Pass no timeout parameter
+            and do not ask for it to run in the background. When the tool's result comes back,
+            reply in one line: the exit code if the command finished, or, if the result says the
+            command is still running, say so and end your turn. Run no other command.
+          settings: |
+            {
+              "permissions": {
+                "allow": ["Bash(just:*)", "Bash(cargo:*)", "Bash(git:*)", "Bash(ls:*)", "Bash(cat:*)"]
+              }
+            }
+      - name: What the session did with the Bash tool
+        if: always()
+        shell: bash
+        run: |
+          raw="$RUNNER_TEMP/claude-execution-output.json"
+          [ -f "$raw" ] || { echo "no session record at $raw"; exit 0; }
+          # One JSON array of messages, or one message per line: read either.
+          f="$RUNNER_TEMP/session-messages.json"
+          jq -s 'if length == 1 and (.[0] | type) == "array" then .[0] else . end' "$raw" > "$f"
+          echo "messages: $(jq length "$f")"
+          echo "Bash calls: the program, the timeout passed, run_in_background:"
+          jq -r '.[] | select(.type=="assistant") | .message.content[]? | select(.type=="tool_use" and .name=="Bash")
+                 | "  \(.input.command | split(" ")[0]) timeout=\(.input.timeout // "none") background=\(.input.run_in_background // false)"' "$f"
+          echo "Bash results that said the command moved to the background:"
+          jq '[.[] | select(.type=="user") | .message.content[]? | select(.type=="tool_result")
+               | (.content | tostring) | select(test("moved to the background"))] | length' "$f"
+          echo "The session:"
+          jq -r '.[] | select(.type=="result") | "  subtype=\(.subtype) duration_ms=\(.duration_ms) turns=\(.num_turns) denials=\(.permission_denials | length)"' "$f"
+          echo "Denied tools, by name and program:"
+          jq -r '.[] | select(.type=="result") | .permission_denials[]? | "  \(.tool_name) \(.tool_input.command // "" | split(" ")[0])"' "$f"
+
+  bounded:
+    runs-on: blacksmith-4vcpu-ubuntu-2404
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+      - uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8 # v1
+        with:
+          toolchain: stable
+          components: clippy, rustfmt
+      - uses: extractions/setup-just@53165ef7e734c5c07cb06b3c8e7b647c5aa16db3 # v4.0.0
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
+        with:
+          shared-key: gates
+          save-if: false
+      - name: Code
+        id: claude
+        continue-on-error: true
+        env:
+          BASH_DEFAULT_TIMEOUT_MS: "1800000"
+          BASH_MAX_TIMEOUT_MS: "2700000"
+          CLAUDE_CODE_DISABLE_BACKGROUND_TASKS: "1"
+        uses: anthropics/claude-code-action@5a856893345e332afa621934082d8c660c26d689 # v1.0.282
+        with:
+          claude_code_oauth_token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
+          claude_args: "--model claude-opus-5-5 --effort xhigh --max-turns 20"
+          show_full_output: false
+          prompt: |
+            Run exactly one command with the Bash tool: `just test`. Pass no timeout parameter
+            and do not ask for it to run in the background. When the tool's result comes back,
+            reply in one line: the exit code if the command finished, or, if the result says the
+            command is still running, say so and end your turn. Run no other command.
+          settings: |
+            {
+              "permissions": {
+                "allow": ["Bash(just:*)", "Bash(cargo:*)", "Bash(git:*)", "Bash(ls:*)", "Bash(cat:*)"]
+              }
+            }
+      - name: What the session did with the Bash tool
+        if: always()
+        shell: bash
+        run: |
+          raw="$RUNNER_TEMP/claude-execution-output.json"
+          [ -f "$raw" ] || { echo "no session record at $raw"; exit 0; }
+          # One JSON array of messages, or one message per line: read either.
+          f="$RUNNER_TEMP/session-messages.json"
+          jq -s 'if length == 1 and (.[0] | type) == "array" then .[0] else . end' "$raw" > "$f"
+          echo "messages: $(jq length "$f")"
+          echo "Bash calls: the program, the timeout passed, run_in_background:"
+          jq -r '.[] | select(.type=="assistant") | .message.content[]? | select(.type=="tool_use" and .name=="Bash")
+                 | "  \(.input.command | split(" ")[0]) timeout=\(.input.timeout // "none") background=\(.input.run_in_background // false)"' "$f"
+          echo "Bash results that said the command moved to the background:"
+          jq '[.[] | select(.type=="user") | .message.content[]? | select(.type=="tool_result")
+               | (.content | tostring) | select(test("moved to the background"))] | length' "$f"
+          echo "The session:"
+          jq -r '.[] | select(.type=="result") | "  subtype=\(.subtype) duration_ms=\(.duration_ms) turns=\(.num_turns) denials=\(.permission_denials | length)"' "$f"
+          echo "Denied tools, by name and program:"
+          jq -r '.[] | select(.type=="result") | .permission_denials[]? | "  \(.tool_name) \(.tool_input.command // "" | split(" ")[0])"' "$f"
