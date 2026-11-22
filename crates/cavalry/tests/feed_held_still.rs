@@ -49,9 +49,10 @@
 //!
 //! 1. A feed process starts on directories of its own and appends four records.
 //! 2. The process is stopped with `SIGSTOP` for 12 s and continued with `SIGCONT`.
-//! 3. It appends three records. The append says that the client was closed and where
-//!    the feed goes on, in one of the orders below, and its positions go on from the
-//!    last one answered. It appends two more, with nothing to say.
+//! 3. It appends three records. In the first two orders above, the append says that
+//!    the client was closed and where the feed goes on; in the third it says nothing.
+//!    Its positions go on from the last one answered. It appends two more, with
+//!    nothing to say.
 //! 4. The process is killed with `SIGKILL`.
 //! 5. A new feed process on the same directories begins at the last position
 //!    answered, and reads back every record once, in order, each at the position it
@@ -467,9 +468,10 @@ fn test() {
 
     assert!(
         reconnected > 0,
-        "the stop closed neither feed's client, so nothing here held a reconnect: the order \
-         in which a client's keepalive meets the driver within microseconds of its \
-         heartbeat came for both feeds at once"
+        "the stop closed neither feed's client, so this run held no reconnect, and run it \
+         again: no fault of the feed's. Each client's keepalive met the driver within the \
+         microseconds after its heartbeat, the third order of the module's doc, for both \
+         feeds at once"
     );
 
     // A kill, as a power cut is to a process: no signal it can handle.
