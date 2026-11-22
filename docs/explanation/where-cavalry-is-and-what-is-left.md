@@ -3,7 +3,8 @@
 This page answers one question: where is Cavalry now, measured from where it started,
 and what work is left before a team can use it in place of Aeron. It was read again
 for work item 360 on 2026-11-21, against `master` at commit 20741de3. Every state on
-this page is the state at that commit. The line itself is decided in
+this page is the state at that commit, but for a state that a feature changed when it
+landed, which gives the date. The line itself is decided in
 [ADR 0138](../decisions/0138-draw-the-finish-line-at-a-beta-that-is-an-alternative-to-aeron-and-build-it-sixth.md);
 this page is the reading of the repository behind that decision, and the order of the
 work that reaches the line. The page was first written on 2026-11-09 for the line of
@@ -212,10 +213,10 @@ production, each on a log directory it keeps.
   recordings. Feature 7 gives it that call.
 - The durable log's format has moved from version 2 to 4 since its pin. Each version
   added a file for cluster members and changed nothing a server's directory holds, so
-  such a directory opens under `master`. `conformance/upgrade/log-directory.sh` holds
-  that in every pull request: it builds the tree at 620a2e29, has it write a
-  directory as a server writes its own, and opens it in place under the tree under
-  test
+  such a directory opens under `master`. Since 2026-11-22,
+  `conformance/upgrade/log-directory.sh` holds that in every pull request: it builds
+  the tree at 620a2e29, has it write a directory as a server writes its own, and
+  opens it in place under the tree under test
   ([ADR 0141](../decisions/0141-open-in-place-a-log-directory-written-by-the-tree-that-servers-run-and-build-that-tree-on-every-run.md)).
 - Its standby, work item 312, waits on Cavalry's cluster. Condition 9 of the line
   ends by telling the owner that the cluster is ready for the second node.
@@ -245,7 +246,10 @@ each. Their state today:
 | 6. No fault is left to an operator's rule where a check can hold it | Five faults are held by rules: work items 277, 286, 287 and 288, and the members string |
 | 7. A leader that stops, in any way, is replaced within a stated bound | Two of six ways are held by tests; a planned stop costs 11 s; work item 280 is open |
 | 8. Redundancy is restored while the cluster runs, and the cluster runs for days | Not started: no start from a peer's snapshot, no purge while running, no job across hosts, no cluster soak |
-| 9. What Brigade's server runs is a gate here, and the release carries its data | The three gates are in since 2026-11-22 (feature 2): the feed's shape in `just test`, a log directory of 620a2e29 opened in place in `just conformance`, and the server's suite against `master` each night. Left for features 10 to 12: the server builds from the published crates, the candidate's soak, and the notice of work item 312 |
+| 9. What Brigade's server runs is a gate here, and the release carries its data | The three gates are in since 2026-11-22 (feature 2): the feed's shape in `just test`, a log directory of 620a2e29 opened in place in `just conformance`, and the server's suite against `master` each night. Left for features 10 and 12: the server builds from the published crates, the candidate's soak, and the notice of work item 312 |
+
+Row 9 is the state on 2026-11-22, when feature 2 landed. Every other row is the state
+at 20741de3.
 
 ## The roadmap
 
@@ -389,11 +393,12 @@ condition of ADR 0138.
 ## How this page stays true
 
 The work item that lands a feature of "The roadmap" marks the feature done on this
-page in the same change, with the date and what was found. The sections above "The
-finish line" stay the reading at the commit the first paragraph names; they are read
-again, and the date and the commit moved, when the candidate is cut. When 0.1.0 is
-published and the nine conditions hold, ADR 0138's Revisit fires, and this page
-becomes the survey for the slice after it.
+page in the same change, with the date and what was found, and gives the date of any
+other state on the page that it changes. The sections above "The finish line" stay
+the reading at the commit the first paragraph names, but for those dated states; they
+are read again, and the date and the commit moved, when the candidate is cut. When
+0.1.0 is published and the nine conditions hold, ADR 0138's Revisit fires, and this
+page becomes the survey for the slice after it.
 
 ## Decisions behind this page
 

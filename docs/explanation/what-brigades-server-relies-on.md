@@ -204,6 +204,8 @@ copy in the same way.
   2 of its twelve, which is work item 362.
 - [ADR 0141](../decisions/0141-open-in-place-a-log-directory-written-by-the-tree-that-servers-run-and-build-that-tree-on-every-run.md):
   the log directory's upgrade gate.
+- [ADR 0142](../decisions/0142-build-brigades-server-against-master-each-night-through-a-cargo-patch.md):
+  the nightly build of the server against `master`, and who reads a red night.
 - [ADR 0025](../decisions/0025-record-a-stream-in-the-driver.md): which publication
   `start recording` takes.
 - [ADR 0059](../decisions/0059-create-a-publication-at-a-position-and-arm-a-recording.md):
