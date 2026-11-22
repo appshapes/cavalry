@@ -42,8 +42,8 @@
 //!
 //! A program with no test harness (`harness = false` in the crate's `Cargo.toml`), as
 //! `crates/cavalry-raft/tests/throttle.rs` is and for its reasons: a program that
-//! starts itself again needs its own `main`, and it has one thread while it chooses
-//! its ports and starts its first processes (`crates/cavalry-raft/tests/ports/mod.rs`,
+//! starts itself again needs its own `main`, and it chooses its ports on its one
+//! thread before it starts its first process (`crates/cavalry-raft/tests/ports/mod.rs`,
 //! "What the rule does not cover"). `cargo test` runs it with the others, whatever
 //! filter it is given.
 
@@ -153,14 +153,16 @@ impl Drop for Process {
     }
 }
 
-/// One feed: its shape, its directories and addresses, the process that runs it now,
+/// One feed: its shape, the process that runs it now, its directories and addresses,
 /// and what the test appended to it.
 struct Feed {
     name: &'static str,
+    /// Before `dir`, because fields drop in order: a test that panics kills the
+    /// feed's process before it removes the directory the process writes in.
+    process: Option<Process>,
     dir: TestDir,
     control: String,
     own: String,
-    process: Option<Process>,
     /// The position after each record the feed answered, in order: record `i` is
     /// `record(i, length(i))`.
     answered: Vec<i64>,
@@ -173,10 +175,10 @@ impl Feed {
         let ports = free_ports(2);
         Self {
             name,
+            process: None,
             dir: TestDir::new(name),
             control: format!("127.0.0.1:{}", ports[0]),
             own: format!("127.0.0.1:{}", ports[1]),
-            process: None,
             answered: Vec::new(),
         }
     }
