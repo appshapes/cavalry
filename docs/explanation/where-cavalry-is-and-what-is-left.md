@@ -84,7 +84,7 @@ dedicated hosts (ADR 0016, ADR 0034, ADR 0044), a weekly email of the changes (A
   superseded.
 - **Specification.** Ten pages under `spec/`, each with a version. The client
   protocol is at version 10, the C ABI at 5, the UDP transport at 4, the durable log
-  at 5 since 2026-11-22, and the cluster protocol at 1.
+  at 6 since 2026-11-22, and the cluster protocol at 1.
 - **Code.** 97,279 lines of Rust under `crates/*/src`, unit tests included, and 969
   test functions under `crates/`. `cavalry-raft` is 15,851 lines; on 2026-11-09 it
   was two.
@@ -189,8 +189,8 @@ the line.
 | The leader's service is gone, or its recorder cannot sync | Nothing detects a service that is gone (ADR 0118), and no test holds what a member does whose recorder cannot sync | It gives the lead up | 4 |
 | A follower is cut off or started again | It rejoins about 10 s after the cut is mended; tests over drivers | As today | Done |
 | A member takes the log slowly | It paces the whole cluster under `fc=min`; `doctor` has no finding | `doctor` names the member | 4 |
-| A host loses power | Since 2026-11-22, held by work item 287, three pull requests on `master`: the driver cuts each recording a crash left live to what it had synced, and the member starts on its directory again (ADR 0143, ADR 0144). A test over three drivers has all three hosts lose power together. A member that lost power under a driver of an earlier version still stays out | A check at the start | Done |
-| A member's log directory is lost | An operator's rule: never start one member alone on a new directory | The member comes back with no vote on what it forgot | 3 |
+| A host loses power | Since 2026-11-22, held by work item 287, three pull requests on `master`: the driver cuts each recording a crash left live to what it had synced, and the member starts on its directory again (ADR 0143, ADR 0144). A test over three drivers has all three hosts lose power together. A member that lost power under a driver of an earlier version is refused on its directory, and is started on a new one, as the next row says | A check at the start | Done |
+| A member's log directory is lost | Since 2026-11-22 the member is started on a new log directory, and it comes back with no vote on what it forgot: it casts no vote and seeks no leadership until its log reaches its vote floor, the position its leader held when it came back (ADR 0145). `cluster.vote_floor` and `cluster.votes_withheld` say so, and `cavalry doctor` does not name the member yet. While it withholds, a cluster of three elects a leader only while both other members run. Tests of three members in memory hold it | The member comes back with no vote on what it forgot | 3 |
 | Members are started with different members strings | Three rules that no member checks (ADR 0134) | Members tell each other, and `doctor` names the one | 5 |
 | A member is lost after the logs were purged | It cannot be replaced: no member starts from a peer's snapshot | Replaced on a new host while the cluster runs | 5 |
 | A client has messages in flight at a leader change | Its session follows the next leader. A message in an entry that was cut is lost, and the client is not told which | Specified, and held in six languages | 6 |
@@ -211,12 +211,14 @@ production, each on a log directory it keeps.
   its snapshots cover. It uses no cluster call.
 - It reads the catalog through `cavalry-log`, because the client lists no
   recordings. Feature 7 gives it that call.
-- The durable log's format has moved from version 2 to 5 since its pin. Versions 3
+- The durable log's format has moved from version 2 to 6 since its pin. Versions 3
   and 4 each added a file for cluster members and changed nothing a server's
   directory holds. Since 2026-11-22, version 5 keeps each recording's synced position
   in bytes of its time index that were reserved. No index the pin wrote has a synced
-  position, and version 5 recovers such an index as version 4 did (ADR 0144). So
-  such a directory opens under `master`. Since 2026-11-22,
+  position, and version 5 recovers such an index as version 4 did (ADR 0144).
+  Version 6, of the same day, adds a cluster member's vote floor to its terms file,
+  which a directory with no cluster member does not have, so it changes nothing a
+  server's directory holds (ADR 0145). So such a directory opens under `master`. Since 2026-11-22,
   `conformance/upgrade/log-directory.sh` holds that in every pull request: it builds
   the tree at 620a2e29, has it write a directory as a server writes its own, and
   opens it in place under the tree under test
@@ -249,16 +251,17 @@ each. Their state today:
 | --- | --- |
 | 1. Installed, not cloned | Not started |
 | 2. What an Aeron user reaches for first is there, or is named as absent | The table above: ten rows wait on features 5, 6 and 7; no page for the reader who comes from Aeron |
-| 3. Nothing known lies about delivery | Work item 286 is open, invariant 1; issues 14, 16 and 17 are open; issues 245, 252 and 274 and work items 334 and 338 are tests that failed with no cause found yet |
+| 3. Nothing known lies about delivery | Issues 14, 16 and 17 are open; issues 245, 252 and 274 and work items 334 and 338 are tests that failed with no cause found yet |
 | 4. The frozen surfaces are named and an upgrade across them has run | The upgrade gate runs a cluster across two trees; nothing is frozen, and a client and a driver of different builds have never met |
 | 5. Honest and explainable to a stranger | The README's status is corrected with this page; no page for reporting a problem, no `SECURITY.md`, no generated latency page; errors name pages by a path in the repository |
-| 6. No fault is left to an operator's rule where a check can hold it | Four faults are held by rules: work items 277, 286 and 288, and the members string |
+| 6. No fault is left to an operator's rule where a check can hold it | Three faults are held by rules: work items 277 and 288, and the members string |
 | 7. A leader that stops, in any way, is replaced within a stated bound | Two of six ways are held by tests; a planned stop costs 11 s; work item 280 is open |
 | 8. Redundancy is restored while the cluster runs, and the cluster runs for days | Not started: no start from a peer's snapshot, no purge while running, no job across hosts, no cluster soak |
 | 9. What Brigade's server runs is a gate here, and the release carries its data | The three gates are in since 2026-11-22 (feature 2): the feed's shape in `just test`, a log directory of 620a2e29 opened in place in `just conformance`, and the server's suite against `master` each night. Left for features 10 and 12: the server builds from the published crates, the candidate's soak, and the notice of work item 312 |
 
 Row 9 is the state on 2026-11-22, when feature 2 landed. Rows 3 and 6 are the state on
-2026-11-22, when work item 287 landed. Every other row is the state at 20741de3.
+2026-11-22, when work item 286's vote floor landed. Every other row is the state at
+20741de3.
 
 ## The roadmap
 

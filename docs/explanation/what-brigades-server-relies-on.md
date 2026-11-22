@@ -105,8 +105,10 @@ says in its first comment what it holds.
 
 A server's log directory outlives the build that wrote it. The two servers in
 production hold directories that the tree at 620a2e29 wrote, in version 2 of the
-durable log's format, and `master` writes version 5 since 2026-11-22
-([ADR 0144](../decisions/0144-keep-a-recordings-synced-position-in-its-time-index-and-cut-a-recording-a-crash-left-live-to-it.md)).
+durable log's format, and `master` writes version 6 since 2026-11-22
+([ADR 0144](../decisions/0144-keep-a-recordings-synced-position-in-its-time-index-and-cut-a-recording-a-crash-left-live-to-it.md),
+[ADR 0145](../decisions/0145-withhold-the-vote-of-a-member-that-lost-its-log-until-it-holds-what-the-cluster-held.md)). Version 6 adds a cluster member's vote floor to its
+terms file, which a server's directory does not have.
 So the server relies on one more
 thing than its calls: a later driver opens its directory in place, with no step by an
 operator, and the feed goes on in it.
