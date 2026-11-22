@@ -23,9 +23,10 @@
 //!   goes on from there.
 //! - **Some or all of the append's records reach the recording first.** The recording
 //!   stops past them. A stop syncs the recording's files before the catalog says it
-//!   stopped (`cavalry-log`'s `CatalogWriter::stop`), so they are on the disk, and
-//!   the feed answers them at the positions they hold and offers again only the ones
-//!   after the stop. A stop in the middle of a record leaves the part that came,
+//!   stopped (`cavalry-log`'s `LogDir::stop`, which syncs the segment and the index
+//!   and then calls `CatalogWriter::stop`), so they are on the disk, and the feed
+//!   answers them at the positions they hold and offers again only the ones after
+//!   the stop. A stop in the middle of a record leaves the part that came,
 //!   which a reader drops, and the record is offered again whole. This order failed
 //!   the test once on CI, when it asserted the first order alone: the three records
 //!   got through, and the feed went on at 47616 where the test looked for 6432.
