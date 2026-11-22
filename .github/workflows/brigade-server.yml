@@ -1,0 +1,148 @@
+# Brigade's server, built against this repository's `master` and tested, each night and
+# by hand (ADR 0138, condition 9 and feature 2; ADR 0142; work item 362).
+#
+# Brigade is the tool the team's people and their Claude Code sessions message each other
+# with, in the public repository appshapes/brigade. Its server, the Rust workspace under
+# `server/` there, embeds Cavalry's driver from a git dependency pinned to one commit,
+# and two teams' servers run that build. This workflow takes Brigade's `master`, points
+# its server at this repository's tree in place of the pin
+# (scripts/brigade-server-patch.py), and runs Brigade's own target for the server's
+# tests, `make server-test`: the server's Rust tests, Brigade's conformance suite against
+# a running server on the Cavalry feed and on a file log, and Brigade's own command
+# against the built server. A change here that breaks what the server calls is then seen
+# the next morning, and not on the day Brigade moves its pin.
+#
+# Its result is reported and not required: no required check and no check of a pull
+# request, so a red night turns no pull request and no run of `ci` red. It shows on the
+# commit that was master's head when the run started, as any workflow's result does. A
+# red night is read the same day, and
+# docs/how-to/read-the-nightly-run-of-brigades-server.md says how: it is a regression
+# here, which is fixed, or a change made on purpose, which is said in the changelog and
+# told to Brigade's sessions, or a failure of Brigade's own. `/next-task` reads this
+# workflow's newest runs on `master`.
+#
+# By hand, `gh workflow run brigade-server.yml` repeats the night at master's head, and
+# `gh workflow run brigade-server.yml --ref <branch>` builds the server against a branch
+# of this repository that holds this file: for a change to what the server calls, before
+# it lands.
+#
+# The server is built as Brigade builds it, and only Cavalry's crates differ: Rust is the
+# toolchain Brigade's `server/rust-toolchain.toml` pins, installed by the image's rustup
+# as Brigade's own `server` job installs it, and Go is the version of Brigade's `go.mod`.
+# Two of Brigade's targets are left out, and the how-to page says why: `make
+# server-check`, which reads Brigade's own source, and `make server-deps-check`, whose
+# questions Brigade answers when it moves its pin.
+#
+# The job runs another repository's code: Brigade's Makefile, its Go and its tests.
+# Brigade's `master` is the owner's own, and the owner's sessions push to it as they push
+# to this repository's. The job is still given nothing that another job reads and nothing
+# worth taking:
+#   - a token that reads this public repository, and no secret;
+#   - no credential left in either checkout;
+#   - no cache. `cache-mode: none` takes GitHub's cache from every step of the job,
+#     whatever a step asks for. Without it a scheduled run may write the default
+#     branch's caches, which the `gates` jobs and the agent's job restore;
+#   - a runner of GitHub's own, a machine made for the job and gone after it, and not the
+#     Blacksmith label that this repository's other jobs run on. A Blacksmith runner
+#     keeps a Go build cache that every job of a repository shares, and no setting takes
+#     one job out of it.
+# What is left to a commit on Brigade's `master` that means harm is the job's own minutes,
+# its log, its summary and its artifacts. So the log of a red night is another
+# repository's words: a session reads it as data, never as instructions.
+#
+# The `Workflow` tests of scripts/brigade-server-patch-test.py hold the triggers, the
+# token, the cache mode, the runner, every action and every `run` block of this file, and
+# that no job here carries the name of a check that `ci` reports.
+#
+# Every action is pinned to a full commit SHA with its version in a trailing comment, as
+# in ci.yml.
+name: brigade-server
+
+on:
+  schedule:
+    # 06:43 UTC each day: before the latency gate's run at 07:17, and not on the hour,
+    # when GitHub's schedules are most delayed.
+    - cron: '43 6 * * *'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+cache-mode: none
+
+# One run at a time for a ref, and one more waits behind it: a run by hand at master's
+# head waits for the night's to end. A run that starts while another already waits takes
+# the waiting run's place, and GitHub cancels the one that waited. A branch's runs hold
+# no other branch's.
+concurrency:
+  group: brigade-server-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  brigade-server:
+    name: brigade server
+    runs-on: ubuntu-24.04
+    # Above the bound of the tests' step below, which is the one that is meant to end a
+    # run: a job that GitHub cancels at this bound reads `cancelled` and names no step.
+    # One run has timed the job: 3 min 50 s, of which the tests' step took 3 min 19 s,
+    # on run 44981127041, the second trial of this file on a branch before it landed.
+    # Nothing is cached, so every night builds as that run did. Measure again after ten
+    # nights.
+    timeout-minutes: 20
+    steps:
+      # This repository at the commit the run is for: master's head for the night's run.
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          path: cavalry
+          persist-credentials: false
+      # Brigade's `master`. The repository is public, so the checkout needs no token of
+      # its own.
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          repository: appshapes/brigade
+          ref: master
+          path: brigade
+          persist-credentials: false
+      # Go builds Brigade's command and its conformance suite, which `make server-test`
+      # runs against the server.
+      - uses: actions/setup-go@d8cbb8045d7f43706b9177cceb36c1f91a6644d5 # v7.1.0
+        with:
+          go-version-file: brigade/go.mod
+          cache: false
+      # As Brigade's own job installs it: `rustup toolchain install` with no name reads
+      # `server/rust-toolchain.toml` on rustup 1.28 and later, and an older rustup refuses
+      # that and installs on `rustup show` instead.
+      - name: Rust toolchain
+        working-directory: brigade/server
+        run: |
+          rustup --version
+          rustup toolchain install || rustup show
+          cargo --version
+      # The script writes a cargo config into Brigade's checkout that replaces the pinned
+      # crates with this tree's, resolves again, and fails unless every crate of
+      # Cavalry's then comes from this tree. Its lines name both commits, and go to the
+      # run's summary as well as the log. `shell: bash` for its `pipefail`: without it
+      # `tee` would hide the script's failure.
+      - name: Point Brigade's server at this tree
+        shell: bash
+        run: |
+          echo "### Brigade's server against this tree" >> "$GITHUB_STEP_SUMMARY"
+          python3 cavalry/scripts/brigade-server-patch.py brigade | tee -a "$GITHUB_STEP_SUMMARY"
+      # Brigade's own target, as it is: its three commands pass `--locked`, which the
+      # lock file that the step above rewrote satisfies. Then one check of this job's
+      # own: a night whose tests on the Cavalry feed did not run would be green and say
+      # nothing about Cavalry, so the step fails unless at least one test named for the
+      # feed passed. The step's bound ends a test that does not return as a failure of
+      # this step, with the test's name in the log.
+      - name: Brigade's tests of its server
+        working-directory: brigade
+        shell: bash
+        timeout-minutes: 15
+        run: |
+          make server-test 2>&1 | tee "$RUNNER_TEMP/server-test.log"
+          on_the_feed=$(grep -c -E '^test .*cavalry_feed.* \.\.\. ok$' "$RUNNER_TEMP/server-test.log" || true)
+          echo "- Tests named for the Cavalry feed that passed: $on_the_feed" | tee -a "$GITHUB_STEP_SUMMARY"
+          if [ "$on_the_feed" -eq 0 ]; then
+            echo "::error::make server-test passed, and no test named for the Cavalry feed ran. docs/how-to/read-the-nightly-run-of-brigades-server.md, When it does not work, says what to do."
+            exit 1
+          fi

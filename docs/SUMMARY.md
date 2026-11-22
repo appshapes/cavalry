@@ -31,6 +31,7 @@ under `docs/` is listed here; `just lint-docs` fails on one that is not.
 - [Run a test many times in a row](how-to/run-a-test-many-times.md)
 - [Promote a standby to a voter](how-to/promote-a-standby.md)
 - [Upgrade a cluster one member at a time](how-to/upgrade-a-cluster.md)
+- [Read the nightly run of Brigade's server](how-to/read-the-nightly-run-of-brigades-server.md)
 
 # Reference
 
@@ -191,3 +192,4 @@ under `docs/` is listed here; `just lint-docs` fails on one that is not.
 - [0138. Draw the finish line at a beta that is an alternative to Aeron, and build it sixth in twelve features](decisions/0138-draw-the-finish-line-at-a-beta-that-is-an-alternative-to-aeron-and-build-it-sixth.md)
 - [0139. Run the latency gate each night as a coarse check, until the slice that measures Cavalry against Aeron](decisions/0139-run-the-latency-gate-each-night-as-a-coarse-check.md)
 - [0140. Let the fixer write a spec page that an Accepted ADR on its branch names](decisions/0140-let-the-fixer-write-a-spec-page-that-an-accepted-adr-on-its-branch-names.md)
+- [0142. Build Brigade's server against `master` each night through a cargo patch, and read a red night the same day](decisions/0142-build-brigades-server-against-master-each-night-through-a-cargo-patch.md)
