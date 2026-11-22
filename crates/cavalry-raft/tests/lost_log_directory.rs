@@ -168,6 +168,114 @@ fn two_members_that_lost_their_logs_vote_in_the_one_that_holds_the_log() {
     }
 }
 
+/// A member that lost its log follows no leader that a later term has deposed. A leads
+/// term t and can reach nobody; `voter` still reaches A, so its canvass positions keep A
+/// quorate. `voter` and `parted` elect `parted` in t + 1 and commit entries that A lacks.
+/// Then `voter` loses its log, `parted` stops, and A reaches `voter` again, all within the
+/// leader heartbeat timeout, while A's election is still closed. A answers the new
+/// member's canvass, since no term is below −1. A member that took A's log end as its
+/// vote floor would follow A, and A and it are a quorum. Entries offered to A would be
+/// committed where `parted`'s committed entries of t + 1 lie, and a committed entry
+/// would be replaced. The member with no log hears every voter first, and `parted`, which
+/// holds the later term, is stopped, so it takes no leader (`spec/cluster.md`, "A member
+/// that lost its log"; ADR 0145). Once `parted` runs again, the member takes it and the
+/// three end on its log.
+#[test]
+fn a_member_that_lost_its_log_follows_no_leader_a_later_term_deposed() {
+    let ids = [0, 1, 2];
+    let mut safety = Safety::new(&ids);
+    let (mut cluster, old) = elected(7, &mut safety);
+    let others = followers(&ids, old);
+    let (parted, voter) = (others[0], others[1]);
+    offer(&mut cluster, &mut safety, 0, 10);
+    // One more entry that `voter` receives and does not sync, so that `parted`'s log is
+    // ahead of its own and `parted` is the candidate of t + 1: a request vote of `voter`'s
+    // would reach A and end A's lead.
+    cluster.pause_sync(voter);
+    let held_by_old = offer(&mut cluster, &mut safety, 10, 1);
+    safety.run(&mut cluster, 100);
+    assert_eq!(cluster.commit_position(old), Some(held_by_old));
+    let term = cluster.member(old).expect("a member").leadership_term_id();
+
+    // A reaches nobody; `voter` still reaches A.
+    cluster.cut_between(old, parted);
+    cluster.cut_one_way(old, voter);
+    safety.run_until(&mut cluster, 30_000, "`parted` leads t + 1", |cluster| {
+        cluster.role(parted) == Some(cavalry_raft::Role::Leader)
+    });
+    cluster.resume_sync(voter);
+    let pair = [parted, voter];
+    safety.run_until(&mut cluster, 5_000, "`voter` follows `parted`", |cluster| {
+        settled(cluster, &pair)
+    });
+    assert!(
+        cluster
+            .member(parted)
+            .expect("a member")
+            .leadership_term_id()
+            > term
+    );
+    let committed = offer(&mut cluster, &mut safety, 20, 10);
+    safety.run(&mut cluster, 100);
+    assert_eq!(cluster.commit_position(parted), Some(committed));
+    assert!(committed > held_by_old);
+    let log = cluster.log_to(parted, committed);
+    // A has not heard that it was deposed: it still leads t, its election closed.
+    let deposed = cluster.member(old).expect("a member");
+    assert_eq!(deposed.role(), cavalry_raft::Role::Leader);
+    assert_eq!(deposed.leadership_term_id(), term);
+    assert_eq!(
+        deposed.election_state(),
+        cavalry_raft::ElectionState::Closed
+    );
+
+    // `voter` loses its log, `parted` stops, and A reaches `voter` again.
+    safety.wipe(&mut cluster, voter);
+    cluster.halt(parted);
+    cluster.heal_between(old, voter);
+    safety.run(&mut cluster, 1_000);
+    // Entries offered to A are appended to its log, and none is committed.
+    for i in 30..40u32 {
+        if cluster.offer(&i.to_le_bytes()).is_ok() {
+            safety.run(&mut cluster, 1);
+        }
+    }
+    safety.run(&mut cluster, 5_000);
+    assert_eq!(cluster.commit_position(old), Some(held_by_old));
+    let wiped = cluster.member(voter).expect("a member");
+    assert_eq!(wiped.vote_floor(), -1, "it took no leader");
+    assert_ne!(wiped.leader_member_id(), old);
+    let counts = cluster.counts(voter).expect("a member");
+    assert!(counts.leaders_withheld > 0, "{counts:?}");
+
+    // `parted` runs again and A hears it: `parted`'s log leads, and the three end on it.
+    // The commit `parted` knows counted the acknowledgement of the log `voter` lost, so
+    // a quorum's append positions are below it until `voter` has caught up. The check
+    // of every step stops here, as in the test of two lost logs; what is held is the
+    // end.
+    cluster.resume(parted);
+    cluster.heal_between(old, parted);
+    let mut steps = 0;
+    while !(settled(&cluster, &ids)
+        && ids
+            .iter()
+            .all(|&id| cluster.append_position(id) >= Some(committed)))
+    {
+        assert!(
+            steps < 60_000,
+            "the three settle behind one leader and hold what `parted` committed: not within 60 s"
+        );
+        cluster.step();
+        steps += 1;
+    }
+    assert_eq!(cluster.leader(), Some(parted));
+    for &id in &ids {
+        assert_eq!(cluster.log_to(id, committed), log, "member {id}");
+    }
+    let floor = cluster.member(voter).expect("a member").vote_floor();
+    assert!(floor >= committed, "the floor {floor} holds {committed}");
+}
+
 /// ADR 0145's cost, held: a new cluster in which one member holds nothing yet when the
 /// first leader stops elects no leader until that leader runs again. The member that
 /// holds nothing cannot tell its empty log from one it lost, so it withholds, and the

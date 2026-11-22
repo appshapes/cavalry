@@ -9,7 +9,8 @@ mod common;
 use cavalry_proto::cluster::{Message, Template};
 use cavalry_raft::{Consensus, ElectionState, Refused, Role};
 use common::{
-    Call, Stub, append_position, at, canvass_position, leadership_term, new_leadership_term,
+    Call, Stub, append_position, at, canvass_position, hear_the_others, leadership_term,
+    new_leadership_term,
 };
 
 /// Member 0 of three, which elects, taken by hand to the cycle after it has both
@@ -256,6 +257,9 @@ fn a_follower_records_the_term_before_it_reports_for_it() {
         "one canvass position to each other member"
     );
 
+    // Its log is empty, so it takes the leader once it has heard member 0 too (ADR
+    // 0145).
+    hear_the_others(&mut follower, &mut io, 5, 1);
     follower
         .on_message(at(5), &new_leadership_term(1, 0), &mut io)
         .expect("no fault");
@@ -368,6 +372,9 @@ fn a_member_whose_elections_fail_one_after_another_canvasses_once_an_interval() 
             // The leader's answer to the log the member reported: no term before
             // its first election recorded term 0, and term 0 from then on.
             let answer = if member.counts().elections_failed == 0 {
+                // Its log is empty before its first election records term 0, so it
+                // takes the leader once it has heard member 2 too (ADR 0145).
+                hear_the_others(&mut member, &mut io, ms, 0);
                 new_leadership_term(0, 0)
             } else {
                 leadership_term(0, 0, 0, 0, 0, [-1, -1, -1])

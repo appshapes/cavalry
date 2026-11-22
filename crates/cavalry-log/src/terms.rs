@@ -241,7 +241,9 @@ impl std::fmt::Display for TermsError {
                                 member on a new log directory: it replicates the log, and \
                                 it casts no vote and seeks no leadership until its log \
                                 reaches what the cluster held when it took a leader, the \
-                                position cluster.vote_floor holds. It catches up only \
+                                position cluster.vote_floor holds. It takes that leader \
+                                only once it has heard every other member, and waits while \
+                                one is stopped. It catches up only \
                                 while its leader's log begins at position 0; where it no \
                                 longer does, leave the member stopped, and start the \
                                 cluster again as a new cluster, every member on a new log \

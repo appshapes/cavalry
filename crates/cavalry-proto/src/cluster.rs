@@ -2729,6 +2729,33 @@ pub fn withheld_vote(voters: usize, reports: &[Option<LogReport>], candidate: Lo
         })
 }
 
+/// Whether a voter whose log is empty takes the sender of a new leadership term for
+/// `term` as its leader, and so stores its vote floor (`spec/cluster.md`, "A member
+/// that lost its log", "Taking a leader"; ADR 0145). It does when it voted for that
+/// leader in that term in this election, `voted`. It does too when each of the
+/// `voters` voters but itself, the voter at `own`, has been heard in this election,
+/// `heard[i]` the highest term voter `i` named by a canvass position or a new
+/// leadership term, `None` for one not heard, and none named a term above `term`. The
+/// caller counts the message itself as the leader's. A leader that a later term
+/// deposed answers a member whose candidate term is −1, and the voter that holds the
+/// later term names it; while a voter is not heard it may hold one.
+pub fn takes_leader(
+    voters: usize,
+    own: usize,
+    heard: &[Option<i64>],
+    term: i64,
+    voted: bool,
+) -> bool {
+    voted
+        || (voters >= 1
+            && heard.len() >= voters
+            && heard
+                .iter()
+                .take(voters)
+                .enumerate()
+                .all(|(index, named)| index == own || named.is_some_and(|named| named <= term)))
+}
+
 /// The fields of a request vote a reader answers.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub struct VoteRequest {

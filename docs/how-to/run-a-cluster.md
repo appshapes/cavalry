@@ -33,12 +33,17 @@ committed once a quorum, two of three, has it on disk.
 - Each member's log directory on storage that outlives the member's host or
   container: a volume, not the container's own file system. The directory holds the
   member's votes and its log. A member that comes back on an empty one, beside the
-  others, has no record of them. It replicates the log, and it casts no vote and
-  seeks no leadership until its log reaches what the cluster held when it took a
-  leader, the position `cluster.vote_floor` holds
+  others, has no record of them. It takes a leader only once it has heard every
+  other member, so it waits, and `cluster.leaders_withheld` rises, while another
+  member is stopped. Then it replicates the log, and it casts no vote and seeks no
+  leadership until its log reaches what the cluster held when it took a leader, the
+  position `cluster.vote_floor` holds
   ([ADR 0145](../decisions/0145-withhold-the-vote-of-a-member-that-lost-its-log-until-it-holds-what-the-cluster-held.md)).
-  Until it has caught up, the cluster tolerates one failed member fewer. It is safe,
-  and a volume spares that wait.
+  Until it has caught up, the cluster tolerates one failed member fewer. That is
+  safe while each other member holds the log it kept. It is not safe in one case:
+  another member that holds no log either, because it started late and has not yet
+  caught up, while the member that holds the log is stopped. The two then elect as a
+  new cluster does. A volume spares the wait and that case.
 - Every member on this version of Cavalry. A member of a version in which the member
   with the lowest id was the leader casts no vote, so the two are not one cluster,
   and a log directory that version wrote is refused here. To move a cluster from
@@ -211,10 +216,13 @@ committed once a quorum, two of three, has it on disk.
   directory, or the file was removed. Without it the member cannot tell which
   recordings hold its log, and it does not start. The cluster goes on without this
   member while the other two run. To have three members again, start this member
-  on a new log directory. It joins the other two and replicates the log, and it
-  casts no vote and seeks no leadership until its log reaches what the cluster held
-  when it took a leader, which `cluster.vote_floor` on its host holds and
-  `cluster.append_position` reaches once it has caught up. It catches up only while
+  on a new log directory while the other two run. It takes a leader once it has
+  heard both, joins them and replicates the log, and it casts no vote and seeks no
+  leadership until its log reaches what the cluster held when it took a leader,
+  which `cluster.vote_floor` on its host holds and `cluster.append_position` reaches
+  once it has caught up. While one of the other two is stopped it takes no leader,
+  and `cluster.leaders_withheld` on its host rises: start the stopped member on the
+  log directory it kept. It catches up only while
   the leader's log begins at position 0. Where the other members' recordings were
   purged below a snapshot, start the cluster again as a new cluster: stop every
   member, give every member a new log directory, and start them together.

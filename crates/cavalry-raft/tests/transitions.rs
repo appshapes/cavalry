@@ -16,7 +16,7 @@ use std::fmt::Debug;
 use cavalry_proto::cluster::Message;
 use cavalry_raft::{Consensus, Counts, ElectionState, Role};
 use cavalry_shm::counters::generated::COUNTERS;
-use common::{Stub, append_position, at, canvass_position, new_leadership_term};
+use common::{Stub, append_position, at, canvass_position, hear_the_others, new_leadership_term};
 
 /// The two machines a core moves.
 const ELECTION: &str = "cluster_election";
@@ -184,8 +184,16 @@ impl Watch {
         self.check(before, core);
     }
 
-    /// One message read at `ms`, checked.
+    /// One message read at `ms`, checked. Before a new leadership term the core has
+    /// heard every other member, as a member whose log is empty has in a cluster before
+    /// it takes a leader ([`hear_the_others`]; ADR 0145); those reads move nothing.
     fn read(&mut self, core: &mut Consensus, io: &mut Stub, ms: u64, message: &Message<'_>) {
+        if let Message::NewLeadershipTerm {
+            leader_member_id, ..
+        } = *message
+        {
+            hear_the_others(core, io, ms, leader_member_id);
+        }
         let before = (core.election_state(), core.role(), core.counts());
         core.on_message(at(ms), message, io).expect("no fault");
         self.check(before, core);
@@ -224,6 +232,7 @@ fn to_follower_log_await(
 ) -> u64 {
     watch.work(follower, io, ms);
     assert_eq!(follower.election_state(), ElectionState::Canvass);
+    // `Watch::read` has it hear the other members first.
     watch.read(follower, io, ms + 1, term);
     watch.work(follower, io, ms + 2);
     watch.work(follower, io, ms + 3);

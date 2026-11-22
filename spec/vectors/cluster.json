@@ -3245,6 +3245,120 @@
     },
     {
       "kind": "arithmetic",
+      "name": "takes-leader-every-voter-heard-none-later",
+      "rule": "takes-leader",
+      "inputs": {
+        "voters": 3,
+        "own": 2,
+        "heard": [
+          5,
+          5,
+          null
+        ],
+        "term": 5,
+        "voted": false
+      },
+      "fields": {
+        "takes": true
+      }
+    },
+    {
+      "kind": "arithmetic",
+      "name": "takes-leader-a-voter-silent",
+      "rule": "takes-leader",
+      "inputs": {
+        "voters": 3,
+        "own": 2,
+        "heard": [
+          5,
+          null,
+          null
+        ],
+        "term": 5,
+        "voted": false
+      },
+      "fields": {
+        "takes": false
+      }
+    },
+    {
+      "kind": "arithmetic",
+      "name": "takes-leader-a-deposed-leader-beside-a-later-term",
+      "rule": "takes-leader",
+      "inputs": {
+        "voters": 3,
+        "own": 2,
+        "heard": [
+          4,
+          5,
+          null
+        ],
+        "term": 4,
+        "voted": false
+      },
+      "fields": {
+        "takes": false
+      }
+    },
+    {
+      "kind": "arithmetic",
+      "name": "takes-leader-the-later-term-beside-the-deposed-leader",
+      "rule": "takes-leader",
+      "inputs": {
+        "voters": 3,
+        "own": 2,
+        "heard": [
+          4,
+          5,
+          null
+        ],
+        "term": 5,
+        "voted": false
+      },
+      "fields": {
+        "takes": true
+      }
+    },
+    {
+      "kind": "arithmetic",
+      "name": "takes-leader-voted-it-in",
+      "rule": "takes-leader",
+      "inputs": {
+        "voters": 3,
+        "own": 2,
+        "heard": [
+          null,
+          null,
+          null
+        ],
+        "term": 1,
+        "voted": true
+      },
+      "fields": {
+        "takes": true
+      }
+    },
+    {
+      "kind": "arithmetic",
+      "name": "takes-leader-a-standby-past-the-voters-unread",
+      "rule": "takes-leader",
+      "inputs": {
+        "voters": 2,
+        "own": 1,
+        "heard": [
+          3,
+          null,
+          null
+        ],
+        "term": 3,
+        "voted": false
+      },
+      "fields": {
+        "takes": true
+      }
+    },
+    {
+      "kind": "arithmetic",
       "name": "candidate-unanimous",
       "rule": "candidate",
       "inputs": {

@@ -13,7 +13,9 @@ mod common;
 
 use cavalry_proto::cluster::{Message, Template};
 use cavalry_raft::{Consensus, ElectionCause, ElectionState, Refused, Role};
-use common::{Call, Stub, append_position, at, canvass_position, new_leadership_term};
+use common::{
+    Call, Stub, append_position, at, canvass_position, hear_the_others, new_leadership_term,
+};
 
 /// Member 0 of `[0, 1, 2]`, electing.
 fn elector(seed: u64) -> Consensus {
@@ -102,6 +104,8 @@ fn to_closed_leader(member: &mut Consensus, io: &mut Stub) -> u64 {
 /// next millisecond.
 fn to_closed_follower(member: &mut Consensus, io: &mut Stub) -> u64 {
     work(member, io, 1);
+    // Its log is empty: it takes the leader once it has heard member 2 too (ADR 0145).
+    hear_the_others(member, io, 2, 1);
     read(member, io, 2, &new_leadership_term(1, 0));
     work(member, io, 3);
     work(member, io, 4);

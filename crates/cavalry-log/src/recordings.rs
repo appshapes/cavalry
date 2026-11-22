@@ -198,7 +198,9 @@ impl std::fmt::Display for RecordingsError {
                         member on a new log directory: it replicates the log, and it casts \
                         no vote and seeks no leadership until its log reaches what the \
                         cluster held when it took a leader, the position \
-                        cluster.vote_floor holds. It catches up only while its leader's \
+                        cluster.vote_floor holds. It takes that leader only once it has \
+                        heard every other member, and waits while one is stopped. It \
+                        catches up only while its leader's \
                         log begins at position 0; where it no longer does, leave the member \
                         stopped: the cluster goes on while a quorum of the others runs, and \
                         is brought back to its full count by starting it again as a new \

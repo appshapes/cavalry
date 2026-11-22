@@ -67,10 +67,10 @@ while the third holds the whole log: every voter is heard, and the third is vote
 
 **The vote floor.** A member whose log is empty that takes a leader on a new
 leadership term stores that message's log position, the leader's append position,
-as its vote floor, before it records a term. The leader's log holds every entry the
-cluster committed, so a member whose append position has reached its floor holds
-every entry it could have acknowledged before it came back, and votes as any voter
-does from then on. A message whose log position is 0, a new cluster's first leader's,
+as its vote floor, before it records a term. A leader taken by the rule below holds
+every entry the cluster committed, so a member whose append position has reached its
+floor holds every entry it could have acknowledged before it came back, and votes as
+any voter does from then on. A message whose log position is 0, a new cluster's first leader's,
 gives no floor. The floor is one slot of the terms file's header, bytes 48 to 60
 until now reserved: the position under its CRC32, written once and synced. A torn
 write reads as no floor, and since the floor is written before the first term the
@@ -85,14 +85,44 @@ crash tore would then read as no floor at all, and a second slot that keeps the
 floor before it, as the candidate term has, does not fit in the 20 bytes the header
 has left.
 
-**Two pure functions and their vectors.** `withholds(own, vote_floor, log_heard)`
-and `withheld_vote(voters, reports, candidate)` in `cavalry-proto`, pinned by the
-`withholds` and `withheld-vote` arithmetic vectors of `spec/vectors/cluster.json`,
-beside the `candidate` and `request-vote` vectors they sit next to.
+**Taking a leader.** A leader that a later term deposed, and that has not heard of
+that term, still leads with its election closed, and it answers every canvass
+position whose terms are not above its own. Its log lacks what the later term
+committed. A member that kept its candidate term ignores that leader, since it voted
+in the later term or followed it. A member that lost its log has a candidate term of
+−1, which is above no term. Its floor would then be the deposed leader's log end, and
+it and the deposed leader would be a quorum whose commits replace the later term's.
+So a voter whose log is empty takes a leader in two cases only. In the first, it
+voted for that leader, in that term, in this election. In the second, each other
+voter has been heard in this election, by a canvass position or a new leadership
+term, and none named a term above the leader's. A canvass position names the
+sender's candidate term, and a new leadership term names the term it leads. It
+ignores any other new leadership term, counted in `cluster.leaders_withheld`.
+
+The second case holds the floor. A committed entry that counted the member's
+acknowledgement was recorded by another voter, which recorded the entry's term first
+and keeps it, so that voter names a term at least the entry's. A leader of that term
+or a later one holds the entry, by Raft's vote rule. The case holds the forgotten
+vote too: the candidate it went to stored its term first, so it names a term at
+least the vote's. The member's candidate term becomes the leader's, and it votes in
+that term no second time. A member whose election has closed sends no canvass
+position, so a follower would never be heard. So a member that holds a log, that
+does not lead, and that is in a state other than canvass and nominate answers a
+canvass position whose log is empty with its own. It answers that member alone, at
+most once each election status interval, 100 ms. A member whose log is empty answers
+none, so no two members answer each other. A standby takes any leader, since its
+appends count toward no commit.
+
+**Three pure functions and their vectors.** `withholds(own, vote_floor, log_heard)`,
+`withheld_vote(voters, reports, candidate)` and `takes_leader(voters, own, heard,
+term, voted)` in `cavalry-proto`. The `withholds`, `withheld-vote` and
+`takes-leader` arithmetic vectors of `spec/vectors/cluster.json` pin them. They sit
+beside the `candidate` and `request-vote` vectors.
 
 **What an operator does now.** A member whose log directory is lost or damaged is
-started on a new one, and it comes back by itself. The refusals that named the old
-rule, and `docs/how-to/run-a-cluster.md`, say so. Where the leader's log no longer
+started on a new one. It comes back by itself once every other voter runs and
+reaches it, and it waits while one does not. The refusals that named the old rule,
+and `docs/how-to/run-a-cluster.md`, say so. Where the leader's log no longer
 begins at position 0, its recordings purged below a snapshot, the member cannot
 catch up and withholds until a start from a peer's snapshot is built (work item
 365); the advice for that case is unchanged.
@@ -132,6 +162,25 @@ catch up and withholds until a start from a peer's snapshot is built (work item
 - **Withhold only from a candidate whose log is behind the longest log heard.** Safe
   only when the member holding the committed entry is heard. The fault is exactly the
   case in which it is stopped.
+- **Take any leader that answers, the floor alone guarding the vote.** This was the
+  first draft of this decision, and the pull request's review found the schedule
+  that breaks it. A leader that a later term deposed answers the member, which takes
+  that leader's log end as its floor. It follows the leader, and the two are a
+  quorum that commits over the later term's committed entries. The test of the
+  Evidence fails on it.
+- **Have the leader answer a member whose log is empty only while a quorum of the
+  other voters has recently reported its term.** A deposed leader stays fresh for as
+  long as the window, and a report that arrives late refreshes it. Every window is a
+  bet on clocks and on processes that never stand still. It also leaves the member
+  trusting a leader of a build that does not hold the rule.
+- **Count a member whose log is empty out of a leader's quorum.** That stops a
+  deposed leader from staying quorate on the member's canvass positions. It does
+  not stop the member from taking that leader's term and floor, and the two still
+  commit together.
+- **Hold the two cases above to the vote too, so that a member whose log is empty
+  never votes until it has heard every voter.** That closes the residual case of the
+  Consequences. But a new cluster then elects no leader while one of its members has
+  not started, and no member can tell the two apart.
 
 ## Evidence
 
@@ -156,8 +205,20 @@ catch up and withholds until a start from a peer's snapshot is built (work item
     two others elect and commit ten entries. Then the leader stops and the third is
     heard: for 30 s no leader is elected, and the third withholds and never stands.
     Once the leader runs again, the three end on its log.
-- `spec/vectors/cluster.json`: ten arithmetic vectors, five `withholds` and five
-  `withheld-vote`, read by `crates/cavalry-proto/tests/cluster_conformance.rs`.
+  - `a_member_that_lost_its_log_follows_no_leader_a_later_term_deposed` is the
+    review's schedule. A leads term t and reaches nobody. The voter still reaches A,
+    so its canvass positions keep A quorate. The other two elect a leader in t + 1
+    and commit ten entries that A lacks. Then the voter loses its log, the new leader
+    stops, and A reaches the voter again, while A's election is still closed. For
+    6 s A takes offers and commits none. The member with no log takes no leader,
+    stores no floor and counts `cluster.leaders_withheld`. Once the leader of t + 1
+    runs again, the three end on its log, and the member's floor is at or past what
+    it committed. Without the rule of "Taking a leader" it fails at the check of
+    every step: `member 1 leads with a log that differs from what was committed`.
+    That is the draft of this decision before the review, on db85cd0b.
+- `spec/vectors/cluster.json`: sixteen arithmetic vectors, five `withholds`, five
+  `withheld-vote` and six `takes-leader`, read by
+  `crates/cavalry-proto/tests/cluster_conformance.rs`.
 - `spec/vectors/durable-log.json`: five terms header vectors for the floor slot,
   read by `crates/cavalry-log/tests/conformance.rs`. `crates/cavalry-log/src/terms.rs`,
   `the_vote_floor_is_stored_once_and_read_back_and_a_torn_one_reads_as_none`.
@@ -181,9 +242,22 @@ catch up and withholds until a start from a peer's snapshot is built (work item
 
 ## Consequences
 
-- A member whose log directory is lost comes back on a new one by itself, and votes
-  no leader in that lacks an entry it had acknowledged. The operator's rule of ADR
-  0104 is gone, and nothing about it is left to an operator.
+- A member whose log directory is lost comes back on a new one by itself, follows no
+  leader that a later term deposed, and votes no leader in that lacks an entry it had
+  acknowledged. The operator's rule of ADR 0104 is gone. One case is left: two
+  members that hold no log while the third is stopped, below. No operator's rule
+  held it before either.
+- A voter whose log is empty takes no leader while another voter, not that leader,
+  is stopped or cannot reach it, unless it voted that leader in. This holds even when
+  the leader is the newest term's. So a cluster of three in which one member lost its
+  log and another is stopped has a leader and no follower of it. It commits nothing
+  until the stopped member runs again, and `cluster.leaders_withheld` counts the
+  wait. No member can tell that leader from a deposed one while the member that
+  would name the later term is stopped.
+- A follower that holds a log answers a canvass position whose log is empty, at most
+  once each election status interval, 100 ms. A follower of a build before this
+  decision does not answer, so a member that lost its log during an upgrade waits
+  until that follower canvasses or is upgraded.
 - While a member withholds, the cluster tolerates one failed voter fewer, and a
   member that came back catches up from position 0, so the window grows with the
   log. A volume for the log directory spares it, which the how-to's prerequisite
@@ -202,6 +276,15 @@ catch up and withholds until a start from a peer's snapshot is built (work item
   cluster's next entries end it.
 - Two members of three that lost their logs while the third is stopped elect between
   them as a new cluster does. A quorum's record is gone, which no rule gives back.
+- So do two members of three that hold no log, one that lost it and one that never
+  held a byte of it, while the third, which holds the log, is stopped. The one that
+  never held a byte is a new cluster's member that started late and has not caught
+  up. No member that runs holds what the cluster committed, and neither can tell
+  the cluster from a new one whose third member has not started. A rule that held
+  this case would keep every new cluster from electing until each of its members
+  runs (Alternatives considered). A member that has not caught up shows it in
+  `cluster.append_position`, below its leader's, and a member started late beside
+  a running cluster catches up within its first seconds.
 - A member whose leader's log no longer begins at position 0 withholds until work
   item 365 gives it a start from a peer's snapshot.
 - The terms file holds one more field, which a reader of version 5 ignores, so a

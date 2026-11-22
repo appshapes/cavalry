@@ -118,9 +118,10 @@ const DOC_KEPT_LOG: &str = "docs/reference/durable-log.md#log-recordings";
 /// member out of the cluster for want of the log directory it had.
 const ON_A_NEW_LOG_DIRECTORY: &str = "start the member on a new log directory: it replicates \
      the log, and it casts no vote and seeks no leadership until its log reaches what the \
-     cluster held when it took a leader, the position cluster.vote_floor holds, so that it \
-     votes no leader in that lacks an entry it had acknowledged. It catches up only while \
-     its leader's log begins at position 0. Where it no longer does, recordings purged \
+     cluster held when it took a leader, the position cluster.vote_floor holds. It takes \
+     that leader only once it has heard every other member, so while one is stopped it \
+     waits, and cluster.leaders_withheld rises: start the stopped member on the log \
+     directory it kept. It catches up only while its leader's log begins at position 0. Where it no longer does, recordings purged \
      below a snapshot, leave the member stopped: the cluster goes on while a quorum of the \
      others runs, and is brought back to its full count by starting it again as a new \
      cluster, every member on a new log directory";

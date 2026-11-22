@@ -12,7 +12,8 @@ mod common;
 use cavalry_proto::cluster::Message;
 use cavalry_raft::{Consensus, ElectionCause, ElectionState, Role};
 use common::{
-    Stub, at, canvass_position, follow_term, leadership_term, lose_the_leader, new_leadership_term,
+    Stub, at, canvass_position, follow_term, hear_the_others, leadership_term, lose_the_leader,
+    new_leadership_term,
 };
 
 /// A member that started has no leader and cause 0, in init and in canvass.
@@ -40,6 +41,7 @@ fn a_follower_names_its_leader_until_its_next_election_and_the_cause_is_the_hear
     let mut member = Consensus::with_election(&[0, 1, 2], 1, 7).expect("a member");
     let mut io = Stub::new();
     member.do_work(at(1), &mut io).expect("no fault");
+    hear_the_others(&mut member, &mut io, 2, 0);
     member
         .on_message(at(2), &new_leadership_term(0, 0), &mut io)
         .expect("no fault");
@@ -191,6 +193,7 @@ fn a_followers_election_that_failed_is_the_cause_of_its_next() {
     let mut io = Stub::new();
     let mut member = Consensus::with_election(&[0, 1, 2], 1, 7).expect("a member");
     member.do_work(at(1), &mut io).expect("no fault");
+    hear_the_others(&mut member, &mut io, 2, 0);
     member
         .on_message(at(2), &new_leadership_term(0, 0), &mut io)
         .expect("no fault");

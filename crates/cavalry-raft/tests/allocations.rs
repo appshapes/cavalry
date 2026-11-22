@@ -19,7 +19,7 @@ use std::alloc::System;
 
 use cavalry_proto::cluster::Message;
 use cavalry_raft::{Consensus, ElectionState};
-use common::{Stub, append_position, at, canvass_position, new_leadership_term};
+use common::{Stub, append_position, at, canvass_position, hear_the_others, new_leadership_term};
 use stats_alloc::{INSTRUMENTED_SYSTEM, Region, StatsAlloc};
 
 #[global_allocator]
@@ -76,6 +76,7 @@ fn a_leader_and_a_follower_run_ten_thousand_cycles_without_an_allocation() {
     let mut follower_io = Stub::new();
     let mut follower = Consensus::with_election(&[0, 1, 2], 1, 7).expect("a member");
     follower.do_work(at(1), &mut follower_io).expect("no fault");
+    hear_the_others(&mut follower, &mut follower_io, 2, 0);
     follower
         .on_message(at(2), &new_leadership_term(0, 0), &mut follower_io)
         .expect("no fault");
@@ -118,6 +119,13 @@ fn a_leader_and_a_follower_run_ten_thousand_cycles_without_an_allocation() {
                 &mut follower_io,
             )
             .expect("no fault");
+        // Once every election status interval, the canvass position of a member whose
+        // log is empty, which the follower answers with its own (ADR 0145).
+        if ms % 100 == 0 {
+            follower
+                .on_message(clock, &canvass_position(2, -1, 0), &mut follower_io)
+                .expect("no fault");
+        }
         follower.do_work(clock, &mut follower_io).expect("no fault");
     }
     let change = region.change();

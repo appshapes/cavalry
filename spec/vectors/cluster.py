@@ -619,6 +619,18 @@ def withheld_vote(voters, reports, candidate_log):
     return {"vote": vote}
 
 
+def takes_leader(voters, own, heard, term, voted):
+    """spec/cluster.md, "A member that lost its log", "Taking a leader" (ADR 0145): whether a
+    voter whose log is empty takes the sender of a new leadership term for `term` as its leader:
+    when it voted for that leader in that term, or when each of the `voters` voters but itself,
+    voter `own`, has been heard, `heard[i]` the highest term voter i named or None, and none named
+    a term above `term`."""
+    named = heard[:voters]
+    takes = voted or (voters >= 1 and len(named) == voters and all(
+        i == own or (t is not None and t <= term) for i, t in enumerate(named)))
+    return {"takes": takes}
+
+
 VOTING_STATES = (1, 2, 3, 4)  # canvass, nominate, candidate ballot, follower ballot
 
 
@@ -865,6 +877,17 @@ VECTORS += [
           ("withheld-vote-a-voter-ahead-of-the-candidate", 3, [[-1, 0], [3, 98304], [3, 65536]], [3, 65536]),
           ("withheld-vote-two-empty-one-holds-the-log", 3, [[-1, 0], [-1, 0], [3, 98304]], [3, 98304]),
           ("withheld-vote-a-standby-past-the-voters-unread", 2, [[-1, 0], [3, 4096], None], [3, 4096]),
+      ]],
+    *[arithmetic(name, "takes-leader",
+                 {"voters": voters, "own": own, "heard": heard, "term": term, "voted": voted},
+                 takes_leader(voters, own, heard, term, voted))
+      for name, voters, own, heard, term, voted in [
+          ("takes-leader-every-voter-heard-none-later", 3, 2, [5, 5, None], 5, False),
+          ("takes-leader-a-voter-silent", 3, 2, [5, None, None], 5, False),
+          ("takes-leader-a-deposed-leader-beside-a-later-term", 3, 2, [4, 5, None], 4, False),
+          ("takes-leader-the-later-term-beside-the-deposed-leader", 3, 2, [4, 5, None], 5, False),
+          ("takes-leader-voted-it-in", 3, 2, [None, None, None], 1, True),
+          ("takes-leader-a-standby-past-the-voters-unread", 2, 1, [3, None, None], 3, False),
       ]],
     arithmetic("candidate-unanimous", "candidate",
                {"members": 3, "reports": [[3, 98304], [3, 98304], [2, 65536]], "own": [3, 98304],

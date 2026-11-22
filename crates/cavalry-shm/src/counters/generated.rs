@@ -551,6 +551,9 @@ pub const CLUSTER_VOTE_FLOOR: CounterId = CounterId(181);
 /// `cluster.votes_withheld`, a client counter: Request votes one cluster member answered with nothing because it withholds its vote, its log empty beside a member that holds one or below its cluster.vote_floor, and not every voter had reported a log the candidate's is at least. A vote such a member cast could elect a leader that lacks an entry the cluster committed with its acknowledgement before it lost its log (spec/cluster.md, A member that lost its log; ADR 0145). key and label as cluster.elections.
 pub const CLUSTER_VOTES_WITHHELD: CounterId = CounterId(182);
 
+/// `cluster.leaders_withheld`, a client counter: New leadership terms that one cluster member, a voter with its log empty, ignored where it would otherwise have taken the sender as its leader: it had not voted that leader in, and had not heard each other voter in this election name a term at most the leader's. A leader that a later term deposed, and that has not heard of it, still answers a member whose log is empty, and a member that followed it would count toward commits that replace what the later term committed (spec/cluster.md, A member that lost its log, Taking a leader; ADR 0145). key and label as cluster.elections.
+pub const CLUSTER_LEADERS_WITHHELD: CounterId = CounterId(183);
+
 /// Every entry of `counters.toml`, in the file's order.
 pub const COUNTERS: &[CounterDef] = &[
     CounterDef {
@@ -2008,5 +2011,13 @@ pub const COUNTERS: &[CounterDef] = &[
         scope: Scope::Client,
         doc: "Request votes one cluster member answered with nothing because it withholds its vote, its log empty beside a member that holds one or below its cluster.vote_floor, and not every voter had reported a log the candidate's is at least. A vote such a member cast could elect a leader that lacks an entry the cluster committed with its acknowledgement before it lost its log (spec/cluster.md, A member that lost its log; ADR 0145). key and label as cluster.elections.",
         doctor: "This member lost its log directory, or joined a new cluster late, and the cluster held an election before it had caught up with the log: it answered none of the candidates' requests, so as to elect no leader that lacks a committed entry. An election succeeds without it when a quorum of the other voters votes. If no leader is elected while it rises, a quorum of the other voters is not running: start the stopped ones on the log directories they kept.",
+    },
+    CounterDef {
+        id: CLUSTER_LEADERS_WITHHELD,
+        name: "cluster.leaders_withheld",
+        kind: Kind::Counter,
+        scope: Scope::Client,
+        doc: "New leadership terms that one cluster member, a voter with its log empty, ignored where it would otherwise have taken the sender as its leader: it had not voted that leader in, and had not heard each other voter in this election name a term at most the leader's. A leader that a later term deposed, and that has not heard of it, still answers a member whose log is empty, and a member that followed it would count toward commits that replace what the later term committed (spec/cluster.md, A member that lost its log, Taking a leader; ADR 0145). key and label as cluster.elections.",
+        doctor: "This member started on an empty log directory and a leader answered it, but a voter other than that leader has not been heard: it is stopped, it cannot reach this member, or it runs a build before ADR 0145 and has not canvassed since. This member takes no leader until it hears that voter, since only that voter can show that no later term was elected without the leader. Start the stopped voter on the log directory it kept, or mend the path between the two; the member then takes its leader within 100 ms.",
     },
 ];

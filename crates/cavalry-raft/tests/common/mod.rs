@@ -4,7 +4,7 @@
 
 #![allow(dead_code)]
 
-use cavalry_proto::cluster::{Message, Template};
+use cavalry_proto::cluster::{MAX_MEMBERS, Message, Template};
 use cavalry_raft::consensus::{base_above, term_at_or_below, terms_above};
 use cavalry_raft::{Clock, Consensus, ElectionState, Io, Log, ReplayStopped, Role};
 
@@ -501,9 +501,26 @@ pub fn leadership_term(
     }
 }
 
+/// A canvass position with no log from each member id below `MAX_MEMBERS` but
+/// `member`'s own and `leader`'s, at `ms`: what a member whose log is empty has heard
+/// from every other voter in a cluster before it takes `leader`'s new leadership term
+/// (`spec/cluster.md`, "A member that lost its log", "Taking a leader"; ADR 0145). An id
+/// that is no member's is not read. Each names term −1, so none is above the leader's.
+pub fn hear_the_others(member: &mut Consensus, io: &mut Stub, ms: u64, leader: i32) {
+    let own = member.member_id();
+    for id in (0..MAX_MEMBERS).filter_map(|id| i32::try_from(id).ok()) {
+        if id != own && id != leader {
+            member
+                .on_message(at(ms), &canvass_position(id, -1, 0), io)
+                .expect("no fault");
+        }
+    }
+}
+
 /// Takes `member` from canvass to closed as a follower of the leader whose new
 /// leadership term is `term`, with the image of the leader's log joining at `join`,
-/// from `ms` on; returns the millisecond its election closed at.
+/// from `ms` on; returns the millisecond its election closed at. The member has heard
+/// every other member first ([`hear_the_others`]).
 pub fn follow_term(
     member: &mut Consensus,
     io: &mut Stub,
@@ -512,6 +529,12 @@ pub fn follow_term(
     join: i64,
 ) -> u64 {
     assert_eq!(member.election_state(), ElectionState::Canvass);
+    if let Message::NewLeadershipTerm {
+        leader_member_id, ..
+    } = *term
+    {
+        hear_the_others(member, io, ms, leader_member_id);
+    }
     member.on_message(at(ms), term, io).expect("no fault");
     assert_eq!(member.election_state(), ElectionState::FollowerReplay);
     member.do_work(at(ms + 1), io).expect("no fault");

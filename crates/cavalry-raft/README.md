@@ -404,10 +404,17 @@ commit path runs per message.
   reported a log the candidate's is at least. Taking a leader with its log empty,
   it stores the leader's append position as its vote floor, through
   `Io::store_vote_floor`, in its `terms` file before it records a term;
-  `Consensus::vote_floor()` and the gauge `cluster.vote_floor` hold it.
+  `Consensus::vote_floor()` and the gauge `cluster.vote_floor` hold it. A voter
+  whose log is empty takes a leader only when it voted it in, or when every other
+  voter has named a term in this election and none named one above the leader's
+  ("Taking a leader"): a leader that a later term deposed answers it too. It
+  ignores any other new leadership term, counted in `cluster.leaders_withheld`, and
+  a follower that holds a log answers its canvass position with its own, so that it
+  hears the followers.
   `tests/lost_log_directory.rs` makes the history: an entry committed by two, one of
   them on an empty directory, the other stopped, and no leader elected without the
-  entry until the stopped one runs again.
+  entry until the stopped one runs again. It makes the review's schedule too: a
+  deposed leader that answers the member with no log, which follows it not.
 - Runs beside members of another version of its major, as the members of a cluster
   do while it is upgraded one member at a time (`spec/cluster.md`, "Versions and
   the upgrade"; ADR 0136; work item 231). A member writes its own version, 256 for
