@@ -443,11 +443,17 @@ committed once a quorum, two of three, has it on disk.
   and that its file system has room. Where one of the three is above 0, this
   member took no snapshot where the others did: until it takes one, a start of
   this member reads more of its log than a start of the others does. If none of
-  the three is above 0, either a step took the driver longer than a second, as on
-  a loaded host or a slow disk, or the leader was asked for a second snapshot
-  while the first was being taken: `cluster.snapshot_actions` on the leader then
-  rose twice within a second, every member counts one snapshot given up, and each
-  still takes the first. The leader asks for the next snapshot when its log has
+  the three is above 0, one of three causes explains the count. A step took the
+  driver longer than a second, as on a loaded host or a slow disk. Or the
+  recorder took longer than 2 s to sync this member's log to the snapshot's
+  position, as on a loaded host or a slow disk: a member lists a snapshot only
+  once its own log has synced to the snapshot's position
+  ([ADR 0143](../decisions/0143-list-a-members-snapshot-once-its-log-has-synced-to-the-snapshots-position.md)).
+  Or the leader was asked for a second snapshot while the first was being taken:
+  `cluster.snapshot_actions` on the leader then rose twice within a few seconds,
+  every member counts one snapshot given up, and each still takes the first. For
+  the first two, check the load of this host and the latency of the log
+  directory's device. The leader asks for the next snapshot when its log has
   grown by 256 MiB, and the member takes that one by itself. A count that no
   longer rises is a fault that has passed.
 - `WARN cluster.snapshots_passed_over`: when this member started, it could not

@@ -13,4 +13,4 @@ pub use consensus::{
 };
 pub use module::{ConsensusModule, ListedFound, MAX_PAYLOAD_LENGTH, RaftError, SNAPSHOT_INTERVAL};
 pub use sessions::{Ingress, Leadership, OpenSession, SessionCounts, SessionIo, Sessions};
-pub use snapshot::{SNAPSHOT_TIMEOUT, ServiceSnapshotCounts, SnapshotCounts};
+pub use snapshot::{LOG_SYNC_WAIT, SNAPSHOT_TIMEOUT, ServiceSnapshotCounts, SnapshotCounts};
