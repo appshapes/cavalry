@@ -1301,6 +1301,52 @@ static napi_value fn_cavalry_cluster_service_sessions(napi_env env, napi_callbac
   return make_int32(env, (int32_t) result);
 }
 
+static napi_value fn_cavalry_cluster_service_snapshot_due(napi_env env, napi_callback_info info) {
+  size_t argc = 1; napi_value argv[1];
+  if (!read_args(env, info, 1, &argc, argv, "cavalry_cluster_service_snapshot_due")) return NULL;
+  cavalry_cluster_service_t *service = (cavalry_cluster_service_t *) external_arg(env, argv[0], "service");
+  if (arg_failed) return NULL;
+  int64_t position = 0;
+  bool result = cavalry_cluster_service_snapshot_due(service, &position);
+  napi_value tuple; napi_create_array_with_length(env, 2, &tuple);
+  napi_set_element(env, tuple, 0, make_bool(env, result));
+  napi_set_element(env, tuple, 1, make_int64(env, position));
+  return tuple;
+}
+
+static napi_value fn_cavalry_cluster_service_snapshot(napi_env env, napi_callback_info info) {
+  size_t argc = 3; napi_value argv[3];
+  if (!read_args(env, info, 3, &argc, argv, "cavalry_cluster_service_snapshot")) return NULL;
+  cavalry_cluster_service_t *service = (cavalry_cluster_service_t *) external_arg(env, argv[0], "service");
+  if (arg_failed) return NULL;
+  cavalry_t *client = (cavalry_t *) external_arg(env, argv[1], "client");
+  if (arg_failed) return NULL;
+  size_t length = 0; const uint8_t *state = (const uint8_t *) bytes_arg(env, argv[2], &length, "state");
+  if (arg_failed) return NULL;
+  int result = cavalry_cluster_service_snapshot(service, client, state, length);
+  return make_int32(env, (int32_t) result);
+}
+
+static napi_value fn_cavalry_cluster_service_restore(napi_env env, napi_callback_info info) {
+  size_t argc = 2; napi_value argv[2];
+  if (!read_args(env, info, 2, &argc, argv, "cavalry_cluster_service_restore")) return NULL;
+  cavalry_cluster_service_t *service = (cavalry_cluster_service_t *) external_arg(env, argv[0], "service");
+  if (arg_failed) return NULL;
+  cavalry_t *client = (cavalry_t *) external_arg(env, argv[1], "client");
+  if (arg_failed) return NULL;
+  const uint8_t *state = NULL; size_t length = 0;
+  int result = cavalry_cluster_service_restore(service, client, &state, &length);
+  napi_value tuple; napi_create_array_with_length(env, 2, &tuple);
+  napi_set_element(env, tuple, 0, make_int32(env, (int32_t) result));
+  napi_value state_copy = make_null(env);
+  if (state != NULL && napi_create_buffer_copy(env, length, state, NULL, &state_copy) != napi_ok) {
+    napi_throw_error(env, NULL, "cavalry_cluster_service_restore: Node could not copy the bytes the library gave; free memory and call again");
+    return NULL;
+  }
+  napi_set_element(env, tuple, 1, state_copy);
+  return tuple;
+}
+
 static napi_value fn_cavalry_cluster_service_close(napi_env env, napi_callback_info info) {
   size_t argc = 2; napi_value argv[2];
   if (!read_args(env, info, 2, &argc, argv, "cavalry_cluster_service_close")) return NULL;
@@ -1958,6 +2004,9 @@ static napi_value init(napi_env env, napi_value exports) {
     { "cavalry_cluster_service_position", NULL, fn_cavalry_cluster_service_position, NULL, NULL, NULL, napi_default, NULL },
     { "cavalry_cluster_service_answers", NULL, fn_cavalry_cluster_service_answers, NULL, NULL, NULL, napi_default, NULL },
     { "cavalry_cluster_service_sessions", NULL, fn_cavalry_cluster_service_sessions, NULL, NULL, NULL, napi_default, NULL },
+    { "cavalry_cluster_service_snapshot_due", NULL, fn_cavalry_cluster_service_snapshot_due, NULL, NULL, NULL, napi_default, NULL },
+    { "cavalry_cluster_service_snapshot", NULL, fn_cavalry_cluster_service_snapshot, NULL, NULL, NULL, napi_default, NULL },
+    { "cavalry_cluster_service_restore", NULL, fn_cavalry_cluster_service_restore, NULL, NULL, NULL, napi_default, NULL },
     { "cavalry_cluster_service_close", NULL, fn_cavalry_cluster_service_close, NULL, NULL, NULL, napi_default, NULL },
     { "cavalry_connect_cluster", NULL, fn_cavalry_connect_cluster, NULL, NULL, NULL, napi_default, NULL },
     { "cavalry_cluster_session_offer", NULL, fn_cavalry_cluster_session_offer, NULL, NULL, NULL, napi_default, NULL },

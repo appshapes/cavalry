@@ -88,6 +88,9 @@ def cs_type(ctype: str, header, where: str) -> str:
         inner = base[:-3]
         if inner in header.opaque and where == "param":
             return "out nint"
+        # Bytes the library holds and the caller reads, as a restored state is.
+        if inner == "uint8_t" and where == "param":
+            return "out byte*"
         raise SystemExit(f"generate_dotnet: no .NET type for {c!r}")
     if base.endswith(" *"):
         inner = base[:-2]

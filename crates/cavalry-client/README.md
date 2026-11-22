@@ -232,8 +232,9 @@ The client API implementation, re-exported by the `cavalry` crate. Data plane.
   refusal of the driver's but one for the snapshot's recording, error code 21 or
   23, is the call's error, a registry at its bound, code 10, among them: the
   service has not started, and the program asks again. A program that never calls
-  `restore` reads its member's log from position 0, as before, and so does a
-  service written through the C ABI. Such a service needs its member's whole log:
+  `restore` reads its member's log from position 0, as before; through the C ABI
+  the call is `cavalry_cluster_service_restore` (`spec/c-abi.md`, "A service's
+  snapshot and its start"; ADR 0146). Such a program needs its member's whole log:
   the member's `cluster.log_purge_position` rises once the service takes
   snapshots, and assumes a program that calls `restore`, so beside a program that
   takes snapshots and never calls it, nothing may be purged. For the entries of

@@ -21,7 +21,7 @@
  `cavalry_context_init` passes to `cavalry_context_init_v` and the library compares
  with its own.
  */
-#define CAVALRY_ABI_VERSION 5
+#define CAVALRY_ABI_VERSION 6
 
 /*
  The images a subscription holds at most.
@@ -350,6 +350,30 @@
 #define CAVALRY_ERR_CLUSTER_ACTION 146
 
 /*
+ `cavalry_cluster_service_snapshot` where no snapshot is due: the last entry of the
+ service's last poll was not a request for a snapshot that the handler took.
+ */
+#define CAVALRY_ERR_CLUSTER_NO_SNAPSHOT_DUE 147
+
+/*
+ `cavalry_cluster_service_snapshot` with a state longer than one snapshot holds,
+ 1 GiB; both lengths are in the message, and nothing was written.
+ */
+#define CAVALRY_ERR_CLUSTER_SNAPSHOT_TOO_LONG 148
+
+/*
+ `cavalry_cluster_service_snapshot` gave the snapshot up at one of its steps, which
+ the message names; the service is as it was, and the snapshot is still due.
+ */
+#define CAVALRY_ERR_CLUSTER_SNAPSHOT_FAILED 149
+
+/*
+ `cavalry_cluster_service_restore` after the service began: a poll opened its
+ member's log, or an earlier call answered where it starts.
+ */
+#define CAVALRY_ERR_CLUSTER_RESTORE_TOO_LATE 150
+
+/*
  Why a client closed: `cavalry_close` was called.
  */
 #define CAVALRY_CLOSED_BY_USER 1
@@ -427,10 +451,36 @@
 
 /*
  A committed entry that no leader of this version appends and a service of this
- version does nothing with: a timer event, a cluster action or a membership change
- event.
+ version does nothing with: a timer event, a cluster action that suspends or
+ resumes, or a membership change event.
  */
 #define CAVALRY_CLUSTER_ENTRY_OTHER 5
+
+/*
+ A committed entry: the leader asks for a snapshot here. The poll ends after it, and
+ the program gives its state to `cavalry_cluster_service_snapshot` before its next
+ poll, or polls on and takes none. 6, after `CAVALRY_CLUSTER_ENTRY_OTHER`, which
+ version 5 of the ABI handed this entry over as.
+ */
+#define CAVALRY_CLUSTER_ENTRY_SNAPSHOT 6
+
+/*
+ A service's start: the driver hosts no cluster member that has a log yet. Call
+ `cavalry_cluster_service_restore` again before the first poll.
+ */
+#define CAVALRY_CLUSTER_RESTORED_NO_MEMBER 1
+
+/*
+ A service's start: the member lists no snapshot of a service, or the one it lists
+ could not be taken; the polls read the log from position 0.
+ */
+#define CAVALRY_CLUSTER_RESTORED_FROM_START 2
+
+/*
+ A service's start: the program's state at the snapshot is in `*state` and
+ `*length`, and the polls read the log from the snapshot's position.
+ */
+#define CAVALRY_CLUSTER_RESTORED_STATE 3
 
 /*
  A service's reply: it is on its way to the session, or an earlier handling of the
@@ -1276,9 +1326,75 @@ bool cavalry_cluster_service_answers(const cavalry_cluster_service_t *service);
 int cavalry_cluster_service_sessions(const cavalry_cluster_service_t *service);
 
 /*
- Closes the service's publications and its counter, stops its read of the log, and
- frees the handle, as the Rust `ClusterService::close` does. With a null `client`
- it is the Rust handle's drop: the publications, the counter and the log's
+ Whether a snapshot is due: `true` when the last entry of the service's last poll
+ was the leader's request for a snapshot, `CAVALRY_CLUSTER_ENTRY_SNAPSHOT`, and the
+ handler took it, with the snapshot's log position written through `position`;
+ `false`, with nothing written, otherwise and from the next poll on, as the Rust
+ `ClusterService::snapshot_due` gives `None`. A null `service` or `position` is
+ `false` with `CAVALRY_ERR_NULL`, and a call from inside the service's own handler
+ `false` with `CAVALRY_ERR_POLLING`.
+
+ # Safety
+
+ `service` is null or a live handle not in use by another call; `position` is null
+ or writable.
+ */
+bool cavalry_cluster_service_snapshot_due(const cavalry_cluster_service_t *service,
+                                          int64_t *position);
+
+/*
+ Takes a snapshot of the program's state, the `length` bytes at `state`, as the Rust
+ `ClusterService::snapshot` does: the service writes a recording through its
+ member's driver with `client`, stops it, checks it, and sends its member a service
+ ack. 1 when the ack is on its way; 0 when nothing was written because the member
+ lists a snapshot of a service at or past this position already; −1 with
+ `CAVALRY_ERR_CLUSTER_NO_SNAPSHOT_DUE` where none is due,
+ `CAVALRY_ERR_CLUSTER_SNAPSHOT_TOO_LONG` for a state over 1 GiB,
+ `CAVALRY_ERR_CLUSTER_SNAPSHOT_FAILED` with the step in the message, or the client's
+ or the driver's code. A −1 leaves the service as it was, the snapshot still due
+ until the next poll. A null `state` with a `length` of 0 is a state of no bytes.
+ The call waits for the driver, at most the snapshot timeout, 1 s, at each step.
+
+ # Safety
+
+ `service` is null or a live handle not in use by another call; `client` is null or
+ a live client handle not in use by another call; `state` is null with a `length` of
+ 0, or readable for `length` bytes during the call.
+ */
+int cavalry_cluster_service_snapshot(cavalry_cluster_service_t *service,
+                                     cavalry_t *client,
+                                     const uint8_t *state,
+                                     size_t length);
+
+/*
+ Starts the service from the newest snapshot of a service that its member lists, as
+ the Rust `ClusterService::restore` does, before the service's first poll. Returns
+ `CAVALRY_CLUSTER_RESTORED_STATE` with the program's state at `*state` and its
+ length in `*length`, bytes the handle holds until its next poll or its close;
+ `CAVALRY_CLUSTER_RESTORED_FROM_START` when there is no snapshot to take, so that the
+ polls read the log from position 0; `CAVALRY_CLUSTER_RESTORED_NO_MEMBER` while the
+ driver hosts no member with a log, so that the caller asks again; or −1 with
+ `CAVALRY_ERR_CLUSTER_RESTORE_TOO_LATE` once the service has begun, or with the
+ client's or the driver's code, after which nothing has begun. `*state` is null and
+ `*length` 0 for every answer but a state of one byte or more, written first, so
+ that every refusal leaves them so.
+
+ # Safety
+
+ `service` is null or a live handle not in use by another call; `client` is null or
+ a live client handle not in use by another call; `state` and `length` are null or
+ writable.
+ */
+int cavalry_cluster_service_restore(cavalry_cluster_service_t *service,
+                                    cavalry_t *client,
+                                    const uint8_t **state,
+                                    size_t *length);
+
+/*
+ Closes the service's publications and its counters, those of its snapshots and of
+ its start among them, stops its read of the log, and frees the handle with the
+ state a restore gave, as the Rust `ClusterService::close` does. With a null
+ `client` it is the Rust handle's drop: the publications, the counters and the log's
  subscription are closed with no answer waited for, the replay is left to the
  driver, and the function returns 0, which is how a service is closed after its
  client's `cavalry_close`. The handle is freed whatever the function returns, with

@@ -154,12 +154,16 @@ service)` for each committed entry, in order:
   call. It is empty for every other entry.
 - `entry` is a `ClusterEntryValues`: `entry.Type`, one of
   `Abi.CLUSTER_ENTRY_SESSION_MESSAGE`, `_SESSION_OPEN`, `_SESSION_CLOSE`,
-  `_NEW_LEADERSHIP_TERM` and `_OTHER`; `entry.Position`; `entry.LeadershipTermId`;
+  `_NEW_LEADERSHIP_TERM`, `_OTHER` and `_SNAPSHOT`; `entry.Position`;
+  `entry.LeadershipTermId`;
   `entry.Timestamp`, the cluster's time, the one clock a service reads, so that every
   member's service reaches the same state; `entry.SessionId`, −1 where the entry has
   no session; `entry.LeaderMemberId`, for a new leadership term; and `entry.TimedOut`,
   for a session close. It is the one object the service keeps, over a struct filled
   for each entry, so copy a value out to keep it.
+  `_SNAPSHOT` is the leader's request for a snapshot: the poll ends after it. This
+  client's service has no call that takes a snapshot yet, so a handler passes it
+  over, as it does `_OTHER` (`spec/c-abi.md`, "A service's snapshot and its start").
 - `service` is the service that was polled, for `service.Reply`.
 
 What the handler returns says what becomes of the entry. `Abi.ACTION_CONTINUE` takes

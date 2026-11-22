@@ -5,7 +5,7 @@ The `extern "C"` ABI and its cbindgen header. Data plane, and the other crate wh
 
 ## What this does
 
-- Exposes the client API as a C ABI, `spec/c-abi.md` version 5, declared by the
+- Exposes the client API as a C ABI, `spec/c-abi.md` version 6, declared by the
   committed header `include/cavalry.h`, so one Rust core serves every language. The
   thin clients under `clients/` for Python, Node, Go, the JVM and .NET are generated
   over it and released together.
@@ -53,6 +53,16 @@ The `extern "C"` ABI and its cbindgen header. Data plane, and the other crate wh
   the entry's leader answers. The poll holds the client it was called with: a
   function that takes that client is refused from inside the handler
   (`spec/cluster.md`, "The service" and "Replies"; ADR 0118; ADR 0123).
+- Takes a service's snapshot and starts a service from one, for a program in C. The
+  poll ends after the leader's request for a snapshot, which the handler is handed
+  with the type `CAVALRY_CLUSTER_ENTRY_SNAPSHOT`; `cavalry_cluster_service_snapshot_due`
+  then gives the snapshot's position, and `cavalry_cluster_service_snapshot` writes
+  the program's state, its own bytes, before the next poll. Before its first poll a
+  service calls `cavalry_cluster_service_restore`, which gives the state its last
+  snapshot held, held by the handle until the next poll, and reads the log from that
+  snapshot's position. Each of the four ways these fail has a code of its own, 147 to
+  150 (`spec/c-abi.md`, "A service's snapshot and its start"; ADR 0131; ADR 0132;
+  ADR 0146).
 - Carries every non-Rust client's messages: a claim, a commit, an offer and a poll
   cross this boundary per message, a cluster session's and a cluster service's
   among them, which is why it is on the data plane.
@@ -210,7 +220,7 @@ Running it prints one line, such as `received "hello" from session -1716223105`.
 program built against another version of the header is refused at its first call:
 
 ```text
-cavalry_context_init refused (abi-version): the program was built against ABI version 4 and this library is version 5; rebuild the program against this library's header; see docs/reference/c-abi.md#versions-and-what-a-reader-rejects
+cavalry_context_init refused (abi-version): the program was built against ABI version 5 and this library is version 6; rebuild the program against this library's header; see docs/reference/c-abi.md#versions-and-what-a-reader-rejects
 ```
 
 A session with a cluster is the same calls in C, in this order. The block is
@@ -259,8 +269,10 @@ unsafe {
 # }
 ```
 
-A cluster's service is these calls, in this order. The block is compiled and not
-run: it needs a cluster member on the client's driver.
+A cluster's service is these calls, in this order: its start from its last
+snapshot, its polls, and the snapshot a poll that ends at the leader's request asks
+for. The block is compiled and not run: it needs a cluster member on the client's
+driver.
 [Run a cluster](../../docs/how-to/run-a-cluster.md) starts one.
 
 ```no_run
@@ -303,10 +315,28 @@ unsafe {
     let mut service = ptr::null_mut();
     assert_eq!(cavalry_cluster_service(&mut service, client), 0);
     let mut echo = Echo { service, total: 0 };
+    // The start, before the first poll: the state as the last snapshot held it, or
+    // none, and the log read from 0. The state's bytes are the handle's until the poll.
+    let (mut state, mut length) = (ptr::null(), 0);
+    let mut restored = CAVALRY_CLUSTER_RESTORED_NO_MEMBER;
+    while restored == CAVALRY_CLUSTER_RESTORED_NO_MEMBER {
+        restored = cavalry_cluster_service_restore(service, client, &mut state, &mut length);
+        assert!(restored > 0, "{}", CStr::from_ptr(cavalry_errmsg()).to_str()?);
+    }
+    if restored == CAVALRY_CLUSTER_RESTORED_STATE {
+        echo.total = u64::from_le_bytes(std::slice::from_raw_parts(state, length).try_into()?);
+    }
     // The service's duty cycle: the entries a quorum committed, in the log's order.
     while echo.total < 5 {
         let taken = cavalry_cluster_service_poll(service, client, Some(on_entry), (&mut echo as *mut Echo).cast(), 10);
         assert!(taken >= 0, "{}", CStr::from_ptr(cavalry_errmsg()).to_str()?);
+        // A poll that ended at the leader's request: the state as it is there.
+        let mut position = 0;
+        if cavalry_cluster_service_snapshot_due(service, &mut position) {
+            let state = echo.total.to_le_bytes();
+            let written = cavalry_cluster_service_snapshot(service, client, state.as_ptr(), state.len());
+            assert!(written >= 0, "{}", CStr::from_ptr(cavalry_errmsg()).to_str()?);
+        }
     }
     assert_eq!(cavalry_cluster_service_close(service, client), 0);
     assert_eq!(cavalry_close(client), 0);
