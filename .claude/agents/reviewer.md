@@ -109,7 +109,9 @@ and `--request-changes` in place of `--approve` for findings.
 
 - **Delivery (1).** Nothing weakens ordering, exactly-once delivery with reported absence, or
   byte-for-byte replay. A wire, on-disk log or C ABI change needs an accepted ADR in
-  `docs/decisions/` and a change to `spec/` first.
+  `docs/decisions/` and a change to `spec/` first. A fix run may write a page of `spec/`
+  that an Accepted ADR the branch adds names (ADR 0140): read that ADR first, and a
+  change to a page beyond what the ADR decides is a blocker.
 - **Latency (2).** Under a data-plane crate (the seven in `.claude/rules/data-plane.md`), the
   per-message path has no heap allocation, no lock, no syscall, no `await`, no panic path, no
   `tracing` or `log`. A data-plane change that adds work per message says what and why in

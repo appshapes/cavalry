@@ -171,8 +171,10 @@ gh pr checks <number>
   step 2, step 4, push. A person's push raises its own `dispatch review` run.
 
 - **A blocker the fixer cannot apply.** The fixer's run denies writes to
-  `.github/workflows/**`, `.claude/**`, `spec/**` and `bench/baseline.json`
-  (`claude.yml`, `settings.deny`), so a review whose blockers are all there ends its run
+  `.github/workflows/**`, `.claude/**` and `bench/baseline.json`, and to `spec/**` but
+  for a page that an Accepted ADR the branch adds names, with its vectors and
+  `spec/README.md` (`claude.yml`, `settings.deny`; ADR 0140), so a review whose blockers
+  are all there ends its run
   with "Fix session ended without a push landing ... and without a change to the pull
   request body". These are the author's from the first review: apply them, push. A
   blocker on the pull request body alone the fixer applies itself with `gh pr edit`,

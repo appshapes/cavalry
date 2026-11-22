@@ -3,8 +3,9 @@
 # reading:
 #   * the writer commits with plain `git` on its branch and never runs the `/commit` skill
 #     (that sequence stages every untracked file and merges origin mid-run);
-#   * writes to .github/workflows/**, .claude/**, spec/** and bench/baseline.json are DENIED,
-#     not merely discouraged;
+#   * writes to .github/workflows/**, .claude/** and bench/baseline.json are DENIED, not
+#     merely discouraged, and so are writes to spec/**, but for a page that an Accepted ADR
+#     the branch adds names (ADR 0140);
 #   * GH_ACTIONS_TOKEN, the owner's personal access token, lives in OTHER JOBS (`open-pr`,
 #     `approve-fixer-runs`), never in the job that runs the agent. The agent's Bash children
 #     inherit its environment, and a personal access token reaches every repository its
@@ -170,6 +171,36 @@ jobs:
         with:
           fetch-depth: 0        # the agent diffs against master and reads history for its review record
 
+      # Which files under spec/ this run may write (ADR 0140; work item 340). A branch that
+      # adds an Accepted ADR naming a page of spec/ may write that page, its vectors and
+      # spec/README.md; any other branch is denied all of spec/, as every run was before.
+      # Three things keep the answer the repository's and not the branch's:
+      #   * the script is master's copy, read by the full name of the remote-tracking
+      #     branch and never from the checkout. The short name `origin/master` would read
+      #     a tag of that name first, and the checkout fetches every tag;
+      #   * the step runs here, before the toolchain is installed and before any cache is
+      #     restored, so that nothing a run saved stands in for `git` or `python3`;
+      #   * the answer becomes text in the agent's settings, so it is taken only when it is
+      #     one line of deny entries for files under spec/ and nothing else.
+      # The step cannot fail the job and cannot open spec/ by failing: the script answers
+      # "deny all" for what it cannot read, and the settings deny all when the step gave no
+      # answer. A run that an `@claude` comment on a pull request starts is asked here at
+      # master, before the action checks the branch out, so it is denied all of spec/; the
+      # fix run that a review starts is asked at the pull request's merge commit.
+      - name: Which pages of spec/ this run may write
+        id: spec
+        if: github.event_name != 'pull_request_review' || !startsWith(github.event.review.user.login, 'claude') || steps.fix_gate.outputs.proceed == 'true'
+        continue-on-error: true
+        shell: bash
+        run: |
+          answer=$(git show refs/remotes/origin/master:scripts/fixer-spec-pages.py | env -u FIXER_SPEC_BASE python3 -I -)
+          entries='^("(Write|Edit)\(spec/[A-Za-z0-9._/*-]+\)", ?)+$'
+          if [[ "$answer" =~ $entries ]]; then
+            echo "deny=$answer" >> "$GITHUB_OUTPUT"
+          else
+            echo "::warning::fixer-spec-pages gave no list of deny entries for spec/, so this run is denied all of spec/"
+          fi
+
       # The same toolchain steps as ci.yml, so `just lint` and `just test` work when the agent
       # reaches for them, and the install stays out of the turn budget.
       - name: Install the Rust toolchain
@@ -267,8 +298,7 @@ jobs:
                   "Edit(.github/workflows/**)",
                   "Write(.claude/**)",
                   "Edit(.claude/**)",
-                  "Write(spec/**)",
-                  "Edit(spec/**)",
+                  ${{ steps.spec.outputs.deny || '"Write(spec/**)", "Edit(spec/**)",' }}
                   "Write(bench/baseline.json)",
                   "Edit(bench/baseline.json)",
                   "Read(./.env)",
@@ -288,7 +318,12 @@ jobs:
           #                          the edit is a better error than failing at the push.
           #   .claude/**           : the agent must not rewrite its own operating instructions.
           #   spec/**              : a wire change is a spec change with an ADR first (CLAUDE.md,
-          #                          "Protocol"); the agent asks, a human decides.
+          #                          "Protocol"). A page that an Accepted ADR the branch
+          #                          adds names is writable, with its vectors and
+          #                          spec/README.md, and the step "Which pages of spec/ this
+          #                          run may write" denies every other file under spec/ by
+          #                          name (ADR 0140). With no such ADR, or no answer from the
+          #                          step, the entry is spec/**, as it always was.
           #   bench/baseline.json  : the baseline is what CI diffs a histogram against; an agent
           #                          that rewrites it hides the regression it was asked to fix.
           #   .env                 : local-only credential files, gitignored; the deny is free.

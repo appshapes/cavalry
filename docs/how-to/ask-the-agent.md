@@ -93,8 +93,11 @@ branch locally; GitHub has already deleted it on origin.
 - **"Fix session ended without a push landing ... and without a change to the pull
   request body."** The fixer's run ended with nothing it could show: no commit reached
   the branch and the body is as the review found it. Its comment on the pull request
-  says what it did. A blocker it may not apply (`.github/workflows/`, `.claude/`,
-  `spec/`, `bench/baseline.json`) is yours: apply it and push, and the push starts the
+  says what it did. A blocker it may not apply is yours: one under `.github/workflows/`
+  or `.claude/`, one in `bench/baseline.json`, or one in a page of `spec/` that no
+  Accepted ADR the branch adds names
+  ([ADR 0140](../decisions/0140-let-the-fixer-write-a-spec-page-that-an-accepted-adr-on-its-branch-names.md)).
+  Apply it and push, and the push starts the
   review. A fixer run that ended early with some blockers done is not this case: it
   pushed those as commits, its comment says which gates ran on the head it left, and
   the review of that head lists what is left.

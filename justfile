@@ -26,7 +26,8 @@ test *ARGS: test-scripts
 # loopback, the latency gate's rule on made-up results (ADR 0029), and the udp pair's wait
 # for each other against a fake GitHub API and a fake clock (card 212), and the fixer
 # workflow's approval of the run GitHub held on its push, the step's own script against
-# a fake `gh` (card 215), and `just tidy`'s
+# a fake `gh` (card 215), and which pages of spec/ the loop's agent may write, by the
+# ADRs of a made-up branch (ADR 0140), and `just tidy`'s
 # matching of a merged pull request's head to what is here, against a made-up origin
 # and a fake `gh` (card 262), and the counters lint's reading of the counters that a
 # sentence of counters.toml names (work item 230). Standard library only, no network.
@@ -37,6 +38,7 @@ test-scripts:
     python3 scripts/changelog-test.py
     python3 scripts/wait-for-partner-job-test.py
     python3 scripts/claude-workflow-test.py
+    python3 scripts/fixer-spec-pages-test.py
     python3 scripts/tidy-test.py
     python3 scripts/gen-counters-test.py
     python3 clients/generate-test.py

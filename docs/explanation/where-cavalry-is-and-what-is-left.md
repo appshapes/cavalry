@@ -311,7 +311,7 @@ Everything else on this page a session does on its own, and records.
 | What | For | When |
 | --- | --- | --- |
 | The owner's leave to change the bench's workflows and rules | Feature 1 | Given on 2026-11-21, and used: feature 1 is on `master`, and the owner dropped the three bench names from branch protection the same day |
-| A ruling on work item 340, whether the review loop's fixer may write `spec/` | Every feature that changes `spec/` | Ruled on 2026-11-21: it may, when the pull request's branch holds an Accepted ADR that names the page. The workflow's change lands from a person's session, beside feature 1 |
+| A ruling on work item 340, whether the review loop's fixer may write `spec/` | Every feature that changes `spec/` | Ruled on 2026-11-21: it may, when the pull request's branch holds an Accepted ADR that names the page. Landed the same day ([ADR 0140](../decisions/0140-let-the-fixer-write-a-spec-page-that-an-accepted-adr-on-its-branch-names.md)) |
 | An account, a name and a publishing credential on crates.io, PyPI, npm, Maven Central and NuGet, stored as secrets of the repository | Feature 10 | At its start: the names are reserved first, and Maven Central asks for a verified namespace |
 | The setting that publishes the book, and a contact address for `SECURITY.md` | Feature 11 | At its start |
 | A runner on `kip` with its own label, and the three hosts' addresses on the lab's network | Feature 9 | Before feature 9, which follows feature 5. Asked for early: a runner's registration has a lead time |
@@ -351,8 +351,7 @@ condition of ADR 0138.
   tried it.
 - **A package name that is taken.** Feature 10 finds out first.
 - **The review loop.** The reviewer and the fixer have stopped for a night before on
-  a usage limit, and a blocker under `spec/` costs every fix cycle until work item
-  340's change lands.
+  a usage limit.
 - **A finding in the soak.** That is what the week is for.
 - **A beta user who needs encryption before they can start.** ADR 0138 keeps ADR
   0061's answer: a new ADR supersedes it and moves the line.

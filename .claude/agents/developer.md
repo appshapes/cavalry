@@ -121,8 +121,13 @@ what the list below denies stays denied. Everything else, do and show the eviden
   pull request comment, never by editing the body, because the run reads a changed body
   on an unchanged head as a fixed body blocker (claude.yml, "Verify the fix landed") and
   asks for a review that would block on the same thing again.
-- **`spec/`** without an accepted ADR, and **`bench/baseline.json`** ever. A baseline an agent
-  rewrote hides a regression.
+- **`spec/`**, but for a page that an Accepted ADR your branch adds names, with that
+  page's vectors and `spec/README.md`: the workflow lets you write those and denies the
+  other files under `spec/` by name (ADR 0140). It asks before your run starts, so an ADR
+  you write in this run opens nothing for this run. A blocker under `spec/` that no ADR
+  on the branch names stays the author's: say so in a comment and leave it. Change a
+  page only as far as the ADR decides. And **`bench/baseline.json`** ever. A baseline an
+  agent rewrote hides a regression.
 - **`#[allow]`** of a workspace lint, or an edit to `clippy.toml` or `Cargo.toml` lints.
 - **Secrets.** Nothing on argv, in a log, or in a file under the repository.
 - **"Docs to follow."** Docs ship in the same commit: the README or `docs/` page, the
