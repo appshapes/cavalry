@@ -3228,23 +3228,24 @@ fn toggle_taken(member: &Member) -> (i64, i64) {
 }
 
 /// Runs the members until the leader, `members[0]`, has looked over its driver's whole
-/// counters file once and a tenth more. A leader looks when a millisecond has passed
-/// since its last look, 16 records a look, so this counts the cycles of this loop
-/// that began a millisecond or more after the last one counted, and ends when their
-/// records are the file's and a tenth more: a slow runner makes it longer, never
-/// shorter.
+/// counters file once. A leader looks at the first duty cycle that begins a
+/// millisecond or more after its last look, 16 records a look, and this loop runs its
+/// duty cycle at every turn. So each span of two milliseconds of this loop holds a
+/// look or more, whenever in a cycle the leader reads its clock: the loop counts such
+/// spans, and ends when their records are the file's and 16 more. A slow runner makes
+/// it longer, never shorter.
 fn run_past_a_whole_look(members: &mut [Member]) {
     use cavalry_proto::cluster::{CONTROL_TOGGLE_LOOK_INTERVAL_NS, CONTROL_TOGGLE_LOOK_RECORDS};
 
     let capacity = CountersReader::open(&members[0].dir)
         .expect("the counters file opens")
         .capacity();
-    let looks = (capacity / CONTROL_TOGGLE_LOOK_RECORDS) * 11 / 10 + 1;
-    let interval = Duration::from_nanos(CONTROL_TOGGLE_LOOK_INTERVAL_NS);
+    let looks = capacity / CONTROL_TOGGLE_LOOK_RECORDS + 1;
+    let span = Duration::from_nanos(2 * CONTROL_TOGGLE_LOOK_INTERVAL_NS);
     let mut counted = 0;
     let mut last = Instant::now();
     run_until(members, "the leader looks over its counters file", |_| {
-        if last.elapsed() >= interval {
+        if last.elapsed() >= span {
             counted += 1;
             last = Instant::now();
         }

@@ -526,8 +526,11 @@ is snapshot. The counter's key is the member's id and then the toggle's id, the
 command's client id, a number no other client of that driver has
 (`spec/client-protocol.md`, "The driver directory"): 12 bytes, an i32 and an i64,
 little-endian. The command is the counter's one writer, as every counter has one
-(`spec/counters-file.md`), and the counter is gone when the command removes it or
-ends. In Aeron, this is the cluster control toggle, which the consensus module
+(`spec/counters-file.md`). The counter is gone when the command removes it, and a
+command that ends without removing it has it freed by the driver, which forgets a
+client at its close or once it has timed it out (`spec/client-protocol.md`,
+"Liveness and timeouts"). The id is the adder's word: a leader takes it as the key
+gives it. In Aeron, this is the cluster control toggle, which the consensus module
 allocates and a tool writes; here the command that asks allocates it, since a second
 writer of one counter is what the counters file does not have.
 
@@ -550,28 +553,43 @@ the counter of the driver's command ring (`spec/client-protocol.md`, "The driver
 directory"). So a toggle that stays, because its command has not ended or never
 will, is not taken again and holds no later toggle back, and a member that stops
 leading and leads again while a toggle is still there does not take it twice: one
-request is one cluster action. Of two commands that ask one member at once, each is
-served with a snapshot of its own when the leader's look meets the toggle with the
-lower id first. When it meets the higher first, the lower is never taken: its
-command reads an id above its own in `cluster.control_toggle_taken`, ends at once,
-and says to ask again.
+toggle is at most one cluster action. Of two commands that ask one member at once,
+each has its toggle taken, with a snapshot of its own, when the leader's look meets
+the toggle with the lower id first. When it meets the higher first, the lower is
+never taken, and the snapshot of the higher answers both commands, as the next
+paragraph says. A toggle keyed with an id that the driver has given no client yet
+would leave every toggle below it untaken until the member starts again; a command
+writes its own client id and no other.
 
-The command that asked reads the answer in the member's counters. Its request is
-taken when `cluster.control_toggle_taken` holds its toggle's id, and the snapshot it
-asked for is the member's own when `cluster.snapshot_position` is at or past the
-`cluster.control_toggle_snapshot_position` it then reads: both are of its own toggle,
-so a snapshot that another action asked for a moment before does not answer it. The
-command loads the id with an acquire load and the position after it, as a reader
-that branches on a position does (`spec/counters-file.md`, "Value slot"): the
-member's release store of the id comes after its store of the position, so a
-command that has read its own id reads the position of its own toggle, on a machine
-that orders stores weakly as on any other. Before it adds its toggle the command
-looks for the member's `cluster.control_toggle_taken`: a member of a build before
-this one has none and serves no toggle, and the command ends at once and says so.
-It waits for no longer than the control toggle timeout ("Values"), and removes its
-toggle when it ends, however it ends. A member that stops leading while a toggle
-waits leaves it: the command reads `cluster.role` while it waits, and ends when the
-member no longer leads. The id a member took last is its process's own: a member
+The command that asked reads the answer in the member's counters, and what answers
+it is a snapshot that the member asked for after the command began. Before it adds
+its toggle the command loads the member's `cluster.control_toggle_taken`. A member
+of a build before this one has no such counter and serves no toggle, and the
+command ends at once and says so. The id it loads is below the command's own, or
+the command takes a new client id, by attaching again, and loads it again. Then it
+adds its toggle and waits for `cluster.control_toggle_taken` to hold an id at or
+above its own: the leader took a toggle after that first load, the command's own or
+a later one, so the cluster action was appended after the command began. It loads
+that id with an acquire load and then `cluster.control_toggle_snapshot_position`, as
+a reader that branches on a position does (`spec/counters-file.md`, "Value slot"):
+the member's release store of the id comes after its store of the position, so the
+position the command reads is that toggle's or a later one's, on a machine that
+orders stores weakly as on any other. The command keeps that position, and its
+request is answered when `cluster.snapshot_position` is at or past it: the member
+lists a snapshot of a position that its log reached after the command began. A
+snapshot that another action asked for before the command began does not answer it,
+since its position is below every position stored after.
+
+The command waits for no longer than the control toggle timeout ("Values"), and
+removes its toggle when it ends, however it ends. A member that stops leading while
+a toggle waits leaves it: the command reads `cluster.role` while it waits, and ends
+when the member no longer leads. A member that gives the snapshot up
+("A snapshot that fails") lists none at the position, and the command's wait ends at
+its timeout. A leader that is closing may append the action and store neither
+gauge. A follower that is still taking the snapshot before it when it reads a
+toggle's action gives the later one up, counted in its `cluster.snapshots_failed`,
+as for any two actions close together: the leader waits for its own snapshot and
+cannot see a follower's. The id a member took last is its process's own: a member
 that starts again and leads takes a toggle it finds, whatever its process took
 before, which is at most one more snapshot.
 
@@ -2181,7 +2199,7 @@ that a reader of a counters file knows which transition it saw.
 | snapshot log sync wait | 2 s: how long a snapshot whose recording has stopped waits for the member's log to sync to the snapshot's log position before the member gives it up, the recording sync interval of `spec/client-protocol.md`, "Liveness and timeouts", within which the recorder syncs a recording by itself, and the snapshot timeout beside it for the sync ("Snapshots"; ADR 0143) |
 | snapshot load timeout | 5 s: how long a member's start waits for its driver to play one snapshot's recording back before it passes that snapshot over, so 320 s at the most for the 64 snapshots a file lists ("A member's start") |
 | service snapshot load timeout | 5 s: how long a service's start waits for the first message of its snapshot's recording, and for each message after one, before it passes the snapshot over ("A service's start") |
-| control toggle look | at most 16 metadata records of the counters file, no more often than each millisecond: what a leader reads to find a control toggle, in a ring over the file's records, so a file of 16,384 records is read once in 1,024 ms and the largest, of 65,536, in 4,096 ms ("Snapshots", "The control toggle") |
+| control toggle look | at most 16 metadata records of the counters file, no more often than each millisecond: what a leader reads to find a control toggle, in a ring over the file's records, so a file of 16,384 records is read once in 1,024 looks, 1,024 ms at the soonest, and the largest, of 65,536, in 4,096; a leader whose duty cycle idles for longer than a millisecond looks once a cycle ("Snapshots", "The control toggle") |
 | control toggle value | 4, snapshot, Aeron's `SNAPSHOT`; Aeron's other toggle states are out of this version |
 | control toggle timeout | 10 s: how long the command that added a control toggle waits for the member to take it and to list the snapshot, before it removes the toggle and says what the member's counters hold |
 

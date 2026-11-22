@@ -54,8 +54,11 @@ it appended: it appends the cluster action, and stores the snapshot's log positi
 `cluster.control_toggle_snapshot_position` and then the toggle's id in
 `cluster.control_toggle_taken`, each with a release store. It takes each toggle
 once: none whose id is at or below the id of the last it took, since a driver gives
-its clients rising ids. The command reads its answer in those two gauges and in
-`cluster.snapshot_position`.
+its clients rising ids. The command loads `cluster.control_toggle_taken` before it
+adds its toggle, and is answered by a toggle at or above its own id, taken after
+that load, its own or a later one: it then waits for `cluster.snapshot_position` to
+reach the `cluster.control_toggle_snapshot_position` it reads. What answers a
+command is a snapshot the member asked for after the command began.
 The item moves to work item 335 because the first feature that needs a thing builds
 it: the round of feature 6 needs it, and nothing else of feature 5 moves.
 
@@ -93,9 +96,11 @@ it: the round of feature 6 needs it, and nothing else of feature 5 moves.
   A pass over 16,384 records on the thread that replicates and commits the log is a
   stall of that thread each time. A slice is bounded.
 - **A larger slice, 64 records each millisecond.** Lost. A pass in 256 ms answers
-  the command sooner than it needs: the command waits for 10 s, and a pass in 1,024
-  ms, or 4,096 ms over the largest file, leaves the snapshot the rest. 16 records is
-  the smallest look whose pass over the largest file is under half of the wait.
+  the command sooner than it needs: the command waits for 10 s, and a pass of 1,024
+  looks, or 4,096 over the largest file, leaves the snapshot the rest. 16 records is
+  the smallest power of two whose pass over the largest file is under half of the
+  wait at a look each millisecond; a leader that idles looks once a duty cycle, a
+  little less often.
 - **A toggle served by its value: the command writes a second value once it is
   answered.** Lost. A command that dies writes nothing, and its toggle stays until
   the driver times its client out.
@@ -111,8 +116,20 @@ it: the round of feature 6 needs it, and nothing else of feature 5 moves.
   id taken, forgets nothing.
 - **Of two toggles the leader takes the lower id first, after a whole pass.** Lost.
   It holds every request for a whole pass, a second or more, to order two commands
-  that asked one member at the same moment. The command with the lower id is told at
-  once, by an id above its own in `cluster.control_toggle_taken`, and asks again.
+  that asked one member at the same moment. The command with the lower id needs no
+  toggle of its own taken: the higher one's action was appended after both began.
+- **A command is answered by its own id alone, and one that reads a higher id was
+  passed over and asks again.** Lost, after it was written; the second read before
+  the push found it. A leader takes the next toggle as soon as its own snapshot is
+  listed, so `cluster.control_toggle_taken` may hold a command's id for some
+  milliseconds only, and a command that loads it less often would read a later id
+  and call itself passed over when it was served. An id at or above its own, with a
+  load before the toggle is added, has no such window, and a snapshot asked for
+  after the command began is what its operator wants.
+- **A wait between two toggles, so that no follower is still taking the snapshot
+  before.** Lost. The leader sees its own snapshot and no follower's, and a wait of
+  the snapshot timeout would hold every second command for a second. A follower that
+  gives the later snapshot up counts it, and its next is whole.
 - **The command waits for `cluster.snapshot_actions` to rise, or for
   `cluster.snapshot_position` to pass the commit position it read.** Lost. An action
   the interval appended a moment before the request moves both, and the command
@@ -125,8 +142,8 @@ it: the round of feature 6 needs it, and nothing else of feature 5 moves.
   `a_leader_takes_a_control_toggle_once_and_every_member_takes_its_snapshot`: three
   members over three drivers on the loopback, each toggle added by a client of a
   member's driver as a command adds it. Each wait for nothing to happen lasts until
-  the leader has looked over its whole counters file and a tenth more, counted in
-  looks and not in time. A toggle beside a follower and one beside the leader that
+  the leader has looked over its whole counters file, counted in spans of two look
+  intervals, each of which holds a look or more, and not in time alone. A toggle beside a follower and one beside the leader that
   holds 2, Aeron's suspend, are taken by no member: every
   `cluster.control_toggle_taken` is −1 and no action is counted. A toggle beside the
   leader that holds 4 is taken: the leader stores the toggle's id, and the position
@@ -152,6 +169,20 @@ it: the round of feature 6 needs it, and nothing else of feature 5 moves.
   below the clock's step, p99.99 250 ns, 334 ns and 292 ns, max 417 ns, 417 ns and
   333 ns. At one look each millisecond that is under 0.05% of the thread at the
   longest look measured. No Linux host has timed it.
+- `crates/cavalry-raft/src/module/tests.rs`,
+  `a_leader_takes_a_control_toggle_only_between_its_own_snapshots`: the leader's
+  process asks for a snapshot while the followers stand still, so its action is not
+  committed. Run alone until it has looked over its whole counters file, the leader
+  meets a toggle and does not take it: one action counted, and
+  `cluster.control_toggle_taken` at −1. With the followers running it takes its own
+  snapshot and then the toggle: at that moment it counts two actions, one snapshot
+  listed and none given up, and the second is listed after. The test fails with
+  either half of the wait taken out: with no wait for its read to pass its own
+  action, at the first check, and with no wait for its own snapshot, at the second.
+- Not held by a test: a member that stops leading and leads again while a toggle
+  stays, which follows from the one number it keeps; and a follower that gives up
+  the later of two snapshots close together, which is the behaviour of any two
+  actions (ADR 0129).
 - The stores and the load are the ones `spec/counters-file.md` gives a position:
   `Counter::store_release` for both gauges, the position first, and an acquire load
   of the id by the command. No code of `cavalry-shm` changes.
@@ -173,7 +204,16 @@ it: the round of feature 6 needs it, and nothing else of feature 5 moves.
 - The id a member took last is its process's: a member that starts again and leads
   takes a toggle it finds, which is at most one more snapshot.
 - Of two commands that ask one member at the same moment, the one with the lower id
-  may be passed over, and is told so at once.
+  may have its toggle passed over, and is answered by the other's snapshot.
+- Two toggles taken one after the other are two actions some tens of milliseconds
+  apart, closer than the interval's ever are. A follower that is still taking the
+  first when it reads the second gives the second up, counted in its
+  `cluster.snapshots_failed`; the leader's own are never so close.
+- A toggle's id is the adder's word. One keyed with an id no client has yet leaves
+  every lower toggle untaken until the member starts again, and whoever can add a
+  counter to a member's driver can also stop it.
+- A command that ends without removing its toggle leaves it until the driver has
+  closed or timed out its client; it is not taken again meanwhile.
 - A toggle is told from a counter that the driver freed and gave to another client
   by a second read of its record after its value.
 - Revisit: when the counters file gains a sign that a counter was added, for a look

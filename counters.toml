@@ -1804,7 +1804,7 @@ name = "cluster.control_toggle"
 kind = "gauge"
 scope = "client"
 doc = "A request to one cluster member from a command on its host: 4, snapshot, asks the member for a snapshot, which it takes while it leads; every other value is no request of this version. The command adds the counter, is its one writer, and removes it when it ends; the member reads it and writes nothing in it (spec/cluster.md, Snapshots, The control toggle; ADR 0147). key: member id (i32), then the toggle's id (i64), the command's client id, little-endian; label text: the member id in decimal."
-doctor = "A command that asks this member for a snapshot is waiting. The member takes the request while it leads, takes no snapshot of its own and has read its log past its last cluster action: its cluster.control_toggle_taken then holds the id in this counter's key. A toggle whose id is above cluster.control_toggle_taken, and that stays so, is beside a member that does not lead, see cluster.role, or whose snapshot does not end, see cluster.snapshots_failed. One whose id is at or below it was taken, or was passed over for a later one, and is not taken again. The counter goes when its command ends, after 10 s at the most."
+doctor = "A command that asks this member for a snapshot is waiting, or was answered and has not yet removed its toggle. The member takes a toggle whose id is above its cluster.control_toggle_taken while it leads, takes no snapshot of its own and has read its log past its last cluster action. A toggle whose id stays above cluster.control_toggle_taken is beside a member that does not lead, see cluster.role, or whose snapshot does not end, see cluster.snapshots_failed. One whose id is at or below it is not taken again: it was taken, or a later one was taken and answers it. The counter goes when its command removes it. A command waits 10 s at the most, and the driver frees the counter of a command that ended without removing it once that command's client has closed or timed out."
 
 [[counter]]
 id = 185
@@ -1812,14 +1812,14 @@ name = "cluster.control_toggle_taken"
 kind = "gauge"
 scope = "client"
 doc = "The id of the control toggle one cluster member took last: the member led, appended a cluster action that asks for a snapshot, and stored the toggle's id here, after cluster.control_toggle_snapshot_position. It takes no toggle whose id is at or below this one. -1 while it has taken none since it started (spec/cluster.md, Snapshots, The control toggle; ADR 0147). key: member id (i32), little-endian; label text: the member id in decimal."
-doctor = "It rises with each request for a snapshot this member took while it led. A command whose toggle's id is below it was passed over for a later request, and asks again."
+doctor = "It rises with each control toggle this member took while it led. A command is answered by a toggle at or above its own id, its own or a later one, taken after the command began."
 
 [[counter]]
 id = 186
 name = "cluster.control_toggle_snapshot_position"
 kind = "gauge"
 scope = "client"
-doc = "The log position of the snapshot one cluster member asked for the control toggle it took last, the position after the cluster action it appended; -1 while it has taken none since it started. The command that added the toggle waits for cluster.snapshot_position to reach it (spec/cluster.md, Snapshots, The control toggle; ADR 0147). key: member id (i32), little-endian; label text: the member id in decimal."
+doc = "The log position of the snapshot one cluster member asked for the control toggle it took last, the position after the cluster action it appended; -1 while it has taken none since it started. A command that the toggle answers, the one that added it or one whose toggle has a lower id, waits for cluster.snapshot_position to reach it (spec/cluster.md, Snapshots, The control toggle; ADR 0147). key: member id (i32), little-endian; label text: the member id in decimal."
 doctor = "Read it beside cluster.snapshot_position: while that is below this position, the snapshot a command asked for is being taken or was given up, and cluster.snapshots_failed says which."
 
 # A cluster member's role (spec/cluster.md, "Roles and the election"; ADR 0052, feature

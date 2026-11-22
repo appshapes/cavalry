@@ -16,8 +16,9 @@
 //! taken once and holds no other toggle back. What the member took, and the log
 //! position of the snapshot it asked for, are two gauges the command reads: the
 //! position is stored first and the id after it, both with release stores, so a
-//! command that loads its own id with an acquire load reads its own toggle's
-//! position.
+//! command that loads an id at or above its own with an acquire load reads the
+//! position of that toggle or of a later one. Either answers it: the action was
+//! appended after the command began.
 
 use cavalry_client::{Cavalry, ClientError, Counter};
 use cavalry_proto::cluster::{
@@ -127,12 +128,13 @@ impl ControlToggle {
 
     /// The member took `found`: it appended the cluster action, and the snapshot it
     /// asked for is of `snapshot_position`, `None` when the log's position could not
-    /// be read after the append. The toggle is not taken again either way. With a
-    /// position, the position is stored first and the toggle's id after it, each with
-    /// a release store, so that the command that reads its own id reads its own
-    /// toggle's position (`spec/cluster.md`, "The control toggle"); with none, nothing
-    /// is stored, and the command's wait ends at its timeout. A store that a closed
-    /// client refuses is of a member that is closing.
+    /// be read after the append, which is of a member that is closing. The toggle is
+    /// not taken again either way. With a position, the position is stored first and
+    /// the toggle's id after it, each with a release store, so that a command that
+    /// reads an id at or above its own reads the position of that toggle or of a
+    /// later one (`spec/cluster.md`, "The control toggle"); with none, nothing is
+    /// stored, and the command's wait ends at its timeout. A store that a closed
+    /// client refuses is of a member that is closing too.
     pub(crate) fn took(&mut self, found: Found, snapshot_position: Option<i64>) {
         let Found(toggle) = found;
         self.taken = toggle;
