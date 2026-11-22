@@ -3187,7 +3187,7 @@ fn a_start_is_refused_when_the_catalog_does_not_hold_the_log_the_record_names() 
             "{text}"
         );
         assert!(
-            text.contains("Do not start this member alone on a new log directory"),
+            text.contains("the member on a new log directory: it replicates the log, and it casts"),
             "{text}"
         );
         assert!(
@@ -3221,7 +3221,7 @@ fn a_start_is_refused_on_a_log_the_member_forgot_a_recording_of() {
         assert_eq!(refused.reason(), "log-forgotten");
         let text = refused.to_string();
         assert!(
-            text.contains("Do not start this member alone on a new log directory"),
+            text.contains("the member on a new log directory: it replicates the log, and it casts"),
             "{text}"
         );
         assert!(
@@ -3499,7 +3499,7 @@ fn a_start_is_refused_on_a_log_whose_last_recordings_are_gone_below_its_snapshot
             "{text}"
         );
         assert!(
-            text.contains("Do not start this member alone on a new log directory"),
+            text.contains("the member on a new log directory: it replicates the log, and it casts"),
             "{text}"
         );
     };
@@ -3595,7 +3595,7 @@ fn a_start_is_refused_on_a_log_the_catalog_holds_whole_that_ends_below_its_snaps
         );
         assert!(text.contains("as by a `truncate recording`"), "{text}");
         assert!(
-            text.contains("Do not start this member alone on a new log directory"),
+            text.contains("the member on a new log directory: it replicates the log, and it casts"),
             "{text}"
         );
         assert!(
@@ -4159,7 +4159,7 @@ fn a_member_whose_record_holds_a_term_and_no_record_of_its_recordings_is_refused
         "{text}"
     );
     assert!(
-        text.contains("Do not start this member alone on a new log directory"),
+        text.contains("the member on a new log directory: it replicates the log, and it casts"),
         "{text}"
     );
     assert!(
@@ -4231,7 +4231,7 @@ fn a_member_whose_log_has_lost_its_record_of_terms_is_refused() {
     let text = refused.to_string();
     assert!(text.contains(&format!("to position {one}")), "{text}");
     assert!(
-        text.contains("Do not start this member alone on a new log directory"),
+        text.contains("the member on a new log directory: it replicates the log, and it casts"),
         "{text}"
     );
     assert!(

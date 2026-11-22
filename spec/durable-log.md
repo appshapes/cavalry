@@ -1,4 +1,4 @@
-# The durable log, version 5
+# The durable log, version 6
 
 The on-disk record of a stream: what the driver writes when it records a publication,
 and what `cavalry replay` and `just replay-check` read back. A directory, the driver's
@@ -25,7 +25,11 @@ index header that the recorder writes at each sync, and the recovery that cuts a
 recording a crash left live to it, so that no frame a power loss may have damaged is
 handed on (ADR 0144). The slots were reserved bytes that a reader of version 4
 ignores, and an index without them is recovered as version 4 recovered it, so a
-directory either version wrote opens under the other in place.
+directory either version wrote opens under the other in place. Version 6 adds the
+vote floor, a slot of the terms file's header that a cluster member writes once, when
+it takes a leader with its log empty, and below which it withholds its vote (ADR
+0145; `spec/cluster.md`, "A member that lost its log"); the slot was reserved bytes
+that a reader of version 5 ignores.
 
 Integers are little-endian; offsets and lengths are in bytes; signed fields are two's
 complement; a timestamp is nanoseconds since the Unix epoch as an i64. A position is
@@ -239,7 +243,10 @@ entries in the order they were written.
 | 28 | 4 | reserved | bytes | written as 0, never read |
 | 32 | 8 | candidate term, slot 1 | i64 | −1 for none, else 0 or more |
 | 40 | 4 | candidate checksum, slot 1 | u32 | the zlib CRC32 of bytes 32 to 40 |
-| 44 | 20 | reserved | bytes | written as 0, never read |
+| 44 | 4 | reserved | bytes | written as 0, never read |
+| 48 | 8 | vote floor | i64 | 0 or more, a multiple of 32, in a slot whose checksum matches |
+| 56 | 4 | vote floor checksum | u32 | the zlib CRC32 of bytes 48 to 56 |
+| 60 | 4 | reserved | bytes | written as 0, never read |
 
 The candidate term is stored in two slots, so that a raise a crash tears reads as the
 candidate term stored before it. The stored candidate term is the higher of the slots
@@ -249,6 +256,19 @@ does not match is the raise a crash tore, and it is not read. A crash tears at m
 slot, so a file in which neither checksum matches is damaged, as is one in which a slot
 whose checksum matches holds a value below −1, and the reader refuses both with
 `candidate`.
+
+The **vote floor** is the position below which the member withholds its vote and
+seeks no leadership (`spec/cluster.md`, "A member that lost its log"; ADR 0145). It is
+one slot, the position under its checksum, which the module writes once and never
+again: a creation leaves its bytes zero, and the checksum of eight zero bytes is not
+zero, so the slot reads as no floor until the write. A slot whose checksum does not
+match is no floor, which is also the write a crash tore: the module writes the floor
+before it records a term, so a member whose write was torn holds no term yet, finds
+its log empty at its next start, and writes its floor again then. A slot whose
+checksum matches holds what the writer wrote, so a position below 0 or not a multiple
+of 32 in it is damage, and the reader refuses the file with `vote-floor`. A reader of
+version 5 of this page reads the slot as the reserved bytes it was, and the header's
+version stays 0.
 
 Entry i is at 64 + i × 32. A reader ignores bytes past the last whole entry, which a
 write cut short can leave; the next append writes over them.
@@ -612,11 +632,12 @@ The consensus module is the terms file's only writer, from its own thread (ADR
 0060). It creates the file as the driver creates the catalog's header, before the
 member's first message: every field after the magic, both candidate slots at −1 under
 their checksums, and a sync, then the magic and a sync. A terms file shorter than its
-header, or whose magic is zero while it holds no whole entry and no slot whose
-checksum matches holds a candidate term of 0 or more, was torn while the module
-created it, and the module writes the header again; a zero magic over a whole entry
-or over such a slot is damage, since creation writes neither, and the member refuses
-to start with `not-ready`. The module appends an entry in two synced writes, before
+header, or whose magic is zero while it holds no whole entry, no slot whose checksum
+matches holds a candidate term of 0 or more, and the vote floor slot's checksum does
+not match, was torn while the module created it, and the module writes the header
+again; a zero magic over a whole entry, over such a slot or over a vote floor is
+damage, since creation writes none of them, and the member refuses to start with
+`not-ready`. The module appends an entry in two synced writes, before
 the member reports an append position for the term: the checksum and the fields,
 bytes 4 to 32, and a sync, then the state, 1, and a sync, so that a crash between the
 two leaves an empty entry. An entry's fields are written once, by its append, and
@@ -627,7 +648,12 @@ term id again. It drops the terms a leader's record lacks the same way, by writi
 state 3 over each valid entry whose leadership term id is above the term the leader
 named, whatever its base (`spec/cluster.md`, "Messages during an election"; ADR
 0096). It raises the candidate term in one synced write, the other slot's
-value and checksum, before the vote or request vote that raises it is sent. A crash
+value and checksum, before the vote or request vote that raises it is sent. It writes
+the vote floor in one synced write, the position and its checksum, once, when the
+member takes a leader with its log empty and before it records a term
+(`spec/cluster.md`, "A member that lost its log"); asked for a second floor, or for a
+position below 0 or not a multiple of 32, it writes nothing, `floor`, the writer's
+fault. A crash
 leaves at most one write torn, which the reader reads as the state before it: an
 empty entry, a valid entry not yet deleted, or the candidate term stored before the
 raise. At a member's start the module checks the file's length against the bound
@@ -789,6 +815,7 @@ The terms file, with the file's length:
 | `entry-length` | The entry length is not 32. |
 | `length` | The file holds more than 1048576 whole entries. |
 | `candidate` | Neither candidate checksum matches its slot, or a slot whose checksum matches holds a candidate term below −1: the file is damaged. One checksum that does not match is not a failure: that slot is the raise a crash tore, and the stored candidate term is the other slot's. |
+| `vote-floor` | The vote floor slot's checksum matches and its position is below 0 or not a multiple of 32: the file is damaged. A checksum that does not match is not a failure: there is no floor. |
 
 An entry, with its index and the entry before it:
 
@@ -889,8 +916,9 @@ whose checksum does not match, and the synced position, `null` for none, and mar
 with `creation` the headers a writer creates, whose encoding a reader gives back byte
 for byte, under version 5; terms
 header vectors with the file length, a valid vector's `fields` naming the candidate
-term each slot holds, `null` for a slot whose checksum does not match, and the stored
-candidate term, and terms entry vectors with the entry's index and
+term each slot holds, `null` for a slot whose checksum does not match, the stored
+candidate term, and the vote floor, `null` for none, under version 6, and terms entry
+vectors with the entry's index and
 the valid entry before it, under version 2; log recordings header vectors with the
 file length, slot vectors that carry a slot's fields and its entries and no byte
 after them, a valid vector's `fields` naming the sequence, the floor position and

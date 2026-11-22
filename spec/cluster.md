@@ -1138,6 +1138,62 @@ member that was started with an older string its host still holds, since that
 member agrees with its host; one such member is enough for the next change to put
 two members' strings two marks apart.
 
+**A member that lost its log.** A member whose log directory was lost, or never kept,
+as a container's that is on no volume, starts again on a new one: its record of
+terms holds no term, its candidate term is −1 and its log holds nothing. No start can
+tell it from a member of a new cluster. It has forgotten the votes it cast and the
+entries it acknowledged, and an entry a quorum committed may have counted its
+acknowledgement: its vote, given to a candidate whose log lacks that entry while the
+members that hold it are stopped, would elect a leader without it (ADR 0104, ADR
+0145). In Aeron, a member that lost its state is rebuilt from a backup by an
+operator, and nothing in its election holds it back ([glossary](../docs/glossary.md)).
+So such a member **withholds**: it never goes from canvass to nominate, and it answers
+a request vote with nothing, its candidate term unchanged, counted in
+`cluster.votes_withheld`, as a standby does ("Standbys"). It answers as a voter in its
+state does in one case alone: when each voter of its members string has reported its
+log in this election, itself and the candidate among them, the candidate's log in the
+request, and the candidate's log is at least each ("Logs compared"). A log at least
+that of a member holding a committed entry holds the entry, as Raft's vote rule has
+it, so such a candidate holds every committed entry that any voter still holds; while
+a voter has not reported, it may hold one the candidate lacks. A member withholds in
+two cases, which the `withholds` vectors pin, and votes in the one above, which the
+`withheld-vote` vectors pin, the voters alone given:
+
+- Its log is empty, log leadership term id −1 at position 0, while a member's report
+  in this election, or the request it answers, holds a log, log leadership term id 0
+  or more or a position above 0. A member whose log is empty beside members whose
+  logs are empty too is a member of a new cluster, and votes as any voter does.
+- Its append position is below its vote floor.
+
+The **vote floor** is the position below which a member withholds. A member whose log
+is empty that takes a leader on a new leadership term, going to follower replay or to
+follower log replication, stores that message's log position, the leader's append
+position, as its vote floor before it records a term, written and synced in its
+record of terms (`spec/durable-log.md`, "Terms"); a message whose log position is 0
+gives no floor. The leader's log holds every entry the cluster committed, so once the
+member's append position reaches its floor, its log holds every entry it could have
+acknowledged before it came back, and it votes as any voter does. A member stores
+its floor once, reads it at its start with its candidate term, and keeps it: a member
+that stops below its floor and starts again on that log directory withholds still.
+The leader's log can end in a tail that no quorum has recorded, which a later leader
+cuts, so a floor can lie above the log the cluster then holds; the member withholds
+until the log has grown past its floor again, as the cluster's next entries take it,
+and a floor is never lowered. `cluster.vote_floor` holds it, −1 for none.
+
+What it costs. While a member withholds, the cluster tolerates one failed voter
+fewer: a cluster of three in which one member withholds elects only while both others
+run, and when one of them stops it elects no leader until that one runs again, even
+when what it held was never committed. A new cluster in which one member holds
+nothing yet when the first leader stops is such a cluster, though the member never
+held a byte: no member can tell that case from one in which it held a committed
+entry and lost it. Two members of three that lost their logs
+while the third is heard elect the third, since every voter is heard. Two that lost
+their logs while the third is stopped elect between them as a new cluster does: a
+quorum's record is gone, which no rule of this page gives back. And a member whose
+leader's log no longer begins at position 0, its recordings purged below a snapshot,
+cannot replicate what it lacks, and withholds until it is started from a peer's
+snapshot, which this version does not do (work item 365).
+
 **A member's start.** A member starts on a new log directory or on the one it kept
 ("The log"; ADR 0089, ADR 0108). On a new one its record holds no term, its candidate
 term is −1 and its log holds nothing. On the one it kept it takes up its candidate
@@ -1290,13 +1346,14 @@ begins elsewhere or is of another stream; or a recording that begins past the
 furthest end of the ones before it. In every one of them a start would give the
 member a log shorter than the one it reported, or a module that does not know its
 sessions, and with a member whose log is behind it is a quorum that can elect a
-leader without an entry the cluster committed. For the same
-reason one member is never started alone on a new log directory beside the others:
-it would join and replicate the log, with no record of the votes it cast and none of
-the log it held (ADR 0104). A cluster that has lost a member's log directory goes on
-with the members that remain while they are a quorum, and is brought back to its
-full count by starting it again as a new cluster, every member on a new log
-directory. A member that does not start counts nothing: it adds its counters once
+leader without an entry the cluster committed. A member started on a new log
+directory beside the others is safe: it joins and replicates the log, and it
+withholds its vote until its log reaches its vote floor ("A member that lost its
+log"; ADR 0145). So a cluster that has lost a member's log directory starts that
+member again on a new one and is back to its full count once the member has caught
+up. Where its leader's log no longer begins at position 0, the member cannot catch
+up, and the cluster is brought back to its full count by starting it again as a new
+cluster, every member on a new log directory. A member that does not start counts nothing: it adds its counters once
 it has read its log, and its error says which case it met.
 
 The members of a cluster are all of a version that elects. A member of a version
@@ -1326,7 +1383,8 @@ still hold every committed entry among them. A recording that a driver of versio
 of the durable log or before was making at the loss has no synced position, and
 recovery keeps what its files hold, as that version did: a member whose host lost
 power while it ran such a driver is not started on that log directory again, under
-any version, and stays out as a member whose log directory was lost does.
+any version, and starts on a new one, as a member whose log directory was lost does
+("A member that lost its log").
 
 **Versions and the upgrade.** A cluster's members may be of different versions of
 this page while their major is one, as they are during an upgrade (`CLAUDE.md`,
@@ -1865,7 +1923,9 @@ that a reader of a counters file knows which transition it saw.
 | `cluster.leadership_terms_ignored` | a new leadership term ignored for its term: below the reader's candidate term in canvass, or not the candidate term in a ballot state |
 | `cluster.voters` | a gauge: the members to which the member's own string gives a vote, one bit for each member of the string in the rising order of their ids, the lowest id's bit the lowest, set for a voter: 7 for a string of four members whose highest id is a standby. It does not change while the member runs ("Standbys"; ADR 0134) |
 | `cluster.standby` | a gauge: 1 when the member's own string marks it a standby, 0 when it gives it a vote. It does not change while the member runs ("Standbys") |
+| `cluster.vote_floor` | a gauge: the member's vote floor, the position below which it withholds its vote and seeks no leadership, which it stored when it took a leader with its log empty; −1 for none. It does not change once stored ("A member that lost its log"; ADR 0145) |
 | `cluster.standby_vote_requests` | a request vote that the member read as a standby and answered with nothing: the candidate's string gives this member a vote, and the member's own does not ("Standbys", "Changing a standby's mark") |
+| `cluster.votes_withheld` | a request vote that the member answered with nothing because it withholds its vote, its log empty while a member that holds one is heard or below its vote floor, and not every voter had reported a log the candidate's is at least ("A member that lost its log"; ADR 0145) |
 | `cluster.protocol_version` | a gauge: the member's own version of this page in semantic form, 256 for version 1. It does not change while the member runs. A member of a build older than this counter has none: every member of version 0, and one of the first build of version 1 ("Versions and the upgrade"; ADR 0137) |
 | `cluster.sessions` | a gauge: open sessions, on every member, as the snapshot it started from and its log's committed session open and close events since left them |
 | `cluster.sessions_accepted` | a session connect the leader accepted: a session id given, and a session open event to append |

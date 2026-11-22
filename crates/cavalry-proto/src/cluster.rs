@@ -2692,6 +2692,43 @@ pub fn candidate(
     }
 }
 
+/// Whether a member withholds its vote and its candidacy (`spec/cluster.md`, "A member
+/// that lost its log"; ADR 0145). It does while its log is empty, log leadership term
+/// id −1 at position 0, and `log_heard`: a member's report in this election, or the
+/// request it answers, holds a log. Such a member may have lost a log directory that
+/// held entries a quorum committed with its acknowledgement, and with them the record
+/// of its votes. It does too while its append position is below `vote_floor`, the
+/// vote floor its record of terms holds, −1 for none: the end of the log of the leader
+/// it took with its log empty, which holds every entry committed before it came back.
+/// A member whose log is empty while no member holds a log is one of a new cluster,
+/// and it votes.
+pub const fn withholds(own: LogReport, vote_floor: i64, log_heard: bool) -> bool {
+    let empty = own.term < 0 && own.position == 0;
+    (empty && log_heard) || own.position < vote_floor
+}
+
+/// Whether a member that withholds votes all the same for a candidate whose log is
+/// `candidate` (`spec/cluster.md`, "A member that lost its log"; ADR 0145): when each
+/// of the `voters` voters has reported its log in this election, `reports[i]` voter
+/// `i`'s, the member's own and the candidate's among them, and the candidate's log is
+/// at least each. A log at least that of a member that holds a committed entry holds
+/// the entry, as Raft's vote rule has it, so such a candidate holds every committed
+/// entry that any voter still holds. While a voter has not reported, the member votes
+/// for no one: that voter may hold an entry the candidate lacks.
+pub fn withheld_vote(voters: usize, reports: &[Option<LogReport>], candidate: LogReport) -> bool {
+    voters >= 1
+        && reports.len() >= voters
+        && reports.iter().take(voters).all(|report| match report {
+            Some(report) => log_at_least(
+                candidate.term,
+                candidate.position,
+                report.term,
+                report.position,
+            ),
+            None => false,
+        })
+}
+
 /// The fields of a request vote a reader answers.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub struct VoteRequest {

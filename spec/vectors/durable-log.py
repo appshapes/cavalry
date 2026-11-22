@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """Write spec/vectors/durable-log.json: the test vectors for spec/durable-log.md,
-version 5. The reference encoder, standard library only. Run from the repository root:
+version 6. The reference encoder, standard library only. Run from the repository root:
 
     python3 spec/vectors/durable-log.py
 
@@ -105,7 +105,10 @@ TERMS_MAGIC = b"CVLYTERM"
 TERMS_HEADER_LENGTH = 64
 TERMS_ENTRY_LENGTH = 32
 # magic, version, entry length, then the two candidate slots, each a term, its checksum and reserved bytes
-TERMS_HEADER = struct.Struct("<8siiqI4sqI20s")
+# magic, version, entry length, candidate slot 0 and its checksum, reserved, candidate
+# slot 1 and its checksum, reserved, the vote floor and its checksum (version 6; ADR
+# 0145), reserved.
+TERMS_HEADER = struct.Struct("<8siiqI4sqI4sqI4s")
 TERMS_ENTRY = struct.Struct("<iIqqq")  # state, checksum, leadership term id, term base log position, recording id
 
 
@@ -114,18 +117,25 @@ def candidate_checksum(candidate_term):
     return zlib.crc32(struct.pack("<q", candidate_term)) & 0xFFFFFFFF
 
 
-def terms_header(slots=(-1, -1), version=0, entry_length=TERMS_ENTRY_LENGTH, magic=TERMS_MAGIC, checksums=(None, None)):
+def terms_header(slots=(-1, -1), version=0, entry_length=TERMS_ENTRY_LENGTH, magic=TERMS_MAGIC, checksums=(None, None),
+                 floor=None, floor_checksum=None):
     """The terms file's header (spec/durable-log.md, "Terms"): the two candidate slots, each
-    under the zlib CRC32 of its eight bytes unless a checksum is given. `written` is what
-    the encoder packs; the fields a reader decodes are the candidate term each slot holds,
-    None for a slot whose checksum does not match, and the stored candidate term, the
-    higher of the slots that hold one."""
+    under the zlib CRC32 of its eight bytes unless a checksum is given, and the vote floor
+    slot, zero bytes when `floor` is None and else the floor under its CRC32 unless a
+    checksum is given. `written` is what the encoder packs; the fields a reader decodes
+    are the candidate term each slot holds, None for a slot whose checksum does not match,
+    the stored candidate term, the higher of the slots that hold one, and the vote floor,
+    None for a slot whose checksum does not match."""
     sums = [candidate_checksum(term) if given is None else given for term, given in zip(slots, checksums)]
     held = [term if checksum == candidate_checksum(term) else None for term, checksum in zip(slots, sums)]
     stored = max((term for term in held if term is not None), default=None)
+    floor_written = 0 if floor is None else floor
+    floor_sum = 0 if floor is None else (candidate_checksum(floor) if floor_checksum is None else floor_checksum)
+    floor_held = floor_written if floor_sum == candidate_checksum(floor_written) else None
     return {"magic": magic.hex(), "version": version, "entry_length": entry_length,
-            "candidate_terms": held, "candidate_term": stored,
-            "written": {"candidate_terms": list(slots), "candidate_checksums": sums}}
+            "candidate_terms": held, "candidate_term": stored, "vote_floor": floor_held,
+            "written": {"candidate_terms": list(slots), "candidate_checksums": sums,
+                        "vote_floor": floor_written, "vote_floor_checksum": floor_sum}}
 
 
 def terms_header_fields(h):
@@ -137,7 +147,7 @@ def terms_header_fields(h):
 def encode_terms_header(h):
     terms, sums = h["written"]["candidate_terms"], h["written"]["candidate_checksums"]
     return TERMS_HEADER.pack(bytes.fromhex(h["magic"]), h["version"], h["entry_length"], terms[0], sums[0], b"",
-                             terms[1], sums[1], b"")
+                             terms[1], sums[1], b"", h["written"]["vote_floor"], h["written"]["vote_floor_checksum"], b"")
 
 
 def terms_entry(leadership_term_id, term_base_log_position, recording_id=-1, state=VALID, checksum=None):
@@ -458,6 +468,14 @@ def main():
     neither = terms_header(slots=(6, 4), checksums=(0, 0))
     invalid_terms_header("terms-candidate-neither-checksum", "candidate", encode_terms_header(neither))
     invalid_terms_header("terms-candidate-below-none", "candidate", encode_terms_header(terms_header(slots=(-5, 4))))
+    # The vote floor (version 6; ADR 0145): written once, under its own checksum, and
+    # read as none when that does not match, a creation's zero bytes among them.
+    valid_terms_header("terms-header-vote-floor", terms_header(slots=(-1, 4), floor=1 << 20))
+    valid_terms_header("terms-header-vote-floor-torn", terms_header(slots=(-1, 4), floor=1 << 20, floor_checksum=0xDEADBEEF))
+    invalid_terms_header("terms-vote-floor-unaligned", "vote-floor", encode_terms_header(terms_header(slots=(-1, 4), floor=4096 + 16)))
+    invalid_terms_header("terms-vote-floor-negative", "vote-floor", encode_terms_header(terms_header(slots=(-1, 4), floor=-32)))
+    invalid_terms_header("terms-order-candidate-before-vote-floor", "candidate",
+                         encode_terms_header(terms_header(slots=(-5, 4), floor=-32)))
     invalid_terms_header("terms-order-magic-before-version", "magic",
                          encode_terms_header(terms_header(magic=b"CVLYTIDX", version=1)))
     invalid_terms_header("terms-order-length-before-candidate", "length", encode_terms_header(neither), file_length=over)
@@ -712,7 +730,7 @@ def main():
     snapshots_file("snapshots-file-a-slot-that-fails-a-check", [two, bad_position], error="position")
     snapshots_file("snapshots-file-a-torn-slot-and-one-that-fails-a-check", [torn, bad_sequence], error="sequence")
     snapshots_file("snapshots-file-order-slot-0-before-slot-1", [bad_position, bad_sequence], error="position")
-    doc = {"spec": "durable-log", "version": 5, "generated_by": "spec/vectors/durable-log.py", "vectors": vectors}
+    doc = {"spec": "durable-log", "version": 6, "generated_by": "spec/vectors/durable-log.py", "vectors": vectors}
     out = Path(__file__).resolve().parent / "durable-log.json"
     out.write_text(json.dumps(doc, indent=2) + "\n")
     print(f"durable-log.py: wrote {len(vectors)} vectors to {out}")

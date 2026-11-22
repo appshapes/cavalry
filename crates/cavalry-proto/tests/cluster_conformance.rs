@@ -13,7 +13,7 @@ use cavalry_proto::cluster::{
     Stream, TermFields, TermSpan, TimeUnit, VERSION, Vote, VoteAnswer, VoteRequest, answered_term,
     ballot, candidate, canvass_position_action, commit_position, entry_position, log_at_least,
     new_leadership_term_action, next_fields, parse_members, quorum, replay_end, replication_record,
-    replication_stop, request_vote, write_log_recordings,
+    replication_stop, request_vote, withheld_vote, withholds, write_log_recordings,
 };
 use serde_json::{Map, Value, json};
 
@@ -547,6 +547,35 @@ fn arithmetic_vector(name: &str, vector: &Value) {
                     .expect("deadline_passed"),
             );
             json!({"nominate": nominate, "unanimous": unanimous})
+        }
+        "withholds" => {
+            let own = inputs["own"].as_array().expect("own");
+            let own = LogReport {
+                term: own[0].as_i64().expect("term"),
+                position: own[1].as_i64().expect("position"),
+            };
+            let heard = inputs["log_heard"].as_bool().expect("log_heard");
+            json!({"withholds": withholds(own, int(inputs, "vote_floor"), heard)})
+        }
+        "withheld-vote" => {
+            let voters = usize::try_from(int(inputs, "voters")).expect("voters");
+            let reports: Vec<Option<LogReport>> = inputs["reports"]
+                .as_array()
+                .expect("reports")
+                .iter()
+                .map(|r| {
+                    r.as_array().map(|pair| LogReport {
+                        term: pair[0].as_i64().expect("term"),
+                        position: pair[1].as_i64().expect("position"),
+                    })
+                })
+                .collect();
+            let candidate = inputs["candidate"].as_array().expect("candidate");
+            let candidate = LogReport {
+                term: candidate[0].as_i64().expect("term"),
+                position: candidate[1].as_i64().expect("position"),
+            };
+            json!({"vote": withheld_vote(voters, &reports, candidate)})
         }
         "replication-stop" => {
             let ReplicationStop {

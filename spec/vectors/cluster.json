@@ -3026,6 +3026,225 @@
     },
     {
       "kind": "arithmetic",
+      "name": "withholds-not-a-new-clusters-member",
+      "rule": "withholds",
+      "inputs": {
+        "own": [
+          -1,
+          0
+        ],
+        "vote_floor": -1,
+        "log_heard": false
+      },
+      "fields": {
+        "withholds": false
+      }
+    },
+    {
+      "kind": "arithmetic",
+      "name": "withholds-an-empty-log-beside-a-log",
+      "rule": "withholds",
+      "inputs": {
+        "own": [
+          -1,
+          0
+        ],
+        "vote_floor": -1,
+        "log_heard": true
+      },
+      "fields": {
+        "withholds": true
+      }
+    },
+    {
+      "kind": "arithmetic",
+      "name": "withholds-below-its-floor",
+      "rule": "withholds",
+      "inputs": {
+        "own": [
+          3,
+          4096
+        ],
+        "vote_floor": 8192,
+        "log_heard": false
+      },
+      "fields": {
+        "withholds": true
+      }
+    },
+    {
+      "kind": "arithmetic",
+      "name": "withholds-at-its-floor-not",
+      "rule": "withholds",
+      "inputs": {
+        "own": [
+          3,
+          8192
+        ],
+        "vote_floor": 8192,
+        "log_heard": true
+      },
+      "fields": {
+        "withholds": false
+      }
+    },
+    {
+      "kind": "arithmetic",
+      "name": "withholds-a-log-with-no-floor-not",
+      "rule": "withholds",
+      "inputs": {
+        "own": [
+          3,
+          4096
+        ],
+        "vote_floor": -1,
+        "log_heard": true
+      },
+      "fields": {
+        "withholds": false
+      }
+    },
+    {
+      "kind": "arithmetic",
+      "name": "withheld-vote-every-voter-heard-none-ahead",
+      "rule": "withheld-vote",
+      "inputs": {
+        "voters": 3,
+        "reports": [
+          [
+            -1,
+            0
+          ],
+          [
+            3,
+            98304
+          ],
+          [
+            3,
+            65536
+          ]
+        ],
+        "candidate": [
+          3,
+          98304
+        ]
+      },
+      "fields": {
+        "vote": true
+      }
+    },
+    {
+      "kind": "arithmetic",
+      "name": "withheld-vote-a-voter-silent",
+      "rule": "withheld-vote",
+      "inputs": {
+        "voters": 3,
+        "reports": [
+          [
+            -1,
+            0
+          ],
+          null,
+          [
+            3,
+            65536
+          ]
+        ],
+        "candidate": [
+          3,
+          65536
+        ]
+      },
+      "fields": {
+        "vote": false
+      }
+    },
+    {
+      "kind": "arithmetic",
+      "name": "withheld-vote-a-voter-ahead-of-the-candidate",
+      "rule": "withheld-vote",
+      "inputs": {
+        "voters": 3,
+        "reports": [
+          [
+            -1,
+            0
+          ],
+          [
+            3,
+            98304
+          ],
+          [
+            3,
+            65536
+          ]
+        ],
+        "candidate": [
+          3,
+          65536
+        ]
+      },
+      "fields": {
+        "vote": false
+      }
+    },
+    {
+      "kind": "arithmetic",
+      "name": "withheld-vote-two-empty-one-holds-the-log",
+      "rule": "withheld-vote",
+      "inputs": {
+        "voters": 3,
+        "reports": [
+          [
+            -1,
+            0
+          ],
+          [
+            -1,
+            0
+          ],
+          [
+            3,
+            98304
+          ]
+        ],
+        "candidate": [
+          3,
+          98304
+        ]
+      },
+      "fields": {
+        "vote": true
+      }
+    },
+    {
+      "kind": "arithmetic",
+      "name": "withheld-vote-a-standby-past-the-voters-unread",
+      "rule": "withheld-vote",
+      "inputs": {
+        "voters": 2,
+        "reports": [
+          [
+            -1,
+            0
+          ],
+          [
+            3,
+            4096
+          ],
+          null
+        ],
+        "candidate": [
+          3,
+          4096
+        ]
+      },
+      "fields": {
+        "vote": true
+      }
+    },
+    {
+      "kind": "arithmetic",
       "name": "candidate-unanimous",
       "rule": "candidate",
       "inputs": {

@@ -663,15 +663,20 @@ fn a_term_fewer_than_a_quorum_recorded_strands_no_member() {
 /// terms, so an old message must change nothing: an answer to a report the member
 /// made before it recorded more, or a copy from a leader it has since joined. Three
 /// members, at eight seeds, every consensus message up to two seconds late and out
-/// of order. Three times over, the leader appends an entry, is stopped, another
-/// member leads, and the first runs again. The check after every step holds
+/// of order, once the first election has settled with messages on time. Three times
+/// over, the leader appends an entry, is stopped, another member leads, and the first
+/// runs again. The first election is on time for ADR 0145's sake: a member whose log is
+/// empty withholds its vote while the member that holds a log is stopped, so a new
+/// cluster's leader stopped before its followers hold its log is not replaced until
+/// it runs again, which is no case of this test's. The check after every step holds
 /// throughout: no committed entry is lost or replaced, and no member holds, below
 /// the commit position it knows, bytes that were not committed. No member refuses a
 /// truncation, and once the messages arrive in order again the three settle on one
-/// leader and one log. The rule runs under these messages: at five of the eight
-/// seeds members drop terms, twelve drops in all, and three of them cut their log
-/// first, and the check holds through each. `dropped_terms.rs` has the rule's own
-/// cases.
+/// leader and one log. The rule runs under these messages: over the eight seeds
+/// members drop two terms and truncate one log, and the check holds through each.
+/// Before ADR 0145 the first election ran under late messages too, and twelve drops
+/// and three truncations ran; the seeds hold both kinds of step, which the last two
+/// assertions check. `dropped_terms.rs` has the rule's own cases.
 #[test]
 fn late_new_leadership_terms_cut_nothing_that_was_committed() {
     let (mut dropped, mut truncated) = (0, 0);
@@ -679,6 +684,11 @@ fn late_new_leadership_terms_cut_nothing_that_was_committed() {
         let ids = [0, 1, 2];
         let mut safety = Safety::new(&ids);
         let mut cluster = Cluster::with_election(&ids, seed).expect("three members");
+        // The first election with messages on time, so that every member holds a log
+        // before any message is late (ADR 0145).
+        safety.run_until(&mut cluster, 3_000, "the first election", |cluster| {
+            settled(cluster, &ids)
+        });
         assert_eq!(cluster.set_delivery(0, 2_000), 2_000);
         for round in 0..3u8 {
             // An entry, once a leader's election has closed and takes it.

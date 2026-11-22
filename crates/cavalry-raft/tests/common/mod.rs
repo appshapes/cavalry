@@ -86,6 +86,9 @@ pub struct Stub {
     /// The candidate term the log directory holds: what a test gave it, as a
     /// directory kept from an earlier start, or what the member stored since.
     pub candidate_term: i64,
+    /// The vote floor the log directory holds, −1 for none (ADR 0145): what
+    /// `vote_floor` returns and `store_vote_floor` writes.
+    pub vote_floor: i64,
     /// The highest term of the record the log directory holds, likewise.
     pub log_term: i64,
     /// How many times the member read each of the two.
@@ -128,6 +131,7 @@ impl Stub {
             last_append: None,
             last_append_flags: 0,
             candidate_term: -1,
+            vote_floor: -1,
             log_term: -1,
             reads: [0; 2],
             last_canvass: None,
@@ -250,6 +254,15 @@ impl Io for Stub {
     fn log_leadership_term_id(&mut self) -> i64 {
         self.reads[1] += 1;
         self.log_term
+    }
+
+    fn vote_floor(&mut self) -> i64 {
+        self.vote_floor
+    }
+
+    fn store_vote_floor(&mut self, position: i64) -> Result<(), Self::Fault> {
+        self.vote_floor = position;
+        Ok(())
     }
 
     fn record_term(&mut self, term: i64, base: i64) -> Result<(), Self::Fault> {

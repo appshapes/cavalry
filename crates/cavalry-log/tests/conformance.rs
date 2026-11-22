@@ -118,8 +118,8 @@ fn every_vector_agrees_with_the_layout_layer() {
     let doc: Value = serde_json::from_str(VECTORS).expect("the vectors are JSON");
     assert_eq!(doc["spec"], "durable-log");
     assert_eq!(
-        doc["version"], 5,
-        "the vectors are for the page's version 5"
+        doc["version"], 6,
+        "the vectors are for the page's version 6"
     );
     let mut count = 0;
     for vector in doc["vectors"].as_array().expect("a vector list") {
@@ -241,9 +241,18 @@ fn every_vector_agrees_with_the_layout_layer() {
                             Some(int(fields, "candidate_term")),
                             "{name}"
                         );
+                        assert_eq!(
+                            header.vote_floor,
+                            fields["vote_floor"].as_i64(),
+                            "{name}: the vote floor"
+                        );
                         // A torn slot's bytes are whatever the crash left, so only a
-                        // header with both slots whole encodes back to its bytes.
-                        if header.candidate_slots.iter().all(Option::is_some) {
+                        // header with every slot whole, or a floor slot of zero bytes,
+                        // encodes back to its bytes.
+                        let floor_bytes = &bytes[48..60];
+                        let floor_whole =
+                            header.vote_floor.is_some() || floor_bytes.iter().all(|&b| b == 0);
+                        if header.candidate_slots.iter().all(Option::is_some) && floor_whole {
                             assert_eq!(
                                 &header.encode()[..],
                                 &bytes[..TERMS_HEADER_LENGTH],

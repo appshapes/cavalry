@@ -159,6 +159,8 @@ struct Cut {
 struct Disk {
     id: i32,
     candidate_term: i64,
+    /// The vote floor its `terms` file holds, −1 for none (ADR 0145).
+    vote_floor: i64,
     terms: Vec<(i64, i64)>,
     /// Subscribed to the log, with a recording armed.
     joined: bool,
@@ -200,6 +202,7 @@ impl Disk {
         Self {
             id,
             candidate_term: -1,
+            vote_floor: -1,
             terms: Vec::new(),
             joined: false,
             image: None,
@@ -362,6 +365,20 @@ impl Io for MemberIo<'_> {
             .get(self.own)
             .and_then(|disk| disk.terms.iter().map(|&(term, _)| term).max())
             .unwrap_or(-1)
+    }
+
+    fn vote_floor(&mut self) -> i64 {
+        self.world
+            .disks
+            .get(self.own)
+            .map_or(-1, |disk| disk.vote_floor)
+    }
+
+    fn store_vote_floor(&mut self, position: i64) -> Result<(), Self::Fault> {
+        if let Some(disk) = self.world.disks.get_mut(self.own) {
+            disk.vote_floor = position;
+        }
+        Ok(())
     }
 
     fn add_log(&mut self, term: i64, base: i64) -> Result<Option<Log>, Self::Fault> {

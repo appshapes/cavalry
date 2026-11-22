@@ -103,7 +103,8 @@ commit path runs per message.
   position it had synced, so the log a member starts on holds no frame past what it
   synced, and no frame a power loss took the body of (ADR 0144). A recording that a
   driver of version 4 of the durable log or before was making has no synced position
-  to cut to: a member whose host lost power under such a driver stays out.
+  to cut to: a member whose host lost power under such a driver starts on a new log
+  directory, where it withholds its vote until it holds the log (ADR 0145).
   `tests/restart.rs` stops a follower, the leader and all three members over three
   drivers and starts them again, and has all three hosts lose power together, each
   member's log holding a frame past its sync whose body is gone: each driver cuts it,
@@ -395,6 +396,18 @@ commit path runs per message.
   member checks, and `docs/how-to/promote-a-standby.md` the steps. A test runs
   what the rules prevent: two marks changed at once elect a leader that lacks a
   committed entry (ADR 0134).
+- Brings back a member that lost its log directory with no vote on what it forgot
+  (`spec/cluster.md`, "A member that lost its log"; ADR 0145). A member whose log is
+  empty while another member's report holds a log, or whose append position is below
+  its vote floor, withholds: it never nominates itself, and it answers a request
+  vote with nothing, counted in `cluster.votes_withheld`, unless every voter has
+  reported a log the candidate's is at least. Taking a leader with its log empty,
+  it stores the leader's append position as its vote floor, through
+  `Io::store_vote_floor`, in its `terms` file before it records a term;
+  `Consensus::vote_floor()` and the gauge `cluster.vote_floor` hold it.
+  `tests/lost_log_directory.rs` makes the history: an entry committed by two, one of
+  them on an empty directory, the other stopped, and no leader elected without the
+  entry until the stopped one runs again.
 - Runs beside members of another version of its major, as the members of a cluster
   do while it is upgraded one member at a time (`spec/cluster.md`, "Versions and
   the upgrade"; ADR 0136; work item 231). A member writes its own version, 256 for
@@ -418,7 +431,8 @@ commit path runs per message.
   [Run a cluster in ten minutes](../../docs/tutorials/run-a-cluster.md).
 - To come, each with its work item: the gate across three hosts (work item 232), a
   service's snapshot through the C ABI and the five clients (work item 335), and a
-  member that lost its log directory (work item 286).
+  start from a peer's snapshot, for a member that lost its log directory beside
+  members whose logs no longer begin at position 0 (work item 365).
 
 In Aeron, this is Cluster, with Cluster Standby as a paid component
 ([glossary](../../docs/glossary.md)).

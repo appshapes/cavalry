@@ -21,7 +21,7 @@ use cavalry_proto::cluster::{
     LEADER_HEARTBEAT_TIMEOUT_NS, LIVE_ADD_MAX_WINDOW, LogReport, MAX_MEMBERS, MemberPosition,
     Message, PROTOCOL_VERSION, STARTUP_CANVASS_TIMEOUT_NS, TermAction, TermFields, TermSpan,
     TimeUnit, Vote, VoteRequest, ballot, candidate, canvass_position_action, commit_position,
-    new_leadership_term_action, next_fields, quorum, request_vote,
+    new_leadership_term_action, next_fields, quorum, request_vote, withheld_vote, withholds,
 };
 use cavalry_shm::counters::CounterId;
 use cavalry_shm::counters::generated::{
@@ -32,6 +32,7 @@ use cavalry_shm::counters::generated::{
     CLUSTER_LOG_IMAGES_LOST, CLUSTER_LOG_REPLICATIONS, CLUSTER_LOG_REPLICATIONS_UNAVAILABLE,
     CLUSTER_LOG_TRUNCATIONS, CLUSTER_STANDBY_VOTE_REQUESTS, CLUSTER_TERMS_DROPPED,
     CLUSTER_TERMS_LED, CLUSTER_TRUNCATIONS_REFUSED, CLUSTER_VOTES_AGAINST, CLUSTER_VOTES_FOR,
+    CLUSTER_VOTES_WITHHELD,
 };
 
 /// The cluster session id of a session message of no session: one the leader's own
@@ -224,6 +225,17 @@ pub trait Io {
     /// −1 for a record with none: what [`Io::record_term`] wrote, before this start or
     /// since. Read once with [`Io::candidate_term`], and from memory as it is.
     fn log_leadership_term_id(&mut self) -> i64;
+
+    /// The vote floor the member's record of terms holds, −1 for none: the position
+    /// below which it casts no vote and seeks none, what [`Io::store_vote_floor`] wrote,
+    /// before this start or since (`spec/cluster.md`, "A member that lost its log";
+    /// ADR 0145). Read once with [`Io::candidate_term`], and from memory as it is.
+    fn vote_floor(&mut self) -> i64;
+
+    /// Stores `position` as the member's vote floor, durably, before it records a term:
+    /// once, when the member takes a leader with its log empty, `position` the end of
+    /// the leader's log (ADR 0145).
+    fn store_vote_floor(&mut self, position: i64) -> Result<(), Self::Fault>;
 
     /// The leader's log for `term`: its publication on stream 100 at position `base`
     /// with every other member's `log` endpoint as a destination, and its recording.
@@ -619,11 +631,16 @@ pub struct Counts {
     /// and answered with nothing: the candidate's members string gives this member a
     /// vote, and the member's own does not (ADR 0134).
     pub standby_vote_requests: u64,
+    /// `cluster.votes_withheld`: a request vote the member answered with nothing
+    /// because it withholds its vote, its log empty beside a member that holds one or
+    /// below its vote floor, and not every voter had reported a log the candidate's
+    /// is at least (ADR 0145).
+    pub votes_withheld: u64,
 }
 
 impl Counts {
     /// How many counts a member keeps: one counter of `counters.toml` each.
-    pub const LEN: usize = 23;
+    pub const LEN: usize = 24;
 
     /// Each count with the id of its counter in `counters.toml`, the constant
     /// `cavalry-shm` generates from it: what the consensus module stores, each as a
@@ -678,6 +695,7 @@ impl Counts {
             (CLUSTER_CATCHUPS, self.catchups),
             (CLUSTER_TERMS_DROPPED, self.terms_dropped),
             (CLUSTER_STANDBY_VOTE_REQUESTS, self.standby_vote_requests),
+            (CLUSTER_VOTES_WITHHELD, self.votes_withheld),
         ]
     }
 }
@@ -949,6 +967,9 @@ pub struct Consensus {
     state_since_ns: u64,
     /// The highest term this member has proposed or followed.
     candidate_term: i64,
+    /// The position below which this member casts no vote and seeks none, which it
+    /// stored when it took a leader with its log empty; −1 for none (ADR 0145).
+    vote_floor: i64,
     /// The highest term in this member's record of terms.
     log_term: i64,
     /// The term this member leads or follows, −1 for none.
@@ -1094,6 +1115,7 @@ impl Consensus {
             state: ElectionState::Init,
             state_since_ns: 0,
             candidate_term: -1,
+            vote_floor: -1,
             log_term: -1,
             term: -1,
             term_base: 0,
@@ -1507,6 +1529,9 @@ impl Consensus {
                         self.on_message(clock, message, io)
                     }
                     TermAction::Replay => {
+                        // A member that takes a leader with its log empty stores its
+                        // vote floor first, before it records a term (ADR 0145).
+                        self.take_vote_floor(log_position, io)?;
                         // The term at its base, recorded before any position is
                         // reported for it; a term already in the record stays as it is.
                         if let Some((term, base)) = action.records
@@ -1541,6 +1566,9 @@ impl Consensus {
                     // anything (ADR 0086). The sender is its leader from here, as in
                     // the step to follower replay.
                     TermAction::Replicate => {
+                        // As in the step to follower replay: the vote floor before any
+                        // term, which state 9 records (ADR 0145).
+                        self.take_vote_floor(log_position, io)?;
                         let begins = (self.append_position == next_term_base_log_position)
                             .then_some((next_leadership_term_id, next_term_base_log_position));
                         self.candidate_term = self.candidate_term.max(leadership_term_id);
@@ -1920,6 +1948,27 @@ impl Consensus {
             }
             return Ok(());
         }
+        // A member that withholds answers nothing, as a standby does, unless every
+        // voter has reported a log the candidate's is at least: then the candidate
+        // holds every committed entry any voter still holds, and the member answers as
+        // any voter does (`spec/cluster.md`, "A member that lost its log"; ADR 0145).
+        let candidate_log = LogReport {
+            term: request.log_leadership_term_id,
+            position: request.log_position,
+        };
+        if self.withholds(Some(candidate_log)) {
+            let mut reports = self.reports(self.own_report());
+            if let Some(slot) = self
+                .other(candidate_member_id)
+                .and_then(|index| reports.get_mut(index))
+            {
+                *slot = Some(candidate_log);
+            }
+            if !withheld_vote(self.count, &reports, candidate_log) {
+                count(&mut self.counts.votes_withheld);
+                return Ok(());
+            }
+        }
         let answer = request_vote(
             self.candidate_term,
             LogReport {
@@ -2173,6 +2222,7 @@ impl Consensus {
         if !self.read_back {
             self.candidate_term = self.candidate_term.max(io.candidate_term());
             self.log_term = self.log_term.max(io.log_leadership_term_id());
+            self.vote_floor = self.vote_floor.max(io.vote_floor());
             self.read_back = true;
         }
         // Out of the live log, so that the image joined next is a new one whose join
@@ -2278,6 +2328,52 @@ impl Consensus {
         }
     }
 
+    /// Whether this member withholds its vote and its candidacy (`spec/cluster.md`,
+    /// "A member that lost its log"; ADR 0145): its log empty while a member's report
+    /// in this election, or `candidate`, the log of a request it answers, holds a log;
+    /// or its append position below its vote floor.
+    fn withholds(&self, candidate: Option<LogReport>) -> bool {
+        let holds = |log: &LogReport| log.term >= 0 || log.position > 0;
+        let reported = self
+            .peers
+            .iter()
+            .take(self.members)
+            .enumerate()
+            .filter(|&(index, peer)| index != self.own && peer.reported)
+            .any(|(_, peer)| {
+                holds(&LogReport {
+                    term: peer.term,
+                    position: peer.position,
+                })
+            });
+        let log_heard = reported || candidate.as_ref().is_some_and(holds);
+        withholds(self.own_report(), self.vote_floor, log_heard)
+    }
+
+    /// The position below which this member casts no vote and seeks none, −1 for
+    /// none: the end of the log of the leader it took with its log empty (`spec/cluster.md`,
+    /// "A member that lost its log"; ADR 0145), stored in its record of terms.
+    pub fn vote_floor(&self) -> i64 {
+        self.vote_floor
+    }
+
+    /// Stores the vote floor when this member takes a leader with its log empty: the
+    /// end of the leader's log, `leader_log_position`, which holds every entry the
+    /// cluster committed before, written durably before the member records a term.
+    /// A leader whose log is empty too, a new cluster's first, gives no floor.
+    fn take_vote_floor<I: Io>(
+        &mut self,
+        leader_log_position: i64,
+        io: &mut I,
+    ) -> Result<(), I::Fault> {
+        let empty = self.log_term < 0 && self.append_position == 0;
+        if empty && self.vote_floor < 0 && leader_log_position > 0 {
+            io.store_vote_floor(leader_log_position)?;
+            self.vote_floor = leader_log_position;
+        }
+        Ok(())
+    }
+
     /// The logs the members have reported in this election, this member's own among
     /// them: `None` for a member that has not reported.
     fn reports(&self, own: LogReport) -> [Option<LogReport>; MAX_MEMBERS] {
@@ -2308,6 +2404,12 @@ impl Consensus {
         // (`spec/cluster.md`, "Standbys"; ADR 0134). It canvasses until a leader
         // answers it.
         if self.is_standby() {
+            return 0;
+        }
+        // Nor does a member that withholds its vote: its log may lack an entry a
+        // quorum committed with its acknowledgement before it lost it (ADR 0145). It
+        // canvasses until a leader answers it, or until it no longer withholds.
+        if self.withholds(None) {
             return 0;
         }
         let deadline_passed = if self.startup {
