@@ -12,14 +12,48 @@
 //! nothing either: every append was synced before it was answered, and the next start
 //! begins the feed at the last record answered.
 //!
+//! # Three orders, as the threads fall
+//!
+//! As the process comes back, its append, the recorder and the driver's timeout of the
+//! client all run at once, and the test holds what the feed is owed in each order
+//! (work item 413):
+//!
+//! - **The driver drops the client before a record of the append reaches the
+//!   recording.** The recording stops where it stood before the stop, and the feed
+//!   goes on from there.
+//! - **Some or all of the append's records reach the recording first.** The recording
+//!   stops past them. A stop syncs the recording's files before the catalog says it
+//!   stopped (`cavalry-log`'s `LogDir::stop`, which syncs the segment and the index
+//!   and then calls `CatalogWriter::stop`), so they are on the disk, and the feed
+//!   answers them at the positions they hold and offers again only the ones after
+//!   the stop. A stop in the middle of a record leaves the part that came,
+//!   which a reader drops, and the record is offered again whole. This order failed
+//!   the test once on CI, when it asserted the first order alone: the three records
+//!   got through, and the feed went on at 47616 where the test looked for 6432.
+//! - **The client's keepalive reaches the driver before the driver's first check, and
+//!   the client is never dropped.** In one duty cycle the driver stores its heartbeat,
+//!   reads the clients' commands and then times out a client it has not heard from,
+//!   and the client checks the driver's heartbeat before it sends its keepalive. So
+//!   this takes the client's check and keepalive within the microseconds between the
+//!   driver's heartbeat and its read of the commands. The feed goes on with nothing to
+//!   say.
+//!
+//! In the first two the append says, once, that the client was closed and where the
+//! feed goes on: at or past the last record answered before the stop, and at or before
+//! the end of the append's last record. In every order the positions go on from the
+//! last one answered, and after the kill the feed reads back every record once, in
+//! order, at its position. One of the two feeds at least must take the reconnect, or
+//! the run held nothing of what the test is for.
+//!
 //! The test, for both shapes of the feed at once, [`feed::PINNED`] and
 //! [`feed::MOVED_TO`]:
 //!
 //! 1. A feed process starts on directories of its own and appends four records.
 //! 2. The process is stopped with `SIGSTOP` for 12 s and continued with `SIGCONT`.
-//! 3. It appends three records. The append must say that the client was closed and
-//!    that the feed goes on at the last position answered before the stop, and its
-//!    positions go on from there. It appends two more, with nothing to say.
+//! 3. It appends three records. In the first two orders above, the append says that
+//!    the client was closed and where the feed goes on; in the third it says nothing.
+//!    Its positions go on from the last one answered. It appends two more, with
+//!    nothing to say.
 //! 4. The process is killed with `SIGKILL`.
 //! 5. A new feed process on the same directories begins at the last position
 //!    answered, and reads back every record once, in order, each at the position it
@@ -327,6 +361,35 @@ impl Feed {
     }
 }
 
+/// What the append after the stop had to say, in the orders of the module's doc:
+/// `Some` with where the feed went on once the client was closed, `None` when the
+/// client outlived the stop. Fails on any other note, more than one, or a position
+/// before the last record answered before the stop, `held_at`, or past the end of
+/// the append's last record, `appended_to`.
+fn goes_on_at(name: &str, notes: &[String], held_at: i64, appended_to: i64) -> Option<i64> {
+    const NOTE: &str = "note the Cavalry client was closed under an append; connected again, \
+                        and the feed goes on at position ";
+    match notes {
+        [] => None,
+        [note] => {
+            let stopped_at: i64 = note
+                .strip_prefix(NOTE)
+                .and_then(|position| position.parse().ok())
+                .unwrap_or_else(|| {
+                    panic!("{name}: the append after the stop said something else: {note}")
+                });
+            assert!(
+                (held_at..=appended_to).contains(&stopped_at),
+                "{name}: the feed goes on at {stopped_at}, which is not at or past the last \
+                 record answered before the stop, {held_at}, and at or before the end of the \
+                 append's last record, {appended_to}"
+            );
+            Some(stopped_at)
+        }
+        _ => panic!("{name}: the append after the stop said more than once: {notes:?}"),
+    }
+}
+
 fn test() {
     let began = Instant::now();
     // Both feeds' ports before the first process: one thread, as the ports' rule asks.
@@ -371,18 +434,30 @@ fn test() {
         );
     }
 
+    let mut reconnected = 0;
     for feed in &mut feeds {
         let held_at = feed.answered.last().copied().expect("four records");
         let notes = feed.append(3);
-        // The stop was long enough to close the client, so this is the path taken.
-        assert_eq!(
-            notes,
-            [format!(
-                "note the Cavalry client was closed under an append; connected again, and the \
-                 feed goes on at position {held_at}"
-            )],
-            "{}: the append after the stop connects again where the feed stopped",
-            feed.name
+        let appended_to = feed.answered.last().copied().expect("seven records");
+        let order = goes_on_at(feed.name, &notes, held_at, appended_to);
+        if order.is_some() {
+            reconnected += 1;
+        }
+        println!(
+            "feed_held_still: {}: {}",
+            feed.name,
+            order.map_or_else(
+                || "the client outlived the stop, and the feed went on with nothing to say"
+                    .to_owned(),
+                |stopped_at| if stopped_at == held_at {
+                    format!("connected again, and went on where it stopped, at {held_at}")
+                } else {
+                    format!(
+                        "connected again past records that reached the recording first, at \
+                         {stopped_at} of {held_at} to {appended_to}"
+                    )
+                }
+            )
         );
         let notes = feed.append(2);
         assert!(
@@ -391,6 +466,14 @@ fn test() {
             feed.name
         );
     }
+
+    assert!(
+        reconnected > 0,
+        "the stop closed neither feed's client, so this run held no reconnect, and run it \
+         again: no fault of the feed's. Each client's keepalive met the driver within the \
+         microseconds after its heartbeat, the third order of the module's doc, for both \
+         feeds at once"
+    );
 
     // A kill, as a power cut is to a process: no signal it can handle.
     for feed in &mut feeds {
@@ -421,9 +504,9 @@ fn test() {
         );
     }
     println!(
-        "feed_held_still: ok in {:.1} s: both feeds, held still for {HELD:?}, connected again \
-         where they stopped; after a kill each began at its last record answered and read back \
-         {} records, each once, in order",
+        "feed_held_still: ok in {:.1} s: both feeds, held still for {HELD:?}, went on from the \
+         last record answered; after a kill each began at its last record answered and read \
+         back {} records, each once, in order",
         began.elapsed().as_secs_f64(),
         feeds[0].answered.len()
     );
