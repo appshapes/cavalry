@@ -29,8 +29,8 @@ use cavalry_driver::IdleStrategy;
 use cavalry_log::catalog::CatalogReader;
 use cavalry_log::layout::{Descriptor, State as SlotState, locate};
 use cavalry_proto::cluster::{
-    EMPTY_MEMBER, Endpoint, LEADER_HEARTBEAT_TIMEOUT_NS, MAX_MEMBERS, STARTUP_CANVASS_TIMEOUT_NS,
-    parse_members, quorum,
+    CONTROL_TOGGLE_SNAPSHOT, EMPTY_MEMBER, Endpoint, LEADER_HEARTBEAT_TIMEOUT_NS, MAX_MEMBERS,
+    STARTUP_CANVASS_TIMEOUT_NS, control_toggle_id, parse_members, quorum,
 };
 #[cfg(target_os = "linux")]
 use cavalry_proto::udp::DATAGRAMS_PER_BURST;
@@ -48,17 +48,18 @@ use cavalry_shm::counters::generated::{
     SENDER_JOINS_REFUSED, SENDER_LIMIT, SENDER_POSITION, SUBSCRIPTION_POSITION,
 };
 use cavalry_shm::counters::generated::{
-    CLUSTER_APPEND_POSITION, CLUSTER_COMMIT_POSITION, CLUSTER_ELECTION_CAUSE,
-    CLUSTER_ELECTION_STATE, CLUSTER_ELECTIONS_FAILED, CLUSTER_JOIN_POSITION_MISMATCHES,
-    CLUSTER_LEADER_HEARTBEAT_TIMEOUTS, CLUSTER_LEADER_MEMBER_ID, CLUSTER_LEADER_QUORUM_LOSSES,
-    CLUSTER_LEADERS_WITHHELD, CLUSTER_LEADERSHIP_TERM_ID, CLUSTER_LOG_IMAGES_LOST,
-    CLUSTER_LOG_RECORDINGS_FORGOTTEN, CLUSTER_LOG_RECORDINGS_UNSYNCED,
-    CLUSTER_LOG_RECORDINGS_UNWRITTEN, CLUSTER_LOG_REPLICATIONS_UNAVAILABLE,
-    CLUSTER_MESSAGES_REJECTED, CLUSTER_PROTOCOL_VERSION, CLUSTER_REPLIES_STALE, CLUSTER_ROLE,
-    CLUSTER_SERVICE_ACKS_REJECTED, CLUSTER_SERVICE_SNAPSHOTS_FAILED,
-    CLUSTER_SERVICE_SNAPSHOTS_PASSED_OVER, CLUSTER_SNAPSHOTS_FAILED, CLUSTER_SNAPSHOTS_PASSED_OVER,
-    CLUSTER_STANDBY, CLUSTER_STANDBY_VOTE_REQUESTS, CLUSTER_TRUNCATIONS_REFUSED,
-    CLUSTER_VOTE_FLOOR, CLUSTER_VOTERS, CLUSTER_VOTES_WITHHELD,
+    CLUSTER_APPEND_POSITION, CLUSTER_COMMIT_POSITION, CLUSTER_CONTROL_TOGGLE,
+    CLUSTER_CONTROL_TOGGLE_TAKEN, CLUSTER_ELECTION_CAUSE, CLUSTER_ELECTION_STATE,
+    CLUSTER_ELECTIONS_FAILED, CLUSTER_JOIN_POSITION_MISMATCHES, CLUSTER_LEADER_HEARTBEAT_TIMEOUTS,
+    CLUSTER_LEADER_MEMBER_ID, CLUSTER_LEADER_QUORUM_LOSSES, CLUSTER_LEADERS_WITHHELD,
+    CLUSTER_LEADERSHIP_TERM_ID, CLUSTER_LOG_IMAGES_LOST, CLUSTER_LOG_RECORDINGS_FORGOTTEN,
+    CLUSTER_LOG_RECORDINGS_UNSYNCED, CLUSTER_LOG_RECORDINGS_UNWRITTEN,
+    CLUSTER_LOG_REPLICATIONS_UNAVAILABLE, CLUSTER_MESSAGES_REJECTED, CLUSTER_PROTOCOL_VERSION,
+    CLUSTER_REPLIES_STALE, CLUSTER_ROLE, CLUSTER_SERVICE_ACKS_REJECTED,
+    CLUSTER_SERVICE_SNAPSHOTS_FAILED, CLUSTER_SERVICE_SNAPSHOTS_PASSED_OVER,
+    CLUSTER_SNAPSHOTS_FAILED, CLUSTER_SNAPSHOTS_PASSED_OVER, CLUSTER_STANDBY,
+    CLUSTER_STANDBY_VOTE_REQUESTS, CLUSTER_TRUNCATIONS_REFUSED, CLUSTER_VOTE_FLOOR, CLUSTER_VOTERS,
+    CLUSTER_VOTES_WITHHELD,
 };
 use cavalry_shm::counters::{CounterId, CountersError, CountersReader, Scope};
 
@@ -1003,6 +1004,8 @@ fn counters_checks(
 }
 
 const DOC_CLUSTER: &str = "docs/how-to/run-a-cluster.md#when-it-does-not-work";
+/// Where `cavalry snapshot` and a request that waits are explained.
+const DOC_SNAPSHOT: &str = "docs/how-to/ask-for-a-snapshot.md#when-it-does-not-work";
 
 /// A member's counts that no other check of a member reads, each with a `counters.toml`
 /// doctor sentence that says what to do when it is above 0: each is reported by its
@@ -1098,6 +1101,15 @@ struct MemberCounters {
     /// −1 for none (ADR 0145); `None` while the counters file holds no such record, as
     /// for a member of a build older than the counter.
     vote_floor: Option<i64>,
+    /// The highest id among the control toggles beside the member that ask for a
+    /// snapshot, each a counter that a `cavalry snapshot` adds and removes
+    /// (`spec/cluster.md`, "The control toggle"; ADR 0147); `None` while there is
+    /// none, which is nearly always.
+    toggle: Option<i64>,
+    /// `cluster.control_toggle_taken`: the id of the toggle the member took last, −1
+    /// for none; `None` while the counters file holds no such record, as for a member
+    /// of a build that takes no toggle.
+    toggle_taken: Option<i64>,
     /// The values of [`MEMBER_COUNTS`], in its order.
     counts: [i64; MEMBER_COUNTS.len()],
 }
@@ -1402,6 +1414,9 @@ fn cluster_checks(
         .map(|entry| entry.id.0)
         .collect();
     let mut members: Vec<MemberCounters> = Vec::new();
+    // The control toggles that ask for a snapshot, each with the member it asks: a
+    // command's counters, and no member's, so one beside no member is no member.
+    let mut toggles: Vec<(i32, i64)> = Vec::new();
     // The sessions' counts above 0, each with its session's id, and whether the file
     // holds a session's record at all.
     let mut stale: Vec<(i64, CounterId, i64)> = Vec::new();
@@ -1434,6 +1449,16 @@ fn cluster_checks(
             key.copy_from_slice(head);
         }
         let member_id = i32::from_le_bytes(key);
+        if type_id == CLUSTER_CONTROL_TOGGLE.0 {
+            // A command's, keyed by the member's id and then its own: kept apart, and
+            // given to its member once every record is read.
+            if value == CONTROL_TOGGLE_SNAPSHOT
+                && let Some(toggle) = control_toggle_id(fields.key(), member_id)
+            {
+                toggles.push((member_id, toggle));
+            }
+            continue;
+        }
         let index = match members.iter().position(|member| member.id == member_id) {
             Some(index) => index,
             None => {
@@ -1479,6 +1504,8 @@ fn cluster_checks(
             member.protocol_version = Some(value);
         } else if type_id == CLUSTER_VOTE_FLOOR.0 {
             member.vote_floor = Some(value);
+        } else if type_id == CLUSTER_CONTROL_TOGGLE_TAKEN.0 {
+            member.toggle_taken = Some(value);
         } else if let Some(count) = MEMBER_COUNTS
             .iter()
             .position(|counter| counter.0 == type_id)
@@ -1487,15 +1514,23 @@ fn cluster_checks(
             *count = value;
         }
     }
+    // Each member's toggle: the highest id when two commands ask one member at once.
+    // A toggle that names a member this driver does not host is told by no finding:
+    // its command says so itself, and ends.
+    for (member_id, toggle) in toggles {
+        if let Some(member) = members.iter_mut().find(|member| member.id == member_id) {
+            member.toggle = member.toggle.max(Some(toggle));
+        }
+    }
     let mut checks = 0;
     if !members.is_empty() {
         members.sort_by_key(|member| member.id);
         for member in &members {
             member_findings(member, cluster, findings);
         }
-        // The seven of `member_findings`, the vote floor's among them (ADR 0145), and
-        // one for each of the member's counts.
-        checks += 7 + MEMBER_COUNTS.len();
+        // The eight of `member_findings`, the vote floor's (ADR 0145) and the control
+        // toggle's (ADR 0147) among them, and one for each of the member's counts.
+        checks += 8 + MEMBER_COUNTS.len();
     }
     if sessions {
         stale.sort_by_key(|(session, counter, _)| (*session, counter.0));
@@ -2024,6 +2059,62 @@ fn member_findings(
                 level: Level::Warn,
                 message: format!("member {id}'s {} is {value}: {}", def.name, def.doctor),
                 doc: DOC_CLUSTER,
+            });
+        }
+    }
+    // A request for a snapshot that the member has not taken: a toggle whose id is
+    // above the last it took. Beside a leader it is taken within a second or so, and
+    // is worth a note; beside a member that does not lead, or one of a build that
+    // takes none, it is never taken, and the operator ran the command on the wrong
+    // host (`spec/cluster.md`, "The control toggle"; ADR 0147).
+    if let Some(toggle) = member.toggle {
+        let waiting = match member.toggle_taken {
+            None => Some((
+                Level::Warn,
+                format!(
+                    "a `cavalry snapshot` asks member {id} for a snapshot, and the member is \
+                     of a build that takes no such request: it has no \
+                     cluster.control_toggle_taken. The command ends by itself and says so; \
+                     upgrade the member, or wait for the snapshot its leader asks for each \
+                     256 MiB of log"
+                ),
+            )),
+            Some(taken) if toggle <= taken => None,
+            Some(_) if leads && closed => Some((
+                Level::Note,
+                format!(
+                    "a `cavalry snapshot` asks member {id} for a snapshot, and the member has \
+                     not taken the request yet: it takes one when it takes no snapshot of \
+                     its own and has read its log past its last cluster action, within a \
+                     second or so. If this note stays, a snapshot of the member's own does \
+                     not end: see cluster.snapshots_failed"
+                ),
+            )),
+            Some(_) => Some((
+                Level::Warn,
+                match member.followed() {
+                    Some(leader) => format!(
+                        "a `cavalry snapshot` asks member {id} for a snapshot, and the member \
+                         does not lead: member {leader} does. The request is never taken \
+                         here, and its command ends by itself; run `cavalry snapshot` on \
+                         member {leader}'s host"
+                    ),
+                    None => format!(
+                        "a `cavalry snapshot` asks member {id} for a snapshot, and the member \
+                         does not lead: the cluster is holding an election. The request is \
+                         not taken until this member leads, and its command ends by itself; \
+                         run `cavalry snapshot` on the leader's host once the election has \
+                         closed"
+                    ),
+                },
+            )),
+        };
+        if let Some((level, message)) = waiting {
+            findings.push(Finding {
+                check: "cluster.control_toggle",
+                level,
+                message,
+                doc: DOC_SNAPSHOT,
             });
         }
     }
@@ -7725,7 +7816,7 @@ mod tests {
 
         // A follower that follows: the note alone, with who it is and what it knows.
         let (checks, findings) = cluster_findings("cluster-follower", 1, &follower);
-        assert_eq!(checks, 21);
+        assert_eq!(checks, 22);
         assert_eq!(findings.len(), 1, "{findings:?}");
         assert_eq!(findings[0].check, "cluster-member");
         assert_eq!(findings[0].level, Level::Note);
@@ -7902,7 +7993,7 @@ mod tests {
         let dir = TestDir::new("cluster-session-member");
         let reader = session_file(&dir, 7, 2, Some((1, &follower)));
         let mut findings = Vec::new();
-        assert_eq!(cluster_checks(&reader, true, None, &mut findings), 22);
+        assert_eq!(cluster_checks(&reader, true, None, &mut findings), 23);
         let found: Vec<&str> = findings.iter().map(|finding| finding.check).collect();
         assert_eq!(
             found,
@@ -7946,5 +8037,153 @@ mod tests {
             keyed_by_a_session += usize::from(by_session);
         }
         assert_eq!(keyed_by_a_session, SESSION_COUNTS.len());
+    }
+
+    /// A request for a snapshot that waits beside a member is explained by what the
+    /// member can do with it (`spec/cluster.md`, "The control toggle"; ADR 0147): a
+    /// warning beside a member that does not lead, which names the leader and where to
+    /// run the command; a warning beside a member of a build that takes none; a note
+    /// beside a leader that has not taken it yet; and nothing once the member has
+    /// taken it, or for a toggle that asks for no snapshot.
+    #[test]
+    fn a_control_toggle_that_waits_is_explained_by_its_members_role() {
+        use cavalry_proto::cluster::control_toggle_key;
+
+        // A member's counters and one control toggle beside it, of id 40.
+        let with_toggle = |test: &str, values: &[(CounterId, i64)], toggle: i64| {
+            let dir = TestDir::new(test);
+            let mut file = CountersFile::create(&dir.0, 1024).expect("the counters file");
+            for (type_id, value) in values {
+                file.allocate(*type_id, &1i32.to_le_bytes(), "cluster 1")
+                    .expect("a counter")
+                    .set(*value);
+            }
+            file.allocate(
+                CLUSTER_CONTROL_TOGGLE,
+                &control_toggle_key(1, 40),
+                "cluster.control_toggle 1",
+            )
+            .expect("the toggle")
+            .set(toggle);
+            let reader = CountersReader::open(&dir.0).expect("opens");
+            let mut findings = Vec::new();
+            cluster_checks(&reader, true, None, &mut findings);
+            findings
+                .into_iter()
+                .filter(|finding| finding.check == "cluster.control_toggle")
+                .collect::<Vec<_>>()
+        };
+        let follower = [
+            (CLUSTER_ROLE, 0),
+            (CLUSTER_ELECTION_STATE, 17),
+            (CLUSTER_LEADERSHIP_TERM_ID, 3),
+            (CLUSTER_LEADER_MEMBER_ID, 2),
+            (CLUSTER_CONTROL_TOGGLE_TAKEN, -1),
+        ];
+        let found = with_toggle("toggle-follower", &follower, 4);
+        assert_eq!(found.len(), 1, "{found:?}");
+        assert_eq!(found[0].level, Level::Warn);
+        assert_eq!(
+            found[0].message,
+            "a `cavalry snapshot` asks member 1 for a snapshot, and the member does not lead: \
+             member 2 does. The request is never taken here, and its command ends by itself; \
+             run `cavalry snapshot` on member 2's host"
+        );
+        assert_eq!(
+            found[0].doc,
+            "docs/how-to/ask-for-a-snapshot.md#when-it-does-not-work"
+        );
+
+        // In an election: no leader to name.
+        let electing = [
+            (CLUSTER_ROLE, 1),
+            (CLUSTER_ELECTION_STATE, 5),
+            (CLUSTER_LEADERSHIP_TERM_ID, 3),
+            (CLUSTER_LEADER_MEMBER_ID, -1),
+            (CLUSTER_CONTROL_TOGGLE_TAKEN, -1),
+        ];
+        let found = with_toggle("toggle-electing", &electing, 4);
+        assert_eq!(found.len(), 1, "{found:?}");
+        assert_eq!(found[0].level, Level::Warn);
+        assert!(
+            found[0]
+                .message
+                .contains("the cluster is holding an election"),
+            "{}",
+            found[0].message
+        );
+
+        // A member of a build that takes no toggle: it has no gauge.
+        let old = [(CLUSTER_ROLE, 2), (CLUSTER_ELECTION_STATE, 17)];
+        let found = with_toggle("toggle-old", &old, 4);
+        assert_eq!(found.len(), 1, "{found:?}");
+        assert_eq!(found[0].level, Level::Warn);
+        assert!(
+            found[0]
+                .message
+                .contains("is of a build that takes no such request"),
+            "{}",
+            found[0].message
+        );
+
+        // A leader that has not taken it yet: a note. One that has: nothing.
+        let leader = |taken: i64| {
+            [
+                (CLUSTER_ROLE, 2),
+                (CLUSTER_ELECTION_STATE, 17),
+                (CLUSTER_LEADERSHIP_TERM_ID, 3),
+                (CLUSTER_LEADER_MEMBER_ID, 1),
+                (CLUSTER_CONTROL_TOGGLE_TAKEN, taken),
+            ]
+        };
+        let found = with_toggle("toggle-leader", &leader(39), 4);
+        assert_eq!(found.len(), 1, "{found:?}");
+        assert_eq!(found[0].level, Level::Note);
+        assert!(
+            found[0].message.contains("has not taken the request yet"),
+            "{}",
+            found[0].message
+        );
+        assert!(with_toggle("toggle-taken", &leader(40), 4).is_empty());
+        assert!(with_toggle("toggle-answered", &leader(41), 4).is_empty());
+        // A toggle that holds another value asks for nothing.
+        assert!(with_toggle("toggle-suspend", &follower, 2).is_empty());
+
+        // Two toggles beside a leader that took the lower: the higher still waits. A
+        // toggle keyed with another member's id, which this driver does not host, is
+        // no member and no finding.
+        let dir = TestDir::new("toggle-two");
+        let mut file = CountersFile::create(&dir.0, 1024).expect("the counters file");
+        // The other member's toggle first, so that it is read before any member's
+        // own counter.
+        for (member, toggle) in [(7, 99), (1, 41), (1, 40)] {
+            file.allocate(
+                CLUSTER_CONTROL_TOGGLE,
+                &control_toggle_key(member, toggle),
+                "cluster.control_toggle",
+            )
+            .expect("the toggle")
+            .set(CONTROL_TOGGLE_SNAPSHOT);
+        }
+        for (type_id, value) in leader(40) {
+            file.allocate(type_id, &1i32.to_le_bytes(), "cluster 1")
+                .expect("a counter")
+                .set(value);
+        }
+        let reader = CountersReader::open(&dir.0).expect("opens");
+        let mut findings = Vec::new();
+        cluster_checks(&reader, true, None, &mut findings);
+        let found: Vec<(&str, Level)> = findings
+            .iter()
+            .map(|finding| (finding.check, finding.level))
+            .collect();
+        assert_eq!(
+            found,
+            [
+                ("cluster-member", Level::Note),
+                ("cluster.control_toggle", Level::Note)
+            ],
+            "one member, and the toggle of id 41 that it has not taken: {findings:?}"
+        );
     }
 }

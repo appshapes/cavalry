@@ -114,6 +114,12 @@ it ends.
   client id`.** A program other than this command added a request with an id that
   is no client's of the driver, and the member takes no request below it. Stop the
   member and start it again with `cavalry run`, which clears it.
+- **`cavalry doctor` prints `cluster.control_toggle`.** A request is waiting beside
+  that member at the moment doctor read its counters. As a `note`, beside the
+  leader, it is a request about to be taken. As a `WARN`, the member does not lead,
+  and the line names the leader's host to run the command on, or the member is of
+  a build that takes no request, and the line says to upgrade it. The command that
+  asked ends by itself.
 - Two people ask one member at the same moment. The leader may take one request
   for both: each command prints the same position, of a snapshot that the leader
   asked for after both began.
