@@ -820,6 +820,82 @@ mod tests {
         stand.toggle_gone();
     }
 
+    /// The driver goes while the command waits: the command's own client closes under
+    /// it, and the wait ends at once, well before its timeout, with what to do.
+    #[test]
+    fn the_wait_ends_at_once_when_the_driver_goes() {
+        let mut stand = Stand::leader("driver-gone");
+        let asked = stand.ask(LONG);
+        stand.toggle();
+        let went = Instant::now();
+        stand
+            .driver
+            .take()
+            .expect("the driver runs")
+            .close()
+            .expect("the driver closes");
+        let message = refused(asked);
+        let took = went.elapsed();
+        assert!(
+            message.starts_with(
+                "the driver of member 1 went, or closed this command's client, while the \
+                 command waited"
+            ),
+            "{message}"
+        );
+        assert!(took < Duration::from_secs(5), "{took:?}");
+    }
+
+    /// The member goes while the command waits, before it takes the request and
+    /// after: its `cluster.role` is freed, as its counters are when its process stops,
+    /// and the wait ends at once, says how far the request came, and removes the
+    /// toggle.
+    #[test]
+    fn the_wait_ends_at_once_when_the_member_goes() {
+        let mut stand = Stand::leader("member-gone");
+        let asked = stand.ask(LONG);
+        stand.toggle();
+        let went = Instant::now();
+        // Dropping the stand-in's counter removes it from the driver.
+        stand
+            .counters
+            .retain(|(type_id, _)| *type_id != CLUSTER_ROLE);
+        let message = refused(asked);
+        let took = went.elapsed();
+        assert!(
+            message.starts_with(
+                "member 1 went while the command read its counters, and the request was \
+                 removed. Run `cavalry doctor` on this host"
+            ),
+            "{message}"
+        );
+        assert!(took < Duration::from_secs(5), "{took:?}");
+        stand.toggle_gone();
+        drop(stand);
+
+        let mut stand = Stand::leader("member-gone-taken");
+        let asked = stand.ask(LONG);
+        let toggle = stand.toggle();
+        stand.set(CLUSTER_CONTROL_TOGGLE_SNAPSHOT_POSITION, 192);
+        stand.set(CLUSTER_CONTROL_TOGGLE_TAKEN, toggle);
+        std::thread::sleep(Duration::from_millis(50));
+        let went = Instant::now();
+        stand
+            .counters
+            .retain(|(type_id, _)| *type_id != CLUSTER_ROLE);
+        let message = refused(asked);
+        let took = went.elapsed();
+        assert!(
+            message.starts_with(
+                "member 1 went while the command read its counters, after it had taken the \
+                 request. Run `cavalry doctor` on this host"
+            ),
+            "{message}"
+        );
+        assert!(took < Duration::from_secs(5), "{took:?}");
+        stand.toggle_gone();
+    }
+
     /// A member whose last toggle has an id no client of the driver has yet: the
     /// command attaches three times for a higher id, asks nothing, and says how to
     /// clear it.
