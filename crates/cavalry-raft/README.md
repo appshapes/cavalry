@@ -105,7 +105,9 @@ commit path runs per message.
   driver of version 4 of the durable log or before was making has no synced position
   to cut to: a member whose host lost power under such a driver stays out.
   `tests/restart.rs` stops a follower, the leader and all three members over three
-  drivers and starts them again.
+  drivers and starts them again, and has all three hosts lose power together, each
+  member's log holding a frame past its sync whose body is gone: each driver cuts it,
+  and the three start again on what they synced.
 - Counts every move of the election. `ElectionState` is the state machine
   `cluster_election` of `counters.toml`, and each of its transitions adds one to a
   count of `Counts`, the counter registered for it; `Counts::by_counter` pairs each

@@ -1,6 +1,8 @@
 //! Three members over three drivers on the loopback, stopped and started again on the
 //! log directories they kept (`spec/cluster.md`, "A member's start"; ADR 0089, ADR
-//! 0108): a follower, the leader, and all three at once. A member that starts again
+//! 0108): a follower, the leader, all three at once, and all three after their hosts
+//! lost power together, each log holding a frame past its sync whose body is gone
+//! (ADR 0144). A member that starts again
 //! reads its log back from the recordings its record of them names, joins the
 //! cluster with it, and replicates only what it lacks. Each test holds that nothing
 //! committed is lost: a service beside the member that started again reads every
@@ -15,12 +17,16 @@ use std::time::{Duration, Instant};
 
 use cavalry_client::{Cavalry, CommittedLog};
 use cavalry_driver::Driver;
+use cavalry_log::catalog::CatalogReader;
+use cavalry_log::layout::{CatalogHeader, crc32, locate};
 use cavalry_log::recordings::RecordingsFile;
+use cavalry_proto::frame::{DataFrameHeader, Flags, FrameType};
 use cavalry_raft::{ConsensusModule, ElectionState, RaftError, Refused, Role};
 use cavalry_shm::counters::CountersReader;
 use cavalry_shm::counters::generated::{
     CLUSTER_LEADER_MEMBER_ID, CLUSTER_LOG_RECORDINGS_FORGOTTEN, CLUSTER_LOG_RECORDINGS_LISTED,
-    CLUSTER_LOG_RECORDINGS_UNSYNCED, CLUSTER_TRUNCATIONS_FINISHED,
+    CLUSTER_LOG_RECORDINGS_UNSYNCED, CLUSTER_TRUNCATIONS_FINISHED, RECORDING_CUT_TO_SYNCED,
+    RECORDING_RECOVERED,
 };
 
 mod ports;
@@ -585,4 +591,140 @@ fn all_three_members_start_again_on_their_logs_and_the_log_goes_on() {
         member.module.close().expect("the member closes");
         member.driver.close().expect("the driver closes");
     }
+}
+
+/// Leaves `member`'s log directory as a power loss on its host would, once the member
+/// has closed: the recording that ends its log reads live in the catalog again, and
+/// past the position it had synced lies a frame whose header survived and whose body
+/// did not, a frame of an entry's length with every field the `frame` check reads
+/// and a body of zeros (`spec/durable-log.md`, "The driver"; ADR 0144). Returns the
+/// position the log had synced to, where the frame begins.
+fn lose_power(log_dir: &Path, member_id: i32) -> i64 {
+    let (_, named) = record_of(log_dir, member_id);
+    let &(recording_id, _) = named.last().expect("the log is in a recording");
+    let descriptor = CatalogReader::open(log_dir)
+        .expect("the catalog opens")
+        .get(recording_id)
+        .expect("the slot reads")
+        .expect("the catalog holds the recording");
+    let synced = descriptor.stop_position();
+    assert!(synced > 0, "the recording holds the log: {descriptor:?}");
+    // The stop the close wrote, undone: the stop fields at −1 and −1 under their
+    // checksum, as a recording reads when the power was lost while it ran.
+    let mut stop = [0u8; 20];
+    stop[4..12].copy_from_slice(&(-1i64).to_le_bytes());
+    stop[12..20].copy_from_slice(&(-1i64).to_le_bytes());
+    let checksum = crc32(&stop[4..20]);
+    stop[..4].copy_from_slice(&checksum.to_le_bytes());
+    let slot = CatalogHeader::slot_offset(u64::try_from(recording_id).expect("an id"));
+    write_at(&log_dir.join("catalog"), &stop, slot + 4);
+    // The frame past the sync: its header whole, its body lost.
+    let located = locate(&descriptor, synced).expect("a position of the recording");
+    let header = DataFrameHeader::new(FrameType::Data, Flags::UNFRAGMENTED, FRAME as usize)
+        .expect("a header")
+        .with_term_offset(located.term_offset)
+        .with_term_id(located.term_id)
+        .with_session_id(descriptor.session_id())
+        .with_stream_id(descriptor.stream_id())
+        .to_bytes();
+    let mut frame = [0u8; FRAME as usize];
+    frame[..header.len()].copy_from_slice(&header);
+    write_at(
+        &log_dir.join(&located.segment_file),
+        &frame,
+        located.offset_in_segment as u64,
+    );
+    synced
+}
+
+fn write_at(path: &Path, bytes: &[u8], offset: u64) {
+    use std::os::unix::fs::FileExt;
+    std::fs::OpenOptions::new()
+        .write(true)
+        .open(path)
+        .expect("the file opens")
+        .write_all_at(bytes, offset)
+        .expect("the bytes are written");
+}
+
+/// The hosts of all three members lose power together, each while its recorder held
+/// a frame of the log that it had not synced, and that frame's body is lost: the case
+/// in which a cluster could commit bytes that no client sent (work item 287; ADR
+/// 0144). Started again, each member's driver cuts the recording to what it had
+/// synced and counts the cut, so each member's log ends where the cluster's committed
+/// log ended, and not one frame past it. The members elect in a term above the one
+/// they held and the log goes on. A service beside each member reads all seventeen
+/// entries from 0, the same bytes on each, and the first eleven are the bytes a
+/// service read before the power was lost: no member hands the damaged frame on.
+#[test]
+fn three_members_whose_hosts_lost_power_together_start_again_on_what_they_synced() {
+    let dir = TestDir::new("power");
+    let members_string = members_string();
+    let mut members = start(dir.path(), &members_string);
+    run_until_led(&mut members, -1);
+    offer_entries(&mut members, 0, 10);
+    let first = FRAME + 10 * FRAME;
+    run_until_committed(&mut members, "the first entries committed", first);
+    let first_term = members[0].module.leadership_term_id();
+    let before = read_committed(&mut members, 0, first);
+    assert_eq!(before.len(), 11);
+
+    let mut ids = Vec::new();
+    for member in members {
+        let id = member.module.member_id();
+        member.module.close().expect("the member closes");
+        member.driver.close().expect("the driver closes");
+        assert_eq!(lose_power(&member.log_dir, id), first, "member {id}");
+        ids.push(id);
+    }
+
+    let mut members = start(dir.path(), &members_string);
+    for member in &mut members {
+        let static_counter = |id: cavalry_shm::counters::CounterId| {
+            CountersReader::open(&member.dir)
+                .expect("the counters file opens")
+                .read(id.record())
+                .expect("a static counter")
+        };
+        assert_eq!(
+            (
+                static_counter(RECORDING_RECOVERED),
+                static_counter(RECORDING_CUT_TO_SYNCED)
+            ),
+            (1, 1),
+            "member {}'s driver rebuilt the live recording and cut it",
+            member.module.member_id()
+        );
+        // Each alone, before it has heard another: the log it synced, and not the
+        // frame past it.
+        run_until(
+            std::slice::from_mut(member),
+            "the member read its log back",
+            |members| members[0].module.append_position() == first,
+        );
+    }
+    run_until_led(&mut members, first_term);
+    offer_entries(&mut members, 10, 5);
+    let second = first + FRAME + 5 * FRAME;
+    run_until_committed(&mut members, "the log went on", second);
+
+    let read: Vec<Read> = (0..3)
+        .map(|index| read_committed(&mut members, index, second))
+        .collect();
+    assert_eq!(read[0].len(), 17);
+    assert_eq!(read[0][..11], before[..]);
+    assert_eq!(read[1], read[0]);
+    assert_eq!(read[2], read[0]);
+    assert!(
+        read[0]
+            .iter()
+            .all(|(_, entry)| entry.iter().any(|&byte| byte != 0)),
+        "no entry of zeros, which the lost body would have been"
+    );
+
+    for member in members {
+        member.module.close().expect("the member closes");
+        member.driver.close().expect("the driver closes");
+    }
+    assert_eq!(ids.len(), 3);
 }
