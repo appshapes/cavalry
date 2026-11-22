@@ -30,7 +30,9 @@ test *ARGS: test-scripts
 # ADRs of a made-up branch (ADR 0140), and `just tidy`'s
 # matching of a merged pull request's head to what is here, against a made-up origin
 # and a fake `gh` (card 262), and the counters lint's reading of the counters that a
-# sentence of counters.toml names (work item 230). Standard library only, no network.
+# sentence of counters.toml names (work item 230), and the script that points Brigade's
+# server at this tree, against a made-up checkout and a fake `cargo`, with the nightly
+# workflow that runs it (work item 362). Standard library only, no network.
 test-scripts:
     python3 scripts/release-notes-email-test.py
     python3 scripts/release-notes-test.py
@@ -39,6 +41,7 @@ test-scripts:
     python3 scripts/wait-for-partner-job-test.py
     python3 scripts/claude-workflow-test.py
     python3 scripts/fixer-spec-pages-test.py
+    python3 scripts/brigade-server-patch-test.py
     python3 scripts/tidy-test.py
     python3 scripts/gen-counters-test.py
     python3 clients/generate-test.py
