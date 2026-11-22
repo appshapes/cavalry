@@ -1,6 +1,8 @@
 //! One feed run as a process of its own: what a test starts when the server's process
-//! is what it tests. The feed is this directory's `mod.rs`; this file adds nothing to
-//! it but a way to drive it from outside.
+//! is what it tests, and what `conformance/upgrade/log-directory.sh` builds from two
+//! trees and has the older write a log directory with (ADR 0141). The feed is this
+//! directory's `mod.rs`; this file adds nothing to it but a way to drive it from
+//! outside.
 //!
 //! [`run`] opens the feed, says `open <where it begins>`, and then does what its
 //! standard input says until that ends. Each line in is one command, and each command

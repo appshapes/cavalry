@@ -626,15 +626,19 @@ fn a_release_rolls_the_feed_the_server_moves_to_and_purges_what_a_snapshot_cover
 }
 
 /// A purge is refused while a replay reads the recording, and the server sends it
-/// again at its next release. Another client of the same driver holds the replay: one
-/// with no subscriber, which the driver keeps for the replay connect timeout of 5 s.
+/// again at its next release. Another client of the same driver holds the replay. Its
+/// subscriber reads nothing, and the recording is longer than a term, which is further
+/// than a replay's publication goes ahead of its slowest subscriber: the replay stands
+/// short of the recording's end until it is stopped, however long the release takes.
 fn a_purge_refused_under_a_replay_is_made_at_the_next_release(shape: Shape, name: &str) {
     let dir = TestDir::new(name);
     let options = options(&dir, shape, 1);
+    let term = i64::try_from(shape.term_length).expect("a term length");
     let mut appended = Appended::new();
     let mut log = FeedLog::open(&options).expect("the feed opens");
 
     append(&mut log, &mut appended, &[1, 2_000]);
+    append_past(&mut log, &mut appended, term);
     let a = log.end();
     log.release(a).expect("the first release");
     append(&mut log, &mut appended, &[2, 3_000]);
@@ -642,6 +646,9 @@ fn a_purge_refused_under_a_replay_is_made_at_the_next_release(shape: Shape, name
     let _ = log.notes();
 
     let mut reader = Cavalry::connect_to(&options.driver_dir).expect("a second client");
+    let unread = reader
+        .add_subscription("cavalry:ipc", REPLAY_STREAM + 1)
+        .expect("a subscription that reads nothing");
     let replay = reader
         .start_replay(0, 0, NULL_LENGTH, REPLAY_STREAM + 1, "cavalry:ipc")
         .expect("a replay of recording 0");
@@ -657,6 +664,11 @@ fn a_purge_refused_under_a_replay_is_made_at_the_next_release(shape: Shape, name
         "the purge of a recording that a replay reads is refused: {notes:?}"
     );
     assert_eq!(slot_state(&options.log_dir, 0), Some(State::Valid));
+    assert_eq!(
+        replay.ended(),
+        None,
+        "the replay is live: its subscriber has read nothing"
+    );
 
     reader
         .stop_replay(replay.replay_session_id())
@@ -677,6 +689,7 @@ fn a_purge_refused_under_a_replay_is_made_at_the_next_release(shape: Shape, name
         )]
     );
     assert_eq!(slot_state(&options.log_dir, 0), Some(State::Deleted));
+    unread.close().expect("the subscription closes");
     reader.close().expect("the second client closes");
 }
 
