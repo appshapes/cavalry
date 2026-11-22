@@ -68,6 +68,7 @@ use crate::snapshot::{
     self, ModuleSnapshot, OpenError, SERVICE_ACK_LIMIT, ServiceSnapshotCounts, SnapshotCounts,
     SnapshotDue,
 };
+use crate::toggle::ControlToggle;
 
 /// The longest payload [`ConsensusModule::offer`] takes: what one frame of the log
 /// carries after the frame header and the session message header, at the UDP
@@ -2955,6 +2956,9 @@ pub struct ConsensusModule {
     /// member read in its log or appended to it: a leader asks for the next one a
     /// snapshot interval past it.
     snapshot_asked_at: i64,
+    /// The member's side of the control toggle, by which a command on its host asks
+    /// it for a snapshot: its look in the counters file and its two gauges.
+    toggle: ControlToggle,
     io: ClientIo,
     counters: Counters,
     messages_rejected: u64,
@@ -3241,6 +3245,9 @@ impl ConsensusModule {
                 passed_over,
             ),
         )?;
+        // The two gauges a command reads its answer in, after the snapshots' own
+        // (ADR 0147).
+        let toggle = ControlToggle::open(&mut client, member_id)?;
         let started = Instant::now();
         Ok(Self {
             core,
@@ -3252,6 +3259,7 @@ impl ConsensusModule {
             session_log_position: from,
             snapshot,
             snapshot_asked_at: from,
+            toggle,
             io: ClientIo {
                 client,
                 terms,
@@ -3424,6 +3432,9 @@ impl ConsensusModule {
         // snapshot interval since the last one asked for. An action the log does not
         // take is asked again on a later cycle.
         let asked = self.ask_snapshot_at_the_interval();
+        // And when a command on its host asks, with a control toggle: a look of a
+        // few records of the counters file, no more often than each millisecond.
+        let toggled = self.take_control_toggle();
         // What the service beside this member says of the snapshots it took, read
         // and listed here. Its error, a stream that stopped or a list that could
         // not be written, is returned after the core's own.
@@ -3462,6 +3473,7 @@ impl ConsensusModule {
         listed?;
         written?;
         asked?;
+        toggled?;
         Ok(work + session_work? + snapshot_work? + acks_work?)
     }
 
@@ -3546,6 +3558,41 @@ impl ConsensusModule {
             self.snapshot.count_action();
         }
         Ok(appended)
+    }
+
+    /// Takes a control toggle, when this member leads and a look finds one that asks
+    /// for a snapshot (`spec/cluster.md`, "Snapshots", "The control toggle"; ADR
+    /// 0147): the leader appends the cluster action and stores what it took for the
+    /// command that asked. It takes one only while it takes no snapshot of its own
+    /// and its read of its log has passed every action it appended, so that the
+    /// action it appends is the one snapshot being taken; until then the toggle
+    /// waits where it is. An action the back-pressured log does not take is tried
+    /// at the next look. A member that does not lead looks for none.
+    fn take_control_toggle(&mut self) -> Result<(), RaftError> {
+        let serves = self.core.role() == Role::Leader
+            && self.core.election_state() == ElectionState::Closed
+            && self.session_log_position >= self.core.term_base_log_position();
+        if !serves {
+            return Ok(());
+        }
+        let Some(found) = self
+            .toggle
+            .look(self.io.client.counters(), self.clock.now_ns)
+        else {
+            return Ok(());
+        };
+        if !self.snapshot.is_idle() || self.session_log_position < self.snapshot_asked_at {
+            return Ok(());
+        }
+        let Some(Ok(position)) = self.io.log_publication.as_ref().map(Publication::position) else {
+            return Ok(());
+        };
+        if self.append_snapshot_action(position)? {
+            // The position after the action's entry, which the append stored: the
+            // snapshot's log position.
+            self.toggle.took(found, self.snapshot_asked_at);
+        }
+        Ok(())
     }
 
     /// Asks every member of the cluster for a snapshot, for the leader's own process:

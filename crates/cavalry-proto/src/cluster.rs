@@ -155,6 +155,27 @@ pub const MAX_SERVICE_SNAPSHOT_STATE_LENGTH: usize = 1 << 30;
 /// the last carries the rest.
 pub const SERVICE_SNAPSHOT_STATE_MESSAGE_LENGTH: usize = 1024;
 
+/// What a control toggle holds to ask its member for a snapshot: 4, Aeron's
+/// `SNAPSHOT`, the one state of Aeron's toggle this version acts on
+/// (`spec/cluster.md`, "Values").
+pub const CONTROL_TOGGLE_SNAPSHOT: i64 = 4;
+
+/// The length of a control toggle's key: the member's id, an `i32`, and the toggle's
+/// id, an `i64`.
+pub const CONTROL_TOGGLE_KEY_LENGTH: usize = 12;
+
+/// The control toggle look: how many metadata records of the counters file a leader
+/// reads at a time to find a control toggle (`spec/cluster.md`, "Values").
+pub const CONTROL_TOGGLE_LOOK_RECORDS: u32 = 16;
+
+/// The control toggle look's interval, in nanoseconds: 1 ms. A leader looks no more
+/// often.
+pub const CONTROL_TOGGLE_LOOK_INTERVAL_NS: u64 = 1_000_000;
+
+/// The control toggle timeout, in nanoseconds: 10 s, how long the command that added
+/// a toggle waits for the member to take it and to list the snapshot.
+pub const CONTROL_TOGGLE_TIMEOUT_NS: u64 = 10_000_000_000;
+
 /// The leader heartbeat interval, in nanoseconds: 200 ms.
 pub const LEADER_HEARTBEAT_INTERVAL_NS: u64 = 200_000_000;
 
@@ -3563,6 +3584,46 @@ fn i64_at(bytes: &[u8], at: usize) -> i64 {
         .get(at..at.saturating_add(8))
         .and_then(|field| field.try_into().ok())
         .map_or(0, i64::from_le_bytes)
+}
+
+/// The key of a control toggle, the counter by which a command on a member's host
+/// asks that member for a snapshot: the member's id and then the toggle's id, the
+/// command's client id, little-endian (`spec/cluster.md`, "The control toggle").
+///
+/// ```
+/// use cavalry_proto::cluster::{control_toggle_id, control_toggle_key};
+///
+/// let key = control_toggle_key(2, 77);
+/// assert_eq!(key, [2, 0, 0, 0, 77, 0, 0, 0, 0, 0, 0, 0]);
+/// assert_eq!(control_toggle_id(&key, 2), Some(77));
+/// ```
+pub fn control_toggle_key(member_id: i32, toggle_id: i64) -> [u8; CONTROL_TOGGLE_KEY_LENGTH] {
+    let mut key = [0u8; CONTROL_TOGGLE_KEY_LENGTH];
+    let (member, toggle) = key.split_at_mut(4);
+    member.copy_from_slice(&member_id.to_le_bytes());
+    toggle.copy_from_slice(&toggle_id.to_le_bytes());
+    key
+}
+
+/// The id of the control toggle whose counter has the key `key`, when that toggle is
+/// `member_id`'s: `None` for another member's, and for a key too short to be one. A
+/// counters file's record holds a key with zero bytes after it, which are not read.
+///
+/// ```
+/// use cavalry_proto::cluster::{control_toggle_id, control_toggle_key};
+///
+/// // A record's key: the toggle's 12 bytes, then zero bytes to 112.
+/// let mut record = [0u8; 112];
+/// record[..12].copy_from_slice(&control_toggle_key(2, 77));
+/// assert_eq!(control_toggle_id(&record, 2), Some(77));
+/// // Another member's toggle, and a key that is no toggle's.
+/// assert_eq!(control_toggle_id(&record, 1), None);
+/// assert_eq!(control_toggle_id(&record[..8], 2), None);
+/// ```
+pub fn control_toggle_id(key: &[u8], member_id: i32) -> Option<i64> {
+    let member = key.get(..4)?;
+    let toggle = key.get(4..CONTROL_TOGGLE_KEY_LENGTH)?;
+    (member == member_id.to_le_bytes()).then(|| i64_at(toggle, 0))
 }
 
 /// The entry in the bytes of `entry`.

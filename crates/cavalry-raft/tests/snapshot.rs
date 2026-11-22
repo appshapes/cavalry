@@ -3177,3 +3177,217 @@ fn a_services_start_from_its_snapshot_timed() {
         stop(member);
     }
 }
+
+/// A command's side of a control toggle, as a test holds it: a client of the member's
+/// driver, the counter it added with the member's id and its own client id as the
+/// key, and that id (`spec/cluster.md`, "The control toggle"; ADR 0147).
+struct Toggle {
+    client: Cavalry,
+    counter: cavalry_client::Counter,
+    id: i64,
+}
+
+impl Toggle {
+    /// Adds a toggle for `member` on its driver, holding `value`.
+    fn add(member: &Member, value: i64) -> Self {
+        let mut client = Cavalry::connect_to(&member.dir).expect("the command's client connects");
+        let id = client.client_id();
+        let member_id = member.module.member_id();
+        let counter = client
+            .add_counter(
+                cavalry_shm::counters::generated::CLUSTER_CONTROL_TOGGLE.0,
+                &cavalry_proto::cluster::control_toggle_key(member_id, id),
+                &format!("cluster.control_toggle {member_id}"),
+            )
+            .expect("the driver adds the toggle");
+        counter.store_release(value).expect("the toggle is stored");
+        Self {
+            client,
+            counter,
+            id,
+        }
+    }
+
+    /// Removes the toggle, as a command does when it ends.
+    fn remove(self) {
+        self.counter.close();
+        self.client.close().expect("the command's client closes");
+    }
+}
+
+/// What a member holds of the control toggle it took last: its id, and the log
+/// position of the snapshot it asked for it.
+fn toggle_taken(member: &Member) -> (i64, i64) {
+    use cavalry_shm::counters::generated::{
+        CLUSTER_CONTROL_TOGGLE_SNAPSHOT_POSITION, CLUSTER_CONTROL_TOGGLE_TAKEN,
+    };
+    (
+        counter(member, CLUSTER_CONTROL_TOGGLE_TAKEN.0),
+        counter(member, CLUSTER_CONTROL_TOGGLE_SNAPSHOT_POSITION.0),
+    )
+}
+
+/// Runs the members for longer than a leader's look takes to read its driver's whole
+/// counters file once, 16 records each millisecond over 16,384 records: 1,024 ms.
+fn run_past_a_whole_look(members: &mut [Member]) {
+    let until = Instant::now() + Duration::from_millis(1_300);
+    run_until(members, "the members run on", |_| Instant::now() >= until);
+}
+
+/// A leader takes a control toggle that asks for a snapshot, once, and every member
+/// takes the snapshot at the position the leader stored for it. A member that does not
+/// lead takes none, a toggle of another value is passed over, and of two toggles the
+/// second is taken when the first has gone from its counter, with a snapshot of its
+/// own.
+#[test]
+fn a_leader_takes_a_control_toggle_once_and_every_member_takes_its_snapshot() {
+    use cavalry_proto::cluster::CONTROL_TOGGLE_SNAPSHOT;
+
+    let dir = TestDir::new("toggle");
+    let members_string = members_string();
+    let mut members: Vec<Member> = [1, 0, 2]
+        .into_iter()
+        .map(|id| start_member(dir.path(), &members_string, id))
+        .collect();
+    run_until_led(&mut members, -1);
+    offer_entries(&mut members, 0, 3);
+    let end = 4 * FRAME;
+    run_until_committed(&mut members, "the three entries are committed", end);
+    for member in &members {
+        assert_eq!(toggle_taken(member), (-1, -1), "no toggle taken yet");
+    }
+
+    // A toggle beside a follower, and one beside the leader that holds Aeron's
+    // suspend, 2: neither is taken, however long they stay.
+    let beside_follower = Toggle::add(&members[1], CONTROL_TOGGLE_SNAPSHOT);
+    let suspend = Toggle::add(&members[0], 2);
+    run_past_a_whole_look(&mut members);
+    for member in &members {
+        assert_eq!(toggle_taken(member), (-1, -1));
+        assert_eq!(counter(member, CLUSTER_SNAPSHOT_ACTIONS.0), 0);
+        assert_eq!(member.module.snapshot_position(), None);
+    }
+
+    // A toggle beside the leader that asks for a snapshot: the leader appends one
+    // action, stores the snapshot's position and then the toggle's id, and every
+    // member lists its snapshot at that position.
+    let first = Toggle::add(&members[0], CONTROL_TOGGLE_SNAPSHOT);
+    run_until(&mut members, "the leader took the toggle", |members| {
+        toggle_taken(&members[0]).0 == first.id
+    });
+    let (_, position) = toggle_taken(&members[0]);
+    assert_eq!(
+        position,
+        end + FRAME,
+        "the position after the action's entry"
+    );
+    run_until(
+        &mut members,
+        "every member listed the snapshot",
+        |members| {
+            members
+                .iter()
+                .all(|m| m.module.snapshot_position() == Some(position))
+        },
+    );
+    assert_eq!(counter(&members[0], CLUSTER_SNAPSHOT_ACTIONS.0), 1);
+
+    // The toggle stays, and a second is added: the leader takes neither while the
+    // first is in its counter. One request is one action.
+    let second = Toggle::add(&members[0], CONTROL_TOGGLE_SNAPSHOT);
+    run_past_a_whole_look(&mut members);
+    assert_eq!(toggle_taken(&members[0]), (first.id, position));
+    assert_eq!(counter(&members[0], CLUSTER_SNAPSHOT_ACTIONS.0), 1);
+
+    // The first command ends: the second toggle is taken, with a snapshot of its own.
+    first.remove();
+    run_until(
+        &mut members,
+        "the leader took the second toggle",
+        |members| toggle_taken(&members[0]).0 == second.id,
+    );
+    let (_, next) = toggle_taken(&members[0]);
+    assert_eq!(next, position + FRAME);
+    run_until(
+        &mut members,
+        "every member listed the second snapshot",
+        |members| {
+            members
+                .iter()
+                .all(|m| m.module.snapshot_position() == Some(next))
+        },
+    );
+    assert_eq!(counter(&members[0], CLUSTER_SNAPSHOT_ACTIONS.0), 2);
+    for member in &members[1..] {
+        assert_eq!(
+            toggle_taken(member),
+            (-1, -1),
+            "a follower takes no toggle, its own among them"
+        );
+        assert_eq!(counter(member, CLUSTER_SNAPSHOT_ACTIONS.0), 0);
+    }
+
+    // The command that held suspend stores snapshot in its toggle: it is the
+    // counter's writer. The leader takes it once the second has gone.
+    suspend
+        .counter
+        .store_release(CONTROL_TOGGLE_SNAPSHOT)
+        .expect("the toggle is stored");
+    second.remove();
+    run_until(
+        &mut members,
+        "the leader took the third toggle",
+        |members| toggle_taken(&members[0]).0 == suspend.id,
+    );
+    assert_eq!(counter(&members[0], CLUSTER_SNAPSHOT_ACTIONS.0), 3);
+
+    suspend.remove();
+    beside_follower.remove();
+    for member in members {
+        stop(member);
+    }
+}
+
+/// What one look costs the thread that runs a leader: 16 metadata records of a
+/// counters file of 16,384, read as the leader reads them, 20,000 looks over the
+/// file. The median, the 99.99th percentile and the longest are printed. Ignored,
+/// since it measures and asserts nothing: `cargo test --release -p cavalry-raft --test
+/// snapshot -- --ignored --nocapture a_control_toggles_look_timed`.
+#[test]
+#[ignore = "a measurement for ADR 0147, run by hand"]
+fn a_control_toggles_look_timed() {
+    use cavalry_proto::cluster::{CONTROL_TOGGLE_LOOK_RECORDS, control_toggle_id};
+    use cavalry_shm::counters::generated::CLUSTER_CONTROL_TOGGLE;
+
+    let dir = TestDir::new("look-timed");
+    let members_string = members_string();
+    let member = start_member(dir.path(), &members_string, 0);
+    let reader = CountersReader::open(&member.dir).expect("the counters file opens");
+    let capacity = reader.capacity();
+    let mut next = 0u32;
+    let mut found = 0u32;
+    let mut took = Vec::with_capacity(20_000);
+    for _ in 0..20_000 {
+        let from = Instant::now();
+        for _ in 0..CONTROL_TOGGLE_LOOK_RECORDS {
+            let counter = if next < capacity { next } else { 0 };
+            if let Ok(Some(record)) = reader.record(counter)
+                && record.type_id() == CLUSTER_CONTROL_TOGGLE.0
+                && control_toggle_id(record.key(), 0).is_some()
+            {
+                found += 1;
+            }
+            next = counter + 1;
+        }
+        took.push(from.elapsed());
+    }
+    took.sort();
+    println!(
+        "a look of {CONTROL_TOGGLE_LOOK_RECORDS} records of {capacity}, 20,000 looks, {found} toggles found: \
+         p50 {} ns, p99.99 {} ns, max {} ns",
+        took[took.len() / 2].as_nanos(),
+        took[took.len() * 9_999 / 10_000].as_nanos(),
+        took[took.len() - 1].as_nanos(),
+    );
+    stop(member);
+}

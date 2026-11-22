@@ -1611,7 +1611,7 @@ id = 160
 name = "cluster.snapshot_actions"
 kind = "counter"
 scope = "client"
-doc = "Cluster actions asking for a snapshot that one cluster member appended to the log while it led: one each time its log grew by the snapshot interval, 256 MiB, since the action before, and one each time its own process asked (spec/cluster.md, Snapshots and Values). key: member id (i32), little-endian; label text: the member id in decimal."
+doc = "Cluster actions asking for a snapshot that one cluster member appended to the log while it led: one each time its log grew by the snapshot interval, 256 MiB, since the action before, one each time its own process asked, and one for each control toggle it took, which a command on its host adds (spec/cluster.md, Snapshots and Values). key: member id (i32), little-endian; label text: the member id in decimal."
 doctor = "It rises on the leader alone. Each one is followed on every member by cluster.snapshots_begun, once the member has read the action in its committed log. If it rises and cluster.snapshots_begun does not on some member, that member's commit position does not reach the action: see cluster.commit_position there."
 
 [[counter]]
@@ -1797,6 +1797,30 @@ kind = "counter"
 scope = "client"
 doc = "New leadership terms that one cluster member, a voter with its log empty, ignored where it would otherwise have taken the sender as its leader: it had not voted that leader in, and had not heard each other voter in this election name a term at most the leader's. A leader that a later term deposed, and that has not heard of it, still answers a member whose log is empty, and a member that followed it would count toward commits that replace what the later term committed (spec/cluster.md, A member that lost its log, Taking a leader; ADR 0145). key and label as cluster.elections."
 doctor = "This member started on an empty log directory and a leader answered it, but a voter other than that leader has not been heard: it is stopped, it cannot reach this member, or it runs a build before ADR 0145 and has not canvassed since. This member takes no leader until it hears that voter, since only that voter can show that no later term was elected without the leader. Start the stopped voter on the log directory it kept, or mend the path between the two; the member then takes its leader within 100 ms."
+
+[[counter]]
+id = 184
+name = "cluster.control_toggle"
+kind = "gauge"
+scope = "client"
+doc = "A request to one cluster member from a command on its host: 4, snapshot, asks the member for a snapshot, which it takes while it leads; every other value is no request of this version. The command adds the counter, is its one writer, and removes it when it ends; the member reads it and writes nothing in it (spec/cluster.md, Snapshots, The control toggle; ADR 0147). key: member id (i32), then the toggle's id (i64), the command's client id, little-endian; label text: the member id in decimal."
+doctor = "A command that asks this member for a snapshot is waiting. The member takes the request while it leads, takes no snapshot of its own and has read its log past its last cluster action: its cluster.control_toggle_taken then holds the id in this counter's key. A toggle that stays while cluster.control_toggle_taken does not move is beside a member that does not lead, see cluster.role, or whose snapshot does not end, see cluster.snapshots_failed. The counter goes when its command ends, after 10 s at the most."
+
+[[counter]]
+id = 185
+name = "cluster.control_toggle_taken"
+kind = "gauge"
+scope = "client"
+doc = "The id of the control toggle one cluster member took last: the member led, appended a cluster action that asks for a snapshot, and stored the toggle's id here, after cluster.control_toggle_snapshot_position. -1 while it has taken none since it started (spec/cluster.md, Snapshots, The control toggle; ADR 0147). key: member id (i32), little-endian; label text: the member id in decimal."
+doctor = ""
+
+[[counter]]
+id = 186
+name = "cluster.control_toggle_snapshot_position"
+kind = "gauge"
+scope = "client"
+doc = "The log position of the snapshot one cluster member asked for the control toggle it took last, the position after the cluster action it appended; -1 while it has taken none since it started. The command that added the toggle waits for cluster.snapshot_position to reach it (spec/cluster.md, Snapshots, The control toggle; ADR 0147). key: member id (i32), little-endian; label text: the member id in decimal."
+doctor = "Read it beside cluster.snapshot_position: while that is below this position, the snapshot a command asked for is being taken or was given up, and cluster.snapshots_failed says which."
 
 # A cluster member's role (spec/cluster.md, "Roles and the election"; ADR 0052, feature
 # 3). A member is a candidate (ADR 0077, ADR 0081) from its nomination until it

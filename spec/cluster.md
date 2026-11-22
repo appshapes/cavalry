@@ -509,14 +509,68 @@ reads the log from that snapshot's position ("A service's start", below; ADR 013
 **The action.** The leader asks for a snapshot by appending a cluster action whose
 action is snapshot ("Cluster action, template 23"), an entry of its own as a session
 open event is: with its term, the cluster's time and, as its log position, the
-position at which the entry begins. It appends one in two cases. The first is by
+position at which the entry begins. It appends one in three cases. The first is by
 itself: its log publication's position is the snapshot interval ("Values") or more
 past the position after the last such action in its log, 0 where there is none, and
 it serves sessions, its election closed and its log read to its term base log position
 ("Sessions"). The second is when its own process asks, once its election has closed
-("The leader's own entries"). An action that the back-pressured log does not take is
-tried again on a later duty cycle in the first case, and is refused to the process
-that asked in the second.
+("The leader's own entries"). The third is when a command on its host asks, with a
+control toggle ("The control toggle", below). An action that the back-pressured log
+does not take is tried again on a later duty cycle in the first case, is refused to
+the process that asked in the second, and is tried again at the next look in the third.
+
+**The control toggle.** A command on a member's host asks that member for a snapshot
+without a message: it adds a counter, `cluster.control_toggle`, through the member's
+driver (`spec/client-protocol.md`, "Commands", add counter), and stores 4 in it, which
+is snapshot. The counter's key is the member's id and then the toggle's id, the
+command's client id, a number no other client of that driver has
+(`spec/client-protocol.md`, "The driver directory"): 12 bytes, an i32 and an i64,
+little-endian. The command is the counter's one writer, as every counter has one
+(`spec/counters-file.md`), and the counter is gone when the command removes it or
+ends. In Aeron, this is the cluster control toggle, which the consensus module
+allocates and a tool writes; here the command that asks allocates it, since a second
+writer of one counter is what the counters file does not have.
+
+A leader that serves sessions looks for a toggle of its own id in its driver's
+counters file: at most the records of the control toggle look ("Values") at a time,
+in a ring over the file's metadata records, and no more often than that look's
+interval. A member that does not lead looks for none and takes none. The leader takes
+a toggle that holds 4 when it takes no snapshot of its own and its read of its own
+committed log ("Sessions") has passed every cluster action it appended: it appends
+the action, stores the snapshot's log position, the position after the action's
+entry, in `cluster.control_toggle_snapshot_position`, and then the toggle's id in
+`cluster.control_toggle_taken`, each with a release store. A toggle it cannot take
+yet waits where it is. A toggle that holds another value is no request of this
+version, and the leader passes it over.
+
+A leader serves one toggle at a time, and each toggle once. It remembers the counter
+and the id of the toggle it took for as long as that counter holds that toggle, reads
+that one record at each look, and takes no other toggle until the record holds
+another counter or none. And it takes no toggle whose id its own
+`cluster.control_toggle_taken` holds, so a member that stops leading and leads again
+while a toggle is still there does not take it twice: a driver gives no two clients
+one id. So one request is one cluster action, however long its command stays, and of
+two commands that ask one member the second is served after the first has removed
+its toggle, with a snapshot of its own.
+
+The command that asked reads the answer in the member's counters. Its request is
+taken when `cluster.control_toggle_taken` holds its toggle's id, and the snapshot it
+asked for is the member's own when `cluster.snapshot_position` is at or past the
+`cluster.control_toggle_snapshot_position` it then reads: both are of its own toggle,
+so a snapshot that another action asked for a moment before does not answer it. The
+command loads the id with an acquire load and the position after it, as a reader
+that branches on a position does (`spec/counters-file.md`, "Value slot"): the
+member's release store of the id comes after its store of the position, so a
+command that has read its own id reads the position of its own toggle, on a machine
+that orders stores weakly as on any other. Before it adds its toggle the command
+looks for the member's `cluster.control_toggle_taken`: a member of a build before
+this one has none and serves no toggle, and the command ends at once and says so.
+It waits for no longer than the control toggle timeout ("Values"), and removes its
+toggle when it ends, however it ends. A member that stops leading while a toggle
+waits leaves it: the command reads `cluster.role` while it waits, and ends when the
+member no longer leads. A member's memory of the toggle it serves does not outlive
+the member: one that starts again and leads takes a toggle it finds, whichever
+member's process served it before, which is at most one more snapshot.
 
 **The snapshot's position.** Every member takes the snapshot when its consensus
 module's read of its own committed log ("Sessions") reaches the action. The action is
@@ -2075,7 +2129,7 @@ that a reader of a counters file knows which transition it saw.
 | `cluster.log_recordings_forgotten` | a recording of its log that the member forgot, its table holding 1,024 stopped ones already: the member replays nothing below its oldest kept recording to a member or a service from then on, and starts again on its log directory only from a snapshot of a position at or above where its log then begins ("A member's start"; ADR 0091, ADR 0108, ADR 0130) |
 | `cluster.truncations_finished` | a start that finished a truncation the member's stop had cut short: the last recordings its file names were gone from the catalog, or its record of terms held a term based above the end of its log ("A member's start"; ADR 0108) |
 | `cluster.snapshot_position` | a gauge: the log position of the newest snapshot of its consensus module that the member's snapshots file lists, −1 while it lists none ("Snapshots"; ADR 0129) |
-| `cluster.snapshot_actions` | a cluster action asking for a snapshot that the member appended while it led, at the snapshot interval or for its own process ("Snapshots") |
+| `cluster.snapshot_actions` | a cluster action asking for a snapshot that the member appended while it led, at the snapshot interval, for its own process or for a control toggle ("Snapshots") |
 | `cluster.snapshots_begun` | a snapshot the member began: it read the action and, in that duty cycle, started a recording of its one publication on the snapshot stream, which it added at its start ("Snapshots") |
 | `cluster.snapshot_steps` | a snapshot whose messages the member had all written, so that it asked the recording's stop ("Snapshots") |
 | `cluster.snapshots_taken` | a snapshot the member listed in its snapshots file, which counts from then on ("Snapshots") |
@@ -2091,6 +2145,9 @@ that a reader of a counters file knows which transition it saw.
 | `cluster.log_purge_position` | a gauge: the position the member's log is needed from, the lower of the log positions of the newest snapshot of its consensus module and of the newest snapshot of a service that it lists, 0 while it lists no snapshot of one of the two; a recording of the log that stopped at or below it may be purged when the service's program asks it to start from its snapshot, and none beside a service whose program never asks ("A member's start") |
 | `cluster.service_snapshot_start_position` | a gauge: the log position of the snapshot the service beside the member started from, −1 when the member named one and the service passed it over; the service adds the counter, with its member's id as the key, when its program asks it to start from a snapshot and the member names one ("A service's start") |
 | `cluster.service_snapshots_passed_over` | a snapshot that the service beside the member was told of at its start and could not take, so that it reads the log from position 0; a refusal of its replay is one only when it is for the recording, error code 21 or 23, and any other refusal is the start's error and is not counted; the service adds the counter as the one before it ("A service's start") |
+| `cluster.control_toggle` | a gauge that a command on the member's host adds, with the member's id and then the toggle's id as the key, and the command alone writes: 4, snapshot, asks the member for a snapshot, and every other value is no request of this version ("Snapshots", "The control toggle"; ADR 0147) |
+| `cluster.control_toggle_taken` | a gauge: the id of the control toggle the member took last, for which it appended a cluster action while it led; −1 while it has taken none ("The control toggle") |
+| `cluster.control_toggle_snapshot_position` | a gauge: the log position of the snapshot the member asked for the control toggle it took last, the position after the cluster action it appended; −1 while it has taken none. The command that asked waits for `cluster.snapshot_position` to reach it ("The control toggle") |
 
 ## Values
 
@@ -2121,6 +2178,9 @@ that a reader of a counters file knows which transition it saw.
 | snapshot log sync wait | 2 s: how long a snapshot whose recording has stopped waits for the member's log to sync to the snapshot's log position before the member gives it up, the recording sync interval of `spec/client-protocol.md`, "Liveness and timeouts", within which the recorder syncs a recording by itself, and the snapshot timeout beside it for the sync ("Snapshots"; ADR 0143) |
 | snapshot load timeout | 5 s: how long a member's start waits for its driver to play one snapshot's recording back before it passes that snapshot over, so 320 s at the most for the 64 snapshots a file lists ("A member's start") |
 | service snapshot load timeout | 5 s: how long a service's start waits for the first message of its snapshot's recording, and for each message after one, before it passes the snapshot over ("A service's start") |
+| control toggle look | at most 16 metadata records of the counters file, no more often than each millisecond: what a leader reads to find a control toggle, in a ring over the file's records, so a file of 16,384 records is read once in 1,024 ms and the largest, of 65,536, in 4,096 ms, plus the one record of the toggle it serves ("Snapshots", "The control toggle") |
+| control toggle value | 4, snapshot, Aeron's `SNAPSHOT`; Aeron's other toggle states are out of this version |
+| control toggle timeout | 10 s: how long the command that added a control toggle waits for the member to take it and to list the snapshot, before it removes the toggle and says what the member's counters hold |
 
 Timeouts are measured on a monotonic clock of the process that measures them, a
 member's or a client's, nanoseconds that never step back, and on no wall clock: a step
@@ -2235,4 +2295,8 @@ member and the snapshot recording messages (34, 35, 41, 43, 70 to 74); terminati
 this version does not hold, a timer, the cluster's members and a service's pending
 messages (104, 106, 107). A member of this version appends no timer event, membership
 change event, session close event with the reason service action, or cluster action
-whose action is suspend or resume, and a reader accepts each.
+whose action is suspend or resume, and a reader accepts each. Of Aeron's control
+toggle a member of this version acts on one state, snapshot, 4: inactive, neutral,
+suspend, resume, shutdown, abort and standby snapshot (0 to 3 and 5 to 7) are no
+request here, and a toggle is no counter the member allocates ("Snapshots", "The
+control toggle").

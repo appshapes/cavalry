@@ -199,3 +199,4 @@ under `docs/` is listed here; `just lint-docs` fails on one that is not.
 - [0143. List a member's snapshot once its log has synced to the snapshot's position](decisions/0143-list-a-members-snapshot-once-its-log-has-synced-to-the-snapshots-position.md)
 - [0144. Keep a recording's synced position in its time index, and cut a recording a crash left live to it](decisions/0144-keep-a-recordings-synced-position-in-its-time-index-and-cut-a-recording-a-crash-left-live-to-it.md)
 - [0145. Withhold the vote of a member that lost its log until it holds what the cluster held](decisions/0145-withhold-the-vote-of-a-member-that-lost-its-log-until-it-holds-what-the-cluster-held.md)
+- [0147. Ask a member for a snapshot with a control toggle that the asking command owns](decisions/0147-ask-a-member-for-a-snapshot-with-a-control-toggle-that-the-asking-command-owns.md)
