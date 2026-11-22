@@ -126,3 +126,14 @@ python3 conformance/python/cluster.py "$cluster" "$CAVALRY_CLUSTER_MEMBERS" "$re
     cat "$cluster"/member-*.out >&2 || true
     exit 1
 }
+
+# The snapshot round, on the log the cluster round left: `cavalry snapshot` asks the
+# leader for a snapshot, each member's service takes one through the client, and a
+# new service beside each member starts from it (spec/c-abi.md, version 6; ADR 0146;
+# ADR 0147).
+echo "conformance/python: run snapshot.py, a service's snapshot and its start from one beside each member"
+python3 conformance/python/snapshot.py "$cluster" target/release/cavalry || {
+    echo "conformance/python: snapshot.py failed; the members said:" >&2
+    cat "$cluster"/member-*.out >&2 || true
+    exit 1
+}

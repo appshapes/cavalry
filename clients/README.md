@@ -74,6 +74,14 @@ imports), Go (`go/`, by `generate_go.py`), the JVM (`jvm/`, by `generate_jvm.py`
   handler that fails has its entry aborted, so the poll ends at it, raises once the
   ABI has returned, and the next poll hands the entry over again. Every client has
   both.
+- A client whose service object takes a snapshot runs the snapshot round in its
+  runner (`conformance/README.md`, "The snapshot round"). The three calls have one
+  shape in every client (ADR 0149): `snapshot_due` gives the snapshot's log position
+  or nothing; `snapshot` takes the program's bytes and gives whether the snapshot
+  was written; and `restore` gives the restored code and the state together, the
+  state a copy the caller owns. The Python client has them. Each other client
+  gains them in a change of its own, and until then its README says that its service
+  has no such call.
 
 ## Released together
 

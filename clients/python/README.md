@@ -146,9 +146,9 @@ service)` for each committed entry, in order:
   member's service reaches the same state; `entry.session_id`, −1 where the entry has
   no session; `entry.leader_member_id`, for a new leadership term; and
   `entry.timed_out`, for a session close.
-  `_SNAPSHOT` is the leader's request for a snapshot: the poll ends after it. This
-  client's service has no call that takes a snapshot yet, so a handler passes it
-  over, as it does `_OTHER` (`spec/c-abi.md`, "A service's snapshot and its start").
+  `_SNAPSHOT` is the leader's request for a snapshot: the poll ends after it, and
+  the program gives its state to `service.snapshot` before its next poll ("A
+  service's snapshot and its start", below).
 - `service` is the service that was polled, for `service.reply`.
 
 What the handler returns says what becomes of the entry. `None` or `cavalry.CONTINUE`
@@ -188,6 +188,65 @@ The service's poll and its close are calls on the client the service was made on
 (`spec/c-abi.md`, "Functions", cluster service; ADR 0123; ADR 0124).
 `conformance/python/cluster.py` is a program that runs three services and a session
 through every call above.
+
+### A service's snapshot and its start
+
+A service's program holds the cluster's state, and a snapshot is that state as the
+program's own bytes at one position of the log, the same beside every member. A
+service that starts again takes its state from its last snapshot and reads the log
+after it, where it would read the log from position 0 (`spec/c-abi.md`, "A service's
+snapshot and its start"; ADR 0146; ADR 0149). Three calls, none of them from inside
+the handler:
+
+- `service.restore()`, before the first poll, returns `(restored, state)`.
+  `CAVALRY_CLUSTER_RESTORED_STATE`: `state` is the program's state as it gave it, as
+  `bytes`, a copy the caller owns; the polls read the log from the snapshot's
+  position. `CAVALRY_CLUSTER_RESTORED_FROM_START`: `state` is `None`, and the polls
+  read from position 0. `CAVALRY_CLUSTER_RESTORED_NO_MEMBER`: `state` is `None`; the
+  driver hosts no member with a log yet, and the program calls again before it polls.
+- `service.snapshot_due()`, after a poll, is the snapshot's log position when the
+  poll ended at the leader's request, an entry whose `type` is
+  `CAVALRY_CLUSTER_ENTRY_SNAPSHOT`, and `None` otherwise.
+- `service.snapshot(state)`, before the next poll, writes the snapshot and tells the
+  member, which lists it. `state` is `bytes`, 1 GiB at the most. It returns `True`,
+  or `False` when the member lists one at or past that position already.
+
+So a program's loop is this:
+
+```python
+restored, state = service.restore()
+while restored == cavalry.CAVALRY_CLUSTER_RESTORED_NO_MEMBER:
+    restored, state = service.restore()
+if state is not None:
+    load(state)                        # the program's own: bytes to its state
+while running:
+    service.poll(on_entry, 10)
+    if service.snapshot_due() is not None:
+        service.snapshot(dump())       # the program's own: its state to bytes
+```
+
+The state must be a function of the entries the handler was handed, and of nothing
+else: every member's service gives its own, and a start from any of them must reach
+what the others hold. A program that never calls `restore` reads the log from
+position 0 at every start, and its member's log can then not be purged.
+
+`snapshot` and `restore` wait for the driver, a second at the most for each step of
+a snapshot and for as long as the snapshot's recording takes to play back at a
+start, with the GIL released and the client's lock held ("Threads"). Each raises
+`CavalryError` with the ABI's code: `CAVALRY_ERR_CLUSTER_NO_SNAPSHOT_DUE`,
+`CAVALRY_ERR_CLUSTER_SNAPSHOT_TOO_LONG`, `CAVALRY_ERR_CLUSTER_SNAPSHOT_FAILED` with
+the step in the message, `CAVALRY_ERR_CLUSTER_RESTORE_TOO_LATE` once the service has
+begun, and `CAVALRY_ERR_POLLING` from inside a handler. After an error of `snapshot`
+the snapshot is still due, and the program calls again or polls on.
+
+`snapshot_due` waits for nothing, and releases the GIL as every call that is not a
+message's does ("Threads"): beside another Python thread that is busy, the loop above
+can wait a switch interval, 5 ms by default, to take the GIL back after each poll. A
+program with such a thread has its handler note an entry whose `type` is
+`CAVALRY_CLUSTER_ENTRY_SNAPSHOT`, and asks `snapshot_due` after a poll only then.
+`conformance/python/snapshot.py` is a program that runs every call above beside
+three members, and [Take a snapshot of a service's state](../../docs/how-to/take-a-services-snapshot.md)
+is the task from its start.
 
 ## What it must never do
 
@@ -374,7 +433,8 @@ service, and it is on a message's path, so it takes no lock: from
 `client.cluster_service()` until the service's close, that client is used by the
 thread that polls the service and by no other. A program whose other threads add or
 command gives them a `Client` of their own. The service's open and close take the
-client's lock, as a committed log's do. `Client.add_destination` and
+client's lock, as a committed log's do, and so do its `snapshot` and its `restore`,
+which are made between polls by the thread that polls. `Client.add_destination` and
 `remove_destination` are calls on the client, not on the `Publication` they name: they
 may run beside that publication's `offer` or `try_claim` in another thread, but not
 beside its `close` (`spec/c-abi.md`, "Threads"; ADR 0057).
