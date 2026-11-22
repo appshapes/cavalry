@@ -86,10 +86,10 @@ jobs:
     runs-on: ubuntu-24.04
     # Above the bound of the tests' step below, which is the one that is meant to end a
     # run: a job that GitHub cancels at this bound reads `cancelled` and names no step.
-    # One run has timed the job: 3 min 50 s, of which the tests' step took 3 min 19 s,
-    # on run 44981127041, the second trial of this file on a branch before it landed.
-    # Nothing is cached, so every night builds as that run did. Measure again after ten
-    # nights.
+    # Two runs have timed the job, trials of this file on a branch before it landed:
+    # 3 min 50 s and 3 min 55 s, of which the tests' step took 3 min 19 s and 3 min 38 s
+    # (runs 44981127041 and 44984317057). Nothing is cached, so every night builds as
+    # they did. Measure again after ten nights.
     timeout-minutes: 20
     steps:
       # This repository at the commit the run is for: master's head for the night's run.

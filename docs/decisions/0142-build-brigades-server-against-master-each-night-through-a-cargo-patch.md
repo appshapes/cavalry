@@ -141,7 +141,7 @@ Somebody reads a red night the same day.
   decision's first draft, and the first trial: 2 min 58 s. Lost: that run's log reads
   `Cache mode: write`, `Enabling Blacksmith transparent cache` and a `GOCACHEPROG`,
   and Context says who reads those two caches. The job on GitHub's runner takes
-  3 min 50 s.
+  3 min 55 s.
 - **Restore a build cache.** Lost with the alternative before it: a job that runs
   another repository's code hands nothing to the jobs that hold a token.
 - **Ask nothing of one red night, as the latency gate does (ADR 0139).** Lost: the
@@ -162,13 +162,17 @@ Somebody reads a red night the same day.
 
 ## Evidence
 
-- Run 44981127041, the second trial of the workflow on a branch before it landed, with
-  a `push` trigger that the landed file does not hold: green in 3 min 50 s on
-  `ubuntu-24.04`, of which the tests' step took 3 min 19 s. Its log reads `Cache mode:
-  none`, and Go's `GOCACHEPROG` is empty in it. Brigade at 5ddacc75 against `master` at 901aceb2 plus this change.
-  The nine tests on the feed passed, the conformance suite on the feed among them,
-  and the script named all seven crates of Cavalry's that the server links as taken
-  from the tree.
+- Run 44984317057, the third trial of the workflow on a branch before it landed. The
+  trial's file held a `push` trigger and one job more than the landed file holds, and
+  the job's own lines were the landed file's. The job was green in 3 min 55 s on
+  `ubuntu-24.04`, of which the tests' step took 3 min 38 s. Its log reads `Cache
+  mode: none`, and Go's `GOCACHEPROG` is empty in it. Brigade at 5ddacc75 against
+  `master` at 7db4451b plus this change. The nine tests on the feed passed, the
+  conformance suite on the feed among them, and the script named all seven crates
+  of Cavalry's that the server links as taken from the tree.
+- The trial's other job, for Decision 6: a step with a bound of one minute that did
+  not return. GitHub ended it as a failure of that step, with the line `The action 'A
+  step that does not return' has timed out after 1 minutes`.
 - Run 44975525712, the first trial, on the Blacksmith label: green in 2 min 58 s, with
   the three lines that the fifth alternative quotes.
 - The same on a laptop, macOS with 18 cores: `make server-test` green in 194 s.
@@ -218,7 +222,7 @@ follows. A change made on purpose keeps the nights red until Brigade's `master`
 follows it, and a second failure can hide behind the first for that long. A red night
 that a green one follows before anybody looks is named by nothing but GitHub's notice
 to whoever last changed the schedule. The job is slower than on the repository's
-usual runner, 3 min 50 s against 2 min 58 s, and it is this repository's one job on a
+usual runner, 3 min 55 s against 2 min 58 s, and it is this repository's one job on a
 runner of GitHub's: ADR 0004 records Blacksmith as the owner's choice of runner for
 the loop's workflows, and this job is an exception to that choice, which one line of
 the workflow undoes. The how-to page has to be kept: it names nine tests at one commit

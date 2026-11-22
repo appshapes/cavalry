@@ -78,13 +78,13 @@ link, and Brigade answers that when it moves its pin.
    gh run view <run id> --log | grep -E "Brigade's server: |Cavalry: |the server pins: |Taken from this tree: |Crates the lock file|feed that passed: [0-9]"
    ```
 
-   You will see the job's own lines. These are from run 44981127041, a trial of the
+   You will see the job's own lines. These are from run 44984317057, a trial of the
    job on a branch before it landed:
 
    ```text
    - Brigade's server: 5ddacc75397efa7a8ded54db3e560fa3ca31f813
-   - Cavalry: ef63e4f815ffad020a3013563de0cdf69585760d
-   - In place of what the server pins: rev=620a2e29e04751c7a1f930132666f85b3dd58e7a
+   - Cavalry: 90e4608e853f59921108a3a180780388d34111c0
+   - In place of what the server pins: `rev=620a2e29e04751c7a1f930132666f85b3dd58e7a`
    - Taken from this tree: cavalry, cavalry-client, cavalry-driver, cavalry-log, cavalry-proto, cavalry-raft, cavalry-shm
    - Crates the lock file gained: nix 0.32.0
    - Tests named for the Cavalry feed that passed: 7
@@ -129,9 +129,10 @@ link, and Brigade answers that when it moves its pin.
    - **`Brigade's tests of its server`, with `no test named for the Cavalry feed
      ran`.** Every test passed, and none of them was on the feed.
      [When it does not work](#when-it-does-not-work) has this case.
-   - **`Brigade's tests of its server`, ended by its bound of 15 minutes.** A test
-     did not return. The last line of the log that reads `test <name> has been
-     running for over 60 seconds` names it. Treat it as a failed test of that name.
+   - **`Brigade's tests of its server`, with `has timed out after 15 minutes`.** A
+     test did not return, and the step's bound ended it. The last line of the log
+     that reads `test <name> has been running for over 60 seconds` names it. Treat it
+     as a failed test of that name.
    - **A step before those.** The checkout, Go or rustup failed: the runner or the
      network. Step 5 runs it again.
 
@@ -207,15 +208,19 @@ link, and Brigade answers that when it moves its pin.
      `Crates the lock file gained:` line with the last green run's. The job takes
      the newest release that this tree's requirement allows, where this repository's
      own lock file keeps the older one.
-   - **A new image of the runner.** Neither commit moved, and the runner's image did.
-     The first step of the job prints it:
+   - **A new image of the runner.** Neither commit moved, and the lines that failed
+     name a tool of the runner's: rustup, the C compiler, `make`. The first step of
+     the job prints the image:
 
      ```sh
      # ignore: needs gh signed in; run it for the last green run and for the red one
      gh run view <run id> --log | grep -A2 "Runner Image$"
      ```
 
-     The `Version:` line differs between the two runs when GitHub replaced the image.
+     You will see `Image: ubuntu-24.04` and a `Version:` line. GitHub replaces an
+     image in steps, so two runs of one day can differ in that line: the two trials
+     of this job on 2026-11-22 did. A newer version is the cause only when the lines
+     that failed point at it.
    - **An intermittent failure of the runner or the network.** A step before the
      tests failed, or a download did, and the second attempt passed. It is nobody's,
      and step 7 records nothing.
