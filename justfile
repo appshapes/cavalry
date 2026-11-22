@@ -87,7 +87,12 @@ bench-compare:
 # versions run during an upgrade" (work item 231; ADR 0136): it builds the last tree
 # of the cluster protocol's version before this one beside this tree, and upgrades a
 # cluster of three members on the loopback from the one to the other, one member at a
-# time. It needs the repository's whole history to name that tree.
+# time. It needs the repository's whole history to name that tree. Then
+# conformance/upgrade/log-directory.sh, the log directory's half of that gate (work
+# item 362; ADR 0141): it builds the tree that Brigade's servers run, 620a2e29, has it
+# write a log directory as a server writes its own, with two purges in it, once stopped
+# and once killed, and holds that this tree opens each in place, reads back every
+# record at its position and takes a new recording. It needs the whole history too.
 conformance:
     cargo test -p cavalry-proto --test conformance
     cargo test -p cavalry-proto --test client_protocol_conformance
@@ -106,6 +111,7 @@ conformance:
     conformance/jvm/run.sh
     conformance/dotnet/run.sh
     conformance/upgrade/run.sh
+    conformance/upgrade/log-directory.sh
 
 # Deterministic replay test (CLAUDE.md, gate 1; ADR 0030): a driver on a directory of
 # its own records 100,000 hash-chained messages while a live subscriber prints them,
