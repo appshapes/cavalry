@@ -1020,8 +1020,13 @@ const DOC_CLUSTER: &str = "docs/how-to/run-a-cluster.md#when-it-does-not-work";
 /// snapshots of the service beside it: a service ack for which the member listed
 /// nothing, a snapshot the service gave up (ADR 0131), and a snapshot the service
 /// was told of at its start and passed over (ADR 0132). The service counts the
-/// last two under its member's id. The last is a standby's: a request vote that
-/// reached it, from a member whose string gives it a vote (ADR 0134).
+/// last two under its member's id. The next is a standby's: a request vote that
+/// reached it, from a member whose string gives it a vote (ADR 0134). The last two
+/// are of a voter that started on an empty log directory (ADR 0145): a request vote
+/// it answered with nothing while it withholds its vote, and a leader it passed over
+/// while its log was empty. The last is reported only while the member's log is
+/// still empty and it has no leader, since the core counts it only then and the
+/// count does not fall ([`cluster_checks`]).
 const MEMBER_COUNTS: [CounterId; 14] = [
     CLUSTER_MESSAGES_REJECTED,
     CLUSTER_LEADER_HEARTBEAT_TIMEOUTS,
