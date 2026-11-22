@@ -548,7 +548,10 @@ committed once a quorum, two of three, has it on disk.
   committed with its acknowledgement before it lost its log. An election succeeds
   without it while a quorum of the other members votes. If no leader is elected
   while the count rises, a member that holds the log is stopped: start it again on
-  the log directory it kept, and the cluster elects once it runs.
+  the log directory it kept, and the cluster elects once it runs. The count stays
+  until this member starts again. When this member's `note cluster-member` line
+  says `election closed` and `cavalry doctor` prints no `WARN cluster.vote_floor`
+  for it, the count is history: the member has caught up and votes again.
 - `WARN cluster.leaders_withheld`: this member started on an empty log directory,
   a leader answered it, and it has not taken that leader yet; the count says how
   many times it passed one over. It takes a leader only once it has heard every
