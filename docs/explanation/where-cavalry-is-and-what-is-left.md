@@ -163,7 +163,7 @@ the line.
 | Record and replay | Works: from a position or an instant, bounded, following a live recording, onto shared memory or UDP | Done |
 | List and describe recordings | `cavalry doctor` lists the live ones; no call and no command lists the stopped ones, and the id of one is what `cavalry record` printed | Feature 7 |
 | Truncate, purge and delete | Works on a stopped recording, by command | Done |
-| A checksum beside recorded frames | None; a power loss can leave a frame whose body is damaged | Feature 3 |
+| A checksum beside recorded frames | None, and none is planned. Since 2026-11-22 a recording that a crash left live ends at the position its recorder had synced, so a power loss leaves in it no frame whose body was lost (ADR 0144) | Done, by the synced position |
 | A client that drives a remote driver's recordings; a replay that merges into a live stream | Absent | Out |
 | Election and a commit by quorum | Works; the membership is a string of up to 8 members | Done |
 | Sessions in six languages | Work: connect, redirect, follow the leader, keepalive, close. At most 10 sessions; a message of at most 1,344 bytes | Feature 6 |
@@ -379,8 +379,6 @@ condition of ADR 0138.
   message longer than one frame each change the cluster protocol. Timers add an
   entry to the log, and the first version that does so must say when a leader may
   use it (ADR 0136, Revisit).
-- **Work item 287.** It changes the on-disk format, and its ADR asks for the cost on
-  the recorder's thread before it chooses.
 - **The native library in five package formats.** Nothing in the repository has
   tried it.
 - **A package name that is taken.** Feature 10 finds out first.
