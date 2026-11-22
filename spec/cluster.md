@@ -1306,26 +1306,27 @@ that version wrote holds a record of terms and no log recordings file, so its me
 is refused here. A cluster of that version comes to this one as a new cluster, every
 member on this version and on a new log directory.
 
-What a start holds after a power loss. After a power loss or a crash of the operating
-system, the driver's recovery cuts each recording that was being made to the synced
-position its time index holds (`spec/durable-log.md`, "Time index" and "The driver";
-ADR 0144): the frames past it, which the loss may have left with a header and no
-body, are dropped, and the recording ends at what its recorder had synced. The driver
-does the same after a crash of its process alone, since no start can tell the two
-apart. A member's append position is what its recordings have synced ("The log"), so
-after a crash of any kind a member's log holds every entry it reported and no frame it
-did not sync: as leader it replicates no frame whose body was lost, and as a follower
-it keeps none in its copy of the entries the others hold. A member whose host lost
-power, or whose operating system crashed, starts on its log directory again as after
-any stop, and `recording.cut_to_synced` on its driver counts each recording that
-recovery cut. A recording that a driver of version 4 of the durable log or before was
-making at the loss has no synced position, and recovery keeps what its files hold, as
-that version did; a member whose host lost power while it ran such a driver is not
-started on that log directory again, under any version, and stays out as a member
-whose log directory was lost does. Its log reaches its newest snapshot, since a member lists a snapshot only
-once its log has synced to the snapshot's position ("Snapshots"; ADR 0143). The commit
-position is a quorum's append positions, so when every member's host lost power
-together the members started again still hold every committed entry among them.
+What a start holds after a power loss. After a power loss or a crash of the
+operating system, the driver's recovery cuts each recording that was being made to
+the synced position its time index holds (`spec/durable-log.md`, "Time index" and
+"The driver"; ADR 0144): the frames past it, which the loss may have left with a
+header and no body, are dropped, and the recording ends at what its recorder had
+synced. The driver does the same after a crash of its process alone, since no start
+can tell the two apart. A member's append position is what its recordings have
+synced ("The log"), so after a crash of any kind a member's log holds every entry it
+reported and no frame it did not sync: as leader it replicates no frame whose body
+was lost, and as a follower it keeps none in its copy of the entries the others
+hold. A member whose host lost power, or whose operating system crashed, starts on
+its log directory again as after any stop, and `recording.cut_to_synced` on its
+driver counts each recording that recovery cut. Its log reaches its newest snapshot,
+since a member lists a snapshot only once its log has synced to the snapshot's
+position ("Snapshots"; ADR 0143). The commit position is a quorum's append
+positions, so when every member's host lost power together the members started again
+still hold every committed entry among them. A recording that a driver of version 4
+of the durable log or before was making at the loss has no synced position, and
+recovery keeps what its files hold, as that version did: a member whose host lost
+power while it ran such a driver is not started on that log directory again, under
+any version, and stays out as a member whose log directory was lost does.
 
 **Versions and the upgrade.** A cluster's members may be of different versions of
 this page while their major is one, as they are during an upgrade (`CLAUDE.md`,

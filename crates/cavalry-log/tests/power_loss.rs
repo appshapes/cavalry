@@ -286,7 +286,9 @@ fn a_tail_lost_with_its_index_entries_stops_at_the_sync_and_counts_no_cut() {
     let index = dir.index(found.recording_id());
     let entries = fs::read(&index).expect("the index reads");
     let kept = entries[HEADER_LENGTH..]
-        .chunks_exact(16)
+        .as_chunks::<16>()
+        .0
+        .iter()
         .take_while(|entry| i64::from_le_bytes(entry[8..16].try_into().expect("8")) <= synced)
         .count();
     OpenOptions::new()

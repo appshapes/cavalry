@@ -103,8 +103,9 @@ commit path runs per message.
   position it had synced, so the log a member starts on holds no frame past what it
   synced, and no frame a power loss took the body of (ADR 0144). A recording that a
   driver of version 4 of the durable log or before was making has no synced position
-  to cut to: a member whose host lost power under such a driver stays out. `tests/restart.rs` stops a follower, the leader and all
-  three members over three drivers and starts them again.
+  to cut to: a member whose host lost power under such a driver stays out.
+  `tests/restart.rs` stops a follower, the leader and all three members over three
+  drivers and starts them again.
 - Counts every move of the election. `ElectionState` is the state machine
   `cluster_election` of `counters.toml`, and each of its transitions adds one to a
   count of `Counts`, the counter registered for it; `Counts::by_counter` pairs each

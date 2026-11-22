@@ -51,7 +51,8 @@ The durable log: recording and replay. Data plane.
   stop (ADR 0025). A sync syncs the segment, then writes the position into the index
   header's other synced slot, then syncs the index, so the synced position on the disk
   never names a byte the segment has not kept; a new segment file's name is synced
-  with its directory before a byte is written into it (ADR 0144). A roll allocates nothing while the log directory's path is at most
+  with its directory before a byte is written into it (ADR 0144). A roll allocates
+  nothing while the log directory's path is at most
   337 bytes (`recorder::LOG_DIR_PATH_LIMIT`): the standard library opens a path on its
   stack only under 384 bytes, the longest segment name is 45, and the next segment's
   name is formatted on the stack into a path the writer keeps

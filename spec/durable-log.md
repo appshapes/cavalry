@@ -551,14 +551,16 @@ and the files alone give its stop, as in version 4. Second, an empty recording: 
 no segment file of the recording below the bound exists, when the bound is the
 retained position, or when the segment holding the retained position exists and the
 frame length there is 0, the recorder crashed before the first frame, or before it
-first synced one, or a truncate to the retained position removed every file; the stop position is the retained position, the stop timestamp is the start
+first synced one, or a truncate to the retained position removed every file; the stop
+position is the retained position, the stop timestamp is the start
 timestamp, the index entries past the stop are dropped so the index holds its first
 entry alone, and the slot stays valid; a start segment file shorter
 than the start position's offset in it, which a pre-extension torn by a crash can leave,
 reads as a frame length of 0 there, an empty recording and not damage, and the scan below
 stops the same way at a position past the end of its segment file. Third, the scan's start:
 the driver walks the index back from its last entry at or below the bound to the
-first entry at whose position a frame checks, and starts there, or at the start position when none does;
+first entry at whose position a frame checks, and starts there, or at the start
+position when none does;
 after a power loss an entry can point past what its segment kept, since the two files
 are synced apart, and walking back skips it; the walk costs one header read per entry
 skipped, and the entries that can point past the data are those appended since the last
@@ -583,7 +585,8 @@ segment between the start position and the last segment file below the bound is
 missing, so that the scan would cut off data that is on disk, the bound is above the
 retained position and the frame at the start position has a non-zero length and fails
 the check, or the index's header holds a synced slot whose checksum matches and that
-fails `position`, which no crash leaves; the index is then left as it is. Every action recovery takes, a truncation, a dropped slot, a rewritten
+fails `position`, which no crash leaves; the index is then left as it is. Every action
+recovery takes, a truncation, a dropped slot, a rewritten
 index, a rebuilt stop, a cut to the synced position, a slot set to state 2, is a state
 transition with a counter of its own, which the recorder's feature adds (ADR 0023,
 card 93; ADR 0144). A slot with state 3 whose files are still present loses them
