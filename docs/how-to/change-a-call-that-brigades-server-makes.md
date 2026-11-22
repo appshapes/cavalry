@@ -41,10 +41,15 @@ lists those calls and says why they are held.
    must do now ([how](../../changelog.d/README.md)).
 
 6. Tell the sessions that work on Brigade's server. Add one work item to the Brigade
-   Board, tagged `brigade` and `server`, that says what changed and which commit holds
-   it: `brigade work-item add --tag brigade,server`, with the title, an empty line and
-   the description on its standard input. You will see `added:` and the work item's
-   number.
+   Board, titled `Brigade's server on master: <the call that changed>` and tagged
+   `brigade` and `server`. Say in it what changed and which commit holds it: `brigade
+   work-item add --tag brigade,server`, with the title, an empty line and the
+   description on its standard input. You will see `added:` and the work item's
+   number. The title's first words are how the nightly run's page and `/next-task`
+   find that a red night has been read
+   ([Read the nightly run of Brigade's server](read-the-nightly-run-of-brigades-server.md),
+   step 4). When your change turns a night red, whoever reads that night comments on
+   this work item and adds no second one.
 
 ## How to verify it worked
 
@@ -53,6 +58,10 @@ lists those calls and says why they are held.
 - `just lint-docs` ends with `ok`: the changelog entry is in the shape it checks.
 - For a change that broke the server's use on purpose: the table's row, the comment in
   `tests/feed/mod.rs` and the changelog entry name the same call.
+- To hold a branch against the server's own suite before it lands, start the nightly
+  job on it: `gh workflow run brigade-server.yml --ref <branch>`
+  ([Read the nightly run of Brigade's server](read-the-nightly-run-of-brigades-server.md),
+  "Run it by hand").
 
 ## When it does not work
 
