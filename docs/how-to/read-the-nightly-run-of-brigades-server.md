@@ -138,7 +138,10 @@ link, and Brigade answers that when it moves its pin.
 
 4. Find out whether somebody has read this failure already. A red night that has been
    read is one work item on the board, and its title begins `Brigade's server on
-   master:`:
+   master:`. A change made on purpose has one before any night is red: the session
+   that made it wrote it, titled for the call that changed
+   ([Change a call that Brigade's server makes](change-a-call-that-brigades-server-makes.md),
+   step 6). List them all:
 
    ```sh
    # ignore: needs brigade
@@ -148,8 +151,13 @@ link, and Brigade answers that when it moves its pin.
    The listing cuts a long title short, so read each one that it prints with
    `brigade work-item show <number>`. Then:
 
-   - One in the list Wanting or Doing names the same test or the same error: stop
-     here. The night stays red until that work item is in Done.
+   - One in the list Wanting or Doing names the same test, the same error, or the
+     call of Cavalry's that the lines that failed name: stop here. The night stays
+     red until that work item is in Done. When it names no run yet, as the work item
+     of a change made on purpose does not at first, it becomes this night's record:
+     comment on it with the run, both commits of step 2 and the lines that failed,
+     with `brigade work-item comment <number>` and the comment on its standard input,
+     and add no new one.
    - One in Done names it, and this run began before the work item moved to Done,
      which its history says: the fix landed after this run. Start the job by hand
      ([Run it by hand](#run-it-by-hand)), and stop here when that run is green.
@@ -230,10 +238,11 @@ link, and Brigade answers that when it moves its pin.
 
 7. Act on it, and record it. Whoever reads the red night first acts: a session that
    `/next-task` gave the task to, or a person whom GitHub notified of the failed run.
-   The record is one work item, with the title `Brigade's server on master: <the
-   test or the error>`. Its description names the run, both commits of step 2 and
-   the lines that failed. When step 4 moved a work item back to Doing, comment on
-   that one with the same three things, and add none.
+   The record is one work item, whose title begins `Brigade's server on master:` and
+   then names the test or the error, or, for a change made on purpose, the call that
+   changed. Its description names the run, both commits of step 2 and the lines that
+   failed. When step 4 moved a work item back to Doing, comment on that one with the
+   same three things, and add none.
 
    - **A regression here is fixed**, before the next feature. So is a new release of
      another crate or a new image of the runner that breaks the build, and so is an
@@ -253,14 +262,17 @@ link, and Brigade answers that when it moves its pin.
 
    - **A change made on purpose is said in the changelog and told to Brigade's
      sessions.** The change's entry under `changelog.d/` says what a program that
-     embeds the driver has to change. The work item has the tags `brigade` and
-     `server`, which Brigade's sessions read, and names that entry. Nothing more
-     changes here: the night stays red until Brigade's `master` follows the change.
-     The session that made the change may have written a work item for Brigade's
-     sessions already
+     embeds the driver has to change. Nothing more changes here: the night stays red
+     until Brigade's `master` follows the change. The session that made the change
+     tells Brigade's sessions with one work item, titled `Brigade's server on master:
+     <the call that changed>`
      ([Change a call that Brigade's server makes](change-a-call-that-brigades-server-makes.md),
-     step 6). Write this one all the same, and name the earlier one in it: the title
-     `Brigade's server on master:` is what step 4 and `/next-task` look for.
+     step 6). Step 4 finds that work item by its title and the call, and it is the
+     night's record. So you reach this case only when the board has no such work
+     item: the session wrote none, or wrote one before that page gave the title.
+     Then write it here, with that title and the tags `brigade` and `server`, which
+     Brigade's sessions read, and name the change's entry in it. When the session
+     wrote one under another title, name that one in yours too.
 
      ```sh
      # ignore: needs brigade; the title, a blank line and the description go on stdin

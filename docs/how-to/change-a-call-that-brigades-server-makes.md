@@ -47,7 +47,9 @@ lists those calls and says why they are held.
    description on its standard input. You will see `added:` and the work item's
    number. The title's first words are how the nightly run's page and `/next-task`
    find that a red night has been read
-   ([Read the nightly run of Brigade's server](read-the-nightly-run-of-brigades-server.md)).
+   ([Read the nightly run of Brigade's server](read-the-nightly-run-of-brigades-server.md),
+   step 4). When your change turns a night red, whoever reads that night comments on
+   this work item and adds no second one.
 
 ## How to verify it worked
 
