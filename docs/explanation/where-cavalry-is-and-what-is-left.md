@@ -280,6 +280,22 @@ What has landed:
   under half again, and may not see one added system call on a row of 500 ns. The
   lints and the allocation tests hold those rules by reading the code, and the slice
   after the line measures what they cannot.
+- **Feature 2, on 2026-11-22**
+  ([ADR 0141](../decisions/0141-open-in-place-a-log-directory-written-by-the-tree-that-servers-run-and-build-that-tree-on-every-run.md)
+  and
+  [ADR 0142](../decisions/0142-build-brigades-server-against-master-each-night-through-a-cargo-patch.md)).
+  What Brigade's server runs is held in three places. `just test` runs the server's
+  use of Cavalry, copied from its code call for call, in both shapes of its feed.
+  `just conformance` builds the tree at 620a2e29, has it write a log directory as a
+  server writes its own, and opens that directory in place under the tree under
+  test. `.github/workflows/brigade-server.yml` builds the server at Brigade's
+  `master` against this `master` at 06:43 UTC each night and runs the server's own
+  suite, reported and not required. What was found: two things that the server's
+  code expects do not hold. A recording started beside an earlier client that the
+  driver still has is of that client's publication, which work item 372 carries.
+  The server's read of a recording that ends in padding can fail its start, which
+  is the server's own to change.
+  [What Brigade's server runs](#what-brigades-server-runs) has the rest.
 
 How the order was chosen:
 
