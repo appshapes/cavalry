@@ -35,7 +35,7 @@ committed once a quorum, two of three, has it on disk.
   member's votes and its log. A member that comes back on an empty one, beside the
   others, has no record of them. It takes a leader only once it has heard every
   other member, so it waits, and `cluster.leaders_withheld` rises, while another
-  member is stopped. Then it replicates the log, and it casts no vote and seeks no
+  member is stopped. Then it replicates the log, and it withholds its vote and seeks no
   leadership until its log reaches what the cluster held when it took a leader, the
   position `cluster.vote_floor` holds
   ([ADR 0145](../decisions/0145-withhold-the-vote-of-a-member-that-lost-its-log-until-it-holds-what-the-cluster-held.md)).
@@ -221,7 +221,7 @@ committed once a quorum, two of three, has it on disk.
   recordings hold its log, and it does not start. The cluster goes on without this
   member while the other two run. To have three members again, start this member
   on a new log directory while the other two run. It takes a leader once it has
-  heard both, joins them and replicates the log, and it casts no vote and seeks no
+  heard both, joins them and replicates the log, and it withholds its vote and seeks no
   leadership until its log reaches what the cluster held when it took a leader,
   which `cluster.vote_floor` on its host holds and `cluster.append_position` reaches
   once it has caught up. While one of the other two is stopped it takes no leader,
@@ -527,6 +527,43 @@ committed once a quorum, two of three, has it on disk.
   member whose line differs with the cluster's string. A member whose host holds
   an older string prints no `WARN cluster-voters`. The count stays until this
   member starts again: [Promote a standby to a voter](promote-a-standby.md).
+- `WARN cluster.vote_floor`: this member started on an empty log directory beside
+  members that hold the cluster's log, and its `cluster.append_position` is still
+  below its vote floor; the line says how many bytes short it is. It lost its log
+  directory, or it joined a new cluster after the first term began. Until its log
+  reaches the floor, it withholds its vote and seeks no leadership, so the cluster elects
+  a leader only while both other members run. It catches up from its leader by
+  itself, and the line goes once it has. If the bytes short stay the same while the
+  cluster appends, its leader's log no longer begins at position 0, and it cannot
+  catch up: start the cluster again as a new cluster, every member on a new log
+  directory
+  ([ADR 0145](../decisions/0145-withhold-the-vote-of-a-member-that-lost-its-log-until-it-holds-what-the-cluster-held.md)).
+  A standby that starts on an empty log directory stores a vote floor too, and
+  `cavalry doctor` prints no line for it: a standby has no vote to withhold. Once
+  it is promoted to a voter ([Promote a standby to a voter](promote-a-standby.md)),
+  the line applies to it as written.
+- `WARN cluster.votes_withheld`: this member, below its vote floor or with its log
+  empty, answered a candidate's request with no vote, and the count says how many
+  times. A vote from it could have elected a leader that lacks an entry the cluster
+  committed with its acknowledgement before it lost its log. An election succeeds
+  without it while a quorum of the other members votes. If no leader is elected
+  while the count rises, a member that holds the log is stopped: start it again on
+  the log directory it kept, and the cluster elects once it runs. The count stays
+  until this member starts again. When this member's `note cluster-member` line
+  says `election closed` and `cavalry doctor` prints no `WARN cluster.vote_floor`
+  for it, the count is history: the member has caught up and votes again.
+- `WARN cluster.leaders_withheld`: this member started on an empty log directory,
+  a leader answered it, and it has not taken that leader yet; the count says how
+  many times it passed one over. It takes a leader only once it has heard every
+  other voter, since only a voter it has not heard could show that a later term was
+  elected without that leader. Run `cavalry doctor` on each other member's host:
+  the member whose driver is stopped, or whose host cannot reach this one, is the
+  one it waits for. Start that member on the log directory it kept, or mend the path
+  between the two, and this member takes its leader within 100 ms. A member of a
+  build before ADR 0145 does not answer it until that member canvasses in an
+  election or is upgraded. `cavalry doctor` prints the line only while this
+  member's log is empty and it has no leader. The count stays until this member
+  starts again, so in a later election it says nothing of why there is no leader.
 - `WARN cluster.service_snapshots_passed_over`: the service beside this member was
   told of a snapshot when it started, and could not take it. It read the log from
   position 0. Nothing committed is lost. If this member's log no longer begins at
