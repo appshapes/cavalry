@@ -195,8 +195,8 @@ impl std::fmt::Display for RecordingsError {
         // (`spec/cluster.md`, "A member that lost its log"; ADR 0145).
         let stay_out = "Without the list this member cannot tell its log from the other \
                         recordings in the directory, and it does not start. Start the \
-                        member on a new log directory: it replicates the log, and it casts \
-                        no vote and seeks no leadership until its log reaches what the \
+                        member on a new log directory: it replicates the log, and it withholds \
+                        its vote and seeks no leadership until its log reaches what the \
                         cluster held when it took a leader, the position \
                         cluster.vote_floor holds. It takes that leader only once it has \
                         heard every other member, and waits while one is stopped. It \

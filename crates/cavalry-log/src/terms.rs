@@ -239,7 +239,7 @@ impl std::fmt::Display for TermsError {
         const STAY_OUT: &str = "the member's votes and the terms of its log are in this \
                                 file, so the member does not start without it. Start the \
                                 member on a new log directory: it replicates the log, and \
-                                it casts no vote and seeks no leadership until its log \
+                                it withholds its vote and seeks no leadership until its log \
                                 reaches what the cluster held when it took a leader, the \
                                 position cluster.vote_floor holds. It takes that leader \
                                 only once it has heard every other member, and waits while \
@@ -296,7 +296,7 @@ impl std::fmt::Display for TermsError {
                 f,
                 "terms file rejected (vote-floor): the vote floor slot holds position \
                  {found}, which no writer writes, so the position below which the member \
-                 casts no vote cannot be read and the file is damaged: {STAY_OUT}; see {DOC}"
+                 withholds its vote cannot be read and the file is damaged: {STAY_OUT}; see {DOC}"
             ),
             TermsError::VoteFloorRefused { position } => write!(
                 f,
@@ -378,7 +378,7 @@ pub struct TermsHeader {
     /// checksum does not match, the raise a crash tore. A header that parsed holds a
     /// term in at least one slot.
     pub candidate_slots: [Option<i64>; 2],
-    /// The vote floor: the position below which the member casts no vote, which it
+    /// The vote floor: the position below which the member withholds its vote, which it
     /// stores once when it takes a leader with its log empty, or `None` when its slot's
     /// checksum does not match, as in a file the module created and never set it in,
     /// or one a version before 6 of the page wrote (ADR 0145).
