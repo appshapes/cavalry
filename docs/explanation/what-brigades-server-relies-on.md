@@ -156,7 +156,13 @@ server ends, and its next start is correct.
 
 After a stall of the whole process the driver times the client out as the process
 comes back, so the server's reconnect meets a driver that has dropped the client:
-`feed_held_still.rs` holds that. The test
+`feed_held_still.rs` holds that. The records the server's first append offers as the
+process comes back can reach the recording before the driver drops the client. Its
+recording then stops past them, and the stop has synced them, so the reconnect finds
+them in the feed and the server answers them at their positions. The feed then goes
+on past the last record answered before the stall, not at it. And in a window of
+microseconds the client's keepalive reaches the driver first, and the client is never
+dropped. The test holds each order (work item 413). The test
 `a_start_beside_an_earlier_client_the_driver_still_holds_records_that_clients_publication`
 holds the rule as it stands, so that a change to it is seen. Work item 372 on the
 Brigade Board holds the question of whether the rule changes.
