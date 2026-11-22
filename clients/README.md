@@ -9,9 +9,9 @@ users expect and nothing more.
 
 ## How a client is generated
 
-`python3 clients/generate.py <language>` reads the header, the eight opaque handle
-types, the nine structs with their fields, the fragment handler's type, the 58
-functions with their return and parameter types and the 71 defines, and writes the
+`python3 clients/generate.py <language>` reads the header, the eleven opaque handle
+types, the thirteen structs with their fields, the fragment handler's type, the 96
+functions with their return and parameter types and the 103 defines, and writes the
 client's package: the binding, which declares every function and struct to the
 language's foreign-function layer, and the client's own code, the wrapper types that
 hold invariant 2's per-message rules between the user's code and the ABI. The

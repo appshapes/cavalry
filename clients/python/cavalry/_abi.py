@@ -14,7 +14,7 @@ from ctypes import (CFUNCTYPE, POINTER, Structure, c_bool, c_char_p, c_int, c_in
 # The defines, the header's constants (spec/c-abi.md, "Constants", "Result codes",
 # "Error codes").
 CAVALRY_DIR_ENV = "CAVALRY_DIR"
-CAVALRY_ABI_VERSION = 5
+CAVALRY_ABI_VERSION = 6
 CAVALRY_MAX_IMAGES = 256
 CAVALRY_SERVICE_LOG_STREAM_ID = 104
 CAVALRY_NULL_POSITION = -1
@@ -77,6 +77,10 @@ CAVALRY_ERR_CLUSTER_CONNECT_TIMEOUT = 143
 CAVALRY_ERR_CLUSTER_ENTRY = 144
 CAVALRY_ERR_CLUSTER_NO_ENTRY = 145
 CAVALRY_ERR_CLUSTER_ACTION = 146
+CAVALRY_ERR_CLUSTER_NO_SNAPSHOT_DUE = 147
+CAVALRY_ERR_CLUSTER_SNAPSHOT_TOO_LONG = 148
+CAVALRY_ERR_CLUSTER_SNAPSHOT_FAILED = 149
+CAVALRY_ERR_CLUSTER_RESTORE_TOO_LATE = 150
 CAVALRY_CLOSED_BY_USER = 1
 CAVALRY_CLOSED_DRIVER_CLOSED = 2
 CAVALRY_CLOSED_DRIVER_TIMEOUT = 3
@@ -93,6 +97,10 @@ CAVALRY_CLUSTER_ENTRY_SESSION_OPEN = 2
 CAVALRY_CLUSTER_ENTRY_SESSION_CLOSE = 3
 CAVALRY_CLUSTER_ENTRY_NEW_LEADERSHIP_TERM = 4
 CAVALRY_CLUSTER_ENTRY_OTHER = 5
+CAVALRY_CLUSTER_ENTRY_SNAPSHOT = 6
+CAVALRY_CLUSTER_RESTORED_NO_MEMBER = 1
+CAVALRY_CLUSTER_RESTORED_FROM_START = 2
+CAVALRY_CLUSTER_RESTORED_STATE = 3
 CAVALRY_CLUSTER_REPLY_SENT = 1
 CAVALRY_CLUSTER_REPLY_NOT_ANSWERING = 2
 CAVALRY_CLUSTER_REPLY_RETRY = 3
@@ -301,6 +309,9 @@ FUNCTIONS = {
     "cavalry_cluster_service_position": (c_int64, [c_void_p]),
     "cavalry_cluster_service_answers": (c_bool, [c_void_p]),
     "cavalry_cluster_service_sessions": (c_int, [c_void_p]),
+    "cavalry_cluster_service_snapshot_due": (c_bool, [c_void_p, POINTER(c_int64)]),
+    "cavalry_cluster_service_snapshot": (c_int, [c_void_p, c_void_p, c_char_p, c_size_t]),
+    "cavalry_cluster_service_restore": (c_int, [c_void_p, c_void_p, POINTER(c_void_p), POINTER(c_size_t)]),
     "cavalry_cluster_service_close": (c_int, [c_void_p, c_void_p]),
     "cavalry_connect_cluster": (c_int, [POINTER(c_void_p), c_void_p, c_char_p, c_char_p]),
     "cavalry_cluster_session_offer": (c_int64, [c_void_p, c_char_p, c_size_t]),

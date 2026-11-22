@@ -1,6 +1,6 @@
 {
   "spec": "spec/c-abi.md",
-  "version": 5,
+  "version": 6,
   "generated_by": "spec/vectors/c-abi.py; do not edit by hand",
   "opaque_types": [
     "cavalry_context_t",
@@ -1458,6 +1458,64 @@
       ]
     },
     {
+      "name": "cavalry_cluster_service_snapshot_due",
+      "returns": "bool",
+      "params": [
+        [
+          "const cavalry_cluster_service_t *",
+          "service"
+        ],
+        [
+          "int64_t *",
+          "position"
+        ]
+      ]
+    },
+    {
+      "name": "cavalry_cluster_service_snapshot",
+      "returns": "int",
+      "params": [
+        [
+          "cavalry_cluster_service_t *",
+          "service"
+        ],
+        [
+          "cavalry_t *",
+          "client"
+        ],
+        [
+          "const uint8_t *",
+          "state"
+        ],
+        [
+          "size_t",
+          "length"
+        ]
+      ]
+    },
+    {
+      "name": "cavalry_cluster_service_restore",
+      "returns": "int",
+      "params": [
+        [
+          "cavalry_cluster_service_t *",
+          "service"
+        ],
+        [
+          "cavalry_t *",
+          "client"
+        ],
+        [
+          "const uint8_t **",
+          "state"
+        ],
+        [
+          "size_t *",
+          "length"
+        ]
+      ]
+    },
+    {
       "name": "cavalry_cluster_service_close",
       "returns": "int",
       "params": [
@@ -1508,7 +1566,7 @@
     }
   ],
   "defines": {
-    "CAVALRY_ABI_VERSION": 5,
+    "CAVALRY_ABI_VERSION": 6,
     "CAVALRY_DIR_ENV": "CAVALRY_DIR",
     "CAVALRY_MAX_IMAGES": 256,
     "CAVALRY_SERVICE_LOG_STREAM_ID": 104,
@@ -1572,6 +1630,10 @@
     "CAVALRY_ERR_CLUSTER_ENTRY": 144,
     "CAVALRY_ERR_CLUSTER_NO_ENTRY": 145,
     "CAVALRY_ERR_CLUSTER_ACTION": 146,
+    "CAVALRY_ERR_CLUSTER_NO_SNAPSHOT_DUE": 147,
+    "CAVALRY_ERR_CLUSTER_SNAPSHOT_TOO_LONG": 148,
+    "CAVALRY_ERR_CLUSTER_SNAPSHOT_FAILED": 149,
+    "CAVALRY_ERR_CLUSTER_RESTORE_TOO_LATE": 150,
     "CAVALRY_CLOSED_BY_USER": 1,
     "CAVALRY_CLOSED_DRIVER_CLOSED": 2,
     "CAVALRY_CLOSED_DRIVER_TIMEOUT": 3,
@@ -1588,6 +1650,10 @@
     "CAVALRY_CLUSTER_ENTRY_SESSION_CLOSE": 3,
     "CAVALRY_CLUSTER_ENTRY_NEW_LEADERSHIP_TERM": 4,
     "CAVALRY_CLUSTER_ENTRY_OTHER": 5,
+    "CAVALRY_CLUSTER_ENTRY_SNAPSHOT": 6,
+    "CAVALRY_CLUSTER_RESTORED_NO_MEMBER": 1,
+    "CAVALRY_CLUSTER_RESTORED_FROM_START": 2,
+    "CAVALRY_CLUSTER_RESTORED_STATE": 3,
     "CAVALRY_CLUSTER_REPLY_SENT": 1,
     "CAVALRY_CLUSTER_REPLY_NOT_ANSWERING": 2,
     "CAVALRY_CLUSTER_REPLY_RETRY": 3,

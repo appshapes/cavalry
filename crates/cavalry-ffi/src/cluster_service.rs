@@ -1,9 +1,10 @@
 //! A cluster service's handle: its poll with the C fragment handler, an entry's
-//! values, the reply and the action its handler calls, its reads and its close
-//! (`spec/c-abi.md`, "Functions", cluster service, "Result codes", "Calls during a
-//! claim or a poll", "What a header carries"; ADR 0123). The Rust core is
-//! `cavalry_client::ClusterService` (`spec/cluster.md`, "The service" and "Replies";
-//! ADR 0118).
+//! values, the reply and the action its handler calls, its reads, its snapshot and its
+//! start from one, and its close (`spec/c-abi.md`, "Functions", cluster service,
+//! "Result codes", "Calls during a claim or a poll", "What a header carries", "A
+//! service's snapshot and its start"; ADR 0123, ADR 0146). The Rust core is
+//! `cavalry_client::ClusterService` (`spec/cluster.md`, "The service", "Replies" and
+//! "Snapshots"; ADR 0118, ADR 0131, ADR 0132).
 //!
 //! The Rust handler is `FnMut(&Committed, &mut Replies) -> Action`. The C handler is
 //! the one fragment handler, which takes no `Replies` and returns nothing, so the
@@ -14,7 +15,10 @@
 use std::ffi::{c_int, c_void};
 use std::ptr;
 
-use cavalry_client::{Action, ClusterError, ClusterService, Committed, Entry, Replies, Reply};
+use cavalry_client::{
+    Action, ClusterError, ClusterService, Committed, Entry, Replies, Reply, Restored,
+};
+use cavalry_proto::cluster::MAX_SERVICE_SNAPSHOT_STATE_LENGTH;
 
 use crate::client::{self, cavalry_mut, cavalry_t};
 use crate::codes::*;
@@ -45,6 +49,10 @@ pub struct cavalry_cluster_service_t {
     /// null whenever no handler of this service runs, which is how a reply or an
     /// action from outside the handler is told.
     replies: *mut Replies<'static>,
+    /// The program's state that `cavalry_cluster_service_restore` gave, which the
+    /// caller reads through the pointer it was given until the service's next poll or
+    /// its close: each releases it.
+    restored: Option<Vec<u8>>,
     service: ClusterService,
 }
 
@@ -52,9 +60,10 @@ pub struct cavalry_cluster_service_t {
 // the handle runs: the poll writes it before it calls the C handler and writes null
 // when the handler returns, on the polling thread, and nothing else writes it. A handle
 // moves between threads only between calls ("Threads"), so it never carries the
-// pointer with it. Everything else in the handle is `Send` on its own: plain data, and
-// `cavalry_client::ClusterService`, which `lib.rs` asserts `Send` at compile time, so
-// that a change making it `!Send` fails the build rather than passing under this impl.
+// pointer with it. Everything else in the handle is `Send` on its own: plain data, the
+// bytes of a restored state, and `cavalry_client::ClusterService`, which `lib.rs`
+// asserts `Send` at compile time, so that a change making it `!Send` fails the build
+// rather than passing under this impl.
 unsafe impl Send for cavalry_cluster_service_t {}
 
 /// One committed entry as a service is handed it: what `cavalry_cluster_entry_values`
@@ -119,6 +128,22 @@ fn no_entry(function: &str) {
     );
 }
 
+/// Frees a state that `cavalry_cluster_service_restore` gave, filled with `0xDD`
+/// first in a debug build, so that a caller who reads it after its release reads the
+/// poison and not the program's bytes (`spec/c-abi.md`, "Lifetimes"; `CLAUDE.md`,
+/// Unsafe).
+fn release(state: Option<Vec<u8>>) {
+    #[cfg(debug_assertions)]
+    if let Some(mut state) = state {
+        state.fill(0xDD);
+        // A store to memory that is freed next is one a compiler may leave out; the
+        // poison is for a reader the compiler does not see.
+        std::hint::black_box(&mut state);
+    }
+    #[cfg(not(debug_assertions))]
+    drop(state);
+}
+
 /// An entry's values, as the struct holds them.
 fn values_of(committed: &Committed<'_>) -> cavalry_cluster_entry_values_t {
     let (r#type, session_id, leader_member_id, timed_out) = match committed.entry {
@@ -143,10 +168,10 @@ fn values_of(committed: &Committed<'_>) -> cavalry_cluster_entry_values_t {
             leader_member_id,
             false,
         ),
-        // The ABI has no kind for the leader's request for a snapshot, and no call
-        // that takes one: a client is handed the entry as it was before a service
-        // took snapshots, and its poll ends after it (ADR 0131).
-        Entry::Snapshot | Entry::Other => (CAVALRY_CLUSTER_ENTRY_OTHER, -1, -1, false),
+        // The poll ends after it, and the program gives its state once the poll has
+        // returned (ADR 0131, ADR 0146).
+        Entry::Snapshot => (CAVALRY_CLUSTER_ENTRY_SNAPSHOT, -1, -1, false),
+        Entry::Other => (CAVALRY_CLUSTER_ENTRY_OTHER, -1, -1, false),
     };
     cavalry_cluster_entry_values_t {
         position: committed.position,
@@ -220,6 +245,7 @@ pub unsafe extern "C" fn cavalry_cluster_service(
             fault: NO_FAULT,
             action: CAVALRY_ACTION_CONTINUE,
             replies: ptr::null_mut(),
+            restored: None,
             service: made,
         });
     }
@@ -275,6 +301,10 @@ pub unsafe extern "C" fn cavalry_cluster_service_poll(
     if unsafe { client::refused("cavalry_cluster_service_poll", client) } {
         return -1;
     }
+    // The state the last restore gave is the caller's until this poll (`spec/c-abi.md`,
+    // "Lifetimes"). SAFETY: a live handle that no poll borrows, checked above, used from
+    // one thread at a time: this is the one reference to the field.
+    release(unsafe { &mut *ptr::addr_of_mut!((*service).restored) }.take());
     let limit = fragment_limit.min(c_int::MAX as usize);
     // SAFETY: both state words are Idle, so no poll borrows the service or the client,
     // and each handle is used from one thread at a time: these are the one reference
@@ -639,9 +669,227 @@ pub unsafe extern "C" fn cavalry_cluster_service_sessions(
     }
 }
 
-/// Closes the service's publications and its counter, stops its read of the log, and
-/// frees the handle, as the Rust `ClusterService::close` does. With a null `client`
-/// it is the Rust handle's drop: the publications, the counter and the log's
+/// Whether a snapshot is due: `true` when the last entry of the service's last poll
+/// was the leader's request for a snapshot, `CAVALRY_CLUSTER_ENTRY_SNAPSHOT`, and the
+/// handler took it, with the snapshot's log position written through `position`;
+/// `false`, with nothing written, otherwise and from the next poll on, as the Rust
+/// `ClusterService::snapshot_due` gives `None`. A null `service` or `position` is
+/// `false` with `CAVALRY_ERR_NULL`, and a call from inside the service's own handler
+/// `false` with `CAVALRY_ERR_POLLING`.
+///
+/// # Safety
+///
+/// `service` is null or a live handle not in use by another call; `position` is null
+/// or writable.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn cavalry_cluster_service_snapshot_due(
+    service: *const cavalry_cluster_service_t,
+    position: *mut i64,
+) -> bool {
+    if service.is_null() {
+        error::null("cavalry_cluster_service_snapshot_due", "service");
+        return false;
+    }
+    if position.is_null() {
+        error::null("cavalry_cluster_service_snapshot_due", "position");
+        return false;
+    }
+    // SAFETY: the caller's convention above.
+    let due = unsafe {
+        read(
+            "cavalry_cluster_service_snapshot_due",
+            service,
+            None,
+            ClusterService::snapshot_due,
+        )
+    };
+    match due {
+        Some(due) => {
+            // SAFETY: writable, by the caller's convention.
+            unsafe { *position = due };
+            true
+        }
+        None => false,
+    }
+}
+
+/// Takes a snapshot of the program's state, the `length` bytes at `state`, as the Rust
+/// `ClusterService::snapshot` does: the service writes a recording through its
+/// member's driver with `client`, stops it, checks it, and sends its member a service
+/// ack. 1 when the ack is on its way; 0 when nothing was written because the member
+/// lists a snapshot of a service at or past this position already; −1 with
+/// `CAVALRY_ERR_CLUSTER_NO_SNAPSHOT_DUE` where none is due,
+/// `CAVALRY_ERR_CLUSTER_SNAPSHOT_TOO_LONG` for a state over 1 GiB,
+/// `CAVALRY_ERR_CLUSTER_SNAPSHOT_FAILED` with the step in the message, or the client's
+/// or the driver's code. A −1 leaves the service as it was, the snapshot still due
+/// until the next poll. A null `state` with a `length` of 0 is a state of no bytes.
+/// The call waits for the driver, at most the snapshot timeout, 1 s, at each step.
+///
+/// # Safety
+///
+/// `service` is null or a live handle not in use by another call; `client` is null or
+/// a live client handle not in use by another call; `state` is null with a `length` of
+/// 0, or readable for `length` bytes during the call.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn cavalry_cluster_service_snapshot(
+    service: *mut cavalry_cluster_service_t,
+    client: *mut cavalry_t,
+    state: *const u8,
+    length: usize,
+) -> c_int {
+    if service.is_null() {
+        error::null("cavalry_cluster_service_snapshot", "service");
+        return -1;
+    }
+    if client.is_null() {
+        error::null("cavalry_cluster_service_snapshot", "client");
+        return -1;
+    }
+    if state.is_null() && length > 0 {
+        error::null("cavalry_cluster_service_snapshot", "state");
+        return -1;
+    }
+    // SAFETY: a live handle, by the caller's convention.
+    // The parameter `state` is the program's bytes; the state word is this module's.
+    if unsafe { self::state(service) } == State::Polling {
+        polling("cavalry_cluster_service_snapshot");
+        return -1;
+    }
+    // SAFETY: `client` is non-null, checked above, and a live handle.
+    if unsafe { client::refused("cavalry_cluster_service_snapshot", client) } {
+        return -1;
+    }
+    // SAFETY: a live handle that no poll borrows, checked above, used from one thread
+    // at a time: this is the one reference to the service.
+    let inner = unsafe { &mut *ptr::addr_of_mut!((*service).service) };
+    // A state longer than a snapshot holds is refused before the bytes are looked at,
+    // in the Rust call's order: no snapshot due first, then the length. So a `length`
+    // that no buffer could hold never becomes a slice.
+    if length > MAX_SERVICE_SNAPSHOT_STATE_LENGTH {
+        error::set_cluster(&match inner.snapshot_due() {
+            None => ClusterError::NoSnapshotDue,
+            Some(_) => ClusterError::SnapshotTooLong {
+                found: length,
+                limit: MAX_SERVICE_SNAPSHOT_STATE_LENGTH,
+            },
+        });
+        return -1;
+    }
+    let bytes: &[u8] = if length == 0 {
+        &[]
+    } else {
+        // SAFETY: readable for `length` bytes, by the caller's convention, during the
+        // call; `length` is at most 1 GiB, checked above.
+        unsafe { std::slice::from_raw_parts(state, length) }
+    };
+    // SAFETY: `client` is non-null, checked above, a live handle used from one thread
+    // at a time ("Threads"), and held by no poll, checked above.
+    let client = unsafe { cavalry_mut(client) };
+    match inner.snapshot(client, bytes) {
+        Ok(true) => 1,
+        Ok(false) => 0,
+        Err(error) => {
+            error::set_cluster(&error);
+            -1
+        }
+    }
+}
+
+/// Starts the service from the newest snapshot of a service that its member lists, as
+/// the Rust `ClusterService::restore` does, before the service's first poll. Returns
+/// `CAVALRY_CLUSTER_RESTORED_STATE` with the program's state at `*state` and its
+/// length in `*length`, bytes the handle holds until its next poll or its close;
+/// `CAVALRY_CLUSTER_RESTORED_FROM_START` when there is no snapshot to take, so that the
+/// polls read the log from position 0; `CAVALRY_CLUSTER_RESTORED_NO_MEMBER` while the
+/// driver hosts no member with a log, so that the caller asks again; or −1 with
+/// `CAVALRY_ERR_CLUSTER_RESTORE_TOO_LATE` once the service has begun, or with the
+/// client's or the driver's code, after which nothing has begun. `*state` is null and
+/// `*length` 0 for every answer but a state of one byte or more, written first, so
+/// that every refusal leaves them so.
+///
+/// # Safety
+///
+/// `service` is null or a live handle not in use by another call; `client` is null or
+/// a live client handle not in use by another call; `state` and `length` are null or
+/// writable.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn cavalry_cluster_service_restore(
+    service: *mut cavalry_cluster_service_t,
+    client: *mut cavalry_t,
+    state: *mut *const u8,
+    length: *mut usize,
+) -> c_int {
+    // Written first, so that every return below leaves no pointer into a state unless
+    // it gives one.
+    if !state.is_null() {
+        // SAFETY: writable, by the caller's convention.
+        unsafe { *state = ptr::null() };
+    }
+    if !length.is_null() {
+        // SAFETY: writable, by the caller's convention.
+        unsafe { *length = 0 };
+    }
+    if service.is_null() {
+        error::null("cavalry_cluster_service_restore", "service");
+        return -1;
+    }
+    if client.is_null() {
+        error::null("cavalry_cluster_service_restore", "client");
+        return -1;
+    }
+    if state.is_null() {
+        error::null("cavalry_cluster_service_restore", "the state to fill");
+        return -1;
+    }
+    if length.is_null() {
+        error::null("cavalry_cluster_service_restore", "the length to fill");
+        return -1;
+    }
+    // SAFETY: a live handle, by the caller's convention.
+    if unsafe { self::state(service) } == State::Polling {
+        polling("cavalry_cluster_service_restore");
+        return -1;
+    }
+    // SAFETY: `client` is non-null, checked above, and a live handle.
+    if unsafe { client::refused("cavalry_cluster_service_restore", client) } {
+        return -1;
+    }
+    // SAFETY: a live handle that no poll borrows, checked above, used from one thread
+    // at a time: this is the one reference to the service; `client` is non-null, a
+    // live handle used from one thread at a time ("Threads"), and held by no poll.
+    let restored = unsafe {
+        let inner = &mut *ptr::addr_of_mut!((*service).service);
+        inner.restore(cavalry_mut(client))
+    };
+    match restored {
+        Ok(Restored::NoMember) => CAVALRY_CLUSTER_RESTORED_NO_MEMBER,
+        Ok(Restored::FromStart) => CAVALRY_CLUSTER_RESTORED_FROM_START,
+        Ok(Restored::State(bytes)) => {
+            // SAFETY: the field alone, of a live handle that no poll borrows, and the two
+            // writable pointers. The bytes stay where they are, on the heap, until the
+            // field is taken by the next poll or by the close.
+            unsafe {
+                let held = &mut *ptr::addr_of_mut!((*service).restored);
+                release(held.take());
+                let bytes = held.insert(bytes);
+                if !bytes.is_empty() {
+                    *state = bytes.as_ptr();
+                    *length = bytes.len();
+                }
+            }
+            CAVALRY_CLUSTER_RESTORED_STATE
+        }
+        Err(error) => {
+            error::set_cluster(&error);
+            -1
+        }
+    }
+}
+
+/// Closes the service's publications and its counters, those of its snapshots and of
+/// its start among them, stops its read of the log, and frees the handle with the
+/// state a restore gave, as the Rust `ClusterService::close` does. With a null
+/// `client` it is the Rust handle's drop: the publications, the counters and the log's
 /// subscription are closed with no answer waited for, the replay is left to the
 /// driver, and the function returns 0, which is how a service is closed after its
 /// client's `cavalry_close`. The handle is freed whatever the function returns, with
@@ -674,9 +922,10 @@ pub unsafe extern "C" fn cavalry_cluster_service_close(
     }
     // SAFETY: a live handle freed once, by the caller's convention; the service is
     // moved out, so its own close below consumes it.
-    let closed = unsafe { handle::take_out(service) };
+    let mut closed = unsafe { handle::take_out(service) };
+    release(closed.restored.take());
     if client.is_null() {
-        // Dropping the service closes its publications, its counter and the log's
+        // Dropping the service closes its publications, its counters and the log's
         // subscription; the driver ends the replay once the replay connect timeout
         // has passed with no subscriber.
         drop(closed);
@@ -800,6 +1049,12 @@ mod tests {
         assert_eq!(
             values(Entry::Other),
             (CAVALRY_CLUSTER_ENTRY_OTHER, -1, -1, false)
+        );
+        // The leader's request for a snapshot has a kind of its own since version 6,
+        // where version 5 handed it over as `_OTHER` (ADR 0146).
+        assert_eq!(
+            values(Entry::Snapshot),
+            (CAVALRY_CLUSTER_ENTRY_SNAPSHOT, -1, -1, false)
         );
     }
 }

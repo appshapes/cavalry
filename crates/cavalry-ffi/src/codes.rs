@@ -9,7 +9,7 @@ use std::ffi::c_int;
 /// This page's version: the header's `CAVALRY_ABI_VERSION`, which
 /// `cavalry_context_init` passes to `cavalry_context_init_v` and the library compares
 /// with its own.
-pub const CAVALRY_ABI_VERSION: c_int = 5;
+pub const CAVALRY_ABI_VERSION: c_int = 6;
 /// The environment variable a context's default directory reads.
 pub const CAVALRY_DIR_ENV: &str = "CAVALRY_DIR";
 /// The images a subscription holds at most.
@@ -156,6 +156,18 @@ pub const CAVALRY_ERR_CLUSTER_NO_ENTRY: c_int = 145;
 /// `cavalry_cluster_service_action` with a value that is none of `CAVALRY_ACTION_ABORT`,
 /// `CAVALRY_ACTION_BREAK` and `CAVALRY_ACTION_CONTINUE`.
 pub const CAVALRY_ERR_CLUSTER_ACTION: c_int = 146;
+/// `cavalry_cluster_service_snapshot` where no snapshot is due: the last entry of the
+/// service's last poll was not a request for a snapshot that the handler took.
+pub const CAVALRY_ERR_CLUSTER_NO_SNAPSHOT_DUE: c_int = 147;
+/// `cavalry_cluster_service_snapshot` with a state longer than one snapshot holds,
+/// 1 GiB; both lengths are in the message, and nothing was written.
+pub const CAVALRY_ERR_CLUSTER_SNAPSHOT_TOO_LONG: c_int = 148;
+/// `cavalry_cluster_service_snapshot` gave the snapshot up at one of its steps, which
+/// the message names; the service is as it was, and the snapshot is still due.
+pub const CAVALRY_ERR_CLUSTER_SNAPSHOT_FAILED: c_int = 149;
+/// `cavalry_cluster_service_restore` after the service began: a poll opened its
+/// member's log, or an earlier call answered where it starts.
+pub const CAVALRY_ERR_CLUSTER_RESTORE_TOO_LATE: c_int = 150;
 
 /// Why a client closed: `cavalry_close` was called.
 pub const CAVALRY_CLOSED_BY_USER: i32 = 1;
@@ -191,9 +203,24 @@ pub const CAVALRY_CLUSTER_ENTRY_SESSION_CLOSE: i32 = 3;
 /// A committed entry: a leadership term began, led by `leader_member_id`.
 pub const CAVALRY_CLUSTER_ENTRY_NEW_LEADERSHIP_TERM: i32 = 4;
 /// A committed entry that no leader of this version appends and a service of this
-/// version does nothing with: a timer event, a cluster action or a membership change
-/// event.
+/// version does nothing with: a timer event, a cluster action that suspends or
+/// resumes, or a membership change event.
 pub const CAVALRY_CLUSTER_ENTRY_OTHER: i32 = 5;
+/// A committed entry: the leader asks for a snapshot here. The poll ends after it, and
+/// the program gives its state to `cavalry_cluster_service_snapshot` before its next
+/// poll, or polls on and takes none. 6, after `CAVALRY_CLUSTER_ENTRY_OTHER`, which
+/// version 5 of the ABI handed this entry over as.
+pub const CAVALRY_CLUSTER_ENTRY_SNAPSHOT: i32 = 6;
+
+/// A service's start: the driver hosts no cluster member that has a log yet. Call
+/// `cavalry_cluster_service_restore` again before the first poll.
+pub const CAVALRY_CLUSTER_RESTORED_NO_MEMBER: c_int = 1;
+/// A service's start: the member lists no snapshot of a service, or the one it lists
+/// could not be taken; the polls read the log from position 0.
+pub const CAVALRY_CLUSTER_RESTORED_FROM_START: c_int = 2;
+/// A service's start: the program's state at the snapshot is in `*state` and
+/// `*length`, and the polls read the log from the snapshot's position.
+pub const CAVALRY_CLUSTER_RESTORED_STATE: c_int = 3;
 
 /// A service's reply: it is on its way to the session, or an earlier handling of the
 /// same entry sent it.

@@ -155,13 +155,17 @@ service)` for each committed entry, in order:
 - `body` is a session message's payload, a `[]byte` into the log for the call. It is
   `nil` for every other entry.
 - `entry` is a `*ClusterEntryValues`: `entry.Type`, one of `ClusterEntrySessionMessage`,
-  `ClusterEntrySessionOpen`, `ClusterEntrySessionClose`, `ClusterEntryNewLeadershipTerm`
-  and `ClusterEntryOther`; `entry.Position`; `entry.LeadershipTermID`;
+  `ClusterEntrySessionOpen`, `ClusterEntrySessionClose`, `ClusterEntryNewLeadershipTerm`,
+  `ClusterEntryOther` and `ClusterEntrySnapshot`; `entry.Position`;
+  `entry.LeadershipTermID`;
   `entry.Timestamp`, the cluster's time, the one clock a service reads, so that every
   member's service reaches the same state; `entry.SessionID`, −1 where the entry has
   no session; `entry.LeaderMemberID`, for a new leadership term; and `entry.TimedOut`,
   for a session close. It is the one struct the service keeps, written for each
   entry, so copy a field out to keep it.
+  `ClusterEntrySnapshot` is the leader's request for a snapshot: the poll ends after it. This
+  client's service has no call that takes a snapshot yet, so a handler passes it
+  over, as it does `ClusterEntryOther` (`spec/c-abi.md`, "A service's snapshot and its start").
 - `service` is the service that was polled, for `service.Reply`.
 
 What the handler returns says what becomes of the entry. `ActionContinue` takes it,

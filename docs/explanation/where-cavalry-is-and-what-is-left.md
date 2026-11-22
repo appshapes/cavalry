@@ -83,7 +83,7 @@ dedicated hosts (ADR 0016, ADR 0034, ADR 0044), a weekly email of the changes (A
 - **Decisions.** 137 ADRs, 0001 to 0137, all Accepted but four that later ones
   superseded.
 - **Specification.** Ten pages under `spec/`, each with a version. The client
-  protocol is at version 10, the C ABI at 5, the UDP transport at 4, the durable log
+  protocol is at version 10, the C ABI at 6 since 2026-11-22, the UDP transport at 4, the durable log
   at 6 since 2026-11-22, and the cluster protocol at 1.
 - **Code.** 97,279 lines of Rust under `crates/*/src`, unit tests included, and 969
   test functions under `crates/`. `cavalry-raft` is 15,851 lines; on 2026-11-09 it
@@ -168,7 +168,7 @@ the line.
 | Election and a commit by quorum | Works; the membership is a string of up to 8 members | Done |
 | Sessions in six languages | Work: connect, redirect, follow the leader, keepalive, close. At most 10 sessions; a message of at most 1,344 bytes | Feature 6 |
 | A service in six languages | Works: session open and close, message, new term, the cluster's time, replies. No timer | Feature 6 |
-| A service's snapshot | Rust alone | Feature 6 |
+| A service's snapshot | Rust, and the C ABI since version 6 (ADR 0146); none of the five clients yet | Feature 6 |
 | Catch-up, a restart on the log a member kept, a start from its own snapshot | Work | Done |
 | A start from a peer's snapshot | Absent | Feature 5 |
 | A standby | Works: marked in the members string, promoted by restarts | Done |
