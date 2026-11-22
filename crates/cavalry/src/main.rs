@@ -7,7 +7,8 @@
 //! <position, instant or start>` plays a recording back and prints every message (ADR 0030),
 //! or, with `--channel <a cavalry:udp channel>`, plays it to a subscriber on that
 //! channel's endpoint and prints the summary alone, exit 1 when no subscriber answered
-//! or the driver went before the end (ADR 0043).
+//! or the driver went before the end (ADR 0043). `cavalry snapshot` asks the cluster
+//! member on the driver for a snapshot and waits until the member lists it (ADR 0147).
 //! `console` arrives with its feature. No arguments and no configuration are the primary way to run it (CLAUDE.md,
 //! invariant 5): the directory is `spec/client-protocol.md`'s default and the log
 //! directory `Driver::default_log_dir()`'s. The keys of `config.toml` are read from the
@@ -26,6 +27,8 @@ use cavalry::{
     Cavalry, ClientError, Driver, FOLLOW_LENGTH, IdleStrategy, Idler, Image, NULL_LENGTH,
     NULL_POSITION, Positions, Subscription, doctor, index,
 };
+
+mod snapshot;
 
 const USAGE: &str = "usage: cavalry <command> [--dir <path>] [--log-dir <path>]
 
@@ -66,6 +69,11 @@ const USAGE: &str = "usage: cavalry <command> [--dir <path>] [--log-dir <path>]
                            1 when no subscriber on the endpoint answered it within the
                            replay connect timeout, 5 s, or the driver went before the
                            end
+  snapshot                 ask the cluster member on this driver, which must lead its
+                           cluster, for a snapshot: every member takes one, and the
+                           command prints the log position once this member lists its
+                           own; exit 1 with what to do when the member does not lead,
+                           or lists none within 10 s
   --version                print the version
 
   --dir <path>      the driver directory, for every command; the default is
@@ -130,6 +138,7 @@ enum Invocation {
     Doctor(Flags),
     Record(Flags, RecordAction),
     Replay(Flags, ReplayRequest),
+    Snapshot(Flags),
     Version,
     Help,
     /// Not a command, or a command with arguments it does not take; the message says
@@ -150,7 +159,7 @@ fn parse(args: impl Iterator<Item = String>) -> Invocation {
     match command.as_str() {
         "--version" | "-V" if args.peek().is_none() => return Invocation::Version,
         "--help" | "-h" | "help" if args.peek().is_none() => return Invocation::Help,
-        "run" | "doctor" | "record" | "replay" => {}
+        "run" | "doctor" | "record" | "replay" | "snapshot" => {}
         other => {
             return Invocation::Wrong(format!(
                 "`{other}` is not a command this version has, or it took an argument it does \
@@ -323,6 +332,7 @@ fn parse(args: impl Iterator<Item = String>) -> Invocation {
     match command.as_str() {
         "run" => Invocation::Run(flags),
         "doctor" => Invocation::Doctor(flags),
+        "snapshot" => Invocation::Snapshot(flags),
         "replay" => match (recording, from) {
             (Some(recording_id), Some(from)) if follow && to.is_some() => {
                 let _ = (recording_id, from);
@@ -630,6 +640,10 @@ fn main() -> ExitCode {
         },
         Invocation::Replay(flags, request) => match configure(flags) {
             Ok(config) => replay(&config, request),
+            Err(code) => code,
+        },
+        Invocation::Snapshot(flags) => match configure(flags) {
+            Ok(config) => snapshot(&config),
             Err(code) => code,
         },
         Invocation::Version => {
@@ -1090,6 +1104,40 @@ fn record(config: &Config, action: RecordAction) -> ExitCode {
     }
 }
 
+/// `cavalry snapshot`: asks the cluster member on the driver for a snapshot, with a
+/// control toggle, and prints the log position of the snapshot once the member lists
+/// it. Exit 1 with what to do when the driver hosts no member, the member does not
+/// lead, or it lists no snapshot within the control toggle timeout, 10 s
+/// (`spec/cluster.md`, "The control toggle"; ADR 0147).
+fn snapshot(config: &Config) -> ExitCode {
+    match snapshot::ask(&config.dir) {
+        Ok(listed) => {
+            // The snapshot asked for, or, where the member gave that one up and took a
+            // later one, the later one: either was asked for after the command began.
+            let later = if listed.log_position > listed.asked_position {
+                format!(
+                    ", a later one than the snapshot of position {} that this request asked \
+                     for",
+                    listed.asked_position
+                )
+            } else {
+                String::new()
+            };
+            println!(
+                "member {} lists a snapshot of log position {}{later}: every entry below \
+                 that position is in it. Every member takes a snapshot where its leader asks \
+                 for one, and lists it in the `snapshots` file of its log directory",
+                listed.member_id, listed.log_position
+            );
+            ExitCode::SUCCESS
+        }
+        Err(message) => {
+            eprintln!("cavalry snapshot: {message}");
+            ExitCode::FAILURE
+        }
+    }
+}
+
 /// `cavalry replay`: a client of the driver that subscribes to a replay stream, starts
 /// the replay and prints one line per message, `<position> <body>`, the position from
 /// the frame's header, the body as UTF-8 when it is printable and as hex otherwise, a
@@ -1537,6 +1585,28 @@ mod tests {
             ["run", "--stop", "1"].as_slice(),
             ["fly"].as_slice(),
             ["--version", "now"].as_slice(),
+        ] {
+            assert!(matches!(parsed(args), Invocation::Wrong(_)), "{args:?}");
+        }
+        // `snapshot` takes the directory and nothing of its own.
+        match parsed(&["snapshot", "--dir", "/x"]) {
+            Invocation::Snapshot(Flags {
+                dir: Some(dir),
+                log_dir: None,
+            }) => assert_eq!(dir, PathBuf::from("/x")),
+            _ => panic!("not a snapshot invocation"),
+        }
+        assert!(matches!(
+            parsed(&["snapshot"]),
+            Invocation::Snapshot(Flags {
+                dir: None,
+                log_dir: None
+            })
+        ));
+        for args in [
+            ["snapshot", "now"].as_slice(),
+            ["snapshot", "--member", "1"].as_slice(),
+            ["snapshot", "--dir", "/x", "--dir", "/y"].as_slice(),
         ] {
             assert!(matches!(parsed(args), Invocation::Wrong(_)), "{args:?}");
         }

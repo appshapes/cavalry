@@ -64,7 +64,9 @@ dependencies = [
  "cavalry-control",
  "cavalry-driver",
  "cavalry-log",
+ "cavalry-proto",
  "cavalry-raft",
+ "cavalry-shm",
  "ctrlc",
 ]
 

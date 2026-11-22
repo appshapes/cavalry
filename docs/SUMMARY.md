@@ -34,6 +34,7 @@ under `docs/` is listed here; `just lint-docs` fails on one that is not.
 - [Upgrade a cluster one member at a time](how-to/upgrade-a-cluster.md)
 - [Change a call that Brigade's server makes](how-to/change-a-call-that-brigades-server-makes.md)
 - [Read the nightly run of Brigade's server](how-to/read-the-nightly-run-of-brigades-server.md)
+- [Ask a cluster for a snapshot](how-to/ask-for-a-snapshot.md)
 
 # Reference
 

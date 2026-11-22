@@ -201,6 +201,8 @@ committed once a quorum, two of three, has it on disk.
   the leader was offered, in order (`scripts/replay-check.sh`).
 - A program beside a member reads the entries as the cluster commits them:
   [Read a cluster's committed log from a service](read-the-committed-log.md).
+- To have the cluster take a snapshot now, and not at the next 256 MiB of its log:
+  [Ask a cluster for a snapshot](ask-for-a-snapshot.md).
 
 ## When it does not work
 
