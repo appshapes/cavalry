@@ -311,16 +311,20 @@ committed once a quorum, two of three, has it on disk.
   member is refused again, or the refusal names no snapshot passed over, do as for
   a directory with no `log-recordings` file, above, to have three members again.
 - The member's host lost power, or its operating system crashed, while the member
-  ran. Do not start the member on that log directory again. Leave it stopped, and
-  do as for a directory with no `log-recordings` file, above. Nothing refuses this
-  start, and no counter tells this crash from a process that was ended, so the rule
-  is yours to keep. A process that was ended is safe to start again. When two of
-  the three hosts lost power together, do not start any member on its log
-  directory: start the cluster again as a new cluster. After such a crash a
-  member's log can end in entries that were not written whole, and a member that
-  starts on them can hand them to the others
-  ([ADR 0108](../decisions/0108-list-the-recordings-of-a-members-log-in-its-log-directory-and-start-a-member-on-the-log-it-kept.md),
-  "What a start does not hold").
+  ran. Start the member again on its log directory, as after any stop. When its
+  driver opens the log directory, it cuts each recording that was being made to the
+  position the recording had synced, and drops the frames past it, which the crash
+  may have left with no body. `recording.cut_to_synced` on that driver counts each
+  recording it cut, and `cavalry doctor` explains it. The member's log then holds
+  every entry the member reported and nothing past it, and the member takes what it
+  lacks from its leader. The same holds when every host lost power together
+  ([ADR 0144](../decisions/0144-keep-a-recordings-synced-position-in-its-time-index-and-cut-a-recording-a-crash-left-live-to-it.md)).
+  This holds for a recording that this version's driver was making. A driver of an
+  earlier version, version 4 of the durable log or before, kept no synced position,
+  so a recording it was making when the power was lost cannot be cut. When the member
+  ran such a driver at the loss, do not start it on that log directory again, even
+  under a newer driver: leave it stopped and do as for a directory with no
+  `log-recordings` file, above.
 - `cavalry run: the cluster member stopped, so the driver stops`, and the process
   exits with 1. The member could not go on, so `cavalry run` gave it up and closed
   its driver: a driver that runs on with the cluster's keys set and no member is

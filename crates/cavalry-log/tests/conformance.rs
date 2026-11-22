@@ -118,8 +118,8 @@ fn every_vector_agrees_with_the_layout_layer() {
     let doc: Value = serde_json::from_str(VECTORS).expect("the vectors are JSON");
     assert_eq!(doc["spec"], "durable-log");
     assert_eq!(
-        doc["version"], 4,
-        "the vectors are for the page's version 4"
+        doc["version"], 5,
+        "the vectors are for the page's version 5"
     );
     let mut count = 0;
     for vector in doc["vectors"].as_array().expect("a vector list") {
@@ -183,7 +183,17 @@ fn every_vector_agrees_with_the_layout_layer() {
                             int(&vector["fields"], "recording_id"),
                             "{name}"
                         );
-                        assert_eq!(&header.encode()[..], &bytes[..HEADER_LENGTH], "{name}");
+                        assert_eq!(
+                            header.synced_position(),
+                            vector["fields"]["synced_position"].as_i64(),
+                            "{name}: the synced position"
+                        );
+                        // A header a writer creates reads back byte for byte; one a
+                        // sync wrote slot 1 of, or a crash tore, has bytes no
+                        // creation writes.
+                        if vector["creation"].as_bool() != Some(false) {
+                            assert_eq!(&header.encode()[..], &bytes[..HEADER_LENGTH], "{name}");
+                        }
                         assert_eq!(
                             IndexHeader::entries(file_length),
                             vector["entries"].as_u64().expect("entries"),

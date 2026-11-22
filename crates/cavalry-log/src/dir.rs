@@ -129,6 +129,10 @@ pub struct Recovery {
     /// Files removed: segments wholly past a rebuilt stop, and a deleted recording's
     /// files found still present.
     pub files_removed: u64,
+    /// Recordings live at a crash whose files held bytes past the position their time
+    /// index says was synced, cut to that position: the frames past it, whole or not,
+    /// are dropped, since a power loss may have taken any of their bodies (ADR 0144).
+    pub cut_to_synced: u64,
 }
 
 /// A log directory held by its one writer, the driver (`spec/durable-log.md`, "The
@@ -424,11 +428,29 @@ fn rebuild(dir: &Path, found: &Descriptor, recovery: &mut Recovery) -> Result<Re
     // The recording's bytes begin at the retained position: the start position until a
     // purge moved it (ADR 0031); every rule below counts from there.
     let start = found.retained_position();
-    let mut index = repair_index(dir, found, recovery)?;
-    let segments = list_segments(dir, id)?;
+    let Some(mut index) = repair_index(dir, found, recovery)? else {
+        // A synced slot whose checksum matches and whose position no writer writes.
+        return Ok(Rebuilt::Damage);
+    };
+    // The synced position the index holds (ADR 0144): the bytes past it were written
+    // and not synced, and a power loss may have taken any frame's body there, so the
+    // stop is at most it. An index with none was written by a driver before version 5
+    // of the page, or written again above, and the files alone give its stop.
+    let bound = index.synced.map(|synced| synced.max(start));
+    let all_segments = list_segments(dir, id)?;
+    // Segment files wholly at or past the bound hold no synced byte: the rules below
+    // read none of them, and they go with the files past the stop.
+    let segments: Vec<Segment> = match bound {
+        Some(bound) => all_segments
+            .iter()
+            .filter(|segment| segment.base < bound)
+            .cloned()
+            .collect(),
+        None => all_segments.clone(),
+    };
     let mut damage = false;
     let mut stop = None;
-    if segments.is_empty() {
+    if segments.is_empty() || bound == Some(start) {
         stop = Some(start);
     } else {
         let start_located = locate(found, start)?;
@@ -464,21 +486,44 @@ fn rebuild(dir: &Path, found: &Descriptor, recovery: &mut Recovery) -> Result<Re
     let stop = match stop {
         Some(stop) => stop,
         None => {
-            // The scan's start: the last index entry at whose position a frame checks,
-            // walking back entry by entry from the file, or the start position.
+            // The scan's start: the last index entry at or below the bound at whose
+            // position a frame checks, walking back entry by entry from the file, or
+            // the start position.
+            let limit = bound.unwrap_or(i64::MAX);
             let mut from = start;
             let mut j = index.count;
             while j > 0 {
                 j -= 1;
                 let entry = index.read(j)?;
-                if entry.position >= start && frame_checks(&segments, found, entry.position)? {
+                if entry.position >= start
+                    && entry.position <= limit
+                    && frame_checks(&segments, found, entry.position)?
+                {
                     from = entry.position;
                     break;
                 }
             }
-            scan(&segments, found, from)?
+            scan(&segments, found, from, limit)?
         }
     };
+    // The cut to the synced position: the bytes past it are zeroed in the segment that
+    // holds it, as a truncate leaves them, and synced, so that no later scan finds a
+    // frame there, whatever a power loss kept of them (ADR 0144); a segment that begins
+    // at the position goes with the files past the stop below. The recorder had
+    // written past it when a frame begins there or an index entry lies past it, and
+    // then the cut is counted.
+    if let Some(bound) = bound
+        && stop == bound
+    {
+        let indexed_past = match index.count.checked_sub(1) {
+            Some(last) => index.read(last)?.position > bound,
+            None => false,
+        };
+        if written_past(&all_segments, found, bound)? || indexed_past {
+            recovery.cut_to_synced += 1;
+        }
+        zero_past(&all_segments, found, bound)?;
+    }
     // The cut: entries past the stop are dropped. Positions never decrease from one
     // entry to the next, so the first entry past the stop is found by a search over the
     // file, in a number of reads that grows with the logarithm of the count.
@@ -581,12 +626,16 @@ fn frame_checks(segments: &[Segment], found: &Descriptor, position: i64) -> Resu
     }
 }
 
-/// The scan: frame by frame from `from`, to the end of the last segment file at most,
-/// stopping at the first frame that fails the check or whose length is 0; returns the
-/// end of the last frame that checks.
-fn scan(segments: &[Segment], found: &Descriptor, from: i64) -> Result<i64, DirError> {
+/// The scan: frame by frame from `from`, to the end of the last segment file at most
+/// and to `limit` at most, stopping at the first frame that fails the check, whose
+/// length is 0 or that would end past the limit; returns the end of the last frame
+/// that checks.
+fn scan(segments: &[Segment], found: &Descriptor, from: i64, limit: i64) -> Result<i64, DirError> {
     let mut position = from;
     loop {
+        if position >= limit {
+            return Ok(position);
+        }
         let located = locate(found, position)?;
         let Some(segment) = segments
             .iter()
@@ -595,18 +644,64 @@ fn scan(segments: &[Segment], found: &Descriptor, from: i64) -> Result<i64, DirE
             return Ok(position);
         };
         match frame_at(segment, found, &located)? {
-            Frame::Checks(aligned) => position += aligned,
-            Frame::Zero | Frame::Fails => return Ok(position),
+            Frame::Checks(aligned) if position.saturating_add(aligned) <= limit => {
+                position += aligned;
+            }
+            Frame::Checks(_) | Frame::Zero | Frame::Fails => return Ok(position),
         }
     }
 }
 
-/// A recording's time index, open for the repair: the file and how many whole entries
-/// in order it holds. Entries are read from the file one at a time; none are held.
+/// Whether the recorder wrote past `position`: the frame length there, in the segment
+/// file that holds it, is not 0. A file that is missing, or that ends before the
+/// position, holds nothing there.
+fn written_past(segments: &[Segment], found: &Descriptor, position: i64) -> Result<bool, DirError> {
+    let located = locate(found, position)?;
+    match segments
+        .iter()
+        .find(|segment| segment.base == located.segment_base_position)
+    {
+        Some(segment) => Ok(!matches!(frame_at(segment, found, &located)?, Frame::Zero)),
+        None => Ok(false),
+    }
+}
+
+/// Zeroes the bytes past `position` in the segment file that holds it, as a truncate
+/// does: one truncation to the position's offset, an extension to the segment file
+/// length again, and a sync. At a segment's base the file lies wholly past the
+/// position and is removed with the files past the stop instead.
+fn zero_past(segments: &[Segment], found: &Descriptor, position: i64) -> Result<(), DirError> {
+    let located = locate(found, position)?;
+    if located.offset_in_segment == 0 {
+        return Ok(());
+    }
+    let Some(segment) = segments
+        .iter()
+        .find(|segment| segment.base == located.segment_base_position)
+    else {
+        return Ok(());
+    };
+    let file = OpenOptions::new()
+        .write(true)
+        .open(&segment.path)
+        .map_err(io("open", &segment.path))?;
+    file.set_len(located.offset_in_segment as u64)
+        .map_err(io("cut", &segment.path))?;
+    file.set_len(u64::from(found.segment_file_length().unsigned_abs()))
+        .map_err(io("extend", &segment.path))?;
+    file.sync_all().map_err(io("sync", &segment.path))
+}
+
+/// A recording's time index, open for the repair: the file, how many whole entries in
+/// order it holds, and the synced position its header holds. Entries are read from the
+/// file one at a time; none are held.
 struct Index {
     file: File,
     path: PathBuf,
     count: u64,
+    /// The synced position of the header, `None` in an index a driver before version
+    /// 5 of the page wrote and in one written again here (ADR 0144).
+    synced: Option<i64>,
 }
 
 impl Index {
@@ -644,12 +739,14 @@ impl Index {
 
 /// The index repair: a missing or torn index is written again with the start entry, an
 /// index with no whole entry gets it, and the file is truncated to whole entries in
-/// order, checked forward in fixed chunks with only the entry before kept.
+/// order, checked forward in fixed chunks with only the entry before kept. `None` is an
+/// index whose header holds a synced slot that fails `position`: damage, which no
+/// crash leaves and which the repair leaves alone (ADR 0144).
 fn repair_index(
     dir: &Path,
     found: &Descriptor,
     recovery: &mut Recovery,
-) -> Result<Index, DirError> {
+) -> Result<Option<Index>, DirError> {
     let id = found.recording_id();
     let path = dir.join(index_file_name(id));
     let file = OpenOptions::new()
@@ -660,24 +757,29 @@ fn repair_index(
         .open(&path)
         .map_err(io("open", &path))?;
     let length = file.metadata().map_err(io("stat", &path))?.len();
-    let header_ok = if length >= HEADER_LENGTH as u64 {
+    let header = if length >= HEADER_LENGTH as u64 {
         let mut bytes = [0u8; HEADER_LENGTH];
         file.read_exact_at(&mut bytes, 0)
             .map_err(io("read the header of", &path))?;
-        matches!(IndexHeader::parse(&bytes, length), Ok(header) if header.recording_id() == id)
+        match IndexHeader::parse(&bytes, length) {
+            Ok(header) if header.recording_id() == id => Some(header),
+            Err(LayoutError::Position { .. }) => return Ok(None),
+            Ok(_) | Err(_) => None,
+        }
     } else {
-        false
+        None
     };
     let mut index = Index {
         file,
         path,
         count: 0,
+        synced: header.and_then(|header| header.synced_position()),
     };
-    if !header_ok {
+    if header.is_none() {
         write_index(&index.file, &index.path, id)?;
         index.write_first(found)?;
         recovery.index_rewritten += 1;
-        return Ok(index);
+        return Ok(Some(index));
     }
     let whole = (length - HEADER_LENGTH as u64) / ENTRY_LENGTH as u64;
     let mut buffer = [0u8; INDEX_CHUNK * ENTRY_LENGTH];
@@ -720,7 +822,7 @@ fn repair_index(
     if changed {
         recovery.index_rewritten += 1;
     }
-    Ok(index)
+    Ok(Some(index))
 }
 
 /// Writes an index header anew in the page's order: the fields, a sync, then the magic;

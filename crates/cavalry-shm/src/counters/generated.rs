@@ -542,6 +542,9 @@ pub const CLUSTER_STANDBY_VOTE_REQUESTS: CounterId = CounterId(178);
 /// `cluster.protocol_version`, a client gauge: One cluster member's version of the cluster protocol in semantic form, the major times 65536, the minor times 256 and the patch, added: 256 for version 1, 0.1.0. A member stores it when it starts, and it does not change while the member runs. A member of a build older than this counter has none: every member of version 0, and one of the first build of version 1 (spec/cluster.md, Versions and the upgrade; ADR 0137). key and label as cluster.elections.
 pub const CLUSTER_PROTOCOL_VERSION: CounterId = CounterId(179);
 
+/// `recording.cut_to_synced`, a static counter: Recordings found live when the driver opened the log directory whose files held frames past the position their time index says the recorder had synced, which recovery cut to that position: the frames past it were dropped, whole or not, since a power loss or a crash of the operating system may have taken any of their bodies (spec/durable-log.md, The driver; ADR 0144). Counted in recording.recovered as well.
+pub const RECORDING_CUT_TO_SYNCED: CounterId = CounterId(180);
+
 /// Every entry of `counters.toml`, in the file's order.
 pub const COUNTERS: &[CounterDef] = &[
     CounterDef {
@@ -1975,5 +1978,13 @@ pub const COUNTERS: &[CounterDef] = &[
         scope: Scope::Client,
         doc: "One cluster member's version of the cluster protocol in semantic form, the major times 65536, the minor times 256 and the patch, added: 256 for version 1, 0.1.0. A member stores it when it starts, and it does not change while the member runs. A member of a build older than this counter has none: every member of version 0, and one of the first build of version 1 (spec/cluster.md, Versions and the upgrade; ADR 0137). key and label as cluster.elections.",
         doctor: "The members of a cluster may be of different versions of one major while the cluster is upgraded, one member at a time (docs/how-to/upgrade-a-cluster.md). Members of two majors form no cluster, and each rejects the other's messages, counted in cluster.messages_rejected.",
+    },
+    CounterDef {
+        id: RECORDING_CUT_TO_SYNCED,
+        name: "recording.cut_to_synced",
+        kind: Kind::Counter,
+        scope: Scope::Static,
+        doc: "Recordings found live when the driver opened the log directory whose files held frames past the position their time index says the recorder had synced, which recovery cut to that position: the frames past it were dropped, whole or not, since a power loss or a crash of the operating system may have taken any of their bodies (spec/durable-log.md, The driver; ADR 0144). Counted in recording.recovered as well.",
+        doctor: "The previous driver stopped without a stop while its recorder held frames it had not yet synced: its process was killed or crashed, the operating system crashed, or the host lost power. Each such recording ends at the position it had synced, and the frames written after the last sync were dropped. The cut dropped only bytes that no sync had covered, so nothing a client was told is durable went with it: a sync recording command's answer, a recording's synced position and a cluster member's append position all name a synced position, and a member takes what it lacks from its leader. If this climbs at every start, find what stops the driver without `close`.",
     },
 ];

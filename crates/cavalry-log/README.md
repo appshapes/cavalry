@@ -27,7 +27,13 @@ The durable log: recording and replay. Data plane.
 - Holds the log directory for the driver: `dir::LogDir` opens it under an exclusive
   advisory lock on the catalog, so two drivers never write one directory, and runs the
   recovery pass of the spec before any recording is added, reporting every action for
-  the driver to count (ADR 0025). The pass runs whole only there; the repair of one
+  the driver to count (ADR 0025). A recording that a crash left live ends at the
+  synced position its time index holds, the bytes past it zeroed and the cut counted
+  in `Recovery::cut_to_synced`: after a power loss a frame there can have its header
+  and not its body, which no check of the frame sees, and no start can tell a power
+  loss from a crash of the process (ADR 0144). An index without a synced position, one
+  a driver before version 5 of the page wrote, is recovered from its files alone, as
+  before. The pass runs whole only there; the repair of one
   slot after a retention command's file work failed is the same rules in two halves,
   `dir::repair_files` on the thread that has the files and `LogDir::apply_repair`, the
   one catalog write they end in, on the thread that owns the catalog, each reporting
@@ -42,7 +48,11 @@ The durable log: recording and replay. Data plane.
   most once per millisecond, rolls segments at their length, and syncs once per second
   behind two positions, what is written and what is synced, or at once when its caller
   was asked to (`RecordingWriter::sync_now`; ADR 0069); `LogDir::stop` writes the
-  stop (ADR 0025). A roll allocates nothing while the log directory's path is at most
+  stop (ADR 0025). A sync syncs the segment, then writes the position into the index
+  header's other synced slot, then syncs the index, so the synced position on the disk
+  never names a byte the segment has not kept; a new segment file's name is synced
+  with its directory before a byte is written into it (ADR 0144). A roll allocates
+  nothing while the log directory's path is at most
   337 bytes (`recorder::LOG_DIR_PATH_LIMIT`): the standard library opens a path on its
   stack only under 384 bytes, the longest segment name is 45, and the next segment's
   name is formatted on the stack into a path the writer keeps
