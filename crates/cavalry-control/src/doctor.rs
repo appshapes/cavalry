@@ -1367,9 +1367,13 @@ fn election_state_name(code: i64) -> String {
 /// the path that needs, a note (`cluster-joining`); a leader that lost its quorum
 /// (`cluster-quorum-lost`); a commit position behind the leader's own append position
 /// (`cluster-commit-waits`); a member that runs with other voters than the members
-/// string doctor was given names (`cluster-voters`; ADR 0134); and each of
-/// [`MEMBER_COUNTS`] above 0, by its counter's
-/// name with its doctor sentence, consensus messages rejected among them. A stopped
+/// string doctor was given names (`cluster-voters`; ADR 0134); a voter below its vote
+/// floor, which withholds its vote, with where its log is and how far it has to go
+/// (`cluster.vote_floor`; ADR 0145), and no standby, which has no vote to withhold;
+/// and each of [`MEMBER_COUNTS`] above 0, by its counter's name with its doctor
+/// sentence, consensus messages rejected among them, but for
+/// `cluster.leaders_withheld`, which is reported only while the member's log is empty
+/// and it has no leader. A stopped
 /// driver's member is gone with its client, so the checks run while the driver runs,
 /// and only where a member is. With `cluster`, from the members string doctor was
 /// given, a quorum is named by its size and a check of a path between two members
