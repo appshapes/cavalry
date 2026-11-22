@@ -7,7 +7,10 @@
 //!
 //! It is a test double, not a transport: it allocates, and nothing of it is on a
 //! message's path in a running member. What it plays faithfully is what the core
-//! depends on: a consensus message arrives whole, late or never; a follower's image of
+//! depends on: a consensus message arrives whole, late or never; a member started
+//! again, on an empty log directory or on the one it kept, reads none that was in
+//! flight to it before, so none that a peer sent before that start (`spec/cluster.md`,
+//! "Taking a leader"; ADR 0145); a follower's image of
 //! the log joins at the position the leader's publication is at when the follower
 //! subscribes; a member's append position is what its recording has synced; the
 //! leader's own append position rises by its own sync, like any member's; and every
@@ -1241,12 +1244,16 @@ impl Cluster {
     /// Starts the member again on an empty log directory, as a container whose volume
     /// was not kept does: its core is new and its terms, its vote and its recordings
     /// are gone. When it led, its log publication is gone with it, and every
-    /// follower's image of it. What the cluster does about it is the test. A member
-    /// starts on the log it kept with [`Cluster::restart`].
+    /// follower's image of it. Every consensus message in flight to it is lost, so the
+    /// new core reads none that a peer sent before this start, as on the new driver
+    /// such a member starts on (`spec/cluster.md`, "Taking a leader"; ADR 0145). What
+    /// the cluster does about it is the test. A member starts on the log it kept with
+    /// [`Cluster::restart`].
     pub fn wipe(&mut self, member: i32) {
         let Some(index) = self.index(member) else {
             return;
         };
+        self.lose_in_flight_to(index);
         let ids: Vec<i32> = self.world.disks.iter().map(|disk| disk.id).collect();
         let standbys = self.standbys.get(index).cloned().unwrap_or_default();
         let led = self
@@ -1285,8 +1292,11 @@ impl Cluster {
     /// had synced. What had reached it and was not synced is gone, and so are its
     /// subscriptions, its image of the log and every replay it ran or received. When
     /// it led, its log publication is gone with it, and every follower's image of it.
-    /// A member that was halted or stalled runs again, and its counts begin at 0.
-    /// Its members string marks the standbys it marked before.
+    /// Every consensus message in flight to it is lost, as at [`Cluster::wipe`]: the
+    /// host's driver started again with it, and each peer's stream begins in a new
+    /// image at the peer's sender position. A member that was halted or stalled runs
+    /// again, and its counts begin at 0. Its members string marks the standbys it
+    /// marked before.
     pub fn restart(&mut self, member: i32) {
         let Some(index) = self.index(member) else {
             return;
@@ -1316,6 +1326,7 @@ impl Cluster {
         if let Some(core) = self.cores.get_mut(index) {
             *core = new;
         }
+        self.lose_in_flight_to(index);
         if let Some(marks) = self.standbys.get_mut(index) {
             *marks = standby_ids.to_vec();
         }
@@ -1347,6 +1358,15 @@ impl Cluster {
             }
         }
         Ok(())
+    }
+
+    /// Loses every consensus message in flight to the member at `index`, as a member
+    /// started again on a new driver loses them: each peer's stream begins in a new
+    /// image, made by the peer's setup frame at its sender position, and a datagram of
+    /// the image before is dropped (`spec/udp.md`, "The receiver", steps 1 and 2). The
+    /// messages in flight to every other member stay where they are.
+    fn lose_in_flight_to(&mut self, index: usize) {
+        self.world.net.retain(|flight| flight.to != index);
     }
 
     /// Takes the member's image of the log away, as the transport does when the
@@ -1474,5 +1494,70 @@ impl core::fmt::Debug for Cluster {
             )
             .field("in_flight", &self.world.net.len())
             .finish()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// How many consensus messages are in flight to the member at `index`.
+    fn in_flight_to(cluster: &Cluster, index: usize) -> usize {
+        cluster
+            .world
+            .net
+            .iter()
+            .filter(|flight| flight.to == index)
+            .count()
+    }
+
+    /// A cluster of three that has elected, whose consensus messages are then up to
+    /// [`MAX_DELAY_MS`] late for one second, so that every member has messages in
+    /// flight to it.
+    fn with_messages_in_flight() -> Cluster {
+        let mut cluster = Cluster::with_election(&[0, 1, 2], 1).expect("three members");
+        cluster.run_ms(3_000);
+        assert!(cluster.leader().is_some(), "a leader");
+        cluster.set_delivery(0, MAX_DELAY_MS);
+        cluster.run_ms(1_000);
+        cluster.set_delivery(0, 0);
+        for index in 0..3 {
+            assert!(in_flight_to(&cluster, index) > 0, "member {index}");
+        }
+        cluster
+    }
+
+    /// A member started again on an empty log directory reads no message that was in
+    /// flight to it, so none that a peer sent before it lost its log
+    /// (`spec/cluster.md`, "Taking a leader"; ADR 0145). The messages to the others
+    /// are kept, and the new core hears the others by what they send from then on.
+    #[test]
+    fn a_message_in_flight_to_a_member_when_it_is_wiped_never_reaches_the_new_core() {
+        let mut cluster = with_messages_in_flight();
+        let others = [in_flight_to(&cluster, 0), in_flight_to(&cluster, 2)];
+        cluster.wipe(1);
+        assert_eq!(in_flight_to(&cluster, 1), 0);
+        assert_eq!(
+            [in_flight_to(&cluster, 0), in_flight_to(&cluster, 2)],
+            others
+        );
+        cluster.run_ms(MAX_DELAY_MS + 1);
+        let member = cluster.member(1).expect("a member");
+        assert_eq!(member.election_state(), ElectionState::Closed);
+        assert_eq!(Some(member.leader_member_id()), cluster.leader());
+    }
+
+    /// The same at a start on the log directory the member kept, as after a power
+    /// loss, when the host's driver started again with it.
+    #[test]
+    fn a_message_in_flight_to_a_member_when_it_is_restarted_never_reaches_the_new_core() {
+        let mut cluster = with_messages_in_flight();
+        let others = [in_flight_to(&cluster, 0), in_flight_to(&cluster, 2)];
+        cluster.restart(1);
+        assert_eq!(in_flight_to(&cluster, 1), 0);
+        assert_eq!(
+            [in_flight_to(&cluster, 0), in_flight_to(&cluster, 2)],
+            others
+        );
     }
 }

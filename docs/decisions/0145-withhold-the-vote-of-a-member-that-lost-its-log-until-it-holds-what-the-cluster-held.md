@@ -105,7 +105,35 @@ and keeps it, so that voter names a term at least the entry's. A leader of that 
 or a later one holds the entry, by Raft's vote rule. The case holds the forgotten
 vote too: the candidate it went to stored its term first, so it names a term at
 least the vote's. The member's candidate term becomes the leader's, and it votes in
-that term no second time. A member whose election has closed sends no canvass
+that term no second time.
+
+The argument reads terms and a log position from messages, and a message names what
+its sender held when it was written. A canvass position written before the voter
+recorded a later term names the earlier one. So the second case rests on two facts
+about what the member reads from its start, which `spec/cluster.md`, "Taking a
+leader", states with where each is established. First, it reads nothing that came,
+in a peer's stream, before what its run before had read. That holds the terms and the
+vote: what the run before read was written after the term it rests on was recorded.
+Second, where its run before held any of the log, it reads nothing that a peer's
+sender had sent before the start. That holds the floor: a new leadership term
+written after the start carries a log position past every entry the member
+acknowledged. Each peer's consensus messages come on the peer's own publication to
+the member, in the order written. A member that held any of the log and starts on a
+new log directory starts on a new driver, since a driver that ran on holds a
+recording of its log and that start is refused. On the new driver, each peer's
+stream begins in a new image at the peer's sender position. A member that held none
+of the log can start beside a driver that ran on, and its subscription joins the
+images that driver kept at their rebuild position, past every frame their readers
+read. The in-memory cluster holds both facts: a member started again, on an empty
+log directory or on the one it kept, reads nothing that was in flight to it, so
+nothing that a peer sent before that start.
+Without that, a canvass position that `parted` wrote naming t, held late until the
+voter had lost its log, let the voter take the deposed leader: the third review's
+schedule, in the Evidence. One kind of frame is outside the second fact: one the
+peer wrote before the start and its sender held back by flow control, a receiver
+window behind the image before. The Consequences name it.
+
+A member whose election has closed sends no canvass
 position, so a follower would never be heard. So a member that holds a log, that
 does not lead, and that is in a state other than canvass and nominate answers a
 canvass position whose log is empty with its own. It answers that member alone, at
@@ -225,6 +253,19 @@ catch up and withholds until a start from a peer's snapshot is built (work item
     committed, and catches up. With the other follower cut, the leader then commits
     five more entries on the member's acknowledgement. With the answer removed, the
     member has not settled behind the leader after 5 s, and the test fails.
+  - `a_member_that_lost_its_log_reads_no_canvass_position_sent_before_it_lost_it` is
+    the third review's schedule: the schedule of the deposed leader above, with the
+    canvass positions sent for 300 ms of `parted`'s canvass for t + 1 up to 10 s late.
+    Some of them, which name t, are still on their way to the voter when it loses its
+    log. It passes. With `Cluster::wipe` keeping what is in flight to the member, as it
+    did before, it fails at the check of every step: `member 1 leads with a log that
+    differs from what was committed`.
+- `crates/cavalry-raft/src/memory.rs`, two unit tests:
+  `a_message_in_flight_to_a_member_when_it_is_wiped_never_reaches_the_new_core` and
+  the same for `Cluster::restart`. With messages up to 10 s late for a second, each
+  member has messages in flight to it. After the start, none is in flight to the
+  member started again, and the messages to the others are kept. Both fail when the
+  two starts keep what is in flight.
 - `crates/cavalry-raft/tests/canvass_answer.rs`, one core driven by hand, pins the
   answer to a canvass position whose log is empty. A follower whose election has
   closed and whose log holds term 0 sends one canvass position, of its own log, its
@@ -312,6 +353,16 @@ catch up and withholds until a start from a peer's snapshot is built (work item
   runs (Alternatives considered). A member that has not caught up shows it in
   `cluster.append_position`, below its leader's, and a member started late beside
   a running cluster catches up within its first seconds.
+- The floor rests on what the transport delivers to a member started again, and one
+  kind of frame is outside it. A frame that the leader wrote before the start, and
+  that its sender still held back by flow control, a receiver window behind the
+  member's image before, is sent to the new image. A new leadership term among those
+  frames, written before the leader appended an entry the member acknowledged, gives
+  a floor below that entry. It takes an image that read nothing of the leader's
+  consensus stream while the leader wrote a receiver window of consensus messages to
+  the member, all within the leader heartbeat timeout during which the member went on
+  acknowledging. This decision does not close that case. `spec/cluster.md`, "Taking a
+  leader", names it.
 - A member whose leader's log no longer begins at position 0 withholds until work
   item 365 gives it a start from a peer's snapshot.
 - The terms file holds one more field, which a reader of version 5 ignores, so a
@@ -325,8 +376,9 @@ catch up and withholds until a start from a peer's snapshot is built (work item
 
 - Work item 286 on the Brigade Board; work item 363, feature 3 of the beta slice
   (ADR 0138); work items 365, 364 and 406.
-- `spec/cluster.md`, "A member that lost its log", "A member's start", "Counters";
-  `spec/durable-log.md`, "Terms" and "The driver".
+- `spec/cluster.md`, "A member that lost its log", "Taking a leader", "A member's
+  start", "Counters"; `spec/durable-log.md`, "Terms" and "The driver"; `spec/udp.md`,
+  "The sender" and "The receiver", for what a member started again reads.
 - [ADR 0104](0104-have-the-consensus-module-elect-its-leader-and-take-the-appointed-leader-out.md),
   the rule and the guard it lost.
 - [ADR 0108](0108-list-the-recordings-of-a-members-log-in-its-log-directory-and-start-a-member-on-the-log-it-kept.md),

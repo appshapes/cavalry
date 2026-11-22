@@ -267,6 +267,24 @@ fn two_members_that_lost_their_logs_vote_in_the_one_that_holds_the_log() {
 /// three end on its log.
 #[test]
 fn a_member_that_lost_its_log_follows_no_leader_a_later_term_deposed() {
+    follows_no_deposed_leader(false);
+}
+
+/// The schedule above, with the canvass positions `parted` sends while it canvasses for
+/// t + 1 up to 10 s late, so that some of them, which name t, the term `parted` followed,
+/// are still on their way to `voter` when it loses its log. A member that read them would
+/// hear `parted` name no term above A's, and take A. A member started again reads no
+/// message that a peer sent before that start, as on the new driver it starts on
+/// ([`Cluster::wipe`]; `spec/cluster.md`, "Taking a leader"; ADR 0145), so it takes no
+/// leader while `parted` is stopped, as above.
+#[test]
+fn a_member_that_lost_its_log_reads_no_canvass_position_sent_before_it_lost_it() {
+    follows_no_deposed_leader(true);
+}
+
+/// The schedule of the two tests above; `late_canvass` makes the canvass positions sent
+/// while `parted` canvasses for t + 1 up to 10 s late.
+fn follows_no_deposed_leader(late_canvass: bool) {
     let ids = [0, 1, 2];
     let mut safety = Safety::new(&ids);
     let (mut cluster, old) = elected(7, &mut safety);
@@ -285,6 +303,14 @@ fn a_member_that_lost_its_log_follows_no_leader_a_later_term_deposed() {
     // A reaches nobody; `voter` still reaches A.
     cluster.cut_between(old, parted);
     cluster.cut_one_way(old, voter);
+    if late_canvass {
+        safety.run_until(&mut cluster, 30_000, "`parted` canvasses", |cluster| {
+            cluster.election_state(parted) == Some(cavalry_raft::ElectionState::Canvass)
+        });
+        cluster.set_delivery(0, 10_000);
+        safety.run(&mut cluster, 300);
+        cluster.set_delivery(0, 0);
+    }
     safety.run_until(&mut cluster, 30_000, "`parted` leads t + 1", |cluster| {
         cluster.role(parted) == Some(cavalry_raft::Role::Leader)
     });

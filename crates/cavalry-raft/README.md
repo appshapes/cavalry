@@ -418,7 +418,13 @@ commit path runs per message.
   makes the how-to's path: a follower on an empty directory while the other two run
   on, with no election, takes the leader once the other follower answers it.
   `tests/canvass_answer.rs` pins that answer, one core at a time: who sends it, what
-  it holds and to whom, and when nothing is sent.
+  it holds and to whom, and when nothing is sent. The rule rests on what a member
+  started again reads: nothing that a peer sent before its start, as on the new
+  driver it starts on ("Taking a leader", "What the second case rests on"). So
+  `memory::Cluster::wipe` and `memory::Cluster::restart` lose every consensus message
+  in flight to the member. With the review's schedule and the canvass positions of
+  the new leader's canvass held late past the wipe, `tests/lost_log_directory.rs`
+  fails without that loss.
 - Runs beside members of another version of its major, as the members of a cluster
   do while it is upgraded one member at a time (`spec/cluster.md`, "Versions and
   the upgrade"; ADR 0136; work item 231). A member writes its own version, 256 for

@@ -1223,6 +1223,47 @@ voter had reported a log the candidate's is at least. A standby takes a leader a
 every member did before this rule, since its appends count toward no commit and it
 has no vote.
 
+What the second case rests on. Its argument reads a voter's term, and the leader's
+log position, from the messages the member reads once it has lost its log, and a
+message names what its sender held when it was written. So the case rests on two
+facts about what the member reads from its start. First, it reads nothing that came,
+in a peer's stream, before what its run before had read: a voter that recorded a
+term before a message that run read names a term at least that one in every message
+it wrote after it. Second, where its run before held any of the log, it reads nothing
+that a peer's sender had sent before the start. So a new leadership term it reads
+was written after the start, but for the frames the next paragraph names, and so
+once the leader held every entry the member had acknowledged, and its log position
+is past them. Both come from the consensus stream, each peer's
+own publication to the member, read in the order written ("Members and streams"). A
+member's driver records its log into its log directory, so a driver that ran on
+through the member's stop holds a recording of the log's stream once the member held
+any of the log, and a start beside it with no `terms` file is refused ("A member's
+start"). A member that held any of the log and starts on a new log directory starts
+on a new driver, then. Each peer's stream begins on it in a new image, made once the
+member subscribes, by the peer's setup frame at the peer's sender position, and a
+datagram below it is dropped (`spec/udp.md`, "The receiver", steps 1 and 2). A member
+that held none of the log can start beside a driver that ran on. Its subscription
+then joins each image of a peer's stream that the driver kept at the image's rebuild
+position, which is past every frame a reader of the image has read (step 3), or it
+gets a new image, where the image was retired with the subscription of the run
+before (step 5; ADR 0068). Either way the first fact holds, and the second is not
+needed, since the member acknowledged nothing. A member that starts on the log
+directory it kept, with an empty log, needs neither: it recorded no term, so it
+counted toward no commit, and it keeps its candidate term, so it votes once in a
+term.
+
+One kind of frame is outside the second fact. A frame that a peer wrote before the
+start and that its sender had not yet sent is sent to the new image. The sender holds
+a frame back only while the readers of the image before are a receiver window behind
+(`spec/udp.md`, "The sender", and "The receiver", step 4). A new leadership term
+among such frames, written before the leader appended an entry the member
+acknowledged, would give the member a floor below that entry. For that, the image
+before must have read nothing of
+the leader's consensus stream while the leader wrote a receiver window of consensus
+messages to the member. And all that time the member must have gone on acknowledging
+the leader's entries, which it does for at most the leader heartbeat timeout once it
+hears nothing from its leader. This version does not rule that case out.
+
 A member whose election has closed sends no canvass position, so a member that lost
 its log would not hear it. So a member that holds a log, log leadership term id 0 or
 more or a position above 0, that does not lead, and that is in a state other than
