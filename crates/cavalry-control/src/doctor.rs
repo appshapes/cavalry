@@ -51,13 +51,14 @@ use cavalry_shm::counters::generated::{
     CLUSTER_APPEND_POSITION, CLUSTER_COMMIT_POSITION, CLUSTER_ELECTION_CAUSE,
     CLUSTER_ELECTION_STATE, CLUSTER_ELECTIONS_FAILED, CLUSTER_JOIN_POSITION_MISMATCHES,
     CLUSTER_LEADER_HEARTBEAT_TIMEOUTS, CLUSTER_LEADER_MEMBER_ID, CLUSTER_LEADER_QUORUM_LOSSES,
-    CLUSTER_LEADERSHIP_TERM_ID, CLUSTER_LOG_IMAGES_LOST, CLUSTER_LOG_RECORDINGS_FORGOTTEN,
-    CLUSTER_LOG_RECORDINGS_UNSYNCED, CLUSTER_LOG_RECORDINGS_UNWRITTEN,
-    CLUSTER_LOG_REPLICATIONS_UNAVAILABLE, CLUSTER_MESSAGES_REJECTED, CLUSTER_PROTOCOL_VERSION,
-    CLUSTER_REPLIES_STALE, CLUSTER_ROLE, CLUSTER_SERVICE_ACKS_REJECTED,
-    CLUSTER_SERVICE_SNAPSHOTS_FAILED, CLUSTER_SERVICE_SNAPSHOTS_PASSED_OVER,
-    CLUSTER_SNAPSHOTS_FAILED, CLUSTER_SNAPSHOTS_PASSED_OVER, CLUSTER_STANDBY,
-    CLUSTER_STANDBY_VOTE_REQUESTS, CLUSTER_TRUNCATIONS_REFUSED, CLUSTER_VOTERS,
+    CLUSTER_LEADERS_WITHHELD, CLUSTER_LEADERSHIP_TERM_ID, CLUSTER_LOG_IMAGES_LOST,
+    CLUSTER_LOG_RECORDINGS_FORGOTTEN, CLUSTER_LOG_RECORDINGS_UNSYNCED,
+    CLUSTER_LOG_RECORDINGS_UNWRITTEN, CLUSTER_LOG_REPLICATIONS_UNAVAILABLE,
+    CLUSTER_MESSAGES_REJECTED, CLUSTER_PROTOCOL_VERSION, CLUSTER_REPLIES_STALE, CLUSTER_ROLE,
+    CLUSTER_SERVICE_ACKS_REJECTED, CLUSTER_SERVICE_SNAPSHOTS_FAILED,
+    CLUSTER_SERVICE_SNAPSHOTS_PASSED_OVER, CLUSTER_SNAPSHOTS_FAILED, CLUSTER_SNAPSHOTS_PASSED_OVER,
+    CLUSTER_STANDBY, CLUSTER_STANDBY_VOTE_REQUESTS, CLUSTER_TRUNCATIONS_REFUSED,
+    CLUSTER_VOTE_FLOOR, CLUSTER_VOTERS, CLUSTER_VOTES_WITHHELD,
 };
 use cavalry_shm::counters::{CounterId, CountersError, CountersReader, Scope};
 
@@ -1021,7 +1022,7 @@ const DOC_CLUSTER: &str = "docs/how-to/run-a-cluster.md#when-it-does-not-work";
 /// was told of at its start and passed over (ADR 0132). The service counts the
 /// last two under its member's id. The last is a standby's: a request vote that
 /// reached it, from a member whose string gives it a vote (ADR 0134).
-const MEMBER_COUNTS: [CounterId; 12] = [
+const MEMBER_COUNTS: [CounterId; 14] = [
     CLUSTER_MESSAGES_REJECTED,
     CLUSTER_LEADER_HEARTBEAT_TIMEOUTS,
     CLUSTER_LOG_IMAGES_LOST,
@@ -1034,6 +1035,8 @@ const MEMBER_COUNTS: [CounterId; 12] = [
     CLUSTER_SERVICE_SNAPSHOTS_FAILED,
     CLUSTER_SERVICE_SNAPSHOTS_PASSED_OVER,
     CLUSTER_STANDBY_VOTE_REQUESTS,
+    CLUSTER_VOTES_WITHHELD,
+    CLUSTER_LEADERS_WITHHELD,
 ];
 
 /// Where a cluster session's findings are explained.
@@ -1086,6 +1089,10 @@ struct MemberCounters {
     /// as for a member of a build older than the counter: every build of version 0,
     /// and the first build of version 1.
     protocol_version: Option<i64>,
+    /// `cluster.vote_floor`: the position below which the member withholds its vote,
+    /// −1 for none (ADR 0145); `None` while the counters file holds no such record, as
+    /// for a member of a build older than the counter.
+    vote_floor: Option<i64>,
     /// The values of [`MEMBER_COUNTS`], in its order.
     counts: [i64; MEMBER_COUNTS.len()],
 }
@@ -1461,6 +1468,8 @@ fn cluster_checks(
             member.standby = Some(value);
         } else if type_id == CLUSTER_PROTOCOL_VERSION.0 {
             member.protocol_version = Some(value);
+        } else if type_id == CLUSTER_VOTE_FLOOR.0 {
+            member.vote_floor = Some(value);
         } else if let Some(count) = MEMBER_COUNTS
             .iter()
             .position(|counter| counter.0 == type_id)
@@ -1475,8 +1484,9 @@ fn cluster_checks(
         for member in &members {
             member_findings(member, cluster, findings);
         }
-        // The six of `member_findings`, and one for each of the member's counts.
-        checks += 6 + MEMBER_COUNTS.len();
+        // The seven of `member_findings`, the vote floor's among them (ADR 0145), and
+        // one for each of the member's counts.
+        checks += 7 + MEMBER_COUNTS.len();
     }
     if sessions {
         stale.sort_by_key(|(session, counter, _)| (*session, counter.0));
@@ -1962,10 +1972,37 @@ fn member_findings(
             doc: DOC_CLUSTER,
         });
     }
+    // A member below its vote floor withholds its vote (ADR 0145): the gauge's text,
+    // with where its log is and how far it has to go, while it lasts, and nothing once
+    // its log has reached the floor.
+    if let Some(floor) = member.vote_floor
+        && floor >= 0
+        && append < floor
+        && let Some(def) = COUNTERS.iter().find(|def| def.id == CLUSTER_VOTE_FLOOR)
+    {
+        findings.push(Finding {
+            check: def.name,
+            level: Level::Warn,
+            message: format!(
+                "member {id}'s {} is {floor} and its cluster.append_position {append}, {} \
+                 bytes short: {}",
+                def.name,
+                floor - append,
+                def.doctor
+            ),
+            doc: DOC_CLUSTER,
+        });
+    }
     for (counter, value) in MEMBER_COUNTS.iter().zip(member.counts) {
         let Some(def) = COUNTERS.iter().find(|def| def.id == *counter) else {
             continue;
         };
+        // The leaders a member whose log is empty passed over are a fault only while
+        // it still has none: a new cluster's member that starts after the others have
+        // elected can pass over one before a follower's answer reaches it (ADR 0145).
+        if *counter == CLUSTER_LEADERS_WITHHELD && closed {
+            continue;
+        }
         if value > 0 {
             findings.push(Finding {
                 check: def.name,
@@ -7162,6 +7199,118 @@ mod tests {
     /// number in the string doctor was given. A request vote that reached it is
     /// reported with what it means: two members run with strings that differ (ADR
     /// 0134).
+    /// A member that came back on an empty log directory and has not caught up with
+    /// its vote floor is named, with where its log is and how far it has to go, and
+    /// the requests it left unanswered meanwhile are reported with what they mean
+    /// (ADR 0145). Once its log reaches the floor, doctor says nothing of it. One that
+    /// has taken no leader yet, waiting to hear a voter, is reported with the leaders
+    /// it passed over and what to start.
+    #[test]
+    fn a_member_below_its_vote_floor_is_named_and_its_withheld_votes_explained() {
+        let below = [
+            (CLUSTER_ROLE, 0),
+            (CLUSTER_ELECTION_STATE, 17),
+            (CLUSTER_LEADERSHIP_TERM_ID, 2),
+            (CLUSTER_LEADER_MEMBER_ID, 1),
+            (CLUSTER_APPEND_POSITION, 4096),
+            (CLUSTER_VOTE_FLOOR, 1 << 20),
+            (CLUSTER_VOTES_WITHHELD, 3),
+        ];
+        let (_, findings) = cluster_findings("vote-floor-below", 2, &below);
+        let found: Vec<&str> = findings.iter().map(|finding| finding.check).collect();
+        assert_eq!(
+            found,
+            [
+                "cluster-member",
+                "cluster.vote_floor",
+                "cluster.votes_withheld"
+            ],
+            "{findings:?}"
+        );
+        let floor = &findings[1];
+        assert_eq!(floor.level, Level::Warn);
+        assert!(
+            floor.message.starts_with(
+                "member 2's cluster.vote_floor is 1048576 and its cluster.append_position \
+                 4096, 1044480 bytes short: This member started on an empty log directory"
+            ),
+            "{}",
+            floor.message
+        );
+        assert!(
+            floor
+                .message
+                .contains("the cluster tolerates one failed member fewer meanwhile"),
+            "{}",
+            floor.message
+        );
+        assert_eq!(floor.doc, DOC_CLUSTER);
+        let withheld = &findings[2];
+        assert!(
+            withheld
+                .message
+                .starts_with("member 2's cluster.votes_withheld is 3: This member lost its log"),
+            "{}",
+            withheld.message
+        );
+
+        // At its floor it votes as any voter, and doctor names nothing.
+        let reached = [
+            (CLUSTER_ROLE, 0),
+            (CLUSTER_ELECTION_STATE, 17),
+            (CLUSTER_LEADERSHIP_TERM_ID, 2),
+            (CLUSTER_LEADER_MEMBER_ID, 1),
+            (CLUSTER_APPEND_POSITION, 1 << 20),
+            (CLUSTER_VOTE_FLOOR, 1 << 20),
+            (CLUSTER_VOTES_WITHHELD, 0),
+        ];
+        let (_, findings) = cluster_findings("vote-floor-reached", 2, &reached);
+        let found: Vec<&str> = findings.iter().map(|finding| finding.check).collect();
+        assert_eq!(found, ["cluster-member"], "{findings:?}");
+
+        // Before it takes a leader it has no floor, and the leaders it passed over
+        // name the voter it waits for.
+        let waiting = [
+            (CLUSTER_ROLE, 0),
+            (CLUSTER_ELECTION_STATE, 1),
+            (CLUSTER_LEADERSHIP_TERM_ID, -1),
+            (CLUSTER_APPEND_POSITION, 0),
+            (CLUSTER_VOTE_FLOOR, -1),
+            (CLUSTER_LEADERS_WITHHELD, 4),
+        ];
+        let (_, findings) = cluster_findings("vote-floor-waiting", 2, &waiting);
+        let found: Vec<&str> = findings.iter().map(|finding| finding.check).collect();
+        assert!(!found.contains(&"cluster.vote_floor"), "{findings:?}");
+        let passed_over = findings
+            .iter()
+            .find(|finding| finding.check == "cluster.leaders_withheld")
+            .expect("the leaders it passed over are reported");
+        assert_eq!(passed_over.level, Level::Warn);
+        assert!(
+            passed_over.message.starts_with(
+                "member 2's cluster.leaders_withheld is 4: This member started on an empty \
+                 log directory and a leader answered it"
+            ),
+            "{}",
+            passed_over.message
+        );
+        assert_eq!(passed_over.doc, DOC_CLUSTER);
+
+        // Once it has taken a leader, the leaders it passed over before are history.
+        let joined = [
+            (CLUSTER_ROLE, 0),
+            (CLUSTER_ELECTION_STATE, 17),
+            (CLUSTER_LEADERSHIP_TERM_ID, 2),
+            (CLUSTER_LEADER_MEMBER_ID, 1),
+            (CLUSTER_APPEND_POSITION, 1 << 20),
+            (CLUSTER_VOTE_FLOOR, 1 << 20),
+            (CLUSTER_LEADERS_WITHHELD, 1),
+        ];
+        let (_, findings) = cluster_findings("vote-floor-joined", 2, &joined);
+        let found: Vec<&str> = findings.iter().map(|finding| finding.check).collect();
+        assert_eq!(found, ["cluster-member"], "{findings:?}");
+    }
+
     #[test]
     fn a_standby_is_named_and_is_told_what_elects_its_leader() {
         let standby = [
@@ -7521,7 +7670,7 @@ mod tests {
 
         // A follower that follows: the note alone, with who it is and what it knows.
         let (checks, findings) = cluster_findings("cluster-follower", 1, &follower);
-        assert_eq!(checks, 18);
+        assert_eq!(checks, 21);
         assert_eq!(findings.len(), 1, "{findings:?}");
         assert_eq!(findings[0].check, "cluster-member");
         assert_eq!(findings[0].level, Level::Note);
@@ -7698,7 +7847,7 @@ mod tests {
         let dir = TestDir::new("cluster-session-member");
         let reader = session_file(&dir, 7, 2, Some((1, &follower)));
         let mut findings = Vec::new();
-        assert_eq!(cluster_checks(&reader, true, None, &mut findings), 19);
+        assert_eq!(cluster_checks(&reader, true, None, &mut findings), 22);
         let found: Vec<&str> = findings.iter().map(|finding| finding.check).collect();
         assert_eq!(
             found,

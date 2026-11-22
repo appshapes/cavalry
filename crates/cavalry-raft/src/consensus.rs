@@ -228,7 +228,7 @@ pub trait Io {
     fn log_leadership_term_id(&mut self) -> i64;
 
     /// The vote floor the member's record of terms holds, −1 for none: the position
-    /// below which it casts no vote and seeks none, what [`Io::store_vote_floor`] wrote,
+    /// below which it withholds its vote and seeks none, what [`Io::store_vote_floor`] wrote,
     /// before this start or since (`spec/cluster.md`, "A member that lost its log";
     /// ADR 0145). Read once with [`Io::candidate_term`], and from memory as it is.
     fn vote_floor(&mut self) -> i64;
@@ -982,7 +982,7 @@ pub struct Consensus {
     state_since_ns: u64,
     /// The highest term this member has proposed or followed.
     candidate_term: i64,
-    /// The position below which this member casts no vote and seeks none, which it
+    /// The position below which this member withholds its vote and seeks none, which it
     /// stored when it took a leader with its log empty; −1 for none (ADR 0145).
     vote_floor: i64,
     /// The highest term in this member's record of terms.
@@ -2449,7 +2449,7 @@ impl Consensus {
         withholds(self.own_report(), self.vote_floor, log_heard)
     }
 
-    /// The position below which this member casts no vote and seeks none, −1 for
+    /// The position below which this member withholds its vote and seeks none, −1 for
     /// none: the end of the log of the leader it took with its log empty (`spec/cluster.md`,
     /// "A member that lost its log"; ADR 0145), stored in its record of terms.
     pub fn vote_floor(&self) -> i64 {
