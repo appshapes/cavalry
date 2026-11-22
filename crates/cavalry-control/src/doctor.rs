@@ -1997,10 +1997,13 @@ fn member_findings(
         let Some(def) = COUNTERS.iter().find(|def| def.id == *counter) else {
             continue;
         };
-        // The leaders a member whose log is empty passed over are a fault only while
-        // it still has none: a new cluster's member that starts after the others have
-        // elected can pass over one before a follower's answer reaches it (ADR 0145).
-        if *counter == CLUSTER_LEADERS_WITHHELD && closed {
+        // The core passes over a leader only while the member's log is empty (ADR
+        // 0145), and the count does not fall. It is a fault only while the member
+        // still has no leader and its log is still empty: a new cluster's member that
+        // starts after the others have elected can pass over one before a follower's
+        // answer reaches it, and once its log holds anything, the term's first entry
+        // at least, a later election's open state says nothing of what it counted.
+        if *counter == CLUSTER_LEADERS_WITHHELD && (closed || append > 0) {
             continue;
         }
         if value > 0 {
@@ -7193,7 +7196,8 @@ mod tests {
     /// the requests it left unanswered meanwhile are reported with what they mean
     /// (ADR 0145). Once its log reaches the floor, doctor says nothing of it. One that
     /// has taken no leader yet, waiting to hear a voter, is reported with the leaders
-    /// it passed over and what to start.
+    /// it passed over and what to start; once it has a leader, or its log holds
+    /// anything, in a later election too, those are history and are not reported.
     #[test]
     fn a_member_below_its_vote_floor_is_named_and_its_withheld_votes_explained() {
         let below = [
@@ -7298,6 +7302,22 @@ mod tests {
         let (_, findings) = cluster_findings("vote-floor-joined", 2, &joined);
         let found: Vec<&str> = findings.iter().map(|finding| finding.check).collect();
         assert_eq!(found, ["cluster-member"], "{findings:?}");
+
+        // In a later election, its leader gone and its log caught up, they are history
+        // still: the line names no voter it waits for, since it waits for none.
+        let later = [
+            (CLUSTER_ROLE, 0),
+            (CLUSTER_ELECTION_STATE, 1),
+            (CLUSTER_LEADERSHIP_TERM_ID, 2),
+            (CLUSTER_LEADER_MEMBER_ID, -1),
+            (CLUSTER_APPEND_POSITION, 1 << 20),
+            (CLUSTER_VOTE_FLOOR, 1 << 20),
+            (CLUSTER_LEADERS_WITHHELD, 1),
+        ];
+        let (_, findings) = cluster_findings("vote-floor-later-election", 2, &later);
+        let found: Vec<&str> = findings.iter().map(|finding| finding.check).collect();
+        assert!(!found.contains(&"cluster.leaders_withheld"), "{findings:?}");
+        assert!(found.contains(&"cluster-no-leader"), "{findings:?}");
     }
 
     const THREE_VOTERS_AND_A_STANDBY: &str = "0,127.0.0.1:9000,127.0.0.1:9001,127.0.0.1:9002,127.0.0.1:9003,127.0.0.1:9004\

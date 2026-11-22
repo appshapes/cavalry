@@ -554,7 +554,9 @@ committed once a quorum, two of three, has it on disk.
   one it waits for. Start that member on the log directory it kept, or mend the path
   between the two, and this member takes its leader within 100 ms. A member of a
   build before ADR 0145 does not answer it until that member canvasses in an
-  election or is upgraded. The line goes once this member has a leader.
+  election or is upgraded. `cavalry doctor` prints the line only while this
+  member's log is empty and it has no leader. The count stays until this member
+  starts again, so in a later election it says nothing of why there is no leader.
 - `WARN cluster.service_snapshots_passed_over`: the service beside this member was
   told of a snapshot when it started, and could not take it. It read the log from
   position 0. Nothing committed is lost. If this member's log no longer begins at
