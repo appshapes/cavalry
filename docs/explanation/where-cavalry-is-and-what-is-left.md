@@ -83,8 +83,8 @@ dedicated hosts (ADR 0016, ADR 0034, ADR 0044), a weekly email of the changes (A
 - **Decisions.** 137 ADRs, 0001 to 0137, all Accepted but four that later ones
   superseded.
 - **Specification.** Ten pages under `spec/`, each with a version. The client
-  protocol is at version 10, the C ABI at 5, the durable log and the UDP transport at
-  4, and the cluster protocol at 1.
+  protocol is at version 10, the C ABI at 5, the UDP transport at 4, the durable log
+  at 5 since 2026-11-22, and the cluster protocol at 1.
 - **Code.** 97,279 lines of Rust under `crates/*/src`, unit tests included, and 969
   test functions under `crates/`. `cavalry-raft` is 15,851 lines; on 2026-11-09 it
   was two.
@@ -163,7 +163,7 @@ the line.
 | Record and replay | Works: from a position or an instant, bounded, following a live recording, onto shared memory or UDP | Done |
 | List and describe recordings | `cavalry doctor` lists the live ones; no call and no command lists the stopped ones, and the id of one is what `cavalry record` printed | Feature 7 |
 | Truncate, purge and delete | Works on a stopped recording, by command | Done |
-| A checksum beside recorded frames | None; a power loss can leave a frame whose body is damaged | Feature 3 |
+| A checksum beside recorded frames | None, and none is planned. Since 2026-11-22 a recording that this version's recorder was making at a crash ends at the position it had synced, so a power loss leaves in it no frame whose body was lost (ADR 0144). A recording that a driver of an earlier version was making at the loss keeps what its files hold. Nothing checks a frame below the synced position, so a disk that keeps bytes wrongly goes unseen | Done, by the synced position |
 | A client that drives a remote driver's recordings; a replay that merges into a live stream | Absent | Out |
 | Election and a commit by quorum | Works; the membership is a string of up to 8 members | Done |
 | Sessions in six languages | Work: connect, redirect, follow the leader, keepalive, close. At most 10 sessions; a message of at most 1,344 bytes | Feature 6 |
@@ -189,7 +189,7 @@ the line.
 | The leader's service is gone, or its recorder cannot sync | Nothing detects a service that is gone (ADR 0118), and no test holds what a member does whose recorder cannot sync | It gives the lead up | 4 |
 | A follower is cut off or started again | It rejoins about 10 s after the cut is mended; tests over drivers | As today | Done |
 | A member takes the log slowly | It paces the whole cluster under `fc=min`; `doctor` has no finding | `doctor` names the member | 4 |
-| A host loses power | Held by work item 287, three pull requests on `master`: the driver cuts each recording a crash left live to what it had synced, and the member starts on its directory again (ADR 0143, ADR 0144). A test over three drivers has all three hosts lose power together. A member that lost power under a driver of an earlier version still stays out | A check at the start | Done |
+| A host loses power | Since 2026-11-22, held by work item 287, three pull requests on `master`: the driver cuts each recording a crash left live to what it had synced, and the member starts on its directory again (ADR 0143, ADR 0144). A test over three drivers has all three hosts lose power together. A member that lost power under a driver of an earlier version still stays out | A check at the start | Done |
 | A member's log directory is lost | An operator's rule: never start one member alone on a new directory | The member comes back with no vote on what it forgot | 3 |
 | Members are started with different members strings | Three rules that no member checks (ADR 0134) | Members tell each other, and `doctor` names the one | 5 |
 | A member is lost after the logs were purged | It cannot be replaced: no member starts from a peer's snapshot | Replaced on a new host while the cluster runs | 5 |
@@ -211,13 +211,22 @@ production, each on a log directory it keeps.
   its snapshots cover. It uses no cluster call.
 - It reads the catalog through `cavalry-log`, because the client lists no
   recordings. Feature 7 gives it that call.
-- The durable log's format has moved from version 2 to 4 since its pin. Each version
-  added a file for cluster members and changed nothing a server's directory holds, so
+- The durable log's format has moved from version 2 to 5 since its pin. Versions 3
+  and 4 each added a file for cluster members and changed nothing a server's
+  directory holds. Since 2026-11-22, version 5 keeps each recording's synced position
+  in bytes of its time index that were reserved. No index the pin wrote has a synced
+  position, and version 5 recovers such an index as version 4 did (ADR 0144). So
   such a directory opens under `master`. Since 2026-11-22,
   `conformance/upgrade/log-directory.sh` holds that in every pull request: it builds
   the tree at 620a2e29, has it write a directory as a server writes its own, and
   opens it in place under the tree under test
   ([ADR 0141](../decisions/0141-open-in-place-a-log-directory-written-by-the-tree-that-servers-run-and-build-that-tree-on-every-run.md)).
+  Version 5 changes one thing a server's directory keeps: after `master`'s driver
+  crashes, by its process or by its host, the driver's next start cuts the recording
+  that the crash left live to the position it had synced. A power loss then leaves
+  no frame whose body was lost. A crash of the process alone drops at most 1 s of
+  the feed, which version 4 kept. The server syncs before each answer, so no record
+  it answered is dropped.
 - Its standby, work item 312, waits on Cavalry's cluster. Condition 9 of the line
   ends by telling the owner that the cluster is ready for the second node.
 
@@ -248,8 +257,8 @@ each. Their state today:
 | 8. Redundancy is restored while the cluster runs, and the cluster runs for days | Not started: no start from a peer's snapshot, no purge while running, no job across hosts, no cluster soak |
 | 9. What Brigade's server runs is a gate here, and the release carries its data | The three gates are in since 2026-11-22 (feature 2): the feed's shape in `just test`, a log directory of 620a2e29 opened in place in `just conformance`, and the server's suite against `master` each night. Left for features 10 and 12: the server builds from the published crates, the candidate's soak, and the notice of work item 312 |
 
-Row 9 is the state on 2026-11-22, when feature 2 landed. Every other row is the state
-at 20741de3.
+Row 9 is the state on 2026-11-22, when feature 2 landed. Rows 3 and 6 are the state on
+2026-11-22, when work item 287 landed. Every other row is the state at 20741de3.
 
 ## The roadmap
 
@@ -379,8 +388,6 @@ condition of ADR 0138.
   message longer than one frame each change the cluster protocol. Timers add an
   entry to the log, and the first version that does so must say when a leader may
   use it (ADR 0136, Revisit).
-- **Work item 287.** It changes the on-disk format, and its ADR asks for the cost on
-  the recorder's thread before it chooses.
 - **The native library in five package formats.** Nothing in the repository has
   tried it.
 - **A package name that is taken.** Feature 10 finds out first.
