@@ -40,7 +40,7 @@ import (
 // The header's constants, as the ABI names them (spec/c-abi.md), in Go's casing.
 const (
 	DirEnv                            = "CAVALRY_DIR" // CAVALRY_DIR_ENV
-	ABIVersion                        = 5             // CAVALRY_ABI_VERSION
+	ABIVersion                        = 6             // CAVALRY_ABI_VERSION
 	MaxImages                         = 256           // CAVALRY_MAX_IMAGES
 	ServiceLogStreamID                = 104           // CAVALRY_SERVICE_LOG_STREAM_ID
 	NullPosition                      = -1            // CAVALRY_NULL_POSITION
@@ -103,6 +103,10 @@ const (
 	ErrClusterEntry                   = 144           // CAVALRY_ERR_CLUSTER_ENTRY
 	ErrClusterNoEntry                 = 145           // CAVALRY_ERR_CLUSTER_NO_ENTRY
 	ErrClusterAction                  = 146           // CAVALRY_ERR_CLUSTER_ACTION
+	ErrClusterNoSnapshotDue           = 147           // CAVALRY_ERR_CLUSTER_NO_SNAPSHOT_DUE
+	ErrClusterSnapshotTooLong         = 148           // CAVALRY_ERR_CLUSTER_SNAPSHOT_TOO_LONG
+	ErrClusterSnapshotFailed          = 149           // CAVALRY_ERR_CLUSTER_SNAPSHOT_FAILED
+	ErrClusterRestoreTooLate          = 150           // CAVALRY_ERR_CLUSTER_RESTORE_TOO_LATE
 	ClosedByUser                      = 1             // CAVALRY_CLOSED_BY_USER
 	ClosedDriverClosed                = 2             // CAVALRY_CLOSED_DRIVER_CLOSED
 	ClosedDriverTimeout               = 3             // CAVALRY_CLOSED_DRIVER_TIMEOUT
@@ -119,6 +123,10 @@ const (
 	ClusterEntrySessionClose          = 3             // CAVALRY_CLUSTER_ENTRY_SESSION_CLOSE
 	ClusterEntryNewLeadershipTerm     = 4             // CAVALRY_CLUSTER_ENTRY_NEW_LEADERSHIP_TERM
 	ClusterEntryOther                 = 5             // CAVALRY_CLUSTER_ENTRY_OTHER
+	ClusterEntrySnapshot              = 6             // CAVALRY_CLUSTER_ENTRY_SNAPSHOT
+	ClusterRestoredNoMember           = 1             // CAVALRY_CLUSTER_RESTORED_NO_MEMBER
+	ClusterRestoredFromStart          = 2             // CAVALRY_CLUSTER_RESTORED_FROM_START
+	ClusterRestoredState              = 3             // CAVALRY_CLUSTER_RESTORED_STATE
 	ClusterReplySent                  = 1             // CAVALRY_CLUSTER_REPLY_SENT
 	ClusterReplyNotAnswering          = 2             // CAVALRY_CLUSTER_REPLY_NOT_ANSWERING
 	ClusterReplyRetry                 = 3             // CAVALRY_CLUSTER_REPLY_RETRY

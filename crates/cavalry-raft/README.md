@@ -451,7 +451,8 @@ commit path runs per message.
   and the tutorial that runs three members, a service and a client,
   [Run a cluster in ten minutes](../../docs/tutorials/run-a-cluster.md).
 - To come, each with its work item: the gate across three hosts (work item 232), a
-  service's snapshot through the C ABI and the five clients (work item 335), and a
+  service's snapshot through the five clients, which the C ABI has since its
+  version 6 (work item 335; ADR 0146), and a
   start from a peer's snapshot, for a member that lost its log directory beside
   members whose logs no longer begin at position 0 (work item 365).
 

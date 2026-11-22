@@ -23,7 +23,7 @@ public static unsafe partial class Abi
     internal const string Library = "cavalry_ffi";
 
     public const string DIR_ENV = "CAVALRY_DIR"; // CAVALRY_DIR_ENV
-    public const int ABI_VERSION = 5; // CAVALRY_ABI_VERSION
+    public const int ABI_VERSION = 6; // CAVALRY_ABI_VERSION
     public const int MAX_IMAGES = 256; // CAVALRY_MAX_IMAGES
     public const int SERVICE_LOG_STREAM_ID = 104; // CAVALRY_SERVICE_LOG_STREAM_ID
     public const int NULL_POSITION = -1; // CAVALRY_NULL_POSITION
@@ -86,6 +86,10 @@ public static unsafe partial class Abi
     public const int ERR_CLUSTER_ENTRY = 144; // CAVALRY_ERR_CLUSTER_ENTRY
     public const int ERR_CLUSTER_NO_ENTRY = 145; // CAVALRY_ERR_CLUSTER_NO_ENTRY
     public const int ERR_CLUSTER_ACTION = 146; // CAVALRY_ERR_CLUSTER_ACTION
+    public const int ERR_CLUSTER_NO_SNAPSHOT_DUE = 147; // CAVALRY_ERR_CLUSTER_NO_SNAPSHOT_DUE
+    public const int ERR_CLUSTER_SNAPSHOT_TOO_LONG = 148; // CAVALRY_ERR_CLUSTER_SNAPSHOT_TOO_LONG
+    public const int ERR_CLUSTER_SNAPSHOT_FAILED = 149; // CAVALRY_ERR_CLUSTER_SNAPSHOT_FAILED
+    public const int ERR_CLUSTER_RESTORE_TOO_LATE = 150; // CAVALRY_ERR_CLUSTER_RESTORE_TOO_LATE
     public const int CLOSED_BY_USER = 1; // CAVALRY_CLOSED_BY_USER
     public const int CLOSED_DRIVER_CLOSED = 2; // CAVALRY_CLOSED_DRIVER_CLOSED
     public const int CLOSED_DRIVER_TIMEOUT = 3; // CAVALRY_CLOSED_DRIVER_TIMEOUT
@@ -102,6 +106,10 @@ public static unsafe partial class Abi
     public const int CLUSTER_ENTRY_SESSION_CLOSE = 3; // CAVALRY_CLUSTER_ENTRY_SESSION_CLOSE
     public const int CLUSTER_ENTRY_NEW_LEADERSHIP_TERM = 4; // CAVALRY_CLUSTER_ENTRY_NEW_LEADERSHIP_TERM
     public const int CLUSTER_ENTRY_OTHER = 5; // CAVALRY_CLUSTER_ENTRY_OTHER
+    public const int CLUSTER_ENTRY_SNAPSHOT = 6; // CAVALRY_CLUSTER_ENTRY_SNAPSHOT
+    public const int CLUSTER_RESTORED_NO_MEMBER = 1; // CAVALRY_CLUSTER_RESTORED_NO_MEMBER
+    public const int CLUSTER_RESTORED_FROM_START = 2; // CAVALRY_CLUSTER_RESTORED_FROM_START
+    public const int CLUSTER_RESTORED_STATE = 3; // CAVALRY_CLUSTER_RESTORED_STATE
     public const int CLUSTER_REPLY_SENT = 1; // CAVALRY_CLUSTER_REPLY_SENT
     public const int CLUSTER_REPLY_NOT_ANSWERING = 2; // CAVALRY_CLUSTER_REPLY_NOT_ANSWERING
     public const int CLUSTER_REPLY_RETRY = 3; // CAVALRY_CLUSTER_REPLY_RETRY
@@ -333,6 +341,16 @@ public static unsafe partial class Abi
 
     [LibraryImport(Library)]
     internal static partial int cavalry_cluster_service_sessions(nint service);
+
+    [LibraryImport(Library)]
+    [return: MarshalAs(UnmanagedType.U1)]
+    internal static partial bool cavalry_cluster_service_snapshot_due(nint service, out long position);
+
+    [LibraryImport(Library)]
+    internal static partial int cavalry_cluster_service_snapshot(nint service, nint client, byte* state, nuint length);
+
+    [LibraryImport(Library)]
+    internal static partial int cavalry_cluster_service_restore(nint service, nint client, out byte* state, out nuint length);
 
     [LibraryImport(Library)]
     internal static partial int cavalry_cluster_service_close(nint service, nint client);

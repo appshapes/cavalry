@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Write spec/vectors/c-abi.json: the vectors for spec/c-abi.md, version 5.
+"""Write spec/vectors/c-abi.json: the vectors for spec/c-abi.md, version 6.
 
 This script is the page's reference, independent of the Rust code and of the committed
 header: it lists, from the page's own tables, every opaque type, every struct with its
@@ -17,7 +17,7 @@ and a reader checks a header against them (spec/README.md, "Conventions").
 import json
 from pathlib import Path
 
-ABI_VERSION = 5
+ABI_VERSION = 6
 
 OPAQUE_TYPES = [
     "cavalry_context_t", "cavalry_t", "cavalry_publication_t", "cavalry_subscription_t",
@@ -227,6 +227,12 @@ FUNCTIONS = [
     fn("int64_t", "cavalry_cluster_service_position", CSERVICE),
     fn("bool", "cavalry_cluster_service_answers", CSERVICE),
     fn("int", "cavalry_cluster_service_sessions", CSERVICE),
+    # Version 6: a service's snapshot and its start from one (ADR 0146).
+    fn("bool", "cavalry_cluster_service_snapshot_due", CSERVICE, ("int64_t *", "position")),
+    fn("int", "cavalry_cluster_service_snapshot", SERVICE, CLIENT,
+       ("const uint8_t *", "state"), ("size_t", "length")),
+    fn("int", "cavalry_cluster_service_restore", SERVICE, CLIENT,
+       ("const uint8_t **", "state"), ("size_t *", "length")),
     fn("int", "cavalry_cluster_service_close", SERVICE, CLIENT),
     # errors and version
     fn("int", "cavalry_errcode"),
@@ -307,6 +313,10 @@ DEFINES = {
     "CAVALRY_ERR_CLUSTER_ENTRY": 144,
     "CAVALRY_ERR_CLUSTER_NO_ENTRY": 145,
     "CAVALRY_ERR_CLUSTER_ACTION": 146,
+    "CAVALRY_ERR_CLUSTER_NO_SNAPSHOT_DUE": 147,
+    "CAVALRY_ERR_CLUSTER_SNAPSHOT_TOO_LONG": 148,
+    "CAVALRY_ERR_CLUSTER_SNAPSHOT_FAILED": 149,
+    "CAVALRY_ERR_CLUSTER_RESTORE_TOO_LATE": 150,
     # why a client closed, `Closed`'s reasons in order
     "CAVALRY_CLOSED_BY_USER": 1,
     "CAVALRY_CLOSED_DRIVER_CLOSED": 2,
@@ -320,12 +330,18 @@ DEFINES = {
     "CAVALRY_REPLAY_STOP_STOPPED": 1,
     "CAVALRY_REPLAY_STOP_NOT_CONNECTED": 2,
     "CAVALRY_REPLAY_STOP_FAILED": 3,
-    # what a committed entry is, `Entry`'s five in order
+    # what a committed entry is: `Entry`'s kinds, with `Snapshot` after `Other`, so that
+    # version 5's values keep their meaning
     "CAVALRY_CLUSTER_ENTRY_SESSION_MESSAGE": 1,
     "CAVALRY_CLUSTER_ENTRY_SESSION_OPEN": 2,
     "CAVALRY_CLUSTER_ENTRY_SESSION_CLOSE": 3,
     "CAVALRY_CLUSTER_ENTRY_NEW_LEADERSHIP_TERM": 4,
     "CAVALRY_CLUSTER_ENTRY_OTHER": 5,
+    "CAVALRY_CLUSTER_ENTRY_SNAPSHOT": 6,
+    # what a service found to start from, `Restored`'s three in order
+    "CAVALRY_CLUSTER_RESTORED_NO_MEMBER": 1,
+    "CAVALRY_CLUSTER_RESTORED_FROM_START": 2,
+    "CAVALRY_CLUSTER_RESTORED_STATE": 3,
     # what became of a reply, `Reply`'s six in order
     "CAVALRY_CLUSTER_REPLY_SENT": 1,
     "CAVALRY_CLUSTER_REPLY_NOT_ANSWERING": 2,

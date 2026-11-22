@@ -111,7 +111,10 @@ def c_arg(param, header, index: int, lines: list, struct_names: set, opaque: set
         return name
     if base.endswith(" **"):
         inner = base[:-3]
-        lines.append(f"  {inner} *{name} = NULL;")
+        # The pointer keeps the parameter's `const`: a `uint8_t **` passed where the
+        # header takes `const uint8_t **` is an incompatible pointer type in C.
+        qualifier = "const " if const else ""
+        lines.append(f"  {qualifier}{inner} *{name} = NULL;")
         return f"&{name}"
     if base.endswith(" *"):
         inner = base[:-2]
@@ -167,11 +170,21 @@ def c_return(fn, header, call: str, outs: list, lines: list, opaque: set) -> Non
         lines.append(f"  return {make};")
         return
     # A function with out parameters returns an array: the result, then each out value;
-    # a handle out parameter is the external, or null when the result is not 0.
+    # a handle out parameter is the external, or null when the result is not 0; bytes
+    # the library holds are a Buffer that copies them, or null where it gave none.
     lines.append(f"  napi_value tuple; napi_create_array_with_length(env, {len(outs) + 1}, &tuple);")
     lines.append(f"  napi_set_element(env, tuple, 0, {make});")
     for i, (kind, name) in enumerate(outs, 1):
-        if kind == "handle":
+        if kind == "bytes":
+            data, length = name
+            lines.append(f"  napi_value {data}_copy = make_null(env);")
+            lines.append(f"  if ({data} != NULL && napi_create_buffer_copy(env, {length}, {data}, NULL, &{data}_copy) != napi_ok) {{")
+            lines.append(f"    napi_throw_error(env, NULL, \"{fn.name}: Node could not copy the bytes the library "
+                         f"gave; free memory and call again\");")
+            lines.append("    return NULL;")
+            lines.append("  }")
+            lines.append(f"  napi_set_element(env, tuple, {i}, {data}_copy);")
+        elif kind == "handle":
             lines.append(f"  napi_set_element(env, tuple, {i}, make_external(env, (void *) {name}));")
         elif kind == "int64_t":
             lines.append(f"  napi_set_element(env, tuple, {i}, make_int64(env, {name}));")
@@ -228,6 +241,15 @@ def write_addon(header) -> str:
                 i += 2
                 continue
             base = t[6:] if t.startswith("const ") else t
+            # Bytes the library holds and their count, as a restored state is: the two
+            # out parameters come back as one Buffer, a copy, since the library frees
+            # the bytes at a later call (spec/c-abi.md, "Lifetimes").
+            if base == "uint8_t **" and nxt is not None and " ".join(nxt.type.split()) == "size_t *":
+                body.append(f"  const uint8_t *{p.name} = NULL; size_t {nxt.name} = 0;")
+                outs.append(("bytes", (p.name, nxt.name)))
+                args += [f"&{p.name}", f"&{nxt.name}"]
+                i += 2
+                continue
             if base.endswith(" **"):
                 expr = c_arg(p, header, js_args, body, struct_names, opaque)
                 outs.append(("handle", p.name))
