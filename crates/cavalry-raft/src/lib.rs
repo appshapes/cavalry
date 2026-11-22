@@ -6,6 +6,7 @@ pub mod memory;
 pub mod module;
 pub mod sessions;
 mod snapshot;
+mod toggle;
 
 pub use consensus::{
     Clock, Consensus, Counts, ElectionCause, ElectionState, Io, Log, MembersRefused, NO_SESSION,

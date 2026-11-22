@@ -173,7 +173,7 @@ the line.
 | A start from a peer's snapshot | Absent | Feature 5 |
 | A standby | Works: marked in the members string, promoted by restarts | Done |
 | An upgrade one member at a time | Works within one major version, gated on the loopback | Done |
-| Commands that show a cluster or ask for a snapshot | Absent | Feature 5 |
+| Commands that show a cluster or ask for a snapshot | A leader takes a control toggle, the request a command adds for a snapshot (ADR 0147); no command adds one yet, and none shows a cluster | Features 6 and 5 |
 | A log purged below a snapshot | By hand, with the member stopped | Feature 5 |
 | Dynamic membership, authentication, suspend and resume | Absent | Out |
 | Encryption, a metrics export, a console, discovery, Kubernetes, kernel bypass, Windows | Absent | Out |

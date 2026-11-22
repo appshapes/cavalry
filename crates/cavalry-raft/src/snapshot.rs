@@ -482,6 +482,13 @@ impl ModuleSnapshot {
         self.state == SnapshotState::Writing
     }
 
+    /// Whether the member takes no snapshot of its own: a leader takes a control
+    /// toggle only then, since a cluster action read while a snapshot is being taken
+    /// ends the later one (`spec/cluster.md`, "The control toggle").
+    pub(crate) fn is_idle(&self) -> bool {
+        self.state == SnapshotState::Idle
+    }
+
     /// Begins the snapshot `due` asks for: a recording of the member's publication on
     /// the snapshot stream, from the publication's position. A snapshot asked for
     /// while one is being taken, or at a position the file's newest snapshot already

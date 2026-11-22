@@ -290,6 +290,22 @@ commit path runs per message.
   taken measured 25.44 ms at the most over 50 snapshots on a laptop, and 19.71 ms
   at the median. A step that fails is counted in
   `cluster.snapshots_failed`, and the member goes on with its log whole.
+- Takes a control toggle while it leads (`spec/cluster.md`, "The control toggle";
+  ADR 0147): the counter `cluster.control_toggle` that a command on the member's
+  host adds to ask it for a snapshot, keyed by the member's id and the toggle's id
+  and holding 4. The leader finds it by reading at most 16 metadata records of its
+  driver's counters file no more often than each millisecond, in a ring: over
+  three runs of 20,000 looks on a laptop a look measured p99.99 250 ns, 334 ns and
+  292 ns, and 417 ns at the most (ADR 0147, "Evidence"), and a member that does not
+  lead reads nothing. It appends one cluster action for each toggle it takes, when
+  it takes no snapshot of its own and has read its log past the last action it
+  appended, and stores the snapshot's log position in
+  `cluster.control_toggle_snapshot_position` and then the toggle's id in
+  `cluster.control_toggle_taken`, where the command reads its answer. It takes a
+  toggle at most once, and none whose id is at or below the last it took: a toggle
+  that stays is not taken again and holds no other back, and one with a lower id
+  than the last taken is answered by that one's snapshot. The command is the toggle's one
+  writer; the member writes nothing in it.
 - Starts a member from its newest snapshot (`spec/cluster.md`, "A member's start";
   ADR 0130). The start reads the member's snapshots file, plays the newest
   snapshot of the consensus module back through the driver, and takes the sessions

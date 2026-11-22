@@ -68,6 +68,7 @@ use crate::snapshot::{
     self, ModuleSnapshot, OpenError, SERVICE_ACK_LIMIT, ServiceSnapshotCounts, SnapshotCounts,
     SnapshotDue,
 };
+use crate::toggle::ControlToggle;
 
 /// The longest payload [`ConsensusModule::offer`] takes: what one frame of the log
 /// carries after the frame header and the session message header, at the UDP
@@ -2955,6 +2956,9 @@ pub struct ConsensusModule {
     /// member read in its log or appended to it: a leader asks for the next one a
     /// snapshot interval past it.
     snapshot_asked_at: i64,
+    /// The member's side of the control toggle, by which a command on its host asks
+    /// it for a snapshot: its look in the counters file and its two gauges.
+    toggle: ControlToggle,
     io: ClientIo,
     counters: Counters,
     messages_rejected: u64,
@@ -3241,6 +3245,9 @@ impl ConsensusModule {
                 passed_over,
             ),
         )?;
+        // The two gauges a command reads its answer in, after the snapshots' own
+        // (ADR 0147).
+        let toggle = ControlToggle::open(&mut client, member_id)?;
         let started = Instant::now();
         Ok(Self {
             core,
@@ -3252,6 +3259,7 @@ impl ConsensusModule {
             session_log_position: from,
             snapshot,
             snapshot_asked_at: from,
+            toggle,
             io: ClientIo {
                 client,
                 terms,
@@ -3424,6 +3432,9 @@ impl ConsensusModule {
         // snapshot interval since the last one asked for. An action the log does not
         // take is asked again on a later cycle.
         let asked = self.ask_snapshot_at_the_interval();
+        // And when a command on its host asks, with a control toggle: a look of a
+        // few records of the counters file, no more often than each millisecond.
+        let toggled = self.take_control_toggle();
         // What the service beside this member says of the snapshots it took, read
         // and listed here. Its error, a stream that stopped or a list that could
         // not be written, is returned after the core's own.
@@ -3462,6 +3473,7 @@ impl ConsensusModule {
         listed?;
         written?;
         asked?;
+        toggled?;
         Ok(work + session_work? + snapshot_work? + acks_work?)
     }
 
@@ -3528,24 +3540,64 @@ impl ConsensusModule {
     }
 
     /// Appends the action at `position`, the log publication's, and notes where the
-    /// log then ends. Whether it was appended: not when the core refuses, which a
-    /// leader that serves is never refused but for back pressure.
-    fn append_snapshot_action(&mut self, position: i64) -> Result<bool, RaftError> {
+    /// log then ends. `None` when it was not appended: the core refuses, which a
+    /// leader that serves is never refused but for back pressure. Else the position
+    /// after the action's entry, the snapshot's log position, itself `None` when the
+    /// publication's position could not be read after the append.
+    fn append_snapshot_action(&mut self, position: i64) -> Result<Option<Option<i64>>, RaftError> {
         let appended = self
             .core
             .snapshot(self.clock, position, &mut self.io)?
             .is_ok();
-        if appended {
-            let end = self
-                .io
-                .log_publication
-                .as_ref()
-                .and_then(|publication| publication.position().ok())
-                .unwrap_or(position);
-            self.snapshot_asked_at = self.snapshot_asked_at.max(end);
-            self.snapshot.count_action();
+        if !appended {
+            return Ok(None);
         }
-        Ok(appended)
+        let end = self
+            .io
+            .log_publication
+            .as_ref()
+            .and_then(|publication| publication.position().ok());
+        self.snapshot_asked_at = self.snapshot_asked_at.max(end.unwrap_or(position));
+        self.snapshot.count_action();
+        Ok(Some(end))
+    }
+
+    /// Takes a control toggle, when this member leads and a look finds one that asks
+    /// for a snapshot (`spec/cluster.md`, "Snapshots", "The control toggle"; ADR
+    /// 0147): the leader appends the cluster action and stores what it took for the
+    /// command that asked. It takes one only while it takes no snapshot of its own
+    /// and its read of its log has passed every action it appended, so that the
+    /// action it appends is the one snapshot being taken; until then the toggle
+    /// waits where it is. An action the back-pressured log does not take is tried
+    /// at the next look. A member that does not lead looks for none.
+    fn take_control_toggle(&mut self) -> Result<(), RaftError> {
+        let serves = self.core.role() == Role::Leader
+            && self.core.election_state() == ElectionState::Closed
+            && self.session_log_position >= self.core.term_base_log_position();
+        if !serves {
+            return Ok(());
+        }
+        let Some(found) = self
+            .toggle
+            .look(self.io.client.counters(), self.clock.now_ns)
+        else {
+            return Ok(());
+        };
+        let Some(Ok(position)) = self.io.log_publication.as_ref().map(Publication::position) else {
+            return Ok(());
+        };
+        // The last action this member appended, where its log still holds it: a
+        // leader that was deposed with an action not yet committed had its log cut
+        // below that action, and the position it noted then is past where its log
+        // ends now. Its read never reaches a position the log does not have.
+        let asked_at = self.snapshot_asked_at.min(position);
+        if !self.snapshot.is_idle() || self.session_log_position < asked_at {
+            return Ok(());
+        }
+        if let Some(end) = self.append_snapshot_action(position)? {
+            self.toggle.took(found, end);
+        }
+        Ok(())
     }
 
     /// Asks every member of the cluster for a snapshot, for the leader's own process:

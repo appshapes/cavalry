@@ -4875,3 +4875,152 @@ fn a_snapshot_whose_list_is_refused_stops_the_member_with_the_snapshots_error() 
         driver.close().expect("the driver closes");
     }
 }
+
+/// A leader whose note of its last cluster action is past the end of its log takes a
+/// control toggle all the same. That is how a leader is left that was deposed with an
+/// action not yet committed: its log is cut below the action, and the position it
+/// noted when it appended is one its read of its log never reaches. A test cannot
+/// depose a leader between an append and its commit, so the note is moved past the
+/// log's end instead (`spec/cluster.md`, "The control toggle"; ADR 0147).
+#[test]
+fn a_leader_whose_last_action_was_cut_from_its_log_takes_a_control_toggle() {
+    use cavalry_proto::cluster::{CONTROL_TOGGLE_SNAPSHOT, control_toggle_key};
+    use cavalry_shm::counters::generated::CLUSTER_CONTROL_TOGGLE;
+
+    let (dir, mut members) = three("toggle-after-a-cut");
+    let end = members[0].1.append_position();
+    members[0].1.snapshot_asked_at = end + 10 * 96;
+    let member_id = members[0].1.member_id();
+    let mut command = Cavalry::connect_to(dir.0.join(format!("member-{member_id}")))
+        .expect("the command's client connects");
+    let toggle = command
+        .add_counter(
+            CLUSTER_CONTROL_TOGGLE.0,
+            &control_toggle_key(member_id, command.client_id()),
+            &format!("cluster.control_toggle {member_id}"),
+        )
+        .expect("the driver adds the toggle");
+    toggle
+        .store_release(CONTROL_TOGGLE_SNAPSHOT)
+        .expect("the toggle is stored");
+    let deadline = Instant::now() + Duration::from_secs(20);
+    while members
+        .iter()
+        .any(|(_, module)| module.snapshot_position() != Some(end + 96))
+    {
+        assert!(
+            Instant::now() < deadline,
+            "the leader did not take the toggle: {:?}",
+            members[0].1.snapshot_counts()
+        );
+        run(&mut members, 1);
+    }
+    assert_eq!(members[0].1.snapshot_counts().actions, 1);
+    toggle.close();
+    command.close().expect("the command's client closes");
+}
+
+/// The value of `member`'s own counter of `type_id`, read from its driver's counters
+/// file by the type and the member's id in the key.
+fn gauge(member: &ConsensusModule, type_id: i32) -> i64 {
+    let counters = member.io.client.counters();
+    let key = member.member_id().to_le_bytes();
+    (0..counters.capacity())
+        .find(|id| {
+            matches!(counters.record(*id), Ok(Some(record))
+                if record.type_id() == type_id && record.key().starts_with(&key))
+        })
+        .map(|id| counters.read_acquire(id).expect("the counter is read"))
+        .expect("the member has the counter")
+}
+
+/// A leader takes a control toggle only once its read of its log has passed the last
+/// action it appended, and only while it takes no snapshot of its own. The leader's
+/// process asks for a snapshot while the followers stand still, so the action is not
+/// committed and the leader's read cannot reach it: the leader, run alone for longer
+/// than it takes to look over its whole counters file, meets the toggle and does not
+/// take it. With the followers running again the leader takes its own snapshot, and
+/// the toggle's when that one is listed: at the moment it takes the toggle, the
+/// toggle's action is the one action it has listed no snapshot for, and it gives no
+/// snapshot up (`spec/cluster.md`, "The control toggle"; ADR 0147).
+#[test]
+fn a_leader_takes_a_control_toggle_only_between_its_own_snapshots() {
+    use cavalry_proto::cluster::{
+        CONTROL_TOGGLE_LOOK_INTERVAL_NS, CONTROL_TOGGLE_LOOK_RECORDS, CONTROL_TOGGLE_SNAPSHOT,
+        control_toggle_key,
+    };
+    use cavalry_shm::counters::generated::{CLUSTER_CONTROL_TOGGLE, CLUSTER_CONTROL_TOGGLE_TAKEN};
+
+    let (dir, mut members) = three("toggle-between");
+    let member_id = members[0].1.member_id();
+    let mut command = Cavalry::connect_to(dir.0.join(format!("member-{member_id}")))
+        .expect("the command's client connects");
+    let id = command.client_id();
+    let toggle = command
+        .add_counter(
+            CLUSTER_CONTROL_TOGGLE.0,
+            &control_toggle_key(member_id, id),
+            &format!("cluster.control_toggle {member_id}"),
+        )
+        .expect("the driver adds the toggle");
+    // The leader's own action first, which no follower takes while none runs.
+    members[0]
+        .1
+        .snapshot()
+        .expect("the leader appends its own action");
+    toggle
+        .store_release(CONTROL_TOGGLE_SNAPSHOT)
+        .expect("the toggle is stored");
+    // The leader alone, until it has looked over its whole counters file: each span
+    // of two look intervals of this loop holds a look or more.
+    let looks = members[0].1.io.client.counters().capacity() / CONTROL_TOGGLE_LOOK_RECORDS + 1;
+    let span = Duration::from_nanos(2 * CONTROL_TOGGLE_LOOK_INTERVAL_NS);
+    let mut counted = 0;
+    let mut last = Instant::now();
+    while counted < looks {
+        members[0].1.do_work().expect("the leader's duty cycle");
+        if last.elapsed() >= span {
+            counted += 1;
+            last = Instant::now();
+        }
+    }
+    assert_eq!(
+        (
+            members[0].1.snapshot_counts().actions,
+            gauge(&members[0].1, CLUSTER_CONTROL_TOGGLE_TAKEN.0)
+        ),
+        (1, -1),
+        "the leader's read has not passed its own action, and it takes no toggle"
+    );
+    // Every member runs: the leader's own snapshot, and then the toggle's.
+    let deadline = Instant::now() + Duration::from_secs(30);
+    loop {
+        assert!(
+            Instant::now() < deadline,
+            "the leader did not take the toggle"
+        );
+        run(&mut members, 1);
+        if gauge(&members[0].1, CLUSTER_CONTROL_TOGGLE_TAKEN.0) == id {
+            let counts = members[0].1.snapshot_counts();
+            assert_eq!(
+                (counts.actions, counts.taken, counts.failed),
+                (2, 1, 0),
+                "the leader's own snapshot is listed, and the toggle's action is the one \
+                 it has listed none for"
+            );
+            break;
+        }
+    }
+    let deadline = Instant::now() + Duration::from_secs(20);
+    while members[0].1.snapshot_counts().taken < 2 {
+        assert!(
+            Instant::now() < deadline,
+            "the toggle's snapshot was not listed: {:?}",
+            members[0].1.snapshot_counts()
+        );
+        run(&mut members, 1);
+    }
+    assert_eq!(members[0].1.snapshot_counts().failed, 0);
+    toggle.close();
+    command.close().expect("the command's client closes");
+}
