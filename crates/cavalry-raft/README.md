@@ -278,7 +278,9 @@ commit path runs per message.
   writes them to its one publication on
   the snapshot stream, as a recording of its own, and lists the snapshot in its
   snapshots file once the recording has stopped at the end of what it wrote (ADR
-  0128). Each step is one duty cycle's work: the longest cycle while a snapshot was
+  0128) and its own log has synced to the snapshot's position, so that no crash
+  leaves it a snapshot its log does not reach (ADR 0143): a log not synced there
+  within `LOG_SYNC_WAIT`, 2 s, gives the snapshot up. Each step is one duty cycle's work: the longest cycle while a snapshot was
   taken measured 25.44 ms at the most over 50 snapshots on a laptop, and 19.71 ms
   at the median. A step that fails is counted in
   `cluster.snapshots_failed`, and the member goes on with its log whole.

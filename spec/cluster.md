@@ -544,15 +544,25 @@ the sessions it writes are the sessions at the snapshot's position. That is one 
 cycle unless the publication is back-pressured. When the recorder has written to the
 end of the last message, the member stops the recording (`stop recording`), which the
 driver answers once the catalog's stop is written and synced. When the driver has
-announced the stop, and the recording stopped at the end of what the member wrote,
-the member lists the snapshot in its snapshots file with service id −1. The snapshot
-counts from that write on.
+announced the stop, the recording stopped at the end of what the member wrote, and
+the member's append position, what its own log has synced ("The log"), has reached
+the snapshot's log position, the member lists the snapshot in its snapshots file
+with service id −1. The snapshot counts from that write on. The last condition holds
+the snapshot to a position that the member's log keeps through a crash of any kind,
+a power loss included, since the driver's recovery keeps what a recording synced
+(`spec/durable-log.md`, "The driver"); a start refuses a log that ends below its
+snapshot ("A member's start"; ADR 0143). The member read the action from its own
+log, and it asks its driver to sync that log whenever the recorder has written past
+what it synced ("The log"), so the wait is that one sync, already asked; the bound
+on it is the snapshot log sync wait ("Values").
 
 **A snapshot that fails.** Each of these ends the snapshot: a command that the driver
 refuses; a recording of another session; a message that the publication does not take
 for the snapshot timeout ("Values"); a stop that is not announced within that
-timeout; a recording that stopped short of what was written; and a cluster action
-read while a snapshot is being taken, which ends the later one. The member asks the
+timeout; a recording that stopped short of what was written; a log that has not
+synced to the snapshot's log position within the snapshot log sync wait ("Values")
+after the stop was read; and a cluster action read while a
+snapshot is being taken, which ends the later one. The member asks the
 stop of a recording that has not stopped, lists nothing, counts the snapshot in
 `cluster.snapshots_failed` and goes on: its log is whole, and the next action asks
 again. A recording left behind is in no list and is no snapshot, and what was
@@ -1217,9 +1227,11 @@ position its read begins at does not start, whichever of the three it is.
 
 Nor does a member whose log ends below that position. The snapshot is of a position
 that the member read from its committed log, which it reads from its own
-recordings, and a truncation never cuts below a commit position ("Messages during
-an election"; ADR 0083). So the log that the member left reaches that position,
-and a log that ends below it has lost its end. Where the catalog lacks the file's
+recordings; the member listed it only once its log had synced to that position
+("Snapshots"; ADR 0143); and a truncation never cuts below a commit position
+("Messages during an election"; ADR 0083). So the log that the member left reaches
+that position, whatever stopped the member, and a log that ends below it has lost
+its end. Where the catalog lacks the file's
 last recordings, they are then no truncation that the member's stop cut short:
 recordings of its log at or above the snapshot's position were removed, as by a
 purge of one recording too many. Where the catalog holds every recording the file
@@ -1919,6 +1931,7 @@ that a reader of a counters file knows which transition it saw.
 | service snapshot state | at most 1,073,741,824 bytes, 1 GiB, of a program's state in one snapshot, written 1,024 bytes to a message ("Snapshots") |
 | snapshot interval | 268,435,456 bytes of the log, 256 MiB: how far past the last cluster action that asked for a snapshot a leader's log grows before the leader appends the next ("Snapshots") |
 | snapshot timeout | 1 s: how long a snapshot being taken may go without its next step, a message its publication takes, its recording's stop announced or, for a service, its ack taken, before the member or the service gives it up ("Snapshots") |
+| snapshot log sync wait | 2 s: how long a snapshot whose recording has stopped waits for the member's log to sync to the snapshot's log position before the member gives it up, the recording sync interval of `spec/client-protocol.md`, "Liveness and timeouts", within which the recorder syncs a recording by itself, and the snapshot timeout beside it for the sync ("Snapshots"; ADR 0143) |
 | snapshot load timeout | 5 s: how long a member's start waits for its driver to play one snapshot's recording back before it passes that snapshot over, so 320 s at the most for the 64 snapshots a file lists ("A member's start") |
 | service snapshot load timeout | 5 s: how long a service's start waits for the first message of its snapshot's recording, and for each message after one, before it passes the snapshot over ("A service's start") |
 

@@ -12,15 +12,19 @@
 //! [`ModuleSnapshot::do_work`] writes the snapshot's messages, a marker, the open
 //! sessions in the order of their ids, the module's own state and a marker; stops the
 //! recording; and lists the snapshot once the driver has said where the recording
-//! stopped and that position is the end of what was written. A snapshot counts from
-//! that listing on, and never before (`spec/durable-log.md`, "Snapshots").
+//! stopped, that position is the end of what was written, and the member's own log
+//! has synced to the snapshot's log position. A snapshot counts from that listing on,
+//! and never before (`spec/durable-log.md`, "Snapshots"). The last condition keeps a
+//! crash of any kind from leaving the member a snapshot of a position its log does not
+//! reach, which its start refuses (`spec/cluster.md`, "A member's start"; ADR 0143).
 //!
 //! Nothing here waits. Each step is one duty cycle's work: a command to the driver
 //! that answers within its response timeout, an offer, or a load of the recording's
 //! stop. A step the driver refuses, a publication that takes no message, or a stop
 //! that does not come within [`SNAPSHOT_TIMEOUT`] ends the snapshot, counted in
-//! `cluster.snapshots_failed`, and the member goes on: its log is whole, and the next
-//! action asks again. While the messages are being written the module does not read
+//! `cluster.snapshots_failed`, and so does a log that has not synced to the snapshot's
+//! position within [`LOG_SYNC_WAIT`] of the stop; the member goes on: its log is
+//! whole, and the next action asks again. While the messages are being written the module does not read
 //! its committed log ([`ModuleSnapshot::is_writing`]), so the table they are written
 //! from does not change under them. That is one cycle unless the publication is
 //! back-pressured.
@@ -67,6 +71,16 @@ const SNAPSHOT_CHANNEL: &str = "cavalry:ipc";
 /// snapshot is given up and counted. It is the page's snapshot timeout, 1 s, the one
 /// a service's snapshot is under as well.
 pub const SNAPSHOT_TIMEOUT: Duration = Duration::from_nanos(SNAPSHOT_TIMEOUT_NS);
+
+/// How long a snapshot whose recording has stopped waits for the member's log to sync
+/// to the snapshot's log position before it is given up, the snapshot log sync wait of
+/// `spec/cluster.md`, "Values" (ADR 0143). The member has asked that sync already, as
+/// it does whenever its log moves; the bound is the recording sync interval, 1 s,
+/// within which the recorder syncs a recording by itself
+/// (`spec/client-protocol.md`, "Liveness and timeouts"), and the snapshot timeout
+/// beside it for the sync, 2 s in all.
+pub const LOG_SYNC_WAIT: Duration =
+    Duration::from_nanos(SNAPSHOT_TIMEOUT_NS + cavalry_log::recorder::SYNC_INTERVAL.unsigned_abs());
 
 /// The longest message of a snapshot: a cluster session with the longest response
 /// channel a leader accepts, 8 + 40 + 4 + 280 bytes, which one frame carries.
@@ -167,6 +181,9 @@ pub(crate) struct ModuleSnapshot {
     end: i64,
     /// Whether the recording's stop has been asked.
     stop_asked: bool,
+    /// Whether the recording has stopped at the end of what was written and the
+    /// snapshot waits for the member's log to sync to its log position.
+    awaiting_log: bool,
     /// When the step the snapshot is at must have moved by.
     deadline: Instant,
     scratch: Box<[u8; SCRATCH_LENGTH]>,
@@ -291,6 +308,7 @@ impl ModuleSnapshot {
             next: 0,
             end: 0,
             stop_asked: false,
+            awaiting_log: false,
             deadline: Instant::now(),
             scratch: Box::new([0; SCRATCH_LENGTH]),
             counts: SnapshotCounts::default(),
@@ -499,6 +517,7 @@ impl ModuleSnapshot {
         self.due = due;
         self.next = 0;
         self.stop_asked = false;
+        self.awaiting_log = false;
         self.recording = Some(recording);
         self.deadline = Instant::now() + SNAPSHOT_TIMEOUT;
         self.state = SnapshotState::Writing;
@@ -506,19 +525,21 @@ impl ModuleSnapshot {
     }
 
     /// One duty cycle of the snapshot being taken: its messages while there are some
-    /// to write, then the recording's stop, then the listing. Returns how much it
-    /// did. `Err` is the snapshots file's alone, a list that could not be written:
-    /// every other failure ends the snapshot, counted, and is no fault of the
-    /// member's.
+    /// to write, then the recording's stop, then the listing, once `append_position`,
+    /// what the member's log has synced, has reached the snapshot's log position.
+    /// Returns how much it did. `Err` is the snapshots file's alone, a list that could
+    /// not be written: every other failure ends the snapshot, counted, and is no fault
+    /// of the member's.
     pub(crate) fn do_work(
         &mut self,
         client: &mut Cavalry,
         sessions: &Sessions,
+        append_position: i64,
     ) -> Result<usize, SnapshotsError> {
         match self.state {
             SnapshotState::Idle => Ok(0),
             SnapshotState::Writing => Ok(self.write(client, sessions)),
-            SnapshotState::Stopping => self.stop(client),
+            SnapshotState::Stopping => self.stop(client, append_position),
         }
     }
 
@@ -609,9 +630,19 @@ impl ModuleSnapshot {
 
     /// Asks the recording's stop once the recorder has written every message, reads
     /// where it stopped, and lists the snapshot when that is the end of what was
-    /// written. The driver answers a stop once the catalog's stop is written and
-    /// synced, so a snapshot listed is one a power loss leaves whole.
-    fn stop(&mut self, client: &mut Cavalry) -> Result<usize, SnapshotsError> {
+    /// written and the member's log has synced to the snapshot's log position. The
+    /// driver answers a stop once the catalog's stop is written and synced, so a
+    /// snapshot listed is one a power loss leaves whole; and a log synced to the
+    /// position is one a power loss leaves long enough for a start from it, since the
+    /// driver's recovery keeps what a recording synced (ADR 0143). The member read the
+    /// snapshot's position from its own log, whose sync it asked when the log moved,
+    /// so the wait is that one sync; a log that has not synced within
+    /// [`LOG_SYNC_WAIT`] gives the snapshot up.
+    fn stop(
+        &mut self,
+        client: &mut Cavalry,
+        append_position: i64,
+    ) -> Result<usize, SnapshotsError> {
         let Some(recording) = self.recording.as_ref() else {
             self.fail(client);
             return Ok(0);
@@ -638,6 +669,21 @@ impl ModuleSnapshot {
             // recorder's failed. It is no snapshot.
             self.fail(client);
             return Ok(1);
+        }
+        if append_position < self.due.log_position {
+            if !self.awaiting_log {
+                self.awaiting_log = true;
+                self.deadline = Instant::now() + LOG_SYNC_WAIT;
+                return Ok(1);
+            }
+            if Instant::now() >= self.deadline {
+                // The member's recorder has not synced its log there: a sync of its
+                // failed or a step took it too long. It is no snapshot, and the next
+                // action asks again.
+                self.fail(client);
+                return Ok(1);
+            }
+            return Ok(0);
         }
         let listed = self.file.list(ListedSnapshot {
             recording_id,
@@ -1161,6 +1207,9 @@ mod failures {
         client: Cavalry,
         sessions: Sessions,
         snapshot: ModuleSnapshot,
+        /// What the member's log has synced, as its core hands it to each duty cycle:
+        /// past every position these tests ask for, unless a test holds it back.
+        append_position: i64,
     }
 
     /// The snapshot an action whose entry ends at `log_position` asks for, in term 0.
@@ -1194,6 +1243,7 @@ mod failures {
                 client,
                 sessions: Sessions::new(0, b"0=127.0.0.1:9000"),
                 snapshot,
+                append_position: i64::MAX,
             }
         }
 
@@ -1216,7 +1266,11 @@ mod failures {
                     self.snapshot.state,
                     self.snapshot.counts
                 );
-                if self.snapshot.do_work(&mut self.client, &self.sessions)? == 0 {
+                if self
+                    .snapshot
+                    .do_work(&mut self.client, &self.sessions, self.append_position)?
+                    == 0
+                {
                     std::thread::sleep(Duration::from_micros(200));
                 }
             }
@@ -1390,6 +1444,99 @@ mod failures {
         f.close();
     }
 
+    /// A snapshot whose recording stopped at the end of what was written waits for
+    /// the member's log to sync to the snapshot's log position before it is listed,
+    /// so that no crash leaves the member a snapshot its log does not reach (ADR
+    /// 0143). Held one position short, the snapshot is in hand, its recording
+    /// stopped, and nothing is listed, past the snapshot timeout; once the log has
+    /// synced to the position, the snapshot is listed and counted as taken.
+    #[test]
+    fn a_snapshot_is_listed_only_once_the_members_log_has_synced_to_its_position() {
+        let mut f = Fixture::new("log-synced");
+        f.append_position = 320 - 32;
+        f.begin(320);
+        f.run_until("the snapshot waits for the log", |snapshot| {
+            snapshot.awaiting_log
+        })
+        .expect("no list is written yet");
+        let recording_id = f.recording_id();
+        assert_eq!(f.stopped(recording_id), f.snapshot.end);
+        let waited = Instant::now() + SNAPSHOT_TIMEOUT;
+        while Instant::now() < waited {
+            f.snapshot
+                .do_work(&mut f.client, &f.sessions, f.append_position)
+                .expect("no list is written");
+            std::thread::sleep(Duration::from_millis(1));
+        }
+        assert_eq!(f.snapshot.state, SnapshotState::Stopping);
+        assert!(f.listed().is_empty());
+        assert_eq!(
+            f.snapshot.counts,
+            SnapshotCounts {
+                begun: 1,
+                steps: 1,
+                ..SnapshotCounts::default()
+            }
+        );
+        f.append_position = 320;
+        f.run_until("the snapshot is listed", |snapshot| {
+            snapshot.state == SnapshotState::Idle
+        })
+        .expect("the list is written");
+        assert_eq!(f.listed(), [320]);
+        assert_eq!(
+            f.snapshot.counts,
+            SnapshotCounts {
+                begun: 1,
+                steps: 1,
+                taken: 1,
+                ..SnapshotCounts::default()
+            }
+        );
+        f.close();
+    }
+
+    /// A log that does not sync to the snapshot's position within the wait gives the
+    /// snapshot up: nothing is listed, one failure is counted, and the recording
+    /// stays in the catalog in no list. The member goes on, and once its log syncs
+    /// the next action's snapshot is taken.
+    #[test]
+    fn a_log_that_does_not_sync_to_the_snapshots_position_within_the_wait_gives_it_up() {
+        let mut f = Fixture::new("log-unsynced");
+        f.append_position = 0;
+        f.begin(320);
+        f.run_until("the snapshot waits for the log", |snapshot| {
+            snapshot.awaiting_log
+        })
+        .expect("no list is written yet");
+        let recording_id = f.recording_id();
+        let began = Instant::now();
+        f.run_until("the snapshot is given up", |snapshot| {
+            snapshot.state == SnapshotState::Idle
+        })
+        .expect("no list is written");
+        assert!(
+            began.elapsed() + Duration::from_millis(50) >= LOG_SYNC_WAIT,
+            "given up after {:?}, before the wait of {LOG_SYNC_WAIT:?}",
+            began.elapsed()
+        );
+        assert!(f.listed().is_empty());
+        assert_eq!(
+            f.snapshot.counts,
+            SnapshotCounts {
+                begun: 1,
+                steps: 1,
+                failed: 1,
+                ..SnapshotCounts::default()
+            }
+        );
+        f.stopped(recording_id);
+        f.append_position = i64::MAX;
+        f.takes(640);
+        assert_eq!(f.listed(), [640]);
+        f.close();
+    }
+
     /// A stop that the driver does not announce by the deadline ends the snapshot.
     /// Here the deadline has passed before the stop is asked, so nothing can have
     /// announced it. Nothing is listed, one failure is counted, no snapshot is in
@@ -1407,7 +1554,7 @@ mod failures {
         f.snapshot.deadline = Instant::now();
         let work = f
             .snapshot
-            .do_work(&mut f.client, &f.sessions)
+            .do_work(&mut f.client, &f.sessions, f.append_position)
             .expect("no list is written");
         assert_eq!(work, 0);
         assert_eq!(f.snapshot.state, SnapshotState::Idle);
