@@ -221,10 +221,12 @@ production, each on a log directory it keeps.
   the tree at 620a2e29, has it write a directory as a server writes its own, and
   opens it in place under the tree under test
   ([ADR 0141](../decisions/0141-open-in-place-a-log-directory-written-by-the-tree-that-servers-run-and-build-that-tree-on-every-run.md)).
-  Version 5 changes one thing a server's directory keeps: when the process of
-  `master`'s driver crashes, the driver's next start drops what the recorder wrote
-  after its last sync, at most 1 s of the feed, where version 4 kept it. The server
-  syncs before each answer, so no record it answered is dropped.
+  Version 5 changes one thing a server's directory keeps: after `master`'s driver
+  crashes, by its process or by its host, the driver's next start cuts the recording
+  that the crash left live to the position it had synced. A power loss then leaves
+  no frame whose body was lost. A crash of the process alone drops at most 1 s of
+  the feed, which version 4 kept. The server syncs before each answer, so no record
+  it answered is dropped.
 - Its standby, work item 312, waits on Cavalry's cluster. Condition 9 of the line
   ends by telling the owner that the cluster is ready for the second node.
 
