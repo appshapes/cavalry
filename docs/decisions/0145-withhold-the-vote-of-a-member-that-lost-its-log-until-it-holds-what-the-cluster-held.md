@@ -124,7 +124,9 @@ recording of its log and that start is refused. On the new driver, each peer's
 stream begins in a new image at the peer's sender position. A member that held none
 of the log can start beside a driver that ran on, and its subscription joins the
 images that driver kept at their rebuild position, past every frame their readers
-read. The in-memory cluster holds both facts: a member started again, on an empty
+read. The driver has always joined a subscription added beside a live image there,
+and no page said so: `spec/udp.md`, "The receiver", step 5, now states it, with no
+frame changed, so that page stays at version 4. The in-memory cluster holds both facts: a member started again, on an empty
 log directory or on the one it kept, reads nothing that was in flight to it, so
 nothing that a peer sent before that start.
 Without that, a canvass position that `parted` wrote naming t, held late until the
@@ -205,6 +207,18 @@ catch up and withholds until a start from a peer's snapshot is built (work item
   deposed leader from staying quorate on the member's canvass positions. It does
   not stop the member from taking that leader's term and floor, and the two still
   commit together.
+- **An echo of the member's run.** The member's canvass position would carry a value
+  that its run chooses at its start, the answer of each peer would carry it back, and
+  the member would count a voter as heard, and take a leader, only on a message that
+  holds the value. No message written before the start holds it, so the rule would rest
+  on no property of the transport, and the frame held back by flow control would be
+  closed too. It adds a field to two layouts, canvass position and new leadership
+  term, so it is a new major of `spec/cluster.md`. A member on a new log directory
+  would then take no leader until every other member runs the new major, and the
+  cluster protocol would gain its first major since ADR 0136's upgrade rule. This
+  decision takes the transport's order, which `spec/udp.md` states and the driver's
+  tests hold, and leaves the held-back frame to work item 411, where the echo is the
+  first way named to close it.
 - **Hold the two cases above to the vote too, so that a member whose log is empty
   never votes until it has heard every voter.** That closes the residual case of the
   Consequences. But a new cluster then elects no leader while one of its members has
@@ -274,6 +288,15 @@ catch up and withholds until a start from a peer's snapshot is built (work item
   in canvass or nominate sends nothing beyond its own canvass position, once each
   interval. With the answer removed, the first of the four tests fails. With any one
   of the answer's three conditions dropped, one of the other three fails.
+- `crates/cavalry-driver/src/conductor.rs`, the two facts of the transport that the
+  second case rests on, beside a driver that ran on:
+  `a_second_subscription_joins_a_live_image_at_its_rebuild_position`, whose second
+  subscription's `subscription.position` starts at the image's rebuild position, 256,
+  and, for an image whose last subscription went,
+  `an_add_while_the_last_subscriptions_image_is_being_retired_waits_for_the_close` and
+  `an_add_on_an_endpoint_another_stream_keeps_is_not_given_the_image_being_retired`,
+  where a subscription added while the image is being retired is not given it and
+  gets the stream back in a new image.
 - `spec/vectors/cluster.json`: sixteen arithmetic vectors, five `withholds`, five
   `withheld-vote` and six `takes-leader`, read by
   `crates/cavalry-proto/tests/cluster_conformance.rs`.
@@ -302,9 +325,10 @@ catch up and withholds until a start from a peer's snapshot is built (work item
 
 - A member whose log directory is lost comes back on a new one by itself, follows no
   leader that a later term deposed, and votes no leader in that lacks an entry it had
-  acknowledged. The operator's rule of ADR 0104 is gone. Two cases are left, both
-  below: two members that hold no log while the third, which holds the log, is
-  stopped. In the first, both members lost their logs, a quorum's record, which no
+  acknowledged, but in the three cases this list names. The operator's rule of ADR
+  0104 is gone. Two of the cases are below: two members that hold no log while the
+  third, which holds the log, is stopped. The third, a frame that the leader's sender
+  held back by flow control, has a bullet of its own further down. In the first, both members lost their logs, a quorum's record, which no
   rule gives back. Under ADR 0104's rule too, both stayed stopped, the one member
   left could elect no leader, and the cluster was started again as a new one. In the
   second, one member lost its log and the other never caught up. ADR 0104's rule
@@ -361,8 +385,14 @@ catch up and withholds until a start from a peer's snapshot is built (work item
   a floor below that entry. It takes an image that read nothing of the leader's
   consensus stream while the leader wrote a receiver window of consensus messages to
   the member, all within the leader heartbeat timeout during which the member went on
-  acknowledging. This decision does not close that case. `spec/cluster.md`, "Taking a
-  leader", names it.
+  acknowledging. Once the member's log reaches that floor it votes as any voter does,
+  and if the leader stops before the member holds the entry, a member that lags behind
+  the entry can be voted in without it. So the case loses a committed entry while each
+  other member holds the log it kept. ADR 0104's rule held it, by keeping the member
+  stopped. This decision does not close it: work item 411 carries it, and
+  `spec/cluster.md`, "Taking a leader", names it. The ways to close it that this
+  decision weighed are in Alternatives considered: an echo of a value of the member's
+  run, which waits for the next major of `spec/cluster.md`.
 - A member whose leader's log no longer begins at position 0 withholds until work
   item 365 gives it a start from a peer's snapshot.
 - The terms file holds one more field, which a reader of version 5 ignores, so a
@@ -370,15 +400,22 @@ catch up and withholds until a start from a peer's snapshot is built (work item
 - Revisit when a start from a peer's snapshot is built: a withholding member can
   reach its floor from the snapshot's position. Revisit too when membership goes
   through the log, which may make the floor one member's view of a record all the
-  members keep.
+  members keep. Revisit when the consensus stream moves to another transport, or a
+  subscription can join an image below its rebuild position: the second case of
+  "Taking a leader" rests on what the transport delivers to a member started again
+  (`spec/udp.md`, "The receiver", steps 1, 3 and 5). And revisit when work item 411
+  closes the frame held back by flow control.
 
 ## References
 
 - Work item 286 on the Brigade Board; work item 363, feature 3 of the beta slice
-  (ADR 0138); work items 365, 364 and 406.
+  (ADR 0138); work items 365, 364 and 406; work item 411, the frame held back by flow
+  control.
 - `spec/cluster.md`, "A member that lost its log", "Taking a leader", "A member's
   start", "Counters"; `spec/durable-log.md`, "Terms" and "The driver"; `spec/udp.md`,
-  "The sender" and "The receiver", for what a member started again reads.
+  "The sender" and "The receiver", for what a member started again reads, whose step
+  5 this decision makes state where a subscription added beside a live image joins
+  it.
 - [ADR 0104](0104-have-the-consensus-module-elect-its-leader-and-take-the-appointed-leader-out.md),
   the rule and the guard it lost.
 - [ADR 0108](0108-list-the-recordings-of-a-members-log-in-its-log-directory-and-start-a-member-on-the-log-it-kept.md),

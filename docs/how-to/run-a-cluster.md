@@ -40,10 +40,14 @@ committed once a quorum, two of three, has it on disk.
   position `cluster.vote_floor` holds
   ([ADR 0145](../decisions/0145-withhold-the-vote-of-a-member-that-lost-its-log-until-it-holds-what-the-cluster-held.md)).
   Until it has caught up, the cluster tolerates one failed member fewer. That is
-  safe while each other member holds the log it kept. It is not safe in one case:
-  another member that holds no log either, because it started late and has not yet
-  caught up, while the member that holds the log is stopped. The two then elect as a
-  new cluster does. A volume spares the wait and that case.
+  safe while each other member holds the log it kept, but in one case the transport
+  can make: a new leadership term that the leader's sender held back by flow control,
+  written before an entry the member had acknowledged, gives the member a vote floor
+  below that entry, and an election while it catches up can then lose the entry
+  (work item 411). It is not safe in one more case: another member that holds no log
+  either, because it started late and has not yet caught up, while the member that
+  holds the log is stopped. The two then elect as a new cluster does. A volume spares
+  the wait and both cases.
 - Every member on this version of Cavalry. A member of a version in which the member
   with the lowest id was the leader casts no vote, so the two are not one cluster,
   and a log directory that version wrote is refused here. To move a cluster from

@@ -1244,7 +1244,7 @@ member subscribes, by the peer's setup frame at the peer's sender position, and 
 datagram below it is dropped (`spec/udp.md`, "The receiver", steps 1 and 2). A member
 that held none of the log can start beside a driver that ran on. Its subscription
 then joins each image of a peer's stream that the driver kept at the image's rebuild
-position, which is past every frame a reader of the image has read (step 3), or it
+position, which is past every frame a reader of the image has read (steps 3 and 5), or it
 gets a new image, where the image was retired with the subscription of the run
 before (step 5; ADR 0068). Either way the first fact holds, and the second is not
 needed, since the member acknowledged nothing. A member that starts on the log
@@ -1262,7 +1262,11 @@ before must have read nothing of
 the leader's consensus stream while the leader wrote a receiver window of consensus
 messages to the member. And all that time the member must have gone on acknowledging
 the leader's entries, which it does for at most the leader heartbeat timeout once it
-hears nothing from its leader. This version does not rule that case out.
+hears nothing from its leader. This version does not rule that case out, and it
+loses a committed entry: once the member's log reaches that floor, it votes as any
+voter does, and if the leader stops before the member holds the entry, a member that
+lags behind the entry can be voted in without it, while each other member holds the
+log it kept.
 
 A member whose election has closed sends no canvass position, so a member that lost
 its log would not hear it. So a member that holds a log, log leadership term id 0 or
@@ -1452,8 +1456,10 @@ furthest end of the ones before it. In every one of them a start would give the
 member a log shorter than the one it reported, or a module that does not know its
 sessions, and with a member whose log is behind it is a quorum that can elect a
 leader without an entry the cluster committed. A member started on a new log
-directory beside the others is safe while each other member holds the log it kept:
-it takes a leader once it has heard every other voter, or voted that leader in, it
+directory beside the others is safe while each other member holds the log it kept,
+but for one kind of frame this version does not rule out, a new leadership term its
+leader's sender held back by flow control ("Taking a leader"). Otherwise it takes a
+leader once it has heard every other voter, or voted that leader in, it
 joins and replicates the log, and it withholds its vote until its log reaches its
 vote floor ("A member that lost its log"; ADR 0145). It waits, taking no leader,
 while another voter is stopped. And beside a member that holds no log either, one
