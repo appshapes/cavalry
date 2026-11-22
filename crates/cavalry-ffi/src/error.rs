@@ -171,8 +171,10 @@ pub(crate) fn set_client(error: &ClientError) {
 /// the session's own four kinds and the service's one on the cluster's codes, the
 /// client's kind as [`set_client`] sets it, and a fault's as [`set_fault`] does
 /// (`spec/c-abi.md`, "Error codes"). The four kinds of a service's snapshot and of
-/// its start from one are the generic error: no call of the ABI takes a snapshot or
-/// starts from one, so none raises them.
+/// its start from one are on 147 to 150. Three of them have the ABI's own words, which
+/// name the C call that was refused and the C calls that come before it, where the
+/// Rust error's words name the Rust ones; a snapshot that failed has the Rust error's
+/// own, which name its step and what the operator does, in no language's calls.
 pub(crate) fn set_cluster(error: &ClusterError) {
     let code = match error {
         ClusterError::Client(error) => return set_client(error),
@@ -185,13 +187,45 @@ pub(crate) fn set_cluster(error: &ClusterError) {
         ClusterError::Version { .. } => CAVALRY_ERR_CLUSTER_VERSION,
         ClusterError::ConnectTimeout { .. } => CAVALRY_ERR_CLUSTER_CONNECT_TIMEOUT,
         ClusterError::Entry { .. } => CAVALRY_ERR_CLUSTER_ENTRY,
-        // A service's snapshot has no call in the ABI yet (ADR 0131), so no client
-        // is given one of these. Were one to be, it is the generic error, with the
-        // error's own message.
-        ClusterError::NoSnapshotDue
-        | ClusterError::SnapshotTooLong { .. }
-        | ClusterError::SnapshotFailed { .. }
-        | ClusterError::RestoreTooLate => CAVALRY_ERR_GENERIC_ERROR,
+        ClusterError::SnapshotFailed { .. } => CAVALRY_ERR_CLUSTER_SNAPSHOT_FAILED,
+        ClusterError::NoSnapshotDue => {
+            set(
+                CAVALRY_ERR_CLUSTER_NO_SNAPSHOT_DUE,
+                format_args!(
+                    "cavalry_cluster_service_snapshot refused (no-snapshot-due): no snapshot \
+                     is due; call it after a poll whose last entry was \
+                     CAVALRY_CLUSTER_ENTRY_SNAPSHOT, while \
+                     cavalry_cluster_service_snapshot_due answers true, and before the next \
+                     poll; see {DOC}#a-services-snapshot-and-its-start"
+                ),
+            );
+            return;
+        }
+        ClusterError::SnapshotTooLong { found, limit } => {
+            set(
+                CAVALRY_ERR_CLUSTER_SNAPSHOT_TOO_LONG,
+                format_args!(
+                    "cavalry_cluster_service_snapshot refused (snapshot-too-long): the state \
+                     is {found} bytes and one snapshot holds {limit}; give the service a \
+                     state of at most {limit} bytes; nothing was written, and the snapshot \
+                     is due until the next poll; see {DOC}#a-services-snapshot-and-its-start"
+                ),
+            );
+            return;
+        }
+        ClusterError::RestoreTooLate => {
+            set(
+                CAVALRY_ERR_CLUSTER_RESTORE_TOO_LATE,
+                format_args!(
+                    "cavalry_cluster_service_restore refused (restore-too-late): the service \
+                     has begun, by a poll that opened its member's log or by an earlier \
+                     restore; call it once, before the first poll, and again only while it \
+                     answers CAVALRY_CLUSTER_RESTORED_NO_MEMBER; see \
+                     {DOC}#a-services-snapshot-and-its-start"
+                ),
+            );
+            return;
+        }
     };
     set(code, format_args!("{error}"));
 }
@@ -428,6 +462,68 @@ mod tests {
             String::from_utf8(message()).expect("UTF-8"),
             fault.to_string()
         );
+    }
+
+    /// The four kinds of a service's snapshot and its start on 147 to 150
+    /// (`spec/c-abi.md`, "Error codes"; ADR 0146). The three a program's call order
+    /// meets name the C calls, never the Rust ones, and end with the anchor of the
+    /// page's walk through a snapshot; a snapshot that failed keeps the Rust error's
+    /// words, which name the step in the parentheses, for each of the five steps.
+    #[test]
+    fn a_services_snapshot_errors_have_codes_of_their_own() {
+        use cavalry_client::SnapshotCause;
+
+        let anchor = "; see docs/reference/c-abi.md#a-services-snapshot-and-its-start";
+        for (error, code, starts) in [
+            (
+                ClusterError::NoSnapshotDue,
+                CAVALRY_ERR_CLUSTER_NO_SNAPSHOT_DUE,
+                "cavalry_cluster_service_snapshot refused (no-snapshot-due): ",
+            ),
+            (
+                ClusterError::SnapshotTooLong {
+                    found: (1 << 30) + 1,
+                    limit: 1 << 30,
+                },
+                CAVALRY_ERR_CLUSTER_SNAPSHOT_TOO_LONG,
+                "cavalry_cluster_service_snapshot refused (snapshot-too-long): the state is \
+                 1073741825 bytes and one snapshot holds 1073741824; ",
+            ),
+            (
+                ClusterError::RestoreTooLate,
+                CAVALRY_ERR_CLUSTER_RESTORE_TOO_LATE,
+                "cavalry_cluster_service_restore refused (restore-too-late): ",
+            ),
+        ] {
+            set_cluster(&error);
+            assert_eq!(cavalry_errcode(), code, "{error}");
+            let text = String::from_utf8(message()).expect("UTF-8");
+            assert!(text.starts_with(starts) && text.ends_with(anchor), "{text}");
+            assert!(
+                !text.contains("ClusterService::") && !text.contains("Entry::"),
+                "no Rust call in a C caller's message: {text}"
+            );
+        }
+        for cause in [
+            SnapshotCause::Recording,
+            SnapshotCause::Write,
+            SnapshotCause::Stop,
+            SnapshotCause::Short,
+            SnapshotCause::Ack,
+        ] {
+            let error = ClusterError::SnapshotFailed { cause };
+            set_cluster(&error);
+            assert_eq!(cavalry_errcode(), CAVALRY_ERR_CLUSTER_SNAPSHOT_FAILED);
+            let text = String::from_utf8(message()).expect("UTF-8");
+            assert_eq!(text, error.to_string(), "the error's own words");
+            assert!(
+                text.starts_with(&format!(
+                    "cluster service snapshot failed (snapshot-failed, {}): ",
+                    cause.name()
+                )),
+                "{text}"
+            );
+        }
     }
 
     #[test]
