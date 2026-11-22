@@ -178,7 +178,7 @@ class Run(unittest.TestCase):
         lines = out.splitlines()
         self.assertEqual(lines[0], NO_COMMIT)
         self.assertRegex(lines[1], f"^{CAVALRY}$")
-        self.assertEqual(lines[2], f"- In place of what the server pins: {PIN}")
+        self.assertEqual(lines[2], f"- In place of what the server pins: `{PIN}`")
         self.assertEqual(lines[3], "- Taken from this tree: cavalry, cavalry-log, cavalry-shm")
         # Cavalry's own crates are left out of both lists: they are the line above.
         self.assertEqual(lines[4], "- Crates the lock file gained: libc 0.2.191, nix 0.32.0")
@@ -214,7 +214,8 @@ class Run(unittest.TestCase):
             theirs.parent.mkdir()
             theirs.write_text("[build]\njobs = 2\n", encoding="utf-8")
             code, out, err, calls = made.run()
-            self.assertEqual((code, out, calls), (1, "", []), err)
+            # Both commits are said first: a night that ends here still names what it built.
+            self.assertEqual((code, len(out.splitlines()), calls), (1, 2, []), err)
             self.assertIn("this script did not write it", err)
             self.assertEqual(theirs.read_text(encoding="utf-8"), "[build]\njobs = 2\n")
 
@@ -404,7 +405,7 @@ class Parts(unittest.TestCase):
         self.assertEqual(patcher.locked(odd + lock(("c", "1.0.0-rc.1+build"))), {("c", "1.0.0-rc.1+build")})
 
     def test_a_url_is_the_same_with_a_slash_or_dot_git_after_it_and_in_any_case(self):
-        self.assertEqual({patcher.same(u) for u in (URL, URL + "/", URL + ".git", URL.upper())}, {URL})
+        self.assertEqual({patcher.same(u) for u in (URL, URL + "/", URL + ".git", URL.upper(), URL + ".GIT/")}, {URL})
         self.assertNotEqual(patcher.same(URL), patcher.same(URL + "-two"))
 
     def test_a_source_that_is_not_gits_has_no_git_url(self):
@@ -489,13 +490,12 @@ class Workflow(unittest.TestCase):
 
     def test_each_checkout_leaves_no_credential_and_brigades_is_its_master(self):
         steps = re.split(r"\n      - ", self.jobs)[1:]
-        self.assertEqual(steps[0], "uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1\n"
-                                   "        with:\n          path: cavalry\n          persist-credentials: false")
-        self.assertEqual(steps[1], "uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1\n"
-                                   "        with:\n          repository: appshapes/brigade\n          ref: master\n"
+        # What follows each `uses:` line. The pins themselves are the test before this one's.
+        given = [step.split("\n", 1)[1] for step in steps[:3]]
+        self.assertEqual(given[0], "        with:\n          path: cavalry\n          persist-credentials: false")
+        self.assertEqual(given[1], "        with:\n          repository: appshapes/brigade\n          ref: master\n"
                                    "          path: brigade\n          persist-credentials: false")
-        self.assertEqual(steps[2].split("\n", 1)[1], "        with:\n          go-version-file: brigade/go.mod\n"
-                                                     "          cache: false")
+        self.assertEqual(given[2], "        with:\n          go-version-file: brigade/go.mod\n          cache: false")
         self.assertEqual(len(steps), 6)
 
     def test_no_step_is_skipped_and_no_failure_is_passed_over(self):
@@ -527,9 +527,11 @@ class Step(unittest.TestCase):
     """The script of the workflow's last step, run under bash as the runner runs a step
     with `shell: bash`, with a fake `make` that prints a log and ends as it is told."""
 
-    def run_step(self, log: str, ends: int = 0):
+    def run_step(self, log: str, ends: int = 0, grep: str = ""):
         directory = Path(tempfile.mkdtemp(prefix="brigade-server-step-"))
         self.addCleanup(lambda: subprocess.run(["rm", "-rf", str(directory)], check=False))
+        if grep:
+            executable(directory / "grep", grep)
         executable(directory / "make", "#!/bin/sh\n[ \"$1\" = server-test ] || exit 64\ncat \"$FAKE_MAKE_LOG\"\n"
                                        "echo 'a line on stderr' >&2\nexit \"$FAKE_MAKE_ENDS\"\n")
         (directory / "log").write_text(log, encoding="utf-8")
@@ -556,6 +558,12 @@ class Step(unittest.TestCase):
         code, out, summary = self.run_step(self.FEED + "test another ... FAILED\n", ends=2)
         self.assertEqual((code, summary), (2, ""))
         self.assertIn("test another ... FAILED\n", out)
+
+    def test_a_count_that_is_no_number_fails_the_step(self):
+        # A `grep` that could not read the log prints nothing: the step must not pass on that.
+        code, out, summary = self.run_step(self.FEED, grep="#!/bin/sh\nexit 2\n")
+        self.assertEqual(code, 1, out)
+        self.assertRegex(out, r"(?m)^::error::make server-test passed, and no test named for the Cavalry feed ran\.")
 
     def test_a_green_make_whose_tests_on_the_feed_did_not_run_fails_the_step(self):
         for log in ("test on_the_file_log ... ok\n",

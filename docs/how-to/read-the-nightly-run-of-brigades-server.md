@@ -149,8 +149,12 @@ link, and Brigade answers that when it moves its pin.
 
    - One in the list Wanting or Doing names the same test or the same error: stop
      here. The night stays red until that work item is in Done.
-   - One in Done names it: the fix landed after this run. Start the job by hand
+   - One in Done names it, and this run began before the work item moved to Done,
+     which its history says: the fix landed after this run. Start the job by hand
      ([Run it by hand](#run-it-by-hand)), and stop here when that run is green.
+   - One in Done names it, and this run began after: the fix did not hold. Move the
+     work item back with `brigade work-item move <number> doing`, and go on. Step 7
+     then comments on that work item and adds no new one.
    - None names it: go on.
 
 5. Run the failed job again, once:
@@ -163,10 +167,13 @@ link, and Brigade answers that when it moves its pin.
 
    The second attempt builds the same commit of this repository, and Brigade's
    `master` as it is by then. Step 2's command prints the lines of the newest attempt.
-   A failure that is gone on the second attempt is intermittent: it is one of the
-   last two cases of step 6. A failure that is there again is one of the first four.
+   A failure that is gone on the second attempt is intermittent, and is one of the
+   last two cases of step 6, unless the `Brigade's server:` line differs between the
+   two attempts. Then Brigade's `master` moved in between: the failure was Brigade's
+   own, and Brigade has fixed it. A failure that is there again is one of the first
+   five cases.
 
-6. Decide whose failure it is. There are six cases:
+6. Decide whose failure it is. There are seven cases:
 
    - **A failure of Brigade's own.** Brigade's `master` fails with its own pin too.
      Read Brigade's own run for the commit that step 2 printed, whose `server` job
@@ -200,6 +207,15 @@ link, and Brigade answers that when it moves its pin.
      `Crates the lock file gained:` line with the last green run's. The job takes
      the newest release that this tree's requirement allows, where this repository's
      own lock file keeps the older one.
+   - **A new image of the runner.** Neither commit moved, and the runner's image did.
+     The first step of the job prints it:
+
+     ```sh
+     # ignore: needs gh signed in; run it for the last green run and for the red one
+     gh run view <run id> --log | grep -A2 "Runner Image$"
+     ```
+
+     The `Version:` line differs between the two runs when GitHub replaced the image.
    - **An intermittent failure of the runner or the network.** A step before the
      tests failed, or a download did, and the second attempt passed. It is nobody's,
      and step 7 records nothing.
@@ -211,12 +227,15 @@ link, and Brigade answers that when it moves its pin.
    `/next-task` gave the task to, or a person whom GitHub notified of the failed run.
    The record is one work item, with the title `Brigade's server on master: <the
    test or the error>`. Its description names the run, both commits of step 2 and
-   the lines that failed.
+   the lines that failed. When step 4 moved a work item back to Doing, comment on
+   that one with the same three things, and add none.
 
    - **A regression here is fixed**, before the next feature. So is a new release of
-     another crate that breaks the server, and so is an intermittent failure of a
-     test on the feed while the newest run is red. The work item has the tag
-     `cavalry`, and `/work-item-start <number>` takes it:
+     another crate or a new image of the runner that breaks the build, and so is an
+     intermittent failure of a test on the feed while the newest run is red. The
+     work item has the tag `cavalry`, and `/work-item-start <number>` takes it. Its
+     description ends with a "Done when" section that reads: a run of
+     `brigade-server.yml` on `master`, started by hand after the fix, is green.
 
      ```sh
      # ignore: needs brigade; the title, a blank line and the description go on stdin
@@ -232,6 +251,11 @@ link, and Brigade answers that when it moves its pin.
      embeds the driver has to change. The work item has the tags `brigade` and
      `server`, which Brigade's sessions read, and names that entry. Nothing more
      changes here: the night stays red until Brigade's `master` follows the change.
+     The session that made the change may have written a work item for Brigade's
+     sessions already
+     ([Change a call that Brigade's server makes](change-a-call-that-brigades-server-makes.md),
+     step 6). Write this one all the same, and name the earlier one in it: the title
+     `Brigade's server on master:` is what step 4 and `/next-task` look for.
 
      ```sh
      # ignore: needs brigade; the title, a blank line and the description go on stdin
@@ -348,6 +372,8 @@ Brigade's own.
   on the board yet: the first reader of a night that it turned red writes one, as
   step 7 says for a failure of Brigade's own.
 - **The run reads `cancelled` and no step failed.** The job passed its own bound of
-  20 minutes, or a person cancelled it. The tests' step has a bound of 15 minutes,
-  which ends a test that does not return as a failure. A cancelled run is a red night
-  all the same: run the job again, as step 5 says.
+  20 minutes, or a person cancelled it, or GitHub cancelled it while it waited
+  because a newer run took its place. In the last case the newer run is the one to
+  read. The tests' step has a bound of 15 minutes, which ends a test that does not
+  return as a failure. A cancelled run with no newer one is a red night all the same:
+  run the job again, as step 5 says.

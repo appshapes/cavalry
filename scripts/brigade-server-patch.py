@@ -15,7 +15,8 @@ server take this tree, and a person runs the same script on their own machine
 
 Given the path of a checkout of Brigade, it:
 
-1. prints the commit of each of the two checkouts, before anything can fail;
+1. prints the commit of each of the two checkouts, before anything it reads of them
+   can fail;
 2. reads which crates of this tree the server's own packages name, and from which git
    URL (`cargo metadata --no-deps` on both workspaces, which resolves nothing), and
    prints what the server pins;
@@ -48,8 +49,8 @@ output and every failure are on stderr.
 
 Brigade's files are another repository's words, and what this script prints goes to a
 workflow's log and to its run's summary. So a name, a version, a URL and a pin are
-printed on stdout only when each is made of plain characters, and what a refusal quotes
-from the checkout is quoted with its control characters escaped.
+printed on stdout only when each is made of plain characters, a pin as code, and what a
+refusal quotes from the checkout is quoted with its control characters escaped.
 
 Python 3.9 standard library only (ADR 0003).
 """
@@ -113,8 +114,8 @@ def git_url(source: object) -> str | None:
 def same(url: str) -> str:
     """A git URL as cargo compares two: `.../cavalry`, `.../cavalry/` and `.../cavalry.git`
     are one repository. Lower case as well, which errs toward calling two URLs one."""
-    url = url.rstrip("/")
-    return (url[:-len(".git")] if url.endswith(".git") else url).lower()
+    url = url.lower().rstrip("/")
+    return url[:-len(".git")] if url.endswith(".git") else url
 
 
 def taken(server: dict, ours: dict[str, Path]) -> dict[str, tuple[str, str]]:
@@ -239,19 +240,20 @@ def point(checkout: Path) -> None:
     if not (server / "Cargo.toml").is_file():
         raise Refused(f"{server} holds no Cargo.toml: give the path of a checkout of appshapes/brigade, "
                       "whose server is the workspace under server/")
+    say(f"- Brigade's server: {commit(checkout, changes=False)}")
+    say(f"- Cavalry: {commit(TREE, changes=True)}")
     config, lock = server / ".cargo" / "config.toml", server / "Cargo.lock"
     for held in (config, config.with_suffix("")):
         if held.exists() and not held.read_text(encoding="utf-8", errors="replace").startswith(MARK):
             raise Refused(f"{held} is there and this script did not write it. It is left as it is. Use a new "
                           "clone of appshapes/brigade; if Brigade's server has a cargo config of its own now, "
                           "scripts/brigade-server-patch.py has to keep its lines")
-    say(f"- Brigade's server: {commit(checkout, changes=False)}")
-    say(f"- Cavalry: {commit(TREE, changes=True)}")
 
     ours = members(json.loads(cargo(server, "metadata", "--no-deps", "--format-version", "1",
                                     "--manifest-path", str(TREE / "Cargo.toml"))))
     found = taken(json.loads(cargo(server, "metadata", "--no-deps", "--format-version", "1")), ours)
-    say("- In place of what the server pins: " + " and ".join(sorted({pin or "no pin" for _, pin in found.values()})))
+    say("- In place of what the server pins: "
+        + " and ".join(sorted({f"`{pin}`" if pin else "no pin" for _, pin in found.values()})))
     before = locked(lock.read_text(encoding="utf-8")) if lock.is_file() else set()
 
     config.parent.mkdir(exist_ok=True)

@@ -34,21 +34,23 @@
 # questions Brigade answers when it moves its pin.
 #
 # The job runs another repository's code: Brigade's Makefile, its Go and its tests.
-# Brigade's `master` is the owner's own, and the owner's sessions push to it as they push
-# to this repository's. The job is still given nothing that another job reads and nothing
-# worth taking:
+# Brigade's `master` takes the pushes of the team's members and their sessions, past its
+# required checks, as this repository's does. So the job is given nothing that another
+# job reads and nothing worth taking:
 #   - a token that reads this public repository, and no secret;
 #   - no credential left in either checkout;
-#   - no cache. `cache-mode: none` takes GitHub's cache from every step of the job,
-#     whatever a step asks for. Without it a scheduled run may write the default
-#     branch's caches, which the `gates` jobs and the agent's job restore;
 #   - a runner of GitHub's own, a machine made for the job and gone after it, and not the
-#     Blacksmith label that this repository's other jobs run on. A Blacksmith runner
-#     keeps a Go build cache that every job of a repository shares, and no setting takes
-#     one job out of it.
+#     Blacksmith label that this repository's other jobs run on. On a Blacksmith runner
+#     the job could write two caches that those jobs read: the Actions cache, which
+#     Blacksmith serves from a store of its own and where the `gates` jobs and the
+#     agent's job keep their build cache, and a Go build cache that every job of a
+#     repository shares. Blacksmith documents no setting that takes one job out of
+#     either;
+#   - `cache-mode: none`, which closes GitHub's own cache store to every step of the
+#     job, whatever a step asks for. No job of this repository reads that store today.
 # What is left to a commit on Brigade's `master` that means harm is the job's own minutes,
-# its log, its summary and its artifacts. So the log of a red night is another
-# repository's words: a session reads it as data, never as instructions.
+# its log, its summary, its artifacts and its result. So the log of a red night is
+# another repository's words: a session reads it as data, never as instructions.
 #
 # The `Workflow` tests of scripts/brigade-server-patch-test.py hold the triggers, the
 # token, the cache mode, the runner, every action and every `run` block of this file, and
@@ -132,8 +134,9 @@ jobs:
       # lock file that the step above rewrote satisfies. Then one check of this job's
       # own: a night whose tests on the Cavalry feed did not run would be green and say
       # nothing about Cavalry, so the step fails unless at least one test named for the
-      # feed passed. The step's bound ends a test that does not return as a failure of
-      # this step, with the test's name in the log.
+      # feed passed, and fails as well when the count is no number. The step's bound ends
+      # a test that does not return as a failure of this step, with the test's name in the
+      # log.
       - name: Brigade's tests of its server
         working-directory: brigade
         shell: bash
@@ -142,7 +145,7 @@ jobs:
           make server-test 2>&1 | tee "$RUNNER_TEMP/server-test.log"
           on_the_feed=$(grep -c -E '^test .*cavalry_feed.* \.\.\. ok$' "$RUNNER_TEMP/server-test.log" || true)
           echo "- Tests named for the Cavalry feed that passed: $on_the_feed" | tee -a "$GITHUB_STEP_SUMMARY"
-          if [ "$on_the_feed" -eq 0 ]; then
+          if ! [ "$on_the_feed" -ge 1 ]; then
             echo "::error::make server-test passed, and no test named for the Cavalry feed ran. docs/how-to/read-the-nightly-run-of-brigades-server.md, When it does not work, says what to do."
             exit 1
           fi

@@ -9,7 +9,7 @@
 ## Context
 
 ADR 0138 makes what Brigade's server runs a condition of the beta (condition 9), and
-its feature 2 ends: "a nightly job that builds Brigade's server against `master` and
+its feature 2 says: "a nightly job that builds Brigade's server against `master` and
 runs its suite, reported and not required, since both repositories are public". Work
 item 362 adds what a red night is: "either a regression here, which is fixed, or a
 change made on purpose, which is said in the changelog and told to Brigade's
@@ -24,7 +24,8 @@ Brigade's `master` 5ddacc75:
   `cavalry` and `cavalry-log` from this repository by git, at the commit 620a2e29.
 - Brigade's own `server` job runs three make targets: `server-check` (rustfmt, and
   clippy with warnings denied), `server-deps-check` (cargo-deny) and `server-test`.
-  Every cargo command of them passes `--locked`, and none takes a flag from outside.
+  Every cargo command of `server-test` passes `--locked`, and none takes a flag from
+  outside.
 - `server-test` is three commands: the Rust tests of the workspace; the three tests
   marked ignored, which need Brigade's Go programs, among them Brigade's conformance
   suite against a running server on the Cavalry feed and on a file log; and Go tests
@@ -32,21 +33,29 @@ Brigade's `master` 5ddacc75:
 - Nine tests of `server/crates/brigade-server/tests/server.rs` run the server on the
   feed. Every other Rust test, and every Go test, runs it on a file log or runs no
   server.
-- The owner's sessions push to Brigade's `master`, as they push to this repository's.
-  Its required checks do not stand before such a push.
+- Brigade's `master` takes direct pushes from two members of the team and their
+  sessions, past its required checks, as this repository's `master` takes its own.
+  The commit 5ddacc75 is such a push.
 
 GitHub runs a scheduled workflow in the default branch's context, and this job runs
-another repository's code there: Brigade's Makefile, its Go and its tests. Two caches
-are within such a job's reach on this repository's usual runner:
+another repository's code there: Brigade's Makefile, its Go and its tests. On this
+repository's usual runner, Blacksmith's (ADR 0004), two caches are within such a job's
+reach:
 
-- GitHub's cache. A run that a schedule or `workflow_dispatch` starts "can create or
-  overwrite caches in the default branch's scope" (GitHub's documentation, Dependency
-  caching). The `gates` jobs restore from that scope, and so does the agent's job in
-  `claude.yml`, which holds a token that writes.
-- The runner's own. The `gates` jobs run on Blacksmith's runners (ADR 0004), and
-  Blacksmith gives Go a build cache through `GOCACHEPROG`: "Each repository has its
-  own cache, shared across branches and pull requests" (Blacksmith's documentation, Go
-  build caching). Its documentation names no setting that takes one job out of it.
+- The Actions cache. Blacksmith serves the cache actions from a store of its own
+  (`ci.yml`'s header), and GitHub's own store holds no cache of this repository's. The
+  `gates` jobs keep their build cache there, and the agent's job in `claude.yml`, which
+  holds a token that writes, restores the same one. GitHub's rule for its own store is
+  that a run which a schedule or `workflow_dispatch` starts "can create or overwrite
+  caches in the default branch's scope" (GitHub's documentation, Dependency caching),
+  and Blacksmith's documentation says that its store scopes an entry as GitHub's does.
+- A Go build cache, which Blacksmith gives every job through `GOCACHEPROG`: "Each
+  repository has its own cache, shared across branches and pull requests"
+  (Blacksmith's documentation, Go build caching).
+
+Blacksmith documents no setting that takes one job out of either. GitHub's `cache-mode:
+none` closes GitHub's own store to a job, and nothing found says that Blacksmith's
+store applies it.
 
 ## Decision
 
@@ -73,16 +82,18 @@ Somebody reads a red night the same day.
    which crates, licences and sources the server may link is Brigade's to answer
    when it moves its pin, and the script prints each night the crates that the lock
    file gained, which is what it will be asked.
-3. **The server is built as Brigade builds it.** Rust is the toolchain that Brigade's
-   `server/rust-toolchain.toml` pins, and Go is the version of Brigade's `go.mod`.
-   Only Cavalry's crates differ.
+3. **The server is built with Brigade's own tools.** Rust is the toolchain that
+   Brigade's `server/rust-toolchain.toml` pins, and Go is the version of Brigade's
+   `go.mod`. What differs from Brigade's own build is Cavalry's crates, the crates
+   that their requirements bring in, and the runner's image.
 4. **The job is given nothing that another job reads, and nothing worth taking.** A
    token that reads this public repository, no secret, and no credential left in
-   either checkout. `cache-mode: none`, which takes GitHub's cache from every step of
-   the job. A runner of GitHub's own, `ubuntu-24.04`, and not the Blacksmith label of
-   this repository's other jobs, so that no cache of the runner's is shared either.
-   Brigade's `master` is the owner's own. What is left to a commit there that means
-   harm is the job's minutes, its log, its summary and its artifacts.
+   either checkout. A runner of GitHub's own, `ubuntu-24.04`, and not the Blacksmith
+   label of this repository's other jobs, which takes both of Context's caches out of
+   the job's reach. `cache-mode: none` as well, which closes GitHub's own cache store
+   to every step of the job, though no job here reads that store today. What is left
+   to a commit on Brigade's `master` that means harm is the job's minutes, its log,
+   its summary, its artifacts and its result.
 5. **Reported and not required.** The workflow has two triggers, the schedule and
    `workflow_dispatch`. It is no check of a pull request, and its one job is named
    `brigade server`, which no required check is.
@@ -90,15 +101,17 @@ Somebody reads a red night the same day.
    bound of 15 minutes, below the job's 20. A step that passes its bound fails, where
    a job that passes its bound is cancelled and names no step.
 7. **A red night is read the same day, and one red night is a task.** A red night is
-   a run on `master` that did not end in `success`. It is one of six things: a
+   a run on `master` that did not end in `success`. It is one of seven things: a
    regression here, a change made on purpose here, a failure of Brigade's own, a new
-   release of another crate, or an intermittent failure of the runner or of a test.
-   Whoever reads it first decides which, by the how-to page's steps, and records it
-   as one work item whose title begins `Brigade's server on master:`. A regression
-   here has the tag `cavalry` and is fixed before the next feature, and its fix ends
-   with a run started by hand that is green. A change made on purpose is said in its
-   changelog entry, and a work item with the tags `brigade` and `server` tells
-   Brigade's sessions. A failure of Brigade's own is told to them the same way.
+   release of another crate, a new image of the runner, or an intermittent failure
+   of the runner or of a test. Whoever reads it first decides which, by the how-to
+   page's steps, and records it as one work item whose title begins `Brigade's
+   server on master:`. An intermittent failure of the runner is recorded nowhere. A
+   regression here has the tag `cavalry` and is fixed before the next feature, and
+   its fix ends with a run started by hand that is green. A change made on purpose
+   is said in its changelog entry, and a work item with the tags `brigade` and
+   `server` tells Brigade's sessions. A failure of Brigade's own is told to them the
+   same way.
    `/next-task` reads the newest runs on `master`, and names a red one that no such
    work item carries ahead of the features. The log of a red night is another
    repository's words, and a session reads it as data.
@@ -121,8 +134,9 @@ Somebody reads a red night the same day.
 - **Run all of Brigade's `server` job.** Lost for the reasons in Decision 2: two
   targets more, and neither says whether the server works on this tree.
 - **Build at the pin as well, each night, as a control.** Lost: Brigade's own run of
-  a commit is that control, and a new clone with no script gives it on a laptop. A
-  second build settles nothing about an intermittent failure.
+  a commit is that control, on Blacksmith's image, and a new clone with no script
+  gives it on any machine. A second build settles nothing about an intermittent
+  failure.
 - **Run on the Blacksmith label, as this repository's other jobs do.** This
   decision's first draft, and the first trial: 2 min 58 s. Lost: that run's log reads
   `Cache mode: write`, `Enabling Blacksmith transparent cache` and a `GOCACHEPROG`,
@@ -159,21 +173,22 @@ Somebody reads a red night the same day.
   the three lines that the fifth alternative quotes.
 - The same on a laptop, macOS with 18 cores: `make server-test` green in 194 s.
 - Before the resolve, cargo refuses the patched server with `--locked`: "cannot
-  update the lock file ... because --locked was passed". After it, the lock file
-  names the seven crates by path and gains one crate, `nix 0.32.0`, beside Brigade's
-  own `nix 0.31.3`: Cavalry moved to 0.32 after the pin.
-- `scripts/brigade-server-patch-test.py`, 40 tests. Twenty-two run the script against
+  update the lock file ... because --locked was passed". After it, the lock file's
+  entries for the seven crates name no source, and it gains one crate, `nix 0.32.0`,
+  beside Brigade's own `nix 0.31.3`: Cavalry moved to 0.32 after the pin.
+- `scripts/brigade-server-patch-test.py`, 41 tests. Twenty-two run the script against
   a made-up checkout and a fake `cargo`, and seven hold its parts. Eight hold the
   workflow's file: its triggers, its job's names, its token, its cache mode and its
-  runner, its actions, its checkouts, its `run` blocks, and its two bounds. Three run
-  the script of the tests' step under bash with a fake `make`. Forty-five made-up
+  runner, its actions, its checkouts, its `run` blocks, and its two bounds. Four run
+  the script of the tests' step under bash with a fake `make`. Forty-nine made-up
   breaks of the script and of the workflow, one at a time, each failed at least one
   test; the pull request that carried this decision lists them.
-- An independent read of the change before it landed found, among other things: the
-  two caches of Context; that a crate renamed here since the pin stayed at the pin
-  under a green; that a night read and fixed would be named again; and that nothing
-  failed when the tests on the feed did not run. Decisions 1, 2, 4, 6 and 7 hold what
-  it found.
+- Two independent reads of the change before it landed. The first found, among other
+  things: that the job could write caches which other jobs restore; that a crate
+  renamed here since the pin stayed at the pin under a green; that a night read and
+  fixed would be named again; and that nothing failed when the tests on the feed did
+  not run. The second found whose store the Actions cache is, and who pushes to
+  Brigade's `master`. Decisions 1, 2, 4, 6 and 7 hold what they found.
 - Brigade's own `server` job, the same target with the pin: 16 of its 18 runs on
   2026-11-15 and 2026-11-16 passed, and the other two were cancelled.
 - One intermittent failure is known, and is Brigade's own: a test of
@@ -189,8 +204,10 @@ the server against its branch before it lands, on the runner or on a laptop; Bri
 own definition of its server's tests is followed with no copy to keep.
 
 Harder: a path dependency is compiled without the cap on lints that cargo gives a git
-dependency, so a warning in a crate of Cavalry's under Brigade's toolchain shows in
-this job's log, where Brigade's own build would hide it. It fails nothing. The
+dependency. So a lint in a crate of Cavalry's speaks here under Brigade's toolchain,
+where Brigade's own build would cap it: a warning shows in the log, and a lint that
+the crate denies fails the build. This repository's gates hold those lints on the
+newest stable toolchain, so the two differ only where the toolchains do. The
 resolve takes the newest release that this tree's requirements allow, where each
 repository's own lock file keeps an older one, so a crate's new release can turn a
 night red when neither repository moved. The script patches a git source and nothing
@@ -200,16 +217,20 @@ reads their names, so a rename in Brigade turns a night red until the pattern
 follows. A change made on purpose keeps the nights red until Brigade's `master`
 follows it, and a second failure can hide behind the first for that long. A red night
 that a green one follows before anybody looks is named by nothing but GitHub's notice
-to whoever last changed the schedule. The job is slower than it would be on the
-repository's usual runner, and it is the one job here that does not run there. The
-how-to page has to be kept: it names nine tests at one commit of Brigade.
+to whoever last changed the schedule. The job is slower than on the repository's
+usual runner, 3 min 50 s against 2 min 58 s, and it is this repository's one job on a
+runner of GitHub's: ADR 0004 records Blacksmith as the owner's choice of runner for
+the loop's workflows, and this job is an exception to that choice, which one line of
+the workflow undoes. The how-to page has to be kept: it names nine tests at one commit
+of Brigade.
 
 Revisit: when Brigade takes Cavalry from a registry, for the script's second source;
 when a change made on purpose has kept the nights red for a week, for building a
 branch of Brigade's that follows it; when three red nights in a row were Brigade's
 own, for whether one red night is still a task; when the release candidate is cut,
-for how condition 9's "green at the candidate" is recorded; when a runner's cache can
-be taken from one job, for the usual runner.
+for how condition 9's "green at the candidate" is recorded; when Blacksmith can take
+both of its caches from one job, or the owner rules for its runner all the same, for
+the usual runner.
 
 ## References
 
@@ -220,7 +241,7 @@ be taken from one job, for the usual runner.
 - `.github/workflows/brigade-server.yml`; `scripts/brigade-server-patch.py`;
   `scripts/brigade-server-patch-test.py`; `.claude/skills/next-task/SKILL.md`, rule 4
 - [Read the nightly run of Brigade's server](../how-to/read-the-nightly-run-of-brigades-server.md)
-- GitHub's documentation: Workflow syntax, `cache-mode`; Dependency caching,
-  "Restrictions for accessing a cache". Blacksmith's documentation: Go build caching
+- GitHub's documentation: Workflow syntax, `cache-mode`; Dependency caching.
+  Blacksmith's documentation: Dependencies and Actions cache; Go build caching
 - Brigade's `Makefile`, `.github/workflows/ci.yml` and
   `server/crates/brigade-log/Cargo.toml`, at `appshapes/brigade` 5ddacc75

@@ -123,16 +123,23 @@ Highest first. Within one rule, the slice ADR's order, then the work item's list
    red"). Its title names the row. One red night is not a task: name it in the footer.
 4. **A red night of Brigade's server.** The newest completed run of
    `brigade-server.yml` on `master` did not end in `success`. Look, in every list,
-   for a work item whose title begins `Brigade's server on master:` and that names
-   that run's failure.
+   for the work items whose title begins `Brigade's server on master:` and that name
+   that run's failure. The first of these that holds says what the task is:
+   - One is in Wanting or Doing with the tag `cavalry`: a regression here. It is the
+     task under this rule until it is in Done.
+   - One is in Wanting or Doing with the tag `brigade`: Brigade's sessions' to do.
+     Name it in the footer.
+   - One is in Done, and the run began before it moved there (`brigade work-item show
+     <number>` has the history): the fix landed after the run. The task is one
+     command, `gh workflow run brigade-server.yml`, whose run is the newest once it
+     ends.
+   - One is in Done, and the run began after it moved there: the fix did not hold.
+     The task is that work item again, and its first move is `brigade work-item move
+     <number> doing`.
+   - One is in Hibernating: it is parked. Name it in the footer.
    - None: nobody has read the night. The task is to read it as
      `docs/how-to/read-the-nightly-run-of-brigades-server.md` says. Its title names
      the step or the test that failed, and reading it ends in such a work item.
-   - One in Wanting or Doing with the tag `cavalry`: a regression here. It is the
-     task under this rule until it is in Done.
-   - One with the tag `brigade`: Brigade's sessions' to do. Name it in the footer.
-   - One in Done: its fix landed after the run. The task is one command, `gh workflow
-     run brigade-server.yml`, whose run is the newest once it ends.
 
    One red night is a task here, since no clock is in the run (ADR 0142, Decision 7).
 5. **The first feature of the slice that is not done.** With a work item: the work
@@ -198,6 +205,7 @@ End with the one command that starts the top task: `/work-item-start <n>` when i
 work item; `brigade work-item add --tag cavalry` when it does not, with the title, a
 blank line and the brief on stdin (what changes, a "Done when" section and the
 invariant by number, as `docs/how-to/implement-a-feature.md`, step 1, says); `gh pr
-view <n>` for a pull request; or `gh run view <run id> --log-failed` for a red night
-of Brigade's server that nobody has read, whose reading decides the work item and its
-tag. Do not run it.
+view <n>` for a pull request; or, for a red night of Brigade's server, `gh run view
+<run id> --log-failed` when nobody has read it, since the reading decides the work
+item and its tag, and `gh workflow run brigade-server.yml` when its fix landed after
+the run. Do not run it.
