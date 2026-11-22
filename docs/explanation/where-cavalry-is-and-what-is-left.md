@@ -212,9 +212,23 @@ production, each on a log directory it keeps.
   recordings. Feature 7 gives it that call.
 - The durable log's format has moved from version 2 to 4 since its pin. Each version
   added a file for cluster members and changed nothing a server's directory holds, so
-  such a directory should open under `master`. No test holds that. Feature 2 does.
+  such a directory opens under `master`. `conformance/upgrade/log-directory.sh` holds
+  that in every pull request: it builds the tree at 620a2e29, has it write a
+  directory as a server writes its own, and opens it in place under the tree under
+  test
+  ([ADR 0141](../decisions/0141-open-in-place-a-log-directory-written-by-the-tree-that-servers-run-and-build-that-tree-on-every-run.md)).
 - Its standby, work item 312, waits on Cavalry's cluster. Condition 9 of the line
   ends by telling the owner that the cluster is ready for the second node.
+
+Feature 2 holds what the server runs, since 2026-11-22 (work item 362). The server's
+use of Cavalry is a test of `just test`, copied from its code call for call. Its log
+directory is held as the third point above says. A workflow builds the server at its
+`master` against this `master` each night and runs its suite.
+[What does Brigade's server rely on?](what-brigades-server-relies-on.md) lists the
+calls and what the server relies on in each, and
+[Read the nightly run of Brigade's server](../how-to/read-the-nightly-run-of-brigades-server.md)
+says what a red night means and who acts. Two things that the server's code expects do
+not hold. The first page names both, and work item 372 carries the first.
 
 ## The finish line
 
@@ -231,7 +245,7 @@ each. Their state today:
 | 6. No fault is left to an operator's rule where a check can hold it | Five faults are held by rules: work items 277, 286, 287 and 288, and the members string |
 | 7. A leader that stops, in any way, is replaced within a stated bound | Two of six ways are held by tests; a planned stop costs 11 s; work item 280 is open |
 | 8. Redundancy is restored while the cluster runs, and the cluster runs for days | Not started: no start from a peer's snapshot, no purge while running, no job across hosts, no cluster soak |
-| 9. What Brigade's server runs is a gate here, and the release carries its data | Not started |
+| 9. What Brigade's server runs is a gate here, and the release carries its data | The three gates are in since 2026-11-22 (feature 2): the feed's shape in `just test`, a log directory of 620a2e29 opened in place in `just conformance`, and the server's suite against `master` each night. Left for features 10 to 12: the server builds from the published crates, the candidate's soak, and the notice of work item 312 |
 
 ## The roadmap
 
@@ -242,7 +256,7 @@ slice, whose seven features took 98 commits.
 | # | Feature | Work item | Takes in | Size | Chain |
 | --- | --- | --- | --- | --- | --- |
 | 1 | Run the latency gate each night as a coarse check. **Done on 2026-11-21** | 361 | Parks work item 198 beside 358 | 2 | First |
-| 2 | Hold what Brigade's server runs | 362 | | 3 | Release |
+| 2 | Hold what Brigade's server runs. **Done on 2026-11-22** | 362 | | 3 | Release |
 | 3 | Hold invariant 1 through the faults that an operator's rule holds today | 363 | Work items 287, 286, 277, 288, 282, 281 | 13 | Cluster |
 | 4 | Replace a leader however it stops | 364 | Work items 280, 343, 355 | 11 | Cluster |
 | 5 | Restore a cluster's redundancy while it runs | 365 | | 13 | Cluster |

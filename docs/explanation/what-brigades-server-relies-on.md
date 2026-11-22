@@ -187,7 +187,11 @@ Both exist, and they answer different questions.
   server/crates/brigade-log/src/feed.rs` in Brigade's repository lists what changed
   since.
 - The server's own suite is the truth about the server. It needs Brigade's repository
-  and its toolchain, so it cannot be a check of every pull request here.
+  and its toolchain, so it cannot be a check of every pull request here. A workflow
+  builds the server at its `master` against this `master` each night and runs that
+  suite:
+  [Read the nightly run of Brigade's server](../how-to/read-the-nightly-run-of-brigades-server.md)
+  says what a red night means and who acts.
 
 The copy is a test of `cavalry`, not of `cavalry-client`, because the server depends on
 `cavalry`. A name that `cavalry` stops re-exporting breaks the server, and breaks the
