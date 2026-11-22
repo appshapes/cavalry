@@ -163,7 +163,7 @@ the line.
 | Record and replay | Works: from a position or an instant, bounded, following a live recording, onto shared memory or UDP | Done |
 | List and describe recordings | `cavalry doctor` lists the live ones; no call and no command lists the stopped ones, and the id of one is what `cavalry record` printed | Feature 7 |
 | Truncate, purge and delete | Works on a stopped recording, by command | Done |
-| A checksum beside recorded frames | None, and none is planned. Since 2026-11-22 a recording that a crash left live ends at the position its recorder had synced, so a power loss leaves in it no frame whose body was lost (ADR 0144) | Done, by the synced position |
+| A checksum beside recorded frames | None, and none is planned. Since 2026-11-22 a recording that this version's recorder was making at a crash ends at the position it had synced, so a power loss leaves in it no frame whose body was lost (ADR 0144). A recording that a driver of an earlier version was making at the loss keeps what its files hold. Nothing checks a frame below the synced position, so a disk that keeps bytes wrongly goes unseen | Done, by the synced position |
 | A client that drives a remote driver's recordings; a replay that merges into a live stream | Absent | Out |
 | Election and a commit by quorum | Works; the membership is a string of up to 8 members | Done |
 | Sessions in six languages | Work: connect, redirect, follow the leader, keepalive, close. At most 10 sessions; a message of at most 1,344 bytes | Feature 6 |
