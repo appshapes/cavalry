@@ -6,9 +6,10 @@
 //! `src/module/tests.rs`, with `#[path = "../../tests/ports/mod.rs"] mod ports;`, and
 //! these, each with `#[path = "../../cavalry-raft/tests/ports/mod.rs"]`: the tests of
 //! `cavalry-ffi` that run cluster members, the conductor's unit tests in
-//! `cavalry-driver/src/conductor.rs`, and six of `cavalry-client`'s tests,
+//! `cavalry-driver/src/conductor.rs`, six of `cavalry-client`'s tests,
 //! `armed_recording`, `destinations`, `replay`, `udp_receive`,
-//! `udp_receive_allocations` and `udp_resubscribe`.
+//! `udp_receive_allocations` and `udp_resubscribe`, and two of `cavalry`'s,
+//! `feed_shape` and `feed_held_still`.
 //!
 //! # The rule
 //!
