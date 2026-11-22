@@ -8,7 +8,10 @@ The durable log: recording and replay. Data plane.
 - Keeps a cluster member's terms file, `terms::TermsFile`, the record of the terms it
   has recorded and its candidate term, two synced writes per term and one per vote,
   read back at the member's start up to the torn tail of a crash, with a vote a crash
-  tore read as the vote stored before it (`spec/durable-log.md`, "Terms"; ADR 0060).
+  tore read as the vote stored before it (`spec/durable-log.md`, "Terms"; ADR 0060),
+  and its vote floor, `TermsFile::set_vote_floor`, one synced write once, the
+  position below which a member that came back with its log empty withholds its
+  vote (ADR 0145).
 - Keeps a cluster member's log recordings file, `recordings::RecordingsFile`, the
   list of the recordings that hold the member's log and the position that list
   begins at. A write puts the whole list into one of two slots and syncs once, so a

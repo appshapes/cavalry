@@ -10,7 +10,7 @@ mod common;
 
 use cavalry_proto::cluster::{Message, PROTOCOL_VERSION, Template};
 use cavalry_raft::{Consensus, ElectionState, Role};
-use common::{Call, Stub, at, canvass_position, new_leadership_term};
+use common::{Call, Stub, at, canvass_position, hear_the_others, new_leadership_term};
 
 /// Member 0 of `[0, 1, 2]`, electing.
 fn elector(seed: u64) -> Consensus {
@@ -492,7 +492,9 @@ fn a_member_that_elects_takes_no_term_from_an_id_that_is_no_other_members() {
 }
 
 /// A member takes the new leadership term of whichever other member sends it, and
-/// that member is its leader.
+/// that member is its leader. Its log is empty, so it takes it once it has heard the
+/// third member too, and not before (`spec/cluster.md`, "A member that lost its log",
+/// "Taking a leader"; ADR 0145).
 #[test]
 fn a_member_that_elects_follows_the_member_whose_term_it_reads() {
     let mut io = Stub::new();
@@ -502,9 +504,17 @@ fn a_member_that_elects_follows_the_member_whose_term_it_reads() {
     member
         .on_message(at(2), &new_leadership_term(2, 0), &mut io)
         .expect("no fault");
+    assert_eq!(member.election_state(), ElectionState::Canvass);
+    assert_eq!(member.leader_member_id(), -1);
+    assert_eq!(member.counts().leaders_withheld, 1);
+    hear_the_others(&mut member, &mut io, 2, 2);
+    member
+        .on_message(at(2), &new_leadership_term(2, 0), &mut io)
+        .expect("no fault");
     assert_eq!(member.election_state(), ElectionState::FollowerReplay);
     assert_eq!(member.leader_member_id(), 2);
     assert_eq!(member.leadership_term_id(), 0);
+    assert_eq!(member.counts().leaders_withheld, 1);
 }
 
 /// A member writes its own version of the page in canvass position and in request

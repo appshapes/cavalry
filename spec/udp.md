@@ -613,7 +613,12 @@ receiver id is a random i64 chosen when it starts. On a datagram from a source a
    a recording of it is live ("The sender"). From the removal of its last
    subscription an image is being retired, whether or not the receiver has finished:
    it is given to no subscription added on its endpoint and stream meanwhile, and no
-   recording starts on it, since its log goes when the retire is done (ADR 0068). An
+   recording starts on it, since its log goes when the retire is done (ADR 0068). A
+   subscription added on the endpoint and stream while an image of it is live and not
+   being retired joins that image at its rebuild position (step 3): the driver gives
+   it a `subscription.position` at that position, then `available image`, so that it
+   reads no frame below it, which another reader of the image may already have read
+   (ADR 0145). An
    image with no activity for the image
    liveness timeout is retired too: a data datagram that is accepted, and a heartbeat
    at or above the last status message's position less a term, count as activity; an

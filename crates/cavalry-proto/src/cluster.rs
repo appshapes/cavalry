@@ -2692,6 +2692,92 @@ pub fn candidate(
     }
 }
 
+/// Whether a member withholds its vote and its candidacy (`spec/cluster.md`, "A member
+/// that lost its log"; ADR 0145). It does while its log is empty, log leadership term
+/// id −1 at position 0, and `log_heard`: a member's report in this election, or the
+/// request it answers, holds a log. Such a member may have lost a log directory that
+/// held entries a quorum committed with its acknowledgement, and with them the record
+/// of its votes. It does too while its append position is below `vote_floor`, the
+/// vote floor its record of terms holds, −1 for none: the end of the log of the leader
+/// it took with its log empty, which holds every entry committed before it came back.
+/// A member whose log is empty while no member holds a log is one of a new cluster,
+/// and it votes.
+pub const fn withholds(own: LogReport, vote_floor: i64, log_heard: bool) -> bool {
+    let empty = own.term < 0 && own.position == 0;
+    (empty && log_heard) || own.position < vote_floor
+}
+
+/// Whether a member that withholds votes all the same for a candidate whose log is
+/// `candidate` (`spec/cluster.md`, "A member that lost its log"; ADR 0145): when each
+/// of the `voters` voters has reported its log in this election, `reports[i]` voter
+/// `i`'s, the member's own and the candidate's among them, and the candidate's log is
+/// at least each. A log at least that of a member that holds a committed entry holds
+/// the entry, as Raft's vote rule has it, so such a candidate holds every committed
+/// entry that any voter still holds. While a voter has not reported, the member votes
+/// for no one: that voter may hold an entry the candidate lacks.
+pub fn withheld_vote(voters: usize, reports: &[Option<LogReport>], candidate: LogReport) -> bool {
+    voters >= 1
+        && reports.len() >= voters
+        && reports.iter().take(voters).all(|report| match report {
+            Some(report) => log_at_least(
+                candidate.term,
+                candidate.position,
+                report.term,
+                report.position,
+            ),
+            None => false,
+        })
+}
+
+/// Whether a voter whose log is empty takes the sender of a new leadership term for
+/// `term` as its leader, and so stores its vote floor (`spec/cluster.md`, "A member
+/// that lost its log", "Taking a leader"; ADR 0145). It does when it voted for that
+/// leader in that term in this election, `voted`. It does too when each of the
+/// `voters` voters but itself, the voter at `own`, has been heard in this election,
+/// `heard[i]` the highest term voter `i` named by a canvass position or a new
+/// leadership term, `None` for one not heard, and none named a term above `term`. The
+/// caller counts the message itself as the leader's. A leader that a later term
+/// deposed answers a member whose candidate term is −1, and the voter that holds the
+/// later term names it; while a voter is not heard it may hold one.
+pub fn takes_leader(
+    voters: usize,
+    own: usize,
+    heard: &[Option<i64>],
+    term: i64,
+    voted: bool,
+) -> bool {
+    voted
+        || (voters >= 1
+            && heard.len() >= voters
+            && heard
+                .iter()
+                .take(voters)
+                .enumerate()
+                .all(|(index, named)| index == own || named.is_some_and(|named| named <= term)))
+}
+
+/// Whether a voter that withholds and votes all the same ([`withheld_vote`]) gives its
+/// vote in `term` to the candidate at index `candidate`: only when each of the
+/// `voters` voters but itself, voter `own`, and the candidate has been heard in this
+/// election, `heard[i]` the highest term voter `i` named or `None`, and named a term
+/// below `term` (`spec/cluster.md`, "A member that lost its log"; ADR 0145). A vote the
+/// member cast in `term` before it lost its log went to a candidate that stored `term`
+/// first and names it since, so with every other voter below `term`, that candidate is
+/// this one, and the member votes no second time in the term.
+pub fn votes_in_term(
+    voters: usize,
+    own: usize,
+    candidate: usize,
+    heard: &[Option<i64>],
+    term: i64,
+) -> bool {
+    voters >= 1
+        && heard.len() >= voters
+        && heard.iter().take(voters).enumerate().all(|(index, named)| {
+            index == own || index == candidate || named.is_some_and(|named| named < term)
+        })
+}
+
 /// The fields of a request vote a reader answers.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub struct VoteRequest {

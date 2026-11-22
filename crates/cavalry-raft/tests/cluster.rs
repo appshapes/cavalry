@@ -533,7 +533,7 @@ fn three_members_replicate_a_hundred_thousand_entries_and_their_recordings_are_e
         "{text}"
     );
     assert!(
-        text.contains("Do not start this member alone on a new log directory")
+        text.contains("start the member on a new log directory: it replicates the log")
             && text.contains("docs/reference/cluster.md#roles-and-the-election"),
         "{text}"
     );

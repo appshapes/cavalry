@@ -190,15 +190,21 @@ const DOC: &str = "docs/reference/durable-log.md#log-recordings";
 
 impl std::fmt::Display for RecordingsError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        // What an operator does when the member cannot tell its log: never a new log
-        // directory for this member alone (`spec/cluster.md`, "A member's start").
+        // What an operator does when the member cannot tell its log: a new log
+        // directory, on which the member withholds its vote until it holds the log
+        // (`spec/cluster.md`, "A member that lost its log"; ADR 0145).
         let stay_out = "Without the list this member cannot tell its log from the other \
-                        recordings in the directory, and it does not start. Leave it \
-                        stopped: the cluster goes on while a quorum of the others runs. To \
-                        have every member again, start the cluster again as a new cluster, \
-                        every member on a new log directory. Do not start this member \
-                        alone on a new log directory: it would vote with no record of its \
-                        votes or its log";
+                        recordings in the directory, and it does not start. Start the \
+                        member on a new log directory: it replicates the log, and it casts \
+                        no vote and seeks no leadership until its log reaches what the \
+                        cluster held when it took a leader, the position \
+                        cluster.vote_floor holds. It takes that leader only once it has \
+                        heard every other member, and waits while one is stopped. It \
+                        catches up only while its leader's \
+                        log begins at position 0; where it no longer does, leave the member \
+                        stopped: the cluster goes on while a quorum of the others runs, and \
+                        is brought back to its full count by starting it again as a new \
+                        cluster, every member on a new log directory";
         match self {
             RecordingsError::Io { what, path, source } => write!(
                 f,
@@ -1086,7 +1092,7 @@ mod tests {
             "{text}"
         );
         assert!(
-            text.contains("Do not start this member alone on a new log directory"),
+            text.contains("Start the member on a new log directory: it replicates the log"),
             "{text}"
         );
         assert!(

@@ -13,7 +13,8 @@ use cavalry_proto::cluster::{
     Stream, TermFields, TermSpan, TimeUnit, VERSION, Vote, VoteAnswer, VoteRequest, answered_term,
     ballot, candidate, canvass_position_action, commit_position, entry_position, log_at_least,
     new_leadership_term_action, next_fields, parse_members, quorum, replay_end, replication_record,
-    replication_stop, request_vote, write_log_recordings,
+    replication_stop, request_vote, takes_leader, votes_in_term, withheld_vote, withholds,
+    write_log_recordings,
 };
 use serde_json::{Map, Value, json};
 
@@ -547,6 +548,59 @@ fn arithmetic_vector(name: &str, vector: &Value) {
                     .expect("deadline_passed"),
             );
             json!({"nominate": nominate, "unanimous": unanimous})
+        }
+        "withholds" => {
+            let own = inputs["own"].as_array().expect("own");
+            let own = LogReport {
+                term: own[0].as_i64().expect("term"),
+                position: own[1].as_i64().expect("position"),
+            };
+            let heard = inputs["log_heard"].as_bool().expect("log_heard");
+            json!({"withholds": withholds(own, int(inputs, "vote_floor"), heard)})
+        }
+        "withheld-vote" => {
+            let voters = usize::try_from(int(inputs, "voters")).expect("voters");
+            let reports: Vec<Option<LogReport>> = inputs["reports"]
+                .as_array()
+                .expect("reports")
+                .iter()
+                .map(|r| {
+                    r.as_array().map(|pair| LogReport {
+                        term: pair[0].as_i64().expect("term"),
+                        position: pair[1].as_i64().expect("position"),
+                    })
+                })
+                .collect();
+            let candidate = inputs["candidate"].as_array().expect("candidate");
+            let candidate = LogReport {
+                term: candidate[0].as_i64().expect("term"),
+                position: candidate[1].as_i64().expect("position"),
+            };
+            json!({"vote": withheld_vote(voters, &reports, candidate)})
+        }
+        "takes-leader" => {
+            let voters = usize::try_from(int(inputs, "voters")).expect("voters");
+            let own = usize::try_from(int(inputs, "own")).expect("own");
+            let heard: Vec<Option<i64>> = inputs["heard"]
+                .as_array()
+                .expect("heard")
+                .iter()
+                .map(Value::as_i64)
+                .collect();
+            let voted = inputs["voted"].as_bool().expect("voted");
+            json!({"takes": takes_leader(voters, own, &heard, int(inputs, "term"), voted)})
+        }
+        "votes-in-term" => {
+            let voters = usize::try_from(int(inputs, "voters")).expect("voters");
+            let own = usize::try_from(int(inputs, "own")).expect("own");
+            let candidate = usize::try_from(int(inputs, "candidate")).expect("candidate");
+            let heard: Vec<Option<i64>> = inputs["heard"]
+                .as_array()
+                .expect("heard")
+                .iter()
+                .map(Value::as_i64)
+                .collect();
+            json!({"vote": votes_in_term(voters, own, candidate, &heard, int(inputs, "term"))})
         }
         "replication-stop" => {
             let ReplicationStop {

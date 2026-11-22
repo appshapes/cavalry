@@ -55,7 +55,7 @@ use cavalry_shm::counters::generated::{
     CLUSTER_LOG_RECORDING_ID, CLUSTER_LOG_RECORDINGS_FORGOTTEN, CLUSTER_LOG_RECORDINGS_LISTED,
     CLUSTER_LOG_RECORDINGS_UNSYNCED, CLUSTER_LOG_RECORDINGS_UNWRITTEN, CLUSTER_MESSAGES_REJECTED,
     CLUSTER_PROTOCOL_VERSION, CLUSTER_ROLE, CLUSTER_SESSIONS, CLUSTER_STANDBY,
-    CLUSTER_TRUNCATIONS_FINISHED, CLUSTER_VOTERS, COUNTERS,
+    CLUSTER_TRUNCATIONS_FINISHED, CLUSTER_VOTE_FLOOR, CLUSTER_VOTERS, COUNTERS,
 };
 
 use crate::consensus::{
@@ -113,6 +113,18 @@ const DOC_MEMBERS: &str = "docs/reference/cluster.md#members-and-streams";
 const DOC_LOG: &str = "docs/reference/cluster.md#the-log";
 const DOC_LOG_RECORDINGS: &str = "docs/reference/cluster.md#the-logs-recordings";
 const DOC_KEPT_LOG: &str = "docs/reference/durable-log.md#log-recordings";
+/// What an operator does with a member whose log directory is lost (`spec/cluster.md`,
+/// "A member that lost its log"; ADR 0145), the words of each refusal that leaves a
+/// member out of the cluster for want of the log directory it had.
+const ON_A_NEW_LOG_DIRECTORY: &str = "start the member on a new log directory: it replicates \
+     the log, and it casts no vote and seeks no leadership until its log reaches what the \
+     cluster held when it took a leader, the position cluster.vote_floor holds. It takes \
+     that leader only once it has heard every other member, so while one is stopped it \
+     waits, and cluster.leaders_withheld rises: start the stopped member on the log \
+     directory it kept. It catches up only while its leader's log begins at position 0. Where it no longer does, recordings purged \
+     below a snapshot, leave the member stopped: the cluster goes on while a quorum of the \
+     others runs, and is brought back to its full count by starting it again as a new \
+     cluster, every member on a new log directory";
 
 /// Why a consensus module did not start, or stopped.
 #[derive(Debug)]
@@ -382,12 +394,9 @@ impl core::fmt::Display for RaftError {
                     ". The terms of the log and the votes the member cast were in it, and \
                      the member does not start without them. Start it with the log \
                      directory it had, whole, as its driver left it. If the file is lost, \
-                     leave the member stopped: the cluster goes on while a quorum of the \
-                     others runs, and a cluster is brought back to its full count by \
-                     starting it again as a new cluster, every member on a new log \
-                     directory. Do not start this member alone on a new log directory, \
-                     and do not put an older copy of the file in its place: either way \
-                     the member would vote with no record of the votes it cast; see {DOC}"
+                     {ON_A_NEW_LOG_DIRECTORY}. Do not put an older copy of the file in its \
+                     place: the member would vote with an older record than the votes it \
+                     cast; see {DOC}"
                 )
             }
             RaftError::LogForgotten {
@@ -440,11 +449,8 @@ impl core::fmt::Display for RaftError {
                     ". A member that starts reads its log from its newest snapshot's \
                      position, or from position 0 with none, which this \
                      one cannot, so it does not start: its log directory no longer \
-                     holds the log from there. Leave the member \
-                     stopped: the cluster goes on while a quorum of the others runs, and \
-                     a cluster is brought back to its full count by starting it again as \
-                     a new cluster, every member on a new log directory. Do not start \
-                     this member alone on a new log directory; see {DOC_KEPT_LOG}"
+                     holds the log from there, so {ON_A_NEW_LOG_DIRECTORY}; see \
+                     {DOC_KEPT_LOG}"
                 )
             }
             RaftError::ListedRecording {
@@ -500,11 +506,8 @@ impl core::fmt::Display for RaftError {
                     f,
                     ". The member does not start on a log it cannot vouch for. Start it \
                      with the log directory it had, whole, as its driver left it. If that \
-                     directory is lost or damaged, leave the member stopped: the cluster \
-                     goes on while a quorum of the others runs, and a cluster is brought \
-                     back to its full count by starting it again as a new cluster, every \
-                     member on a new log directory. Do not start this member alone on a \
-                     new log directory; see {DOC_KEPT_LOG}"
+                     directory is lost or damaged, {ON_A_NEW_LOG_DIRECTORY}; see \
+                     {DOC_KEPT_LOG}"
                 )
             }
             RaftError::LogShort {
@@ -521,11 +524,8 @@ impl core::fmt::Display for RaftError {
                  log was cut, as by a `truncate recording`, or the two files are older \
                  than the snapshot. The member does not start on a log it cannot vouch \
                  for. Start it with the log directory it had, whole, as its driver \
-                 left it. If that directory is lost or damaged, leave the member \
-                 stopped: the cluster goes on while a quorum of the others runs, and a \
-                 cluster is brought back to its full count by starting it again as a \
-                 new cluster, every member on a new log directory. Do not start this \
-                 member alone on a new log directory; see {DOC_KEPT_LOG}"
+                 left it. If that directory is lost or damaged, \
+                 {ON_A_NEW_LOG_DIRECTORY}; see {DOC_KEPT_LOG}"
             ),
             RaftError::Terms(error) => write!(f, "member stopped ({reason}): {error}"),
             RaftError::Catalog(error) => write!(
@@ -1749,6 +1749,18 @@ impl Io for ClientIo {
         self.terms.log_leadership_term_id()
     }
 
+    /// The `terms` file's vote floor, from memory, as [`Io::candidate_term`]: −1 on a
+    /// new log directory and on one whose member never took a leader with its log
+    /// empty (ADR 0145).
+    fn vote_floor(&mut self) -> i64 {
+        self.terms.vote_floor().unwrap_or(-1)
+    }
+
+    /// The vote floor in its slot of the `terms` file, one synced write (ADR 0145).
+    fn store_vote_floor(&mut self, position: i64) -> Result<(), Self::Fault> {
+        Ok(self.terms.set_vote_floor(position)?)
+    }
+
     fn add_log(&mut self, term: i64, base: i64) -> Result<Option<Log>, Self::Fault> {
         // The publication held is the one of the term it was created for, at that
         // term's base: a call for the same term is a step tried again, and one for
@@ -2709,6 +2721,10 @@ struct Counters {
     /// added: a member's build does not change while it runs. The member holds no
     /// peer's version.
     _protocol_version: Stored,
+    /// `cluster.vote_floor`: the position below which the member withholds its vote, −1
+    /// for none, stored each cycle, since the member stores it once when it takes a
+    /// leader with its log empty (ADR 0145).
+    vote_floor: Stored,
     append_position: Stored,
     /// `cluster.log_recording_id`, added before `cluster.commit_position` and stored
     /// before it (`spec/cluster.md`, "The service").
@@ -2778,6 +2794,7 @@ impl Counters {
                 "cluster.protocol_version",
                 i64::from(PROTOCOL_VERSION),
             )?,
+            vote_floor: add(CLUSTER_VOTE_FLOOR, "cluster.vote_floor", core.vote_floor())?,
             append_position: add(
                 CLUSTER_APPEND_POSITION,
                 "cluster.append_position",
@@ -2883,6 +2900,7 @@ impl Counters {
         self.leader_member_id.store(core.leader_gauge());
         self.election_cause
             .store(i64::from(core.election_cause().code()));
+        self.vote_floor.store(core.vote_floor());
         self.append_position.store(core.append_position());
         if self.log_recording_id.store(log_recording_id) {
             self.commit_position.store(core.commit_position());

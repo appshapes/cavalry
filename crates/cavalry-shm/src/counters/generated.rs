@@ -545,6 +545,15 @@ pub const CLUSTER_PROTOCOL_VERSION: CounterId = CounterId(179);
 /// `recording.cut_to_synced`, a static counter: Recordings that recovery cut to the position their time index says the recorder had synced, found live when the driver opened the log directory or in the repair after a retention command's file work failed, where the recorder had written past that position: a frame began there, or the index's last entry lay past it. The frames past it were dropped, whole or not, since a power loss or a crash of the operating system may have taken any of their bodies, and the bytes zeroed (spec/durable-log.md, The driver; ADR 0144). Counted in recording.recovered as well.
 pub const RECORDING_CUT_TO_SYNCED: CounterId = CounterId(180);
 
+/// `cluster.vote_floor`, a client gauge: The position below which one cluster member casts no vote and seeks no leadership, which it stored in its record of terms when it took a leader with its log empty: the end of that leader's log, which holds every entry the cluster committed before the member came back. -1 when it stored none, as a member of a new cluster does, or one that started on the log directory it kept. It does not fall (spec/cluster.md, A member that lost its log; ADR 0145). key and label as cluster.elections.
+pub const CLUSTER_VOTE_FLOOR: CounterId = CounterId(181);
+
+/// `cluster.votes_withheld`, a client counter: Request votes one cluster member answered with nothing because it withholds its vote, its log empty beside a member that holds one or below its cluster.vote_floor, and not every voter had reported a log the candidate's is at least, or a voter other than the candidate had named the request's term or a later one, a term in which this member may have voted before it lost its log. A vote such a member cast could elect a leader that lacks an entry the cluster committed with its acknowledgement before it lost its log (spec/cluster.md, A member that lost its log; ADR 0145). key and label as cluster.elections.
+pub const CLUSTER_VOTES_WITHHELD: CounterId = CounterId(182);
+
+/// `cluster.leaders_withheld`, a client counter: New leadership terms that one cluster member, a voter with its log empty, ignored where it would otherwise have taken the sender as its leader: it had not voted that leader in, and had not heard each other voter in this election name a term at most the leader's. A leader that a later term deposed, and that has not heard of it, still answers a member whose log is empty, and a member that followed it would count toward commits that replace what the later term committed (spec/cluster.md, A member that lost its log, Taking a leader; ADR 0145). key and label as cluster.elections.
+pub const CLUSTER_LEADERS_WITHHELD: CounterId = CounterId(183);
+
 /// Every entry of `counters.toml`, in the file's order.
 pub const COUNTERS: &[CounterDef] = &[
     CounterDef {
@@ -1986,5 +1995,29 @@ pub const COUNTERS: &[CounterDef] = &[
         scope: Scope::Static,
         doc: "Recordings that recovery cut to the position their time index says the recorder had synced, found live when the driver opened the log directory or in the repair after a retention command's file work failed, where the recorder had written past that position: a frame began there, or the index's last entry lay past it. The frames past it were dropped, whole or not, since a power loss or a crash of the operating system may have taken any of their bodies, and the bytes zeroed (spec/durable-log.md, The driver; ADR 0144). Counted in recording.recovered as well.",
         doctor: "The previous driver stopped without a stop while its recorder held frames it had not yet synced: its process was killed or crashed, the operating system crashed, or the host lost power. Each such recording ends at the position it had synced, and the frames written after the last sync were dropped. The cut dropped only bytes that no sync had covered, so nothing a client was told is durable went with it: a sync recording command's answer, a recording's synced position and a cluster member's append position all name a synced position, and a member takes what it lacks from its leader. If this climbs at every start, find what stops the driver without `close`.",
+    },
+    CounterDef {
+        id: CLUSTER_VOTE_FLOOR,
+        name: "cluster.vote_floor",
+        kind: Kind::Gauge,
+        scope: Scope::Client,
+        doc: "The position below which one cluster member casts no vote and seeks no leadership, which it stored in its record of terms when it took a leader with its log empty: the end of that leader's log, which holds every entry the cluster committed before the member came back. -1 when it stored none, as a member of a new cluster does, or one that started on the log directory it kept. It does not fall (spec/cluster.md, A member that lost its log; ADR 0145). key and label as cluster.elections.",
+        doctor: "This member started on an empty log directory beside members that hold the cluster's log: it lost its log directory, or it joined a new cluster after the cluster's first term began. Until its cluster.append_position reaches this position it votes for no candidate unless every voter has reported a log the candidate's is at least and no voter but the candidate has named the term asked for or a later one, and it never seeks leadership, so the cluster tolerates one failed member fewer meanwhile. It catches up from its leader by itself. If cluster.append_position stays below this, its leader's log no longer begins at 0: give the member a snapshot to start from when the cluster can (work item 365), or start the cluster again as a new cluster.",
+    },
+    CounterDef {
+        id: CLUSTER_VOTES_WITHHELD,
+        name: "cluster.votes_withheld",
+        kind: Kind::Counter,
+        scope: Scope::Client,
+        doc: "Request votes one cluster member answered with nothing because it withholds its vote, its log empty beside a member that holds one or below its cluster.vote_floor, and not every voter had reported a log the candidate's is at least, or a voter other than the candidate had named the request's term or a later one, a term in which this member may have voted before it lost its log. A vote such a member cast could elect a leader that lacks an entry the cluster committed with its acknowledgement before it lost its log (spec/cluster.md, A member that lost its log; ADR 0145). key and label as cluster.elections.",
+        doctor: "This member lost its log directory, or joined a new cluster late, and the cluster held an election before it had caught up with the log: it answered none of the candidates' requests, so as to elect no leader that lacks a committed entry. An election succeeds without it when a quorum of the other voters votes. If no leader is elected while it rises, a quorum of the other voters is not running: start the stopped ones on the log directories they kept.",
+    },
+    CounterDef {
+        id: CLUSTER_LEADERS_WITHHELD,
+        name: "cluster.leaders_withheld",
+        kind: Kind::Counter,
+        scope: Scope::Client,
+        doc: "New leadership terms that one cluster member, a voter with its log empty, ignored where it would otherwise have taken the sender as its leader: it had not voted that leader in, and had not heard each other voter in this election name a term at most the leader's. A leader that a later term deposed, and that has not heard of it, still answers a member whose log is empty, and a member that followed it would count toward commits that replace what the later term committed (spec/cluster.md, A member that lost its log, Taking a leader; ADR 0145). key and label as cluster.elections.",
+        doctor: "This member started on an empty log directory and a leader answered it, but a voter other than that leader has not been heard: it is stopped, it cannot reach this member, or it runs a build before ADR 0145 and has not canvassed since. This member takes no leader until it hears that voter, since only that voter can show that no later term was elected without the leader. Start the stopped voter on the log directory it kept, or mend the path between the two; the member then takes its leader within 100 ms.",
     },
 ];

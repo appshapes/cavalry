@@ -4,7 +4,7 @@
 
 #![allow(dead_code)]
 
-use cavalry_proto::cluster::{Message, Template};
+use cavalry_proto::cluster::{MAX_MEMBERS, Message, Template};
 use cavalry_raft::consensus::{base_above, term_at_or_below, terms_above};
 use cavalry_raft::{Clock, Consensus, ElectionState, Io, Log, ReplayStopped, Role};
 
@@ -86,6 +86,9 @@ pub struct Stub {
     /// The candidate term the log directory holds: what a test gave it, as a
     /// directory kept from an earlier start, or what the member stored since.
     pub candidate_term: i64,
+    /// The vote floor the log directory holds, −1 for none (ADR 0145): what
+    /// `vote_floor` returns and `store_vote_floor` writes.
+    pub vote_floor: i64,
     /// The highest term of the record the log directory holds, likewise.
     pub log_term: i64,
     /// How many times the member read each of the two.
@@ -93,6 +96,9 @@ pub struct Stub {
     /// The last canvass position sent: its log leadership term id, its log position
     /// and its leadership term id, the sender's candidate term.
     pub last_canvass: Option<(i64, i64, i64)>,
+    /// The follower member id of the last canvass position sent: the member that
+    /// sent it, by its own account.
+    pub last_canvass_from: Option<i32>,
     /// The `is startup` of the last new leadership term sent.
     pub last_startup: Option<bool>,
     /// The `protocol version` of the last canvass position sent and of the last
@@ -128,9 +134,11 @@ impl Stub {
             last_append: None,
             last_append_flags: 0,
             candidate_term: -1,
+            vote_floor: -1,
             log_term: -1,
             reads: [0; 2],
             last_canvass: None,
+            last_canvass_from: None,
             last_startup: None,
             versions_sent: [None; 2],
         }
@@ -187,10 +195,12 @@ impl Io for Stub {
             log_leadership_term_id,
             log_position,
             leadership_term_id,
+            follower_member_id,
             ..
         } = *message
         {
             self.last_canvass = Some((log_leadership_term_id, log_position, leadership_term_id));
+            self.last_canvass_from = Some(follower_member_id);
         }
         if let Message::NewLeadershipTerm { is_startup, .. } = *message {
             self.last_startup = Some(is_startup);
@@ -250,6 +260,15 @@ impl Io for Stub {
     fn log_leadership_term_id(&mut self) -> i64 {
         self.reads[1] += 1;
         self.log_term
+    }
+
+    fn vote_floor(&mut self) -> i64 {
+        self.vote_floor
+    }
+
+    fn store_vote_floor(&mut self, position: i64) -> Result<(), Self::Fault> {
+        self.vote_floor = position;
+        Ok(())
     }
 
     fn record_term(&mut self, term: i64, base: i64) -> Result<(), Self::Fault> {
@@ -488,9 +507,26 @@ pub fn leadership_term(
     }
 }
 
+/// A canvass position with no log from each member id below `MAX_MEMBERS` but
+/// `member`'s own and `leader`'s, at `ms`: what a member whose log is empty has heard
+/// from every other voter in a cluster before it takes `leader`'s new leadership term
+/// (`spec/cluster.md`, "A member that lost its log", "Taking a leader"; ADR 0145). An id
+/// that is no member's is not read. Each names term −1, so none is above the leader's.
+pub fn hear_the_others(member: &mut Consensus, io: &mut Stub, ms: u64, leader: i32) {
+    let own = member.member_id();
+    for id in (0..MAX_MEMBERS).filter_map(|id| i32::try_from(id).ok()) {
+        if id != own && id != leader {
+            member
+                .on_message(at(ms), &canvass_position(id, -1, 0), io)
+                .expect("no fault");
+        }
+    }
+}
+
 /// Takes `member` from canvass to closed as a follower of the leader whose new
 /// leadership term is `term`, with the image of the leader's log joining at `join`,
-/// from `ms` on; returns the millisecond its election closed at.
+/// from `ms` on; returns the millisecond its election closed at. The member has heard
+/// every other member first ([`hear_the_others`]).
 pub fn follow_term(
     member: &mut Consensus,
     io: &mut Stub,
@@ -499,6 +535,12 @@ pub fn follow_term(
     join: i64,
 ) -> u64 {
     assert_eq!(member.election_state(), ElectionState::Canvass);
+    if let Message::NewLeadershipTerm {
+        leader_member_id, ..
+    } = *term
+    {
+        hear_the_others(member, io, ms, leader_member_id);
+    }
     member.on_message(at(ms), term, io).expect("no fault");
     assert_eq!(member.election_state(), ElectionState::FollowerReplay);
     member.do_work(at(ms + 1), io).expect("no fault");

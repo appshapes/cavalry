@@ -1,6 +1,6 @@
 {
   "spec": "durable-log",
-  "version": 5,
+  "version": 6,
   "generated_by": "spec/vectors/durable-log.py",
   "vectors": [
     {
@@ -1024,7 +1024,8 @@
           -1,
           4
         ],
-        "candidate_term": 4
+        "candidate_term": 4,
+        "vote_floor": null
       },
       "file_length": 128
     },
@@ -1040,7 +1041,8 @@
           -1,
           -1
         ],
-        "candidate_term": -1
+        "candidate_term": -1,
+        "vote_floor": null
       },
       "file_length": 64
     },
@@ -1056,7 +1058,8 @@
           6,
           4
         ],
-        "candidate_term": 6
+        "candidate_term": 6,
+        "vote_floor": null
       },
       "file_length": 128
     },
@@ -1072,7 +1075,8 @@
           null,
           4
         ],
-        "candidate_term": 4
+        "candidate_term": 4,
+        "vote_floor": null
       },
       "file_length": 128
     },
@@ -1088,7 +1092,8 @@
           6,
           null
         ],
-        "candidate_term": 6
+        "candidate_term": 6,
+        "vote_floor": null
       },
       "file_length": 128
     },
@@ -1145,6 +1150,61 @@
       "name": "terms-candidate-below-none",
       "region": "terms-header",
       "bytes": "43564c595445524d0000000020000000fbffffffffffffffe6d10ea500000000040000000000000093d168e10000000000000000000000000000000000000000",
+      "error": "candidate",
+      "file_length": 128
+    },
+    {
+      "name": "terms-header-vote-floor",
+      "region": "terms-header",
+      "bytes": "43564c595445524d0000000020000000ffffffffffffffff1cdf442100000000040000000000000093d168e1000000000000100000000000f2ddf46600000000",
+      "fields": {
+        "magic": "43564c595445524d",
+        "version": 0,
+        "entry_length": 32,
+        "candidate_terms": [
+          -1,
+          4
+        ],
+        "candidate_term": 4,
+        "vote_floor": 1048576
+      },
+      "file_length": 128
+    },
+    {
+      "name": "terms-header-vote-floor-torn",
+      "region": "terms-header",
+      "bytes": "43564c595445524d0000000020000000ffffffffffffffff1cdf442100000000040000000000000093d168e1000000000000100000000000efbeadde00000000",
+      "fields": {
+        "magic": "43564c595445524d",
+        "version": 0,
+        "entry_length": 32,
+        "candidate_terms": [
+          -1,
+          4
+        ],
+        "candidate_term": 4,
+        "vote_floor": null
+      },
+      "file_length": 128
+    },
+    {
+      "name": "terms-vote-floor-unaligned",
+      "region": "terms-header",
+      "bytes": "43564c595445524d0000000020000000ffffffffffffffff1cdf442100000000040000000000000093d168e10000000010100000000000008c72477e00000000",
+      "error": "vote-floor",
+      "file_length": 128
+    },
+    {
+      "name": "terms-vote-floor-negative",
+      "region": "terms-header",
+      "bytes": "43564c595445524d0000000020000000ffffffffffffffff1cdf442100000000040000000000000093d168e100000000e0ffffffffffffff9bfcdf8400000000",
+      "error": "vote-floor",
+      "file_length": 128
+    },
+    {
+      "name": "terms-order-candidate-before-vote-floor",
+      "region": "terms-header",
+      "bytes": "43564c595445524d0000000020000000fbffffffffffffffe6d10ea500000000040000000000000093d168e100000000e0ffffffffffffff9bfcdf8400000000",
       "error": "candidate",
       "file_length": 128
     },

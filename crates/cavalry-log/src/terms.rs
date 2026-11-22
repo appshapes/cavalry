@@ -1,12 +1,17 @@
 //! The terms file: a cluster member's record of the terms it has recorded and the
-//! candidate term it has stored (`spec/durable-log.md`, version 2, "Terms"; ADR 0060).
+//! candidate term it has stored (`spec/durable-log.md`, version 2, "Terms"; ADR 0060),
+//! and the vote floor, since version 6 (ADR 0145).
 //!
 //! The consensus module of `cavalry-raft` is the file's only writer, from its own
 //! thread: [`TermsFile::create`] or [`TermsFile::open`] at the member's start, then
 //! [`TermsFile::append`] before the member reports an append position for a term,
 //! [`TermsFile::truncate_above`] before it reports its log leadership term id again,
-//! and [`TermsFile::set_candidate_term`] before the vote or request vote that raises
-//! the candidate term is sent; each write syncs before it returns. A reader takes the
+//! [`TermsFile::set_candidate_term`] before the vote or request vote that raises
+//! the candidate term is sent, and [`TermsFile::set_vote_floor`] once, when the
+//! member takes a leader with its log empty, before it records a term; each write
+//! syncs before it returns. The vote floor is one slot, bytes 48 to 60 of the header,
+//! under its own checksum: a write a crash tears reads as no floor, which the member
+//! then stores again, since it recorded no term after it. A reader takes the
 //! entries in file order, skips a deleted one and stops at the empty last entry a crash
 //! left, an empty entry before the last being damage:
 //! [`TermsHeader::parse`] and [`TermsEntry::parse`] are the checks of "What a reader
@@ -50,6 +55,9 @@ pub const NO_CANDIDATE_TERM: i64 = -1;
 const SLOT_OFFSETS: [usize; 2] = [16, 32];
 /// A candidate slot's length: the term, an i64, and its CRC32.
 const SLOT_LENGTH: usize = 12;
+/// Where the vote floor slot begins in the header, a position and its CRC32, written
+/// once (`spec/durable-log.md`, version 6, "Terms"; ADR 0145).
+const FLOOR_OFFSET: usize = 48;
 /// The recording id of a term that has no recording yet.
 pub const NO_RECORDING: i64 = -1;
 /// An entry's state: empty. The file ends at an empty entry when it is the last whole
@@ -100,6 +108,19 @@ pub enum TermsError {
     /// holds a term below −1: damage, since a crash tears at most one slot. One slot
     /// whose checksum does not match is no error: it is the raise a crash tore.
     Candidate,
+    /// The vote floor slot's checksum matches and its position is below 0 or not a
+    /// multiple of 32: damage, since the writer writes no such slot.
+    VoteFloor {
+        /// The position found.
+        found: i64,
+    },
+    /// [`TermsFile::set_vote_floor`] was asked of a file whose vote floor is set, or
+    /// for a position below 0 or not a multiple of 32: the writer's fault, and nothing
+    /// is written.
+    VoteFloorRefused {
+        /// The position asked.
+        position: i64,
+    },
     /// The file holds more whole entries than the bound.
     Length {
         /// The whole entries found.
@@ -170,6 +191,8 @@ impl TermsError {
             TermsError::Version { .. } => "version",
             TermsError::EntryLength { .. } => "entry-length",
             TermsError::Candidate => "candidate",
+            TermsError::VoteFloor { .. } => "vote-floor",
+            TermsError::VoteFloorRefused { .. } => "floor",
             TermsError::Length { .. } => "length",
             TermsError::State { .. } | TermsError::EmptyBeforeLast { .. } => "state",
             TermsError::Checksum | TermsError::Damaged { .. } => "checksum",
@@ -209,18 +232,24 @@ impl std::fmt::Display for TermsError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         const DOC: &str = "docs/reference/durable-log.md#terms";
         // What an operator does with a terms file that cannot be read: the member's
-        // votes and the terms of its log are in it, so the member stays out, and it
-        // is never given a new log directory beside the others (`spec/cluster.md`,
-        // "A member's start"; ADR 0104).
+        // votes and the terms of its log are in it, so the member does not start on
+        // it, and starts on a new log directory instead, where it withholds its vote
+        // until it holds the log (`spec/cluster.md`, "A member that lost its log"; ADR
+        // 0145).
         const STAY_OUT: &str = "the member's votes and the terms of its log are in this \
-                                file, so the member does not start without it. Leave the \
-                                member stopped: the cluster goes on while a quorum of the \
-                                others runs. To have every member again, start the cluster \
-                                again as a new cluster, every member on a new log \
-                                directory. Do not start this member alone on a new log \
-                                directory, and do not put an older copy of the file in its \
-                                place: either way the member would vote with no record of \
-                                the votes it cast";
+                                file, so the member does not start without it. Start the \
+                                member on a new log directory: it replicates the log, and \
+                                it casts no vote and seeks no leadership until its log \
+                                reaches what the cluster held when it took a leader, the \
+                                position cluster.vote_floor holds. It takes that leader \
+                                only once it has heard every other member, and waits while \
+                                one is stopped. It catches up only \
+                                while its leader's log begins at position 0; where it no \
+                                longer does, leave the member stopped, and start the \
+                                cluster again as a new cluster, every member on a new log \
+                                directory, to have every member again. Do not put an older \
+                                copy of the file in its place: the member would vote with \
+                                an older record than the votes it cast";
         match self {
             TermsError::Io { what, path, source } => {
                 write!(
@@ -262,6 +291,18 @@ impl std::fmt::Display for TermsError {
                 "terms file rejected (candidate): neither candidate term slot's checksum \
                  matches, or a slot holds a candidate term below -1, so the member's stored \
                  vote cannot be read and the file is damaged: {STAY_OUT}; see {DOC}"
+            ),
+            TermsError::VoteFloor { found } => write!(
+                f,
+                "terms file rejected (vote-floor): the vote floor slot holds position \
+                 {found}, which no writer writes, so the position below which the member \
+                 casts no vote cannot be read and the file is damaged: {STAY_OUT}; see {DOC}"
+            ),
+            TermsError::VoteFloorRefused { position } => write!(
+                f,
+                "terms file refused (floor): a vote floor of {position} was asked of a file \
+                 whose vote floor is set, or is not a position; nothing was written. This is \
+                 a bug: report it with the output of `cavalry doctor`; see {DOC}"
             ),
             TermsError::Length { found } => write!(
                 f,
@@ -329,19 +370,27 @@ impl std::fmt::Display for TermsError {
 
 impl std::error::Error for TermsError {}
 
-/// The terms file's header, read or written: the two candidate term slots.
+/// The terms file's header, read or written: the two candidate term slots and the
+/// vote floor.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct TermsHeader {
     /// The candidate term each slot holds, −1 for none, or `None` for a slot whose
     /// checksum does not match, the raise a crash tore. A header that parsed holds a
     /// term in at least one slot.
     pub candidate_slots: [Option<i64>; 2],
+    /// The vote floor: the position below which the member casts no vote, which it
+    /// stores once when it takes a leader with its log empty, or `None` when its slot's
+    /// checksum does not match, as in a file the module created and never set it in,
+    /// or one a version before 6 of the page wrote (ADR 0145).
+    pub vote_floor: Option<i64>,
 }
 
 impl TermsHeader {
-    /// The header of a created file: both slots hold −1, no candidate term.
+    /// The header of a created file: both slots hold −1, no candidate term, and no
+    /// vote floor.
     pub const CREATED: Self = Self {
         candidate_slots: [Some(NO_CANDIDATE_TERM); 2],
+        vote_floor: None,
     };
 
     /// The stored candidate term: the higher of the slots that hold one, or `None` when
@@ -375,6 +424,12 @@ impl TermsHeader {
         bytes[12..16].copy_from_slice(&(ENTRY_LENGTH as i32).to_le_bytes());
         for (slot, at) in self.candidate_slots.iter().zip(SLOT_OFFSETS) {
             bytes[at..at + SLOT_LENGTH].copy_from_slice(&encode_slot(*slot));
+        }
+        // No vote floor is zero bytes, as a creation leaves the slot: the checksum of
+        // eight zero bytes is not zero, so the slot reads as none.
+        if let Some(floor) = self.vote_floor {
+            bytes[FLOOR_OFFSET..FLOOR_OFFSET + SLOT_LENGTH]
+                .copy_from_slice(&encode_slot(Some(floor)));
         }
         bytes
     }
@@ -414,7 +469,16 @@ impl TermsHeader {
         if candidate_slots == [None, None] || candidate_slots.iter().flatten().any(below_none) {
             return Err(TermsError::Candidate);
         }
-        Ok(Self { candidate_slots })
+        let vote_floor = decode_slot(bytes, FLOOR_OFFSET);
+        if let Some(found) = vote_floor
+            && !is_position(found)
+        {
+            return Err(TermsError::VoteFloor { found });
+        }
+        Ok(Self {
+            candidate_slots,
+            vote_floor,
+        })
     }
 
     /// The whole entries a file of `file_length` bytes holds after the header.
@@ -427,6 +491,11 @@ impl TermsHeader {
     fn slots(bytes: &[u8]) -> [Option<i64>; 2] {
         SLOT_OFFSETS.map(|at| decode_slot(bytes, at))
     }
+}
+
+/// Whether `position` is one a log holds: 0 or more, a multiple of 32.
+const fn is_position(position: i64) -> bool {
+    position >= 0 && position % 32 == 0
 }
 
 /// A candidate slot's bytes: the term and its checksum, or, for a slot that holds no
@@ -649,13 +718,15 @@ impl TermsFile {
             file.read_exact_at(&mut header, 0)
                 .map_err(io("read the header of"))?;
         }
-        // A creation a crash tore: creation writes no entry and no candidate term but
-        // −1, so a zero magic over either is not one, and the header's parse refuses it.
+        // A creation a crash tore: creation writes no entry, no candidate term but −1
+        // and no vote floor, so a zero magic over any of them is not one, and the
+        // header's parse refuses it.
         let voted = |term: &i64| *term > NO_CANDIDATE_TERM;
         let torn_creation = file_length < HEADER_LENGTH as u64
             || (header[..8] == [0u8; 8]
                 && whole == 0
-                && !TermsHeader::slots(&header).iter().flatten().any(voted));
+                && !TermsHeader::slots(&header).iter().flatten().any(voted)
+                && decode_slot(&header, FLOOR_OFFSET).is_none());
         if torn_creation {
             Self::write_header(&file, &path)?;
             return Ok(Self::created(path, file));
@@ -716,6 +787,27 @@ impl TermsFile {
     /// The candidate term stored, −1 for none.
     pub const fn candidate_term(&self) -> i64 {
         self.candidate_term
+    }
+
+    /// The vote floor stored, `None` for none (ADR 0145).
+    pub const fn vote_floor(&self) -> Option<i64> {
+        self.header.vote_floor
+    }
+
+    /// Stores the vote floor in one synced write of its slot, the position and its
+    /// checksum, before the member records a term with it (`spec/durable-log.md`,
+    /// "The driver"; ADR 0145). It is written once: a file whose floor is set, or a
+    /// position below 0 or not a multiple of 32, is [`TermsError::VoteFloorRefused`],
+    /// and nothing is written. A write a crash tears fails its checksum and reads as no
+    /// floor, which the member then stores again, since it has recorded no term yet.
+    pub fn set_vote_floor(&mut self, position: i64) -> Result<(), TermsError> {
+        if self.header.vote_floor.is_some() || !is_position(position) {
+            return Err(TermsError::VoteFloorRefused { position });
+        }
+        let slot = encode_slot(Some(position));
+        self.write_at(FLOOR_OFFSET as u64, &slot, "write the vote floor of")?;
+        self.header.vote_floor = Some(position);
+        Ok(())
     }
 
     /// The valid entries in order: the member's record of recorded terms.
@@ -847,6 +939,67 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).expect("a directory");
         dir
+    }
+
+    /// The vote floor (ADR 0145): none in a created file, written once and synced,
+    /// read back after a reopen, and refused a second time or for a position no log
+    /// holds, with nothing written. A floor's slot torn by a crash reads as none, and a
+    /// zero magic over a floor is no torn creation.
+    #[test]
+    fn the_vote_floor_is_stored_once_and_read_back_and_a_torn_one_reads_as_none() {
+        let kept = dir("vote-floor");
+        let mut file = TermsFile::create(&kept).expect("created");
+        assert_eq!(file.vote_floor(), None);
+        file.set_vote_floor(1 << 20).expect("stored");
+        assert_eq!(file.vote_floor(), Some(1 << 20));
+        assert_eq!(
+            file.set_vote_floor(2 << 20).map_err(|error| error.reason()),
+            Err("floor"),
+            "written once"
+        );
+        file.append(3, 0, NO_RECORDING).expect("appended");
+        drop(file);
+        let file = TermsFile::open(&kept).expect("opened");
+        assert_eq!(file.vote_floor(), Some(1 << 20), "after a reopen");
+        drop(file);
+        let mut fresh = TermsFile::create(&dir("vote-floor-refused")).expect("created");
+        for position in [-32, 4096 + 16] {
+            assert_eq!(
+                fresh
+                    .set_vote_floor(position)
+                    .map_err(|error| error.reason()),
+                Err("floor"),
+                "{position} is no position"
+            );
+        }
+        assert_eq!(fresh.vote_floor(), None, "nothing was written");
+        drop(fresh);
+        // A torn write: the position written and its checksum not.
+        let path = TermsFile::path_in(&kept);
+        let mut bytes = std::fs::read(&path).expect("read");
+        bytes[FLOOR_OFFSET + 8] ^= 0xFF;
+        std::fs::write(&path, &bytes).expect("torn");
+        let file = TermsFile::open(&kept).expect("opened");
+        assert_eq!(file.vote_floor(), None, "a torn floor reads as none");
+        drop(file);
+        // A zero magic over a floor and no term: the floor is written after the magic,
+        // so this is no creation a crash tore, and it is refused.
+        let torn = dir("vote-floor-zero-magic");
+        let mut file = TermsFile::create(&torn).expect("created");
+        file.set_vote_floor(4096).expect("stored");
+        drop(file);
+        let path = TermsFile::path_in(&torn);
+        let mut bytes = std::fs::read(&path).expect("read");
+        bytes[..8].copy_from_slice(&[0u8; 8]);
+        std::fs::write(&path, &bytes).expect("written");
+        assert_eq!(
+            TermsFile::open(&torn)
+                .map(|_| ())
+                .map_err(|error| error.reason()),
+            Err("not-ready")
+        );
+        let _ = std::fs::remove_dir_all(&kept);
+        let _ = std::fs::remove_dir_all(&torn);
     }
 
     #[test]
@@ -1021,9 +1174,9 @@ mod tests {
         assert_eq!(refused.reason(), "candidate");
         let message = refused.to_string();
         assert!(message.contains("damaged"), "{message}");
-        assert!(message.contains("Leave the member stopped"), "{message}");
+        assert!(message.contains("leave the member stopped"), "{message}");
         assert!(
-            message.contains("Do not start this member alone on a new log directory"),
+            message.contains("Start the member on a new log directory: it replicates the log"),
             "{message}"
         );
         assert!(!message.contains("nothing to do"), "{message}");
@@ -1085,6 +1238,7 @@ mod tests {
         // A vote under a zero magic: creation writes -1 in both slots and nothing else.
         let voted = TermsHeader {
             candidate_slots: [Some(NO_CANDIDATE_TERM), Some(4)],
+            vote_floor: None,
         };
         let mut over_a_vote = voted.encode().to_vec();
         over_a_vote[..8].fill(0);
@@ -1165,9 +1319,9 @@ mod tests {
         );
         let message = refused.to_string();
         assert!(message.contains("damaged"), "{message}");
-        assert!(message.contains("Leave the member stopped"), "{message}");
+        assert!(message.contains("leave the member stopped"), "{message}");
         assert!(
-            message.contains("Do not start this member alone on a new log directory"),
+            message.contains("Start the member on a new log directory: it replicates the log"),
             "{message}"
         );
         assert_eq!(
@@ -1212,9 +1366,9 @@ mod tests {
         );
         let message = refused.to_string();
         assert!(message.contains("damaged"), "{message}");
-        assert!(message.contains("Leave the member stopped"), "{message}");
+        assert!(message.contains("leave the member stopped"), "{message}");
         assert!(
-            message.contains("Do not start this member alone on a new log directory"),
+            message.contains("Start the member on a new log directory: it replicates the log"),
             "{message}"
         );
         assert!(!message.contains("nothing to do"), "{message}");
@@ -1254,6 +1408,7 @@ mod tests {
         assert_eq!(TermsFile::open(&dir).unwrap_err().reason(), "length");
         let header = TermsHeader {
             candidate_slots: [None, None],
+            vote_floor: None,
         }
         .encode();
         assert_eq!(
@@ -1274,6 +1429,7 @@ mod tests {
         let dir = dir("chunks");
         let stored = TermsHeader {
             candidate_slots: [Some(3), Some(NO_CANDIDATE_TERM)],
+            vote_floor: None,
         };
         let mut bytes = stored.encode().to_vec();
         for term in 0..300 {

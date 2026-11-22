@@ -601,6 +601,47 @@ def new_leadership_term_action(log_term, append, msg, candidate_term, in_canvass
     return dict(none, action="replay", truncate_to=truncate_to, records=records)
 
 
+def withholds(own, vote_floor, log_heard):
+    """spec/cluster.md, "A member that lost its log" (ADR 0145): whether a member withholds its
+    vote and its candidacy: its log `[term, position]` empty, term −1 at position 0, while a log is
+    heard, or its append position below its vote floor, −1 for none."""
+    empty = own[0] < 0 and own[1] == 0
+    return {"withholds": (empty and log_heard) or own[1] < vote_floor}
+
+
+def withheld_vote(voters, reports, candidate_log):
+    """spec/cluster.md, "A member that lost its log" (ADR 0145): whether a member that withholds
+    votes all the same, when every one of the `voters` voters has reported in this election,
+    `reports[i]` voter i's `[term, position]` or None, and the candidate's log is at least each."""
+    heard = reports[:voters]
+    vote = voters >= 1 and len(heard) == voters and all(
+        r is not None and at_least(candidate_log[0], candidate_log[1], r[0], r[1]) for r in heard)
+    return {"vote": vote}
+
+
+def takes_leader(voters, own, heard, term, voted):
+    """spec/cluster.md, "A member that lost its log", "Taking a leader" (ADR 0145): whether a
+    voter whose log is empty takes the sender of a new leadership term for `term` as its leader:
+    when it voted for that leader in that term, or when each of the `voters` voters but itself,
+    voter `own`, has been heard, `heard[i]` the highest term voter i named or None, and none named
+    a term above `term`."""
+    named = heard[:voters]
+    takes = voted or (voters >= 1 and len(named) == voters and all(
+        i == own or (t is not None and t <= term) for i, t in enumerate(named)))
+    return {"takes": takes}
+
+
+def votes_in_term(voters, own, candidate, heard, term):
+    """spec/cluster.md, "A member that lost its log" (ADR 0145): whether a voter that withholds and
+    votes all the same gives its vote in `term` to voter `candidate`: when each of the `voters`
+    voters but itself, voter `own`, and the candidate has been heard, `heard[i]` the highest term
+    voter i named or None, and named a term below `term`."""
+    named = heard[:voters]
+    vote = voters >= 1 and len(named) == voters and all(
+        i in (own, candidate) or (t is not None and t < term) for i, t in enumerate(named))
+    return {"vote": vote}
+
+
 VOTING_STATES = (1, 2, 3, 4)  # canvass, nominate, candidate ballot, follower ballot
 
 
@@ -830,6 +871,45 @@ VECTORS += [
     arithmetic("ballot-short-of-a-quorum-with-none-against-waits", "ballot",
                {"members": 3, "candidate_term": 3, "votes": [{"member": 0, "vote": True, "term": 3}],
                 "heard": [0, 1], "timeout_passed": False}, {"leader": False, "unanimous": False, "lost": False}),
+    *[arithmetic(name, "withholds", {"own": own, "vote_floor": floor, "log_heard": heard},
+                 withholds(own, floor, heard))
+      for name, own, floor, heard in [
+          ("withholds-not-a-new-clusters-member", [-1, 0], -1, False),
+          ("withholds-an-empty-log-beside-a-log", [-1, 0], -1, True),
+          ("withholds-below-its-floor", [3, 4096], 8192, False),
+          ("withholds-at-its-floor-not", [3, 8192], 8192, True),
+          ("withholds-a-log-with-no-floor-not", [3, 4096], -1, True),
+      ]],
+    *[arithmetic(name, "withheld-vote", {"voters": voters, "reports": reports, "candidate": cand},
+                 withheld_vote(voters, reports, cand))
+      for name, voters, reports, cand in [
+          ("withheld-vote-every-voter-heard-none-ahead", 3, [[-1, 0], [3, 98304], [3, 65536]], [3, 98304]),
+          ("withheld-vote-a-voter-silent", 3, [[-1, 0], None, [3, 65536]], [3, 65536]),
+          ("withheld-vote-a-voter-ahead-of-the-candidate", 3, [[-1, 0], [3, 98304], [3, 65536]], [3, 65536]),
+          ("withheld-vote-two-empty-one-holds-the-log", 3, [[-1, 0], [-1, 0], [3, 98304]], [3, 98304]),
+          ("withheld-vote-a-standby-past-the-voters-unread", 2, [[-1, 0], [3, 4096], None], [3, 4096]),
+      ]],
+    *[arithmetic(name, "takes-leader",
+                 {"voters": voters, "own": own, "heard": heard, "term": term, "voted": voted},
+                 takes_leader(voters, own, heard, term, voted))
+      for name, voters, own, heard, term, voted in [
+          ("takes-leader-every-voter-heard-none-later", 3, 2, [5, 5, None], 5, False),
+          ("takes-leader-a-voter-silent", 3, 2, [5, None, None], 5, False),
+          ("takes-leader-a-deposed-leader-beside-a-later-term", 3, 2, [4, 5, None], 4, False),
+          ("takes-leader-the-later-term-beside-the-deposed-leader", 3, 2, [4, 5, None], 5, False),
+          ("takes-leader-voted-it-in", 3, 2, [None, None, None], 1, True),
+          ("takes-leader-a-standby-past-the-voters-unread", 2, 1, [3, None, None], 3, False),
+      ]],
+    *[arithmetic(name, "votes-in-term",
+                 {"voters": voters, "own": own, "candidate": cand, "heard": heard, "term": term},
+                 votes_in_term(voters, own, cand, heard, term))
+      for name, voters, own, cand, heard, term in [
+          ("votes-in-term-every-other-voter-below", 3, 2, 1, [3, 4, None], 4),
+          ("votes-in-term-another-voter-named-the-term", 3, 2, 0, [3, 4, None], 4),
+          ("votes-in-term-another-voter-named-a-later-term", 3, 2, 0, [3, 5, None], 4),
+          ("votes-in-term-another-voter-silent", 3, 2, 0, [3, None, None], 4),
+          ("votes-in-term-a-standby-past-the-voters-unread", 2, 1, 0, [3, None, 9], 4),
+      ]],
     arithmetic("candidate-unanimous", "candidate",
                {"members": 3, "reports": [[3, 98304], [3, 98304], [2, 65536]], "own": [3, 98304],
                 "deadline_passed": False}, {"nominate": True, "unanimous": True}),
