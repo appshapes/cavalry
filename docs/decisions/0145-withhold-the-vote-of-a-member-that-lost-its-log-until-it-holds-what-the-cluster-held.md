@@ -261,9 +261,19 @@ catch up and withholds until a start from a peer's snapshot is built (work item
 
 - A member whose log directory is lost comes back on a new one by itself, follows no
   leader that a later term deposed, and votes no leader in that lacks an entry it had
-  acknowledged. The operator's rule of ADR 0104 is gone. One case is left: two
-  members that hold no log while the third is stopped, below. No operator's rule
-  held it before either.
+  acknowledged. The operator's rule of ADR 0104 is gone. Two cases are left, both
+  below: two members that hold no log while the third, which holds the log, is
+  stopped. In the first, both members lost their logs, a quorum's record, which no
+  rule gives back. Under ADR 0104's rule too, both stayed stopped, the one member
+  left could elect no leader, and the cluster was started again as a new one. In the
+  second, one member lost its log and the other never caught up. ADR 0104's rule
+  held that case: it kept the member that lost its log stopped, so an operator who
+  followed the rule never reached it. This decision removes the rule and accepts
+  the second case in exchange. The rule held only where an operator knew it and
+  kept it. A container whose log directory is on no volume broke it at every
+  restart, and nothing counted, refused or reported that start (Context). Holding
+  the second case in the cluster instead would keep every new cluster from electing
+  until each of its members runs (Alternatives considered).
 - A voter whose log is empty takes no leader while another voter, not that leader,
   is stopped or cannot reach it, unless it voted that leader in. This holds even when
   the leader is the newest term's. So a cluster of three in which one member lost its
