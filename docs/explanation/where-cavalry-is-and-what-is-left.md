@@ -189,7 +189,7 @@ the line.
 | The leader's service is gone, or its recorder cannot sync | Nothing detects a service that is gone (ADR 0118), and no test holds what a member does whose recorder cannot sync | It gives the lead up | 4 |
 | A follower is cut off or started again | It rejoins about 10 s after the cut is mended; tests over drivers | As today | Done |
 | A member takes the log slowly | It paces the whole cluster under `fc=min`; `doctor` has no finding | `doctor` names the member | 4 |
-| A host loses power | Held by work item 287, three pull requests on `master`: the driver cuts each recording a crash left live to what it had synced, and the member starts on its directory again (ADR 0143, ADR 0144). A test over three drivers has all three hosts lose power together. A member that lost power under a driver of an earlier version still stays out | A check at the start | Done |
+| A host loses power | Since 2026-11-22, held by work item 287, three pull requests on `master`: the driver cuts each recording a crash left live to what it had synced, and the member starts on its directory again (ADR 0143, ADR 0144). A test over three drivers has all three hosts lose power together. A member that lost power under a driver of an earlier version still stays out | A check at the start | Done |
 | A member's log directory is lost | An operator's rule: never start one member alone on a new directory | The member comes back with no vote on what it forgot | 3 |
 | Members are started with different members strings | Three rules that no member checks (ADR 0134) | Members tell each other, and `doctor` names the one | 5 |
 | A member is lost after the logs were purged | It cannot be replaced: no member starts from a peer's snapshot | Replaced on a new host while the cluster runs | 5 |
@@ -248,8 +248,8 @@ each. Their state today:
 | 8. Redundancy is restored while the cluster runs, and the cluster runs for days | Not started: no start from a peer's snapshot, no purge while running, no job across hosts, no cluster soak |
 | 9. What Brigade's server runs is a gate here, and the release carries its data | The three gates are in since 2026-11-22 (feature 2): the feed's shape in `just test`, a log directory of 620a2e29 opened in place in `just conformance`, and the server's suite against `master` each night. Left for features 10 and 12: the server builds from the published crates, the candidate's soak, and the notice of work item 312 |
 
-Row 9 is the state on 2026-11-22, when feature 2 landed. Every other row is the state
-at 20741de3.
+Row 9 is the state on 2026-11-22, when feature 2 landed. Rows 3 and 6 are the state on
+2026-11-22, when work item 287 landed. Every other row is the state at 20741de3.
 
 ## The roadmap
 
