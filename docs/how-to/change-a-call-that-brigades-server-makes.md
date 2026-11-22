@@ -56,6 +56,14 @@ lists those calls and says why they are held.
 
 ## When it does not work
 
+- `conformance/upgrade/log-directory.sh` fails at "build N" and names
+  `crates/cavalry/tests/feed/` or `crates/cavalry/examples/feed-directory.rs`: the
+  feed's files now use a call that the tree at 620a2e29 lacks, which the server pinned
+  to that tree cannot make either. When the change is on purpose, keep the files as
+  they last compiled against that tree under `conformance/upgrade/feed-at-620a2e29/`
+  and have the script copy those
+  ([ADR 0141](../decisions/0141-open-in-place-a-log-directory-written-by-the-tree-that-servers-run-and-build-that-tree-on-every-run.md)).
+
 - A test of `feed_shape.rs` fails and your change did not mean to change a call: the
   test's first comment says what it holds, and the explanation page's table says which
   call that is.

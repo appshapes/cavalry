@@ -29,6 +29,9 @@ destination, recording, catalog, replay and image, are in the
   `crates/cavalry/tests/feed_shape.rs`, and `crates/cavalry/tests/feed_held_still.rs`
   for what needs a process to stop. A change that breaks a call the server makes fails
   there, in the pull request that makes the change.
+- A log directory that the server's pinned tree wrote opens under this tree in place:
+  with no step by an operator, with every record read back at its position.
+  `conformance/upgrade/log-directory.sh` holds that in `just conformance`.
 - Two things the server's code expects do not hold. They are under "What does not
   hold". The first is work item 372 on the Brigade Board. The second is the server's
   to change.
@@ -97,6 +100,34 @@ The two test programs hold every row, in both shapes where a row has two.
 `feed_held_still.rs` holds what a stall and a kill show: `is_closed` after a stall, the
 reconnect under an append, and the three sentences above that name a kill. Each test
 says in its first comment what it holds.
+
+## The log directory the server keeps
+
+A server's log directory outlives the build that wrote it. The two servers in
+production hold directories that the tree at 620a2e29 wrote, in version 2 of the
+durable log's format, and `master` writes version 4. So the server relies on one more
+thing than its calls: a later driver opens its directory in place, with no step by an
+operator, and the feed goes on in it.
+
+Such a directory holds one recording for each run of the server and for each roll,
+with the recordings that a snapshot covers purged. After a kill or a power cut its
+last recording is still live in the catalog.
+
+`conformance/upgrade/log-directory.sh` builds the tree at 620a2e29 on every run of
+`just conformance` and has it write such a directory, once with the last run stopped
+and once with it killed. It then holds that this tree's `cavalry run` starts on each,
+that the feed begins at the last position the older tree answered and reads back every
+record it left, that what was purged stays gone, and that the feed takes a new
+recording in each shape.
+[`conformance/README.md`](../../conformance/README.md), "The log directory's upgrade
+gate", has the steps, and
+[ADR 0141](../decisions/0141-open-in-place-a-log-directory-written-by-the-tree-that-servers-run-and-build-that-tree-on-every-run.md)
+the decision. A change to the format of the durable log passes that gate in the pull
+request that makes it.
+
+The gate builds the feed's files, `tests/feed/` and the example that drives them, in
+the older tree too. So a change that makes those files use a call that 620a2e29 lacks
+fails there. ADR 0141 says what the gate then keeps.
 
 ## What does not hold
 
@@ -167,6 +198,8 @@ copy in the same way.
 - [ADR 0138](../decisions/0138-draw-the-finish-line-at-a-beta-that-is-an-alternative-to-aeron-and-build-it-sixth.md):
   the beta's ninth condition, "What Brigade's server runs is a gate here", and feature
   2 of its twelve, which is work item 362.
+- [ADR 0141](../decisions/0141-open-in-place-a-log-directory-written-by-the-tree-that-servers-run-and-build-that-tree-on-every-run.md):
+  the log directory's upgrade gate.
 - [ADR 0025](../decisions/0025-record-a-stream-in-the-driver.md): which publication
   `start recording` takes.
 - [ADR 0059](../decisions/0059-create-a-publication-at-a-position-and-arm-a-recording.md):

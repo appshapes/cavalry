@@ -1,0 +1,430 @@
+#!/usr/bin/env bash
+# The log directory's upgrade gate (work item 362; ADR 0138, condition 9; ADR 0141;
+# CLAUDE.md, invariants 1 and 3). A log directory written by an older build of
+# Cavalry, N, opens under this tree, N+1, in place: with no step by an operator, with
+# every record that N answered read back at its position, with what N purged still
+# gone, and able to take a new recording. The rule it holds for every change of the
+# durable log's format: a driver opens a directory of the format before it in place.
+#
+# The directory is the one Brigade's server keeps: the feed of
+# docs/explanation/what-brigades-server-relies-on.md, one recorded publication whose
+# every run is a new recording. Two servers hold such a directory in production, each
+# written by the tree at 620a2e29, and the server reads it back at every start.
+#
+# The two builds
+#
+# N+1 is this tree as it stands, built into target/release. N is a commit:
+#
+# - CAVALRY_DIRECTORY_FROM, when it is set: a hash, a tag or a branch.
+# - Otherwise 620a2e29e04751c7a1f930132666f85b3dd58e7a, the commit Brigade's server
+#   pins (`server/crates/brigade-log/Cargo.toml` of github.com/appshapes/brigade).
+#   ADR 0141 says when this line changes: when the servers in production run another
+#   tree.
+#
+# N's tree is exported with `git archive` to target/upgrade/<N's first 8 hex
+# digits>/src and built into target/upgrade/<the same>/target, as
+# conformance/upgrade/run.sh exports and builds its own N. Each build is the binary
+# and one example: `cavalry` and `feed-directory`. N has no such example. The script
+# copies this tree's crates/cavalry/examples/feed-directory.rs and
+# crates/cavalry/tests/feed/ into N's exported tree and builds them there: the feed's
+# files use the calls of 620a2e29 and no later one, which is what makes them the
+# server's. So this script also fails, at its second build, when those files stop
+# compiling against N; step 2's message says what to do then.
+#
+# The schedule, once for a directory whose last run was stopped and once for one whose
+# last run was killed
+#
+# a. N writes the directory, in the shape the server is pinned to. A first run appends
+#    six records and stops. A second run appends five, releases what a snapshot at the
+#    first run's end covers, appends five more, releases again and appends four. Each
+#    release rolls the feed, and the two purge recordings 0 and 1. The second run is
+#    then stopped as the server's clean stop does, or killed with SIGKILL, which leaves
+#    its last recording live in the catalog.
+# b. `cavalry run` of N+1 starts on the directory as N left it. `cavalry replay` of
+#    N+1 plays each recording that is left, from its start to the position N answered.
+# c. N+1's feed, in the pinned shape, begins at the last position N answered, reads
+#    back every record N appended from the oldest recording kept, each at its
+#    position, is refused a read from before that, and appends five records.
+# d. N+1's feed, in the shape the server moves to, `ssc=true` with `term-length=1m`,
+#    begins where c ended, reads back N's records and c's, and appends five records.
+# e. N+1's feed begins where d ended and reads back all of it: recordings that two
+#    builds wrote, in terms of two lengths.
+#
+# What a record read back is held to is the line the feed's process wrote when it
+# appended the record: its length, a digest of its bytes and the position after it
+# (crates/cavalry/tests/feed/process.rs).
+#
+# By hand
+#
+#   conformance/upgrade/log-directory.sh                                  N is 620a2e29
+#   CAVALRY_DIRECTORY_FROM=<commit> conformance/upgrade/log-directory.sh  N as named
+#   CAVALRY_DIRECTORY_FROM=HEAD conformance/upgrade/log-directory.sh      this tree's changes over its last commit
+#
+# The script's directories are under one made by `mktemp` in the temporary directory,
+# on a disk, as a server's log directory is. Its two ports are counted out of 10000 to
+# 19999 from the shell's process id, as conformance/c/run.sh counts its own. Every
+# wait is bounded at 60 s and says what it waited for. On a failure the script prints
+# the step and the reason and each program's output; it stops what it started, by
+# process id, leaves its directory and says where, and exits 1. It runs under bash
+# 3.2, which macOS has, and under bash 5.
+set -euo pipefail
+
+cd "$(dirname "$0")/../.."
+repo=$(pwd)
+began=$(date +%s)
+# The script's programs take their directories by flag, whatever the caller's
+# environment holds.
+unset CAVALRY_DIR CAVALRY_CLUSTER_MEMBERS CAVALRY_CLUSTER_MEMBER_ID
+
+pinned=620a2e29e04751c7a1f930132666f85b3dd58e7a
+step="1 (name the older build)"
+root=""
+# The processes the script started that have not ended, by process id.
+pids=""
+reported=""
+feed_pid=""
+
+say() { printf 'conformance/upgrade/log-directory: %s\n' "$1"; }
+# Fails the step with why. Called from the script's own shell alone, never from a
+# function whose output is captured: an exit there would end the capture and not the
+# script.
+fail() {
+    printf 'conformance/upgrade/log-directory: step %s failed: %s\n' "$step" "$1" >&2
+    reported=yes
+    exit 1
+}
+# The path of program `$2`, `cavalry` or `feed-directory`, in build `$1`, `older` or
+# `newer`.
+program() {
+    local release
+    if [ "$1" = older ]; then release="$older/target/release"; else release="$repo/target/release"; fi
+    if [ "$2" = cavalry ]; then echo "$release/cavalry"; else echo "$release/examples/$2"; fi
+}
+# What a build is called in what the script prints.
+named() { if [ "$1" = older ]; then echo "N"; else echo "N+1"; fi; }
+# Takes process `$1` out of the list of those that run.
+forget() {
+    local pid kept=""
+    for pid in $pids; do
+        [ "$pid" = "$1" ] || kept="$kept $pid"
+    done
+    pids=$kept
+}
+
+# At any exit. After a failure: the step, when nothing said it yet, and every
+# program's output. Always: every process the script started and that still runs is
+# ended, by its process id, with SIGTERM and, 10 s later, SIGKILL. The directory goes
+# after a clean run and stays after a failure.
+finish() {
+    local status=$? pid out deadline
+    trap - EXIT
+    set +e
+    # The feed's input, when it is open. Closing a descriptor that is not open is no
+    # error, and nothing else is redirected here: what follows prints to stderr.
+    exec 3>&-
+    if [ "$status" != 0 ]; then
+        [ -n "$reported" ] || printf 'conformance/upgrade/log-directory: step %s failed: a command of the script exited %s, and its own message is above\n' "$step" "$status" >&2
+        if [ -n "$root" ]; then
+            for out in "$root"/*/*.out; do
+                [ -f "$out" ] || continue
+                printf -- '--- %s\n' "${out#"$root"/}" >&2
+                cat "$out" >&2
+            done
+        fi
+    fi
+    for pid in $pids; do
+        if kill -0 "$pid" 2>/dev/null; then
+            kill -TERM "$pid" 2>/dev/null
+            deadline=$((SECONDS + 10))
+            while kill -0 "$pid" 2>/dev/null && [ "$SECONDS" -lt "$deadline" ]; do sleep 0.1; done
+            if kill -0 "$pid" 2>/dev/null; then kill -KILL "$pid" 2>/dev/null; fi
+            wait "$pid" 2>/dev/null
+        fi
+    done
+    if [ -n "$root" ]; then
+        if [ "$status" = 0 ]; then
+            rm -rf "$root"
+        else
+            printf 'conformance/upgrade/log-directory: the directories and every program'\''s output are left in %s; remove it when you have read them\n' "$root" >&2
+        fi
+    fi
+    [ "$status" = 0 ] || exit 1
+}
+trap finish EXIT
+trap 'reported=yes; printf "conformance/upgrade/log-directory: step %s was interrupted\n" "$step" >&2; exit 1' HUP INT TERM
+
+# Waits for process `$1`, which the script started and `$2` names, to end: 60 s at
+# most. The shell collects a child that ends, so `kill -0` fails from then on.
+ended() {
+    local deadline=$((SECONDS + 60))
+    while kill -0 "$1" 2>/dev/null; do
+        [ "$SECONDS" -lt "$deadline" ] || fail "waited 60 s for $2 (pid $1) to end"
+        sleep 0.1
+    done
+}
+# Stops process `$1`, which the script started and `$2` names, as an operator does:
+# SIGTERM, and then its end.
+stop() {
+    kill -TERM "$1" 2>/dev/null || true
+    ended "$1" "$2, after its SIGTERM,"
+    wait "$1" 2>/dev/null || true
+    forget "$1"
+}
+# Waits until file `$1` holds a line that matches `$2`, 60 s at most; `$3` is what is
+# waited for, and `$4` the process that writes the file, whose end ends the wait.
+await() {
+    local deadline=$((SECONDS + 60))
+    until grep -q -- "$2" "$1" 2>/dev/null; do
+        if ! kill -0 "$4" 2>/dev/null; then
+            # Its last line may have come as it ended.
+            if grep -q -- "$2" "$1" 2>/dev/null; then return 0; fi
+            fail "waited for $3, and the program (pid $4) ended first; it said: $(cat "$1" 2>/dev/null)"
+        fi
+        [ "$SECONDS" -lt "$deadline" ] || fail "waited 60 s for $3"
+        sleep 0.1
+    done
+}
+
+if [ -n "${CAVALRY_DIRECTORY_FROM:-}" ]; then
+    from=$(git rev-parse --verify --quiet "$CAVALRY_DIRECTORY_FROM^{commit}") \
+        || fail "CAVALRY_DIRECTORY_FROM is \`$CAVALRY_DIRECTORY_FROM\`, which names no commit of this repository; give a hash, a tag or a branch that \`git rev-parse\` resolves, or unset it to take the commit Brigade's server pins"
+    how="named by CAVALRY_DIRECTORY_FROM"
+elif from=$(git rev-parse --verify --quiet "$pinned^{commit}"); then
+    how="the commit Brigade's server pins"
+elif [ "$(git rev-parse --is-shallow-repository)" = true ]; then
+    fail "this repository's history is shallow and does not hold $pinned, the commit Brigade's server pins; fetch the whole history, \`git fetch --unshallow\`, or fetch-depth: 0 in the workflow's actions/checkout, and run this again"
+else
+    fail "this repository does not hold $pinned, the commit Brigade's server pins and a commit of master's history; fetch master, \`git fetch origin master\`, and run this again"
+fi
+short=${from:0:8}
+older="$repo/target/upgrade/$short"
+say "N is $short, $how: $(git log -1 --format=%s "$from")"
+say "N's spec/durable-log.md begins \`$(git show "$from:spec/durable-log.md" 2>/dev/null | sed -n 1p)\`; N+1 is this tree, whose page begins \`$(sed -n 1p spec/durable-log.md)\`"
+
+step="2 (build N+1, this tree)"
+at=$(date +%s)
+cargo build --release -p cavalry --bin cavalry --example feed-directory
+say "built N+1 in $(( $(date +%s) - at )) s, into target/release"
+
+step="2 (build N, $short)"
+at=$(date +%s)
+# Exported beside its place and moved there whole, so that an export that was cut
+# short is never taken for the tree: the directory is there only once tar has ended.
+if [ ! -d "$older/src" ]; then
+    rm -rf "$older/src.partial"
+    mkdir -p "$older/src.partial"
+    git archive --format=tar "$from" | tar -x -f - -C "$older/src.partial"
+    mv "$older/src.partial" "$older/src"
+fi
+# The feed's files, from this tree into N's: copied when they differ, so that an
+# unchanged file keeps its time and cargo builds nothing again.
+mkdir -p "$older/src/crates/cavalry/examples" "$older/src/crates/cavalry/tests/feed"
+for file in examples/feed-directory.rs tests/feed/mod.rs tests/feed/process.rs; do
+    cmp -s "crates/cavalry/$file" "$older/src/crates/cavalry/$file" \
+        || cp "crates/cavalry/$file" "$older/src/crates/cavalry/$file"
+done
+(cd "$older/src" && cargo build --release -p cavalry --bin cavalry --example feed-directory \
+    --target-dir "$older/target") \
+    || fail "N, $short, did not build from target/upgrade/$short/src with this tree's feed in it; cargo's own message is above. When it names crates/cavalry/tests/feed/ or crates/cavalry/examples/feed-directory.rs, those files now use a call that N does not have: the server pinned to N cannot make that call either, so read docs/how-to/change-a-call-that-brigades-server-makes.md, \"When it does not work\", which says how this gate keeps a copy of the feed as N compiles it (ADR 0141)"
+for built in cavalry feed-directory; do
+    [ -x "$(program older "$built")" ] || fail "N's build left no $(program older "$built")"
+done
+say "built N in $(( $(date +%s) - at )) s, from target/upgrade/$short/src into target/upgrade/$short/target, with this tree's feed-directory.rs and tests/feed/ in it"
+
+# The feed's two addresses, counted as conformance/c/run.sh counts its own: out of
+# 10000 to 19999, from a hash of the shell's process id, never bound to be chosen.
+first_port=$(( ($$ * 2654435761) % 10000 ))
+control="127.0.0.1:$(( 10000 + (first_port + 40) % 10000 ))"
+own="127.0.0.1:$(( 10000 + (first_port + 41) % 10000 ))"
+
+# The answers of a feed process: the lines that end a command's answer.
+answers='^\(open\|appended\|read\|released\|held\|ended\|failed\)\( \|$\)'
+# The feed process the script talks to: its output file, how many answers the script
+# has read from it, and the last one.
+feed_out=""
+feed_answers=0
+answer=""
+# Starts the feed of build `$1` in shape `$2` on the directories under `$dir`, with
+# its output in `$dir/$3.out`, and reads where it begins into `answer`. `$4`, when
+# given, is the bytes a recording holds before a release rolls it.
+start_feed() {
+    feed_out="$dir/$3.out"
+    feed_answers=0
+    rm -f "$dir/in"
+    mkfifo "$dir/in"
+    "$(program "$1" feed-directory)" --dir "$dir/driver" --log-dir "$dir/log" \
+        --control "$control" --own "$own" --shape "$2" ${4:+--roll-bytes "$4"} \
+        <"$dir/in" >"$feed_out" 2>&1 &
+    feed_pid=$!
+    pids="$pids $feed_pid"
+    # The process's read end is open once this open of the write end returns.
+    exec 3>"$dir/in"
+    answered "the feed of $(named "$1"), shape $2, to say where it begins"
+    case "$answer" in
+        "open "*) answer=${answer#open } ;;
+        *) fail "the feed of $(named "$1"), shape $2, did not open: $answer" ;;
+    esac
+}
+# Waits for the feed process's next answer and sets `answer` to it; `$1` is what is
+# waited for.
+answered() {
+    local deadline=$((SECONDS + 60))
+    feed_answers=$((feed_answers + 1))
+    until [ "$(grep -c -- "$answers" "$feed_out" 2>/dev/null || true)" -ge "$feed_answers" ]; do
+        kill -0 "$feed_pid" 2>/dev/null \
+            || fail "waited for $1, and the feed's process (pid $feed_pid) ended first; it said: $(cat "$feed_out" 2>/dev/null)"
+        [ "$SECONDS" -lt "$deadline" ] || fail "waited 60 s for $1; the feed's process said: $(cat "$feed_out" 2>/dev/null)"
+        sleep 0.05
+    done
+    answer=$(grep -- "$answers" "$feed_out" | sed -n "${feed_answers}p")
+}
+# Sends the feed process command `$1` and waits for its answer, which must begin with
+# the word `$2`; sets `answer` to the rest of it.
+ask() {
+    echo "$1" >&3
+    answered "the feed's answer to \`$1\`"
+    case "$answer" in
+        "$2") answer="" ;;
+        "$2 "*) answer=${answer#"$2 "} ;;
+        *) fail "the feed answered \`$1\` with \`$answer\`, and \`$2\` was expected; its output: $(cat "$feed_out")" ;;
+    esac
+}
+# The lines of the feed process's last answer that begin with the word `$1`: its
+# `record` lines, or its `note` lines.
+lines() {
+    awk -v last="$feed_answers" -v want="$1 " '
+        /^(open|appended|read|released|held|ended|failed)( |$)/ { seen++; next }
+        seen == last - 1 && index($0, want) == 1 { print }
+    ' "$feed_out"
+}
+# Ends the feed process as the server's clean stop does.
+end_feed() {
+    ask end ended
+    exec 3>&-
+    ended "$feed_pid" "the feed's process, after its \`end\`,"
+    wait "$feed_pid" || fail "the feed's process ended with a failure after its \`end\`; it said: $(cat "$feed_out")"
+    forget "$feed_pid"
+}
+# Kills the feed process with its feed open, as a power cut ends a server.
+kill_feed() {
+    ask hold held
+    # Waited for at once and with the shell's own line about a killed job discarded:
+    # SIGKILL ends the process, and the script says that it killed it.
+    { kill -KILL "$feed_pid"; wait "$feed_pid"; } 2>/dev/null || true
+    exec 3>&-
+    forget "$feed_pid"
+}
+# Appends records `$1` to `$1 + $2 - 1`, adds the line of each to `$dir/appended`, and
+# sets `position` to the position after the last.
+append() {
+    ask "append $1 $2" appended
+    position=${answer##* }
+    [ "$(lines record | wc -l | tr -d ' ')" = "$2" ] \
+        || fail "the feed appended records $1 to $(( $1 + $2 - 1 )) and wrote $(lines record | wc -l | tr -d ' ') lines for them; its output: $(cat "$feed_out")"
+    lines record >>"$dir/appended"
+}
+# Fails unless a read from position `$1` gives every record appended past it, each
+# once, in order, at its position; `$2` is who reads.
+reads_back() {
+    ask "read $1" read
+    lines record >"$dir/read"
+    awk -v from="$1" '$2 > from' "$dir/appended" >"$dir/expected"
+    if ! cmp -s "$dir/read" "$dir/expected"; then
+        fail "$2 does not read back from position $1 what was appended past it; the records appended, each as \`record <position after> <length> <digest>\`, and then what was read: $(cat "$dir/expected"; echo ---; cat "$dir/read")"
+    fi
+    read_count=$(wc -l <"$dir/read" | tr -d ' ')
+}
+
+if [ -d "${TMPDIR:-/tmp}" ]; then base=${TMPDIR:-/tmp}; else base=/tmp; fi
+root=$(mktemp -d "${base%/}/cavalry-log-directory.XXXXXX")
+
+for ending in stopped killed; do
+    dir="$root/$ending"
+    mkdir "$dir"
+    : >"$dir/appended"
+
+    step="a ($ending: N writes the directory)"
+    start_feed older pinned "N-run-1" 1
+    [ "$answer" = 0 ] || fail "N's feed begins a new directory at position $answer, not 0"
+    append 0 6
+    first_run=$position
+    end_feed
+    start_feed older pinned "N-run-2" 1
+    [ "$answer" = "$first_run" ] || fail "N's second run begins at position $answer, and its first ended at $first_run"
+    append 6 5
+    ask "release $first_run" released
+    lines note | grep -q "^note let go of 1 recordings of the feed" \
+        || fail "N's first release purged no recording; the feed said: $(lines note)"
+    kept_from=$position
+    append 11 5
+    ask "release $kept_from" released
+    lines note | grep -q "^note let go of 1 recordings of the feed" \
+        || fail "N's second release purged no recording; the feed said: $(lines note)"
+    third_from=$position
+    append 16 4
+    written=$position
+    if [ "$ending" = stopped ]; then end_feed; else kill_feed; fi
+    say "a. $ending: N wrote 20 records to position $written in four recordings over two runs and purged recordings 0 and 1, which held the feed to position $kept_from; recordings 2, from $kept_from, and 3, from $third_from, are left, and the second run was $ending"
+
+    step="b ($ending: cavalry run and cavalry replay of N+1 on the directory)"
+    "$(program newer cavalry)" run --dir "$dir/driver" --log-dir "$dir/log" >"$dir/N+1-driver.out" 2>&1 &
+    driver=$!
+    pids="$pids $driver"
+    await "$dir/N+1-driver.out" "^cavalry run: driver started on " \
+        "\`cavalry run\` of N+1 to start on the directory N wrote" "$driver"
+    replayed=""
+    for part in "2 $kept_from $third_from" "3 $third_from $written"; do
+        # shellcheck disable=SC2086  # the three numbers are split into words on purpose
+        set -- $part
+        "$(program newer cavalry)" replay --dir "$dir/driver" --log-dir "$dir/log" \
+            --recording "$1" --from "$2" >"$dir/replay-$1.out" 2>"$dir/replay-$1.err" \
+            || fail "\`cavalry replay --recording $1 --from $2\` of N+1 failed on the directory N wrote; it said: $(cat "$dir/replay-$1.err")"
+        summary=$(tail -n 1 "$dir/replay-$1.out")
+        case "$summary" in
+            *" ended at position $3: "*" messages from position $2") ;;
+            *) fail "\`cavalry replay\` of N+1 did not play recording $1 from position $2 to $3, where N left it; its last line: $summary" ;;
+        esac
+        replayed="${replayed:+$replayed and }recording $1 from $2 to $3"
+    done
+    stop "$driver" "\`cavalry run\` of N+1"
+    grep -q '^cavalry run: closed; ' "$dir/N+1-driver.out" \
+        || fail "\`cavalry run\` of N+1 was stopped with SIGTERM on the directory N wrote and did not say \`cavalry run: closed\`"
+    say "b. $ending: \`cavalry run\` of N+1 started on the directory as N left it, and \`cavalry replay\` played $replayed"
+
+    step="c ($ending: N+1's feed in the pinned shape)"
+    start_feed newer pinned "N+1-pinned"
+    [ "$answer" = "$written" ] || fail "N+1's feed begins at position $answer on the directory N wrote, and N's last record answered ends at $written"
+    reads_back "$kept_from" "N+1's feed, in the pinned shape,"
+    from_n=$read_count
+    echo "read 0" >&3
+    answered "the feed's answer to \`read 0\`"
+    [ "$answer" = "failed the feed no longer holds position 0: its earliest recording after it begins at $kept_from" ] \
+        || fail "N+1's feed was asked to read from position 0, which N purged, and answered \`$answer\`; it must refuse, and say that its earliest recording begins at $kept_from"
+    append 20 5
+    pinned_to=$position
+    end_feed
+    say "c. $ending: N+1's feed, in the pinned shape, began at $written, read back the $from_n records N left from position $kept_from, each at its position, was refused position 0, and appended 5 records to position $pinned_to"
+
+    step="d ($ending: N+1's feed in the shape the server moves to)"
+    start_feed newer moved-to "N+1-moved-to"
+    [ "$answer" = "$pinned_to" ] || fail "N+1's feed, in the shape the server moves to, begins at position $answer, and the feed ended at $pinned_to"
+    reads_back "$kept_from" "N+1's feed, in the shape the server moves to,"
+    append 25 5
+    moved_to=$position
+    end_feed
+    say "d. $ending: N+1's feed, with ssc=true and term-length=1m, began at $pinned_to, read back $read_count records from position $kept_from and appended 5 records to position $moved_to"
+
+    step="e ($ending: the whole feed, read back)"
+    start_feed newer moved-to "N+1-read"
+    [ "$answer" = "$moved_to" ] || fail "N+1's feed begins at position $answer, and the feed ended at $moved_to"
+    reads_back "$kept_from" "N+1's feed"
+    end_feed
+    say "e. $ending: N+1's feed read back $read_count records from position $kept_from to $moved_to, each once, in order, at its position: $from_n that N wrote in terms of 16 MiB, and 10 that N+1 wrote, 5 of them in terms of 1 MiB"
+done
+
+step="f (stop everything)"
+for pid in $pids; do
+    stop "$pid" "a program the script started"
+done
+say "f. every program the script started has ended; the whole run took $(( $(date +%s) - began )) s"
+say "ok"

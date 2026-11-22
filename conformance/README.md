@@ -184,3 +184,47 @@ The script's header says how to run it by hand.
 [Upgrade a cluster one member at a time](../docs/how-to/upgrade-a-cluster.md) is the
 same upgrade for an operator.
 
+## The log directory's upgrade gate
+
+`upgrade/log-directory.sh` runs after `upgrade/run.sh`, and holds one rule for every
+change of the durable log's format: a driver opens a log directory of the format before
+it in place, with no step by an operator (work item 362;
+[ADR 0141](../docs/decisions/0141-open-in-place-a-log-directory-written-by-the-tree-that-servers-run-and-build-that-tree-on-every-run.md)).
+It is no client's runner either: it holds `CLAUDE.md`'s invariant 1 across two builds
+of Cavalry, on the directory that Brigade's server keeps
+([What does Brigade's server rely on?](../docs/explanation/what-brigades-server-relies-on.md)).
+
+N+1 is the tree under test. N is the commit that Brigade's servers in production run,
+620a2e29, a constant of the script; `CAVALRY_DIRECTORY_FROM=<commit>` names another.
+N is exported with `git archive` into `target/upgrade/<N's first 8 hex digits>/` and
+built there on every run, as `upgrade/run.sh` builds its own. Each build is `cavalry`
+and one example, `feed-directory`. N has no such example: the script copies this
+tree's `crates/cavalry/examples/feed-directory.rs` and `crates/cavalry/tests/feed/`
+into N's exported tree first. Those files are the server's use of Cavalry, which `just
+test` runs, and they use no call that N lacks. So the script fails at its second build
+when a change makes them use one, and says what to do then.
+
+N writes a log directory as a server writes its own, in the shape the server is pinned
+to: two runs, 20 records, four recordings, and two releases that purge the first two
+recordings. The script does this twice. The first directory's last run is stopped as a
+server's clean stop does. The second's is killed with `SIGKILL`, which leaves its last
+recording live in the catalog. For each directory, as N left it, the script then holds
+with N+1's programs:
+
+- `cavalry run` starts on it, and `cavalry replay` plays each recording that is left
+  from its start to the position N answered.
+- The feed, in the pinned shape, begins at the last position N answered. It reads back
+  every record N left, each once, in order, at its position. A read from position 0,
+  which N purged, is refused. It appends five records.
+- The feed, in the shape the server moves to, `ssc=true` with `term-length=1m`, begins
+  where that ended, reads back N's records and those five, and appends five more.
+- One more run reads all of it back: recordings that two builds wrote, in terms of two
+  lengths.
+
+A record read back is held to the line the feed's process wrote when it appended the
+record: its length, a digest of its bytes and the position after it
+(`crates/cavalry/tests/feed/process.rs`). So N+1's read is held to what N was
+answered, and not to what N reads back. Every wait is bounded at 60 s. A failure prints
+the step and each program's output, leaves the script's directory, and exits 1. The
+script's header says how to run it by hand.
+

@@ -146,8 +146,9 @@ struct Process {
 
 impl Drop for Process {
     fn drop(&mut self) {
-        // A process that is stopped takes no kill until it is continued.
-        let _ = ran("kill", &["-CONT", &self.child.id().to_string()]);
+        // SIGKILL ends a process that is stopped as it ends one that runs. A child
+        // that the test has killed and waited for is sent nothing: its process id may
+        // be another process's by now.
         let _ = self.child.kill();
         let _ = self.child.wait();
     }
