@@ -4,7 +4,8 @@
   `cluster.leaders_withheld` counts the waits. It replicates the log, and it casts
   no vote and seeks no leadership until its log reaches what its leader held when it
   joined, the vote floor `cluster.vote_floor` holds. Meanwhile it votes only when
-  every voter has reported a log the candidate's is at least, and
+  every voter has reported a log the candidate's is at least and no other voter has
+  named the term it is asked to vote in, and
   `cluster.votes_withheld` counts the requests it left unanswered. A follower now
   answers the canvass of a member whose log is empty. The rule "never start one
   member alone on a new log directory" is gone. Two cases that the rule held now

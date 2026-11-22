@@ -19,6 +19,12 @@ pub struct Safety {
     ids: Vec<i32>,
     committed: Vec<u8>,
     last_commit: Vec<i64>,
+    /// For each member, what it had appended when it was last wiped: an append
+    /// position it sent before it lost its log can still reach the leader and count
+    /// toward a commit, as a datagram sent before a host's loss can, so the quorum
+    /// below counts the member at that position until it holds as much again. The
+    /// vote floor is what keeps that commit (ADR 0145).
+    appended_before_wipe: Vec<i64>,
 }
 
 impl Safety {
@@ -27,6 +33,7 @@ impl Safety {
             ids: ids.to_vec(),
             committed: Vec::new(),
             last_commit: vec![0; ids.len()],
+            appended_before_wipe: vec![0; ids.len()],
         }
     }
 
@@ -54,7 +61,14 @@ impl Safety {
                 .iter()
                 .enumerate()
                 .filter(|(place, _)| mask >> place & 1 == 1)
-                .map(|(_, &id)| cluster.append_position(id).expect("a member"))
+                .map(|(_, &id)| {
+                    let appended = cluster.append_position(id).expect("a member");
+                    self.ids
+                        .iter()
+                        .position(|&known| known == id)
+                        .and_then(|index| self.appended_before_wipe.get(index))
+                        .map_or(appended, |&before| appended.max(before))
+                })
                 .collect();
             appended.sort_unstable_by(|a, b| b.cmp(a));
             let durable_on_a_quorum = appended[quorum(appended.len()) - 1];
@@ -124,9 +138,11 @@ impl Safety {
     /// committed is not, so a quorum that loses its directories and commits another
     /// history fails the check.
     pub fn wipe(&mut self, cluster: &mut Cluster, member: i32) {
+        let appended = cluster.append_position(member).unwrap_or(0);
         cluster.wipe(member);
         if let Some(index) = self.ids.iter().position(|&id| id == member) {
             self.last_commit[index] = 0;
+            self.appended_before_wipe[index] = appended;
         }
     }
 

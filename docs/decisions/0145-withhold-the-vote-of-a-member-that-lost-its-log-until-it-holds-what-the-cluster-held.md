@@ -59,11 +59,19 @@ and votes as any voter does.
 
 **One case in which it votes.** When each voter of its members string has reported
 its log in this election, itself and the candidate among them, and the candidate's
-log is at least each, a member that withholds answers as any voter does. A log at
-least that of a member that holds a committed entry holds the entry, as Raft's vote
-rule has it, so such a candidate holds every committed entry that any voter still
-holds. This case keeps a cluster live when two of three members lose their logs
-while the third holds the whole log: every voter is heard, and the third is voted in.
+log is at least each, a member that withholds answers as any voter does, provided
+each voter other than itself and the candidate has named a term below the request's
+term. A log at least that of a member that holds a committed entry holds the entry,
+as Raft's vote rule has it, so such a candidate holds every committed entry that any
+voter still holds. The terms keep the member from voting twice in one term: a vote it
+cast before it lost its log went to a candidate that stored the term first and names
+it since, so with each other voter below the term, the candidate it votes for now is
+the one it could have voted for then. Without them, a member that voted for one
+candidate in a term, lost its log and was asked by another candidate of the same
+term, while the two could not reach each other, voted again, and the two led one
+term: the search of the Evidence found it. This case keeps a cluster live when two of
+three members lose their logs while the third holds the whole log: every voter is
+heard, and the third is voted in.
 
 **The vote floor.** A member whose log is empty that takes a leader on a new
 leadership term stores that message's log position, the leader's append position,
@@ -288,6 +296,27 @@ catch up and withholds until a start from a peer's snapshot is built (work item
   in canvass or nominate sends nothing beyond its own canvass position, once each
   interval. With the answer removed, the first of the four tests fails. With any one
   of the answer's three conditions dropped, one of the other three fails.
+- A search, `crates/cavalry-raft/tests/lost_log_search.rs`: three members in memory
+  under a delivery seed of loss and delay, with members halted, cut one way or both,
+  started again on the directory they kept, and wiped, each at a moment the seed
+  draws, for 60 s a seed, with the check of every step. A wipe is drawn only while no
+  other member is short of its floor and the two others run and hold what was
+  committed, so that no accepted case is reached. Over 3,000 seeds in a release build,
+  before the term condition of "One case in which it votes", 11 failed:
+  - Five were two members leading one term. A member voted for one candidate, was
+    wiped within 200 ms, and voted for a second candidate of the same term through
+    the one case in which it votes, the two candidates cut off from each other. At
+    seed 2983 the member voted for member 1 in term 4, was wiped, and voted for member
+    0 in term 4 having heard member 1 name term 4. The term condition ends it:
+    `tests/vote_in_one_term.rs` pins it on one core by hand and fails without it, and
+    seeds 779, 1573 and 2983, which `just test` runs, fail without it too.
+  - Six were the check's quorum below the leader's commit, at most 130 ms after a
+    wipe: the leader had counted an append position the member sent before it lost
+    its log, as a datagram sent before a host's loss can arrive after it. The floor
+    keeps that commit. The check now counts a wiped member at what it had appended,
+    until it holds as much again, and asserts the rest as before.
+  With the term condition and that count, the same 3,000 seeds fail none: 5,811
+  wipes, 4,104 of them reaching their floor within the 60 s.
 - `crates/cavalry-driver/src/conductor.rs`, the two facts of the transport that the
   second case rests on, beside a driver that ran on:
   `a_second_subscription_joins_a_live_image_at_its_rebuild_position`, whose second

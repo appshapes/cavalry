@@ -1162,12 +1162,18 @@ a request vote with nothing, its candidate term unchanged, counted in
 `cluster.votes_withheld`, as a standby does ("Standbys"). It answers as a voter in its
 state does in one case alone: when each voter of its members string has reported its
 log in this election, itself and the candidate among them, the candidate's log in the
-request, and the candidate's log is at least each ("Logs compared"). A log at least
-that of a member holding a committed entry holds the entry, as Raft's vote rule has
-it, so such a candidate holds every committed entry that any voter still holds; while
-a voter has not reported, it may hold one the candidate lacks. A member withholds in
-two cases, which the `withholds` vectors pin, and votes in the one above, which the
-`withheld-vote` vectors pin, the voters alone given:
+request, and the candidate's log is at least each ("Logs compared"), and when each
+voter other than itself and the candidate has named in this election a term below the
+request's candidate term id ("Taking a leader" says how a voter names one). A log at
+least that of a member holding a committed entry holds the entry, as Raft's vote rule
+has it, so such a candidate holds every committed entry that any voter still holds;
+while a voter has not reported, it may hold one the candidate lacks. And a vote the
+member cast before it lost its log, in the request's term, went to a candidate that
+stored the term before it asked and names it in every message it writes after: with
+each other voter below the term, that candidate can only be this one, so the member
+votes no second time in a term, which two leaders of one term would need. A member
+withholds in two cases, which the `withholds` vectors pin, and votes in the one above,
+which the `withheld-vote` and `votes-in-term` vectors pin, the voters alone given:
 
 - Its log is empty, log leadership term id −1 at position 0, while a member's report
   in this election, or the request it answers, holds a log, log leadership term id 0

@@ -631,6 +631,17 @@ def takes_leader(voters, own, heard, term, voted):
     return {"takes": takes}
 
 
+def votes_in_term(voters, own, candidate, heard, term):
+    """spec/cluster.md, "A member that lost its log" (ADR 0145): whether a voter that withholds and
+    votes all the same gives its vote in `term` to voter `candidate`: when each of the `voters`
+    voters but itself, voter `own`, and the candidate has been heard, `heard[i]` the highest term
+    voter i named or None, and named a term below `term`."""
+    named = heard[:voters]
+    vote = voters >= 1 and len(named) == voters and all(
+        i in (own, candidate) or (t is not None and t < term) for i, t in enumerate(named))
+    return {"vote": vote}
+
+
 VOTING_STATES = (1, 2, 3, 4)  # canvass, nominate, candidate ballot, follower ballot
 
 
@@ -888,6 +899,16 @@ VECTORS += [
           ("takes-leader-the-later-term-beside-the-deposed-leader", 3, 2, [4, 5, None], 5, False),
           ("takes-leader-voted-it-in", 3, 2, [None, None, None], 1, True),
           ("takes-leader-a-standby-past-the-voters-unread", 2, 1, [3, None, None], 3, False),
+      ]],
+    *[arithmetic(name, "votes-in-term",
+                 {"voters": voters, "own": own, "candidate": cand, "heard": heard, "term": term},
+                 votes_in_term(voters, own, cand, heard, term))
+      for name, voters, own, cand, heard, term in [
+          ("votes-in-term-every-other-voter-below", 3, 2, 1, [3, 4, None], 4),
+          ("votes-in-term-another-voter-named-the-term", 3, 2, 0, [3, 4, None], 4),
+          ("votes-in-term-another-voter-named-a-later-term", 3, 2, 0, [3, 5, None], 4),
+          ("votes-in-term-another-voter-silent", 3, 2, 0, [3, None, None], 4),
+          ("votes-in-term-a-standby-past-the-voters-unread", 2, 1, 0, [3, None, 9], 4),
       ]],
     arithmetic("candidate-unanimous", "candidate",
                {"members": 3, "reports": [[3, 98304], [3, 98304], [2, 65536]], "own": [3, 98304],

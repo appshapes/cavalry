@@ -13,7 +13,8 @@ use cavalry_proto::cluster::{
     Stream, TermFields, TermSpan, TimeUnit, VERSION, Vote, VoteAnswer, VoteRequest, answered_term,
     ballot, candidate, canvass_position_action, commit_position, entry_position, log_at_least,
     new_leadership_term_action, next_fields, parse_members, quorum, replay_end, replication_record,
-    replication_stop, request_vote, takes_leader, withheld_vote, withholds, write_log_recordings,
+    replication_stop, request_vote, takes_leader, votes_in_term, withheld_vote, withholds,
+    write_log_recordings,
 };
 use serde_json::{Map, Value, json};
 
@@ -588,6 +589,18 @@ fn arithmetic_vector(name: &str, vector: &Value) {
                 .collect();
             let voted = inputs["voted"].as_bool().expect("voted");
             json!({"takes": takes_leader(voters, own, &heard, int(inputs, "term"), voted)})
+        }
+        "votes-in-term" => {
+            let voters = usize::try_from(int(inputs, "voters")).expect("voters");
+            let own = usize::try_from(int(inputs, "own")).expect("own");
+            let candidate = usize::try_from(int(inputs, "candidate")).expect("candidate");
+            let heard: Vec<Option<i64>> = inputs["heard"]
+                .as_array()
+                .expect("heard")
+                .iter()
+                .map(Value::as_i64)
+                .collect();
+            json!({"vote": votes_in_term(voters, own, candidate, &heard, int(inputs, "term"))})
         }
         "replication-stop" => {
             let ReplicationStop {

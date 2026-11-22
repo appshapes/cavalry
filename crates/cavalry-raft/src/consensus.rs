@@ -21,8 +21,8 @@ use cavalry_proto::cluster::{
     LEADER_HEARTBEAT_TIMEOUT_NS, LIVE_ADD_MAX_WINDOW, LogReport, MAX_MEMBERS, MemberPosition,
     Message, PROTOCOL_VERSION, STARTUP_CANVASS_TIMEOUT_NS, TermAction, TermFields, TermSpan,
     TimeUnit, Vote, VoteRequest, ballot, candidate, canvass_position_action, commit_position,
-    new_leadership_term_action, next_fields, quorum, request_vote, takes_leader, withheld_vote,
-    withholds,
+    new_leadership_term_action, next_fields, quorum, request_vote, takes_leader, votes_in_term,
+    withheld_vote, withholds,
 };
 use cavalry_shm::counters::CounterId;
 use cavalry_shm::counters::generated::{
@@ -2009,7 +2009,19 @@ impl Consensus {
             {
                 *slot = Some(candidate_log);
             }
-            if !withheld_vote(self.count, &reports, candidate_log) {
+            // And no other voter names the request's term or a later one, so that a vote
+            // the member cast in it before it lost its log was for this candidate: it
+            // votes no second time in a term.
+            let fresh = self.other(candidate_member_id).is_some_and(|candidate| {
+                votes_in_term(
+                    self.count,
+                    self.own,
+                    candidate,
+                    &self.terms_named,
+                    request.candidate_term_id,
+                )
+            });
+            if !withheld_vote(self.count, &reports, candidate_log) || !fresh {
                 count(&mut self.counts.votes_withheld);
                 return Ok(());
             }

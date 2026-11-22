@@ -2756,6 +2756,28 @@ pub fn takes_leader(
                 .all(|(index, named)| index == own || named.is_some_and(|named| named <= term)))
 }
 
+/// Whether a voter that withholds and votes all the same ([`withheld_vote`]) gives its
+/// vote in `term` to the candidate at index `candidate`: only when each of the
+/// `voters` voters but itself, voter `own`, and the candidate has been heard in this
+/// election, `heard[i]` the highest term voter `i` named or `None`, and named a term
+/// below `term` (`spec/cluster.md`, "A member that lost its log"; ADR 0145). A vote the
+/// member cast in `term` before it lost its log went to a candidate that stored `term`
+/// first and names it since, so with every other voter below `term`, that candidate is
+/// this one, and the member votes no second time in the term.
+pub fn votes_in_term(
+    voters: usize,
+    own: usize,
+    candidate: usize,
+    heard: &[Option<i64>],
+    term: i64,
+) -> bool {
+    voters >= 1
+        && heard.len() >= voters
+        && heard.iter().take(voters).enumerate().all(|(index, named)| {
+            index == own || index == candidate || named.is_some_and(|named| named < term)
+        })
+}
+
 /// The fields of a request vote a reader answers.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub struct VoteRequest {

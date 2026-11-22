@@ -424,7 +424,10 @@ commit path runs per message.
   `memory::Cluster::wipe` and `memory::Cluster::restart` lose every consensus message
   in flight to the member. With the review's schedule and the canvass positions of
   the new leader's canvass held late past the wipe, `tests/lost_log_directory.rs`
-  fails without that loss.
+  fails without that loss. A member that withholds and votes all the same, every
+  voter heard, votes in no term that a voter other than the candidate has named, so
+  that it votes no second time in a term it voted in before it lost its log:
+  `tests/vote_in_one_term.rs` pins it, one core by hand.
 - Runs beside members of another version of its major, as the members of a cluster
   do while it is upgraded one member at a time (`spec/cluster.md`, "Versions and
   the upgrade"; ADR 0136; work item 231). A member writes its own version, 256 for
