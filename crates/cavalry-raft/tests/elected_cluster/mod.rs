@@ -70,6 +70,13 @@ impl Safety {
                         .map_or(appended, |&before| appended.max(before))
                 })
                 .collect();
+            // A member that holds as much again as it had appended before its wipe is
+            // counted at its own position from then on.
+            for (index, &id) in self.ids.iter().enumerate() {
+                if cluster.append_position(id) >= self.appended_before_wipe.get(index).copied() {
+                    self.appended_before_wipe[index] = 0;
+                }
+            }
             appended.sort_unstable_by(|a, b| b.cmp(a));
             let durable_on_a_quorum = appended[quorum(appended.len()) - 1];
             assert!(
@@ -142,7 +149,9 @@ impl Safety {
         cluster.wipe(member);
         if let Some(index) = self.ids.iter().position(|&id| id == member) {
             self.last_commit[index] = 0;
-            self.appended_before_wipe[index] = appended;
+            // A second wipe before the member holds as much again keeps the larger: an
+            // append position sent before the first can still be on its way.
+            self.appended_before_wipe[index] = self.appended_before_wipe[index].max(appended);
         }
     }
 

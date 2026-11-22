@@ -401,7 +401,8 @@ commit path runs per message.
   empty while another member's report holds a log, or whose append position is below
   its vote floor, withholds: it never nominates itself, and it answers a request
   vote with nothing, counted in `cluster.votes_withheld`, unless every voter has
-  reported a log the candidate's is at least. Taking a leader with its log empty,
+  reported a log the candidate's is at least and no voter but the candidate has named
+  the request's term or a later one. Taking a leader with its log empty,
   it stores the leader's append position as its vote floor, through
   `Io::store_vote_floor`, in its `terms` file before it records a term;
   `Consensus::vote_floor()` and the gauge `cluster.vote_floor` hold it. A voter

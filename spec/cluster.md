@@ -1225,7 +1225,8 @@ a vote the member cast before it lost its log was for a candidate that stored th
 term first, so that candidate names a term at least the vote's, and the member, whose
 candidate term becomes the leader's, votes no second time in that term. The first
 case is a vote cast by the rules above: no member the member heard held a log, or each
-voter had reported a log the candidate's is at least. A standby takes a leader as
+voter had reported a log the candidate's is at least and no voter but the candidate
+had named the request's term or a later one. A standby takes a leader as
 every member did before this rule, since its appends count toward no commit and it
 has no vote.
 
@@ -2050,7 +2051,7 @@ that a reader of a counters file knows which transition it saw.
 | `cluster.standby` | a gauge: 1 when the member's own string marks it a standby, 0 when it gives it a vote. It does not change while the member runs ("Standbys") |
 | `cluster.vote_floor` | a gauge: the member's vote floor, the position below which it withholds its vote and seeks no leadership, which it stored when it took a leader with its log empty; −1 for none. It does not change once stored ("A member that lost its log"; ADR 0145) |
 | `cluster.standby_vote_requests` | a request vote that the member read as a standby and answered with nothing: the candidate's string gives this member a vote, and the member's own does not ("Standbys", "Changing a standby's mark") |
-| `cluster.votes_withheld` | a request vote that the member answered with nothing because it withholds its vote, its log empty while a member that holds one is heard or below its vote floor, and not every voter had reported a log the candidate's is at least ("A member that lost its log"; ADR 0145) |
+| `cluster.votes_withheld` | a request vote that the member answered with nothing because it withholds its vote, its log empty while a member that holds one is heard or below its vote floor, and not every voter had reported a log the candidate's is at least, or a voter other than the candidate had named the request's term or a later one ("A member that lost its log"; ADR 0145) |
 | `cluster.leaders_withheld` | a new leadership term that a voter whose log is empty ignored, where it would otherwise have taken the sender as its leader: it had not voted that leader in, and had not heard each other voter in this election name a term at most the leader's ("A member that lost its log", "Taking a leader"; ADR 0145) |
 | `cluster.protocol_version` | a gauge: the member's own version of this page in semantic form, 256 for version 1. It does not change while the member runs. A member of a build older than this counter has none: every member of version 0, and one of the first build of version 1 ("Versions and the upgrade"; ADR 0137) |
 | `cluster.sessions` | a gauge: open sessions, on every member, as the snapshot it started from and its log's committed session open and close events since left them |

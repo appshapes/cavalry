@@ -2721,9 +2721,9 @@ struct Counters {
     /// added: a member's build does not change while it runs. The member holds no
     /// peer's version.
     _protocol_version: Stored,
-    /// `cluster.vote_floor`: the position below which the member casts no vote, −1 for
-    /// none, stored each cycle, since the member stores it once when it takes a leader
-    /// with its log empty (ADR 0145).
+    /// `cluster.vote_floor`: the position below which the member withholds its vote, −1
+    /// for none, stored each cycle, since the member stores it once when it takes a
+    /// leader with its log empty (ADR 0145).
     vote_floor: Stored,
     append_position: Stored,
     /// `cluster.log_recording_id`, added before `cluster.commit_position` and stored

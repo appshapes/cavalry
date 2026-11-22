@@ -635,7 +635,8 @@ pub struct Counts {
     /// `cluster.votes_withheld`: a request vote the member answered with nothing
     /// because it withholds its vote, its log empty beside a member that holds one or
     /// below its vote floor, and not every voter had reported a log the candidate's
-    /// is at least (ADR 0145).
+    /// is at least, or a voter other than the candidate had named the request's term
+    /// or a later one (ADR 0145).
     pub votes_withheld: u64,
     /// `cluster.leaders_withheld`: a new leadership term the member, a voter with its
     /// log empty, ignored where it would otherwise have taken the sender as its leader:
@@ -1994,9 +1995,11 @@ impl Consensus {
             return Ok(());
         }
         // A member that withholds answers nothing, as a standby does, unless every
-        // voter has reported a log the candidate's is at least: then the candidate
-        // holds every committed entry any voter still holds, and the member answers as
-        // any voter does (`spec/cluster.md`, "A member that lost its log"; ADR 0145).
+        // voter has reported a log the candidate's is at least, and no voter but the
+        // candidate has named the request's term or a later one: then the candidate
+        // holds every committed entry any voter still holds, the member votes no second
+        // time in a term, and it answers as any voter does (`spec/cluster.md`, "A
+        // member that lost its log"; ADR 0145).
         let candidate_log = LogReport {
             term: request.log_leadership_term_id,
             position: request.log_position,

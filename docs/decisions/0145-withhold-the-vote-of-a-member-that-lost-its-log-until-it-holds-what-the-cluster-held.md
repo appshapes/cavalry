@@ -151,11 +151,12 @@ most once each election status interval, 100 ms. A member whose log is empty ans
 none, so no two members answer each other. A standby takes any leader, since its
 appends count toward no commit.
 
-**Three pure functions and their vectors.** `withholds(own, vote_floor, log_heard)`,
-`withheld_vote(voters, reports, candidate)` and `takes_leader(voters, own, heard,
-term, voted)` in `cavalry-proto`. The `withholds`, `withheld-vote` and
-`takes-leader` arithmetic vectors of `spec/vectors/cluster.json` pin them. They sit
-beside the `candidate` and `request-vote` vectors.
+**Four pure functions and their vectors.** `withholds(own, vote_floor, log_heard)`,
+`withheld_vote(voters, reports, candidate)`, `votes_in_term(voters, own, candidate,
+heard, term)` and `takes_leader(voters, own, heard, term, voted)` in `cavalry-proto`.
+The `withholds`, `withheld-vote`, `votes-in-term` and `takes-leader` arithmetic
+vectors of `spec/vectors/cluster.json` pin them. They sit beside the `candidate` and
+`request-vote` vectors.
 
 **What an operator does now.** A member whose log directory is lost or damaged is
 started on a new one. It comes back by itself once every other voter runs and
@@ -326,8 +327,8 @@ catch up and withholds until a start from a peer's snapshot is built (work item
   `an_add_on_an_endpoint_another_stream_keeps_is_not_given_the_image_being_retired`,
   where a subscription added while the image is being retired is not given it and
   gets the stream back in a new image.
-- `spec/vectors/cluster.json`: sixteen arithmetic vectors, five `withholds`, five
-  `withheld-vote` and six `takes-leader`, read by
+- `spec/vectors/cluster.json`: twenty-one arithmetic vectors, five `withholds`, five
+  `withheld-vote`, five `votes-in-term` and six `takes-leader`, read by
   `crates/cavalry-proto/tests/cluster_conformance.rs`.
 - `spec/vectors/durable-log.json`: five terms header vectors for the floor slot,
   read by `crates/cavalry-log/tests/conformance.rs`. `crates/cavalry-log/src/terms.rs`,
