@@ -18,7 +18,8 @@ use crate::catalog::CatalogError;
 use crate::dir::LogDir;
 use crate::layout::{
     Descriptor, ENTRY_LENGTH, FRAME_ALIGNMENT, HEADER_LENGTH, IndexEntry, IndexHeader, LayoutError,
-    Recording, SEGMENT_NAME_CAPACITY, index_file_name, locate, segment_file_name_into,
+    Recording, SEGMENT_NAME_CAPACITY, SYNCED_SLOT_OFFSETS, index_file_name, locate,
+    segment_file_name_into,
 };
 
 const DOC: &str = "docs/reference/durable-log.md#the-driver";
@@ -167,6 +168,9 @@ pub struct RecordingWriter {
     segment_length: i64,
     index: File,
     index_path: PathBuf,
+    /// The synced slot of the index header that holds the synced position, 0 or 1: a
+    /// sync writes the other one (`spec/durable-log.md`, "Time index"; ADR 0144).
+    synced_slot: usize,
     entries: u64,
     last_index_timestamp: i64,
     last_sync_timestamp: i64,
@@ -228,7 +232,11 @@ impl LogDir {
             .create_new(true)
             .open(&index_path)
             .map_err(io("create", &index_path))?;
-        let header = IndexHeader::new(id)?.encode();
+        // The header holds the start position as what is synced: nothing past it is
+        // until the first sync, and recovery cuts the recording to it (ADR 0144).
+        let header = IndexHeader::new(id)?
+            .with_synced(descriptor.start_position())?
+            .encode();
         index
             .write_all_at(&header[8..], 8)
             .map_err(io("write the header of", &index_path))?;
@@ -268,6 +276,7 @@ impl LogDir {
             segment_length,
             index,
             index_path,
+            synced_slot: 0,
             entries: 1,
             last_index_timestamp: now,
             last_sync_timestamp: now,
@@ -308,8 +317,12 @@ impl LogDir {
 }
 
 /// Creates a segment file at its full length, synced, so that its length is durable
-/// before a byte is written into it. A file it created and could not extend or sync is
-/// removed again, so that a retry, after the operator frees space, can create it.
+/// before a byte is written into it, and syncs the directory, so that its name is: a
+/// synced position is only as good as the files it covers, and a power loss can take a
+/// name its directory was not synced after (ADR 0144). The directory sync covers the
+/// time index's name too, which [`LogDir::start`] creates before the first segment. A
+/// file it created and could not extend, sync or sync the directory of is removed
+/// again, so that a retry, after the operator frees space, can create it.
 fn open_segment(path: &Path, length: i64) -> Result<File, RecorderError> {
     let segment = OpenOptions::new()
         .read(true)
@@ -317,13 +330,21 @@ fn open_segment(path: &Path, length: i64) -> Result<File, RecorderError> {
         .create_new(true)
         .open(path)
         .map_err(io("create", path))?;
+    // The directory is opened from the path's parent, on the standard library's stack
+    // buffer as the file was: a segment's path always has one.
     let extended = segment
         .set_len(length as u64)
         .map_err(io("extend", path))
-        .and_then(|()| segment.sync_all().map_err(io("sync", path)));
+        .and_then(|()| segment.sync_all().map_err(io("sync", path)))
+        .and_then(|()| match path.parent() {
+            Some(dir) => File::open(dir)
+                .and_then(|dir| dir.sync_all())
+                .map_err(io("sync", dir)),
+            None => Ok(()),
+        });
     if let Err(error) = extended {
-        // The extend's error is the one the operator needs; a file left behind makes
-        // the retry's create refuse, which names the path.
+        // The step's error is the one the operator needs; a file left behind would make
+        // the retry's create refuse, so it goes, whichever step failed.
         let _ = fs::remove_file(path);
         return Err(error);
     }
@@ -472,15 +493,32 @@ impl RecordingWriter {
         Ok(true)
     }
 
+    /// Syncs the segment, then writes the position into the index header's other
+    /// synced slot, then syncs the index: a synced position on the disk is never above
+    /// what the segment holds there, so recovery can cut the recording to it after a
+    /// power loss (`spec/durable-log.md`, "Time index" and "The driver"; ADR 0144). One
+    /// positional write of 12 bytes more than the sync made before, at each sync and
+    /// never for a message. A write of the slot that fails counts as a failed sync: the
+    /// synced position stays where the last slot put it.
     fn sync_files(&mut self) -> Result<(), RecorderError> {
         if let Err(error) = self.segment.sync_data() {
             self.sync_failed = true;
             return Err(io("sync", &self.segment_path)(error));
         }
+        let (next, offset) = match self.synced_slot {
+            0 => (1, SYNCED_SLOT_OFFSETS[1]),
+            _ => (0, SYNCED_SLOT_OFFSETS[0]),
+        };
+        let slot = IndexHeader::synced_slot(self.position);
+        if let Err(error) = self.index.write_all_at(&slot, offset as u64) {
+            self.sync_failed = true;
+            return Err(io("write the synced position of", &self.index_path)(error));
+        }
         if let Err(error) = self.index.sync_data() {
             self.sync_failed = true;
             return Err(io("sync", &self.index_path)(error));
         }
+        self.synced_slot = next;
         self.synced_position = self.position;
         self.unsynced = false;
         Ok(())

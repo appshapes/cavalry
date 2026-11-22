@@ -923,21 +923,45 @@ pub struct Torn {
     pub retained: bool,
 }
 
+/// The offsets in the time index header of its two synced slots, each a synced
+/// position and its checksum (`spec/durable-log.md`, "Time index"; ADR 0144).
+pub const SYNCED_SLOT_OFFSETS: [usize; 2] = [24, 40];
+/// The bytes of a synced slot a write puts down: the position, 8 bytes, and the
+/// checksum of them, 4; the slot's last 4 bytes are reserved and stay 0.
+pub const SYNCED_SLOT_WRITE: usize = 12;
+
 /// The time index header's fields.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct IndexHeader {
     recording_id: i64,
+    synced: Option<i64>,
 }
 
 impl IndexHeader {
-    /// The header of recording `recording_id`'s index.
+    /// The header of recording `recording_id`'s index, with no synced position: the
+    /// header recovery writes again, and an index a driver before version 5 of the
+    /// page wrote.
     pub fn new(recording_id: i64) -> Result<Self, LayoutError> {
         if recording_id < 0 {
             return Err(LayoutError::RecordingId {
                 found: recording_id,
             });
         }
-        Ok(IndexHeader { recording_id })
+        Ok(IndexHeader {
+            recording_id,
+            synced: None,
+        })
+    }
+
+    /// The header with `position` in synced slot 0: the header the recorder creates,
+    /// at the recording's start position. A position below 0 or not a multiple of 32
+    /// is [`LayoutError::Position`].
+    pub fn with_synced(self, position: i64) -> Result<Self, LayoutError> {
+        check_synced(position)?;
+        Ok(IndexHeader {
+            synced: Some(position),
+            ..self
+        })
     }
 
     /// The recording this index belongs to.
@@ -945,12 +969,25 @@ impl IndexHeader {
         self.recording_id
     }
 
-    /// The header's bytes, magic first.
+    /// The synced position: what the recorder had synced of the recording when it
+    /// last wrote a slot, the higher of the two slots whose checksum matches, or
+    /// `None` when neither does, in an index a driver before version 5 of the page
+    /// wrote or one recovery wrote again (ADR 0144).
+    pub const fn synced_position(&self) -> Option<i64> {
+        self.synced
+    }
+
+    /// The header's bytes, magic first, the synced position in slot 0 when there is
+    /// one.
     pub fn encode(&self) -> [u8; HEADER_LENGTH] {
         let mut out = [0u8; HEADER_LENGTH];
         out[..8].copy_from_slice(&INDEX_MAGIC);
         out[8..12].copy_from_slice(&VERSION.to_le_bytes());
         out[16..24].copy_from_slice(&self.recording_id.to_le_bytes());
+        if let Some(position) = self.synced {
+            let slot = SYNCED_SLOT_OFFSETS[0];
+            out[slot..slot + SYNCED_SLOT_WRITE].copy_from_slice(&synced_slot(position));
+        }
         out
     }
 
@@ -969,7 +1006,27 @@ impl IndexHeader {
                 found: recording_id,
             });
         }
-        Ok(IndexHeader { recording_id })
+        // A slot whose checksum does not match is a write a crash tore, or a slot no
+        // write has reached; one whose checksum matches holds what a writer wrote, so
+        // a position no writer writes is damage.
+        let mut synced = None;
+        for offset in SYNCED_SLOT_OFFSETS {
+            let position = i64_at(bytes, offset);
+            if u32_at(bytes, offset + 8) == crc32(&bytes[offset..offset + 8]) {
+                check_synced(position)?;
+                synced = Some(synced.map_or(position, |other: i64| other.max(position)));
+            }
+        }
+        Ok(IndexHeader {
+            recording_id,
+            synced,
+        })
+    }
+
+    /// The synced slot a write puts down at `offset`, 24 or 40: the position and its
+    /// checksum, [`SYNCED_SLOT_WRITE`] bytes.
+    pub fn synced_slot(position: i64) -> [u8; SYNCED_SLOT_WRITE] {
+        synced_slot(position)
     }
 
     /// How many whole entries an index of `file_length` bytes holds; a part-written
@@ -977,6 +1034,21 @@ impl IndexHeader {
     pub const fn entries(file_length: u64) -> u64 {
         (file_length - HEADER_LENGTH as u64) / ENTRY_LENGTH as u64
     }
+}
+
+fn synced_slot(position: i64) -> [u8; SYNCED_SLOT_WRITE] {
+    let mut out = [0u8; SYNCED_SLOT_WRITE];
+    out[..8].copy_from_slice(&position.to_le_bytes());
+    let checksum = crc32(&out[..8]);
+    out[8..].copy_from_slice(&checksum.to_le_bytes());
+    out
+}
+
+fn check_synced(position: i64) -> Result<(), LayoutError> {
+    if position < 0 || position % FRAME_ALIGNMENT != 0 {
+        return Err(LayoutError::Position { found: position });
+    }
+    Ok(())
 }
 
 /// One time index entry: the position the recording had reached at an instant.

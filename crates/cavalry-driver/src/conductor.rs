@@ -53,13 +53,14 @@ use cavalry_shm::counters::generated::{
     IMAGE_REMOVED, LOG_BUFFER_REJECTED_POSITION, LOG_BUFFER_REJECTED_TAIL, PUBLICATION_LIMIT,
     PUBLICATION_POSITION, PUBLICATION_UNBLOCKED, RECORDING_ARMED, RECORDING_ARMED_DROPPED,
     RECORDING_ARMED_FAILED, RECORDING_ARMED_STARTED, RECORDING_BYTES, RECORDING_CATALOG_FULL,
-    RECORDING_CATALOG_TRUNCATED, RECORDING_DELETED, RECORDING_FILES_REMOVED,
-    RECORDING_INDEX_REWRITTEN, RECORDING_INVALIDATED, RECORDING_POSITION, RECORDING_RECOVERED,
-    RECORDING_RETENTION_FAILED, RECORDING_SLOT_DROPPED, RECORDING_START_FAILED, RECORDING_STARTED,
-    RECORDING_STOPPED, RECORDING_SYNCED_POSITION, RECORDING_TRUNCATED, REPLAY_ENDED, REPLAY_FAILED,
-    REPLAY_NOT_CONNECTED, REPLAY_POSITION, REPLAY_START_FAILED, REPLAY_STARTED, REPLAY_STOPPED,
-    SENDER_BYTES_UNSENT, SENDER_FLOW_CONTROL_RECEIVERS, SENDER_JOINS_REFUSED, SENDER_LIMIT,
-    SENDER_POSITION, SUBSCRIPTION_ADD_DEFERRED, SUBSCRIPTION_ADD_DEFERRED_TIMED_OUT,
+    RECORDING_CATALOG_TRUNCATED, RECORDING_CUT_TO_SYNCED, RECORDING_DELETED,
+    RECORDING_FILES_REMOVED, RECORDING_INDEX_REWRITTEN, RECORDING_INVALIDATED, RECORDING_POSITION,
+    RECORDING_RECOVERED, RECORDING_RETENTION_FAILED, RECORDING_SLOT_DROPPED,
+    RECORDING_START_FAILED, RECORDING_STARTED, RECORDING_STOPPED, RECORDING_SYNCED_POSITION,
+    RECORDING_TRUNCATED, REPLAY_ENDED, REPLAY_FAILED, REPLAY_NOT_CONNECTED, REPLAY_POSITION,
+    REPLAY_START_FAILED, REPLAY_STARTED, REPLAY_STOPPED, SENDER_BYTES_UNSENT,
+    SENDER_FLOW_CONTROL_RECEIVERS, SENDER_JOINS_REFUSED, SENDER_LIMIT, SENDER_POSITION,
+    SUBSCRIPTION_ADD_DEFERRED, SUBSCRIPTION_ADD_DEFERRED_TIMED_OUT,
     SUBSCRIPTION_ADD_DEFERRED_WAITING, SUBSCRIPTION_POSITION,
 };
 use cavalry_shm::counters::{Counter, CounterId, CountersError, CountersFile, Scope};
@@ -1092,7 +1093,7 @@ impl Conductor {
         }
     }
 
-    /// Stores what the recovery pass did when the log directory was opened in the six
+    /// Stores what the recovery pass did when the log directory was opened in the seven
     /// `recording.*` recovery counters, so that `doctor` reads it from the counters file
     /// (`spec/durable-log.md`, "The driver"; invariant 4).
     pub(crate) fn record_recovery(&self, recovery: &Recovery) -> Result<(), CountersError> {
@@ -1110,7 +1111,8 @@ impl Conductor {
             RECORDING_SLOT_DROPPED,
             u64::from(recovery.dropped_empty_slot),
         )?;
-        set(RECORDING_FILES_REMOVED, recovery.files_removed)
+        set(RECORDING_FILES_REMOVED, recovery.files_removed)?;
+        set(RECORDING_CUT_TO_SYNCED, recovery.cut_to_synced)
     }
 
     /// The conductor's loop: duty cycles until `stop`, then −1 in the heartbeat.
@@ -7052,6 +7054,7 @@ impl Conductor {
         add(RECORDING_INVALIDATED, recovery.invalidated);
         add(RECORDING_INDEX_REWRITTEN, recovery.index_rewritten);
         add(RECORDING_FILES_REMOVED, recovery.files_removed);
+        add(RECORDING_CUT_TO_SYNCED, recovery.cut_to_synced);
     }
 
     /// Answers `start recording` or `sync recording` with `error`, code 10, when the
@@ -14910,23 +14913,25 @@ mod replay {
         assert!(slot.is_live(), "the catalog holds no stop: {slot:?}");
 
         // The recorder holds the directory's lock until it goes. Recovery rebuilds the
-        // stop from the files, which here hold what was written before the failure.
+        // stop from the files, which here hold what was written before the failure, and
+        // cuts it to the synced position the time index holds: the position announced,
+        // and nothing written past it (ADR 0144).
         drop(appender);
         drop(h.recorder);
         let (log, recovery) =
             cavalry_log::dir::LogDir::open(&h.log_dir, h.now).expect("the log directory opens");
         assert_eq!(recovery.recovered, 1, "the live slot's stop is rebuilt");
+        assert_eq!(recovery.cut_to_synced, 1, "past the sync, which failed");
         let rebuilt = log
             .catalog()
             .get(0)
             .expect("the slot reads")
             .expect("the slot holds the recording")
             .stop_position();
-        assert!(
-            rebuilt >= 640,
-            "recovery's stop {rebuilt} is below the stop announced"
+        assert_eq!(
+            rebuilt, 640,
+            "the stop announced, at the last sync that succeeded"
         );
-        assert_eq!(rebuilt, 1280);
     }
 
     /// The same failure with no room for the stop's reply (invariant 1; ADR 0065). The

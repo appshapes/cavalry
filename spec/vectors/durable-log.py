@@ -1,12 +1,14 @@
 #!/usr/bin/env python3
 """Write spec/vectors/durable-log.json: the test vectors for spec/durable-log.md,
-version 4. The reference encoder, standard library only. Run from the repository root:
+version 5. The reference encoder, standard library only. Run from the repository root:
 
     python3 spec/vectors/durable-log.py
 
 Catalog header vectors carry the 128-byte header and the file length the reader sees;
 descriptor vectors carry one 1024-byte slot and its index; index vectors carry the
-128-byte index header and the file length, or one 16-byte entry and the entry before it;
+128-byte index header and the file length, its fields naming each synced slot's position
+(null for a slot whose checksum does not match) and the synced position, or one 16-byte
+entry and the entry before it;
 position vectors are arithmetic: from a descriptor's fields and a position, the segment
 file, the offset in it and the frame header fields a reader checks. Log recordings
 vectors carry the file's 64-byte header and the file length; one slot's fields and
@@ -24,6 +26,10 @@ INDEX_MAGIC = b"CVLYTIDX"
 CATALOG_HEADER = struct.Struct("<8siiiiq96s")  # magic, version, descriptor length, reserved, checksum kind, created, reserved
 DESCRIPTOR = struct.Struct("<iIqqIiqqqiiiiiii256si128s552s")  # state, stop crc, stop ts, stop pos, creation crc, reserved, creation fields
 INDEX_HEADER = struct.Struct("<8siiq104s")  # magic, version, reserved, recording id, reserved
+# Version 5 of the page: two synced slots in the time index header's reserved bytes, at
+# 24 and 40, each a synced position (i64), the zlib CRC32 of its 8 bytes (u32) and 4
+# reserved bytes (ADR 0144).
+SYNCED_SLOT_OFFSETS = (24, 40)
 ENTRY = struct.Struct("<qq")
 HEADER_LENGTH, DESCRIPTOR_LENGTH, ENTRY_LENGTH = 128, 1024, 16
 CHANNEL_LENGTH, SOURCE_LENGTH = 256, 128
@@ -222,12 +228,27 @@ def snapshots_fields(sequence, entries, **extra):
     return {"sequence": sequence, "entries": [list(entry) for entry in entries], **extra}
 
 
-def index_header(recording_id=0, version=0, magic=INDEX_MAGIC):
-    return {"magic": magic.hex(), "version": version, "recording_id": recording_id}
+def index_header(recording_id=0, version=0, magic=INDEX_MAGIC, synced=(None, None)):
+    """A header's fields. `synced` is each slot's position, or None for a slot of zero bytes."""
+    checked = [position for position in synced if position is not None]
+    return {"magic": magic.hex(), "version": version, "recording_id": recording_id,
+            "synced_slots": list(synced),
+            "synced_position": max(checked) if checked else None}
 
 
-def encode_index_header(h):
-    return INDEX_HEADER.pack(bytes.fromhex(h["magic"]), h["version"], 0, h["recording_id"], b"")
+def encode_index_header(h, torn_slot=None):
+    """The header's bytes; `torn_slot`, 0 or 1, gets a checksum that does not match."""
+    raw = bytearray(INDEX_HEADER.pack(bytes.fromhex(h["magic"]), h["version"], 0, h["recording_id"], b""))
+    for slot, position in enumerate(h["synced_slots"]):
+        if position is None:
+            continue
+        offset = SYNCED_SLOT_OFFSETS[slot]
+        value = struct.pack("<q", position)
+        checksum = zlib.crc32(value) & 0xFFFFFFFF
+        if slot == torn_slot:
+            checksum ^= 0xFFFFFFFF
+        raw[offset:offset + 12] = value + struct.pack("<I", checksum)
+    return bytes(raw)
 
 
 def entry(timestamp, position):
@@ -365,6 +386,27 @@ def main():
     vectors.append(invalid("index-order-version-before-recording-id", "index-header", "version", encode_index_header(index_header(version=1, recording_id=-1)), file_length=HEADER_LENGTH))
     vectors.append(invalid("index-version", "index-header", "version", encode_index_header(index_header(version=1)), file_length=HEADER_LENGTH))
     vectors.append(invalid("index-recording-id", "index-header", "recording-id", encode_index_header(index_header(recording_id=-1)), file_length=HEADER_LENGTH))
+    # The synced slots (version 5; ADR 0144). `creation` marks the headers a writer
+    # creates, which a reader's encoding gives back byte for byte: no synced position,
+    # as a driver before version 5 and recovery write it, or the start position in slot 0.
+    one_entry = HEADER_LENGTH + ENTRY_LENGTH
+    created = index_header(recording_id=1, synced=(4096, None))
+    vectors.append(valid("index-header-synced-at-creation", "index-header", encode_index_header(created), created, file_length=one_entry, entries=1, creation=True))
+    vectors.append(valid("index-header-no-synced-position", "index-header", encode_index_header(ih), ih, file_length=one_entry, entries=1, creation=True))
+    both = index_header(recording_id=1, synced=(4096, 1 << 20))
+    vectors.append(valid("index-header-synced-the-higher-slot", "index-header", encode_index_header(both), both, file_length=one_entry, entries=1, creation=False))
+    later = index_header(recording_id=1, synced=(3 << 20, 1 << 20))
+    vectors.append(valid("index-header-synced-slot-0-after-slot-1", "index-header", encode_index_header(later), later, file_length=one_entry, entries=1, creation=False))
+    # A write a crash tore reads as the slot before it.
+    torn = index_header(recording_id=1, synced=(4096, None))
+    torn_raw = encode_index_header(index_header(recording_id=1, synced=(4096, 1 << 20)), torn_slot=1)
+    vectors.append(valid("index-header-synced-slot-1-torn", "index-header", torn_raw, dict(torn, synced_slots=[4096, None]), file_length=one_entry, entries=1, creation=False))
+    neither = index_header(recording_id=1)
+    neither_raw = encode_index_header(index_header(recording_id=1, synced=(4096, None)), torn_slot=0)
+    vectors.append(valid("index-header-synced-slot-0-torn-none-held", "index-header", neither_raw, neither, file_length=one_entry, entries=1, creation=False))
+    vectors.append(invalid("index-header-synced-position-unaligned", "index-header", "position", encode_index_header(index_header(recording_id=1, synced=(4096, 4096 + 16))), file_length=one_entry))
+    vectors.append(invalid("index-header-synced-position-negative", "index-header", "position", encode_index_header(index_header(recording_id=1, synced=(-32, None))), file_length=one_entry))
+    vectors.append(invalid("index-order-recording-id-before-synced", "index-header", "recording-id", encode_index_header(index_header(recording_id=-1, synced=(-32, None))), file_length=one_entry))
     first = entry(1_760_000_000_000_000_000, 0)
     second = entry(1_760_000_000_001_000_000, 4096)
     vectors.append(valid("index-entry-first", "index-entry", encode_entry(first), first))
@@ -670,7 +712,7 @@ def main():
     snapshots_file("snapshots-file-a-slot-that-fails-a-check", [two, bad_position], error="position")
     snapshots_file("snapshots-file-a-torn-slot-and-one-that-fails-a-check", [torn, bad_sequence], error="sequence")
     snapshots_file("snapshots-file-order-slot-0-before-slot-1", [bad_position, bad_sequence], error="position")
-    doc = {"spec": "durable-log", "version": 4, "generated_by": "spec/vectors/durable-log.py", "vectors": vectors}
+    doc = {"spec": "durable-log", "version": 5, "generated_by": "spec/vectors/durable-log.py", "vectors": vectors}
     out = Path(__file__).resolve().parent / "durable-log.json"
     out.write_text(json.dumps(doc, indent=2) + "\n")
     print(f"durable-log.py: wrote {len(vectors)} vectors to {out}")

@@ -3502,7 +3502,9 @@ mod tests {
     use cavalry_proto::cluster::PROTOCOL_VERSION;
     use cavalry_shm::command_ring::CommandRing;
     use cavalry_shm::counters::CountersFile;
-    use cavalry_shm::counters::generated::{CLIENT_TIMED_OUT, RUN_MEMBER_GIVEN_UP};
+    use cavalry_shm::counters::generated::{
+        CLIENT_TIMED_OUT, RECORDING_CUT_TO_SYNCED, RUN_MEMBER_GIVEN_UP,
+    };
 
     struct TestDir(PathBuf);
 
@@ -4965,6 +4967,35 @@ mod tests {
             report.to_string().contains("WARN client.timed_out"),
             "{report}"
         );
+    }
+
+    /// A recovery that cut a recording to what it had synced, after a crash of any kind
+    /// (ADR 0144): doctor says from the counter alone what was dropped, that nothing a
+    /// client was told is durable was, and what to look for when it recurs.
+    #[test]
+    fn a_recording_cut_to_its_synced_position_is_explained_from_its_counter() {
+        let dir = TestDir::new("cut-to-synced");
+        let counters = CountersFile::create(&dir.0, 256).expect("counters");
+        let ring = CommandRing::create(&dir.0, 4096).expect("ring");
+        let _consumer = ring.consumer(Duration::from_secs(10)).expect("consumer");
+        counters
+            .counter(RECORDING_CUT_TO_SYNCED.record())
+            .expect("static")
+            .add(2);
+        let report = examine(&dir.0);
+        let found = finding(&report, "recording.cut_to_synced");
+        assert_eq!(found.level, Level::Warn);
+        for words in [
+            "recording.cut_to_synced is 2:",
+            "the host lost power",
+            "the frames written after the last sync were dropped",
+            "nothing a client was told is durable went with it",
+            "a member takes what it lacks from its leader",
+        ] {
+            assert!(found.message.contains(words), "{words}: {}", found.message);
+        }
+        assert_eq!(found.doc, DOC_COUNTERS);
+        assert!(report.ok(), "a warning does not fail: {report}");
     }
 
     /// A recording that was armed and then started, which every follower of a cluster

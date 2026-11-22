@@ -1,4 +1,4 @@
-# The durable log, version 4
+# The durable log, version 5
 
 The on-disk record of a stream: what the driver writes when it records a publication,
 and what `cavalry replay` and `just replay-check` read back. A directory, the driver's
@@ -20,7 +20,12 @@ the directory again (ADR 0108); a directory with no cluster member has none, and
 reader of version 2 ignores one. Version 4 adds the snapshots file, a cluster
 member's record of which recordings in the directory are snapshots that a start may
 begin from (ADR 0128); a directory with no cluster member has none, and a reader of
-version 3 ignores one.
+version 3 ignores one. Version 5 adds the synced position, two slots of the time
+index header that the recorder writes at each sync, and the recovery that cuts a
+recording a crash left live to it, so that no frame a power loss may have damaged is
+handed on (ADR 0144). The slots were reserved bytes that a reader of version 4
+ignores, and an index without them is recovered as version 4 recovered it, so a
+directory either version wrote opens under the other in place.
 
 Integers are little-endian; offsets and lengths are in bytes; signed fields are two's
 complement; a timestamp is nanoseconds since the Unix epoch as an i64. A position is
@@ -167,7 +172,30 @@ term never crosses a segment.
 | 8 | 4 | version | i32 | 0 |
 | 12 | 4 | reserved | i32 | written as 0, never read |
 | 16 | 8 | recording id | i64 | 0 or more; the slot in the catalog |
-| 24 | 104 | reserved | bytes | written as 0, never read |
+| 24 | 8 | synced position, slot 0 | i64 | 0 or more, a multiple of 32, in a slot whose checksum matches |
+| 32 | 4 | synced checksum, slot 0 | u32 | the zlib CRC32 of bytes 24 to 32 |
+| 36 | 4 | reserved | bytes | written as 0, never read |
+| 40 | 8 | synced position, slot 1 | i64 | 0 or more, a multiple of 32, in a slot whose checksum matches |
+| 48 | 4 | synced checksum, slot 1 | u32 | the zlib CRC32 of bytes 40 to 48 |
+| 52 | 76 | reserved | bytes | written as 0, never read |
+
+The **synced position** is where the recording's bytes on the disk were vouched for
+when the recorder last wrote a slot: every byte of the recording below it had been
+synced in its segment file. The recorder writes it at each sync, after the segment's
+sync and before the index's ("The driver"), so a synced position on the disk is never
+above what the segment files hold, whatever a crash took. It is kept in two slots, as
+the candidate term of the terms file is, so that a write a crash tears reads as the
+synced position before it. The synced position is the higher of the slots whose
+checksum matches. A creation writes the recording's start position into slot 0 and
+leaves slot 1 zero; each sync after it writes the other slot, the one the synced
+position is not read from, so the first sync writes slot 1. A slot whose checksum does
+not match is a write a crash tore, or a slot no write has reached, whose bytes are
+zero: it is not read. A slot whose checksum matches holds what a writer wrote, so a
+position below 0 or not a multiple of 32 in it is damage, and the reader refuses the
+header with `position`. An index in which neither slot's checksum matches has no
+synced position: a driver before version 5 of this page wrote it, or recovery wrote it
+again ("The driver"). The header's version stays 0, since a reader of version 0 reads
+every field it knows as before and reads the slots as the reserved bytes they were.
 
 Entry j is at 128 + j × 16: a timestamp (i64) and a position (i64, 0 or more, a
 multiple of 32, at a frame boundary the recorder has written). The recorder appends the
@@ -427,7 +455,20 @@ one zeroed slot, the creation fields are written and then the creation checksum,
 stop fields are written at −1 and then the stop checksum, and the state, 1, last; a slot
 whose state is 0 is empty whatever its other bytes hold, so a crash during creation
 leaves an empty last slot. The recording's id is reported, and its files created, only
-after the state is 1. With one writer only the last slot can be empty, and the next
+after the state is 1. The recorder creates the time index before the first segment
+file: the header's fields, with the start position in synced slot 0 and slot 1 zero,
+and a sync, then the magic, the first entry and a sync. It creates each segment file at
+its full length and syncs it, then syncs the directory, before it writes a byte into
+the file, so that a power loss keeps the names of the file and of the index; the
+directory sync is once per segment file, never for a message. A sync of a live
+recording, at the recording sync interval or at a `sync recording` command
+(`spec/client-protocol.md`, "Commands" and "Liveness and timeouts"), syncs the segment
+file being written, then writes the position the recorder has written to into the
+synced slot the synced position is not read from, then syncs the index; a segment file
+that fills is synced before the next one is created. The recording's synced position
+moves, and is reported, only once the index's sync has returned. A sync that fails,
+the slot's write included, leaves the synced position where the last one put it (ADR
+0065). With one writer only the last slot can be empty, and the next
 recording id is the number of whole slots after recovery. Under a version 0 header the
 driver creates slots in version 0's form, so that a directory nobody has purged opens
 under a version 0 driver again; before the first slot whose retained group it writes,
@@ -497,42 +538,72 @@ its stop fields are derived wholly from the files, in this order. First the time
 one that is missing, too short for its header, or whose magic, version or recording id
 fails its check was torn while the recorder created it, and the driver writes it again,
 the header with its magic last and one entry, the start timestamp at the start
-position; an index with a header and no whole entry gets that entry; then the index is
-truncated to whole entries and a last entry that breaks the order is dropped. Second,
-an empty recording: when no segment file of the recording exists, or the segment
-holding the retained position exists and the frame length there is 0, the recorder
-crashed before the first frame, or a truncate to the retained position removed every
-file; the stop position is the retained position, the stop timestamp is the start
+position, and no synced position; an index with a header and no whole entry gets
+that entry; then the index is truncated to whole entries and a last entry that breaks
+the order is dropped. Then the bound: when the index's header holds a synced position
+("Time index"), the bound is the larger of it and the retained position. The bytes
+past it were written and not synced, and after a crash of the operating system or a
+power loss any frame there can be one whose header survived and whose body did not,
+which no check of this page tells from a whole one; so the stop is at most the bound,
+and segment files whose base is at or past the bound hold no synced byte and are read
+by none of the rules below (ADR 0144). An index with no synced position has no bound,
+and the files alone give its stop, as in version 4. Second, an empty recording: when
+no segment file of the recording below the bound exists, when the bound is the
+retained position, or when the segment holding the retained position exists and the
+frame length there is 0, the recorder crashed before the first frame, or before it
+first synced one, or a truncate to the retained position removed every file; the stop position is the retained position, the stop timestamp is the start
 timestamp, the index entries past the stop are dropped so the index holds its first
 entry alone, and the slot stays valid; a start segment file shorter
 than the start position's offset in it, which a pre-extension torn by a crash can leave,
 reads as a frame length of 0 there, an empty recording and not damage, and the scan below
 stops the same way at a position past the end of its segment file. Third, the scan's start:
-the driver walks the index back from its last entry to the first entry at whose
-position a frame checks, and starts there, or at the start position when none does;
+the driver walks the index back from its last entry at or below the bound to the
+first entry at whose position a frame checks, and starts there, or at the start position when none does;
 after a power loss an entry can point past what its segment kept, since the two files
 are synced apart, and walking back skips it; the walk costs one header read per entry
 skipped, and the entries that can point past the data are those appended since the last
 sync, at most a second's worth, since the index and the segment are synced on one cadence. Fourth, the scan: from that position it
-reads frame by frame, to the end of the last segment file at most, and stops at the
-first frame that fails the `frame` check or whose length is 0; the stop position is the
-end of the last frame that checks; index entries past it are dropped; the stop
-timestamp is that of the last entry left; and it writes the stop fields and then the
-stop checksum; segment files that lie wholly past the stop position, such as a next
-segment pre-extended before a power loss, are removed. Only damage gets state 2 and a
-`cavalry doctor` finding: segment files exist but the one holding the start position is
-missing, a segment between the start position and the last segment file is missing, so
-that the scan would cut off data that is on disk, or the frame at the start position has
-a non-zero length and fails the check. Every action recovery takes, a truncation, a
-dropped slot, a rewritten index, a rebuilt stop, a slot set to state 2, is a state
+reads frame by frame, to the end of the last segment file below the bound at most and
+to the bound at most, and stops at the first frame that fails the `frame` check, whose
+length is 0 or that would end past the bound; the stop position is the end of the last
+frame that checks. Fifth, the cut: when the stop position is the bound, the driver
+zeroes the bytes past it in the segment file that holds it, as a truncate does, one
+truncation of that file to the bound's offset in it, an extension to the segment file
+length again and a sync, so that no later scan finds a frame there whatever a power
+loss kept of them; a file whose base is the bound lies wholly past the stop and goes
+with the files below. When the recorder had written past what it synced, the frame
+length at the bound not 0 or the index's last entry past the bound, the driver counts
+the recording in `recording.cut_to_synced`. Then
+index entries past the stop are dropped; the stop timestamp is that of the last entry
+left; and it writes the stop fields and then the stop checksum; segment files that lie
+wholly past the stop position, such as a next segment pre-extended before a power
+loss, are removed. Only damage gets state 2 and a `cavalry doctor` finding: segment
+files below the bound exist but the one holding the start position is missing, a
+segment between the start position and the last segment file below the bound is
+missing, so that the scan would cut off data that is on disk, the bound is above the
+retained position and the frame at the start position has a non-zero length and fails
+the check, or the index's header holds a synced slot whose checksum matches and that
+fails `position`, which no crash leaves; the index is then left as it is. Every action recovery takes, a truncation, a dropped slot, a rewritten
+index, a rebuilt stop, a cut to the synced position, a slot set to state 2, is a state
 transition with a counter of its own, which the recorder's feature adds (ADR 0023,
-card 93). A slot with state 3 whose files are
-still present loses them again. After a process
-crash every byte the recorder wrote is in the page cache and the scan finds it; after an
-operating-system crash or a power loss, bytes past the last sync are not guaranteed, and
-this version cannot tell a frame whose header survived but whose body did not from a
-whole one. A `start recording` whose channel is longer than 256 bytes or whose source
+card 93; ADR 0144). A slot with state 3 whose files are still present loses them
+again. A `start recording` whose channel is longer than 256 bytes or whose source
 identity is longer than 128 is refused with a named error before any slot is written.
+
+Why the bound holds on every crash. After a crash of the driver's process alone every
+byte the recorder wrote is in the operating system's page cache, and the frames past
+the last sync are whole. After a crash of the operating system or a power loss, bytes
+past the last sync are not guaranteed, and a frame whose header survived can have
+lost its body. No start can tell the two crashes apart, so recovery trusts the synced
+position on both: a recording ends at what its recorder had synced, and a crash of
+the process drops at most what the recorder wrote since its last sync, within one
+recording sync interval, 1 s, or since the last `sync recording` command. Nothing a
+client was told is durable is dropped: a `sync recording` command's answer, the
+`recording.synced_position` counter and a cluster member's append position all name a
+position a sync covered (`spec/client-protocol.md`, "Commands"; `spec/cluster.md`,
+"The log"). A recording whose index has no synced position, one a driver before
+version 5 wrote, is recovered from its files alone, and after a power loss its tail is
+what that version left.
 
 The consensus module is the terms file's only writer, from its own thread (ADR
 0060). It creates the file as the driver creates the catalog's header, before the
@@ -689,6 +760,7 @@ The time index header, with the file's length:
 | `magic` | The magic is any other value than `CVLYTIDX`. |
 | `version` | The version is not 0. |
 | `recording-id` | The recording id is below 0. |
+| `position` | A synced slot whose checksum matches holds a position below 0 or not a multiple of 32, slot 0's checked before slot 1's: damage, since a writer writes no such slot. A slot whose checksum does not match is not a failure: it is a write a crash tore or a slot no write has reached, and it is not read. |
 
 A time index entry, with the entry before it when there is one:
 
@@ -808,7 +880,11 @@ either.
 vectors with the file length the reader sees and the whole slots it holds, under version
 0 and version 1; descriptor vectors with the slot index, in both forms, a valid vector's
 `fields` naming its `form`, 0 or 1, and its retained position;
-index header and entry vectors, an entry vector with the entry before it; terms
+index header and entry vectors, an entry vector with the entry before it, a valid
+header vector's `fields` naming the synced position each slot holds, `null` for a slot
+whose checksum does not match, and the synced position, `null` for none, and marking
+with `creation` the headers a writer creates, whose encoding a reader gives back byte
+for byte, under version 5; terms
 header vectors with the file length, a valid vector's `fields` naming the candidate
 term each slot holds, `null` for a slot whose checksum does not match, and the stored
 candidate term, and terms entry vectors with the entry's index and
