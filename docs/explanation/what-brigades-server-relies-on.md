@@ -34,7 +34,7 @@ destination, recording, catalog, replay and image, are in the
   `conformance/upgrade/log-directory.sh` holds that in `just conformance`.
 - Two things the server's code expects do not hold. They are under "What does not
   hold". The first is work item 372 on the Brigade Board. The second is the server's
-  to change.
+  to change, and work item 375 there carries it.
 - A change to a call in the table is either kept compatible or made on purpose.
   [Change a call that Brigade's server makes](../how-to/change-a-call-that-brigades-server-makes.md)
   has the steps.
@@ -159,7 +159,8 @@ Brigade Board holds the question of whether the rule changes.
 
 ### A recording that ends in padding, read back
 
-This one is the server's own, read from its code and not reproduced. When the server
+This one is the server's own, read from its code and not reproduced. Work item 375 on
+the Brigade Board carries it for the sessions that work on the server. When the server
 reads a recording back, it takes the replay as read to its end when the last frame it
 was handed ends there, or when the replay's image stands there in the same pass of its
 loop. Padding at the end of a term reaches no handler, so for a recording that ends in

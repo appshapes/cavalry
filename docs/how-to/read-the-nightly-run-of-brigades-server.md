@@ -385,9 +385,10 @@ Brigade's own.
   that worked work item 362 saw it on a loaded laptop, with Brigade's own pin as well
   as against this tree. Those tests run the server on a file log. Brigade's own
   `server` job passed in 16 of its 18 runs on 2026-11-15 and 2026-11-16, and the
-  other two were cancelled, so no run on a runner has shown it. It has no work item
-  on the board yet: the first reader of a night that it turned red writes one, as
-  step 7 says for a failure of Brigade's own.
+  other two were cancelled, so no run on a runner has shown it. It is work item 374
+  on the Brigade Board, titled as step 7 asks and tagged `brigade` and `server`, so
+  step 4 finds it: the first reader of a night that it turned red comments on that
+  work item with the night's run, and writes no new one.
 - **The run reads `cancelled` and no step failed.** The job passed its own bound of
   20 minutes, or a person cancelled it, or GitHub cancelled it while it waited
   because a newer run took its place. In the last case the newer run is the one to
