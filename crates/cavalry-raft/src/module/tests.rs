@@ -4875,3 +4875,47 @@ fn a_snapshot_whose_list_is_refused_stops_the_member_with_the_snapshots_error() 
         driver.close().expect("the driver closes");
     }
 }
+
+/// A leader whose note of its last cluster action is past the end of its log takes a
+/// control toggle all the same. That is how a leader is left that was deposed with an
+/// action not yet committed: its log is cut below the action, and the position it
+/// noted when it appended is one its read of its log never reaches. A test cannot
+/// depose a leader between an append and its commit, so the note is moved past the
+/// log's end instead (`spec/cluster.md`, "The control toggle"; ADR 0147).
+#[test]
+fn a_leader_whose_last_action_was_cut_from_its_log_takes_a_control_toggle() {
+    use cavalry_proto::cluster::{CONTROL_TOGGLE_SNAPSHOT, control_toggle_key};
+    use cavalry_shm::counters::generated::CLUSTER_CONTROL_TOGGLE;
+
+    let (dir, mut members) = three("toggle-after-a-cut");
+    let end = members[0].1.append_position();
+    members[0].1.snapshot_asked_at = end + 10 * 96;
+    let member_id = members[0].1.member_id();
+    let mut command = Cavalry::connect_to(dir.0.join(format!("member-{member_id}")))
+        .expect("the command's client connects");
+    let toggle = command
+        .add_counter(
+            CLUSTER_CONTROL_TOGGLE.0,
+            &control_toggle_key(member_id, command.client_id()),
+            &format!("cluster.control_toggle {member_id}"),
+        )
+        .expect("the driver adds the toggle");
+    toggle
+        .store_release(CONTROL_TOGGLE_SNAPSHOT)
+        .expect("the toggle is stored");
+    let deadline = Instant::now() + Duration::from_secs(20);
+    while members
+        .iter()
+        .any(|(_, module)| module.snapshot_position() != Some(end + 96))
+    {
+        assert!(
+            Instant::now() < deadline,
+            "the leader did not take the toggle: {:?}",
+            members[0].1.snapshot_counts()
+        );
+        run(&mut members, 1);
+    }
+    assert_eq!(members[0].1.snapshot_counts().actions, 1);
+    toggle.close();
+    command.close().expect("the command's client closes");
+}

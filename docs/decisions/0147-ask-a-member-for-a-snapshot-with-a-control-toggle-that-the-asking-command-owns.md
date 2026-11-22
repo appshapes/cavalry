@@ -49,13 +49,13 @@ the toggle's id, the command's client id, and holding 4, Aeron's `SNAPSHOT`. The
 command is the counter's one writer, and removes it when it ends. A leader that
 serves sessions looks for a toggle of its own id in its driver's counters file, at
 most 16 metadata records no more often than each millisecond, in a ring. It takes
-one when it takes no snapshot of its own and has read its log past every action it
-appended: it appends the cluster action, and stores the snapshot's log position in
+one when it takes no snapshot of its own and has read its log past the last action
+it appended: it appends the cluster action, and stores the snapshot's log position in
 `cluster.control_toggle_snapshot_position` and then the toggle's id in
-`cluster.control_toggle_taken`, each with a release store. It serves one toggle at a
-time and each once: it remembers the counter and the id of the toggle it took for as
-long as that counter holds it, and takes no toggle whose id it took last. The
-command reads its answer in those two gauges and in `cluster.snapshot_position`.
+`cluster.control_toggle_taken`, each with a release store. It takes each toggle
+once: none whose id is at or below the id of the last it took, since a driver gives
+its clients rising ids. The command reads its answer in those two gauges and in
+`cluster.snapshot_position`.
 The item moves to work item 335 because the first feature that needs a thing builds
 it: the round of feature 6 needs it, and nothing else of feature 5 moves.
 
@@ -98,12 +98,21 @@ it: the round of feature 6 needs it, and nothing else of feature 5 moves.
   the smallest look whose pass over the largest file is under half of the wait.
 - **A toggle served by its value: the command writes a second value once it is
   answered.** Lost. A command that dies writes nothing, and its toggle stays until
-  the driver times its client out. The leader's memory of the counter it served
-  covers both.
-- **The leader takes a toggle whose id is above the highest it took.** Lost. Of two
-  toggles the look may meet the higher first, and the lower would then never be
-  taken. Serving one at a time until its counter is free takes both, in the order
-  the ring meets them.
+  the driver times its client out.
+- **The leader remembers the counter of the toggle it took, and takes no other until
+  that counter is free.** Lost, after it was built; the review before the push found
+  it. A command that does not end, its client still alive, holds every later request
+  back for as long as it stays, and the bound on it, the control toggle timeout, is
+  the command's own and not the member's. That is a queue with no bound of the
+  member's (invariant 3). A leader that takes only an id above the last it took needs
+  no memory of a counter: a toggle that stays is passed over, and holds nothing back.
+- **The leader remembers the ids of the last few toggles it took.** Lost. A toggle
+  that stays is taken again once the memory has turned over. One number, the highest
+  id taken, forgets nothing.
+- **Of two toggles the leader takes the lower id first, after a whole pass.** Lost.
+  It holds every request for a whole pass, a second or more, to order two commands
+  that asked one member at the same moment. The command with the lower id is told at
+  once, by an id above its own in `cluster.control_toggle_taken`, and asks again.
 - **The command waits for `cluster.snapshot_actions` to rise, or for
   `cluster.snapshot_position` to pass the commit position it read.** Lost. An action
   the interval appended a moment before the request moves both, and the command
@@ -115,17 +124,27 @@ it: the round of feature 6 needs it, and nothing else of feature 5 moves.
 - `crates/cavalry-raft/tests/snapshot.rs`,
   `a_leader_takes_a_control_toggle_once_and_every_member_takes_its_snapshot`: three
   members over three drivers on the loopback, each toggle added by a client of a
-  member's driver as a command adds it. A toggle beside a follower and one beside
-  the leader that holds 2, Aeron's suspend, stay for 1.3 s, longer than a whole
-  pass, and no member takes either: every `cluster.control_toggle_taken` is −1 and
-  no action is counted. A toggle beside the leader that holds 4 is taken: the leader
-  stores the toggle's id, and the position it stores is the position after the
-  action's entry, at which every member lists its snapshot;
-  `cluster.snapshot_actions` is 1. With that toggle still there and a second added,
-  1.3 s later the leader has taken neither again: one request is one action. When
-  the first is removed the second is taken, with a snapshot one entry later that
-  every member lists. The toggle that held 2 is taken once its command stores 4 in
-  it and the second has gone. No follower takes a toggle or counts an action.
+  member's driver as a command adds it. Each wait for nothing to happen lasts until
+  the leader has looked over its whole counters file and a tenth more, counted in
+  looks and not in time. A toggle beside a follower and one beside the leader that
+  holds 2, Aeron's suspend, are taken by no member: every
+  `cluster.control_toggle_taken` is −1 and no action is counted. A toggle beside the
+  leader that holds 4 is taken: the leader stores the toggle's id, and the position
+  it stores is the position after the action's entry, at which every member lists
+  its snapshot; `cluster.snapshot_actions` is 1. That toggle stays, and the command
+  that held 2 stores 4 in its own, whose id is below the one taken: a whole pass
+  later the leader has taken neither, and the count is 1. A second toggle, added
+  while both stay, is taken with a snapshot one entry later that every member lists,
+  and a whole pass after it the count is 2. No follower takes a toggle or counts an
+  action.
+- `crates/cavalry-raft/src/module/tests.rs`,
+  `a_leader_whose_last_action_was_cut_from_its_log_takes_a_control_toggle`: a
+  leader whose note of its last action is ten entries past the end of its log, as a
+  leader deposed with an action not yet committed is left, takes a toggle, and every
+  member lists the snapshot. Without the rule's "where its log still holds that
+  action" the test fails after 20 s with no action appended: the review before the
+  push found that a leader so left would take no toggle until other entries had
+  grown its log past the note.
 - What one look costs the thread that runs a leader, timed in a release build on an
   Apple M5 Pro laptop, macOS 26.6.1, by the ignored test
   `a_control_toggles_look_timed`, 20,000 looks of 16 records over a member's
@@ -151,8 +170,12 @@ it: the round of feature 6 needs it, and nothing else of feature 5 moves.
   an upgrade one member at a time is not held for the command's wait.
 - Two more counters for each member, and one for each command while it asks, of the
   256 a driver gives its clients.
-- A member's memory of the toggle it serves is its process's: a member that starts
-  again and leads takes a toggle it finds, which is at most one more snapshot.
+- The id a member took last is its process's: a member that starts again and leads
+  takes a toggle it finds, which is at most one more snapshot.
+- Of two commands that ask one member at the same moment, the one with the lower id
+  may be passed over, and is told so at once.
+- A toggle is told from a counter that the driver freed and gave to another client
+  by a second read of its record after its value.
 - Revisit: when the counters file gains a sign that a counter was added, for a look
   that reads nothing until it moves; when a command must suspend or resume a
   cluster, for Aeron's other toggle states; when the page takes its next major, for

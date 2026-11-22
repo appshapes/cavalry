@@ -557,7 +557,7 @@ pub const CLUSTER_LEADERS_WITHHELD: CounterId = CounterId(183);
 /// `cluster.control_toggle`, a client gauge: A request to one cluster member from a command on its host: 4, snapshot, asks the member for a snapshot, which it takes while it leads; every other value is no request of this version. The command adds the counter, is its one writer, and removes it when it ends; the member reads it and writes nothing in it (spec/cluster.md, Snapshots, The control toggle; ADR 0147). key: member id (i32), then the toggle's id (i64), the command's client id, little-endian; label text: the member id in decimal.
 pub const CLUSTER_CONTROL_TOGGLE: CounterId = CounterId(184);
 
-/// `cluster.control_toggle_taken`, a client gauge: The id of the control toggle one cluster member took last: the member led, appended a cluster action that asks for a snapshot, and stored the toggle's id here, after cluster.control_toggle_snapshot_position. -1 while it has taken none since it started (spec/cluster.md, Snapshots, The control toggle; ADR 0147). key: member id (i32), little-endian; label text: the member id in decimal.
+/// `cluster.control_toggle_taken`, a client gauge: The id of the control toggle one cluster member took last: the member led, appended a cluster action that asks for a snapshot, and stored the toggle's id here, after cluster.control_toggle_snapshot_position. It takes no toggle whose id is at or below this one. -1 while it has taken none since it started (spec/cluster.md, Snapshots, The control toggle; ADR 0147). key: member id (i32), little-endian; label text: the member id in decimal.
 pub const CLUSTER_CONTROL_TOGGLE_TAKEN: CounterId = CounterId(185);
 
 /// `cluster.control_toggle_snapshot_position`, a client gauge: The log position of the snapshot one cluster member asked for the control toggle it took last, the position after the cluster action it appended; -1 while it has taken none since it started. The command that added the toggle waits for cluster.snapshot_position to reach it (spec/cluster.md, Snapshots, The control toggle; ADR 0147). key: member id (i32), little-endian; label text: the member id in decimal.
@@ -2035,15 +2035,15 @@ pub const COUNTERS: &[CounterDef] = &[
         kind: Kind::Gauge,
         scope: Scope::Client,
         doc: "A request to one cluster member from a command on its host: 4, snapshot, asks the member for a snapshot, which it takes while it leads; every other value is no request of this version. The command adds the counter, is its one writer, and removes it when it ends; the member reads it and writes nothing in it (spec/cluster.md, Snapshots, The control toggle; ADR 0147). key: member id (i32), then the toggle's id (i64), the command's client id, little-endian; label text: the member id in decimal.",
-        doctor: "A command that asks this member for a snapshot is waiting. The member takes the request while it leads, takes no snapshot of its own and has read its log past its last cluster action: its cluster.control_toggle_taken then holds the id in this counter's key. A toggle that stays while cluster.control_toggle_taken does not move is beside a member that does not lead, see cluster.role, or whose snapshot does not end, see cluster.snapshots_failed. The counter goes when its command ends, after 10 s at the most.",
+        doctor: "A command that asks this member for a snapshot is waiting. The member takes the request while it leads, takes no snapshot of its own and has read its log past its last cluster action: its cluster.control_toggle_taken then holds the id in this counter's key. A toggle whose id is above cluster.control_toggle_taken, and that stays so, is beside a member that does not lead, see cluster.role, or whose snapshot does not end, see cluster.snapshots_failed. One whose id is at or below it was taken, or was passed over for a later one, and is not taken again. The counter goes when its command ends, after 10 s at the most.",
     },
     CounterDef {
         id: CLUSTER_CONTROL_TOGGLE_TAKEN,
         name: "cluster.control_toggle_taken",
         kind: Kind::Gauge,
         scope: Scope::Client,
-        doc: "The id of the control toggle one cluster member took last: the member led, appended a cluster action that asks for a snapshot, and stored the toggle's id here, after cluster.control_toggle_snapshot_position. -1 while it has taken none since it started (spec/cluster.md, Snapshots, The control toggle; ADR 0147). key: member id (i32), little-endian; label text: the member id in decimal.",
-        doctor: "",
+        doc: "The id of the control toggle one cluster member took last: the member led, appended a cluster action that asks for a snapshot, and stored the toggle's id here, after cluster.control_toggle_snapshot_position. It takes no toggle whose id is at or below this one. -1 while it has taken none since it started (spec/cluster.md, Snapshots, The control toggle; ADR 0147). key: member id (i32), little-endian; label text: the member id in decimal.",
+        doctor: "It rises with each request for a snapshot this member took while it led. A command whose toggle's id is below it was passed over for a later request, and asks again.",
     },
     CounterDef {
         id: CLUSTER_CONTROL_TOGGLE_SNAPSHOT_POSITION,

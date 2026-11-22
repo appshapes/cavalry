@@ -3540,24 +3540,26 @@ impl ConsensusModule {
     }
 
     /// Appends the action at `position`, the log publication's, and notes where the
-    /// log then ends. Whether it was appended: not when the core refuses, which a
-    /// leader that serves is never refused but for back pressure.
-    fn append_snapshot_action(&mut self, position: i64) -> Result<bool, RaftError> {
+    /// log then ends. `None` when it was not appended: the core refuses, which a
+    /// leader that serves is never refused but for back pressure. Else the position
+    /// after the action's entry, the snapshot's log position, itself `None` when the
+    /// publication's position could not be read after the append.
+    fn append_snapshot_action(&mut self, position: i64) -> Result<Option<Option<i64>>, RaftError> {
         let appended = self
             .core
             .snapshot(self.clock, position, &mut self.io)?
             .is_ok();
-        if appended {
-            let end = self
-                .io
-                .log_publication
-                .as_ref()
-                .and_then(|publication| publication.position().ok())
-                .unwrap_or(position);
-            self.snapshot_asked_at = self.snapshot_asked_at.max(end);
-            self.snapshot.count_action();
+        if !appended {
+            return Ok(None);
         }
-        Ok(appended)
+        let end = self
+            .io
+            .log_publication
+            .as_ref()
+            .and_then(|publication| publication.position().ok());
+        self.snapshot_asked_at = self.snapshot_asked_at.max(end.unwrap_or(position));
+        self.snapshot.count_action();
+        Ok(Some(end))
     }
 
     /// Takes a control toggle, when this member leads and a look finds one that asks
@@ -3581,16 +3583,19 @@ impl ConsensusModule {
         else {
             return Ok(());
         };
-        if !self.snapshot.is_idle() || self.session_log_position < self.snapshot_asked_at {
-            return Ok(());
-        }
         let Some(Ok(position)) = self.io.log_publication.as_ref().map(Publication::position) else {
             return Ok(());
         };
-        if self.append_snapshot_action(position)? {
-            // The position after the action's entry, which the append stored: the
-            // snapshot's log position.
-            self.toggle.took(found, self.snapshot_asked_at);
+        // The last action this member appended, where its log still holds it: a
+        // leader that was deposed with an action not yet committed had its log cut
+        // below that action, and the position it noted then is past where its log
+        // ends now. Its read never reaches a position the log does not have.
+        let asked_at = self.snapshot_asked_at.min(position);
+        if !self.snapshot.is_idle() || self.session_log_position < asked_at {
+            return Ok(());
+        }
+        if let Some(end) = self.append_snapshot_action(position)? {
+            self.toggle.took(found, end);
         }
         Ok(())
     }

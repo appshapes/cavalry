@@ -535,23 +535,26 @@ A leader that serves sessions looks for a toggle of its own id in its driver's
 counters file: at most the records of the control toggle look ("Values") at a time,
 in a ring over the file's metadata records, and no more often than that look's
 interval. A member that does not lead looks for none and takes none. The leader takes
-a toggle that holds 4 when it takes no snapshot of its own and its read of its own
-committed log ("Sessions") has passed every cluster action it appended: it appends
-the action, stores the snapshot's log position, the position after the action's
-entry, in `cluster.control_toggle_snapshot_position`, and then the toggle's id in
-`cluster.control_toggle_taken`, each with a release store. A toggle it cannot take
-yet waits where it is. A toggle that holds another value is no request of this
+a toggle that holds 4, and whose id is above that of the last toggle it took, when it
+takes no snapshot of its own and its read of its own committed log ("Sessions") has
+passed the last cluster action it appended, where its log still holds that action:
+it appends the action, stores the snapshot's log position, the position after the
+action's entry, in `cluster.control_toggle_snapshot_position`, and then the toggle's
+id in `cluster.control_toggle_taken`, each with a release store. A toggle it cannot
+take yet waits where it is. A toggle that holds another value is no request of this
 version, and the leader passes it over.
 
-A leader serves one toggle at a time, and each toggle once. It remembers the counter
-and the id of the toggle it took for as long as that counter holds that toggle, reads
-that one record at each look, and takes no other toggle until the record holds
-another counter or none. And it takes no toggle whose id its own
-`cluster.control_toggle_taken` holds, so a member that stops leading and leads again
-while a toggle is still there does not take it twice: a driver gives no two clients
-one id. So one request is one cluster action, however long its command stays, and of
-two commands that ask one member the second is served after the first has removed
-its toggle, with a snapshot of its own.
+A leader takes each toggle once: it takes none whose id is at or below the id of the
+last it took. A driver gives its clients rising ids, since a client's id comes from
+the counter of the driver's command ring (`spec/client-protocol.md`, "The driver
+directory"). So a toggle that stays, because its command has not ended or never
+will, is not taken again and holds no later toggle back, and a member that stops
+leading and leads again while a toggle is still there does not take it twice: one
+request is one cluster action. Of two commands that ask one member at once, each is
+served with a snapshot of its own when the leader's look meets the toggle with the
+lower id first. When it meets the higher first, the lower is never taken: its
+command reads an id above its own in `cluster.control_toggle_taken`, ends at once,
+and says to ask again.
 
 The command that asked reads the answer in the member's counters. Its request is
 taken when `cluster.control_toggle_taken` holds its toggle's id, and the snapshot it
@@ -568,9 +571,9 @@ this one has none and serves no toggle, and the command ends at once and says so
 It waits for no longer than the control toggle timeout ("Values"), and removes its
 toggle when it ends, however it ends. A member that stops leading while a toggle
 waits leaves it: the command reads `cluster.role` while it waits, and ends when the
-member no longer leads. A member's memory of the toggle it serves does not outlive
-the member: one that starts again and leads takes a toggle it finds, whichever
-member's process served it before, which is at most one more snapshot.
+member no longer leads. The id a member took last is its process's own: a member
+that starts again and leads takes a toggle it finds, whatever its process took
+before, which is at most one more snapshot.
 
 **The snapshot's position.** Every member takes the snapshot when its consensus
 module's read of its own committed log ("Sessions") reaches the action. The action is
@@ -2178,7 +2181,7 @@ that a reader of a counters file knows which transition it saw.
 | snapshot log sync wait | 2 s: how long a snapshot whose recording has stopped waits for the member's log to sync to the snapshot's log position before the member gives it up, the recording sync interval of `spec/client-protocol.md`, "Liveness and timeouts", within which the recorder syncs a recording by itself, and the snapshot timeout beside it for the sync ("Snapshots"; ADR 0143) |
 | snapshot load timeout | 5 s: how long a member's start waits for its driver to play one snapshot's recording back before it passes that snapshot over, so 320 s at the most for the 64 snapshots a file lists ("A member's start") |
 | service snapshot load timeout | 5 s: how long a service's start waits for the first message of its snapshot's recording, and for each message after one, before it passes the snapshot over ("A service's start") |
-| control toggle look | at most 16 metadata records of the counters file, no more often than each millisecond: what a leader reads to find a control toggle, in a ring over the file's records, so a file of 16,384 records is read once in 1,024 ms and the largest, of 65,536, in 4,096 ms, plus the one record of the toggle it serves ("Snapshots", "The control toggle") |
+| control toggle look | at most 16 metadata records of the counters file, no more often than each millisecond: what a leader reads to find a control toggle, in a ring over the file's records, so a file of 16,384 records is read once in 1,024 ms and the largest, of 65,536, in 4,096 ms ("Snapshots", "The control toggle") |
 | control toggle value | 4, snapshot, Aeron's `SNAPSHOT`; Aeron's other toggle states are out of this version |
 | control toggle timeout | 10 s: how long the command that added a control toggle waits for the member to take it and to list the snapshot, before it removes the toggle and says what the member's counters hold |
 
