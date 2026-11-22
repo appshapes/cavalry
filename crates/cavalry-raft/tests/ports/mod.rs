@@ -6,9 +6,10 @@
 //! `src/module/tests.rs`, with `#[path = "../../tests/ports/mod.rs"] mod ports;`, and
 //! these, each with `#[path = "../../cavalry-raft/tests/ports/mod.rs"]`: the tests of
 //! `cavalry-ffi` that run cluster members, the conductor's unit tests in
-//! `cavalry-driver/src/conductor.rs`, and six of `cavalry-client`'s tests,
+//! `cavalry-driver/src/conductor.rs`, six of `cavalry-client`'s tests,
 //! `armed_recording`, `destinations`, `replay`, `udp_receive`,
-//! `udp_receive_allocations` and `udp_resubscribe`.
+//! `udp_receive_allocations` and `udp_resubscribe`, and two of `cavalry`'s,
+//! `feed_shape` and `feed_held_still`.
 //!
 //! # The rule
 //!
@@ -41,10 +42,13 @@
 //! - A test that starts child processes while another thread of it chooses a port. A
 //!   port is tried by binding a socket, and on macOS a socket is marked close-on-exec
 //!   a moment after it is created, so a child started in that moment keeps the socket
-//!   and the port. One test that takes this file starts child processes,
-//!   `tests/throttle.rs`, whose three members are processes: it is a program with no
-//!   test harness, has one thread, and chooses its ports before it starts the first
-//!   member, so no socket is being created when a child starts.
+//!   and the port. Two tests that take this file start child processes:
+//!   `tests/throttle.rs`, whose three members are processes, and
+//!   `crates/cavalry/tests/feed_held_still.rs`, whose two feeds are. Each is a program
+//!   with no test harness that chooses all its ports on its one thread before it starts
+//!   its first child; `feed_held_still` then starts a thread for each child, which reads
+//!   the child's output and creates no socket. So no socket is being created when a
+//!   child starts.
 //!   `crates/cavalry/tests/cli.rs` starts children from tests that run on several
 //!   threads, and has a rule of its own for that reason: `loopback_ports`, from 10000
 //!   to 19999, counted out and never tried.
