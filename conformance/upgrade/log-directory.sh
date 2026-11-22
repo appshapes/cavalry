@@ -265,14 +265,26 @@ start_feed() {
         *) fail "the feed of $(named "$1"), shape $2, did not open: $answer" ;;
     esac
 }
+# How many answers the feed process has written: 0 before its output file is there,
+# which it opens just after its input.
+counted() {
+    local count
+    count=$(grep -c -- "$answers" "$feed_out" 2>/dev/null || true)
+    echo "${count:-0}"
+}
 # Waits for the feed process's next answer and sets `answer` to it; `$1` is what is
 # waited for.
 answered() {
     local deadline=$((SECONDS + 60))
     feed_answers=$((feed_answers + 1))
-    until [ "$(grep -c -- "$answers" "$feed_out" 2>/dev/null || true)" -ge "$feed_answers" ]; do
-        kill -0 "$feed_pid" 2>/dev/null \
-            || fail "waited for $1, and the feed's process (pid $feed_pid) ended first; it said: $(cat "$feed_out" 2>/dev/null)"
+    until [ "$(counted)" -ge "$feed_answers" ]; do
+        if ! kill -0 "$feed_pid" 2>/dev/null; then
+            # Its last answer may have come as it ended: the process answers `end`
+            # with `ended` and exits at once, and the shell collects it, between the
+            # count above and this check.
+            if [ "$(counted)" -ge "$feed_answers" ]; then break; fi
+            fail "waited for $1, and the feed's process (pid $feed_pid) ended first; it said: $(cat "$feed_out" 2>/dev/null)"
+        fi
         [ "$SECONDS" -lt "$deadline" ] || fail "waited 60 s for $1; the feed's process said: $(cat "$feed_out" 2>/dev/null)"
         sleep 0.05
     done
