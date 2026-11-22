@@ -38,21 +38,6 @@ const POLL: Duration = Duration::from_millis(1);
 /// the member took last, before it says that no id of this driver's is.
 const ATTACHES: usize = 3;
 
-/// How long the command looks for the two gauges of the control toggle beside a
-/// member that has its `cluster.role`: a member adds its counters one after another
-/// at its start, those two last, and one that has neither after this long is of a
-/// build that takes no toggle.
-const STARTING: Duration = Duration::from_secs(1);
-
-/// The command's two waits: how long it looks for a starting member's gauges, and
-/// how long it waits for its answer, the control toggle timeout. A test shortens
-/// both.
-#[derive(Clone, Copy)]
-struct Waits {
-    starting: Duration,
-    answer: Duration,
-}
-
 /// What the member answered: its id, the log position of the snapshot it asked for,
 /// and the position of the snapshot it lists, which is that one or, where that one
 /// was given up and a later one taken, a later one.
@@ -74,13 +59,19 @@ enum When {
     Taken(i64),
 }
 
-/// The counters of the member on a driver that the command reads, each by its id in
-/// the counters file, found once.
-struct Member {
+/// The counters that say whether the member leads, each by its id in the counters
+/// file: its role, its election state and its leader, the first a member adds.
+struct Roles {
     id: i32,
     role: u32,
     election_state: u32,
     leader: u32,
+}
+
+/// The counters of the member on a driver that the command reads, each by its id in
+/// the counters file, found once.
+struct Member {
+    roles: Roles,
     taken: u32,
     position: u32,
     snapshot_position: u32,
@@ -96,10 +87,94 @@ fn find(counters: &CountersReader, type_id: CounterId, key: &[u8]) -> Option<u32
     })
 }
 
+/// The value of member `id`'s counter `counter` of `type_id`, with an acquire load,
+/// `None` when the record is no longer that counter: the member has gone.
+fn load(counters: &CountersReader, id: i32, counter: u32, type_id: CounterId) -> Option<i64> {
+    let value = counters.read_acquire(counter).ok()?;
+    matches!(counters.record(counter), Ok(Some(record))
+        if record.type_id() == type_id.0 && record.key().starts_with(&id.to_le_bytes()))
+    .then_some(value)
+}
+
+/// The message when member `id` went while the command read its counters. `when`
+/// says how far the command had come.
+fn gone(id: i32, when: When) -> String {
+    format!(
+        "member {id} went while the command read its counters{}. Run `cavalry doctor` on \
+         this host, start the member again if it stopped, and run `cavalry snapshot` on \
+         the host of the member that leads; see {DOC}",
+        match when {
+            When::Before => ", so nothing was asked",
+            When::Waiting => ", and the request was removed",
+            When::Taken(_) => ", after it had taken the request",
+        }
+    )
+}
+
+/// The message when member `id` does not lead with its election closed. `leader` is
+/// the member that leads, where the member names one with its election closed, and
+/// `when` says how far the command had come.
+fn does_not_lead(id: i32, when: When, leader: Option<i64>) -> String {
+    let what = match when {
+        When::Before => "does not lead, so nothing was asked".to_string(),
+        When::Waiting => {
+            "stopped leading while the request waited, and the request was removed".to_string()
+        }
+        When::Taken(position) => format!(
+            "took the request, asked every member for a snapshot of log position \
+             {position}, and stopped leading before it listed its own. That snapshot is \
+             taken where the cluster committed the request, and is not where the next \
+             leader's log does not hold it"
+        ),
+    };
+    match leader {
+        Some(leader) => format!(
+            "member {id} {what}: member {leader} leads. Run `cavalry snapshot` on member \
+             {leader}'s host, with its driver directory; see {DOC}"
+        ),
+        None => format!(
+            "member {id} {what}: the cluster is holding an election. Run `cavalry doctor` \
+             until its `cluster-member` note says the election closed and names the \
+             leader, then run `cavalry snapshot` on that member's host; see {DOC}"
+        ),
+    }
+}
+
+impl Roles {
+    /// The message when the member does not lead with its election closed, `None`
+    /// when it does. `when` says how far the command had come when this was read.
+    fn not_leading(&self, counters: &CountersReader, when: When) -> Option<String> {
+        let id = self.id;
+        let (Some(role), Some(state)) = (
+            load(counters, id, self.role, CLUSTER_ROLE),
+            load(counters, id, self.election_state, CLUSTER_ELECTION_STATE),
+        ) else {
+            return Some(gone(id, when));
+        };
+        if role == LEADER && state == ELECTION_CLOSED {
+            return None;
+        }
+        let leader = load(counters, id, self.leader, CLUSTER_LEADER_MEMBER_ID)
+            .filter(|leader| *leader >= 0 && *leader != i64::from(id) && state == ELECTION_CLOSED);
+        Some(does_not_lead(id, when, leader))
+    }
+}
+
 impl Member {
     /// The member on the driver, by its `cluster.role`, and its counters; the message
-    /// to print when the driver hosts none, or one that serves no control toggle.
-    fn find(counters: &CountersReader, dir: &Path, starting: Duration) -> Result<Self, String> {
+    /// to print when the driver hosts none, when the member does not lead with its
+    /// election closed, or when it serves no control toggle.
+    ///
+    /// Whether the member leads is read first, and its other counters then, once. A
+    /// member adds its role, its election state and its leader at its start, then the
+    /// counters of its snapshots, then the two gauges of the control toggle, all
+    /// before its first duty cycle, and it begins as a follower in its election's
+    /// `Init` (`crates/cavalry-raft/src/module.rs`, `ConsensusModule::start`). So a
+    /// member that is starting does not lead, and is told so. One that leads with its
+    /// election closed has added every counter of its build, and one with no gauge
+    /// then is of a build before the control toggle, which is said at once
+    /// (`spec/cluster.md`, "The control toggle").
+    fn find(counters: &CountersReader, dir: &Path) -> Result<Self, String> {
         let no_member = || {
             format!(
                 "the driver in {} hosts no cluster member, so there is nobody to ask: run \
@@ -119,126 +194,84 @@ impl Member {
             .ok_or_else(no_member)?;
         let key = id.to_le_bytes();
         let own = |type_id: CounterId| find(counters, type_id, &key);
-        // A member of a build before the control toggle adds neither gauge. A member
-        // that is starting adds them last, some milliseconds after its role, so the
-        // command looks again for a while before it says which.
-        let deadline = Instant::now() + starting;
-        let (taken, position) = loop {
-            let gauges = own(CLUSTER_CONTROL_TOGGLE_TAKEN)
-                .zip(own(CLUSTER_CONTROL_TOGGLE_SNAPSHOT_POSITION));
-            if let Some(gauges) = gauges {
-                break gauges;
-            }
-            if Instant::now() >= deadline {
-                return Err(format!(
-                    "member {id} is of a build that takes no request for a snapshot: it has \
-                     no `cluster.control_toggle_taken` counter, {} s after the command found \
-                     the member. Nothing was asked. Upgrade the member, or wait for the \
-                     snapshot its leader asks for by itself each 256 MiB of log; see {DOC}",
-                    starting.as_secs_f64()
-                ));
-            }
-            std::thread::sleep(POLL);
+        let Some((election_state, leader)) =
+            own(CLUSTER_ELECTION_STATE).zip(own(CLUSTER_LEADER_MEMBER_ID))
+        else {
+            // A member adds these two just after its role: it is starting, and its
+            // election has not closed, or it went.
+            return Err(match load(counters, id, role, CLUSTER_ROLE) {
+                Some(_) => does_not_lead(id, When::Before, None),
+                None => gone(id, When::Before),
+            });
         };
-        let starting = || {
-            format!(
-                "member {id} is starting and has not added all its counters yet. Nothing was \
-                 asked. Run `cavalry snapshot` again once `cavalry doctor` says its election \
-                 closed; see {DOC}"
-            )
-        };
-        Ok(Self {
+        let roles = Roles {
             id,
             role,
-            election_state: own(CLUSTER_ELECTION_STATE).ok_or_else(starting)?,
-            leader: own(CLUSTER_LEADER_MEMBER_ID).ok_or_else(starting)?,
-            taken,
-            position,
-            snapshot_position: own(CLUSTER_SNAPSHOT_POSITION).ok_or_else(starting)?,
-            snapshots_failed: own(CLUSTER_SNAPSHOTS_FAILED).ok_or_else(starting)?,
-        })
+            election_state,
+            leader,
+        };
+        if let Some(message) = roles.not_leading(counters, When::Before) {
+            return Err(message);
+        }
+        let gauges =
+            own(CLUSTER_CONTROL_TOGGLE_TAKEN).zip(own(CLUSTER_CONTROL_TOGGLE_SNAPSHOT_POSITION));
+        let snapshots = own(CLUSTER_SNAPSHOT_POSITION).zip(own(CLUSTER_SNAPSHOTS_FAILED));
+        match (gauges, snapshots) {
+            (Some((taken, position)), Some((snapshot_position, snapshots_failed))) => Ok(Self {
+                roles,
+                taken,
+                position,
+                snapshot_position,
+                snapshots_failed,
+            }),
+            // A member that went, or stopped leading, since the read above is told so.
+            // One that still leads and has no gauge is of a build before the control
+            // toggle. A build with the gauges adds the counters of its snapshots before
+            // them, so a member with its gauges and without those is going.
+            (gauges, _) => Err(roles
+                .not_leading(counters, When::Before)
+                .unwrap_or_else(|| match gauges {
+                    None => format!(
+                        "member {id} is of a build that takes no request for a snapshot: it \
+                         leads, with its election closed, and has no \
+                         `cluster.control_toggle_taken` counter. Nothing was asked. Upgrade \
+                         the member, or wait for the snapshot it asks for by itself each \
+                         256 MiB of log; see {DOC}"
+                    ),
+                    Some(_) => gone(id, When::Before),
+                })),
+        }
+    }
+
+    /// The member's id in its cluster.
+    fn id(&self) -> i32 {
+        self.roles.id
     }
 
     /// The value of the member's counter `counter` of `type_id`, with an acquire load,
     /// `None` when the record is no longer that counter: the member has gone.
     fn load(&self, counters: &CountersReader, counter: u32, type_id: CounterId) -> Option<i64> {
-        let value = counters.read_acquire(counter).ok()?;
-        matches!(counters.record(counter), Ok(Some(record))
-            if record.type_id() == type_id.0 && record.key().starts_with(&self.id.to_le_bytes()))
-        .then_some(value)
+        load(counters, self.roles.id, counter, type_id)
     }
 
-    /// The message when the member does not lead with its election closed, `None`
-    /// when it does. `when` says how far the command had come when this was read.
+    /// [`Roles::not_leading`], of this member.
     fn not_leading(&self, counters: &CountersReader, when: When) -> Option<String> {
-        let id = self.id;
-        let gone = || {
-            format!(
-                "member {id} went while the command read its counters{}. Run `cavalry \
-                 doctor` on this host, start the member again if it stopped, and run \
-                 `cavalry snapshot` on the host of the member that leads; see {DOC}",
-                match when {
-                    When::Before => ", so nothing was asked",
-                    When::Waiting => ", and the request was removed",
-                    When::Taken(_) => ", after it had taken the request",
-                }
-            )
-        };
-        let Some(role) = self.load(counters, self.role, CLUSTER_ROLE) else {
-            return Some(gone());
-        };
-        let Some(state) = self.load(counters, self.election_state, CLUSTER_ELECTION_STATE) else {
-            return Some(gone());
-        };
-        if role == LEADER && state == ELECTION_CLOSED {
-            return None;
-        }
-        let what = match when {
-            When::Before => "does not lead, so nothing was asked".to_string(),
-            When::Waiting => {
-                "stopped leading while the request waited, and the request was removed".to_string()
-            }
-            When::Taken(position) => format!(
-                "took the request, asked every member for a snapshot of log position \
-                 {position}, and stopped leading before it listed its own. That snapshot is \
-                 taken where the cluster committed the request, and is not where the next \
-                 leader's log does not hold it"
-            ),
-        };
-        let leader = self
-            .load(counters, self.leader, CLUSTER_LEADER_MEMBER_ID)
-            .filter(|leader| *leader >= 0 && *leader != i64::from(id) && state == ELECTION_CLOSED);
-        Some(match leader {
-            Some(leader) => format!(
-                "member {id} {what}: member {leader} leads. Run `cavalry snapshot` on member \
-                 {leader}'s host, with its driver directory; see {DOC}"
-            ),
-            None => format!(
-                "member {id} {what}: the cluster is holding an election. Run `cavalry doctor` \
-                 until its `cluster-member` note says the election closed and names the \
-                 leader, then run `cavalry snapshot` on that member's host; see {DOC}"
-            ),
-        })
+        self.roles.not_leading(counters, when)
     }
 }
 
 /// Asks the member on the driver in `dir` for a snapshot and waits until it lists
 /// one that it asked for after this command began; the message to print otherwise.
 pub(crate) fn ask(dir: &Path) -> Result<Listed, String> {
-    ask_within(
-        dir,
-        Waits {
-            starting: STARTING,
-            answer: Duration::from_nanos(CONTROL_TOGGLE_TIMEOUT_NS),
-        },
-    )
+    ask_within(dir, Duration::from_nanos(CONTROL_TOGGLE_TIMEOUT_NS))
 }
 
-/// [`ask`], with the waits a test shortens.
-fn ask_within(dir: &Path, waits: Waits) -> Result<Listed, String> {
-    let (mut client, member, before) = attach(dir, waits.starting)?;
+/// [`ask`], with the wait for the answer, the control toggle timeout, that a test
+/// shortens.
+fn ask_within(dir: &Path, answer: Duration) -> Result<Listed, String> {
+    let (mut client, member, before) = attach(dir)?;
     let own = client.client_id();
-    let member_id = member.id;
+    let member_id = member.id();
     let toggle = match client.add_counter(
         CLUSTER_CONTROL_TOGGLE.0,
         &control_toggle_key(member_id, own),
@@ -252,7 +285,7 @@ fn ask_within(dir: &Path, waits: Waits) -> Result<Listed, String> {
             ));
         }
     };
-    let answered = wait(&client, &member, &toggle, own, before, waits.answer);
+    let answered = wait(&client, &member, &toggle, own, before, answer);
     // The toggle goes however the wait ended; the driver frees it too if this fails.
     toggle.close();
     let closed = client.close();
@@ -272,17 +305,11 @@ fn ask_within(dir: &Path, waits: Waits) -> Result<Listed, String> {
 /// toggle at or below it. A later command may have been served between this
 /// client's attach and its load, so the command attaches again for a higher id, a
 /// few times.
-fn attach(dir: &Path, starting: Duration) -> Result<(Cavalry, Member, i64), String> {
+fn attach(dir: &Path) -> Result<(Cavalry, Member, i64), String> {
     let mut last = None;
     for _ in 0..ATTACHES {
         let client = Cavalry::connect_to(dir).map_err(|error| error.to_string())?;
-        let found = Member::find(client.counters(), dir, starting).and_then(|member| match member
-            .not_leading(client.counters(), When::Before)
-        {
-            Some(message) => Err(message),
-            None => Ok(member),
-        });
-        let member = match found {
+        let member = match Member::find(client.counters(), dir) {
             Ok(member) => member,
             Err(message) => {
                 let _ = client.close();
@@ -296,18 +323,13 @@ fn attach(dir: &Path, starting: Duration) -> Result<(Cavalry, Member, i64), Stri
         );
         match taken {
             Some(taken) if taken < client.client_id() => return Ok((client, member, taken)),
-            Some(taken) => last = Some((member.id, taken, client.client_id())),
+            Some(taken) => last = Some((member.id(), taken, client.client_id())),
             None => {
-                let message = member.not_leading(client.counters(), When::Before);
+                let message = member
+                    .not_leading(client.counters(), When::Before)
+                    .unwrap_or_else(|| gone(member.id(), When::Before));
                 let _ = client.close();
-                return Err(message.unwrap_or_else(|| {
-                    format!(
-                        "member {} went while the command read its counters, so nothing was \
-                         asked. Run `cavalry doctor` on this host, then `cavalry snapshot` \
-                         again; see {DOC}",
-                        member.id
-                    )
-                }));
+                return Err(message);
             }
         }
         let _ = client.close();
@@ -347,7 +369,7 @@ fn wait(
     timeout: Duration,
 ) -> Result<Listed, String> {
     let counters = client.counters();
-    let id = member.id;
+    let id = member.id();
     toggle
         .store_release(CONTROL_TOGGLE_SNAPSHOT)
         .map_err(|error| format!("the request for a snapshot could not be stored: {error}"))?;
@@ -517,18 +539,10 @@ mod tests {
             self.dir.join("driver")
         }
 
-        /// The command, on a thread of its own, with waits of `answer` and 50 ms.
+        /// The command, on a thread of its own, with a wait of `answer` for its answer.
         fn ask(&self, answer: Duration) -> std::thread::JoinHandle<Result<Listed, String>> {
             let dir = self.driver_dir();
-            std::thread::spawn(move || {
-                ask_within(
-                    &dir,
-                    Waits {
-                        starting: Duration::from_millis(50),
-                        answer,
-                    },
-                )
-            })
+            std::thread::spawn(move || ask_within(&dir, answer))
         }
 
         /// The id of the control toggle beside the member that asks for a snapshot,
@@ -589,11 +603,10 @@ mod tests {
     const SHORT: Duration = Duration::from_millis(200);
     const LONG: Duration = Duration::from_secs(20);
 
-    /// A driver that hosts no member, a member of a build with no gauge, and a member
-    /// that does not lead: each is told before anything is asked, and no toggle is
-    /// added.
+    /// A driver that hosts no member, and a member that does not lead: each is told
+    /// before anything is asked, and no toggle is added.
     #[test]
-    fn nothing_is_asked_of_no_member_an_old_member_or_one_that_does_not_lead() {
+    fn nothing_is_asked_of_no_member_or_one_that_does_not_lead() {
         let stand = Stand::driver("nobody");
         let message = refused(stand.ask(SHORT));
         assert!(
@@ -601,22 +614,6 @@ mod tests {
                 && message.contains("hosts no cluster member, so there is nobody to ask"),
             "{message}"
         );
-        drop(stand);
-
-        // A member of a build before the control toggle: its role and no gauge.
-        let mut stand = Stand::driver("old");
-        stand.add(CLUSTER_ROLE, LEADER);
-        stand.add(CLUSTER_ELECTION_STATE, ELECTION_CLOSED);
-        let message = refused(stand.ask(SHORT));
-        assert!(
-            message.starts_with(
-                "member 1 is of a build that takes no request for a snapshot: it has no \
-                 `cluster.control_toggle_taken` counter, 0.05 s after the command found the \
-                 member. Nothing was asked. Upgrade the member"
-            ),
-            "{message}"
-        );
-        assert!(!stand.has_toggle());
         drop(stand);
 
         // A follower names its leader; a member in an election names none.
@@ -645,12 +642,31 @@ mod tests {
         assert!(!stand.has_toggle());
     }
 
-    /// A member that starts adds its gauges a moment after its role: the command
-    /// looks again and asks it, where it would have called a member with no gauge yet
-    /// an old build.
+    /// A member that is starting has added some of its counters and not its gauges,
+    /// and its election has not closed: it is told that it does not lead. A leader
+    /// whose election has closed and that has no gauge is of a build before the
+    /// control toggle, and is told so at once, with no wait for gauges that its build
+    /// never adds (`spec/cluster.md`, "The control toggle"). No toggle is added.
     #[test]
-    fn a_member_that_is_still_adding_its_counters_is_waited_for() {
+    fn a_starting_member_does_not_lead_and_an_old_build_is_told_at_once() {
+        // Its role alone, the first counter a member adds, and then its election state
+        // and its leader as its start stores them: a follower, in `Init`, with none.
         let mut stand = Stand::driver("starting");
+        stand.add(CLUSTER_ROLE, 0);
+        let election = "member 1 does not lead, so nothing was asked: the cluster is holding \
+                        an election. Run `cavalry doctor` until";
+        let message = refused(stand.ask(LONG));
+        assert!(message.starts_with(election), "{message}");
+        stand.add(CLUSTER_ELECTION_STATE, 0);
+        stand.add(CLUSTER_LEADER_MEMBER_ID, -1);
+        let message = refused(stand.ask(LONG));
+        assert!(message.starts_with(election), "{message}");
+        assert!(!stand.has_toggle());
+        drop(stand);
+
+        // A member of a build before the control toggle: every counter of this build
+        // but the two gauges, leading with its election closed.
+        let mut stand = Stand::driver("old");
         for type_id in [
             CLUSTER_ROLE,
             CLUSTER_ELECTION_STATE,
@@ -664,26 +680,21 @@ mod tests {
         stand.set(CLUSTER_ELECTION_STATE, ELECTION_CLOSED);
         stand.set(CLUSTER_LEADER_MEMBER_ID, i64::from(MEMBER));
         stand.set(CLUSTER_SNAPSHOTS_FAILED, 0);
-        let dir = stand.driver_dir();
-        let asked = std::thread::spawn(move || {
-            ask_within(
-                &dir,
-                Waits {
-                    starting: LONG,
-                    answer: LONG,
-                },
-            )
-        });
-        // The command is looking for the gauges: the member adds them now.
-        std::thread::sleep(Duration::from_millis(100));
-        stand.add(CLUSTER_CONTROL_TOGGLE_SNAPSHOT_POSITION, -1);
-        stand.add(CLUSTER_CONTROL_TOGGLE_TAKEN, -1);
-        let toggle = stand.toggle();
-        stand.set(CLUSTER_CONTROL_TOGGLE_SNAPSHOT_POSITION, 192);
-        stand.set(CLUSTER_CONTROL_TOGGLE_TAKEN, toggle);
-        stand.set(CLUSTER_SNAPSHOT_POSITION, 192);
-        let listed = asked.join().expect("the thread ended").expect("answered");
-        assert_eq!(listed.log_position, 192);
+        let began = Instant::now();
+        let message = refused(stand.ask(LONG));
+        let took = began.elapsed();
+        assert!(
+            message.starts_with(
+                "member 1 is of a build that takes no request for a snapshot: it leads, with \
+                 its election closed, and has no `cluster.control_toggle_taken` counter. \
+                 Nothing was asked. Upgrade the member"
+            ),
+            "{message}"
+        );
+        // An attach and one look, with no wait for the gauges, so that an upgrade one
+        // member at a time is not held for the command (ADR 0147, Consequences).
+        assert!(took < Duration::from_millis(500), "{took:?}");
+        assert!(!stand.has_toggle());
     }
 
     /// The command is answered when the member has taken a toggle at or above its own

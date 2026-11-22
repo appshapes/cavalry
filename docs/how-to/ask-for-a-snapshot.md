@@ -71,20 +71,19 @@ it ends.
 
 - **`member 0 does not lead, so nothing was asked: member 1 leads.`** Run the
   command on member 1's host, with member 1's driver directory.
-- **`... the cluster is holding an election.`** No member leads now. Run `cavalry
-  doctor` until its `cluster-member` note says `election closed` and names the
-  leader, then ask that member.
+- **`... the cluster is holding an election.`** No member leads now, or the member
+  began a moment ago and its first election has not closed. Run `cavalry doctor`
+  until its `cluster-member` note says `election closed` and names the leader, then
+  ask that member.
 - **`the driver in ... hosts no cluster member`.** The directory is a driver's that
   was started without the cluster's two variables, or the wrong directory. Give
   `--dir` the driver directory of the member that leads.
-- **`member 1 is of a build that takes no request for a snapshot`.** The member has
-  no `cluster.control_toggle_taken` counter a second after the command found it: it
-  was built before the command existed. Upgrade it
-  ([Upgrade a cluster one member at a time](upgrade-a-cluster.md)), or wait for the
-  snapshot its leader asks for each 256 MiB of log.
-- **`member 1 is starting and has not added all its counters yet`.** The member's
-  process began a moment ago. Run the command again once `cavalry doctor` says its
-  election closed.
+- **`member 1 is of a build that takes no request for a snapshot`.** The member
+  leads, with its election closed, and has no `cluster.control_toggle_taken`
+  counter: it was built before the command existed. A member adds that counter at
+  its start, before its first election can close, so the command says this at once. Upgrade
+  the member ([Upgrade a cluster one member at a time](upgrade-a-cluster.md)), or
+  wait for the snapshot it asks for each 256 MiB of log.
 - **`member 1 went while the command read its counters`.** The member's process
   stopped. Run `cavalry doctor` on its host, start the member again, and ask the
   member that leads then.
