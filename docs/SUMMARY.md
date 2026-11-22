@@ -13,6 +13,7 @@ under `docs/` is listed here; `just lint-docs` fails on one that is not.
 - [Why Cavalry, and why not Aeron](explanation/why-cavalry.md)
 - [Should ZigBolt's design inform Cavalry's?](explanation/should-zigbolt-inform-cavalry.md)
 - [Where is Cavalry, and what is left before the beta?](explanation/where-cavalry-is-and-what-is-left.md)
+- [What does Brigade's server rely on?](explanation/what-brigades-server-relies-on.md)
 
 # How-to
 
@@ -31,6 +32,7 @@ under `docs/` is listed here; `just lint-docs` fails on one that is not.
 - [Run a test many times in a row](how-to/run-a-test-many-times.md)
 - [Promote a standby to a voter](how-to/promote-a-standby.md)
 - [Upgrade a cluster one member at a time](how-to/upgrade-a-cluster.md)
+- [Change a call that Brigade's server makes](how-to/change-a-call-that-brigades-server-makes.md)
 - [Read the nightly run of Brigade's server](how-to/read-the-nightly-run-of-brigades-server.md)
 
 # Reference

@@ -1,0 +1,67 @@
+# Change a call that Brigade's server makes
+
+A how-to page: one task, changing a call or a behaviour of Cavalry that Brigade's
+server relies on, so that the change is made knowingly.
+[What does Brigade's server rely on?](../explanation/what-brigades-server-relies-on.md)
+lists those calls and says why they are held.
+
+## Prerequisites
+
+- A change that touches a call in that page's table, "What the server calls, and what
+  it relies on", or a test of `crates/cavalry/tests/feed_shape.rs` or
+  `crates/cavalry/tests/feed_held_still.rs` that fails.
+- `cargo`, as for every gate.
+
+## Steps
+
+1. Run the two test programs:
+
+   ```sh
+   cargo test -p cavalry --test feed_shape --test feed_held_still
+   ```
+
+   The second holds a process still for 12 s. You will see `test result: ok. 10
+   passed` and a line that begins `feed_held_still: ok` when the server's use still
+   works. Otherwise you will see the test that names what broke.
+
+2. Decide which of two changes yours is.
+   - **The server's use can keep working.** Keep it working, and go to "How to verify
+     it worked". Until version 0.1.0 the server builds from a pin, commit 620a2e29, and
+     two servers hold their teams' data in the format that pin writes.
+   - **The change must break the server's use.** Go on with step 3.
+
+3. Change `crates/cavalry/tests/feed/mod.rs` in the way the server's own file,
+   `server/crates/brigade-log/src/feed.rs`, will have to change. Say in a comment at
+   the place which call changed and why.
+
+4. Change the row of the table on the explanation page, and its "What does not hold"
+   section when the change ends one of the cases there.
+
+5. Say in the change's entry under `changelog.d/` what a program that makes the call
+   must do now ([how](../../changelog.d/README.md)).
+
+6. Tell the sessions that work on Brigade's server. Add one work item to the Brigade
+   Board, tagged `brigade` and `server`, that says what changed and which commit holds
+   it: `brigade work-item add --tag brigade,server`, with the title, an empty line and
+   the description on its standard input. You will see `added:` and the work item's
+   number.
+
+## How to verify it worked
+
+- `cargo test -p cavalry --test feed_shape --test feed_held_still` prints `test
+  result: ok` and `feed_held_still: ok`.
+- `just lint-docs` ends with `ok`: the changelog entry is in the shape it checks.
+- For a change that broke the server's use on purpose: the table's row, the comment in
+  `tests/feed/mod.rs` and the changelog entry name the same call.
+
+## When it does not work
+
+- A test of `feed_shape.rs` fails and your change did not mean to change a call: the
+  test's first comment says what it holds, and the explanation page's table says which
+  call that is.
+- `a_start_beside_an_earlier_client_the_driver_still_holds_records_that_clients_publication`
+  fails: the rule for which publication `start recording` takes has changed. That test
+  holds the rule as it stood, and its comment says what to turn around (work item 372).
+- `feed_held_still` is killed while its two feed processes are stopped: they stay
+  stopped. The test printed their process ids before it stopped them; `kill -CONT
+  <id>` lets each end.
