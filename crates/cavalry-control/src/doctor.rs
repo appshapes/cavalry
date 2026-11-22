@@ -7188,17 +7188,6 @@ mod tests {
         assert_eq!(found, ["cluster-member"], "{findings:?}");
     }
 
-    const THREE_VOTERS_AND_A_STANDBY: &str = "0,127.0.0.1:9000,127.0.0.1:9001,127.0.0.1:9002,127.0.0.1:9003,127.0.0.1:9004\
-                                 |1,127.0.0.1:9010,127.0.0.1:9011,127.0.0.1:9012,127.0.0.1:9013,127.0.0.1:9014\
-                                 |2,127.0.0.1:9020,127.0.0.1:9021,127.0.0.1:9022,127.0.0.1:9023,127.0.0.1:9024\
-                                 |3,127.0.0.1:9030,127.0.0.1:9031,127.0.0.1:9032,127.0.0.1:9033,127.0.0.1:9034,standby";
-
-    /// A standby is said to be one, from its own gauge and with no members string: it
-    /// follows the log and has no vote. A standby with no leader is told that it
-    /// nominates nothing, and the quorum it waits for is of the voters, by their
-    /// number in the string doctor was given. A request vote that reached it is
-    /// reported with what it means: two members run with strings that differ (ADR
-    /// 0134).
     /// A member that came back on an empty log directory and has not caught up with
     /// its vote floor is named, with where its log is and how far it has to go, and
     /// the requests it left unanswered meanwhile are reported with what they mean
@@ -7311,6 +7300,17 @@ mod tests {
         assert_eq!(found, ["cluster-member"], "{findings:?}");
     }
 
+    const THREE_VOTERS_AND_A_STANDBY: &str = "0,127.0.0.1:9000,127.0.0.1:9001,127.0.0.1:9002,127.0.0.1:9003,127.0.0.1:9004\
+                                 |1,127.0.0.1:9010,127.0.0.1:9011,127.0.0.1:9012,127.0.0.1:9013,127.0.0.1:9014\
+                                 |2,127.0.0.1:9020,127.0.0.1:9021,127.0.0.1:9022,127.0.0.1:9023,127.0.0.1:9024\
+                                 |3,127.0.0.1:9030,127.0.0.1:9031,127.0.0.1:9032,127.0.0.1:9033,127.0.0.1:9034,standby";
+
+    /// A standby is said to be one, from its own gauge and with no members string: it
+    /// follows the log and has no vote. A standby with no leader is told that it
+    /// nominates nothing, and the quorum it waits for is of the voters, by their
+    /// number in the string doctor was given. A request vote that reached it is
+    /// reported with what it means: two members run with strings that differ (ADR
+    /// 0134).
     #[test]
     fn a_standby_is_named_and_is_told_what_elects_its_leader() {
         let standby = [
