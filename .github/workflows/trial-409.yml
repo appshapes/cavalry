@@ -8,16 +8,21 @@
 # printed: the repository is public.
 name: trial 409
 
+# The action takes no `push` event, and a `workflow_dispatch` workflow must be on the
+# default branch, so the trial runs on the opening of a pull request from its own branch,
+# whose review and ci runs are cancelled at once and which is closed unmerged.
 on:
-  push:
-    branches: [409-trial-fixer-bash-timeout]
+  pull_request:
+    types: [opened, reopened]
 
 permissions:
   contents: read
+  pull-requests: read
   id-token: write
 
 jobs:
   as-today:
+    if: github.head_ref == '409-trial-fixer-bash-timeout'
     runs-on: blacksmith-4vcpu-ubuntu-2404
     timeout-minutes: 60
     steps:
@@ -74,6 +79,7 @@ jobs:
           jq -r '.[] | select(.type=="result") | .permission_denials[]? | "  \(.tool_name) \(.tool_input.command // "" | split(" ")[0])"' "$f"
 
   bounded:
+    if: github.head_ref == '409-trial-fixer-bash-timeout'
     runs-on: blacksmith-4vcpu-ubuntu-2404
     timeout-minutes: 60
     steps:
