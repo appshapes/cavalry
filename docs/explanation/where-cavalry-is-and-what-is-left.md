@@ -83,8 +83,8 @@ dedicated hosts (ADR 0016, ADR 0034, ADR 0044), a weekly email of the changes (A
 - **Decisions.** 137 ADRs, 0001 to 0137, all Accepted but four that later ones
   superseded.
 - **Specification.** Ten pages under `spec/`, each with a version. The client
-  protocol is at version 10, the C ABI at 5, the durable log and the UDP transport at
-  4, and the cluster protocol at 1.
+  protocol is at version 10, the C ABI at 5, the UDP transport at 4, the durable log
+  at 5 since 2026-11-22, and the cluster protocol at 1.
 - **Code.** 97,279 lines of Rust under `crates/*/src`, unit tests included, and 969
   test functions under `crates/`. `cavalry-raft` is 15,851 lines; on 2026-11-09 it
   was two.
@@ -211,13 +211,20 @@ production, each on a log directory it keeps.
   its snapshots cover. It uses no cluster call.
 - It reads the catalog through `cavalry-log`, because the client lists no
   recordings. Feature 7 gives it that call.
-- The durable log's format has moved from version 2 to 4 since its pin. Each version
-  added a file for cluster members and changed nothing a server's directory holds, so
+- The durable log's format has moved from version 2 to 5 since its pin. Versions 3
+  and 4 each added a file for cluster members and changed nothing a server's
+  directory holds. Since 2026-11-22, version 5 keeps each recording's synced position
+  in bytes of its time index that were reserved. No index the pin wrote has a synced
+  position, and version 5 recovers such an index as version 4 did (ADR 0144). So
   such a directory opens under `master`. Since 2026-11-22,
   `conformance/upgrade/log-directory.sh` holds that in every pull request: it builds
   the tree at 620a2e29, has it write a directory as a server writes its own, and
   opens it in place under the tree under test
   ([ADR 0141](../decisions/0141-open-in-place-a-log-directory-written-by-the-tree-that-servers-run-and-build-that-tree-on-every-run.md)).
+  Version 5 changes one thing a server's directory keeps: when the process of
+  `master`'s driver crashes, the driver's next start drops what the recorder wrote
+  after its last sync, at most 1 s of the feed, where version 4 kept it. The server
+  syncs before each answer, so no record it answered is dropped.
 - Its standby, work item 312, waits on Cavalry's cluster. Condition 9 of the line
   ends by telling the owner that the cluster is ready for the second node.
 
