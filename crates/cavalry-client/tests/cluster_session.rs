@@ -20,6 +20,7 @@ use cavalry_client::{
 };
 use cavalry_driver::Driver;
 use cavalry_proto::cluster::{EGRESS_STREAM_ID, EventCode, INGRESS_STREAM_ID, Message, Stream};
+use cavalry_shm::counters::CountersError;
 use cavalry_shm::counters::generated::CLUSTER_REPLIES_STALE;
 
 // This test's ports, from the one file that says how they are taken and why, which is
@@ -907,18 +908,29 @@ fn a_session_message_that_arrives_before_the_ok_event_is_kept_for_the_session() 
 /// The session's `cluster.replies_stale` in the driver's counters file, with its
 /// label, or `None` when no record holds it: the session adds it when the leader has
 /// opened it, keyed by the session id, and removes it when it closes.
+///
+/// A session that closes while this reads has the driver free the counter between the
+/// read of its record and the read of its value (work item 421). The value of a freed
+/// record reads as `Unallocated`, which is the counter gone, and so is a record that
+/// another counter took meanwhile, which the second read of the record finds. Every
+/// other error of the read is a fault and fails the test.
 fn stale(client: &Cavalry) -> Option<(i64, String)> {
     let counters = client.counters();
-    (0..counters.capacity()).find_map(|id| {
-        let record = counters.record(id).ok().flatten()?;
-        (record.type_id() == CLUSTER_REPLIES_STALE.0
-            && record.key().starts_with(&SESSION.to_le_bytes()))
-        .then(|| {
-            (
-                counters.read(id).expect("the counter reads"),
-                record.label().to_owned(),
-            )
+    let ours = |id: u32| {
+        counters.record(id).ok().flatten().filter(|record| {
+            record.type_id() == CLUSTER_REPLIES_STALE.0
+                && record.key().starts_with(&SESSION.to_le_bytes())
         })
+    };
+    (0..counters.capacity()).find_map(|id| {
+        let record = ours(id)?;
+        let value = match counters.read(id) {
+            Ok(value) => value,
+            Err(CountersError::Unallocated { .. }) => return None,
+            Err(error) => panic!("the counter reads: {error:?}"),
+        };
+        ours(id)?;
+        Some((value, record.label().to_owned()))
     })
 }
 
