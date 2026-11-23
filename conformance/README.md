@@ -248,9 +248,9 @@ test` runs, and they use no call that N lacks. So the script fails at its second
 when a change makes them use one, and says what to do then.
 
 N writes a log directory as a server writes its own, in the pinned shape, the one of
-server 0.9.0: two runs, 20 records, four recordings, and two releases that purge the first two
-recordings. The script does this twice. The first directory's last run is stopped as a
-server's clean stop does. The second's is killed with `SIGKILL`, which leaves its last
+server 0.9.0: two runs, 20 records, four recordings, and two releases that purge the
+first two recordings. The script does this twice. The first directory's last run is
+stopped as a server's clean stop does. The second's is killed with `SIGKILL`, which leaves its last
 recording live in the catalog. For each directory, as N left it, the script then holds
 with N+1's programs:
 
