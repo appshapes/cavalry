@@ -1,8 +1,8 @@
 // Runs the example of clients/dotnet/README.md against the runner's driver; run.sh calls it
 // after Quickstart, so the README's program is a test (CLAUDE.md, "Clients and developer
 // experience"; .claude/rules/docs.md, "Code in docs"). The README's program is
-// clients/dotnet/example/Program.cs: this checks that the README's C# block is that file,
-// byte for byte, builds the example with this SDK as the README's `dotnet run` does, runs
+// clients/dotnet/example/Program.cs: this checks that the C# block of the README's "Example"
+// is that file, byte for byte, builds the example with this SDK as the README's `dotnet run` does, runs
 // the built program with this runtime for up to 10 s, and exits 1 unless it exits 0 and
 // prints the line the README promises after "You will see". The README's shell lines
 // around the program, the builds and the driver, are run.sh's own steps. Run from the
@@ -36,11 +36,11 @@ public static class Readme
     public static void Main()
     {
         string text = File.ReadAllText(README, Encoding.UTF8);
-        Match program = Regex.Match(text, "```csharp\n(.*?)```\n", RegexOptions.Singleline);
+        Match program = Regex.Match(text, "\n## Example\n.*?```csharp\n(.*?)```\n", RegexOptions.Singleline);
         Match expected = Regex.Match(text, "^You will see `([^`]+)`\\.$", RegexOptions.Multiline);
         if (!program.Success || !expected.Success)
         {
-            Fail("no ```csharp block, or no line \"You will see `...`.\" after it; keep both shapes so this test can find them");
+            Fail("no ```csharp block under \"## Example\", or no line \"You will see `...`.\" after it; keep both shapes so this test can find them");
         }
         string example = File.ReadAllText(EXAMPLE, Encoding.UTF8);
         if (program.Groups[1].Value != example)

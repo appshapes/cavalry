@@ -191,6 +191,76 @@ public sealed unsafe class ClusterService : IDisposable
         return Abi.cavalry_cluster_service_sessions(handle);
     }
 
+    /// <summary>The log position of the snapshot the leader asked for, when the last entry of
+    /// the last poll was <see cref="Abi.CLUSTER_ENTRY_SNAPSHOT"/> and the handler took it:
+    /// the position after that entry, which <see cref="Position"/> is then. Null otherwise,
+    /// and from the next poll on. Null too from inside this service's own handler, where
+    /// the ABI refuses the read with <see cref="Abi.ERR_POLLING"/>: the entry's type says
+    /// that the poll ends after it (spec/c-abi.md, "A service's snapshot and its start";
+    /// ADR 0149).</summary>
+    public long? SnapshotDue()
+    {
+        return Abi.cavalry_cluster_service_snapshot_due(handle, out long position) ? position : null;
+    }
+
+    /// <summary>Takes a snapshot of the program's state: the program's own bytes, in which
+    /// the service reads nothing, 1 GiB at the most. Call it after a poll that ended at the
+    /// leader's request, while <see cref="SnapshotDue"/> gives a position, and before the
+    /// next poll. The service writes a recording through its member's driver and tells the
+    /// member, which lists the snapshot; the call waits for the driver, a second at the
+    /// most for each step of its own and the response timeout, 10 s, for an add or a command that a driver does not answer,
+    /// under the client's lock. True when the snapshot was written and
+    /// the member was told; false when nothing was written because the member lists a
+    /// snapshot of a service at or past this position already. Throws
+    /// <see cref="CavalryException"/>: <see cref="Abi.ERR_CLUSTER_NO_SNAPSHOT_DUE"/> where
+    /// none is due, <see cref="Abi.ERR_CLUSTER_SNAPSHOT_TOO_LONG"/> for a state over 1 GiB,
+    /// <see cref="Abi.ERR_CLUSTER_SNAPSHOT_FAILED"/> when a step made no progress, with the
+    /// step in the message, <see cref="Abi.ERR_POLLING"/> from inside a handler of this
+    /// service or of one whose poll holds the client, or the client's or the driver's
+    /// code. After an exception the service is as it was and the snapshot is still due:
+    /// call again, or poll on.</summary>
+    public bool Snapshot(ReadOnlySpan<byte> state)
+    {
+        int result;
+        fixed (byte* bytes = state)
+        {
+            result = client.SnapshotClusterService(handle, bytes, (nuint) state.Length);
+        }
+        if (result < 0)
+        {
+            throw Abi.LastError("cavalry_cluster_service_snapshot");
+        }
+        return result == 1;
+    }
+
+    /// <summary>Starts the service from the newest snapshot of a service that its member
+    /// lists, before the service's first poll. <c>Restored</c> is one of
+    /// <c>Abi.CLUSTER_RESTORED_*</c>. With <see cref="Abi.CLUSTER_RESTORED_STATE"/>,
+    /// <c>State</c> is the program's state as the program gave it to
+    /// <see cref="Snapshot"/>, a copy the caller owns; the service holds the sessions that
+    /// were open at the snapshot's position, <see cref="Position"/> is that position, and
+    /// the next poll hands over the entry after it. With
+    /// <see cref="Abi.CLUSTER_RESTORED_FROM_START"/>, <c>State</c> is null: the member lists
+    /// no snapshot of a service, or the one it lists could not be taken, and the polls read
+    /// the log from position 0. With <see cref="Abi.CLUSTER_RESTORED_NO_MEMBER"/>,
+    /// <c>State</c> is null: the driver hosts no member that has a log yet, and the program
+    /// calls again before its first poll. A program that never calls it reads the log from
+    /// position 0 at every start. The call waits for the driver to play the snapshot's
+    /// recording back, under the client's lock. Throws <see cref="CavalryException"/>:
+    /// <see cref="Abi.ERR_CLUSTER_RESTORE_TOO_LATE"/> once a poll has opened the member's
+    /// log or a call has answered a state or the log's start,
+    /// <see cref="Abi.ERR_POLLING"/> from inside a handler, or the client's or the driver's
+    /// code, after which the service has not started and the program calls again.</summary>
+    public (int Restored, byte[]? State) Restore()
+    {
+        int restored = client.RestoreClusterService(handle, out byte[]? state);
+        if (restored <= 0)
+        {
+            throw Abi.LastError("cavalry_cluster_service_restore");
+        }
+        return (restored, state);
+    }
+
     /// <summary>Closes the service's publications and its counter, stops its read of the log
     /// and frees the handle. Idempotent. Close a service before its client; after the
     /// client's own close it frees the handle alone, and the driver ends what the service
