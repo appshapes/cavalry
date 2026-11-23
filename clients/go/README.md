@@ -500,7 +500,10 @@ make the client safe to share. A handler that calls its client must reach the AB
 which refuses the call with `ErrPolling`; behind a mutex that its own poll held, the
 same call would stop the goroutine for ever, since a `sync.Mutex` is not taken twice
 (ADR 0124, Alternatives). The service's open and its close take the client's mutex,
-as a committed log's do. A `ClusterSession`'s connect is a call on the client and
+as a committed log's do, and so do its `Snapshot` and its `Restore`: each sends
+commands with the client and waits for the driver (`spec/c-abi.md`, "Threads"; ADR
+0149), and the goroutine that polls makes them between its polls ("A service's
+snapshot and its start"). A `ClusterSession`'s connect is a call on the client and
 takes its mutex; nothing else of a session is.
 
 The table the trampoline reads subscriptions from holds 4,096 subscriptions, committed
