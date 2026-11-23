@@ -26,6 +26,14 @@ says not to wait for CI and names the same two blockers among the checks. Whethe
 session's permissions allow the form is Claude Code's to decide and is not run here,
 and no test makes a session do as the texts say.
 
+And of two steps of claude.yml's fixer job (work item 409). The step that prints what the
+session did with the Bash tool is run on a record written to fool it: what is held is that
+only a program name from its list, a number and a tool name of plain characters reach the
+log, between stop-commands lines, and nothing of a token-shaped word or of a line the
+runner would read as a workflow command. The step that verifies the fix landed is run with
+a fake `gh`: a run that landed nothing fails and comments once on the pull request with the
+run's address and without naming the agent, and a push or a body edit posts no comment.
+
     python3 scripts/claude-workflow-test.py
 """
 import json
@@ -583,6 +591,231 @@ class ReviewerInstructions(unittest.TestCase):
 
     def test_the_brief_no_longer_asks_for_a_green_ci_which_a_session_can_only_wait_for(self):
         self.assertNotIn("CI must be green", self.texts["the brief"])
+
+
+# The fixer's session as the step after the Code step reads it (work item 409): a record
+# written to fool it, with a token-shaped word, lines the runner would read as workflow
+# commands, a bound that is not a number, a command that is not a string and a tool whose
+# name is a workflow command.
+SESSION_BASH = "What the session did with the Bash tool"
+TOKEN_SHAPED = "ghs_ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789ab"
+FIXER_RECORD = [
+    {"type": "system", "subtype": "init"},
+    {"type": "assistant", "message": {"content": [
+        {"type": "tool_use", "name": "Bash", "input": {"command": "just test 2>&1 | tail -20"}},
+        {"type": "tool_use", "name": "Bash", "input": {
+            "command": f"{TOKEN_SHAPED} --x && cargo build; ls\n::warning::forged in a command",
+            "timeout": "600000\n::error::forged in a bound"}},
+        {"type": "tool_use", "name": "Bash", "input": {"command": ["not", "a", "string"], "timeout": 1800000}},
+        {"type": "text", "text": "::set-output name=landed::push"}]}},
+    {"type": "user", "message": {"content": [{"type": "tool_result", "content":
+        "Command did not complete within its 120s timeout and was moved to the background"}]}},
+    {"type": "result", "subtype": "success", "duration_ms": 125031, "num_turns": 2, "permission_denials": [
+        {"tool_name": "Bash", "tool_input": {"command": "sleep 60 && GH_TOKEN=secret-value tail -f x"}},
+        {"tool_name": "::add-mask::forged in a tool name", "tool_input": {"prompt": "x"}},
+        {"tool_name": "Agent", "tool_input": {}}]},
+]
+
+
+def env_value(step, key, workflow=None):
+    """The value of `key` in the `env:` block of the step called `step`, a folded scalar
+    joined with spaces."""
+    lines = (workflow or WORKFLOW).read_text(encoding="utf-8").split("\n")
+    at = lines.index(f"      - name: {step}")
+    first = next(i for i in range(at + 1, len(lines)) if lines[i].strip().startswith(f"{key}:"))
+    value = lines[first].split(":", 1)[1].strip()
+    if value not in (">-", ">", "|"):
+        return value.strip('"')
+    indent = len(lines[first]) - len(lines[first].lstrip())
+    words = []
+    for line in lines[first + 1:]:
+        if not line.strip() or len(line) - len(line.lstrip()) <= indent:
+            break
+        words.append(line.strip())
+    return " ".join(words)
+
+
+@unittest.skipUnless(shutil.which("jq"), "the step reads the session's record with jq, which is not installed here")
+class SessionBash(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        cls.script = step_script(SESSION_BASH)
+        cls.lists = {key: env_value(SESSION_BASH, key) for key in ("PROGRAMS", "TOOLS", "ENDS")}
+
+    def run_step(self, record=FIXER_RECORD, file=True, no_token=False, raw=None):
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp = Path(tmp)
+            (tmp / "bin").mkdir()
+            if no_token:
+                od = tmp / "bin" / "od"
+                od.write_text("#!/bin/sh\nexit 1\n", encoding="utf-8")
+                od.chmod(od.stat().st_mode | stat.S_IXUSR)
+            path = tmp / "claude-execution-output.json"
+            if file:
+                path.write_text(raw if raw is not None else json.dumps(record), encoding="utf-8")
+            env = {"PATH": f"{tmp / 'bin'}{os.pathsep}{os.environ['PATH']}", "RUNNER_TEMP": str(tmp),
+                   "EXECUTION_FILE": str(path) if file else "", **self.lists}
+            # As the runner runs a `shell: bash` step.
+            done = subprocess.run(["bash", "--noprofile", "--norc", "-eo", "pipefail", "-c", self.script],
+                                  env=env, capture_output=True, text=True, timeout=60)
+            return done.returncode, (done.stdout + done.stderr).split("\n")
+
+    def test_only_known_program_names_numbers_and_plain_tool_names_reach_the_log(self):
+        code, lines = self.run_step()
+        self.assertEqual(code, 0, lines)
+        inside, outside, _ = Verify.stopped(self, lines)
+        self.assertEqual(Verify.commands(self, outside), [], "nothing outside the stopped lines is a command")
+        self.assertEqual([line for line in inside if line], [
+            "Bash calls, by program and the bound asked for:",
+            "  just | tail, bound default",
+            "  (other) | cargo | ls | (other), bound (other)",
+            "  (other), bound 1800000",
+            "Results that said a command had moved to the background: 1",
+            "The session ended success, after 125031 ms and 2 turns, with 3 denials:",
+            "  Bash sleep | (other)",
+            "  (other) ",
+            "  Agent ",
+        ])
+        printed = "\n".join(lines)
+        for word in (TOKEN_SHAPED, "forged", "secret-value", "set-output", "add-mask"):
+            self.assertNotIn(word, printed)
+
+    def test_an_end_a_duration_a_count_or_a_tool_that_is_not_what_it_should_be_prints_as_other(self):
+        record = [
+            {"type": "assistant", "message": {"content": [
+                {"type": "tool_use", "name": "Bash", "input": {"command": "ls", "timeout": 10 ** 38}},
+                {"type": "tool_use", "name": "Bash", "input": {"command": "ls", "timeout": 2.5}}]}},
+            {"type": "user", "message": {"content": [{"type": "tool_result", "content":
+                "a page that quotes the words moved to the background"}]}},
+            {"type": "result", "subtype": "::warning::forged in an end", "duration_ms": "::error::forged",
+             "num_turns": 10 ** 30, "permission_denials": [
+                 {"tool_name": "Bash\n::warning::forged in a tool name", "tool_input": {"command": "ls"}},
+                 {"tool_name": TOKEN_SHAPED, "tool_input": {}},
+                 {"tool_name": "mcp__github_comment__update_claude_comment", "tool_input": {}}]},
+            {"type": "result", "subtype": "success", "duration_ms": 1, "num_turns": 1, "permission_denials": -10 ** 25},
+        ]
+        code, lines = self.run_step(record=record)
+        self.assertEqual(code, 0, lines)
+        inside, outside, _ = Verify.stopped(self, lines)
+        self.assertEqual(Verify.commands(self, outside), [])
+        self.assertEqual([line for line in inside if line], [
+            "Bash calls, by program and the bound asked for:",
+            "  ls, bound (other)",
+            "  ls, bound (other)",
+            "Results that said a command had moved to the background: 0",
+            "The session ended (other), after (other) ms and (other) turns, with 3 denials:",
+            "  (other) ls",
+            "  (other) ",
+            "  (an MCP tool) ",
+            "The session ended success, after 1 ms and 1 turns, with (other) denials:",
+        ])
+        printed = "\n".join(lines)
+        for word in (TOKEN_SHAPED, "forged", str(10 ** 38), str(10 ** 30), str(10 ** 25)):
+            self.assertNotIn(word, printed)
+
+    def test_a_record_jq_cannot_read_prints_only_the_steps_own_warning(self):
+        code, lines = self.run_step(raw="::warning::forged in a record that is not JSON")
+        self.assertEqual(code, 0, lines)
+        self.assertNotIn("forged", "\n".join(lines))
+        self.assertEqual([line for line in lines if line],
+                         ["::warning::The record of the session is not JSON that jq reads, so nothing of it is printed"])
+
+    def test_no_record_says_so_and_prints_nothing_else(self):
+        code, lines = self.run_step(file=False)
+        self.assertEqual(code, 0, lines)
+        self.assertEqual([line for line in lines if line], ["No record of a session: the Code step ran none, or wrote none."])
+
+    def test_without_a_token_nothing_of_the_session_is_printed(self):
+        code, lines = self.run_step(no_token=True)
+        self.assertEqual(code, 0, lines)
+        self.assertFalse([line for line in lines if "Bash calls" in line or line.startswith("::stop-commands::")], lines)
+        self.assertEqual([line for line in lines if line.startswith("::")], [
+            "::warning::No token could be made to stop workflow commands, so what the session did is not printed"])
+
+
+# The fixer's verify step (work item 409): a fake `gh` that answers the step's two reads
+# from a scenario and logs every call, the comment above all.
+FIX_VERIFY = "Verify the fix landed"
+REVIEWED = "1111111111111111111111111111111111111111"
+BODY = "The body as the fixer found it."
+FAKE_GH_PULL = r'''#!/usr/bin/env python3
+import json, os, sys
+scenario = json.load(open(os.environ["FAKE_GH"]))
+with open(os.environ["FAKE_GH_LOG"], "a") as log:
+    log.write(json.dumps(sys.argv[1:]) + "\n")
+args = sys.argv[1:]
+if args[:2] == ["api", f"repos/{os.environ['GITHUB_REPOSITORY']}/pulls/{os.environ['PR_NUMBER']}"]:
+    print(scenario["head"] if args[3] == ".head.sha" else scenario["body"])
+    sys.exit(0)
+if args[:2] == ["pr", "comment"]:
+    sys.exit(scenario.get("comment_exit", 0))
+sys.exit(9)
+'''
+
+
+class FixVerify(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        cls.script = step_script(FIX_VERIFY)
+
+    def run_step(self, head=REVIEWED, body=BODY, comment_exit=0):
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp = Path(tmp)
+            gh = tmp / "bin" / "gh"
+            gh.parent.mkdir()
+            gh.write_text(FAKE_GH_PULL, encoding="utf-8")
+            gh.chmod(gh.stat().st_mode | stat.S_IXUSR)
+            (tmp / "scenario.json").write_text(json.dumps({"head": head, "body": body, "comment_exit": comment_exit}),
+                                               encoding="utf-8")
+            log, outputs = tmp / "calls.log", tmp / "outputs"
+            before = subprocess.run(["sha256sum"], input=BODY, capture_output=True, text=True).stdout.split()[0] \
+                if shutil.which("sha256sum") else ""
+            env = {"PATH": f"{gh.parent}{os.pathsep}{os.environ['PATH']}", "GITHUB_REPOSITORY": REPO,
+                   "GITHUB_SERVER_URL": "https://github.com", "GITHUB_RUN_ID": "4242", "GH_TOKEN": "not-a-token",
+                   "PR_NUMBER": PR, "REVIEWED_SHA": REVIEWED, "BODY_HASH_BEFORE": before,
+                   "GITHUB_OUTPUT": str(outputs), "FAKE_GH": str(tmp / "scenario.json"), "FAKE_GH_LOG": str(log)}
+            done = subprocess.run(["bash", "-c", self.script], env=env, capture_output=True, text=True, timeout=60)
+            calls = [json.loads(line) for line in log.read_text(encoding="utf-8").split("\n") if line] if log.exists() else []
+            return (done.returncode, done.stdout + done.stderr, calls,
+                    outputs.read_text(encoding="utf-8") if outputs.exists() else "")
+
+    def comments(self, calls):
+        return [call for call in calls if call[:2] == ["pr", "comment"]]
+
+    @unittest.skipUnless(shutil.which("sha256sum"), "the step hashes the body with sha256sum")
+    def test_a_run_that_landed_nothing_fails_and_hands_the_blockers_to_the_author_on_the_pull_request(self):
+        code, printed, calls, outputs = self.run_step()
+        self.assertEqual(code, 1, printed)
+        self.assertEqual(outputs, "")
+        comments = self.comments(calls)
+        self.assertEqual(len(comments), 1, calls)
+        comment = comments[0]
+        self.assertEqual(comment[2:5], [PR, "--repo", REPO])
+        body = comment[comment.index("--body") + 1]
+        self.assertIn("https://github.com/example-owner/cavalry/actions/runs/4242", body)
+        self.assertIn("The review's blockers are the author's to apply now", body)
+        self.assertNotIn("@claude", body, "a comment that names the agent would start it")
+        self.assertIn("::error::Fix session ended without a push landing", printed)
+
+    @unittest.skipUnless(shutil.which("sha256sum"), "the step hashes the body with sha256sum")
+    def test_a_comment_that_cannot_be_posted_still_fails_the_run(self):
+        code, printed, calls, outputs = self.run_step(comment_exit=1)
+        self.assertEqual(code, 1, printed)
+        self.assertEqual(outputs, "")
+        self.assertIn("::warning::The comment that hands the blockers to the author could not be posted", printed)
+
+    def test_a_push_is_a_landed_fix_and_no_comment_is_posted(self):
+        code, printed, calls, outputs = self.run_step(head="2222222222222222222222222222222222222222")
+        self.assertEqual(code, 0, printed)
+        self.assertEqual(outputs, "landed=push\n")
+        self.assertEqual(self.comments(calls), [])
+
+    @unittest.skipUnless(shutil.which("sha256sum"), "the step hashes the body with sha256sum")
+    def test_an_edit_to_the_body_is_a_landed_fix_and_no_comment_is_posted(self):
+        code, printed, calls, outputs = self.run_step(body="The body the fixer wrote.")
+        self.assertEqual(code, 0, printed)
+        self.assertEqual(outputs, "landed=body\n")
+        self.assertEqual(self.comments(calls), [])
 
 
 if __name__ == "__main__":
