@@ -13,7 +13,10 @@
 # full, and then conformance/go/committed_log, the client's committed log against a
 # cluster (spec/c-abi.md, version 2; ADR 0070), and then conformance/go/cluster, the
 # cluster round: the client's service beside each member and its session on the first
-# driver (spec/c-abi.md, versions 4 and 5; ADR 0124); and cleans up.
+# driver (spec/c-abi.md, versions 4 and 5; ADR 0124), and then conformance/go/snapshot, the
+# snapshot round: a service's snapshot and its start from one beside the same three
+# members, on the log the cluster round left (spec/c-abi.md, version 6; ADR 0149); and
+# cleans up.
 # `just conformance` runs this after conformance/node (clients/README.md; ADR 0046, card
 # 207).
 set -euo pipefail
@@ -151,6 +154,18 @@ echo "conformance/go: run committed_log beside member $member"
 echo "conformance/go: run cluster, a service beside each member and a session on $CAVALRY_DIR"
 (cd conformance/go && go run ./cluster "$cluster" "$CAVALRY_CLUSTER_MEMBERS" "$response") || {
     echo "conformance/go: cluster failed; the members said:" >&2
+    cat "$cluster"/member-*.out >&2 || true
+    exit 1
+}
+
+# The snapshot round, on the log the cluster round left: `cavalry snapshot` asks the
+# leader for a snapshot, each member's service takes one through the client, and a
+# new service beside each member starts from it (spec/c-abi.md, version 6; ADR 0146;
+# ADR 0147; ADR 0149). The binary's path is given whole: the round runs in
+# conformance/go.
+echo "conformance/go: run snapshot, a service's snapshot and its start from one beside each member"
+(cd conformance/go && go run ./snapshot "$cluster" "$OLDPWD/target/release/cavalry") || {
+    echo "conformance/go: snapshot failed; the members said:" >&2
     cat "$cluster"/member-*.out >&2 || true
     exit 1
 }

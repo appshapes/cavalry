@@ -2393,16 +2393,19 @@ class GoPackage(unittest.TestCase):
         self.assertIn("\tmu       sync.Mutex\n\thandle   *C.cavalry_t\n", code)
         for label in lint.RULES["go"]["functions"]:
             self.assertNotIn(".mu.", module.functions[label][2], label)
-        # Three functions outside Client reach the client's handle. The closes of a committed
-        # log and of a cluster service take the client's mutex. A cluster service's Poll takes
+        # Five functions outside Client reach the client's handle. The closes of a committed
+        # log and of a cluster service, and a service's Snapshot and Restore, which wait for
+        # the driver (ADR 0149), take the client's mutex. A cluster service's Poll takes
         # none: it is on every entry's path, and a handler that calls its client must reach
         # the ABI, which refuses the call, where a mutex its own poll held would stop the
         # goroutine for ever (ADR 0124, Alternatives). So that client is one goroutine's
         # from ClusterService to the service's Close (clients/go/README.md, "Threads").
         outside = sorted(label for label, (_, _, body, _, _) in module.functions.items()
                          if not label.startswith("Client.") and re.search(r"\bclient\.handle\b", body))
-        self.assertEqual(outside, ["ClusterService.Close", "ClusterService.Poll", "CommittedLog.Close"])
-        for label in ("ClusterService.Close", "CommittedLog.Close"):
+        self.assertEqual(outside, ["ClusterService.Close", "ClusterService.Poll", "ClusterService.Restore",
+                                   "ClusterService.Snapshot", "CommittedLog.Close"])
+        for label in ("ClusterService.Close", "ClusterService.Restore", "ClusterService.Snapshot",
+                      "CommittedLog.Close"):
             self.assertRegex(module.functions[label][2], r"\t\w\.client\.mu\.Lock\(\)\n\tdefer \w\.client\.mu\.Unlock\(\)\n")
         self.assertIn("ClusterService.Poll", lint.RULES["go"]["functions"])
 

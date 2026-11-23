@@ -2327,6 +2327,87 @@ func (v *ClusterService) Answers() bool { return bool(C.cavalry_cluster_service_
 // most. It is -1 from inside this service's own handler.
 func (v *ClusterService) Sessions() int { return int(C.cavalry_cluster_service_sessions(v.handle)) }
 
+// SnapshotDue is the log position of the snapshot the leader asked for, and true, when the
+// last entry of the last poll was ClusterEntrySnapshot and the handler took it: the
+// position after that entry, which Position is then. It is 0 and false otherwise, and from
+// the next poll on. It is false too from inside this service's own handler, where the ABI
+// refuses the read with ErrPolling: the entry's Type says that the poll ends after it
+// (spec/c-abi.md, "A service's snapshot and its start"; ADR 0149).
+func (v *ClusterService) SnapshotDue() (position int64, due bool) {
+	var at C.int64_t
+	if !bool(C.cavalry_cluster_service_snapshot_due(v.handle, &at)) {
+		return 0, false
+	}
+	return int64(at), true
+}
+
+// Snapshot takes a snapshot of the program's state: the program's own bytes, in which the
+// service reads nothing, 1 GiB at the most. Call it after a poll that ended at the
+// leader's request, while SnapshotDue gives a position, and before the next poll. The
+// service writes a recording through its member's driver and tells the member, which
+// lists the snapshot; the call waits for the driver, a second at the most for each step
+// of its own and the response timeout, 10 s, for an add or a command that a driver does not answer,
+// under the client's lock. It is true when the snapshot was written and the member was
+// told, and false when nothing was written because the member lists a snapshot of a
+// service at or past this position already. The *Error has ErrClusterNoSnapshotDue where
+// none is due, ErrClusterSnapshotTooLong for a state over 1 GiB, ErrClusterSnapshotFailed
+// when a step made no progress, with the step in the message, ErrPolling from inside a
+// handler of this service or of one whose poll holds the client, or the client's or the
+// driver's code. After an error the service is as it was and the snapshot is still due:
+// call again, or poll on.
+func (v *ClusterService) Snapshot(state []byte) (bool, error) {
+	v.client.mu.Lock()
+	defer v.client.mu.Unlock()
+	runtime.LockOSThread()
+	defer runtime.UnlockOSThread()
+	var buffer *C.uint8_t
+	if len(state) > 0 {
+		buffer = (*C.uint8_t)(unsafe.Pointer(&state[0]))
+	}
+	result := C.cavalry_cluster_service_snapshot(v.handle, v.client.handle, buffer, C.size_t(len(state)))
+	if result < 0 {
+		return false, lastError("cavalry_cluster_service_snapshot")
+	}
+	return result == 1, nil
+}
+
+// Restore starts the service from the newest snapshot of a service that its member lists,
+// before the service's first poll. restored is one of ClusterRestored*. With
+// ClusterRestoredState, state is the program's state as the program gave it to Snapshot, a
+// copy the caller owns, never nil; the service holds the sessions that were open at the
+// snapshot's position, Position is that position, and the next poll hands over the entry
+// after it. With ClusterRestoredFromStart, state is nil: the member lists no snapshot of a
+// service, or the one it lists could not be taken, and the polls read the log from
+// position 0. With ClusterRestoredNoMember, state is nil: the driver hosts no member that
+// has a log yet, and the program calls again before its first poll. A program that never
+// calls it reads the log from position 0 at every start. The call waits for the driver to
+// play the snapshot's recording back, under the client's lock. The *Error has
+// ErrClusterRestoreTooLate once a poll has opened the member's log or a call has answered
+// a state or the log's start, ErrPolling from inside a handler, or the client's or the
+// driver's code, after which the service has not started and the program calls again.
+func (v *ClusterService) Restore() (restored int32, state []byte, err error) {
+	v.client.mu.Lock()
+	defer v.client.mu.Unlock()
+	runtime.LockOSThread()
+	defer runtime.UnlockOSThread()
+	var data *C.uint8_t
+	var length C.size_t
+	result := C.cavalry_cluster_service_restore(v.handle, v.client.handle, &data, &length)
+	if result <= 0 {
+		return 0, nil, lastError("cavalry_cluster_service_restore")
+	}
+	if result != ClusterRestoredState {
+		return int32(result), nil, nil
+	}
+	// The bytes are the handle's until the service's next poll or its close
+	// (spec/c-abi.md, "Lifetimes"): copied here, under the client's lock.
+	state = make([]byte, int(length))
+	if length > 0 {
+		copy(state, unsafe.Slice((*byte)(unsafe.Pointer(data)), int(length)))
+	}
+	return int32(result), state, nil
+}
+
 // Close closes the service's publications and its counter, stops its read of the log and
 // frees the handle and the service's slot in the table; idempotent. Close a service before
 // its client; after the client's own Close it frees the handle alone, and the driver ends
