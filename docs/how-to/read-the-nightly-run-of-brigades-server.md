@@ -12,9 +12,12 @@ it calls the feed, as one recorded stream.
 says which calls it uses.
 
 The server takes Cavalry's crates from this repository by git, pinned to one commit.
-A change on `master` that breaks what the server calls would be seen on the day
-Brigade moves its pin, long after the change. So each night at 06:43 UTC the workflow
-`.github/workflows/brigade-server.yml` does five things:
+Brigade's `master` pins one commit, and each release of the server pins the one it was
+built with: the servers in production run server 0.9.0, built at 620a2e29.
+[What does Brigade's server rely on?](../explanation/what-brigades-server-relies-on.md)
+names the builds. A change on `master` that breaks what the server calls would be seen
+on the day Brigade moves its pin, long after the change. So each night at 06:43 UTC
+the workflow `.github/workflows/brigade-server.yml` does five things:
 
 1. It checks out this repository at the head of `master`, and Brigade at the head of
    its `master`.
@@ -78,24 +81,27 @@ link, and Brigade answers that when it moves its pin.
    gh run view <run id> --log | grep -E "Brigade's server: |Cavalry: |the server pins: |Taken from this tree: |Crates the lock file|feed that passed: [0-9]"
    ```
 
-   You will see the job's own lines. These are from run 44984317057, a trial of the
-   job on a branch before it landed:
+   You will see the job's own lines. These are from run 45067503397, started by hand
+   on 2026-11-22:
 
    ```text
-   - Brigade's server: 5ddacc75397efa7a8ded54db3e560fa3ca31f813
-   - Cavalry: 90e4608e853f59921108a3a180780388d34111c0
-   - In place of what the server pins: `rev=620a2e29e04751c7a1f930132666f85b3dd58e7a`
+   - Brigade's server: 56d0620e425f1300354d91e6136076767dc8746e
+   - Cavalry: 49cbf4304489ba5bc6bb2333d80a2de9a0b1cb17
+   - In place of what the server pins: `rev=d265af823b8311ed878ae1cc3643d52a58737cdc`
    - Taken from this tree: cavalry, cavalry-client, cavalry-driver, cavalry-log, cavalry-proto, cavalry-raft, cavalry-shm
-   - Crates the lock file gained: nix 0.32.0
    - Tests named for the Cavalry feed that passed: 7
    ```
 
    The first two lines are the commit of each repository. They are printed before
-   anything can fail, so a red night has them too. The fourth is every crate of
-   Cavalry's that the server links, all from this tree. The fifth is no failure. It
-   lists the crates that this tree asks for and Brigade's lock file did not hold,
-   which is what Brigade meets when it moves its pin. The same lines are on the run's
-   page in a browser, under "Brigade's server against this tree".
+   anything can fail, so a red night has them too. The third is what Brigade's
+   `master` pins at that commit: d265af82 since Brigade's eeefd438, merged as f4189f25
+   on 2026-11-22, and 620a2e29 before it. It is not always the tree that the servers in production run.
+   The fourth is every crate of Cavalry's that the server links, all from this tree.
+   When the lock file gained a crate, a line `Crates the lock file gained:` comes after
+   the fourth, and it is no failure. It lists the crates that this tree asks for and
+   Brigade's lock file did not hold, which is what Brigade meets when it moves its
+   pin. The same lines are on the run's page in a browser, under "Brigade's server
+   against this tree".
 
    When the run passed, stop here.
 
@@ -117,13 +123,26 @@ link, and Brigade answers that when it moves its pin.
      compile`.** The server does not compile against this tree. The lines name the
      item of Cavalry's that changed.
    - **`Brigade's tests of its server`, with `test <name> ... FAILED`.** A Rust test
-     failed. It ran the server on the feed when Brigade's
-     `server/crates/brigade-server/tests/server.rs` marks it `#[cfg(feature =
-     "cavalry")]`. At Brigade's commit 5ddacc75 that is nine tests: the seven with
-     `cavalry_feed` at the end of the name, and
-     `the_feed_is_rolled_and_let_go_of_as_snapshots_cover_it` and
-     `a_server_that_was_held_still_goes_on_where_it_stopped`. Every other test runs
-     the server on a file log, or runs no server, and calls nothing of Cavalry's.
+     failed. It ran on Cavalry's driver when it is one of these:
+     - a test whose name begins `feed::tests::`. These are the unit tests of the
+       feed in Brigade's crate `brigade-log`, `server/crates/brigade-log/src/feed.rs`.
+       Most of them open the feed on a driver, and one reads the catalog that server
+       0.9.0 left.
+     - a test of `server/crates/brigade-server/tests/server.rs` or `tests/stored.rs`
+       that Brigade marks `#[cfg(feature = "cavalry")]`. At Brigade's commit 911f37f8
+       of 2026-11-23 that is ten tests. Nine are in `server.rs`: the seven with
+       `cavalry_feed` at the end of the name, and
+       `the_feed_is_rolled_and_let_go_of_as_snapshots_cover_it` and
+       `a_server_that_was_held_still_goes_on_where_it_stopped`. The tenth is
+       `this_build_starts_on_the_feed_a_release_left_killed_and_the_feed_goes_on` in
+       `stored.rs`.
+
+     Every other test runs the server on a file log, or runs no server, and calls
+     nothing of Cavalry's. The first command of `make server-test`, `cargo test
+     --workspace`, stops at the first test program that fails. So the test programs
+     after it did not run, and neither did the two other commands, which run
+     `the_conformance_suite_is_green_on_the_cavalry_feed` and the Go tests: a red night
+     says nothing of those.
    - **`Brigade's tests of its server`, with `--- FAIL:`.** A Go test of Brigade's
      command failed. Those tests run the server on a file log.
    - **`Brigade's tests of its server`, with `no test named for the Cavalry feed
@@ -337,12 +356,15 @@ Brigade's own.
 
   ```sh
   # ignore: needs gh signed in; the run id is from step 1
-  gh run view <run id> --log | grep -E "test .*(cavalry_feed|the_feed_is_rolled|a_server_that_was_held_still).* \.\.\. "
+  gh run view <run id> --log | grep -E "test .*(feed::tests::|cavalry_feed|the_feed_is_rolled|a_server_that_was_held_still|a_release_left_killed).* \.\.\. "
   ```
 
-  You will see the nine tests of step 3, each ending in `ok`. One of them,
+  You will see the tests of step 3, each ending in `ok`: in run 45067503397, seven of
+  `feed::tests` and the ten others. One of them,
   `the_conformance_suite_is_green_on_the_cavalry_feed`, is printed twice: first as
   `ignored`, and then as `ok` when the second command of `make server-test` runs it.
+  The workflow's own count, `Tests named for the Cavalry feed that passed:`, counts
+  the names with `cavalry_feed` in them alone.
 
 ## When it does not work
 
@@ -379,16 +401,25 @@ Brigade's own.
   the workflow to match them. That is a task here, recorded as step 7 records a
   regression.
 - **`the server ended with signal: 15 (SIGTERM)` in a test of `tests/gateway.rs`.**
-  Known on 2026-11-21, intermittent, and Brigade's own. The server at Brigade's
-  commit 5ddacc75 writes its address file before it installs its handlers for a
-  stop, so a test that stops the server in between ends it by the signal. The session
-  that worked work item 362 saw it on a loaded laptop, with Brigade's own pin as well
-  as against this tree. Those tests run the server on a file log. Brigade's own
-  `server` job passed in 16 of its 18 runs on 2026-11-15 and 2026-11-16, and the
-  other two were cancelled, so no run on a runner has shown it. It is work item 374
-  on the Brigade Board, titled as step 7 asks and tagged `brigade` and `server`, so
-  step 4 finds it: the first reader of a night that it turned red comments on that
-  work item with the night's run, and writes no new one.
+  Brigade's own, and fixed on Brigade's `master` at 66e7dfd2 on 2026-11-22 (its work
+  item 374, in Done). Before that commit, at 5ddacc75 for one, the server wrote its
+  address file before it installed its handlers for a stop, so a test that stopped
+  the server in between ended it by the signal, now and then, and on a file log.
+  Since 66e7dfd2 the server listens for a stop before it says that it is up. A night
+  that this test turns red is new when its Brigade commit, the first line of step 2,
+  holds the fix:
+
+  ```sh
+  # ignore: needs gh signed in; the commit is the first line of step 2
+  gh api repos/appshapes/brigade/compare/66e7dfd2...<Brigade's commit> --jq .status
+  ```
+
+  You will see `ahead` or `identical` for a commit that holds the fix, and `behind`
+  or `diverged` for one that does not. Every run since 2026-11-23 builds one that
+  holds it. Step 4 finds work item 374, which is titled as step 7 asks and tagged
+  `brigade` and `server`. For a commit that holds the fix, its case is the one for a
+  work item in Done whose fix did not hold: move it back to Doing, and step 7
+  comments on it with the night's run.
 - **The run reads `cancelled` and no step failed.** The job passed its own bound of
   20 minutes, or a person cancelled it, or GitHub cancelled it while it waited
   because a newer run took its place. In the last case the newer run is the one to

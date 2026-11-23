@@ -235,7 +235,10 @@ of Cavalry, on the directory that Brigade's server keeps
 ([What does Brigade's server rely on?](../docs/explanation/what-brigades-server-relies-on.md)).
 
 N+1 is the tree under test. N is the commit that Brigade's servers in production run,
-620a2e29, a constant of the script; `CAVALRY_DIRECTORY_FROM=<commit>` names another.
+620a2e29, the pin of Brigade's server 0.9.0, a constant of the script;
+`CAVALRY_DIRECTORY_FROM=<commit>` names another. Server 0.10.0 and Brigade's `master`
+pin later commits, which no server in production runs yet, and ADR 0141's Revisit
+clause says when N changes.
 N is exported with `git archive` into `target/upgrade/<N's first 8 hex digits>/` and
 built there on every run, as `upgrade/run.sh` builds its own. Each build is `cavalry`
 and one example, `feed-directory`. N has no such example: the script copies this
@@ -244,8 +247,8 @@ into N's exported tree first. Those files are the server's use of Cavalry, which
 test` runs, and they use no call that N lacks. So the script fails at its second build
 when a change makes them use one, and says what to do then.
 
-N writes a log directory as a server writes its own, in the shape the server is pinned
-to: two runs, 20 records, four recordings, and two releases that purge the first two
+N writes a log directory as a server writes its own, in the pinned shape, the one of
+server 0.9.0: two runs, 20 records, four recordings, and two releases that purge the first two
 recordings. The script does this twice. The first directory's last run is stopped as a
 server's clean stop does. The second's is killed with `SIGKILL`, which leaves its last
 recording live in the catalog. For each directory, as N left it, the script then holds
@@ -253,10 +256,11 @@ with N+1's programs:
 
 - `cavalry run` starts on it, and `cavalry replay` plays each recording that is left
   from its start to the position N answered.
-- The feed, in the pinned shape, begins at the last position N answered. It reads back
-  every record N left, each once, in order, at its position. A read from position 0,
-  which N purged, is refused. It appends five records.
-- The feed, in the shape the server moves to, `ssc=true` with `term-length=1m`, begins
+- The feed, in the pinned shape, begins at the last position N answered. It read N's
+  catalog before its driver started, as Brigade's server 0.10.0 does, and found terms
+  of 16 MiB. It reads back every record N left, each once, in order, at its position. A
+  read from position 0, which N purged, is refused. It appends five records.
+- The feed, in the shape server 0.10.0 moved to, `ssc=true` with `term-length=1m`, begins
   where that ended, reads back N's records and those five, and appends five more.
 - One more run reads all of it back: recordings that two builds wrote, in terms of two
   lengths.

@@ -44,7 +44,7 @@
 //!   a moment after it is created, so a child started in that moment keeps the socket
 //!   and the port. Two tests that take this file start child processes:
 //!   `tests/throttle.rs`, whose three members are processes, and
-//!   `crates/cavalry/tests/feed_held_still.rs`, whose two feeds are. Each is a program
+//!   `crates/cavalry/tests/feed_held_still.rs`, whose six feeds are. Each is a program
 //!   with no test harness that chooses all its ports on its one thread before it starts
 //!   its first child; `feed_held_still` then starts a thread for each child, which reads
 //!   the child's output and creates no socket. So no socket is being created when a

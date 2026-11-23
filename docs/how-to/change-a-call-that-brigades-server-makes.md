@@ -20,14 +20,16 @@ lists those calls and says why they are held.
    cargo test -p cavalry --test feed_shape --test feed_held_still
    ```
 
-   The second holds a process still for 12 s. You will see `test result: ok. 10
+   The second holds a process still for 12 s. You will see `test result: ok. 12
    passed` and a line that begins `feed_held_still: ok` when the server's use still
    works. Otherwise you will see the test that names what broke.
 
 2. Decide which of two changes yours is.
    - **The server's use can keep working.** Keep it working, and go to "How to verify
-     it worked". Until version 0.1.0 the server builds from a pin, commit 620a2e29, and
-     two servers hold their teams' data in the format that pin writes.
+     it worked". Until version 0.1.0 the server builds from a pin. The two servers in
+     production run Brigade's server 0.9.0, built at 620a2e29, and hold their teams'
+     data in the format that tree writes. Server 0.10.0 and Brigade's `master` pin
+     later commits.
    - **The change must break the server's use.** Go on with step 3.
 
 3. Change `crates/cavalry/tests/feed/mod.rs` in the way the server's own file,
@@ -67,8 +69,8 @@ lists those calls and says why they are held.
 
 - `conformance/upgrade/log-directory.sh` fails at "build N" and names
   `crates/cavalry/tests/feed/` or `crates/cavalry/examples/feed-directory.rs`: the
-  feed's files now use a call that the tree at 620a2e29 lacks, which the server pinned
-  to that tree cannot make either. When the change is on purpose, keep the files as
+  feed's files now use a call that the tree at 620a2e29 lacks, which server 0.9.0, built
+  at that tree, cannot make either. When the change is on purpose, keep the files as
   they last compiled against that tree under `conformance/upgrade/feed-at-620a2e29/`
   and have the script copy those
   ([ADR 0141](../decisions/0141-open-in-place-a-log-directory-written-by-the-tree-that-servers-run-and-build-that-tree-on-every-run.md)).

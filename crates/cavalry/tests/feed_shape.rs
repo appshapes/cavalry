@@ -1,7 +1,7 @@
 //! What Brigade's server runs on an embedded driver, held as a test (work item 362;
 //! ADR 0138, condition 9; invariants 1 and 3). The feed is `tests/feed/mod.rs`, the
 //! server's own use of Cavalry call for call; these tests run it in both of its
-//! shapes, the one the server is pinned to and the one it moves to:
+//! shapes, the pinned one of Brigade's server 0.9.0 and the one its 0.10.0 moved to:
 //!
 //! - an exclusive publication in manual control mode created at a position, by
 //!   `init-term-id`, `term-id` and `term-offset`, in a term past the first;
@@ -14,7 +14,10 @@
 //! - a roll, and a purge of what a snapshot covers, made again when a replay held it
 //!   off;
 //! - a replay across recordings of two term lengths, which is the server's move from
-//!   the one shape to the other on a directory it keeps.
+//!   the one shape to the other on a directory it keeps;
+//! - a recording that ends in a term's padding, read to its end in either order in
+//!   which the driver lets the reader learn that its replay ended (Brigade's work item
+//!   375).
 //!
 //! The stall that ends in a reconnect under an append, and the kill, need a process of
 //! their own to stop: `tests/feed_held_still.rs`. A test that fails here names a call that
@@ -29,7 +32,8 @@ use cavalry_log::layout::State;
 
 mod feed;
 use feed::{
-    FeedLog, FeedOptions, MOVED_TO, PINNED, REPLAY_STREAM, Recorded, Shape, record, recordings,
+    FeedLog, FeedOptions, MOVED_TO, PINNED, REPLAY_STREAM, Recorded, Shape, as_the_replay_says,
+    record, recordings, told_after_the_image_went,
 };
 
 // This test's ports, from the one file that says how they are taken and why, which is
@@ -191,7 +195,8 @@ fn runs_are_one_line_of_positions(shape: Shape, name: &str) {
         [Recorded {
             id: 0,
             start: 0,
-            stop: None
+            stop: None,
+            term_length: shape.term_length,
         }],
         "the run's recording is live in the catalog"
     );
@@ -207,7 +212,8 @@ fn runs_are_one_line_of_positions(shape: Shape, name: &str) {
         [Recorded {
             id: 0,
             start: 0,
-            stop: Some(first_stop)
+            stop: Some(first_stop),
+            term_length: shape.term_length,
         }],
         "the recording stopped at the last record answered"
     );
@@ -251,12 +257,14 @@ fn runs_are_one_line_of_positions(shape: Shape, name: &str) {
             Recorded {
                 id: 0,
                 start: 0,
-                stop: Some(first_stop)
+                stop: Some(first_stop),
+                term_length: shape.term_length,
             },
             Recorded {
                 id: 1,
                 start: first_stop,
-                stop: Some(second_stop)
+                stop: Some(second_stop),
+                term_length: shape.term_length,
             }
         ]
     );
@@ -330,7 +338,8 @@ fn a_start_stops_a_recording_an_earlier_client_left_live(shape: Shape, name: &st
         [Recorded {
             id: 0,
             start: 0,
-            stop: None
+            stop: None,
+            term_length: shape.term_length,
         }],
         "the earlier client leaves its recording live in the catalog"
     );
@@ -345,12 +354,14 @@ fn a_start_stops_a_recording_an_earlier_client_left_live(shape: Shape, name: &st
             Recorded {
                 id: 0,
                 start: 0,
-                stop: Some(left_at)
+                stop: Some(left_at),
+                term_length: shape.term_length,
             },
             Recorded {
                 id: 1,
                 start: left_at,
-                stop: None
+                stop: None,
+                term_length: shape.term_length,
             }
         ],
         "the earlier recording is stopped, and the feed's new one begins at its stop"
@@ -482,12 +493,14 @@ fn a_release_rolls_the_feed_and_purges_what_a_snapshot_covers(shape: Shape, name
             Recorded {
                 id: 0,
                 start: 0,
-                stop: Some(a)
+                stop: Some(a),
+                term_length: shape.term_length,
             },
             Recorded {
                 id: 1,
                 start: a,
-                stop: None
+                stop: None,
+                term_length: shape.term_length,
             }
         ]
     );
@@ -522,12 +535,14 @@ fn a_release_rolls_the_feed_and_purges_what_a_snapshot_covers(shape: Shape, name
             Recorded {
                 id: 1,
                 start: a,
-                stop: Some(b)
+                stop: Some(b),
+                term_length: shape.term_length,
             },
             Recorded {
                 id: 2,
                 start: b,
-                stop: None
+                stop: None,
+                term_length: shape.term_length,
             }
         ],
         "recording 0 is no recording of the feed any more"
@@ -564,12 +579,14 @@ fn a_release_rolls_the_feed_and_purges_what_a_snapshot_covers(shape: Shape, name
             Recorded {
                 id: 2,
                 start: b,
-                stop: Some(c)
+                stop: Some(c),
+                term_length: shape.term_length,
             },
             Recorded {
                 id: 3,
                 start: c,
-                stop: None
+                stop: None,
+                term_length: shape.term_length,
             }
         ]
     );
@@ -721,6 +738,7 @@ fn a_replay_crosses_recordings_of_two_term_lengths() {
     // In terms of 16 MiB, to a position past the first megabyte, so that the next
     // run's publication is created in a term past its first.
     let mut log = FeedLog::open(&pinned).expect("the pinned run opens");
+    assert_eq!(log.longest_term(), 0, "a new directory holds no recording");
     let lengths = first_batch(&log);
     append(&mut log, &mut appended, &lengths);
     append_past(&mut log, &mut appended, short + short / 2);
@@ -759,6 +777,24 @@ fn a_replay_crosses_recordings_of_two_term_lengths() {
 
     let mut log = FeedLog::open(&moved_to).expect("the second run after the move opens");
     assert_eq!(log.begin(), end);
+    assert_eq!(
+        log.longest_term(),
+        PINNED.term_length,
+        "the catalog, read before the driver started, holds a recording of 16 MiB terms"
+    );
+    assert_eq!(
+        recordings(&moved_to.log_dir)
+            .expect("the catalog")
+            .iter()
+            .map(|recorded| recorded.term_length)
+            .collect::<Vec<_>>(),
+        [
+            PINNED.term_length,
+            MOVED_TO.term_length,
+            MOVED_TO.term_length
+        ],
+        "the catalog says each recording's term length, from before the move and after it"
+    );
     same(
         &read(&mut log, 0),
         &appended,
@@ -770,4 +806,62 @@ fn a_replay_crosses_recordings_of_two_term_lengths() {
         &appended[before_the_move - 1..],
         "across the two term lengths, from inside the recording of 16 MiB terms",
     );
+}
+
+/// A recording that a stop left ending in a term's padding is read to its end,
+/// whichever of the driver's two messages reaches the reader first (Brigade's work
+/// item 375). The driver withdraws a replay's image once it has been read to the end
+/// of stream, and `replay stopped` can reach the client after that. The padding
+/// reaches no handler, so only the image's position says that the end was read: the
+/// reader keeps the furthest position the image stood at. Brigade's reader before its
+/// fix failed 9 of 12 starts on such a recording asked as the server asks, as the
+/// driver's threads fell, and fails every read told in the second order. The test asks
+/// in that order first, then as the server asks.
+fn a_recording_that_ends_in_padding_is_read_to_its_end(shape: Shape, name: &str) {
+    let dir = TestDir::new(name);
+    let options = options(&dir, shape, u64::MAX);
+    let term = i64::try_from(shape.term_length).expect("a term length");
+
+    let mut log = FeedLog::open(&options).expect("the feed opens");
+    let appended = log
+        .append_up_to_a_terms_padding(0)
+        .expect("the feed writes a term's padding");
+    let last = appended.last().expect("records before the padding").1;
+    assert!(
+        last < term,
+        "the last record ends before the term's end, at {last}"
+    );
+    // The feed's clean stop, in the moment after the padding.
+    drop(log);
+    assert_eq!(
+        recordings(&options.log_dir).expect("the catalog"),
+        [Recorded {
+            id: 0,
+            start: 0,
+            stop: Some(term),
+            term_length: shape.term_length,
+        }],
+        "a stop after the padding leaves the recording stopped at the term's end"
+    );
+
+    let mut log = FeedLog::open(&options).expect("the feed opens again");
+    assert_eq!(log.begin(), term);
+    log.learn_a_replays_end_by(told_after_the_image_went);
+    same(
+        &read(&mut log, 0),
+        &appended,
+        "told that the replay ended after its image went",
+    );
+    log.learn_a_replays_end_by(as_the_replay_says);
+    same(&read(&mut log, 0), &appended, "told as the server is told");
+}
+
+#[test]
+fn a_recording_of_the_pinned_feed_that_ends_in_padding_is_read_to_its_end() {
+    a_recording_that_ends_in_padding_is_read_to_its_end(PINNED, "padding-pinned");
+}
+
+#[test]
+fn a_recording_of_the_feed_the_server_moves_to_that_ends_in_padding_is_read_to_its_end() {
+    a_recording_that_ends_in_padding_is_read_to_its_end(MOVED_TO, "padding-moved-to");
 }
