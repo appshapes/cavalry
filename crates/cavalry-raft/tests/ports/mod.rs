@@ -35,8 +35,8 @@
 //!
 //! A process chooses at most [`PER_PROCESS`] × ([`SLOT`] − 1) ports: 1,996. The
 //! largest user is this crate's library, `src/module/tests.rs`, whose tests choose 475
-//! ports in one process, ten for each pair of drivers; on 2026-11-23 they had nearly
-//! spent the one slot a process then held (work item 422). Each slot a process holds is
+//! ports in one process, most of them ten for each pair of drivers; on 2026-11-23 they
+//! had nearly spent the one slot a process then held (work item 422). Each slot a process holds is
 //! a socket bound to the slot's first port, 20000 plus a multiple of 500, for as long as
 //! the process runs, so `lsof -nP -iUDP@127.0.0.1 -a -p <pid>` lists the slots a test
 //! process holds while it runs: one that holds three is within a slot of its bound. A
@@ -59,7 +59,9 @@
 //!   with no test harness that chooses all its ports on its one thread before it starts
 //!   its first child; `feed_held_still` then starts a thread for each child, which reads
 //!   the child's output and creates no socket. So no socket is being created when a
-//!   child starts.
+//!   child starts. A slot's lock is such a socket too, taken at a choice: at the first,
+//!   and at the one that spends a slot. Both programs choose fewer ports than a slot
+//!   holds, all before their first child, so they take their one lock first too.
 //!   `crates/cavalry/tests/cli.rs` starts children from tests that run on several
 //!   threads, and has a rule of its own for that reason: `loopback_ports`, from 10000
 //!   to 19999, counted out and never tried.
@@ -128,7 +130,9 @@ impl<const N: usize> Held<N> {
     /// are bound together and released together, so no two of them are the same.
     ///
     /// Panics when every port of the `N` slots has been tried, or when `take` finds no
-    /// slot to take, and says what to do.
+    /// slot to take, and says what to do. A call that panics for want of a slot has
+    /// spent the one try it counted, so a slot taken by a later call begins one port
+    /// further in: one port of the bound, in a process that is failing already.
     pub fn choose(
         &self,
         slot: u32,
@@ -152,9 +156,10 @@ impl<const N: usize> Held<N> {
             let (base, _) = held.get_or_init(|| {
                 take().unwrap_or_else(|| {
                     panic!(
-                        "every slot of test ports is taken, and this test process holds \
-                         {index} of the {N} it may: end the test processes that hold the \
-                         others (crates/cavalry-raft/tests/ports/mod.rs)"
+                        "every slot of test ports is taken: end the test processes that \
+                         hold them, which `lsof -nP -iUDP@127.0.0.1` lists, each with a \
+                         socket on a slot's first port (crates/cavalry-raft/tests/ports/\
+                         mod.rs)"
                     )
                 })
             });
@@ -180,7 +185,18 @@ impl<const N: usize> Held<N> {
 pub fn free_ports(count: usize) -> Vec<u16> {
     static HELD: Held<PER_PROCESS> = Held::new();
     HELD.choose(SLOT, count, || {
-        take_slot(FIRST, SLOT, SLOTS, std::process::id() % SLOTS)
+        let taken = take_slot(FIRST, SLOT, SLOTS, std::process::id() % SLOTS);
+        if taken.is_none() {
+            panic!(
+                "every one of the {SLOTS} slots of test ports is taken: a UDP socket is \
+                 bound to 127.0.0.1 on each of {FIRST}, {}, and so on to {}. End the test \
+                 processes that hold them, which `lsof -nP -iUDP@127.0.0.1` lists \
+                 (crates/cavalry-raft/tests/ports/mod.rs)",
+                FIRST + SLOT,
+                FIRST + (SLOTS - 1) * SLOT
+            );
+        }
+        taken
     })
 }
 

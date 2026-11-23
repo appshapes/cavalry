@@ -1,7 +1,7 @@
 //! The room `tests/ports/mod.rs` gives one test process, held to the use it is for:
 //! more than twice the pairs of drivers that this crate's library tests start, the
-//! largest user of the rule, which chose 475 ports in one process on 2026-11-23, ten
-//! for each pair (work item 422). A test program of its own, so that its ports are
+//! largest user of the rule, which chose 475 ports in one process on 2026-11-23, most
+//! of them ten for each pair (work item 422). A test program of its own, so that its ports are
 //! the only ones its process chooses, and so that it takes nothing from the range that
 //! `tests/ports_rule.rs` tries its bounds in.
 

@@ -25,7 +25,7 @@ fn port(number: u32) -> u16 {
 /// that finds no slot to take panics and says so (invariant 3: the bounds and what
 /// happens at them; work item 422).
 #[test]
-fn a_process_chooses_from_one_slot_it_holds_and_both_bounds_say_when_they_are_met() {
+fn a_process_chooses_from_the_slots_it_holds_and_each_bound_says_when_it_is_met() {
     // The slot this process holds.
     let mut chosen = free_ports(15);
     chosen.extend(free_ports(15));
@@ -106,7 +106,12 @@ fn a_process_chooses_from_one_slot_it_holds_and_both_bounds_say_when_they_are_me
     // No slot to take at all: the panic says so.
     let none = Held::<1>::new();
     let found = std::panic::catch_unwind(|| none.choose(10, 1, || None)).expect_err("no slot");
-    let message = found.downcast_ref::<String>().expect("a message");
+    // A message with nothing formatted into it panics with a `&str`.
+    let message = found
+        .downcast_ref::<String>()
+        .map(String::as_str)
+        .or_else(|| found.downcast_ref::<&str>().copied())
+        .expect("a message");
     assert!(
         message.contains("every slot of test ports is taken"),
         "{message}"
