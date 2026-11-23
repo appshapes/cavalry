@@ -202,3 +202,4 @@ under `docs/` is listed here; `just lint-docs` fails on one that is not.
 - [0145. Withhold the vote of a member that lost its log until it holds what the cluster held](decisions/0145-withhold-the-vote-of-a-member-that-lost-its-log-until-it-holds-what-the-cluster-held.md)
 - [0146. Take the C ABI to version 6 with a service's snapshot and its start from one](decisions/0146-take-the-c-abi-to-version-6-with-a-services-snapshot-and-its-start-from-one.md)
 - [0147. Ask a member for a snapshot with a control toggle that the asking command owns](decisions/0147-ask-a-member-for-a-snapshot-with-a-control-toggle-that-the-asking-command-owns.md)
+- [0149. Give each client's service a snapshot and a start from one, with the state copied to the caller](decisions/0149-give-each-clients-service-a-snapshot-and-a-start-from-one-with-the-state-copied-to-the-caller.md)

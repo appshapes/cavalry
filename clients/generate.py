@@ -1493,6 +1493,79 @@ class ClusterService:
         most. -1 from inside this service's own handler."""
         return self._abi.cavalry_cluster_service_sessions(self._handle)
 
+    def snapshot_due(self):
+        """The log position of the snapshot the leader asked for, when the last entry of
+        the last poll was `CAVALRY_CLUSTER_ENTRY_SNAPSHOT` and the handler took it: the
+        position after that entry, which `position()` is then. None otherwise, and from
+        the next poll on. None too from inside this service's own handler, where the
+        ABI refuses the read with `CAVALRY_ERR_POLLING`: the entry's `type` says that
+        the poll ends after it (spec/c-abi.md, "A service's snapshot and its start")."""
+        position = ctypes.c_int64(-1)
+        due = self._abi.cavalry_cluster_service_snapshot_due(self._handle, ctypes.byref(position))
+        return position.value if due else None
+
+    def snapshot(self, state):
+        """Takes a snapshot of the program's state, `state`, as `bytes`: the program's
+        own bytes, in which the service reads nothing, 1 GiB at the most. A `bytearray`
+        or a `memoryview` is refused with `ctypes.ArgumentError`, as an offer's is. Call it after
+        a poll that ended at the leader's request, while `snapshot_due()` gives a
+        position, and before the next poll. The service writes a recording through its
+        member's driver and tells the member, which lists the snapshot; the call waits
+        for the driver, a second at the most for each step of its own and the driver
+        timeout, 10 s, for an add or a command that a driver does not answer, with the
+        GIL released and the client's lock held. True when the snapshot was written and the member was
+        told. False when nothing was written because the member lists a snapshot of a
+        service at or past this position already, as a service that reads its member's
+        log again from the start finds at every request it met before. Raises
+        `CavalryError`: `CAVALRY_ERR_CLUSTER_NO_SNAPSHOT_DUE` where none is due,
+        `CAVALRY_ERR_CLUSTER_SNAPSHOT_TOO_LONG` for a state over 1 GiB,
+        `CAVALRY_ERR_CLUSTER_SNAPSHOT_FAILED` when a step made no progress, with the step
+        in the message, `CAVALRY_ERR_POLLING` from inside a handler of this service or
+        of one whose poll holds the client, or the client's or the driver's code. After
+        an error the service is as it was and the snapshot is still due: call again, or
+        poll on, and the next request asks again."""
+        with self._client._lock:
+            result = self._abi.cavalry_cluster_service_snapshot(
+                self._handle, self._client._handle, state, len(state))
+            error = None if result >= 0 else _error(self._abi, "cavalry_cluster_service_snapshot")
+        if error is not None:
+            raise error
+        return result == 1
+
+    def restore(self):
+        """Starts the service from the newest snapshot of a service that its member
+        lists, before the service's first poll, and returns `(restored, state)`.
+        `restored` is one of `CAVALRY_CLUSTER_RESTORED_*`. `_STATE`: `state` is the
+        program's state as the program gave it to `snapshot`, as `bytes`, a copy the
+        caller owns; the service holds the sessions that were open at the snapshot's
+        position, `position()` is that position, and the next poll hands over the entry
+        after it. `_FROM_START`: `state` is None; the member lists no snapshot of a
+        service, or the one it lists could not be taken, counted in
+        `cluster.service_snapshots_passed_over`, and the polls read the log from
+        position 0. `_NO_MEMBER`: `state` is None; the driver hosts no member that has a
+        log yet, and the program calls again before its first poll. A program that never
+        calls it reads the log from position 0 at every start, and needs its member's
+        whole log. The call waits for the driver to play the snapshot's recording back,
+        with the GIL released and the client's lock held. Raises `CavalryError`:
+        `CAVALRY_ERR_CLUSTER_RESTORE_TOO_LATE` once a poll has opened the member's log or
+        a call has answered `_STATE` or `_FROM_START`, `CAVALRY_ERR_POLLING` from inside
+        a handler, or the client's or the driver's code, after which the service has not
+        started and the program calls again."""
+        state = ctypes.c_void_p()
+        length = ctypes.c_size_t()
+        with self._client._lock:
+            restored = self._abi.cavalry_cluster_service_restore(
+                self._handle, self._client._handle, ctypes.byref(state), ctypes.byref(length))
+            if restored <= 0:
+                error = _error(self._abi, "cavalry_cluster_service_restore")
+            elif restored == _abi.CAVALRY_CLUSTER_RESTORED_STATE:
+                # The bytes are the handle's until the service's next poll or its close
+                # (spec/c-abi.md, "Lifetimes"): copied here, under the client's lock.
+                return restored, ctypes.string_at(state.value, length.value) if state.value else b""
+            else:
+                return restored, None
+        raise error
+
     def close(self):
         """Closes the service's publications and its counter, stops its read of the log
         and frees the handle; idempotent. Close a service before its client; after the

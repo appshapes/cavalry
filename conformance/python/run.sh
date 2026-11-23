@@ -8,9 +8,10 @@
 # committed log against a cluster (spec/c-abi.md, version 2; ADR 0070), and then
 # conformance/python/cluster.py, the cluster round: the client's service beside each
 # member and its session on the first driver (spec/c-abi.md, versions 4 and 5; ADR 0124);
-# and cleans up. `just conformance` runs this after conformance/c
-# (clients/README.md; ADR 0046, card 205). Nothing is installed: ctypes is in the standard
-# library.
+# then conformance/python/snapshot.py, the snapshot round, beside the same three members
+# on the log the cluster round left (spec/c-abi.md, version 6; ADR 0149); and cleans up.
+# `just conformance` runs this after conformance/c (clients/README.md; ADR 0046, card
+# 205). Nothing is installed: ctypes is in the standard library.
 set -euo pipefail
 cd "$(dirname "$0")/../.."
 
@@ -123,6 +124,17 @@ python3 conformance/python/committed_log.py "$cluster/member-$member" "$member" 
 echo "conformance/python: run cluster.py, a service beside each member and a session on $CAVALRY_DIR"
 python3 conformance/python/cluster.py "$cluster" "$CAVALRY_CLUSTER_MEMBERS" "$response" || {
     echo "conformance/python: cluster.py failed; the members said:" >&2
+    cat "$cluster"/member-*.out >&2 || true
+    exit 1
+}
+
+# The snapshot round, on the log the cluster round left: `cavalry snapshot` asks the
+# leader for a snapshot, each member's service takes one through the client, and a
+# new service beside each member starts from it (spec/c-abi.md, version 6; ADR 0146;
+# ADR 0147).
+echo "conformance/python: run snapshot.py, a service's snapshot and its start from one beside each member"
+python3 conformance/python/snapshot.py "$cluster" target/release/cavalry || {
+    echo "conformance/python: snapshot.py failed; the members said:" >&2
     cat "$cluster"/member-*.out >&2 || true
     exit 1
 }

@@ -16,7 +16,7 @@ bounded at 10 s, and one that runs out says how far it got.
 | Runner | Language | Runs with | Decided in |
 | --- | --- | --- | --- |
 | `c/` | C11, `quickstart.c` and then `cluster.c`, the cluster round, beside three cluster members that `run.sh` starts with `cavalry run`, through `run.sh` | the runner's `cc`, the static library | ADR 0051 (card 204); ADR 0122 and ADR 0123 (work item 229) |
-| `python/` | Python 3, `quickstart.py` and then `readme.py`, the example of `clients/python/README.md`, then `committed_log.py` beside one of three cluster members that `run.sh` starts with `cavalry run`, then `cluster.py`, the cluster round, beside all three, through `run.sh` over `clients/python` | the runner's `python3`, the shared library | ADR 0046 (card 205); ADR 0124 (work item 229) |
+| `python/` | Python 3, `quickstart.py` and then `readme.py`, the example of `clients/python/README.md`, then `committed_log.py` beside one of three cluster members that `run.sh` starts with `cavalry run`, then `cluster.py`, the cluster round, beside all three, then `snapshot.py`, the snapshot round, beside all three, through `run.sh` over `clients/python` | the runner's `python3`, the shared library | ADR 0046 (card 205); ADR 0124 (work item 229); ADR 0149 (work item 335) |
 | `node/` | Node, `quickstart.js` and then `readme.js`, the example of `clients/node/README.md`, then `committed_log.js` beside one of three cluster members that `run.sh` starts with `cavalry run`, then `cluster.js`, the cluster round, beside all three, through `run.sh` over `clients/node` | the runner's `node` and `npm`, whose own `node-gyp` builds the addon against the static library | ADR 0046 (card 206); ADR 0124 (work item 229) |
 | `go/` | Go, the client's own `go test` (its subscription table at the bound), then `quickstart` and then `readme`, the example of `clients/go/README.md`, then, beside one of three cluster members that `run.sh` starts with `cavalry run`, the client's one test that needs a member (a committed log's open with the table full) and `committed_log`, then `cluster`, the cluster round, beside all three, through `run.sh` over `clients/go` | the runner's `go`, whose cgo builds the client against the header and the static library | ADR 0046 (card 207); ADR 0124 (work item 229) |
 | `jvm/` | Java 25, `Quickstart.java` and then `Readme.java`, the example of `clients/jvm/README.md`, then `CommittedLogRound.java` beside one of three cluster members that `run.sh` starts with `cavalry run`, then `ClusterRound.java`, the cluster round, beside all three, through `run.sh` over `clients/jvm` | the runner's `javac` and `java`, whose `java.lang.foreign` binds the shared library when the client loads | ADR 0046 (card 208); ADR 0124 (work item 229) |
@@ -119,6 +119,41 @@ p99.99 and max over 100,000 messages, with the runtime's allocation counters off
 allocations per message on the client's side of the boundary over 10,000 more, counted
 with what the runtime counts, switched on for that round alone (clients/README.md, "What
 every client must pass").
+
+## The snapshot round
+
+The snapshot round is a runner's check of a service's snapshot and of its start from
+one (`spec/c-abi.md`, version 6, "A service's snapshot and its start";
+`spec/cluster.md`, "Snapshots"; ADR 0146, ADR 0147, ADR 0149). It runs after the
+cluster round, beside the same three members and on the log that round left, so its
+services read a term's first entry and a session's open, its messages and its close
+before the request. The Python runner has it, in
+`python/snapshot.py`, which is the shape. Each other runner gains it with its
+client's calls, in a program that its `run.sh` runs after its cluster round.
+
+A service beside each member asks where it starts and is told from the log's start,
+and a second ask is refused. Each reads an entry, and a snapshot where none is due is
+refused. Then the round runs `cavalry snapshot` beside each member: beside the leader
+it exits 0 and prints the snapshot's log position, and beside each follower it exits
+1 and names the leader. Each service's poll ends at the leader's request, with the
+snapshot due at the position the command printed and one state beside the three
+members; from inside the handler there, the read says nothing with the thread's error
+at `CAVALRY_ERR_POLLING`, and the snapshot and the start are refused with it. Each
+service gives its state, once, and is closed, since one service beside a member takes
+snapshots. The round then reads each member's listing through the client: a new
+service beside each member starts from the snapshot, with the state as it was given,
+at the snapshot's position. A service starts so only when its member lists the
+snapshot. The round asks for a second snapshot: each new service's first entry is
+that request, at the first snapshot's position, so it was handed nothing below it,
+and it gives its state, which a start beside each member is then given. Last, a
+service that never asks where it starts reads from position 0 and meets both
+requests, each with the state the other services held there, and is told at each
+that its member lists a snapshot there already. The program's state is a count of
+the entries read and a hash over them, 2,472 bytes, so that a snapshot holds it in
+three messages. The round's waits are bounded at 60 s, and a snapshot that the
+driver gave up at a step is given again. No session is open at either request: a
+snapshot that holds sessions, and a start that takes them, are held through the ABI
+by `crates/cavalry-ffi/tests/cluster_snapshot.rs`, and by no runner.
 
 ## The upgrade gate
 
