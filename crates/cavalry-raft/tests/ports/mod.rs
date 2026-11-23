@@ -4,12 +4,9 @@
 //! tests under `tests/` take it with `mod ports;`. The others take this same file by
 //! path and are what breaks, by name, if the file moves: the module's own tests,
 //! `src/module/tests.rs`, with `#[path = "../../tests/ports/mod.rs"] mod ports;`, and
-//! these, each with `#[path = "../../cavalry-raft/tests/ports/mod.rs"]`: the tests of
-//! `cavalry-ffi` that run cluster members, the conductor's unit tests in
-//! `cavalry-driver/src/conductor.rs`, six of `cavalry-client`'s tests,
-//! `armed_recording`, `destinations`, `replay`, `udp_receive`,
-//! `udp_receive_allocations` and `udp_resubscribe`, and two of `cavalry`'s,
-//! `feed_shape` and `feed_held_still`.
+//! tests of four more crates, `cavalry-client`, `cavalry-ffi`, `cavalry-driver` and
+//! `cavalry`, each with `#[path = "../../cavalry-raft/tests/ports/mod.rs"]`. `git grep
+//! -n 'cavalry-raft/tests/ports/mod.rs'` lists every one of them.
 //!
 //! # The rule
 //!
@@ -27,10 +24,24 @@
 //!   macOS.
 //! - **Another test of the same process.** Each port is chosen once in a process.
 //! - **A test of another process**, when two sessions run `just test` on one host. The
-//!   range is cut into [`SLOTS`] slots of [`SLOT`] ports. A process takes one slot by
+//!   range is cut into [`SLOTS`] slots of [`SLOT`] ports. A process takes a slot by
 //!   binding the slot's first port, keeps that socket for as long as it runs, and
-//!   chooses its ports from that slot alone. The operating system closes the socket
-//!   when the process ends, however it ends, so a slot is never left taken.
+//!   chooses its ports from the slots it holds alone. It takes one slot at its first
+//!   choice, and another only when it has tried every port of the last it took, up to
+//!   [`PER_PROCESS`] slots. The operating system closes the sockets when the process
+//!   ends, however it ends, so a slot is never left taken.
+//!
+//! # The bound, and how near a process is to it
+//!
+//! A process chooses at most [`PER_PROCESS`] × ([`SLOT`] − 1) ports: 1,996. The
+//! largest user is this crate's library, `src/module/tests.rs`, whose tests choose 475
+//! ports in one process, most of them ten for each pair of drivers; on 2026-11-23 they
+//! had nearly spent the one slot a process then held (work item 422). Each slot a process holds is
+//! a socket bound to the slot's first port, 20000 plus a multiple of 500, for as long as
+//! the process runs, so `lsof -nP -iUDP@127.0.0.1 -a -p <pid>` lists the slots a test
+//! process holds while it runs: one that holds three is within a slot of its bound. A
+//! process that has tried every port of its last slot panics and says what to change.
+//! With 24 slots, six processes can each hold four at once.
 //!
 //! # What the rule does not cover
 //!
@@ -48,7 +59,9 @@
 //!   with no test harness that chooses all its ports on its one thread before it starts
 //!   its first child; `feed_held_still` then starts a thread for each child, which reads
 //!   the child's output and creates no socket. So no socket is being created when a
-//!   child starts.
+//!   child starts. A slot's lock is such a socket too, taken at a choice: at the first,
+//!   and at the one that spends a slot. Both programs choose fewer ports than a slot
+//!   holds, all before their first child, so they take their one lock first too.
 //!   `crates/cavalry/tests/cli.rs` starts children from tests that run on several
 //!   threads, and has a rule of its own for that reason: `loopback_ports`, from 10000
 //!   to 19999, counted out and never tried.
@@ -72,6 +85,9 @@ pub const FIRST: u32 = 20_000;
 pub const SLOT: u32 = 500;
 /// The slots of the range, 24 of 500 ports: 20000 to 31999.
 pub const SLOTS: u32 = 24;
+/// The most slots one process holds: it takes the next only when it has tried every
+/// port of the last.
+pub const PER_PROCESS: usize = 4;
 
 /// A socket bound to the loopback `port`, or `None` when the port is in use.
 fn bind(port: u32) -> Option<UdpSocket> {
@@ -89,59 +105,99 @@ pub fn take_slot(first: u32, slot: u32, slots: u32, start: u32) -> Option<(u32, 
         .find_map(|base| bind(base).map(|lock| (base, lock)))
 }
 
-/// Chooses `count` ports from the slot of `slot` ports whose first port is `base`,
-/// counting on from `next`, which starts at 1 because the first port is the slot's
-/// lock. Each port is free when it is chosen and is never chosen again; a port in use
-/// is passed over and is not tried again either. The ports of one call are bound
-/// together and released together, so no two of them are the same.
-///
-/// Panics when the slot has no port left to try, and says what to do.
-pub fn choose(base: u32, slot: u32, next: &AtomicU32, count: usize) -> Vec<u16> {
-    let mut sockets = Vec::with_capacity(count);
-    while sockets.len() < count {
-        let offset = next.fetch_add(1, Ordering::Relaxed);
-        assert!(
-            offset < slot,
-            "this test process has tried all {} ports of its slot, {} to {}: each was \
-             chosen before or was in use. Give a slot more ports and the range fewer \
-             slots (SLOT and SLOTS in crates/cavalry-raft/tests/ports/mod.rs), or find \
-             the program that holds ports of this slot",
-            slot - 1,
-            base + 1,
-            base + slot - 1
-        );
-        if let Some(socket) = bind(base + offset) {
-            sockets.push(socket);
+/// The slots one process holds, at most `N`, each the first port of a slot and the
+/// socket bound to it, taken one after another as the process chooses ports; and the
+/// count of ports it has tried, across them all.
+pub struct Held<const N: usize> {
+    slots: [OnceLock<(u32, UdpSocket)>; N],
+    next: AtomicU32,
+}
+
+impl<const N: usize> Held<N> {
+    /// No slot held and no port tried.
+    pub const fn new() -> Self {
+        Self {
+            slots: [const { OnceLock::new() }; N],
+            next: AtomicU32::new(0),
         }
     }
-    sockets
-        .iter()
-        .map(|socket| socket.local_addr().expect("bound").port())
-        .collect()
+
+    /// Chooses `count` ports from slots of `slot` ports, never a slot's first port,
+    /// which is its lock. The ports are tried in order: those of the first slot held,
+    /// then of the next, which `take` takes when the first port of it is tried, and so
+    /// on to `N` slots. Each port is free when it is chosen and is never chosen again; a
+    /// port in use is passed over and is not tried again either. The ports of one call
+    /// are bound together and released together, so no two of them are the same.
+    ///
+    /// Panics when every port of the `N` slots has been tried, or when `take` finds no
+    /// slot to take, and says what to do. A call that panics for want of a slot has
+    /// spent the one try it counted, so a slot taken by a later call begins one port
+    /// further in: one port of the bound, in a process that is failing already.
+    pub fn choose(
+        &self,
+        slot: u32,
+        count: usize,
+        take: impl Fn() -> Option<(u32, UdpSocket)>,
+    ) -> Vec<u16> {
+        let ports = slot - 1;
+        let mut sockets = Vec::with_capacity(count);
+        while sockets.len() < count {
+            let tried = self.next.fetch_add(1, Ordering::Relaxed);
+            let index = usize::try_from(tried / ports).unwrap_or(usize::MAX);
+            let Some(held) = self.slots.get(index) else {
+                panic!(
+                    "this test process has tried all {} ports of its {N} slots of {ports}: \
+                     each was chosen before or was in use. Give a process more slots \
+                     (PER_PROCESS in crates/cavalry-raft/tests/ports/mod.rs), or find the \
+                     program that holds ports of its slots",
+                    u32::try_from(N).unwrap_or(u32::MAX).saturating_mul(ports)
+                )
+            };
+            let (base, _) = held.get_or_init(|| {
+                take().unwrap_or_else(|| {
+                    panic!(
+                        "every slot of test ports is taken: end the test processes that \
+                         hold them, which `lsof -nP -iUDP@127.0.0.1` lists, each with a \
+                         socket on a slot's first port (crates/cavalry-raft/tests/ports/\
+                         mod.rs)"
+                    )
+                })
+            });
+            if let Some(socket) = bind(base + tried % ports + 1) {
+                sockets.push(socket);
+            }
+        }
+        sockets
+            .iter()
+            .map(|socket| socket.local_addr().expect("bound").port())
+            .collect()
+    }
 }
 
 /// `count` loopback ports for a test's endpoints, each free when it is chosen, each
-/// chosen once in this process, and all from the slot that this process alone holds
-/// (the module's documentation has the rule and what it does not cover).
+/// chosen once in this process, and all from slots that this process alone holds
+/// (the module's documentation has the rule, its bound and what it does not cover).
 ///
-/// The process takes its slot on the first call. Its id picks the slot to try first,
-/// so that two processes seldom try the same one. A process that finds every slot
-/// taken, or that has tried all 499 ports of its slot, panics and says what to do.
+/// The process takes its first slot on the first call, and another each time it has
+/// tried every port of the last, up to [`PER_PROCESS`]. Its id picks the slot to try
+/// first, so that two processes seldom try the same one; a slot this process holds
+/// already is taken, and passed over like another process's.
 pub fn free_ports(count: usize) -> Vec<u16> {
-    static HELD: OnceLock<(u32, UdpSocket)> = OnceLock::new();
-    static NEXT: AtomicU32 = AtomicU32::new(1);
-    let (base, _) = HELD.get_or_init(|| {
-        take_slot(FIRST, SLOT, SLOTS, std::process::id() % SLOTS).unwrap_or_else(|| {
+    static HELD: Held<PER_PROCESS> = Held::new();
+    HELD.choose(SLOT, count, || {
+        let taken = take_slot(FIRST, SLOT, SLOTS, std::process::id() % SLOTS);
+        if taken.is_none() {
             panic!(
                 "every one of the {SLOTS} slots of test ports is taken: a UDP socket is \
-                 bound to 127.0.0.1 on each of {FIRST}, {}, and so on to {}. End the \
-                 test processes that hold them (crates/cavalry-raft/tests/ports/mod.rs)",
+                 bound to 127.0.0.1 on each of {FIRST}, {}, and so on to {}. End the test \
+                 processes that hold them, which `lsof -nP -iUDP@127.0.0.1` lists \
+                 (crates/cavalry-raft/tests/ports/mod.rs)",
                 FIRST + SLOT,
                 FIRST + (SLOTS - 1) * SLOT
-            )
-        })
-    });
-    choose(*base, SLOT, &NEXT, count)
+            );
+        }
+        taken
+    })
 }
 
 /// One loopback port, as [`free_ports`] chooses it.

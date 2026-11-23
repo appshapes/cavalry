@@ -1,28 +1,31 @@
 //! The rule of `tests/ports/mod.rs`, held to its numbers. One test: it first checks the
-//! slot this process holds, then tries the two bounds, every slot taken and a slot
-//! spent, in a small range of its own, the last forty ports of this process's slot.
-//! No other process chooses from those, and this process's own count does not reach
-//! them, so the test takes no slot from another test process and spends none.
+//! slot this process holds, then tries the bounds, every slot taken, a process that
+//! spends one slot and takes the next, and a process that spends all it may hold, in
+//! a small range of its own, the last forty ports of this process's slot. No other
+//! process chooses from those, and this process's own count does not reach them, so
+//! the test takes no slot from another test process and spends none.
 
 mod ports;
 
 use std::io::ErrorKind;
 use std::net::UdpSocket;
-use std::sync::atomic::AtomicU32;
 
-use ports::{FIRST, SLOT, SLOTS, choose, free_port, free_ports, take_slot};
+use ports::{FIRST, Held, SLOT, SLOTS, free_port, free_ports, take_slot};
 
 fn port(number: u32) -> u16 {
     u16::try_from(number).expect("below 32000")
 }
 
-/// A process's ports are all of the one slot it holds, never the slot's first port,
-/// and each is chosen once. A slot that is taken is passed over, the slots are tried
-/// round from the first tried, and with every slot taken there is none to take. A
-/// port in use is passed over, and a slot with no port left to try panics and names
-/// the file to change, each time (invariant 3: the bounds and what happens at them).
+/// A process's first ports are all of the one slot it holds, never the slot's first
+/// port, and each is chosen once. A slot that is taken is passed over, the slots are
+/// tried round from the first tried, and with every slot taken there is none to take.
+/// A port in use is passed over. A process that has tried every port of its slot takes
+/// the next free slot, passing over the one it holds; one that has tried every port of
+/// all the slots it may hold panics and names the file to change, each time; and one
+/// that finds no slot to take panics and says so (invariant 3: the bounds and what
+/// happens at them; work item 422).
 #[test]
-fn a_process_chooses_from_one_slot_it_holds_and_both_bounds_say_when_they_are_met() {
+fn a_process_chooses_from_the_slots_it_holds_and_each_bound_says_when_it_is_met() {
     // The slot this process holds.
     let mut chosen = free_ports(15);
     chosen.extend(free_ports(15));
@@ -60,18 +63,20 @@ fn a_process_chooses_from_one_slot_it_holds_and_both_bounds_say_when_they_are_me
     drop(second);
     assert_eq!(take().expect("slot 3 is free again").0, range + 30);
 
-    // The nine ports of slot 2, counted from 1: three chosen, one in use and passed
-    // over, the other five chosen, and then none left.
-    let slot = first.0;
-    let next = AtomicU32::new(1);
+    // A process that holds at most two slots of ten. Its first is slot 2, its first
+    // port chosen: three of the nine ports, then one in use passed over and one chosen,
+    // then the other four.
+    drop((first, third, fourth));
+    let held = Held::<2>::new();
+    let slot = range + 20;
     assert_eq!(
-        choose(slot, 10, &next, 3),
+        held.choose(10, 3, take),
         [port(slot + 1), port(slot + 2), port(slot + 3)]
     );
     let _in_use = UdpSocket::bind(("127.0.0.1", port(slot + 4))).expect("a free port");
-    assert_eq!(choose(slot, 10, &next, 1), [port(slot + 5)]);
+    assert_eq!(held.choose(10, 1, take), [port(slot + 5)]);
     assert_eq!(
-        choose(slot, 10, &next, 4),
+        held.choose(10, 4, take),
         [
             port(slot + 6),
             port(slot + 7),
@@ -79,14 +84,36 @@ fn a_process_chooses_from_one_slot_it_holds_and_both_bounds_say_when_they_are_me
             port(slot + 9)
         ]
     );
+    // Slot 2 is spent: the next port is of the next free slot, slot 3, which is taken
+    // past slot 2, held by this process now.
+    assert_eq!(held.choose(10, 1, take), [port(range + 31)]);
+    for lock in [slot, range + 30] {
+        let taken = UdpSocket::bind(("127.0.0.1", port(lock))).expect_err("a slot held");
+        assert_eq!(taken.kind(), ErrorKind::AddrInUse);
+    }
+    assert_eq!(held.choose(10, 8, take).len(), 8, "the rest of slot 3");
+    // Both slots spent: no third is taken, and the panic names the file to change.
     for _ in 0..2 {
         let spent =
-            std::panic::catch_unwind(|| choose(slot, 10, &next, 1)).expect_err("a spent slot");
+            std::panic::catch_unwind(|| held.choose(10, 1, take)).expect_err("two spent slots");
         let message = spent.downcast_ref::<String>().expect("a message");
         assert!(
-            message.contains("tried all 9 ports of its slot")
-                && message.contains("crates/cavalry-raft/tests/ports/mod.rs"),
+            message.contains("tried all 18 ports of its 2 slots of 9")
+                && message.contains("PER_PROCESS in crates/cavalry-raft/tests/ports/mod.rs"),
             "{message}"
         );
     }
+    // No slot to take at all: the panic says so.
+    let none = Held::<1>::new();
+    let found = std::panic::catch_unwind(|| none.choose(10, 1, || None)).expect_err("no slot");
+    // A message with nothing formatted into it panics with a `&str`.
+    let message = found
+        .downcast_ref::<String>()
+        .map(String::as_str)
+        .or_else(|| found.downcast_ref::<&str>().copied())
+        .expect("a message");
+    assert!(
+        message.contains("every slot of test ports is taken"),
+        "{message}"
+    );
 }
