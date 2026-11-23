@@ -92,26 +92,27 @@ branch locally; GitHub has already deleted it on origin.
   a review to start the loop again.
 - **"Fix session ended without a push landing ... and without a change to the pull
   request body."** The fixer's run ended with nothing it could show: no commit reached
-  the branch and the body is as the review found it. The run says so in a comment on
-  the pull request, which hands the review's blockers to you, and when a session ran,
-  the fixer's own comment says what it did. Its step "What the session did with the Bash tool" lists the programs of
-  each command the session ran or was denied, the bound it asked for, whether a result
-  said a command had moved to the background, and the tools it was denied, each by a
-  known name or as `(other)`. A session that ended its turn with a gate still running
-  ended the run with it: before work item 409, a gate that outran the Bash tool's bound of
-  120 s moved to the background, and two fix runs on 2026-11-22 ended so with nothing
-  pushed. The workflow now gives a command 20 minutes and turns background commands off,
-  so a gate past that is stopped and the session says so in its comment. On a pull request that changes `.github/workflows/claude.yml`, the
-  fixer does not run at all: the action takes its token only for a workflow file that
-  matches the default branch's, logs "Skipping action due to workflow validation", and
-  the run ends in this case within a minute. A blocker the fixer may not apply is yours: one under `.github/workflows/`
-  or `.claude/`, one in `bench/baseline.json`, or one in a page of `spec/` that no
-  Accepted ADR the branch adds names
+  the branch and the body is as the review found it. The run says so in a comment on the
+  pull request, which hands the review's blockers to you, and when a session ran, the
+  fixer's own comment says what it did. The run's step "What the session did with the
+  Bash tool" lists the programs of each command the session ran or was denied, the bound
+  it asked for, whether a result said a command had moved to the background, and the
+  tools it was denied, each by a known name or as `(other)`. A session that ended its
+  turn with a gate still running ended the run with it: before work item 409, a gate
+  that outran the Bash tool's bound of 120 s moved to the background, and two fix runs
+  on 2026-11-22 ended so with nothing pushed. The workflow now gives a command 20
+  minutes and turns background commands off, so a gate past that is stopped and the
+  session says so in its comment. On a pull request that changes
+  `.github/workflows/claude.yml`, the fixer does not run at all: the action takes its
+  token only for a workflow file that matches the default branch's, logs "Skipping
+  action due to workflow validation", and the run ends in this case within a minute. A
+  blocker the fixer may not apply is yours: one under `.github/workflows/` or
+  `.claude/`, one in `bench/baseline.json`, or one in a page of `spec/` that no Accepted
+  ADR the branch adds names
   ([ADR 0140](../decisions/0140-let-the-fixer-write-a-spec-page-that-an-accepted-adr-on-its-branch-names.md)).
-  Apply it and push, and the push starts the
-  review. A fixer run that ended early with some blockers done is not this case: it
-  pushed those as commits, its comment says which gates ran on the head it left, and
-  the review of that head lists what is left.
+  Apply it and push, and the push starts the review. A fixer run that ended early with
+  some blockers done is not this case: it pushed those as commits, its comment says
+  which gates ran on the head it left, and the review of that head lists what is left.
 - **The fixer's push has no gates.** The `claude` run that pushed a fix ends in a
   failure, in its job `approve-fixer-runs`, step "Approve the runs GitHub held on the
   fixer's push", and no review of the push starts. GitHub holds the `ci` run of every
