@@ -241,8 +241,10 @@ first_port=$(( ($$ * 2654435761) % 10000 ))
 control="127.0.0.1:$(( 10000 + (first_port + 40) % 10000 ))"
 own="127.0.0.1:$(( 10000 + (first_port + 41) % 10000 ))"
 
-# The answers of a feed process: the lines that end a command's answer.
-answers='^\(open\|appended\|read\|released\|held\|ended\|failed\)\( \|$\)'
+# The answers of a feed process: the lines that end a command's answer, one for each
+# command of crates/cavalry/tests/feed/process.rs. An extended regular expression, which
+# `counted`, `answered` and `lines` all take from here.
+answers='^(open|appended|read|released|held|ended|failed|padded|synced|longest)( |$)'
 # The feed process the script talks to: its output file, how many answers the script
 # has read from it, and the last one.
 feed_out=""
@@ -273,7 +275,7 @@ start_feed() {
 # which it opens just after its input.
 counted() {
     local count
-    count=$(grep -c -- "$answers" "$feed_out" 2>/dev/null || true)
+    count=$(grep -c -E -- "$answers" "$feed_out" 2>/dev/null || true)
     echo "${count:-0}"
 }
 # Waits for the feed process's next answer and sets `answer` to it; `$1` is what is
@@ -292,7 +294,7 @@ answered() {
         [ "$SECONDS" -lt "$deadline" ] || fail "waited 60 s for $1; the feed's process said: $(cat "$feed_out" 2>/dev/null)"
         sleep 0.05
     done
-    answer=$(grep -- "$answers" "$feed_out" | sed -n "${feed_answers}p")
+    answer=$(grep -E -- "$answers" "$feed_out" | sed -n "${feed_answers}p")
 }
 # Sends the feed process command `$1` and waits for its answer, which must begin with
 # the word `$2`; sets `answer` to the rest of it.
@@ -308,8 +310,8 @@ ask() {
 # The lines of the feed process's last answer that begin with the word `$1`: its
 # `record` lines, or its `note` lines.
 lines() {
-    awk -v last="$feed_answers" -v want="$1 " '
-        /^(open|appended|read|released|held|ended|failed)( |$)/ { seen++; next }
+    awk -v last="$feed_answers" -v want="$1 " -v answers="$answers" '
+        $0 ~ answers { seen++; next }
         seen == last - 1 && index($0, want) == 1 { print }
     ' "$feed_out"
 }
