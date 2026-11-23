@@ -35,7 +35,6 @@ under `docs/` is listed here; `just lint-docs` fails on one that is not.
 - [Change a call that Brigade's server makes](how-to/change-a-call-that-brigades-server-makes.md)
 - [Read the nightly run of Brigade's server](how-to/read-the-nightly-run-of-brigades-server.md)
 - [Ask a cluster for a snapshot](how-to/ask-for-a-snapshot.md)
-- [Take a snapshot of a service's state](how-to/take-a-services-snapshot.md)
 
 # Reference
 

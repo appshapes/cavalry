@@ -119,12 +119,7 @@ their own.
 - A second read, of that second form, found no way for the round to fail beside a
   cluster that holds no election and none for it to pass over a broken start, and
   found what the round does not hold: a snapshot with sessions in it, which
-  `crates/cavalry-ffi/tests/cluster_snapshot.rs` holds through the ABI. It also found
-  the how-to's program run by no gate, so `conformance/python/howto.py` runs it as
-  the page's steps do, beside three members of its own, and fails unless it prints
-  the page's three lines: `started at position 0 with a total of 0`, `snapshot at
-  position 192: written True` and, run again, `started at position 192 with a total
-  of 0`.
+  `crates/cavalry-ffi/tests/cluster_snapshot.rs` holds through the ABI.
 - `clients/lint.py` finds no lock, no raise and no allocation in the per-message
   functions as before. None of the three calls is bound as a per-message function:
   `snapshot` and `restore` wait for the driver, and `snapshot_due`, which a loop asks
@@ -138,9 +133,9 @@ their own.
   READMEs says that its service has no such call.
 - A program holds its state twice while it starts: the handle's bytes until its
   first poll, and its own copy.
-- `docs/how-to/take-a-services-snapshot.md` shows the three calls in a Python
-  program, which is work item 335's "the tutorial or a how-to shows a service's
-  snapshot in one client language".
+- A how-to that shows the three calls in a Python program follows in a change of
+  its own, with a gate that runs its program as its steps do: work item 335's "the
+  tutorial or a how-to shows a service's snapshot in one client language".
 - Revisit: when a state does not fit memory twice, with ADR 0146's call that gives
   the state in pieces; when a client reads counters, for a round that reads the
   member's listing directly.

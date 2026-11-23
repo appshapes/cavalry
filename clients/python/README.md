@@ -246,8 +246,7 @@ can wait a switch interval, 5 ms by default, to take the GIL back after each pol
 program with such a thread has its handler note an entry whose `type` is
 `CAVALRY_CLUSTER_ENTRY_SNAPSHOT`, and asks `snapshot_due` after a poll only then.
 `conformance/python/snapshot.py` is a program that runs every call above beside
-three members, and [Take a snapshot of a service's state](../../docs/how-to/take-a-services-snapshot.md)
-is the task from its start.
+three members.
 
 ## What it must never do
 

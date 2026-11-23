@@ -137,13 +137,3 @@ python3 conformance/python/snapshot.py "$cluster" target/release/cavalry || {
     cat "$cluster"/member-*.out >&2 || true
     exit 1
 }
-
-# The how-to's program, as its page's steps run it, beside three members of its own:
-# the round's members list a snapshot whose state is the round's, not the page's. Its
-# fifteen ports are counted on from the sixteen above.
-echo "conformance/python: run docs/how-to/take-a-services-snapshot.md's program beside three members of its own"
-python3 conformance/python/howto.py target/release/cavalry "$cluster/how-to" "$(( start + 16 ))" || {
-    echo "conformance/python: howto.py failed; its members said:" >&2
-    cat "$cluster"/how-to/member-*.out >&2 || true
-    exit 1
-}

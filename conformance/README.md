@@ -106,10 +106,6 @@ driver gave up at a step is given again. No session is open at either request: a
 snapshot that holds sessions, and a start that takes them, are held through the ABI
 by `crates/cavalry-ffi/tests/cluster_snapshot.rs`, and by no runner.
 
-The Python runner then runs the program of `docs/how-to/take-a-services-snapshot.md`
-as that page's steps do, in `python/howto.py`, beside three members of its own, and
-fails unless the program prints the three lines the page says a reader will see.
-
 The Node round is the Python round through `clients/node`, with three edges of its
 own. A service's handler that returns a promise, as an `async` handler does, has its
 entry aborted as one that returns 3 has, and so has one that returns `true`, where
