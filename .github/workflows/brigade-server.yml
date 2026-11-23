@@ -4,7 +4,8 @@
 # Brigade is the tool the team's people and their Claude Code sessions message each other
 # with, in the public repository appshapes/brigade. Its server, the Rust workspace under
 # `server/` there, embeds Cavalry's driver from a git dependency pinned to one commit,
-# and two teams' servers run that build. This workflow takes Brigade's `master`, points
+# and two teams' servers run a release of it built at an earlier commit than `master`'s
+# pin. This workflow takes Brigade's `master`, points
 # its server at this repository's tree in place of the pin
 # (scripts/brigade-server-patch.py), and runs Brigade's own target for the server's
 # tests, `make server-test`: the server's Rust tests, Brigade's conformance suite against

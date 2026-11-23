@@ -16,10 +16,12 @@
 # N+1 is this tree as it stands, built into target/release. N is a commit:
 #
 # - CAVALRY_DIRECTORY_FROM, when it is set: a hash, a tag or a branch.
-# - Otherwise 620a2e29e04751c7a1f930132666f85b3dd58e7a, the commit Brigade's server
-#   pins (`server/crates/brigade-log/Cargo.toml` of github.com/appshapes/brigade).
-#   ADR 0141 says when this line changes: when the servers in production run another
-#   tree.
+# - Otherwise 620a2e29e04751c7a1f930132666f85b3dd58e7a, the commit that the servers
+#   in production run: the pin of Brigade's server 0.9.0, its tag `server-v0.9.0` of
+#   github.com/appshapes/brigade (`server/crates/brigade-log/Cargo.toml`). Server
+#   0.10.0 and Brigade's `master` pin later commits, which no server in production
+#   runs yet. ADR 0141 says when this line changes: when the servers in production
+#   run another tree.
 #
 # N's tree is exported with `git archive` to target/upgrade/<N's first 8 hex
 # digits>/src and built into target/upgrade/<the same>/target, as
@@ -27,14 +29,14 @@
 # and one example: `cavalry` and `feed-directory`. N has no such example. The script
 # copies this tree's crates/cavalry/examples/feed-directory.rs and
 # crates/cavalry/tests/feed/ into N's exported tree and builds them there: the feed's
-# files use the calls of 620a2e29 and no later one, which is what makes them the
-# server's. So this script also fails, at its second build, when those files stop
-# compiling against N; step 2's message says what to do then.
+# files use the calls of 620a2e29 and no later one, as the server's own file does in
+# its releases 0.9.0 and 0.10.0. So this script also fails, at its second build, when
+# those files stop compiling against N; step 2's message says what to do then.
 #
 # The schedule, once for a directory whose last run was stopped and once for one whose
 # last run was killed
 #
-# a. N writes the directory, in the shape the server is pinned to. A first run appends
+# a. N writes the directory, in the pinned shape, server 0.9.0's. A first run appends
 #    six records and stops. A second run appends five, releases what a snapshot at the
 #    first run's end covers, appends five more, releases again and appends four. Each
 #    release rolls the feed, and the two purge recordings 0 and 1. The second run is
@@ -42,10 +44,12 @@
 #    its last recording live in the catalog.
 # b. `cavalry run` of N+1 starts on the directory as N left it. `cavalry replay` of
 #    N+1 plays each recording that is left, from its start to the position N answered.
-# c. N+1's feed, in the pinned shape, begins at the last position N answered, reads
-#    back every record N appended from the oldest recording kept, each at its
-#    position, is refused a read from before that, and appends five records.
-# d. N+1's feed, in the shape the server moves to, `ssc=true` with `term-length=1m`,
+# c. N+1's feed, in the pinned shape, begins at the last position N answered. It read
+#    N's catalog before its driver started, as server 0.10.0 does to size its room,
+#    and found terms of 16 MiB. It reads back every record N appended from the oldest
+#    recording kept, each at its position, is refused a read from before that, and
+#    appends five records.
+# d. N+1's feed, in the shape server 0.10.0 moved to, `ssc=true` with `term-length=1m`,
 #    begins where c ended, reads back N's records and c's, and appends five records.
 # e. N+1's feed begins where d ended and reads back all of it: recordings that two
 #    builds wrote, in terms of two lengths.
@@ -187,14 +191,14 @@ await() {
 
 if [ -n "${CAVALRY_DIRECTORY_FROM:-}" ]; then
     from=$(git rev-parse --verify --quiet "$CAVALRY_DIRECTORY_FROM^{commit}") \
-        || fail "CAVALRY_DIRECTORY_FROM is \`$CAVALRY_DIRECTORY_FROM\`, which names no commit of this repository; give a hash, a tag or a branch that \`git rev-parse\` resolves, or unset it to take the commit Brigade's server pins"
+        || fail "CAVALRY_DIRECTORY_FROM is \`$CAVALRY_DIRECTORY_FROM\`, which names no commit of this repository; give a hash, a tag or a branch that \`git rev-parse\` resolves, or unset it to take the commit Brigade's server 0.9.0 pins"
     how="named by CAVALRY_DIRECTORY_FROM"
 elif from=$(git rev-parse --verify --quiet "$pinned^{commit}"); then
-    how="the commit Brigade's server pins"
+    how="the commit Brigade's server 0.9.0 pins"
 elif [ "$(git rev-parse --is-shallow-repository)" = true ]; then
-    fail "this repository's history is shallow and does not hold $pinned, the commit Brigade's server pins; fetch the whole history, \`git fetch --unshallow\`, or fetch-depth: 0 in the workflow's actions/checkout, and run this again"
+    fail "this repository's history is shallow and does not hold $pinned, the commit Brigade's server 0.9.0 pins; fetch the whole history, \`git fetch --unshallow\`, or fetch-depth: 0 in the workflow's actions/checkout, and run this again"
 else
-    fail "this repository does not hold $pinned, the commit Brigade's server pins and a commit of master's history; fetch master, \`git fetch origin master\`, and run this again"
+    fail "this repository does not hold $pinned, the commit Brigade's server 0.9.0 pins and a commit of master's history; fetch master, \`git fetch origin master\`, and run this again"
 fi
 short=${from:0:8}
 older="$repo/target/upgrade/$short"
@@ -237,8 +241,10 @@ first_port=$(( ($$ * 2654435761) % 10000 ))
 control="127.0.0.1:$(( 10000 + (first_port + 40) % 10000 ))"
 own="127.0.0.1:$(( 10000 + (first_port + 41) % 10000 ))"
 
-# The answers of a feed process: the lines that end a command's answer.
-answers='^\(open\|appended\|read\|released\|held\|ended\|failed\)\( \|$\)'
+# The answers of a feed process: the lines that end a command's answer, one for each
+# command of crates/cavalry/tests/feed/process.rs. An extended regular expression, which
+# `counted`, `answered` and `lines` all take from here.
+answers='^(open|appended|read|released|held|ended|failed|padded|synced|longest)( |$)'
 # The feed process the script talks to: its output file, how many answers the script
 # has read from it, and the last one.
 feed_out=""
@@ -269,7 +275,7 @@ start_feed() {
 # which it opens just after its input.
 counted() {
     local count
-    count=$(grep -c -- "$answers" "$feed_out" 2>/dev/null || true)
+    count=$(grep -c -E -- "$answers" "$feed_out" 2>/dev/null || true)
     echo "${count:-0}"
 }
 # Waits for the feed process's next answer and sets `answer` to it; `$1` is what is
@@ -288,7 +294,7 @@ answered() {
         [ "$SECONDS" -lt "$deadline" ] || fail "waited 60 s for $1; the feed's process said: $(cat "$feed_out" 2>/dev/null)"
         sleep 0.05
     done
-    answer=$(grep -- "$answers" "$feed_out" | sed -n "${feed_answers}p")
+    answer=$(grep -E -- "$answers" "$feed_out" | sed -n "${feed_answers}p")
 }
 # Sends the feed process command `$1` and waits for its answer, which must begin with
 # the word `$2`; sets `answer` to the rest of it.
@@ -304,8 +310,8 @@ ask() {
 # The lines of the feed process's last answer that begin with the word `$1`: its
 # `record` lines, or its `note` lines.
 lines() {
-    awk -v last="$feed_answers" -v want="$1 " '
-        /^(open|appended|read|released|held|ended|failed)( |$)/ { seen++; next }
+    awk -v last="$feed_answers" -v want="$1 " -v answers="$answers" '
+        $0 ~ answers { seen++; next }
         seen == last - 1 && index($0, want) == 1 { print }
     ' "$feed_out"
 }
@@ -406,6 +412,8 @@ for ending in stopped killed; do
     step="c ($ending: N+1's feed in the pinned shape)"
     start_feed newer pinned "N+1-pinned"
     [ "$answer" = "$written" ] || fail "N+1's feed begins at position $answer on the directory N wrote, and N's last record answered ends at $written"
+    ask "longest" "longest"
+    [ "$answer" = 16777216 ] || fail "N+1's feed read N's catalog before its driver started and found $answer bytes as the longest term of a recording there, and N recorded each one in terms of 16 MiB, 16777216 bytes"
     reads_back "$kept_from" "N+1's feed, in the pinned shape,"
     from_n=$read_count
     echo "read 0" >&3
@@ -415,12 +423,12 @@ for ending in stopped killed; do
     append 20 5
     pinned_to=$position
     end_feed
-    say "c. $ending: N+1's feed, in the pinned shape, began at $written, read back the $from_n records N left from position $kept_from, each at its position, was refused position 0, and appended 5 records to position $pinned_to"
+    say "c. $ending: N+1's feed, in the pinned shape, began at $written, found terms of 16 MiB in N's catalog before its driver started, read back the $from_n records N left from position $kept_from, each at its position, was refused position 0, and appended 5 records to position $pinned_to"
 
-    step="d ($ending: N+1's feed in the shape the server moves to)"
+    step="d ($ending: N+1's feed in the shape the server moved to)"
     start_feed newer moved-to "N+1-moved-to"
-    [ "$answer" = "$pinned_to" ] || fail "N+1's feed, in the shape the server moves to, begins at position $answer, and the feed ended at $pinned_to"
-    reads_back "$kept_from" "N+1's feed, in the shape the server moves to,"
+    [ "$answer" = "$pinned_to" ] || fail "N+1's feed, in the shape the server moved to, begins at position $answer, and the feed ended at $pinned_to"
+    reads_back "$kept_from" "N+1's feed, in the shape the server moved to,"
     append 25 5
     moved_to=$position
     end_feed

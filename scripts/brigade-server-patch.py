@@ -6,7 +6,7 @@ Brigade is the tool the team's people and their Claude Code sessions message eac
 with, in the repository `appshapes/brigade`. Its server, the Rust workspace under
 `server/` there, embeds Cavalry's driver: it takes the crates `cavalry` and
 `cavalry-log` from this repository by git, pinned to one commit, and two teams' servers
-run that build. A change on `master` here that breaks what the server calls would
+run a release of it built at an earlier commit than `master`'s pin. A change on `master` here that breaks what the server calls would
 otherwise be seen on the day Brigade moves its pin. The nightly job
 `.github/workflows/brigade-server.yml` builds the server against `master` instead and
 runs Brigade's own tests of it. This script is the step of that job that makes the

@@ -6,6 +6,11 @@
 //! of `just test` first. `docs/explanation/what-brigades-server-relies-on.md` lists
 //! the calls and says what to do when one must change.
 //!
+//! The file it copies is the one Brigade released as its server 0.10.0: the tag
+//! `server-v0.10.0`, Brigade's commit 020dc2fd (work item 410). `git log 020dc2fd.. --
+//! server/crates/brigade-log/src/feed.rs` in Brigade's repository lists what changed
+//! there since.
+//!
 //! The imports below are the server's own: the client and the driver from `cavalry`,
 //! and the catalog's reader from `cavalry-log`, because the client lists no recordings.
 //!
@@ -24,8 +29,8 @@
 //! - A client that the driver closed is replaced by a new one, and the feed goes on
 //!   where its recording stopped.
 //!
-//! [`Shape`] is the one thing the server changes between the Cavalry it is pinned to
-//! and the one it moves to.
+//! [`Shape`] is the one thing the server changed between the Cavalry of its release
+//! 0.9.0 and that of 0.10.0.
 
 // Each test program that takes this module uses a part of it.
 #![allow(dead_code)]
@@ -36,8 +41,8 @@ use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
 use cavalry::{
-    Cavalry, Driver, Flags, Image, NULL_LENGTH, Offer, Publication, Recording, ReplayStopReason,
-    Subscription,
+    Cavalry, Driver, Flags, Image, NULL_LENGTH, Offer, Publication, Recording, Replay,
+    ReplayStopReason, Subscription,
 };
 use cavalry_log::catalog::CatalogReader;
 use cavalry_log::layout::State;
@@ -65,19 +70,22 @@ pub struct Shape {
     pub own_subscription: bool,
 }
 
-/// The shape of the server at its pin, 620a2e29: a publication with no connected
-/// receiver refuses every offer and a recording does not count as one, so the server
-/// subscribes to its own feed, added as a destination; and a channel names no term
-/// length, so a log is three terms of 16 MiB.
+/// The shape of Brigade's server 0.9.0 and of every release before it, which pin
+/// Cavalry at 620a2e29 and which the servers in production run: a publication with no
+/// connected receiver refuses every offer and a recording does not count as one, so the
+/// server subscribes to its own feed, added as a destination; and a channel names no
+/// term length, so a log is three terms of 16 MiB. The log directories those servers
+/// keep hold recordings of this shape.
 pub const PINNED: Shape = Shape {
     channel_keys: "",
     term_length: 16 << 20,
     own_subscription: true,
 };
 
-/// The shape the server moves to: the recording connects the publication (`ssc=true`,
-/// ADR 0098) and the channel names terms of 1 MiB (`term-length`, ADR 0099), so the
-/// server reads no feed of its own.
+/// The shape the server moved to in its release 0.10.0, which pins Cavalry at
+/// d265af82: the recording connects the publication (`ssc=true`, ADR 0098) and the
+/// channel names terms of 1 MiB (`term-length`, ADR 0099), so the server reads no feed
+/// of its own.
 pub const MOVED_TO: Shape = Shape {
     channel_keys: "|ssc=true|term-length=1m",
     term_length: 1 << 20,
@@ -110,6 +118,11 @@ pub struct Recorded {
     pub start: i64,
     /// Where it stopped; `None` while it is live.
     pub stop: Option<i64>,
+    /// The term length it was recorded with, which is the shape of the feed that wrote
+    /// it. The server asks its driver directory's file system for the room that a log of
+    /// the longest of these needs, because a replay's log has the terms of its
+    /// recording.
+    pub term_length: u64,
 }
 
 /// The feed's publication, its recording and what keeps it connected. All of it
@@ -135,6 +148,43 @@ pub struct FeedLog {
     max_record_bytes: usize,
     /// What the operator should be told, until the caller asks.
     notes: Vec<String>,
+    /// How a read back learns that a replay ended.
+    ended: Ended,
+    /// The longest term that a recording in the catalog had when the feed opened,
+    /// read before the driver started: what the server sizes its room by.
+    longest_term: u64,
+}
+
+/// How a reader learns that a replay ended: the replay's own word, asked with whether
+/// the replay's image is still in sight. The server asks the replay and nothing else. A
+/// test asks late, as a driver can make a client learn it: `replay stopped` may reach
+/// the client after the driver has withdrawn the image.
+pub type Ended = fn(&Replay, bool) -> Option<(i64, Option<ReplayStopReason>)>;
+
+/// The replay's own word, whenever it is asked: how the server learns it.
+pub fn as_the_replay_says(
+    replay: &Replay,
+    _in_sight: bool,
+) -> Option<(i64, Option<ReplayStopReason>)> {
+    replay.ended()
+}
+
+/// `replay stopped` as it can reach a client: only after the driver has withdrawn the
+/// replay's image. The server does not use this; a test gives it to
+/// [`FeedLog::learn_a_replays_end_by`].
+pub fn told_after_the_image_went(
+    replay: &Replay,
+    in_sight: bool,
+) -> Option<(i64, Option<ReplayStopReason>)> {
+    if in_sight { None } else { replay.ended() }
+}
+
+/// The image of one session on a subscription, while the subscription holds it.
+fn image_of(subscription: &Subscription, session: i32) -> Option<&Image> {
+    subscription
+        .images()
+        .iter()
+        .find(|image| image.session_id() == session)
 }
 
 fn failed(doing: &str, error: impl std::fmt::Display) -> String {
@@ -158,6 +208,7 @@ pub fn recordings(log_dir: &Path) -> Result<Vec<Recorded>, String> {
                 id,
                 start: descriptor.start_position(),
                 stop,
+                term_length: u64::try_from(descriptor.term_length()).unwrap_or(0),
             });
         }
     }
@@ -238,6 +289,21 @@ impl FeedLog {
     /// Starts the driver, connects to it and adds the feed where its last recording
     /// stopped.
     pub fn open(options: &FeedOptions) -> Result<Self, String> {
+        // The server asks its driver directory's file system for room before the driver
+        // opens the log directory, because a driver changes a directory as it opens
+        // it. It sizes the room for the longest term a recording has, from the catalog,
+        // also the catalog of a directory an earlier tree wrote. A directory with no
+        // catalog yet holds no recording, and the server takes any catalog it cannot
+        // read as one with no recording too: the copy does the same. The room itself
+        // is the file system's, and not Cavalry's, so the copy reads the catalog and
+        // asks no more. `conformance/upgrade/log-directory.sh` asks for the longest
+        // term on a directory that the tree at 620a2e29 wrote.
+        let longest_term = recordings(&options.log_dir).map_or(0, |held| {
+            held.iter()
+                .map(|recorded| recorded.term_length)
+                .max()
+                .unwrap_or(0)
+        });
         let driver = Driver::start(&options.driver_dir, &options.log_dir)
             .map_err(|error| failed("starting the Cavalry driver", error))?;
         let mut client = Cavalry::connect_to(&options.driver_dir)
@@ -253,7 +319,15 @@ impl FeedLog {
             end: begin,
             max_record_bytes,
             notes: Vec::new(),
+            ended: as_the_replay_says,
+            longest_term,
         })
+    }
+
+    /// The longest term that a recording in the catalog had when the feed opened, read
+    /// before the driver started; 0 for a directory with no recording.
+    pub fn longest_term(&self) -> u64 {
+        self.longest_term
     }
 
     /// Where this run's recording began.
@@ -368,6 +442,110 @@ impl FeedLog {
         self.begin = stopped_at;
         self.end = stopped_at;
         Ok(stopped_at)
+    }
+
+    /// Has every later read back learn that a replay ended by `ended`, in place of the
+    /// replay's own word. The server does not call this: a test gives it
+    /// [`told_after_the_image_went`].
+    pub fn learn_a_replays_end_by(&mut self, ended: Ended) {
+        self.ended = ended;
+    }
+
+    /// Appends records from number `first` on, up to the last kilobytes of the term the
+    /// feed ends in, and then writes that term's padding: one offer more, of the longest
+    /// record the feed takes, which the term has no room for. The offer is not made
+    /// again. Returns each record appended with the position after it, once the
+    /// recorder has written the padding and the recording stands at the term's end.
+    ///
+    /// The server does not call this. It is the moment after an offer met the end of a
+    /// term and before the offer was made again, in which the feed's last frame is
+    /// padding that no reader's handler is given. A stop or a close in that moment
+    /// leaves a recording that ends in padding (Brigade's work item 375), and a kill
+    /// leaves one only once a sync has covered the padding.
+    pub fn append_up_to_a_terms_padding(
+        &mut self,
+        first: u64,
+    ) -> Result<Vec<(Vec<u8>, i64)>, String> {
+        let term = i64::try_from(self.options.shape.term_length).unwrap_or(i64::MAX);
+        let term_end = (self.end / term + 1) * term;
+        let max = self.max_record_bytes;
+        let mut appended = Vec::new();
+        // Records of three sizes, each while the term has more room left than the
+        // next size down needs, so that a term of 16 MiB takes few syncs; the last
+        // leaves less room than the longest record. Every size is within what the feed
+        // takes as one record at either term length.
+        for (length, room) in [
+            ((1 << 20).min(max), 3 << 20),
+            ((64 << 10).min(max), 256 << 10),
+            ((16 << 10).min(max), 64 << 10),
+        ] {
+            while term_end - self.end > room {
+                let number = first + appended.len() as u64;
+                let records = [record(number, length)];
+                let after = self.append(&records)?;
+                let [records] = records;
+                appended.push((records, after[0]));
+            }
+        }
+        let (Some(feed), Some(client)) = (&mut self.feed, &mut self.client) else {
+            return Err("the feed is closed".to_owned());
+        };
+        let too_long = vec![7_u8; max];
+        let deadline = Instant::now() + PATIENCE;
+        loop {
+            match feed.publication.offer(&too_long) {
+                Err(Offer::AdminAction) => break,
+                Err(Offer::NotConnected | Offer::BackPressured) if Instant::now() < deadline => {
+                    drain(feed);
+                    std::thread::sleep(Duration::from_micros(200));
+                }
+                Ok(after) => {
+                    return Err(format!(
+                        "the offer at the term's end was taken, and ends at {after}: the term \
+                         had room for it"
+                    ));
+                }
+                Err(refusal) => {
+                    return Err(failed("the offer at the term's end", refusal.reason()));
+                }
+            }
+        }
+        while feed.recording.position() < term_end {
+            if client.is_closed() || Instant::now() > deadline {
+                return Err(format!(
+                    "the recorder did not reach the padding at {term_end}: it stands at {}",
+                    feed.recording.position()
+                ));
+            }
+            drain(feed);
+            std::thread::sleep(Duration::from_micros(200));
+        }
+        Ok(appended)
+    }
+
+    /// Waits until a sync of the feed's recording covers `position`, and returns the
+    /// position the syncs cover. No append asks for a sync past its last record, so
+    /// past that it is the recorder's own: a second after the recording's last sync,
+    /// while it holds bytes that no sync covers (`spec/client-protocol.md`, "Liveness
+    /// and timeouts").
+    ///
+    /// The server does not call this.
+    pub fn synced_to(&mut self, position: i64) -> Result<i64, String> {
+        let Some(feed) = &mut self.feed else {
+            return Err("the feed is closed".to_owned());
+        };
+        let deadline = Instant::now() + PATIENCE;
+        while feed.recording.synced_position() < position {
+            if Instant::now() > deadline {
+                return Err(format!(
+                    "no sync covered position {position}: the syncs cover {}",
+                    feed.recording.synced_position()
+                ));
+            }
+            drain(feed);
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        Ok(feed.recording.synced_position())
     }
 
     /// Ends the feed's recording and begins the next one where it stopped, with no
@@ -521,6 +699,7 @@ impl FeedLog {
         from: i64,
         stop: i64,
         each: &mut dyn FnMut(&[u8], i64),
+        ended: Ended,
     ) -> Result<i64, String> {
         let doing = "reading the feed back";
         let replay = client
@@ -538,20 +717,25 @@ impl FeedLog {
         let mut heard = Instant::now();
         // The position after the last frame this reader was handed.
         let mut delivered = from;
+        // The furthest the replay's image has stood in any pass of the loop below. The
+        // image's own position counts the padding at a term's end, which reaches no
+        // handler, so for a recording that ends in padding it is the only thing that
+        // says the end was read. It is kept across the passes because the two things a
+        // reader waits for can come apart: the driver withdraws a replay's image once
+        // it has been read to the end of stream, and `replay stopped` can reach this
+        // client after that (`Replay::ended`). Until Brigade's work item 375 the reader
+        // looked for the image and the end in one pass, found neither in that order,
+        // and failed the start on a recording that was whole.
+        let mut stood = from;
         loop {
             // The images first, so that the replay's position arithmetic is in hand
             // before its frames.
             subscription
                 .poll(|_, _| {}, 0)
                 .map_err(|error| failed(doing, error))?;
-            let image = subscription
-                .images()
-                .iter()
-                .find(|image| image.session_id() == session);
             if arithmetic.is_none() {
-                arithmetic = image.map(Image::positions);
+                arithmetic = image_of(subscription, session).map(Image::positions);
             }
-            let (reached, in_sight) = (image.map(Image::position), image.is_some());
             let mut read = 0;
             if let Some(positions) = &arithmetic {
                 read = subscription
@@ -588,25 +772,29 @@ impl FeedLog {
                     )
                     .map_err(|error| failed(doing, error))?;
             }
+            // Where the image stands is read here, after the frames and before any other
+            // poll. The poll above is what takes the image past a padding frame, and an
+            // image leaves a subscription only inside a poll, so an image the driver
+            // withdraws next is still seen here at its last position. Read before the
+            // frames instead, a withdrawal that lands between that poll and the next
+            // pass would hide the end.
+            let image = image_of(subscription, session);
+            let in_sight = image.is_some();
+            if let Some(image) = image {
+                stood = stood.max(image.position());
+            }
             if read > 0 {
                 heard = Instant::now();
                 continue;
             }
-            if let Some((end, reason)) = replay.ended() {
-                // As the server has it, and with its gap. `Replay::ended` asks a reader
-                // to keep the image's position from each poll; this one keeps the
-                // frames' alone, and reads the image's in this pass only. A recording
-                // that ends in padding is so read to its end only while the image is
-                // still in sight: the page's "What does not hold".
-                //
+            if let Some((end, reason)) = ended(&replay, in_sight) {
                 // The replay is read to its end when the last frame handed over ends
-                // there, or the image stands there: the image's own position counts
-                // the padding that reaches no handler. Nothing else is the end. An
-                // image that is not in sight yet has delivered nothing, and one that
-                // has gone may have gone unread: the driver lets go of a replay's
-                // image a few seconds after the replay stops, whether or not its
-                // subscriber read it.
-                if delivered >= end || reached.is_some_and(|reached| reached >= end) {
+                // there, or the image has stood there in this pass or an earlier one.
+                // Nothing else is the end. An image that is not in sight yet has
+                // delivered nothing, and one that has gone may have gone unread: the
+                // driver lets go of a replay's image a few seconds after the replay
+                // stops, whether or not its subscriber read it.
+                if delivered >= end || stood >= end {
                     return match reason {
                         Some(ReplayStopReason::Ended) | None if end >= stop => Ok(end),
                         _ => Err(format!(
@@ -618,9 +806,10 @@ impl FeedLog {
                 }
                 if arithmetic.is_some() && !in_sight {
                     return Err(format!(
-                        "the replay of recording {} was let go of at position {delivered}, \
-                         before it was read to its end at {end}",
-                        recorded.id
+                        "the replay of recording {} was let go of at position {}, before it \
+                         was read to its end at {end}",
+                        recorded.id,
+                        delivered.max(stood)
                     ));
                 }
             }
@@ -649,6 +838,7 @@ impl FeedLog {
                 self.begin
             ));
         }
+        let ended = self.ended;
         let Some(client) = &mut self.client else {
             return Err("the feed is closed".to_owned());
         };
@@ -671,7 +861,15 @@ impl FeedLog {
                         recorded.start
                     ));
                 }
-                position = Self::play(client, &mut subscription, &recorded, position, stop, each)?;
+                position = Self::play(
+                    client,
+                    &mut subscription,
+                    &recorded,
+                    position,
+                    stop,
+                    each,
+                    ended,
+                )?;
                 if let Some(feed) = &mut self.feed {
                     drain(feed);
                 }

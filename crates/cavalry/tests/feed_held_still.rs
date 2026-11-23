@@ -59,6 +59,29 @@
 //!    answered, and reads back every record once, in order, each at the position it
 //!    was answered with.
 //!
+//! # Killed after a term's padding
+//!
+//! An offer that meets the end of a term writes the term's padding and takes nothing,
+//! and the server makes it again in the next term. A kill in between leaves the
+//! padding written and no record after it (Brigade's work items 375 and 412). Each
+//! append syncs its records and nothing syncs the padding but the recorder's own sync,
+//! a second after the recording's last (`spec/client-protocol.md`, "Liveness and
+//! timeouts"). The next start cuts a recording that a kill left live to the position
+//! its syncs covered (ADR 0144). So the feed then ends at its last record answered or
+//! at the term's end, and at the term's end once a sync covered the padding.
+//!
+//! The test, for both shapes, with two more feeds for each:
+//!
+//! 1. A feed process appends records up to the last kilobytes of a term and writes the
+//!    term's padding (`pad`). One feed of each shape is killed at once. The other is
+//!    killed once a sync has covered the padding (`synced`).
+//! 2. A new feed process on the same directories begins at the last record answered or
+//!    at the term's end, and at the term's end for the feed whose padding was synced.
+//! 3. It reads back every record once, in order, at its position, told that the
+//!    replay ended as the server is told, and then told only once the replay's image
+//!    had gone, the order that failed the server's start until Brigade's work item
+//!    375.
+//!
 //! # Why the feed is a process
 //!
 //! Only a process can be held still with its driver and its client in it, which is
@@ -192,6 +215,8 @@ impl Drop for Process {
 /// and what the test appended to it.
 struct Feed {
     name: &'static str,
+    /// The shape's name, `pinned` or `moved-to`.
+    shape: &'static str,
     /// Before `dir`, because fields drop in order: a test that panics kills the
     /// feed's process before it removes the directory the process writes in.
     process: Option<Process>,
@@ -204,12 +229,13 @@ struct Feed {
 }
 
 impl Feed {
-    /// The feed's directories and its two ports. Chosen for both feeds before the
+    /// The feed's directories and its two ports. Chosen for every feed before the
     /// first process starts.
-    fn new(name: &'static str) -> Self {
+    fn new(name: &'static str, shape: &'static str) -> Self {
         let ports = free_ports(2);
         Self {
             name,
+            shape,
             process: None,
             dir: TestDir::new(name),
             control: format!("127.0.0.1:{}", ports[0]),
@@ -222,7 +248,7 @@ impl Feed {
     fn start(&mut self) {
         let program = std::env::current_exe().expect("this program's path");
         let mut child = Command::new(program)
-            .env(FEED, self.name)
+            .env(FEED, self.shape)
             .env(DIR, self.dir.path())
             .env(CONTROL, &self.control)
             .env(OWN, &self.own)
@@ -333,6 +359,47 @@ impl Feed {
         notes
     }
 
+    /// Appends records up to a term's padding and writes it: the line the process
+    /// wrote for each record appended, and the term's end.
+    fn pad(&mut self) -> (Vec<String>, i64) {
+        self.ask("pad 0");
+        let (lines, term_end) = self.answer("padded");
+        let records: Vec<String> = lines
+            .into_iter()
+            .filter(|line| line.starts_with("record "))
+            .collect();
+        (records, term_end.parse().expect("a position"))
+    }
+
+    /// Reads the feed back from position 0, with `how` after the position: nothing, or
+    /// `late`. Returns the line for each record and where the read ended.
+    fn read_back(&mut self, how: &str) -> (Vec<String>, i64) {
+        self.ask(format!("read 0 {how}").trim_end());
+        let (records, begin) = self.answer("read");
+        (records, begin.parse().expect("a position"))
+    }
+
+    /// Ends the feed's process as the server's clean stop does, and waits for it.
+    fn end(&mut self) {
+        self.ask("end");
+        self.answer("ended");
+        let mut process = self.process.take().expect("the feed's process");
+        drop(process.input.take());
+        let status = process.child.wait().expect("the feed's process has ended");
+        assert!(
+            status.success(),
+            "{}: the feed's process ended with {status}",
+            self.name
+        );
+    }
+
+    /// Kills the feed's process with `SIGKILL` and waits for it.
+    fn kill(&mut self) {
+        let mut process = self.process.take().expect("the feed's process");
+        process.child.kill().expect("the feed's process is killed");
+        process.child.wait().expect("the feed's process has ended");
+    }
+
     /// Fails unless the feed reads back, from position 0, every record the test
     /// appended: once, in order, at the position it was answered with.
     fn reads_back_everything(&mut self) {
@@ -392,8 +459,18 @@ fn goes_on_at(name: &str, notes: &[String], held_at: i64, appended_to: i64) -> O
 
 fn test() {
     let began = Instant::now();
-    // Both feeds' ports before the first process: one thread, as the ports' rule asks.
-    let mut feeds = [Feed::new("pinned"), Feed::new("moved-to")];
+    // Every feed's ports before the first process: one thread, as the ports' rule asks.
+    let mut feeds = [
+        Feed::new("pinned", "pinned"),
+        Feed::new("moved-to", "moved-to"),
+    ];
+    // The feeds killed after a term's padding, at once and once a sync covered it.
+    let mut padded = [
+        (Feed::new("pinned-padded", "pinned"), false),
+        (Feed::new("pinned-padded-synced", "pinned"), true),
+        (Feed::new("moved-to-padded", "moved-to"), false),
+        (Feed::new("moved-to-padded-synced", "moved-to"), true),
+    ];
     for feed in &mut feeds {
         feed.start();
     }
@@ -477,9 +554,7 @@ fn test() {
 
     // A kill, as a power cut is to a process: no signal it can handle.
     for feed in &mut feeds {
-        let mut process = feed.process.take().expect("the feed's process");
-        process.child.kill().expect("the feed's process is killed");
-        process.child.wait().expect("the feed's process has ended");
+        feed.kill();
     }
     for feed in &mut feeds {
         feed.start();
@@ -492,22 +567,104 @@ fn test() {
             feed.name
         );
         feed.reads_back_everything();
-        feed.ask("end");
-        feed.answer("ended");
-        let mut process = feed.process.take().expect("the feed's process");
-        drop(process.input.take());
-        let status = process.child.wait().expect("the feed's process has ended");
-        assert!(
-            status.success(),
-            "{}: the feed's process ended with {status}",
-            feed.name
-        );
+        feed.end();
     }
     println!(
-        "feed_held_still: ok in {:.1} s: both feeds, held still for {HELD:?}, went on from the \
-         last record answered; after a kill each began at its last record answered and read \
-         back {} records, each once, in order",
-        began.elapsed().as_secs_f64(),
+        "feed_held_still: both feeds, held still for {HELD:?}, went on from the last record \
+         answered; after a kill each began at its last record answered and read back {} \
+         records, each once, in order",
         feeds[0].answered.len()
     );
+
+    killed_after_a_terms_padding(&mut padded);
+    println!(
+        "feed_held_still: ok in {:.1} s",
+        began.elapsed().as_secs_f64()
+    );
+}
+
+/// The module's "Killed after a term's padding": each feed with whether it is killed
+/// once a sync covered the padding.
+fn killed_after_a_terms_padding(padded: &mut [(Feed, bool)]) {
+    for (feed, _) in padded.iter_mut() {
+        feed.start();
+    }
+    let mut written = Vec::new();
+    for (feed, synced) in padded.iter_mut() {
+        assert_eq!(
+            feed.opened(),
+            0,
+            "{}: a new feed begins at position 0",
+            feed.name
+        );
+        let (records, term_end) = feed.pad();
+        let last = records
+            .last()
+            .and_then(|line| line.split(' ').nth(1))
+            .and_then(|after| after.parse::<i64>().ok())
+            .expect("a record before the padding");
+        assert!(
+            last < term_end,
+            "{}: the last record ends before the term's end, at {last}",
+            feed.name
+        );
+        if *synced {
+            feed.ask(&format!("synced {term_end}"));
+            let (_, covered) = feed.answer("synced");
+            assert!(
+                covered.parse::<i64>().expect("a position") >= term_end,
+                "{}: a sync covered the padding",
+                feed.name
+            );
+        }
+        feed.kill();
+        written.push((records, last, term_end));
+    }
+    for (feed, _) in padded.iter_mut() {
+        feed.start();
+    }
+    for ((feed, synced), (records, last, term_end)) in padded.iter_mut().zip(written) {
+        let begin = feed.opened();
+        if *synced {
+            assert_eq!(
+                begin, term_end,
+                "{}: a sync covered the padding, and the feed begins before the term's end",
+                feed.name
+            );
+        } else {
+            assert!(
+                begin == last || begin == term_end,
+                "{}: killed after the padding, the feed begins at {begin}: neither the last \
+                 record answered, {last}, nor the term's end, {term_end}",
+                feed.name
+            );
+        }
+        for how in ["", "late"] {
+            assert_eq!(
+                feed.read_back(how),
+                (records.clone(), begin),
+                "{}: the feed reads back each record once, in order, at its position, read \
+                 {}",
+                feed.name,
+                if how.is_empty() {
+                    "as the server reads"
+                } else {
+                    "told that a replay ended only once its image had gone"
+                }
+            );
+        }
+        feed.end();
+        println!(
+            "feed_held_still: {}: killed after a term's padding{}, began at {} and read back \
+             {} records",
+            feed.name,
+            if *synced { " that a sync covered" } else { "" },
+            if begin == term_end {
+                "the term's end"
+            } else {
+                "the last record answered"
+            },
+            records.len()
+        );
+    }
 }

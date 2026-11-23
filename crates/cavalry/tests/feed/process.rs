@@ -14,6 +14,18 @@
 //!   position after each record.
 //! - `read <from>`: answers a `record <position after> <length> <digest>` line for
 //!   each record from `from` to where this run began, then `read <where it began>`.
+//! - `read <from> late`: the same, with the reader told that a replay ended only once
+//!   the replay's image has gone, which is the order the server failed in until
+//!   Brigade's work item 375 (`told_after_the_image_went`).
+//! - `pad <first>`: appends records from `first` on up to the last kilobytes of the
+//!   term the feed ends in, and then writes the term's padding with one offer that the
+//!   term has no room for (`FeedLog::append_up_to_a_terms_padding`). Answers a `record`
+//!   line for each record as it was appended, then `padded <the term's end>`.
+//! - `synced <position>`: waits until a sync of the recording covers `position`, and
+//!   answers `synced <the position the syncs cover>`.
+//! - `longest`: answers `longest <bytes>`, the longest term that a recording in the
+//!   catalog had when the feed opened, read before its driver started
+//!   (`FeedLog::longest_term`); `longest 0` for a directory with no recording.
 //! - `release <before>`: lets go of what a snapshot at `before` covers, as the server
 //!   does when it has taken one. Answers `released`.
 //! - `hold`: answers `held` and then does nothing more, with the feed open: a process
@@ -28,7 +40,7 @@
 use std::io::{BufRead, Write};
 use std::time::{Duration, Instant};
 
-use super::{FeedLog, FeedOptions, MOVED_TO, PINNED, Shape, record};
+use super::{FeedLog, FeedOptions, MOVED_TO, PINNED, Shape, record, told_after_the_image_went};
 
 /// How long a feed process lives at most.
 pub const LIFETIME: Duration = Duration::from_secs(300);
@@ -117,11 +129,14 @@ pub fn run(options: &FeedOptions) -> i32 {
                 });
                 answer(&mut log, appended);
             }
-            ["read", from] => {
+            ["read", from] | ["read", from, "late"] => {
                 let Some(from) = number(from) else {
                     say(&format!("failed `{line}` names no position"));
                     return 1;
                 };
+                if words.len() == 3 {
+                    log.learn_a_replays_end_by(told_after_the_image_went);
+                }
                 let mut lines = Vec::new();
                 let read = log.read_from(from, &mut |record, after| {
                     lines.push(record_line(record, after));
@@ -130,6 +145,36 @@ pub fn run(options: &FeedOptions) -> i32 {
                     say(line);
                 }
                 answer(&mut log, read.map(|begin| format!("read {begin}")));
+            }
+            ["pad", first] => {
+                let Some(first) = number(first) else {
+                    say(&format!("failed `{line}` names no record"));
+                    return 1;
+                };
+                let padded =
+                    log.append_up_to_a_terms_padding(first.unsigned_abs())
+                        .map(|appended| {
+                            for (record, after) in &appended {
+                                say(&record_line(record, *after));
+                            }
+                            let term = i64::try_from(options.shape.term_length).unwrap_or(i64::MAX);
+                            format!("padded {}", (log.end() / term + 1) * term)
+                        });
+                answer(&mut log, padded);
+            }
+            ["synced", position] => {
+                let Some(position) = number(position) else {
+                    say(&format!("failed `{line}` names no position"));
+                    return 1;
+                };
+                let synced = log
+                    .synced_to(position)
+                    .map(|synced| format!("synced {synced}"));
+                answer(&mut log, synced);
+            }
+            ["longest"] => {
+                let longest = format!("longest {}", log.longest_term());
+                answer(&mut log, Ok(longest));
             }
             ["release", before] => {
                 let Some(before) = number(before) else {

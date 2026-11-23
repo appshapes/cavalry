@@ -202,8 +202,9 @@ candidate's soak are those two.
 
 Brigade's server is a Rust process that embeds the driver. Its ordered log, the
 feed, is one recorded publication. It depends on Cavalry by a git dependency pinned
-at 620a2e29, `master` of 2026-11-12, and two teams' servers run that build in
-production, each on a log directory it keeps.
+to one commit. Two teams' servers run its release 0.9.0 in production, built at
+620a2e29, `master` of 2026-11-12, each on a log directory it keeps. Its release 0.10.0
+of 2026-11-22 pins d265af82, and no server in production runs it yet.
 
 - It uses the embedded driver, an exclusive publication in manual control mode
   created at a position, a subscription to its own feed, a recording for each run, a
@@ -211,11 +212,12 @@ production, each on a log directory it keeps.
   its snapshots cover. It uses no cluster call.
 - It reads the catalog through `cavalry-log`, because the client lists no
   recordings. Feature 7 gives it that call.
-- The durable log's format has moved from version 2 to 6 since its pin. Versions 3
+- The durable log's format has moved from version 2 to 6 since 620a2e29. Versions 3
   and 4 each added a file for cluster members and changed nothing a server's
   directory holds. Since 2026-11-22, version 5 keeps each recording's synced position
   in bytes of its time index that were reserved. No index the pin wrote has a synced
-  position, and version 5 recovers such an index as version 4 did (ADR 0144).
+  position, and version 5 recovers such an index as version 4 did (ADR 0144). The tree
+  that server 0.10.0 pins writes version 5.
   Version 6, of the same day, adds a cluster member's vote floor to its terms file,
   which a directory with no cluster member does not have, so it changes nothing a
   server's directory holds (ADR 0145). So such a directory opens under `master`. Since 2026-11-22,
@@ -240,7 +242,9 @@ directory is held as the third point above says. A workflow builds the server at
 calls and what the server relies on in each, and
 [Read the nightly run of Brigade's server](../how-to/read-the-nightly-run-of-brigades-server.md)
 says what a red night means and who acts. Two things that the server's code expects do
-not hold. The first page names both, and work item 372 carries the first.
+not hold. The first page names both, and work item 372 carries the first. The second,
+a read of a recording that ends in padding, Brigade fixed in server 0.10.0, and the
+copy follows that release since work item 410.
 
 ## The finish line
 
@@ -310,7 +314,8 @@ What has landed:
   code expects do not hold. A recording started beside an earlier client that the
   driver still has is of that client's publication, which work item 372 carries.
   The server's read of a recording that ends in padding can fail its start, which
-  is the server's own to change.
+  was the server's own to change: Brigade fixed it in server 0.10.0, and the copy
+  follows that release since work item 410.
   [What Brigade's server runs](#what-brigades-server-runs) has the rest.
 
 How the order was chosen:
