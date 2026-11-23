@@ -168,7 +168,7 @@ the line.
 | Election and a commit by quorum | Works; the membership is a string of up to 8 members | Done |
 | Sessions in six languages | Work: connect, redirect, follow the leader, keepalive, close. At most 10 sessions; a message of at most 1,344 bytes | Feature 6 |
 | A service in six languages | Works: session open and close, message, new term, the cluster's time, replies. No timer | Feature 6 |
-| A service's snapshot | Rust, the C ABI since version 6 (ADR 0146) and the Python, Node and JVM clients (ADR 0149); each other client binds the calls and gains them in a change of its own | Feature 6 |
+| A service's snapshot | Rust, the C ABI since version 6 (ADR 0146) and the Python, Node, Go and JVM clients (ADR 0149); each other client binds the calls and gains them in a change of its own | Feature 6 |
 | Catch-up, a restart on the log a member kept, a start from its own snapshot | Work | Done |
 | A start from a peer's snapshot | Absent | Feature 5 |
 | A standby | Works: marked in the members string, promoted by restarts | Done |

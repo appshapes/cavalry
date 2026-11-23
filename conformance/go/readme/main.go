@@ -1,8 +1,8 @@
 // Runs the example of clients/go/README.md against the runner's driver; run.sh calls it
 // after quickstart, so the README's program is a test (CLAUDE.md, "Clients and developer
 // experience"; .claude/rules/docs.md, "Code in docs"). The README's program is
-// clients/go/example/main.go: this checks that the README's Go block is that file, byte for
-// byte, builds the example with this Go from clients/go, as the README's `go run ./example`
+// clients/go/example/main.go: this checks that the Go block of the README's "Example" is that file,
+// byte for byte, builds the example with this Go from clients/go, as the README's `go run ./example`
 // does, runs the binary for up to 10 s, and exits 1 unless it exits 0 and prints the line
 // the README promises after "You will see". The README's shell lines around the program,
 // the builds and the driver, are run.sh's own steps. Go's standard library only (ADR 0003).
@@ -37,10 +37,10 @@ func main() {
 	if err != nil {
 		fail("cannot read: %v", err)
 	}
-	program := regexp.MustCompile("(?s)```go\n(.*?)```\n").FindSubmatch(text)
+	program := regexp.MustCompile("(?s)\n## Example\n.*?```go\n(.*?)```\n").FindSubmatch(text)
 	expected := regexp.MustCompile("(?m)^You will see `([^`]+)`\\.$").FindSubmatch(text)
 	if program == nil || expected == nil {
-		fail("no ```go block, or no line \"You will see `...`.\" after it; keep both shapes so this test can find them")
+		fail("no ```go block under \"## Example\", or no line \"You will see `...`.\" after it; keep both shapes so this test can find them")
 	}
 	example, err := os.ReadFile(filepath.Join(root, "clients", "go", "example", "main.go"))
 	if err != nil {
