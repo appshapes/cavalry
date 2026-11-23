@@ -56,7 +56,12 @@ is allowed here.
   a member that has taken its leader and joins
   its log, with what its election's state waits for, an image of the leader's log, a
   replication or a catch-up, and the path that needs with its endpoints
-  (`cluster-joining`, a note); a leader that lost its quorum (`cluster-quorum-lost`); a
+  (`cluster-joining`, a note); a request for a snapshot that waits beside the
+  member, the control toggle a `cavalry snapshot` adds, as a note beside a leader
+  that has not taken it yet and as a warning beside a member that does not lead,
+  which names the leader or the election, or beside a leader of a build that takes
+  none
+  (`cluster.control_toggle`; ADR 0147); a leader that lost its quorum (`cluster-quorum-lost`); a
   commit position behind the leader's own append position (`cluster-commit-waits`);
   and, with each counter's own doctor sentence from `counters.toml`, consensus messages
   the member rejected, as from a member of another version

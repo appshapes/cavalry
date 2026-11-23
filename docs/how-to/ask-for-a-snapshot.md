@@ -114,6 +114,18 @@ it ends.
   client id`.** A program other than this command added a request with an id that
   is no client's of the driver, and the member takes no request below it. Stop the
   member and start it again with `cavalry run`, which clears it.
+- **`cavalry doctor` prints `cluster.control_toggle`.** A request is waiting beside
+  that member at the moment doctor read its counters. As a `note`, beside the
+  leader, it is a request about to be taken. If the note is still there when you
+  run doctor again, the leader cannot take a request yet, for one of the two
+  reasons the note names: a snapshot of its own does not end, which its
+  `cluster.snapshots_failed` line counts once the member gives the snapshot up; or
+  its followers have not committed its last cluster action, which its
+  `cluster-commit-waits` line shows. As a `WARN`, either the member does not lead,
+  and the line names the leader, on whose host you run the command, or says that
+  the cluster holds an election; or the member leads and is of a build that takes
+  no request, and the line says to upgrade it. A `cavalry snapshot` that asked
+  ends by itself and removes its request.
 - Two people ask one member at the same moment. The leader may take one request
   for both: each command prints the same position, of a snapshot that the leader
   asked for after both began.
