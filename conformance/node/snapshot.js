@@ -181,6 +181,7 @@ function wait(what, done, programs) {
 function ask(binary, cluster, member) {
   const ran = childProcess.spawnSync(binary, ["snapshot", "--dir", path.join(cluster, `member-${member}`)],
     { encoding: "utf8", timeout: WAIT_MS });
+  if (ran.error && ran.error.code !== "ETIMEDOUT") fail(`\`cavalry snapshot\` beside member ${member} did not run: ${ran.error.message}`);
   if (ran.status === null) fail(`\`cavalry snapshot\` beside member ${member} did not end in 60 s`);
   return ran;
 }

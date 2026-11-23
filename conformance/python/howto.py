@@ -62,14 +62,18 @@ def page():
     return program, first.group(1), taken.group(1), again.group(1), int(taken.group(2))
 
 
-def wait_for_line(path, number, what):
-    """Line `number` of the file a program prints to, once the program has printed it."""
+def wait_for_line(process, path, number, what):
+    """Line `number` of the file `process` prints to, once it has printed it. A program
+    that ended before the line fails at once, with what it printed."""
     deadline = time.monotonic() + WAIT_SECONDS
     while True:
         with open(path, encoding="utf-8") as f:
             lines = f.read().split("\n")
         if len(lines) > number:
             return lines[number - 1]
+        if process.poll() is not None:
+            fail(f"{what}: the program ended with code {process.returncode} before its line {number}; "
+                 f"it printed {lines}")
         if time.monotonic() > deadline:
             fail(f"{what}: no line {number} after {WAIT_SECONDS:.0f} s; the program printed {lines}")
         time.sleep(0.02)
@@ -140,7 +144,7 @@ def main():
 
         # 1. The program beside member 0: a start from the log's start.
         service, printed = run_service("service-1.out")
-        line = wait_for_line(printed, 1, "the program's first run")
+        line = wait_for_line(service, printed, 1, "the program's first run")
         if line != first:
             fail(f"the program's first run printed `{line}`, and the page says `{first}`")
 
@@ -157,14 +161,14 @@ def main():
         if positions != [at]:
             fail(f"`cavalry snapshot` printed the positions {positions} beside the three members, and the page "
                  f"says {at} for a cluster that has committed nothing else")
-        line = wait_for_line(printed, 2, "the program at the leader's request")
+        line = wait_for_line(service, printed, 2, "the program at the leader's request")
         if line != taken:
             fail(f"the program printed `{line}` at the request, and the page says `{taken}`")
 
         # 3. Ctrl-C, and the program again: a start from the snapshot.
         stop(service, signal.SIGINT)
         service, printed = run_service("service-2.out")
-        line = wait_for_line(printed, 1, "the program's second run")
+        line = wait_for_line(service, printed, 1, "the program's second run")
         if line != again:
             fail(f"the program's second run printed `{line}`, and the page says `{again}`")
         stop(service, signal.SIGINT)

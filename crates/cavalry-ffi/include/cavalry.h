@@ -1353,7 +1353,9 @@ bool cavalry_cluster_service_snapshot_due(const cavalry_cluster_service_t *servi
  `CAVALRY_ERR_CLUSTER_SNAPSHOT_FAILED` with the step in the message, or the client's
  or the driver's code. A −1 leaves the service as it was, the snapshot still due
  until the next poll. A null `state` with a `length` of 0 is a state of no bytes.
- The call waits for the driver, at most the snapshot timeout, 1 s, at each step.
+ The call waits for the driver: at most the snapshot timeout, 1 s, at each step of
+ its own, and the response timeout, 10 s, for an add or a command that a driver
+ does not answer.
 
  # Safety
 

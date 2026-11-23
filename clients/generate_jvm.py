@@ -2257,7 +2257,7 @@ public final class ClusterService implements AutoCloseable {
      * poll. The service writes a recording through its member's driver and tells the
      * member, which lists the snapshot; the call copies the array to native memory for its
      * run and waits for the driver, a second at the most for each step of its own and the
-     * driver timeout, 10 s, for an add or a command that a driver does not answer, under the
+     * response timeout, 10 s, for an add or a command that a driver does not answer, under the
      * client's lock. True when the snapshot was written and the member was told; false when nothing
      * was written because the member lists a snapshot of a service at or past this position
      * already. Throws {@link CavalryException}: {@link Abi#ERR_CLUSTER_NO_SNAPSHOT_DUE}

@@ -5,8 +5,11 @@
 # cluster members on the loopback, each a `cavalry run` in a member's role, compiles
 # conformance/c/cluster.c the same way and runs it: a service beside each member and a
 # session with the cluster on the first driver, the cluster round (spec/c-abi.md,
-# versions 4 and 5; ADR 0122; ADR 0123); and cleans up. `just conformance` runs this
-# after the Rust vector suites (spec/c-abi.md; ADR 0051).
+# versions 4 and 5; ADR 0122; ADR 0123), and then conformance/c/snapshot.c, the snapshot
+# round: a service's snapshot and its start from one beside the same three members, on
+# the log the cluster round left (spec/c-abi.md, version 6; ADR 0146; ADR 0149); and
+# cleans up. `just conformance` runs this after the Rust vector suites (spec/c-abi.md;
+# ADR 0051).
 set -euo pipefail
 cd "$(dirname "$0")/../.."
 
@@ -113,6 +116,22 @@ done
 echo "conformance/c: run the cluster round, a service beside each member and a session on $CAVALRY_DIR"
 target/conformance/cluster-c "$cluster" "$CAVALRY_CLUSTER_MEMBERS" "$response" || {
     echo "conformance/c: the cluster round failed; the members said:" >&2
+    cat "$cluster"/member-*.out >&2 || true
+    exit 1
+}
+
+# The snapshot round, on the log the cluster round left: `cavalry snapshot` asks the
+# leader for a snapshot, each member's service takes one through the header's three
+# functions, and a new service beside each member starts from it (spec/c-abi.md,
+# version 6; ADR 0146; ADR 0147; ADR 0149).
+echo "conformance/c: compile snapshot.c with ${CC:-cc} against crates/cavalry-ffi/include/cavalry.h"
+# shellcheck disable=SC2086
+"${CC:-cc}" -std=c11 -Wall -Wextra -Werror -I crates/cavalry-ffi/include \
+    conformance/c/snapshot.c target/release/libcavalry_ffi.a $libs \
+    -o target/conformance/snapshot-c
+echo "conformance/c: run the snapshot round, a service's snapshot and its start from one beside each member"
+target/conformance/snapshot-c "$cluster" target/release/cavalry || {
+    echo "conformance/c: the snapshot round failed; the members said:" >&2
     cat "$cluster"/member-*.out >&2 || true
     exit 1
 }

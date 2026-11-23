@@ -223,7 +223,11 @@ if state is not None:
 while running:
     service.poll(on_entry, 10)
     if service.snapshot_due() is not None:
-        service.snapshot(dump())       # the program's own: its state to bytes
+        try:
+            service.snapshot(dump())   # the program's own: its state to bytes
+        except cavalry.CavalryError as failed:
+            report(failed)             # nothing committed is lost: poll on, and the
+                                       # next request asks again
 ```
 
 The state must be a function of the entries the handler was handed, and of nothing
@@ -233,7 +237,7 @@ position 0 at every start, and its member's log can then not be purged.
 
 `snapshot` and `restore` wait for the driver with the GIL released and the client's
 lock held ("Threads"): a snapshot a second at the most for each step of its own, and
-the driver timeout, 10 s, for an add or a command that a driver does not answer; a
+the response timeout, 10 s, for an add or a command that a driver does not answer; a
 start for as long as the snapshot's recording takes to play back. Each raises
 `CavalryError` with the ABI's code: `CAVALRY_ERR_CLUSTER_NO_SNAPSHOT_DUE`,
 `CAVALRY_ERR_CLUSTER_SNAPSHOT_TOO_LONG`, `CAVALRY_ERR_CLUSTER_SNAPSHOT_FAILED` with
