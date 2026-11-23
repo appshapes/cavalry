@@ -223,24 +223,37 @@ the handler:
   member, which lists it. `state` is a `[]byte`, 1 GiB at the most. It returns `true`,
   or `false` when the member lists one at or past that position already.
 
-So a program's loop is this:
+So a program's loop is this, where `load`, `dump`, `report`, `onEntry` and `running`
+are the program's own:
 
 ```go
-restored, state, err := service.Restore()
-for err == nil && restored == cavalry.ClusterRestoredNoMember {
-	time.Sleep(time.Millisecond) // no member with a log yet: ask again
-	restored, state, err = service.Restore()
-}
-if state != nil {
-	load(state) // the program's own: bytes to its state
-}
-for running {
-	service.Poll(onEntry, 10)
-	if _, due := service.SnapshotDue(); due {
-		if _, err := service.Snapshot(dump()); err != nil { // the program's own: its state to bytes
-			report(err) // nothing committed is lost: poll on, and the next request asks again
+func run(service *cavalry.ClusterService) error {
+	restored, state, err := service.Restore()
+	for err == nil && restored == cavalry.ClusterRestoredNoMember {
+		time.Sleep(time.Millisecond) // no member with a log yet: ask again
+		restored, state, err = service.Restore()
+	}
+	if err != nil {
+		return err // the service has not started: call Restore again before any poll, or stop
+	}
+	if state != nil {
+		load(state) // bytes to the program's state
+	}
+	for running {
+		count, err := service.Poll(onEntry, 10)
+		if err != nil {
+			return err // a *HandlerError: the handler failed, and its entry was not taken
+		}
+		if count < 0 {
+			return service.Err() // the poll stopped on a fault, which service.Fault() gives
+		}
+		if _, due := service.SnapshotDue(); due {
+			if _, err := service.Snapshot(dump()); err != nil { // the program's state to bytes
+				report(err) // nothing committed is lost: poll on, and the next request asks again
+			}
 		}
 	}
+	return nil
 }
 ```
 
@@ -256,8 +269,12 @@ recording takes to play back at a start. Each returns an `*Error` with the ABI's
 `ErrClusterNoSnapshotDue`, `ErrClusterSnapshotTooLong`, `ErrClusterSnapshotFailed`
 with the step in the message, `ErrClusterRestoreTooLate` once the service has begun,
 and `ErrPolling` from inside a handler. After an error of `Snapshot` the snapshot is
-still due, and the program calls again or polls on. `conformance/go/snapshot` is a
-program that runs every call above beside three members.
+still due, and the program calls again or polls on. After an error of `Restore` the
+service has not started, and the program calls again or stops, as the loop does: it
+never polls, because a poll reads the log from position 0, and every `Restore` after
+it returns `ErrClusterRestoreTooLate` (`spec/c-abi.md`, "A service's snapshot and its
+start", item 4). `conformance/go/snapshot` is a program that runs every call above
+beside three members.
 
 ## What it must never do
 
