@@ -1142,6 +1142,59 @@ class ClusterService {
   /** How many sessions the log holds open, as far as the service has read: 10 at most. -1
    * from inside this service's own handler. */
   sessions() { return addon.cavalry_cluster_service_sessions(this.handle); }
+  /** The log position of the snapshot the leader asked for, when the last entry of the last
+   * poll was `constants.CAVALRY_CLUSTER_ENTRY_SNAPSHOT` and the handler took it: the position
+   * after that entry, which `position()` is then. `null` otherwise, and from the next poll
+   * on. `null` too from inside this service's own handler, where the ABI refuses the read
+   * with CAVALRY_ERR_POLLING: the entry's `type` says that the poll ends after it
+   * (spec/c-abi.md, "A service's snapshot and its start"; ADR 0149). */
+  snapshotDue() {
+    const [due, position] = addon.cavalry_cluster_service_snapshot_due(this.handle);
+    return due ? position : null;
+  }
+  /** Takes a snapshot of the program's state, `state`, a `Buffer` or a `Uint8Array`: the
+   * program's own bytes, in which the service reads nothing, 1 GiB at the most. Call it
+   * after a poll that ended at the leader's request, while `snapshotDue()` gives a position,
+   * and before the next poll. The service writes a recording through its member's driver
+   * and tells the member, which lists the snapshot. The call waits for the driver, a second
+   * at the most for each step of its own and the driver timeout, 10 s, for an add or a
+   * command that a driver does not answer, and holds the thread meanwhile, as an add does. `true` when
+   * the snapshot was written and the member was told; `false` when nothing was written
+   * because the member lists a snapshot of a service at or past this position already.
+   * Throws `CavalryError`: CAVALRY_ERR_CLUSTER_NO_SNAPSHOT_DUE where none is due,
+   * CAVALRY_ERR_CLUSTER_SNAPSHOT_TOO_LONG for a state over 1 GiB,
+   * CAVALRY_ERR_CLUSTER_SNAPSHOT_FAILED when a step made no progress, with the step in the
+   * message, CAVALRY_ERR_POLLING from inside a handler of this service or of one whose poll
+   * holds the client, or the client's or the driver's code. After an error the service is
+   * as it was and the snapshot is still due: call again, or poll on. */
+  snapshot(state) {
+    const result = addon.cavalry_cluster_service_snapshot(this.handle, this._client.handle, state);
+    if (result < 0) throw error("cavalry_cluster_service_snapshot");
+    return result === 1;
+  }
+  /** Starts the service from the newest snapshot of a service that its member lists, before
+   * the service's first poll, and returns `{ restored, state }`. `restored` is one of
+   * `constants.CAVALRY_CLUSTER_RESTORED_*`. `_STATE`: `state` is the program's state as the
+   * program gave it to `snapshot`, a `Buffer` that is a copy the caller owns; the service
+   * holds the sessions that were open at the snapshot's position, `position()` is that
+   * position, and the next poll hands over the entry after it. `_FROM_START`: `state` is
+   * `null`; the member lists no snapshot of a service, or the one it lists could not be
+   * taken, and the polls read the log from position 0. `_NO_MEMBER`: `state` is `null`; the
+   * driver hosts no member that has a log yet, and the program calls again before its first
+   * poll. A program that never calls it reads the log from position 0 at every start. The
+   * call waits for the driver to play the snapshot's recording back, and holds the thread
+   * meanwhile. Throws `CavalryError`: CAVALRY_ERR_CLUSTER_RESTORE_TOO_LATE once a poll has
+   * opened the member's log or a call has answered `_STATE` or `_FROM_START`,
+   * CAVALRY_ERR_POLLING from inside a handler, or the client's or the driver's code, after
+   * which the service has not started and the program calls again. */
+  restore() {
+    const [restored, state] = addon.cavalry_cluster_service_restore(this.handle, this._client.handle);
+    if (restored <= 0) throw error("cavalry_cluster_service_restore");
+    if (restored !== constants.CAVALRY_CLUSTER_RESTORED_STATE) return { restored, state: null };
+    // The addon copied the handle's bytes, which the service's next poll frees; a state
+    // of no bytes comes back as null from the ABI, and is an empty Buffer here.
+    return { restored, state: state === null ? Buffer.alloc(0) : state };
+  }
   /** Closes the service's publications and its counter, stops its read of the log and frees
    * the handle; a second close does nothing. Close a service before its client; after the
    * client's own close this frees the handle alone, and the driver ends what the service
