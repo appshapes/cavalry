@@ -3850,7 +3850,8 @@ impl ServiceTimers {
     pub fn told(&mut self, word: TimerWord) {
         match word {
             TimerWord::Cancel { correlation_id } => {
-                if self.cancels_len > 0 && self.cancels.get(self.cancels_head) == Some(&correlation_id)
+                if self.cancels_len > 0
+                    && self.cancels.get(self.cancels_head) == Some(&correlation_id)
                 {
                     self.cancels_head = (self.cancels_head + 1) % MAX_UNSENT_TIMER_CANCELS;
                     self.cancels_len -= 1;

@@ -12,11 +12,10 @@ use cavalry_proto::cluster::{
     MAX_LOG_RECORDINGS, MAX_LOG_RECORDINGS_LENGTH, MAX_MEMBERS, Member, MemberPosition, Message,
     NewLeadershipTermAction, NextFields, RecordedTerms, ReplayEnd, ReplicationStop, ServiceTimers,
     SnapshotMark, Stream, TermFields, TermSpan, TimeUnit, TimerEventIs, VERSION, Vote, VoteAnswer,
-    VoteRequest, answered_term,
-    ballot, candidate, canvass_position_action, commit_position, entry_position, log_at_least,
-    new_leadership_term_action, next_fields, parse_members, quorum, replay_end, replication_record,
-    replication_stop, request_vote, takes_leader, votes_in_term, withheld_vote, withholds,
-    write_log_recordings,
+    VoteRequest, answered_term, ballot, candidate, canvass_position_action, commit_position,
+    entry_position, log_at_least, new_leadership_term_action, next_fields, parse_members, quorum,
+    replay_end, replication_record, replication_stop, request_vote, takes_leader, votes_in_term,
+    withheld_vote, withholds, write_log_recordings,
 };
 use serde_json::{Map, Value, json};
 
@@ -466,7 +465,12 @@ fn log_recordings_vector(name: &str, vector: &Value) {
 /// one table, which refuses, hands over and holds what the vector's fields say.
 fn timers_vector(name: &str, vector: &Value) {
     let mut timers = Box::new(ServiceTimers::new());
-    for (index, step) in vector["steps"].as_array().expect("steps").iter().enumerate() {
+    for (index, step) in vector["steps"]
+        .as_array()
+        .expect("steps")
+        .iter()
+        .enumerate()
+    {
         let at = format!("{name}: step {index}");
         let fields = &step["fields"];
         match step["op"].as_str().expect("op") {
@@ -527,8 +531,9 @@ fn timers_vector(name: &str, vector: &Value) {
                 .iter()
                 .map(|(id, deadline)| json!({ "id": id, "deadline": deadline }))
                 .collect();
+            let pending_is_empty = pending.is_empty();
             assert_eq!(Value::Array(pending), fields["pending"], "{at}: pending");
-            assert_eq!(timers.is_empty(), timers.len() == 0, "{at}: empty");
+            assert_eq!(timers.is_empty(), pending_is_empty, "{at}: empty");
         }
     }
 }
