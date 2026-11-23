@@ -8,9 +8,10 @@
 # committed log against a cluster (spec/c-abi.md, version 2; ADR 0070), and then
 # conformance/python/cluster.py, the cluster round: the client's service beside each
 # member and its session on the first driver (spec/c-abi.md, versions 4 and 5; ADR 0124);
-# and cleans up. `just conformance` runs this after conformance/c
-# (clients/README.md; ADR 0046, card 205). Nothing is installed: ctypes is in the standard
-# library.
+# then conformance/python/snapshot.py, the snapshot round, beside the same three members
+# on the log the cluster round left (spec/c-abi.md, version 6; ADR 0149); and cleans up.
+# `just conformance` runs this after conformance/c (clients/README.md; ADR 0046, card
+# 205). Nothing is installed: ctypes is in the standard library.
 set -euo pipefail
 cd "$(dirname "$0")/../.."
 
