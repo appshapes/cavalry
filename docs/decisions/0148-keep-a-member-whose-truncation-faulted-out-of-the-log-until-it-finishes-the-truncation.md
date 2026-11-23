@@ -96,7 +96,49 @@ next leader asks for its truncation.
 
 ## Evidence
 
-EVIDENCE
+All on an Apple M5 Pro laptop, 18 cores, on 2026-11-23.
+
+- **The search in memory**, `crates/cavalry-raft/tests/faulted_truncation_search.rs`:
+  - The model: three members under drawn loss and delay. The leader is cut off from
+    both others for 11 s to 19 s, so that it appends a tail the next leader lacks. A
+    leader is halted within 300 ms of its election, in one election of three. There
+    are halts, partitions, starts again on the log directory kept and recording ends.
+    Truncations fault at a drawn member, at the second step, the file or the record of
+    terms, for 1 to 3,000 attempts in a row.
+  - The check of every step: `elected_cluster`'s, and three of its own. No member
+    adds, joins or replays a log while its log is cut short of the end it reports, no
+    member's log has a gap, and no member leads while it owes a truncation.
+  - With the code before this decision, where a fault returned and nothing more,
+    seeds 13 and 96 of the first 300 fail the first of the three. At seed 13, 40,437
+    ms in, member 1 joined a log. At seed 96, 53,671 ms in, member 0 did. With this
+    decision both pass, and they are two of the four seeds `just test` runs.
+  - With this decision, 3,000 seeds of 60 s each in a release build pass, in 1,817
+    s: 9,085 leaders cut off, 4,981 leaders halted after their election, 4,874
+    truncations that became owed and 4,849 that then finished with the member
+    running; 614 seeds faulted none. An earlier run of 1,052 seeds, on this change
+    before its review's fixes, passed as well.
+  - Before a leader halted just after its election was drawn, 40 seeds found nothing
+    with the rule taken out. The member that a cut-off leader leaves to truncate is
+    the old leader, and no voter that recorded the new term votes for its log of the
+    older term. The gap needs the third member not yet to hold the new term, which a
+    leader halted just after its election leaves.
+- **On one core**, `crates/cavalry-raft/tests/faulted_truncation.rs`, four tests:
+  - the truncation is owed, asked for each cycle, counted once and finished once;
+  - a member that owes one neither nominates nor takes a leader;
+  - a new leadership term is read once the owed truncation finishes, and never cut to
+    above it;
+  - a member that canvasses while its truncation is under way goes back to init at
+    the next fault.
+
+  Each fails with the rule taken out.
+- **On a driver**, `module::tests::a_truncation_below_a_recording_purges_it_and_finishes_when_a_command_faulted`:
+  - A replay that is still starting makes the driver refuse the cut of the first
+    recording, code 24 `recording busy`.
+  - The purge of the second recording is done. The end, the file and the record of
+    terms are as they were.
+  - Once the replay has stopped, the same truncation finishes.
+- **The gates:** `just lint`, `just test` (704 s), `just docs`, `just lint-docs`,
+  `just conformance` (139 s) and `just replay-check` (9 s) each exit 0.
 
 ## Consequences
 
