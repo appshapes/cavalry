@@ -15,7 +15,7 @@ bounded at 10 s, and one that runs out says how far it got.
 
 | Runner | Language | Runs with | Decided in |
 | --- | --- | --- | --- |
-| `c/` | C11, `quickstart.c` and then `cluster.c`, the cluster round, beside three cluster members that `run.sh` starts with `cavalry run`, through `run.sh` | the runner's `cc`, the static library | ADR 0051 (card 204); ADR 0122 and ADR 0123 (work item 229) |
+| `c/` | C11, `quickstart.c` and then `cluster.c`, the cluster round, beside three cluster members that `run.sh` starts with `cavalry run`, then `snapshot.c`, the snapshot round, beside all three, through `run.sh` | the runner's `cc`, the static library | ADR 0051 (card 204); ADR 0122 and ADR 0123 (work item 229); ADR 0146 and ADR 0149 (work item 335) |
 | `python/` | Python 3, `quickstart.py` and then `readme.py`, the example of `clients/python/README.md`, then `committed_log.py` beside one of three cluster members that `run.sh` starts with `cavalry run`, then `cluster.py`, the cluster round, beside all three, then `snapshot.py`, the snapshot round, beside all three, through `run.sh` over `clients/python` | the runner's `python3`, the shared library | ADR 0046 (card 205); ADR 0124 (work item 229); ADR 0149 (work item 335) |
 | `node/` | Node, `quickstart.js` and then `readme.js`, the example of `clients/node/README.md`, then `committed_log.js` beside one of three cluster members that `run.sh` starts with `cavalry run`, then `cluster.js`, the cluster round, beside all three, then `snapshot.js`, the snapshot round, beside all three, through `run.sh` over `clients/node` | the runner's `node` and `npm`, whose own `node-gyp` builds the addon against the static library | ADR 0046 (card 206); ADR 0124 (work item 229); ADR 0149 (work item 335) |
 | `go/` | Go, the client's own `go test` (its subscription table at the bound), then `quickstart` and then `readme`, the example of `clients/go/README.md`, then, beside one of three cluster members that `run.sh` starts with `cavalry run`, the client's one test that needs a member (a committed log's open with the table full) and `committed_log`, then `cluster`, the cluster round, beside all three, then `snapshot`, the snapshot round, beside all three, through `run.sh` over `clients/go` | the runner's `go`, whose cgo builds the client against the header and the static library | ADR 0046 (card 207); ADR 0124 (work item 229); ADR 0149 (work item 335) |
@@ -129,8 +129,10 @@ cluster round, beside the same three members and on the log that round left, so 
 services read a term's first entry and a session's open, its messages and its close
 before the request. Each client's runner has it, in a program that its `run.sh` runs
 after its cluster round: `python/snapshot.py`, which is the shape, `node/snapshot.js`,
-`go/snapshot`, `jvm/SnapshotRound.java` and `dotnet/Snapshot`. The C runner, which
-runs no client, has no snapshot round yet.
+`go/snapshot`, `jvm/SnapshotRound.java` and `dotnet/Snapshot`. The C runner has it
+over the header alone, in `c/snapshot.c`: its state is a count and an FNV-1a hash,
+2,480 bytes, and from inside the handler it checks too that the refused read writes
+no position and the refused start writes a null state.
 
 A service beside each member asks where it starts and is told from the log's start,
 and a second ask is refused. Each reads an entry, and a snapshot where none is due is

@@ -522,9 +522,12 @@ a `&mut self` one:
   poll never runs beside another call on its client, in any thread.
   `cavalry_cluster_service_snapshot` and `cavalry_cluster_service_restore` count as
   calls on the client as well, for the same reason: each sends commands with it and
-  waits for their answers, a snapshot for up to the snapshot timeout, 1 s, at each
-  step, and a start for its snapshot's replay, up to 5 s between two of its
-  messages. A program whose
+  waits for their answers. An add or a command of either waits up to the response
+  timeout, 10 s, where the driver does not answer (`spec/client-protocol.md`,
+  "Liveness and timeouts"); a snapshot waits up to the snapshot timeout, 1 s, at
+  each step of its own (`spec/cluster.md`, "Values"); and a start waits for its
+  snapshot's replay, up to the service snapshot load timeout, 5 s, between two of
+  its messages (ADR 0150). A program whose
   other threads add or command gives its service a client of its own.
   `cavalry_cluster_service_reply` and `cavalry_cluster_service_action` are calls on
   the service, made by the polling thread from inside the handler. Every other

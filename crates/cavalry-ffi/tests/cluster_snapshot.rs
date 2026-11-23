@@ -13,7 +13,7 @@
 //! session: what is under test is what the log's entries make of its state.
 //!
 //! A member's own snapshot and its services' are taken in order, the members' first:
-//! a service's call waits for its driver for up to a second at each step, and with
+//! a service's call waits for its driver, up to a second at each step of its own, and with
 //! the members' duty cycles on the same thread a member would wait behind it (ADR
 //! 0131, Evidence). Outside a test a service's call is on its program's thread.
 

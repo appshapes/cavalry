@@ -251,7 +251,7 @@ what the others hold. A program that never calls `restore` reads the log from
 position 0 at every start, and its member's log can then not be purged.
 
 `snapshot` and `restore` wait for the driver under the client's lock: a second at the
-most for each step of a snapshot's own, the driver timeout, 10 s, for an add or a
+most for each step of a snapshot's own, the response timeout, 10 s, for an add or a
 command that a driver does not answer, and for as long as the snapshot's recording
 takes to play back at a start. Each throws `CavalryException` with the ABI's code:
 `Abi.ERR_CLUSTER_NO_SNAPSHOT_DUE`, `Abi.ERR_CLUSTER_SNAPSHOT_TOO_LONG`,
@@ -478,7 +478,9 @@ A program whose other threads add or command gives them a `Client` of their own,
 `spec/c-abi.md`, "Threads", says for a program in C. The lock would be on a message's
 path, where another thread's add could hold it for up to 10 s (ADR 0124,
 Alternatives). The service's open and its close take the client's lock, as a
-committed log's do. A `ClusterSession`'s connect is a call on the client and takes
+committed log's do, and so do its `snapshot` and its `restore`, which the thread that
+polls makes between polls: each sends commands with the client and waits for the
+driver. A `ClusterSession`'s connect is a call on the client and takes
 its lock; nothing else of a session is.
 
 The ABI's error, `Abi.errcode()` and `Abi.errmsg()`, is per operating-system thread.

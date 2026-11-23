@@ -261,7 +261,13 @@ function start() {
 }
 function turn() {
   service.poll(onEntry, 10);
-  if (service.snapshotDue() !== null) service.snapshot(dump());   // its state to bytes
+  if (service.snapshotDue() !== null) {
+    try {
+      service.snapshot(dump());                  // the program's own: its state to bytes
+    } catch (failed) {
+      report(failed);                            // nothing committed is lost: poll on,
+    }                                            // and the next request asks again
+  }
   setImmediate(turn);
 }
 start();
@@ -273,7 +279,7 @@ what the others hold. A program that never calls `restore` reads the log from
 position 0 at every start, and its member's log can then not be purged.
 
 `snapshot` and `restore` wait for the driver and hold the thread while they do, as an
-add does: a second at the most for each step of a snapshot's own, the driver timeout,
+add does: a second at the most for each step of a snapshot's own, the response timeout,
 10 s, for an add or a command that a driver does not answer, and for as long as the
 snapshot's recording takes to play back at a start. Each throws `CavalryError` with
 the ABI's code: `CAVALRY_ERR_CLUSTER_NO_SNAPSHOT_DUE`,

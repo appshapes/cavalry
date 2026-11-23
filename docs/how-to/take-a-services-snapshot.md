@@ -110,6 +110,14 @@ are a service's `onTakeSnapshot` and the snapshot image of its `onStart`.
 
 ## When it does not work
 
+- **The program prints nothing.** The driver in the directory you gave hosts no
+  cluster member with a log: `restore` answers
+  `CAVALRY_CLUSTER_RESTORED_NO_MEMBER`, and the program asks again each 10 ms for
+  as long as it does. Run `cavalry doctor --dir` with that directory and the
+  member's two variables set. A driver started without the two cluster variables
+  of [Run a cluster of three members](run-a-cluster.md) is no member, and doctor
+  prints no `cluster-member` line for it. A member whose line says `election
+  closed` has a log; one in an election has none until it has joined its leader's.
 - **`started at position 0` after a snapshot was taken.** The service was started
   beside another member than the one whose service gave its state. Every member
   lists the snapshots of the service beside it, and of no other: run a service

@@ -1602,9 +1602,13 @@ impl ClusterService {
     /// snapshot of a service at or past this position: a service that reads its
     /// member's log again from the start meets the actions it met before.
     ///
-    /// The call waits for the driver: each step is a command or an offer, and a step
-    /// that makes no progress for a second ends the snapshot with
-    /// [`ClusterError::SnapshotFailed`], which names the step. The service is as it
+    /// The call waits for the driver. A step of the snapshot's own, a message its
+    /// publication takes, its recording's write and its stop, that makes no progress
+    /// for a second ends the snapshot with [`ClusterError::SnapshotFailed`], which
+    /// names the step. An add or a command that the driver does not answer waits the
+    /// response timeout, 10 s: an add, or the recording's start, then ends the call
+    /// with the client's error, and the recording's stop ends it as a snapshot
+    /// failed at its stop. The service is as it
     /// was, and the program polls on, or calls again while no poll has been made. A
     /// state longer than 1 GiB is refused, [`ClusterError::SnapshotTooLong`], and a
     /// call where no snapshot is due is [`ClusterError::NoSnapshotDue`].
