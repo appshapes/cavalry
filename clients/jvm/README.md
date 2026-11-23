@@ -160,9 +160,9 @@ opens the member's log when the member has one, and calls
   entry has no session; `entry.leaderMemberId()`, for a new leadership term; and
   `entry.timedOut()`, for a session close. It is the one object the service keeps,
   over a struct filled for each entry, so copy a value out to keep it.
-  `_SNAPSHOT` is the leader's request for a snapshot: the poll ends after it. This
-  client's service has no call that takes a snapshot yet, so a handler passes it
-  over, as it does `_OTHER` (`spec/c-abi.md`, "A service's snapshot and its start").
+  `_SNAPSHOT` is the leader's request for a snapshot: the poll ends after it, and
+  the program gives its state to `service.snapshot` before its next poll ("A
+  service's snapshot and its start", below).
 - `service` is the service that was polled, for `service.reply`.
 
 What the handler returns says what becomes of the entry. `Abi.ACTION_CONTINUE` takes
@@ -197,6 +197,69 @@ The service's `poll` and its `close` are calls on the client the service was mad
 `AutoCloseable`; close a service before its client (`spec/c-abi.md`, "Functions",
 cluster service; ADR 0123; ADR 0124). `conformance/jvm/ClusterRound.java` is a program
 that runs three services and a session through every call above.
+
+### A service's snapshot and its start
+
+A service's program holds the cluster's state, and a snapshot is that state as the
+program's own bytes at one position of the log, the same beside every member. A
+service that starts again takes its state from its last snapshot and reads the log
+after it, where it would read the log from position 0 (`spec/c-abi.md`, "A service's
+snapshot and its start"; ADR 0146; ADR 0149). Three calls, none of them from inside
+the handler:
+
+- `service.restore()`, before the first poll, returns a `ClusterService.Restored`,
+  with `restored()` and `state()`. With `Abi.CLUSTER_RESTORED_STATE`, the state is
+  the program's state as it gave it, a `byte[]` that is a copy the caller owns; the
+  polls read the log from the snapshot's position. With
+  `Abi.CLUSTER_RESTORED_FROM_START`, the state is null, and the polls read from
+  position 0. With `Abi.CLUSTER_RESTORED_NO_MEMBER`, the state is null; the driver
+  hosts no member with a log yet, and the program calls again before it polls.
+- `service.snapshotDue()`, after a poll, is an `OptionalLong`: the snapshot's log
+  position when the poll ended at the leader's request, an entry whose `type()` is
+  `Abi.CLUSTER_ENTRY_SNAPSHOT`, and empty otherwise.
+- `service.snapshot(state)`, before the next poll, writes the snapshot and tells the
+  member, which lists it. `state` is a `byte[]`, 1 GiB at the most, which the call
+  copies to native memory for its run. It returns `true`, or `false` when the member
+  lists one at or past that position already.
+
+So a program's loop is this:
+
+```java
+ClusterService.Restored found = service.restore();
+while (found.restored() == Abi.CLUSTER_RESTORED_NO_MEMBER) {
+    Thread.sleep(1);                     // no member with a log yet: ask again
+    found = service.restore();
+}
+if (found.state() != null) {
+    load(found.state());                 // the program's own: bytes to its state
+}
+while (running) {
+    service.poll(this::onEntry, 10);
+    if (service.snapshotDue().isPresent()) {
+        try {
+            service.snapshot(dump());    // the program's own: its state to bytes
+        } catch (CavalryException failed) {
+            report(failed);              // nothing committed is lost: poll on, and the
+        }                                // next request asks again
+    }
+}
+```
+
+The state must be a function of the entries the handler was handed, and of nothing
+else: every member's service gives its own, and a start from any of them must reach
+what the others hold. A program that never calls `restore` reads the log from
+position 0 at every start, and its member's log can then not be purged.
+
+`snapshot` and `restore` wait for the driver under the client's lock: a second at the
+most for each step of a snapshot's own, the driver timeout, 10 s, for an add or a
+command that a driver does not answer, and for as long as the snapshot's recording
+takes to play back at a start. Each throws `CavalryException` with the ABI's code:
+`Abi.ERR_CLUSTER_NO_SNAPSHOT_DUE`, `Abi.ERR_CLUSTER_SNAPSHOT_TOO_LONG`,
+`Abi.ERR_CLUSTER_SNAPSHOT_FAILED` with the step in the message,
+`Abi.ERR_CLUSTER_RESTORE_TOO_LATE` once the service has begun, and `Abi.ERR_POLLING`
+from inside a handler. After an exception of `snapshot` the snapshot is still due, and
+the program calls again or polls on. `conformance/jvm/SnapshotRound.java` is a program
+that runs every call above beside three members.
 
 ## What it must never do
 

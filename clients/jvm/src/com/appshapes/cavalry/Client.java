@@ -308,4 +308,26 @@ public final class Client implements AutoCloseable {
             throw Abi.failed("cavalry_cluster_service_close", t);
         }
     }
+
+    /** A service's snapshot: a call on this client, which the service's snapshot writes its
+     * recording with, so under this client's lock; the ABI's result, with the thread's
+     * error for the caller to read. */
+    synchronized int snapshotClusterService(MemorySegment service, MemorySegment state, long length) {
+        try {
+            return (int) Abi.cavalry_cluster_service_snapshot.invokeExact(service, handle, state, length);
+        } catch (Throwable t) {
+            throw Abi.failed("cavalry_cluster_service_snapshot", t);
+        }
+    }
+
+    /** A service's start from its member's snapshot: a call on this client, under its lock;
+     * the ABI's restored code, with the thread's error for the caller to read, and the
+     * state's address and its length written through the two segments. */
+    synchronized int restoreClusterService(MemorySegment service, MemorySegment state, MemorySegment length) {
+        try {
+            return (int) Abi.cavalry_cluster_service_restore.invokeExact(service, handle, state, length);
+        } catch (Throwable t) {
+            throw Abi.failed("cavalry_cluster_service_restore", t);
+        }
+    }
 }

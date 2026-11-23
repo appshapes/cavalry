@@ -1,8 +1,8 @@
 // Runs the example of clients/jvm/README.md against the runner's driver; run.sh calls it
 // after Quickstart, so the README's program is a test (CLAUDE.md, "Clients and developer
 // experience"; .claude/rules/docs.md, "Code in docs"). The README's program is
-// clients/jvm/example/Example.java: this checks that the README's Java block is that
-// file, byte for byte, runs it with this Java in source-file mode against the classes
+// clients/jvm/example/Example.java: this checks that the Java block of the README's
+// "Example" is that file, byte for byte, runs it with this Java in source-file mode against the classes
 // run.sh compiled, as the README's `java ... clients/jvm/example/Example.java` line does,
 // for up to 10 s, and exits 1 unless it exits 0 and prints the line the README promises
 // after "You will see". The README's shell lines around the program, the builds and the
@@ -30,10 +30,10 @@ public final class Readme {
 
     public static void main(String[] args) throws IOException, InterruptedException {
         String text = Files.readString(Path.of(README), StandardCharsets.UTF_8);
-        Matcher program = Pattern.compile("(?s)```java\n(.*?)```\n").matcher(text);
+        Matcher program = Pattern.compile("(?s)\n## Example\n.*?```java\n(.*?)```\n").matcher(text);
         Matcher expected = Pattern.compile("(?m)^You will see `([^`]+)`\\.$").matcher(text);
         if (!program.find() || !expected.find()) {
-            fail("no ```java block, or no line \"You will see `...`.\" after it; keep both shapes so this test can find them");
+            fail("no ```java block under \"## Example\", or no line \"You will see `...`.\" after it; keep both shapes so this test can find them");
         }
         String example = Files.readString(Path.of(EXAMPLE), StandardCharsets.UTF_8);
         if (!program.group(1).equals(example)) {
