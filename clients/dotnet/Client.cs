@@ -306,4 +306,32 @@ public sealed class Client : IDisposable
             return Abi.cavalry_cluster_service_close(service, handle);
         }
     }
+
+    /// <summary>A service's snapshot: a call on this client, which the service's snapshot
+    /// writes its recording with, so under this client's lock; the ABI's result, with the
+    /// thread's error for the caller to read.</summary>
+    internal unsafe int SnapshotClusterService(nint service, byte* state, nuint length)
+    {
+        lock (gate)
+        {
+            return Abi.cavalry_cluster_service_snapshot(service, handle, state, length);
+        }
+    }
+
+    /// <summary>A service's start from its member's snapshot: a call on this client, under
+    /// its lock; the ABI's restored code, with the thread's error for the caller to read,
+    /// and for <see cref="Abi.CLUSTER_RESTORED_STATE"/> the state, copied here: the bytes
+    /// are the handle's until the service's next poll or its close (spec/c-abi.md,
+    /// "Lifetimes").</summary>
+    internal unsafe int RestoreClusterService(nint service, out byte[]? state)
+    {
+        lock (gate)
+        {
+            int restored = Abi.cavalry_cluster_service_restore(service, handle, out byte* bytes, out nuint length);
+            state = restored == Abi.CLUSTER_RESTORED_STATE
+                ? new ReadOnlySpan<byte>(bytes, checked((int) length)).ToArray()
+                : null;
+            return restored;
+        }
+    }
 }

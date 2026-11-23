@@ -79,9 +79,7 @@ imports), Go (`go/`, by `generate_go.py`), the JVM (`jvm/`, by `generate_jvm.py`
   shape in every client (ADR 0149): `snapshot_due` gives the snapshot's log position
   or nothing; `snapshot` takes the program's bytes and gives whether the snapshot
   was written; and `restore` gives the restored code and the state together, the
-  state a copy the caller owns. The Python, Node, Go and JVM clients have them. Each other
-  client gains them in a change of its own, and until then its README says that its
-  service has no such call.
+  state a copy the caller owns. Each of the five clients has them.
 
 ## Released together
 
