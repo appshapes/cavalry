@@ -32,8 +32,8 @@ use cavalry_shm::counters::generated::{
     CLUSTER_LEADER_QUORUM_LOSSES, CLUSTER_LEADER_STEP_DOWNS, CLUSTER_LEADERS_WITHHELD,
     CLUSTER_LEADERSHIP_TERMS_IGNORED, CLUSTER_LOG_IMAGES_LOST, CLUSTER_LOG_REPLICATIONS,
     CLUSTER_LOG_REPLICATIONS_UNAVAILABLE, CLUSTER_LOG_TRUNCATIONS, CLUSTER_STANDBY_VOTE_REQUESTS,
-    CLUSTER_TERMS_DROPPED, CLUSTER_TERMS_LED, CLUSTER_TRUNCATIONS_REFUSED, CLUSTER_VOTES_AGAINST,
-    CLUSTER_VOTES_FOR, CLUSTER_VOTES_WITHHELD,
+    CLUSTER_TERMS_DROPPED, CLUSTER_TERMS_LED, CLUSTER_TRUNCATIONS_FAULTED,
+    CLUSTER_TRUNCATIONS_REFUSED, CLUSTER_VOTES_AGAINST, CLUSTER_VOTES_FOR, CLUSTER_VOTES_WITHHELD,
 };
 
 /// The cluster session id of a session message of no session: one the leader's own
@@ -564,7 +564,8 @@ pub struct Counts {
     /// `cluster.leader_heartbeat_timeouts`: a follower that began again at init for
     /// want of its leader's heartbeat.
     pub leader_heartbeat_timeouts: u64,
-    /// `cluster.leadership_terms_ignored`: a new leadership term ignored for its term.
+    /// `cluster.leadership_terms_ignored`: a new leadership term ignored for its term,
+    /// or read while the member owes a truncation it could not finish (ADR 0148).
     pub leadership_terms_ignored: u64,
     /// `cluster.join_position_mismatches`: an image of the live log that joined at a
     /// position other than the member's append position, in follower log await,
@@ -606,7 +607,8 @@ pub struct Counts {
     /// term, to the base of the term its leader's record holds next after its own, the
     /// tail of an older term that no quorum recorded (ADR 0083); or, before it dropped
     /// the terms its leader's record lacks, to the base of the lowest of them, the
-    /// drop counted in `terms_dropped` (ADR 0096).
+    /// drop counted in `terms_dropped` (ADR 0096). Counted once, when it finishes: one
+    /// the member owed after a fault on a later duty cycle (ADR 0148).
     pub log_truncations: u64,
     /// `cluster.truncations_refused`: a member told to truncate below the commit
     /// position it knows, which it did not do: it failed its election and kept its
@@ -643,11 +645,15 @@ pub struct Counts {
     /// it had not voted that leader in, and had not heard each other voter in this
     /// election name a term at most the leader's (ADR 0145).
     pub leaders_withheld: u64,
+    /// `cluster.truncations_faulted`: a truncation of the member's log whose command or
+    /// write faulted, which the member then owed until a truncation to its position
+    /// finished; once for each truncation that became owed (ADR 0148).
+    pub truncations_faulted: u64,
 }
 
 impl Counts {
     /// How many counts a member keeps: one counter of `counters.toml` each.
-    pub const LEN: usize = 25;
+    pub const LEN: usize = 26;
 
     /// Each count with the id of its counter in `counters.toml`, the constant
     /// `cavalry-shm` generates from it: what the consensus module stores, each as a
@@ -704,6 +710,7 @@ impl Counts {
             (CLUSTER_STANDBY_VOTE_REQUESTS, self.standby_vote_requests),
             (CLUSTER_VOTES_WITHHELD, self.votes_withheld),
             (CLUSTER_LEADERS_WITHHELD, self.leaders_withheld),
+            (CLUSTER_TRUNCATIONS_FAULTED, self.truncations_faulted),
         ]
     }
 }
@@ -985,6 +992,10 @@ pub struct Consensus {
     /// The position below which this member withholds its vote and seeks none, which it
     /// stored when it took a leader with its log empty; −1 for none (ADR 0145).
     vote_floor: i64,
+    /// The position of the truncation this member owes, −1 for none: one whose command
+    /// or write faulted, from the fault until a truncation to that position finishes,
+    /// in memory alone (ADR 0148).
+    truncation_owed: i64,
     /// The highest term in this member's record of terms.
     log_term: i64,
     /// The term this member leads or follows, −1 for none.
@@ -1133,6 +1144,7 @@ impl Consensus {
             state_since_ns: 0,
             candidate_term: -1,
             vote_floor: -1,
+            truncation_owed: -1,
             log_term: -1,
             term: -1,
             term_base: 0,
@@ -1261,6 +1273,12 @@ impl Consensus {
     /// fault is returned once the state's work has run.
     pub fn do_work<I: Io>(&mut self, clock: Clock, io: &mut I) -> Result<usize, I::Fault> {
         self.append_position = self.append_position.max(io.append_position());
+        // A truncation this member owes is asked for again before its state's work, in
+        // every state: a fault comes back here, and the member stays out of the log
+        // until a later cycle finishes it (ADR 0148).
+        if self.truncation_owed >= 0 {
+            self.truncate(self.truncation_owed, clock, io)?;
+        }
         let stepped = match self.state {
             ElectionState::Init => self.init(clock, io),
             ElectionState::Canvass => Ok(self.canvass(clock, io)),
@@ -1487,6 +1505,16 @@ impl Consensus {
                     } else {
                         count(&mut self.counts.leadership_terms_ignored);
                     }
+                    return Ok(());
+                }
+                // A member that owes a truncation finishes it first, and reads the
+                // message with the log it then holds: a truncation the message asks is
+                // then asked of a log that ends where the owed one cut it, and never
+                // above. While it still owes one, it reads no new leadership term, so
+                // that it neither joins a log nor replicates a term on an end it no
+                // longer holds (ADR 0148).
+                if self.truncation_owed >= 0 && !self.truncate(self.truncation_owed, clock, io)? {
+                    count(&mut self.counts.leadership_terms_ignored);
                     return Ok(());
                 }
                 // Nominate is canvass with a delay running: it reads a leader's term as
@@ -1899,6 +1927,15 @@ impl Consensus {
     /// `cluster.truncations_refused`, and fails its election.
     /// Once truncated, its append position is the position and its log term the
     /// highest its record still holds, before anything is recorded or reported.
+    ///
+    /// A truncation whose command or write faults is owed from then on: its position
+    /// is kept, counted once in `cluster.truncations_faulted`, the member fails its
+    /// election at this fault and at each later one that finds it out of init, and the
+    /// fault is returned. The I/O has cut the member's recordings, its file and its
+    /// record of terms as far as its steps went, and the end it reports is as it was. [`Consensus::do_work`] and a new leadership term ask for the owed
+    /// position again, here, until a truncation to it finishes; a fault of one of
+    /// those changes nothing more (`spec/cluster.md`, "Messages during an election";
+    /// ADR 0148).
     fn truncate<I: Io>(
         &mut self,
         position: i64,
@@ -1910,13 +1947,37 @@ impl Consensus {
             self.fail(clock);
             return Ok(false);
         }
-        let Some(log_term) = io.truncate_log(position)? else {
-            return Ok(false);
+        let log_term = match io.truncate_log(position) {
+            Ok(Some(log_term)) => log_term,
+            Ok(None) => return Ok(false),
+            Err(fault) => {
+                if self.truncation_owed < 0 {
+                    count(&mut self.counts.truncations_faulted);
+                    self.truncation_owed = position;
+                }
+                // Out of the election at every fault, so that a member whose
+                // truncation goes on faulting reads and sends nothing: one that went on
+                // to canvass while the truncation it owed was under way goes back to
+                // init too, an election failed each time it leaves a state for init.
+                if self.state != ElectionState::Init {
+                    self.fail(clock);
+                }
+                return Err(fault);
+            }
         };
+        self.truncation_owed = -1;
         self.append_position = position;
         self.log_term = log_term;
         count(&mut self.counts.log_truncations);
         Ok(true)
+    }
+
+    /// The position of the truncation this member owes, −1 while it owes none: one
+    /// whose command or write faulted, which it asks for again each duty cycle; until
+    /// it finishes, the member does not nominate and reads no new leadership term
+    /// (`spec/cluster.md`, "Messages during an election"; ADR 0148).
+    pub fn truncation_owed(&self) -> i64 {
+        self.truncation_owed
     }
 
     /// A member whose election had closed holds an election on a term above its own,
@@ -2508,6 +2569,11 @@ impl Consensus {
         // quorum committed with its acknowledgement before it lost it (ADR 0145). It
         // canvasses until a leader answers it, or until it no longer withholds.
         if self.withholds(None) {
+            return 0;
+        }
+        // Nor one that owes a truncation: the end it reports is one its recordings
+        // may no longer hold, and a log it led would begin there (ADR 0148).
+        if self.truncation_owed >= 0 {
             return 0;
         }
         let deadline_passed = if self.startup {

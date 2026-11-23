@@ -199,7 +199,11 @@ commit path runs per message.
   position, truncates each that stopped above it, which after a catch-up can be two
   that overlap, then takes every term based above the position out of the `terms`
   file. Each command waits for the driver's answer, so it is one step; asked again,
-  it changes nothing. `drop_terms_above` takes the terms a leader's record lacks out
+  it changes nothing. A command or a write that faults leaves the recordings cut as
+  far as the commands went, and the core owes the truncation: it asks for it again
+  each duty cycle and neither leads nor joins a log until it finishes, counted in
+  `cluster.truncations_faulted` with the position in `cluster.truncation_owed` (ADR
+  0148). `drop_terms_above` takes the terms a leader's record lacks out
   of that file by term, after such a truncation, each write synced
   (`TermsFile::drop_above_term`; ADR 0096).
 - Asks for the sync a commit waits for: a member's append position is its
@@ -484,16 +488,6 @@ reply carry at most 1,344 bytes, and nothing longer is reassembled (ADR 0116, AD
 to it was dropped (ADR 0118, Revisit). The protocol has no authentication: the
 challenge and its response are reserved (`spec/cluster.md`, "Out of this
 version").
-
-### What the election does not do yet
-
-A truncation whose command faults after an earlier one succeeded leaves the member
-reporting the end and the log term it had until the leader asks again; ADR 0095's
-Consequences say where that is tested. A member that leads before its leader has
-asked again lists a recording that begins past the cut, and its next start is
-refused for the hole, `member refused (listed-recording)`. Card 277 keeps such a
-member from leading or joining until a truncation has finished (ADR 0108,
-Consequences).
 
 ## What it must never do
 

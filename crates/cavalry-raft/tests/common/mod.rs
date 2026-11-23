@@ -53,6 +53,10 @@ pub struct Stub {
     pub stops_pending: u32,
     /// Whether `truncate_log` is still under way: it cuts nothing and returns `None`.
     pub truncating: bool,
+    /// How many more calls of `truncate_log` fault, each leaving the append position
+    /// and the terms as they were, as a module whose command faulted part way does
+    /// (ADR 0148).
+    pub truncate_faults: u32,
     /// Whether `append` is back-pressured.
     pub back_pressured: bool,
     /// Whether `send` reports a message not sent, as a publication that is
@@ -121,6 +125,7 @@ impl Stub {
             fail_remove: false,
             stops_pending: 0,
             truncating: false,
+            truncate_faults: 0,
             back_pressured: false,
             refuse_send: false,
             terms: [None; Stub::TERMS],
@@ -315,6 +320,10 @@ impl Io for Stub {
 
     fn truncate_log(&mut self, position: i64) -> Result<Option<i64>, Self::Fault> {
         self.call(Call::TruncateLog(position));
+        if self.truncate_faults > 0 {
+            self.truncate_faults -= 1;
+            return Err("a command of the truncation faulted");
+        }
         if self.truncating {
             return Ok(None);
         }

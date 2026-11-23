@@ -21,6 +21,13 @@
 //! than the leader's recording has synced, and ends by itself at its end, when it is
 //! stopped, or when it has had no subscriber for the replay connect timeout.
 //!
+//! A member's truncation cuts its log in a driver's order, the recordings from the
+//! last back and then its record of terms, and [`Cluster::fault_truncation`] makes one
+//! fault part way: the log and the record of terms are then cut as far as its steps
+//! went, and the end the member reports is as it was, as a driver leaves them (ADR
+//! 0148). A member started again on the log it kept ends its log where its
+//! entries end, as a start that finishes such a truncation does (ADR 0108).
+//!
 //! Its bounds, and what it does at each:
 //!
 //! - The consensus stream holds at most [`IN_FLIGHT_CAPACITY`] messages in flight,
@@ -197,6 +204,15 @@ struct Disk {
     /// The join position of the replay's image the member records on that
     /// subscription.
     catchup_image: Option<i64>,
+    /// Where its next truncations fault, and for how many of them in a row
+    /// ([`Cluster::fault_truncation`]).
+    truncation_fault: Option<(TruncationFault, u32)>,
+    /// A truncation of its log faulted and none has finished since: its log is cut
+    /// short of the end it reports (ADR 0148).
+    cut_short: bool,
+    /// It added a log, joined one or subscribed for a replay while `cut_short`, which
+    /// ADR 0148 says a member never does: what a test of it reads.
+    took_a_log_cut_short: bool,
 }
 
 impl Disk {
@@ -221,9 +237,36 @@ impl Disk {
             catchup: false,
             catchup_armed: false,
             catchup_image: None,
+            truncation_fault: None,
+            cut_short: false,
+            took_a_log_cut_short: false,
         }
     }
 }
+
+/// Where a member's truncation faults ([`Cluster::fault_truncation`]): one of the
+/// places at which a driver's command or a file write can fail part way through
+/// (`spec/cluster.md`, "Messages during an election"; ADR 0095, ADR 0148). The
+/// truncation is a list of steps: a purge of each recording that begins above the
+/// position, from the last back, where a recording begins at 0, at each term's base
+/// and at each end [`Cluster::end_recording`] marked; then the cut of the one that
+/// holds the position, when anything above it is left; then the member's log
+/// recordings file; then its record of terms.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum TruncationFault {
+    /// At the second step, the first done: the purge of the last recording, or with
+    /// none to purge the cut, or with nothing to cut the file.
+    SecondStep,
+    /// At the file, every command done.
+    List,
+    /// At the record of terms, every command and the file done, and the highest of
+    /// the terms based above the position deleted, where there is one.
+    Terms,
+}
+
+/// A step of the I/O that faulted: a truncation [`Cluster::fault_truncation`] made fail.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Faulted;
 
 /// Everything outside the cores.
 struct World {
@@ -290,7 +333,7 @@ struct MemberIo<'a> {
 }
 
 impl Io for MemberIo<'_> {
-    type Fault = core::convert::Infallible;
+    type Fault = Faulted;
 
     fn send(&mut self, member: i32, message: &Message<'_>) -> bool {
         let Some(to) = self.world.disks.iter().position(|disk| disk.id == member) else {
@@ -385,6 +428,9 @@ impl Io for MemberIo<'_> {
     }
 
     fn add_log(&mut self, term: i64, base: i64) -> Result<Option<Log>, Self::Fault> {
+        if let Some(disk) = self.world.disks.get_mut(self.own) {
+            disk.took_a_log_cut_short |= disk.cut_short;
+        }
         let session_id = 1_000 + i32::try_from(term).unwrap_or(0);
         self.world.publications.push(Publication {
             session_id,
@@ -401,6 +447,7 @@ impl Io for MemberIo<'_> {
 
     fn join_log(&mut self) -> Result<(), Self::Fault> {
         if let Some(disk) = self.world.disks.get_mut(self.own) {
+            disk.took_a_log_cut_short |= disk.cut_short;
             disk.joined = true;
         }
         Ok(())
@@ -480,14 +527,84 @@ impl Io for MemberIo<'_> {
         let Some(disk) = self.world.disks.get_mut(self.own) else {
             return Ok(Some(-1));
         };
+        // A driver's order: a purge of each recording that begins above the position,
+        // the last first, then the cut of the one that holds it, then the file, then
+        // the record of terms (ADR 0095, ADR 0108). A recording begins at 0, at each
+        // term's base and at each end `end_recording` marked.
+        let mut starts: Vec<i64> = disk
+            .terms
+            .iter()
+            .map(|&(_, base)| base)
+            .chain(disk.recording_ends.iter().copied())
+            .filter(|&start| start > position && start < disk.received)
+            .collect();
+        starts.sort_unstable_by(|a, b| b.cmp(a));
+        starts.dedup();
+        let armed = disk
+            .truncation_fault
+            .filter(|&(_, times)| times > 0)
+            .map(|(at, _)| at);
+        // A fault at the second step comes once one step is done, whichever step is
+        // next.
+        let second = armed == Some(TruncationFault::SecondStep);
+        let mut done = 0_usize;
+        let mut faulted = false;
+        for start in starts {
+            if second && done == 1 {
+                faulted = true;
+                break;
+            }
+            disk.log.retain(|entry| entry.position < start);
+            done += 1;
+        }
+        if !faulted && disk.log.iter().any(|entry| entry.position_after > position) {
+            if second && done == 1 {
+                faulted = true;
+            } else {
+                disk.log.retain(|entry| entry.position_after <= position);
+                done += 1;
+            }
+        }
+        // The file, which this model has no copy of: its step is a place to fault.
+        if !faulted {
+            if (second && done == 1) || armed == Some(TruncationFault::List) {
+                faulted = true;
+            } else {
+                done += 1;
+            }
+        }
+        // The record of terms, from the highest term down.
+        if !faulted && ((second && done == 1) || armed == Some(TruncationFault::Terms)) {
+            if armed == Some(TruncationFault::Terms)
+                && let Some(highest) = disk
+                    .terms
+                    .iter()
+                    .enumerate()
+                    .filter(|(_, (_, base))| *base > position)
+                    .max_by_key(|(_, (term, _))| *term)
+                    .map(|(index, _)| index)
+            {
+                disk.terms.remove(highest);
+            }
+            faulted = true;
+        }
+        if faulted {
+            // The log and the record of terms are cut as far as the steps went; the
+            // end the member reports and what it received are as they were.
+            if let Some((at, times)) = disk.truncation_fault {
+                disk.truncation_fault = (times > 1).then_some((at, times - 1));
+            }
+            disk.cut_short = true;
+            return Err(Faulted);
+        }
         // Every entry that ends above the position is gone, read or synced or
-        // neither, and every term recorded at a base above it: one step here, where
-        // a member over a driver truncates one recording and purges the ones after.
+        // neither, and every term recorded at a base above it.
         disk.log.retain(|entry| entry.position_after <= position);
         disk.received = disk.received.min(position);
         disk.synced = disk.synced.min(position);
         disk.terms.retain(|&(_, base)| base <= position);
         disk.recording_ends.retain(|&end| end < position);
+        disk.cut_short = false;
         Ok(Some(
             disk.terms.iter().map(|&(term, _)| term).max().unwrap_or(-1),
         ))
@@ -595,6 +712,7 @@ impl Io for MemberIo<'_> {
             }
         }
         if let Some(disk) = self.world.disks.get_mut(self.own) {
+            disk.took_a_log_cut_short |= disk.cut_short;
             disk.catchup = true;
             disk.catchup_armed = true;
             disk.catchup_image = None;
@@ -848,6 +966,10 @@ impl Cluster {
         // is every message in flight, the bound `send` holds, and the ones still
         // waiting stay ahead of any sent while these arrive. A message sent now is due
         // at the next step at the soonest, so the walk ends.
+        // The members whose message faulted this step: a member over a driver runs no
+        // more of that duty cycle, its core's own work included (`ConsensusModule::
+        // do_work`), so neither does one here.
+        let mut faulted = vec![false; self.world.disks.len()];
         let mut index = 0;
         while index < self.world.net.len() {
             let due = self
@@ -888,7 +1010,15 @@ impl Cluster {
                     world: &mut self.world,
                     own: flight.to,
                 };
-                let Ok(()) = core.on_message(clock, &message, &mut io);
+                // A fault, of a truncation this test made fail, leaves the member as
+                // the I/O left it. The rest of the step's messages are read, as the rest
+                // of a poll's batch is, and the member's own work waits for the next
+                // step, as `cavalry run` runs its next cycle.
+                if core.on_message(clock, &message, &mut io).is_err()
+                    && let Some(slot) = faulted.get_mut(flight.to)
+                {
+                    *slot = true;
+                }
             }
         }
         for (own, core) in self.cores.iter_mut().enumerate() {
@@ -897,6 +1027,7 @@ impl Cluster {
                 .disks
                 .get(own)
                 .is_none_or(|disk| disk.halted || disk.stalled)
+                || faulted.get(own).copied().unwrap_or(false)
             {
                 continue;
             }
@@ -905,7 +1036,10 @@ impl Cluster {
                 world: &mut self.world,
                 own,
             };
-            let Ok(_) = core.do_work(clock, &mut io);
+            // A fault, as above: the member's next cycle tries again.
+            if core.do_work(clock, &mut io).is_err() {
+                continue;
+            }
         }
     }
 
@@ -1139,7 +1273,11 @@ impl Cluster {
             world: &mut self.world,
             own,
         };
-        let Ok(outcome) = core.offer(clock, payload, &mut io);
+        // An offer truncates nothing, so no step of it faults here; one that did
+        // would leave the entry unoffered, which back-pressure says too.
+        let Ok(outcome) = core.offer(clock, payload, &mut io) else {
+            return Err(Refused::BackPressured);
+        };
         outcome.map(|()| {
             self.world
                 .publication_of(own)
@@ -1333,7 +1471,19 @@ impl Cluster {
         if let Some(disk) = self.world.disks.get_mut(index) {
             let synced = disk.synced;
             disk.log.retain(|entry| entry.position_after <= synced);
-            disk.received = synced;
+            // A truncation that faulted left the log shorter than the end the member
+            // reported: the start ends the log where its entries end, and deletes from
+            // its record every term based above that, as a start over a driver makes a
+            // log directory agree with itself after a stop or a fault inside a
+            // truncation (ADR 0108, ADR 0148). With no such truncation nothing changes:
+            // the entries end at the synced position, and no term is based above it,
+            // since a member records a term only at a base its append position, what
+            // its recording has synced, has reached.
+            let end = disk.log.last().map_or(0, |entry| entry.position_after);
+            disk.synced = synced.min(end);
+            disk.terms.retain(|&(_, base)| base <= end);
+            disk.cut_short = false;
+            disk.received = disk.synced;
             disk.joined = false;
             disk.image = None;
             disk.image_lost = false;
@@ -1433,6 +1583,57 @@ impl Cluster {
                 disk.recording_ends.push(end);
             }
         }
+    }
+
+    /// Makes the member's next `times` truncations of its log fault `at` the step it
+    /// names, as a driver that refuses a command, or does not answer it in time,
+    /// leaves one (ADR 0148). Each truncation that faults cuts the member's log and its
+    /// record of terms as far as its steps went, and leaves the end the member reports
+    /// as it was; the member owes it, and asks for it again. A truncation the
+    /// member asks for after the last of them, or one with too few steps to reach a
+    /// second, finishes.
+    pub fn fault_truncation(&mut self, member: i32, at: TruncationFault, times: u32) {
+        if let Some(disk) = self.disk_mut(member) {
+            disk.truncation_fault = (times > 0).then_some((at, times));
+        }
+    }
+
+    /// Whether a truncation of the member's log faulted and none has finished since:
+    /// its log is cut short of the end it reports. A start on the log it kept ends
+    /// that ([`Cluster::restart`]).
+    pub fn log_cut_short(&self, member: i32) -> bool {
+        self.world
+            .disks
+            .iter()
+            .any(|disk| disk.id == member && disk.cut_short)
+    }
+
+    /// Whether the member, at any time since it last started on an empty log
+    /// directory, added a log, joined one or subscribed for a replay while its log
+    /// was cut short: what ADR 0148 says a member never does, since that log or
+    /// replay begins at an end the member no longer holds.
+    pub fn took_a_log_cut_short(&self, member: i32) -> bool {
+        self.world
+            .disks
+            .iter()
+            .any(|disk| disk.id == member && disk.took_a_log_cut_short)
+    }
+
+    /// The position at which the member's log has a gap: an entry that begins past the
+    /// end of the one before it, or a first entry that does not begin at 0. `None`
+    /// while its log is whole. A member over a driver whose log had one would list a
+    /// recording that begins past the end of the one before it, which its next start
+    /// refuses (`listed-recording`; ADR 0108).
+    pub fn log_gap(&self, member: i32) -> Option<i64> {
+        let disk = self.world.disks.iter().find(|disk| disk.id == member)?;
+        let mut end = 0;
+        for entry in &disk.log {
+            if entry.position != end {
+                return Some(end);
+            }
+            end = entry.position_after;
+        }
+        None
     }
 
     /// Stops the member's recording from syncing, so that its append position stays

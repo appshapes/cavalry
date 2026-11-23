@@ -205,3 +205,4 @@ under `docs/` is listed here; `just lint-docs` fails on one that is not.
 - [0147. Ask a member for a snapshot with a control toggle that the asking command owns](decisions/0147-ask-a-member-for-a-snapshot-with-a-control-toggle-that-the-asking-command-owns.md)
 - [0149. Give each client's service a snapshot and a start from one, with the state copied to the caller](decisions/0149-give-each-clients-service-a-snapshot-and-a-start-from-one-with-the-state-copied-to-the-caller.md)
 - [0150. Say on the C ABI's page that a snapshot's adds and commands wait the response timeout](decisions/0150-say-on-the-c-abis-page-that-a-snapshots-adds-and-commands-wait-the-response-timeout.md)
+- [0148. Keep a member whose truncation faulted out of the log until it finishes the truncation](decisions/0148-keep-a-member-whose-truncation-faulted-out-of-the-log-until-it-finishes-the-truncation.md)

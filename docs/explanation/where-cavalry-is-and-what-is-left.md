@@ -258,13 +258,14 @@ each. Their state today:
 | 3. Nothing known lies about delivery | Issues 14, 16 and 17 are open; a member that lost its log and a member that never caught up elect as a new cluster while the one that holds the log is stopped (ADR 0145); a new leadership term that flow control held back can give a member that lost its log a vote floor below an entry it had acknowledged (work item 411); issues 245, 252 and 274 and work items 334 and 338 are tests that failed with no cause found yet |
 | 4. The frozen surfaces are named and an upgrade across them has run | The upgrade gate runs a cluster across two trees; nothing is frozen, and a client and a driver of different builds have never met |
 | 5. Honest and explainable to a stranger | The README's status is corrected with this page; no page for reporting a problem, no `SECURITY.md`, no generated latency page; errors name pages by a path in the repository |
-| 6. No fault is left to an operator's rule where a check can hold it | Three faults are held by rules: work items 277 and 288, and the members string |
+| 6. No fault is left to an operator's rule where a check can hold it | Two faults are held by rules: work item 288 and the members string. Since work item 277 a member whose truncation faulted part way leads and joins no log until it finishes, with a counter and a `doctor` finding (ADR 0148) |
 | 7. A leader that stops, in any way, is replaced within a stated bound | Two of six ways are held by tests; a planned stop costs 11 s; work item 280 is open |
 | 8. Redundancy is restored while the cluster runs, and the cluster runs for days | Not started: no start from a peer's snapshot, no purge while running, no job across hosts, no cluster soak |
 | 9. What Brigade's server runs is a gate here, and the release carries its data | The three gates are in since 2026-11-22 (feature 2): the feed's shape in `just test`, a log directory of 620a2e29 opened in place in `just conformance`, and the server's suite against `master` each night. Left for features 10 and 12: the server builds from the published crates, the candidate's soak, and the notice of work item 312 |
 
-Row 9 is the state on 2026-11-22, when feature 2 landed. Rows 3 and 6 are the state on
-2026-11-22, when work item 286's vote floor landed. Every other row is the state at
+Row 9 is the state on 2026-11-22, when feature 2 landed. Row 3 is the state on
+2026-11-22, when work item 286's vote floor landed, and row 6 on 2026-11-23, when work
+item 277 landed. Every other row is the state at
 20741de3.
 
 ## The roadmap

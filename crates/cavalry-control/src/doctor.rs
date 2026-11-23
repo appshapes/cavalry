@@ -58,8 +58,8 @@ use cavalry_shm::counters::generated::{
     CLUSTER_REPLIES_STALE, CLUSTER_ROLE, CLUSTER_SERVICE_ACKS_REJECTED,
     CLUSTER_SERVICE_SNAPSHOTS_FAILED, CLUSTER_SERVICE_SNAPSHOTS_PASSED_OVER,
     CLUSTER_SNAPSHOTS_FAILED, CLUSTER_SNAPSHOTS_PASSED_OVER, CLUSTER_STANDBY,
-    CLUSTER_STANDBY_VOTE_REQUESTS, CLUSTER_TRUNCATIONS_REFUSED, CLUSTER_VOTE_FLOOR, CLUSTER_VOTERS,
-    CLUSTER_VOTES_WITHHELD,
+    CLUSTER_STANDBY_VOTE_REQUESTS, CLUSTER_TRUNCATION_OWED, CLUSTER_TRUNCATIONS_FAULTED,
+    CLUSTER_TRUNCATIONS_REFUSED, CLUSTER_VOTE_FLOOR, CLUSTER_VOTERS, CLUSTER_VOTES_WITHHELD,
 };
 use cavalry_shm::counters::{CounterId, CountersError, CountersReader, Scope};
 
@@ -1027,10 +1027,12 @@ const DOC_SNAPSHOT: &str = "docs/how-to/ask-for-a-snapshot.md#when-it-does-not-w
 /// reached it, from a member whose string gives it a vote (ADR 0134). The last two
 /// are of a voter that started on an empty log directory (ADR 0145): a request vote
 /// it answered with nothing while it withholds its vote, and a leader it passed over
-/// while its log was empty. The last is reported only while the member's log is
-/// still empty and it has no leader, since the core counts it only then and the
-/// count does not fall ([`cluster_checks`]).
-const MEMBER_COUNTS: [CounterId; 14] = [
+/// while its log was empty. The second to last is reported only while the member's
+/// log is still empty and it has no leader, since the core counts it only then and the
+/// count does not fall ([`cluster_checks`]). The last is a truncation of the member's
+/// log whose command or write faulted, which the member owed until one finished (ADR
+/// 0148).
+const MEMBER_COUNTS: [CounterId; 15] = [
     CLUSTER_MESSAGES_REJECTED,
     CLUSTER_LEADER_HEARTBEAT_TIMEOUTS,
     CLUSTER_LOG_IMAGES_LOST,
@@ -1045,6 +1047,7 @@ const MEMBER_COUNTS: [CounterId; 14] = [
     CLUSTER_STANDBY_VOTE_REQUESTS,
     CLUSTER_VOTES_WITHHELD,
     CLUSTER_LEADERS_WITHHELD,
+    CLUSTER_TRUNCATIONS_FAULTED,
 ];
 
 /// Where a cluster session's findings are explained.
@@ -1101,6 +1104,10 @@ struct MemberCounters {
     /// −1 for none (ADR 0145); `None` while the counters file holds no such record, as
     /// for a member of a build older than the counter.
     vote_floor: Option<i64>,
+    /// `cluster.truncation_owed`: the position of the truncation the member owes, −1
+    /// for none (ADR 0148); `None` while the counters file holds no such record, as
+    /// for a member of a build older than the counter.
+    truncation_owed: Option<i64>,
     /// The highest id among the control toggles beside the member that ask for a
     /// snapshot, each a counter that a `cavalry snapshot` adds and removes
     /// (`spec/cluster.md`, "The control toggle"; ADR 0147); `None` while there is
@@ -1381,7 +1388,9 @@ fn election_state_name(code: i64) -> String {
 /// (`cluster-commit-waits`); a member that runs with other voters than the members
 /// string doctor was given names (`cluster-voters`; ADR 0134); a voter below its vote
 /// floor, which withholds its vote, with where its log is and how far it has to go
-/// (`cluster.vote_floor`; ADR 0145), and no standby, which has no vote to withhold;
+/// (`cluster.vote_floor`; ADR 0145), and no standby, which has no vote to withhold; a
+/// member that owes a truncation whose command or write faulted, with the position it
+/// owes and the end it reports (`cluster.truncation_owed`; ADR 0148);
 /// and each of [`MEMBER_COUNTS`] above 0, by its counter's name with its doctor
 /// sentence, consensus messages rejected among them, but for
 /// `cluster.leaders_withheld`, which is reported only while the member's log is empty
@@ -1504,6 +1513,8 @@ fn cluster_checks(
             member.protocol_version = Some(value);
         } else if type_id == CLUSTER_VOTE_FLOOR.0 {
             member.vote_floor = Some(value);
+        } else if type_id == CLUSTER_TRUNCATION_OWED.0 {
+            member.truncation_owed = Some(value);
         } else if type_id == CLUSTER_CONTROL_TOGGLE_TAKEN.0 {
             member.toggle_taken = Some(value);
         } else if let Some(count) = MEMBER_COUNTS
@@ -1528,9 +1539,10 @@ fn cluster_checks(
         for member in &members {
             member_findings(member, cluster, findings);
         }
-        // The eight of `member_findings`, the vote floor's (ADR 0145) and the control
-        // toggle's (ADR 0147) among them, and one for each of the member's counts.
-        checks += 8 + MEMBER_COUNTS.len();
+        // The nine of `member_findings`, the vote floor's (ADR 0145), the control
+        // toggle's (ADR 0147) and the owed truncation's (ADR 0148) among them, and one
+        // for each of the member's counts.
+        checks += 9 + MEMBER_COUNTS.len();
     }
     if sessions {
         stale.sort_by_key(|(session, counter, _)| (*session, counter.0));
@@ -2036,6 +2048,25 @@ fn member_findings(
                 def.name,
                 floor - append,
                 def.doctor
+            ),
+            doc: DOC_CLUSTER,
+        });
+    }
+    // A member that owes a truncation whose command or write faulted is out of the log
+    // until it finishes (ADR 0148): the gauge's text, with the position it owes and the
+    // end it reports, while it lasts, and nothing once it finished.
+    if let Some(owed) = member.truncation_owed
+        && owed >= 0
+        && let Some(def) = COUNTERS
+            .iter()
+            .find(|def| def.id == CLUSTER_TRUNCATION_OWED)
+    {
+        findings.push(Finding {
+            check: def.name,
+            level: Level::Warn,
+            message: format!(
+                "member {id}'s {} is {owed} and its cluster.append_position {append}: {}",
+                def.name, def.doctor
             ),
             doc: DOC_CLUSTER,
         });
@@ -7305,6 +7336,73 @@ mod tests {
         assert_eq!(found, ["cluster-member"], "{findings:?}");
     }
 
+    /// A member that owes a truncation whose command faulted is named while it owes
+    /// it, with the position it owes and the end it reports, and the truncation that
+    /// faulted is reported with what the member does meanwhile (ADR 0148). Once a
+    /// truncation to that position has finished the gauge is −1 and the member is not
+    /// named; the count, which does not fall, is still reported.
+    #[test]
+    fn a_member_that_owes_a_truncation_is_named_until_it_finishes() {
+        let owing = [
+            (CLUSTER_ROLE, 0),
+            (CLUSTER_ELECTION_STATE, 1),
+            (CLUSTER_LEADERSHIP_TERM_ID, 2),
+            (CLUSTER_LEADER_MEMBER_ID, -1),
+            (CLUSTER_APPEND_POSITION, 4096),
+            (CLUSTER_TRUNCATION_OWED, 1024),
+            (CLUSTER_TRUNCATIONS_FAULTED, 1),
+        ];
+        let (_, findings) = cluster_findings("truncation-owed", 2, &owing);
+        let found: Vec<&str> = findings.iter().map(|finding| finding.check).collect();
+        assert!(found.contains(&"cluster.truncation_owed"), "{findings:?}");
+        assert!(
+            found.contains(&"cluster.truncations_faulted"),
+            "{findings:?}"
+        );
+        let owed = findings
+            .iter()
+            .find(|finding| finding.check == "cluster.truncation_owed")
+            .expect("the owed truncation");
+        assert_eq!(owed.level, Level::Warn);
+        assert!(
+            owed.message.starts_with(
+                "member 2's cluster.truncation_owed is 1024 and its cluster.append_position \
+                 4096: This member is out of the log until a truncation of its log finishes"
+            ),
+            "{}",
+            owed.message
+        );
+        assert_eq!(owed.doc, DOC_CLUSTER);
+        let faulted = findings
+            .iter()
+            .find(|finding| finding.check == "cluster.truncations_faulted")
+            .expect("the count");
+        assert!(
+            faulted
+                .message
+                .starts_with("member 2's cluster.truncations_faulted is 1: A truncation"),
+            "{}",
+            faulted.message
+        );
+
+        let finished = [
+            (CLUSTER_ROLE, 0),
+            (CLUSTER_ELECTION_STATE, 17),
+            (CLUSTER_LEADERSHIP_TERM_ID, 3),
+            (CLUSTER_LEADER_MEMBER_ID, 1),
+            (CLUSTER_APPEND_POSITION, 8192),
+            (CLUSTER_TRUNCATION_OWED, -1),
+            (CLUSTER_TRUNCATIONS_FAULTED, 1),
+        ];
+        let (_, findings) = cluster_findings("truncation-finished", 2, &finished);
+        let found: Vec<&str> = findings.iter().map(|finding| finding.check).collect();
+        assert!(!found.contains(&"cluster.truncation_owed"), "{findings:?}");
+        assert!(
+            found.contains(&"cluster.truncations_faulted"),
+            "{findings:?}"
+        );
+    }
+
     /// A member that came back on an empty log directory and has not caught up with
     /// its vote floor is named, with where its log is and how far it has to go, and
     /// the requests it left unanswered meanwhile are reported with what they mean
@@ -7827,7 +7925,7 @@ mod tests {
 
         // A follower that follows: the note alone, with who it is and what it knows.
         let (checks, findings) = cluster_findings("cluster-follower", 1, &follower);
-        assert_eq!(checks, 22);
+        assert_eq!(checks, 24);
         assert_eq!(findings.len(), 1, "{findings:?}");
         assert_eq!(findings[0].check, "cluster-member");
         assert_eq!(findings[0].level, Level::Note);
@@ -8004,7 +8102,7 @@ mod tests {
         let dir = TestDir::new("cluster-session-member");
         let reader = session_file(&dir, 7, 2, Some((1, &follower)));
         let mut findings = Vec::new();
-        assert_eq!(cluster_checks(&reader, true, None, &mut findings), 23);
+        assert_eq!(cluster_checks(&reader, true, None, &mut findings), 25);
         let found: Vec<&str> = findings.iter().map(|finding| finding.check).collect();
         assert_eq!(
             found,

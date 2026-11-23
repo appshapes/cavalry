@@ -55,7 +55,8 @@ use cavalry_shm::counters::generated::{
     CLUSTER_LOG_RECORDING_ID, CLUSTER_LOG_RECORDINGS_FORGOTTEN, CLUSTER_LOG_RECORDINGS_LISTED,
     CLUSTER_LOG_RECORDINGS_UNSYNCED, CLUSTER_LOG_RECORDINGS_UNWRITTEN, CLUSTER_MESSAGES_REJECTED,
     CLUSTER_PROTOCOL_VERSION, CLUSTER_ROLE, CLUSTER_SESSIONS, CLUSTER_STANDBY,
-    CLUSTER_TRUNCATIONS_FINISHED, CLUSTER_VOTE_FLOOR, CLUSTER_VOTERS, COUNTERS,
+    CLUSTER_TRUNCATION_OWED, CLUSTER_TRUNCATIONS_FINISHED, CLUSTER_VOTE_FLOOR, CLUSTER_VOTERS,
+    COUNTERS,
 };
 
 use crate::consensus::{
@@ -1996,10 +1997,16 @@ impl Io for ClientIo {
     /// `cluster.log_recording_id` still holds the id of the recording the member
     /// left, which the duty cycle that left it stores −1 over: a service takes the
     /// member's commit position as its bound while the counter names a recording, and
-    /// no recording of the log is cut under that bound (ADR 0103). A command
-    /// that faults returns with what was cut so far cut in the table too, and the
-    /// leader's next new leadership term asks again: a purge of a recording already
-    /// purged, or a truncation to where a recording already stops, changes nothing.
+    /// no recording of the log is cut under that bound (ADR 0103). A command or a
+    /// write that faults returns with what was cut so far cut in the table too, with
+    /// the file and the record of terms as far as its steps went, and with where the
+    /// log ends as it was. The
+    /// core then owes the truncation and asks for it again, to the same position,
+    /// each duty cycle until it finishes, and the member neither leads nor joins a log
+    /// meanwhile (ADR 0148): a purge of a recording already purged, or a truncation to
+    /// where a recording already stops, changes nothing. The position is never above
+    /// the one that faulted, so the table, which ends at or above that position, ends
+    /// where the truncation says.
     /// The core asks it of a member that is out of the log, with a position below its
     /// append position and at or above the commit position it knows (ADR 0083).
     fn truncate_log(&mut self, position: i64) -> Result<Option<i64>, Self::Fault> {
@@ -2726,6 +2733,9 @@ struct Counters {
     /// for none, stored each cycle, since the member stores it once when it takes a
     /// leader with its log empty (ADR 0145).
     vote_floor: Stored,
+    /// `cluster.truncation_owed`: the position of the truncation the member owes, −1
+    /// while it owes none (ADR 0148).
+    truncation_owed: Stored,
     append_position: Stored,
     /// `cluster.log_recording_id`, added before `cluster.commit_position` and stored
     /// before it (`spec/cluster.md`, "The service").
@@ -2796,6 +2806,11 @@ impl Counters {
                 i64::from(PROTOCOL_VERSION),
             )?,
             vote_floor: add(CLUSTER_VOTE_FLOOR, "cluster.vote_floor", core.vote_floor())?,
+            truncation_owed: add(
+                CLUSTER_TRUNCATION_OWED,
+                "cluster.truncation_owed",
+                core.truncation_owed(),
+            )?,
             append_position: add(
                 CLUSTER_APPEND_POSITION,
                 "cluster.append_position",
@@ -2902,6 +2917,7 @@ impl Counters {
         self.election_cause
             .store(i64::from(core.election_cause().code()));
         self.vote_floor.store(core.vote_floor());
+        self.truncation_owed.store(core.truncation_owed());
         self.append_position.store(core.append_position());
         if self.log_recording_id.store(log_recording_id) {
             self.commit_position.store(core.commit_position());
