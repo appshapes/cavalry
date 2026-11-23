@@ -2085,9 +2085,10 @@ fn member_findings(
                 format!(
                     "a `cavalry snapshot` asks member {id} for a snapshot, and the member has \
                      not taken the request yet: it takes one when it takes no snapshot of \
-                     its own and has read its log past its last cluster action, within a \
-                     second or so. If this note stays, a snapshot of the member's own does \
-                     not end: see cluster.snapshots_failed"
+                     its own and has read its committed log past its last cluster action, \
+                     within a second or so. If this note stays, a snapshot of the member's \
+                     own does not end, see cluster.snapshots_failed, or its followers have \
+                     not committed its last cluster action, see cluster-commit-waits"
                 ),
             )),
             Some(_) => Some((
@@ -8141,6 +8142,23 @@ mod tests {
         assert_eq!(found[0].level, Level::Note);
         assert!(
             found[0].message.contains("has not taken the request yet"),
+            "{}",
+            found[0].message
+        );
+        // Both of the reasons a leader leaves a request where it is, each with where
+        // doctor tells it: a snapshot of its own, and a commit that waits.
+        assert!(
+            found[0].message.contains(
+                "a snapshot of the member's own does not end, see cluster.snapshots_failed"
+            ),
+            "{}",
+            found[0].message
+        );
+        assert!(
+            found[0].message.contains(
+                "its followers have not committed its last cluster action, see \
+                 cluster-commit-waits"
+            ),
             "{}",
             found[0].message
         );
