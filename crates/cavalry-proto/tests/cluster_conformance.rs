@@ -1,16 +1,18 @@
 //! Runs every vector in `spec/vectors/cluster.json` against this crate: a message
 //! vector decodes to its fields on its stream and encodes back to its bytes, or is
 //! rejected for the named reason; a members vector parses to its members or is
-//! refused; an arithmetic vector's fields are computed from its inputs
-//! (`spec/README.md`, "Conventions"; ADR 0058). `just conformance` runs this test
+//! refused; an arithmetic vector's fields are computed from its inputs; a timers
+//! vector's steps are taken by a service's table of timers, which answers each as
+//! the vector says (`spec/README.md`, "Conventions"; ADR 0058; ADR 0151). `just conformance` runs this test
 //! alone; `just test` runs it with the rest.
 
 use cavalry_proto::cluster::{
     Ballot, Candidate, CanvassAction, CanvassTerms, ChangeType, CloseReason, ClusterAction,
     ClusterError, CommitPosition, EMPTY_MEMBER, EventCode, LogRecording, LogRecordings, LogReport,
     MAX_LOG_RECORDINGS, MAX_LOG_RECORDINGS_LENGTH, MAX_MEMBERS, Member, MemberPosition, Message,
-    NewLeadershipTermAction, NextFields, RecordedTerms, ReplayEnd, ReplicationStop, SnapshotMark,
-    Stream, TermFields, TermSpan, TimeUnit, VERSION, Vote, VoteAnswer, VoteRequest, answered_term,
+    NewLeadershipTermAction, NextFields, RecordedTerms, ReplayEnd, ReplicationStop, ServiceTimers,
+    SnapshotMark, Stream, TermFields, TermSpan, TimeUnit, TimerEventIs, VERSION, Vote, VoteAnswer,
+    VoteRequest, answered_term,
     ballot, candidate, canvass_position_action, commit_position, entry_position, log_at_least,
     new_leadership_term_action, next_fields, parse_members, quorum, replay_end, replication_record,
     replication_stop, request_vote, takes_leader, votes_in_term, withheld_vote, withholds,
@@ -327,6 +329,15 @@ fn fields(message: &Message<'_>) -> Value {
             "log_position": log_position, "timestamp": timestamp, "ack_id": ack_id,
             "relevant_id": relevant_id, "service_id": service_id,
         }),
+        Message::ScheduleTimer {
+            correlation_id,
+            deadline,
+        }
+        | Message::Timer {
+            correlation_id,
+            deadline,
+        } => json!({ "correlation_id": correlation_id, "deadline": deadline }),
+        Message::CancelTimer { correlation_id } => json!({ "correlation_id": correlation_id }),
     }
 }
 
@@ -448,6 +459,77 @@ fn log_recordings_vector(name: &str, vector: &Value) {
             "{name}: position {}",
             read["position"]
         );
+    }
+}
+
+/// A timers vector (`spec/cluster.md`, "The service", "Timers"): each step is taken by
+/// one table, which refuses, hands over and holds what the vector's fields say.
+fn timers_vector(name: &str, vector: &Value) {
+    let mut timers = Box::new(ServiceTimers::new());
+    for (index, step) in vector["steps"].as_array().expect("steps").iter().enumerate() {
+        let at = format!("{name}: step {index}");
+        let fields = &step["fields"];
+        match step["op"].as_str().expect("op") {
+            "schedule" => {
+                let refused = timers
+                    .schedule(int(step, "id"), int(step, "deadline"))
+                    .is_err();
+                assert_eq!(Value::from(refused), fields["refused"], "{at}: refused");
+            }
+            "fill" => {
+                let refused = (0..int(step, "count"))
+                    .filter(|id| timers.schedule(*id, int(step, "deadline") + id).is_err())
+                    .count();
+                assert_eq!(Value::from(refused), fields["refused"], "{at}: refused");
+            }
+            "cancel" => {
+                timers.cancel(int(step, "id"));
+            }
+            "event" => {
+                let id = int(step, "id");
+                let handed = timers.begin_event(id, int(step, "timestamp")) == TimerEventIs::Handed;
+                assert_eq!(Value::from(handed), fields["handed"], "{at}: handed");
+                if handed {
+                    // The handler: what it does with the timer's id and with another's.
+                    if let Some(inside) = step.get("schedule_inside") {
+                        let refused = timers
+                            .schedule(int(inside, "id"), int(inside, "deadline"))
+                            .is_err();
+                        assert_eq!(
+                            Value::from(refused),
+                            fields["refused_inside"],
+                            "{at}: refused inside"
+                        );
+                    }
+                    if step.get("cancel_inside").is_some() {
+                        timers.cancel(id);
+                    }
+                    if let Some(deadline) = step.get("reschedule") {
+                        timers
+                            .schedule(id, deadline.as_i64().expect("a deadline"))
+                            .expect("a pending id is scheduled at any count");
+                    }
+                    let taken = step.get("taken").and_then(Value::as_bool).unwrap_or(true);
+                    let pending = timers.end_event(taken);
+                    assert_eq!(
+                        pending,
+                        !taken || step.get("reschedule").is_some(),
+                        "{at}: whether the timer is pending after its event"
+                    );
+                }
+            }
+            other => panic!("{at}: unknown op {other}"),
+        }
+        if let Some(count) = fields.get("pending_count") {
+            assert_eq!(Value::from(timers.len()), *count, "{at}: pending count");
+        } else {
+            let pending: Vec<Value> = timers
+                .iter()
+                .map(|(id, deadline)| json!({ "id": id, "deadline": deadline }))
+                .collect();
+            assert_eq!(Value::Array(pending), fields["pending"], "{at}: pending");
+            assert_eq!(timers.is_empty(), timers.len() == 0, "{at}: empty");
+        }
     }
 }
 
@@ -775,12 +857,13 @@ fn every_vector_in_spec_vectors_cluster_json() {
             "members" => members_vector(name, vector),
             "arithmetic" => arithmetic_vector(name, vector),
             "log recordings" => log_recordings_vector(name, vector),
+            "timers" => timers_vector(name, vector),
             other => panic!("{name}: unknown kind {other}"),
         }
         let count = kinds.get(kind).and_then(Value::as_u64).unwrap_or(0);
         kinds.insert(kind.to_string(), Value::from(count + 1));
     }
-    assert_eq!(kinds.len(), 4, "the four kinds of spec/cluster.md, Vectors");
+    assert_eq!(kinds.len(), 5, "the five kinds of spec/cluster.md, Vectors");
 }
 
 /// The file at its bound (`spec/cluster.md`, "The log's recordings"): 1,025 entries

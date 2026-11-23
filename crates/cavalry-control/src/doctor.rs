@@ -7878,10 +7878,10 @@ mod tests {
                 findings[0].message
             );
         }
-        // The value this build's members store is the one the note reads as version 1.
+        // The value this build's members store is the one the note reads as version 2.
         assert_eq!(
             protocol_version_text(Some(i64::from(PROTOCOL_VERSION))),
-            "; it runs version 1 of the cluster protocol, 0.1.0"
+            "; it runs version 2 of the cluster protocol, 0.2.0"
         );
         // Another major is named in semantic form alone: its page's version is no
         // longer the minor.

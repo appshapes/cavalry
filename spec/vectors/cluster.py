@@ -14,9 +14,9 @@ import json
 import struct
 from pathlib import Path
 
-SCHEMA_ID, VERSION = 1, 1
+SCHEMA_ID, VERSION = 1, 2
 HEADER_VERSION = 0  # every header's, in every version of major 0 ("Versions and the upgrade")
-PROTOCOL_VERSION = VERSION << 8  # this page's version in semantic form, 0.1.0
+PROTOCOL_VERSION = VERSION << 8  # this page's version in semantic form, 0.2.0
 LATER_MINOR = (7 << 8) + 3  # 0.7.3, a later minor of major 0, which a reader of this version reads
 HEADER = struct.Struct("<HHHH")  # block length, template id, schema id, version
 NULL = -1
@@ -99,10 +99,13 @@ TEMPLATES = {
     33: ("service-ack", 36, ("consensus-module",),
          [("log_position", "q"), ("timestamp", "q"), ("ack_id", "q"), ("relevant_id", "q"),
           ("service_id", "i")], []),
+    31: ("schedule-timer", 16, ("consensus-module",), [("correlation_id", "q"), ("deadline", "q")], []),
+    32: ("cancel-timer", 8, ("consensus-module",), [("correlation_id", "q")], []),
+    104: ("timer", 16, ("snapshot",), [("correlation_id", "q"), ("deadline", "q")], []),
 }
 STREAMS = {
     "log": (1, 20, 21, 22, 23, 24, 25), "consensus": tuple(range(50, 58)), "ingress": (1, 3, 4, 5),
-    "egress": (1, 2, 6), "snapshot": (100, 102, 103, 105), "consensus-module": (33,),
+    "egress": (1, 2, 6), "snapshot": (100, 102, 103, 104, 105), "consensus-module": (31, 32, 33),
 }
 # which fields allow -1 (spec/cluster.md, each table)
 ALLOW_NULL = {
@@ -206,6 +209,8 @@ CONSENSUS_MODULE = dict(next_session_id=8, next_service_session_id=0, log_servic
                         pending_message_capacity=0)
 CLIENT_SESSION = dict(cluster_session_id=7, response_stream_id=102)
 SERVICE_ACK = dict(log_position=98304, timestamp=TS, ack_id=0, relevant_id=12, service_id=0)
+SCHEDULE_TIMER = dict(correlation_id=99, deadline=TS + 5_000)
+CANCEL_TIMER = dict(correlation_id=99)
 
 VECTORS = [
     message("session-message-log", 1, "log", SESSION_MESSAGE, payload=b"hello"),
@@ -302,6 +307,15 @@ VECTORS = [
     # member lists nothing for such an ack, and the message is read all the same.
     message("service-ack-fields-a-reader-ignores", 33, "consensus-module",
             dict(SERVICE_ACK, log_position=0, timestamp=-1, ack_id=5, relevant_id=-1, service_id=3)),
+    # A service's timers (version 2). A correlation id and a deadline are any value: a program chose the
+    # one, and a deadline in the past, a negative one among them, is due at once.
+    message("schedule-timer", 31, "consensus-module", SCHEDULE_TIMER),
+    message("schedule-timer-any-values", 31, "consensus-module",
+            dict(correlation_id=-(1 << 63), deadline=-1)),
+    message("cancel-timer", 32, "consensus-module", CANCEL_TIMER),
+    message("cancel-timer-any-id", 32, "consensus-module", dict(correlation_id=(1 << 63) - 1)),
+    message("timer", 104, "snapshot", SCHEDULE_TIMER),
+    message("timer-any-values", 104, "snapshot", dict(correlation_id=-1, deadline=(1 << 63) - 1)),
 ]
 
 # ---- rejections, in the order the checks run ----------------------------------------
@@ -317,8 +331,24 @@ VECTORS += [
     message("reject-template-unknown", 55, "consensus", COMMIT, error="template",
             bytes_=HEADER.pack(20, 9, SCHEMA_ID, HEADER_VERSION) + bytes(20)),
     message("reject-stream", 55, "log", COMMIT, error="stream", bytes_=commit),
-    message("reject-template-of-a-snapshots-timer", 103, "snapshot", CLUSTER_SESSION, error="template",
-            bytes_=HEADER.pack(16, 104, SCHEMA_ID, HEADER_VERSION) + bytes(16)),
+    # Aeron's pending message tracker, 107, which a snapshot of this version does not hold.
+    message("reject-template-of-a-snapshots-pending-messages", 103, "snapshot", CLUSTER_SESSION, error="template",
+            bytes_=HEADER.pack(16, 107, SCHEMA_ID, HEADER_VERSION) + bytes(16)),
+    # Aeron's close session, 30, beside the two timer messages that version 2 names.
+    message("reject-template-close-session", 33, "consensus-module", SERVICE_ACK, error="template",
+            bytes_=HEADER.pack(8, 30, SCHEMA_ID, HEADER_VERSION) + bytes(8)),
+    message("reject-stream-schedule-timer-on-the-log", 31, "log", SCHEDULE_TIMER, error="stream",
+            bytes_=encode(31, SCHEDULE_TIMER)),
+    message("reject-stream-cancel-timer-on-the-consensus-stream", 32, "consensus", CANCEL_TIMER, error="stream",
+            bytes_=encode(32, CANCEL_TIMER)),
+    message("reject-stream-timer-on-the-consensus-module-stream", 104, "consensus-module", SCHEDULE_TIMER,
+            error="stream", bytes_=encode(104, SCHEDULE_TIMER)),
+    message("reject-stream-timer-event-on-the-consensus-module-stream", 20, "consensus-module", TIMER,
+            error="stream", bytes_=encode(20, TIMER)),
+    message("reject-block-length-cancel-timer", 32, "consensus-module", CANCEL_TIMER, error="block-length",
+            bytes_=encode(32, CANCEL_TIMER, block_length=16) + bytes(8)),
+    message("reject-length-schedule-timer-trailing", 31, "consensus-module", SCHEDULE_TIMER, error="length",
+            bytes_=encode(31, SCHEDULE_TIMER) + bytes(1)),
     message("reject-stream-cluster-session-on-the-log", 103, "log", CLUSTER_SESSION, error="stream",
             bytes_=encode(103, CLUSTER_SESSION, {"response_channel": CHANNEL})),
     message("reject-stream-consensus-module-on-the-egress", 105, "egress", CONSENSUS_MODULE, error="stream",
@@ -1095,6 +1125,127 @@ VECTORS += [
 
 LOG_RECORDINGS_MAGIC = b"CVLYLREC"
 MAX_LOG_RECORDINGS = 1025
+
+
+# ---- a service's timers ("The service", "Timers") ------------------------------------------
+
+MAX_SERVICE_TIMERS = 1024
+
+
+def timers(name, steps):
+    """A service's pending timers through `steps`, each a dict with an `op`:
+
+    - `schedule`, an `id` and a `deadline`: refused when the id is not pending and the table is full;
+    - `fill`, a `count` and a `deadline`: a schedule of each id from 0 to the count less one, in that
+      order, the id's deadline being the deadline plus the id; its fields say how many were `refused`;
+    - `cancel`, an `id`;
+    - `event`, an `id` and a `timestamp`: handed to the program when the timer is pending with a deadline
+      at or before the timestamp. With `taken` false the handler does not take the event, and the timer
+      is pending as before; with `reschedule`, a deadline, the handler schedules the id again while it
+      handles the event; with `cancel_inside`, it cancels the id there; with `schedule_inside`, an id
+      and a deadline, it schedules another timer there, and the fields say whether that was
+      `refused_inside`.
+
+    After every step the vector gives the pending timers in the rising order of their ids, or, when
+    more than eight are pending, their `pending_count` alone."""
+    pending, out = {}, []
+    for step in steps:
+        op, fields = step["op"], {}
+        if op == "schedule":
+            refused = step["id"] not in pending and len(pending) >= MAX_SERVICE_TIMERS
+            if not refused:
+                pending[step["id"]] = step["deadline"]
+            fields["refused"] = refused
+        elif op == "fill":
+            refused = 0
+            for i in range(step["count"]):
+                if i not in pending and len(pending) >= MAX_SERVICE_TIMERS:
+                    refused += 1
+                else:
+                    pending[i] = step["deadline"] + i
+            fields["refused"] = refused
+        elif op == "cancel":
+            pending.pop(step["id"], None)
+        elif op == "event":
+            handed = step["id"] in pending and pending[step["id"]] <= step["timestamp"]
+            fields["handed"] = handed
+            if handed and "schedule_inside" in step:
+                inside = step["schedule_inside"]
+                refused = inside["id"] not in pending and len(pending) >= MAX_SERVICE_TIMERS
+                if not refused:
+                    pending[inside["id"]] = inside["deadline"]
+                fields["refused_inside"] = refused
+            if handed and step.get("taken", True):
+                if "reschedule" in step:
+                    pending[step["id"]] = step["reschedule"]
+                else:
+                    del pending[step["id"]]
+        else:
+            raise AssertionError(op)
+        if len(pending) > 8:
+            fields["pending_count"] = len(pending)
+        else:
+            fields["pending"] = [{"id": i, "deadline": pending[i]} for i in sorted(pending)]
+        out.append(dict(step, fields=fields))
+    return {"kind": "timers", "name": name, "steps": out}
+
+
+def schedule(id_, deadline):
+    return {"op": "schedule", "id": id_, "deadline": deadline}
+
+
+def cancel(id_):
+    return {"op": "cancel", "id": id_}
+
+
+def event(id_, timestamp, **more):
+    return dict({"op": "event", "id": id_, "timestamp": timestamp}, **more)
+
+
+VECTORS += [
+    # Handed once, at or after the deadline, and never again.
+    timers("timer-handed-once", [schedule(7, TS + 100), event(7, TS + 100), event(7, TS + 200)]),
+    # An event before the deadline is passed over and the timer stays; the next one hands it.
+    timers("timer-event-early", [schedule(7, TS + 100), event(7, TS + 99), event(7, TS + 150)]),
+    # An event for a timer nobody scheduled, and one after its cancel: passed over.
+    timers("timer-event-of-no-timer", [event(7, TS), schedule(7, TS + 100), cancel(7), event(7, TS + 100)]),
+    # Scheduling a pending id sets its deadline: an event that was due by the first deadline alone is
+    # passed over, as a leader whose service is behind its log appends it.
+    timers("timer-scheduled-again-for-later",
+           [schedule(7, TS + 100), schedule(7, TS + 500), event(7, TS + 100), event(7, TS + 500)]),
+    timers("timer-scheduled-again-for-earlier",
+           [schedule(7, TS + 500), schedule(7, TS + 100), event(7, TS + 100)]),
+    # A deadline in the past is due at once, and a negative id and a negative deadline are values.
+    timers("timer-due-at-once", [schedule(-3, -1), event(-3, 0)]),
+    # Two events for one schedule, as two leaders append them: the second is passed over.
+    timers("timer-event-twice", [schedule(7, TS + 100), event(7, TS + 100), event(7, TS + 101)]),
+    # A timer that repeats: its handler schedules its id again while it handles the event.
+    timers("timer-repeats", [schedule(7, TS + 100), event(7, TS + 100, reschedule=TS + 200),
+                             event(7, TS + 150), event(7, TS + 200, reschedule=TS + 300)]),
+    # A handler that does not take the event is handed it again, with the timer as it was before,
+    # whatever the handler did with its id.
+    timers("timer-event-not-taken", [schedule(7, TS + 100), event(7, TS + 100, taken=False),
+                                     event(7, TS + 100, taken=False, reschedule=TS + 900),
+                                     event(7, TS + 100)]),
+    # A handler that cancels the id of the event it handles: pending no more once it has taken the event.
+    timers("timer-cancelled-by-its-own-handler", [schedule(7, TS + 100), event(7, TS + 100, cancel_inside=True),
+                                                  event(7, TS + 100)]),
+    # Several timers: each event is for its own id, and the pending ones are in the order of their ids.
+    timers("timers-several", [schedule(9, TS + 300), schedule(-2, TS + 100), schedule(4, TS + 200),
+                              event(4, TS + 250), cancel(9), event(9, TS + 300), event(-2, TS + 300)]),
+    # At the bound: a schedule of another id is refused and changes nothing, one of a pending id is taken,
+    # and a cancel makes room.
+    timers("timers-at-the-bound",
+           [{"op": "fill", "count": MAX_SERVICE_TIMERS, "deadline": TS},
+            schedule(MAX_SERVICE_TIMERS, TS), schedule(0, TS + 9), event(0, TS + 8), event(0, TS + 9),
+            schedule(MAX_SERVICE_TIMERS, TS), schedule(MAX_SERVICE_TIMERS + 1, TS), cancel(5),
+            schedule(MAX_SERVICE_TIMERS + 1, TS)]),
+    # While a program handles a timer's event the timer still counts toward the bound: a schedule of
+    # another id there is refused, and one made once the event is taken is not.
+    timers("timers-at-the-bound-inside-a-handler",
+           [{"op": "fill", "count": MAX_SERVICE_TIMERS, "deadline": TS},
+            event(3, TS + 3, schedule_inside={"id": -1, "deadline": TS}), schedule(-1, TS)]),
+]
 
 
 def log_recordings_bytes(member, live, live_start, entries, version=0,
