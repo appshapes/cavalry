@@ -2331,49 +2331,6 @@ fn a_member_truncates_its_log_recording_by_recording() {
     );
 }
 
-/// A truncation below where a recording begins purges it: the member holds two
-/// recordings and truncates inside the first. The second is gone from the driver's
-/// catalog and from the table, the first is cut, term 1 leaves the record, and a
-/// replay of this member's own from the position finds nothing. Asked again,
-/// nothing changes.
-#[test]
-fn a_truncation_below_a_recording_purges_it() {
-    let mut pair = pair("truncate-purge");
-    let (two, first) = pair.follow_and_leave(0, 0, &[b"one", b"two"]);
-    let (_four, second) = pair.follow_and_leave(1, two, &[b"three", b"four"]);
-    let one = two / 2;
-    pair.member
-        .io
-        .record_term(0, 0)
-        .expect("term 0 is recorded");
-    pair.member
-        .io
-        .record_term(1, two)
-        .expect("term 1 is recorded");
-
-    assert_eq!(
-        pair.member.io.truncate_log(one).expect("truncated"),
-        Some(0)
-    );
-    assert_eq!(pair.member.io.append_position(), one);
-    assert_eq!(pair.stop_of(first), Some(one));
-    assert_eq!(pair.stop_of(second), None, "purged");
-    assert_eq!(
-        pair.member.io.kept.iter().copied().collect::<Vec<_>>(),
-        vec![Kept {
-            recording_id: first,
-            start: 0,
-            stop: one,
-        }]
-    );
-    assert_eq!(pair.member.io.recording_at(one), None);
-    assert_eq!(
-        pair.member.io.truncate_log(one).expect("truncated"),
-        Some(0)
-    );
-    assert_eq!(pair.member.io.kept.len(), 1);
-}
-
 /// A purge whose answer was never read is done (ADR 0095). The member's client purges
 /// the second of its two recordings, as a truncation before this one would have, and
 /// the table still names it. A truncation below it is answered "unknown recording"
@@ -2414,6 +2371,108 @@ fn a_truncation_takes_a_recording_already_purged_as_purged() {
             stop: one,
         }]
     );
+}
+
+/// A truncation below where a recording begins purges it, and one whose second
+/// command faults finishes when it is asked again (ADR 0095, ADR 0148). The member
+/// holds two recordings, of terms 0 and 1, and truncates inside the first: the purge
+/// of the second, then the cut of the first. A replay of the first that is still
+/// starting makes the driver refuse the cut, `recording busy`: the call faults with
+/// the second purged and gone from the table, and the first kept whole. Where the log
+/// ends, the file and the record of terms are as they were, the fault coming before
+/// either step, so the file names no recording past where the log ended before. The
+/// core owes the truncation and asks for it again; once the replay has stopped, the
+/// same truncation finishes: the first is cut, the file names it alone, term 1 leaves
+/// the record, and a replay of this member's own from the position finds nothing.
+/// Asked again, nothing changes. One test for both, since the library's tests share
+/// one slot of 499 ports (`tests/ports/mod.rs`) and a pair takes ten.
+#[test]
+fn a_truncation_below_a_recording_purges_it_and_finishes_when_a_command_faulted() {
+    let mut pair = pair("truncate-fault");
+    let (two, first) = pair.follow_and_leave(0, 0, &[b"one", b"two"]);
+    let (four, second) = pair.follow_and_leave(1, two, &[b"three", b"four"]);
+    let one = two / 2;
+    pair.member
+        .io
+        .record_term(0, 0)
+        .expect("term 0 is recorded");
+    pair.member
+        .io
+        .record_term(1, two)
+        .expect("term 1 is recorded");
+    let listed = record_in(&pair.member_log_dir, 1);
+    assert_eq!(listed.2, vec![(first, 0), (second, two)]);
+
+    // A replay of the first recording, which no subscriber takes: it is starting
+    // while the cut is asked.
+    let replay = pair
+        .member
+        .io
+        .client
+        .start_replay(first, 0, cavalry_client::NULL_LENGTH, 4_321, "cavalry:ipc")
+        .expect("the replay starts");
+    let fault = pair
+        .member
+        .io
+        .truncate_log(one)
+        .expect_err("the cut of the first is refused");
+    assert!(
+        matches!(
+            fault,
+            RaftError::Client(ClientError::Refused {
+                code: Some(ErrorCode::RecordingBusy),
+                ..
+            })
+        ),
+        "{fault}"
+    );
+    assert_eq!(pair.stop_of(second), None, "purged");
+    assert_eq!(pair.stop_of(first), Some(two), "not cut");
+    assert_eq!(
+        pair.member.io.kept.iter().copied().collect::<Vec<_>>(),
+        vec![Kept {
+            recording_id: first,
+            start: 0,
+            stop: two,
+        }]
+    );
+    assert_eq!(
+        pair.member.io.append_position(),
+        four,
+        "the end it reported"
+    );
+    assert_eq!(
+        record_in(&pair.member_log_dir, 1),
+        listed,
+        "the file as it was"
+    );
+    assert_eq!(pair.member.io.terms_after(0)[0], Some((1, two)));
+
+    replay
+        .stop(&mut pair.member.io.client)
+        .expect("the replay stops");
+    let log_term = wait_for("the truncation asked again finishes", || {
+        pair.member.io.truncate_log(one).ok().flatten()
+    });
+    assert_eq!(log_term, 0);
+    assert_eq!(pair.member.io.append_position(), one);
+    assert_eq!(pair.stop_of(first), Some(one));
+    assert_eq!(
+        pair.member.io.kept.iter().copied().collect::<Vec<_>>(),
+        vec![Kept {
+            recording_id: first,
+            start: 0,
+            stop: one,
+        }]
+    );
+    assert_eq!(record_in(&pair.member_log_dir, 1).2, vec![(first, 0)]);
+    assert_eq!(pair.member.io.terms_after(0), [None, None]);
+    assert_eq!(pair.member.io.recording_at(one), None);
+    assert_eq!(
+        pair.member.io.truncate_log(one).expect("truncated"),
+        Some(0)
+    );
+    assert_eq!(pair.member.io.kept.len(), 1);
 }
 
 /// A member that still holds a recording is not out of the log, and a truncation

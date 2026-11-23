@@ -267,8 +267,11 @@ committed once a quorum, two of three, has it on disk.
   One of its messages can come from a directory that nobody changed: `the
   recordings before it ending at` a position, `below where it begins`. A
   truncation of this member's log stopped on a fault part way, and the member then
-  led a term, so its file names a recording that begins past the cut. Start this
-  member on a new log directory, as for a directory that is lost.
+  led a term or joined one, so its file names a recording that begins past the cut.
+  A member of a build since ADR 0148 does neither until the truncation finishes
+  (`WARN cluster.truncation_owed`, below), so this comes from a directory an older
+  build ran on. Start this member on a new log directory, as for a directory that
+  is lost.
   Another names a position `below position` of `the newest snapshot the member can
   read`: the last recordings of the member's log are gone, and the log that is left
   ends below the position the member's start would read it from. A truncation
@@ -566,6 +569,24 @@ committed once a quorum, two of three, has it on disk.
   election or is upgraded. `cavalry doctor` prints the line only while this
   member's log is empty and it has no leader. The count stays until this member
   starts again, so in a later election it says nothing of why there is no leader.
+- `WARN cluster.truncation_owed`: a truncation of this member's log, which a new
+  leader asked for, faulted part way, and the member owes it; the line names the
+  position it owes and the end it reports. The driver refused a command, did not
+  answer in time, or a write to the log directory failed: `cavalry run` printed that
+  error for the member. Until the truncation finishes the member neither leads nor
+  joins a log, so the cluster elects a leader only while both other members run.
+  The member asks for the truncation again at each duty cycle, and the line goes
+  once it finishes. While it keeps failing the member reads and sends nothing, and
+  `cavalry run` gives it up after 10 s of failed cycles: mend what the error names,
+  then start the member again on the log directory it kept. Its start makes that
+  directory agree with itself, and the next leader asks for whatever the fault left
+  uncut
+  ([ADR 0148](../decisions/0148-keep-a-member-whose-truncation-faulted-out-of-the-log-until-it-finishes-the-truncation.md)).
+- `WARN cluster.truncations_faulted`: how many truncations of this member's log
+  faulted part way. With no `WARN cluster.truncation_owed` line for the member,
+  each one finished, and the count is history. It stays until this member starts
+  again. A count that rises often names a driver or a disk to look at: the line
+  `cavalry run` printed for each fault says which.
 - `WARN cluster.service_snapshots_passed_over`: the service beside this member was
   told of a snapshot when it started, and could not take it. It read the log from
   position 0. Nothing committed is lost. If this member's log no longer begins at
