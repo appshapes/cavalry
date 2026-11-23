@@ -310,6 +310,12 @@ export class ClusterService {
   position(): number;
   answers(): boolean;
   sessions(): number;
+  /** The snapshot's log position after a poll that ended at the leader's request, else `null`. */
+  snapshotDue(): number | null;
+  /** `true` when the snapshot was written, `false` when the member lists one there already. */
+  snapshot(state: Buffer | Uint8Array): boolean;
+  /** One of `constants.CAVALRY_CLUSTER_RESTORED_*`, and the state, a copy, for `_STATE`. */
+  restore(): { restored: number; state: Buffer | null };
   close(): void;
 }
 

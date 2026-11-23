@@ -174,9 +174,9 @@ service)` for each committed entry, in order:
   new leadership term; and `entry.timedOut`, for a session close. `entry` is one
   object the service keeps, valid for the call: once the handler has returned, every
   one of them reads `undefined`.
-  `_SNAPSHOT` is the leader's request for a snapshot: the poll ends after it. This
-  client's service has no call that takes a snapshot yet, so a handler passes it
-  over, as it does `_OTHER` (`spec/c-abi.md`, "A service's snapshot and its start").
+  `_SNAPSHOT` is the leader's request for a snapshot: the poll ends after it, and
+  the program gives its state to `service.snapshot` before its next poll ("A
+  service's snapshot and its start", below).
 - `service` is the service that was polled, for `service.reply`.
 
 What the handler returns says what becomes of the entry. Nothing, or
@@ -222,6 +222,67 @@ frees the service, and a second close does nothing; close a service before its c
 (`spec/c-abi.md`, "Functions", cluster service; ADR 0123; ADR 0124).
 `conformance/node/cluster.js` is a program that runs three services and a session
 through every call above.
+
+### A service's snapshot and its start
+
+A service's program holds the cluster's state, and a snapshot is that state as the
+program's own bytes at one position of the log, the same beside every member. A
+service that starts again takes its state from its last snapshot and reads the log
+after it, where it would read the log from position 0 (`spec/c-abi.md`, "A service's
+snapshot and its start"; ADR 0146; ADR 0149). Three calls, none of them from inside
+the handler:
+
+- `service.restore()`, before the first poll, returns `{ restored, state }`.
+  `constants.CAVALRY_CLUSTER_RESTORED_STATE`: `state` is the program's state as it
+  gave it, a `Buffer` that is a copy the caller owns; the polls read the log from the
+  snapshot's position. `CAVALRY_CLUSTER_RESTORED_FROM_START`: `state` is `null`, and
+  the polls read from position 0. `CAVALRY_CLUSTER_RESTORED_NO_MEMBER`: `state` is
+  `null`; the driver hosts no member with a log yet, and the program calls again
+  before it polls.
+- `service.snapshotDue()`, after a poll, is the snapshot's log position when the
+  poll ended at the leader's request, an entry whose `type` is
+  `constants.CAVALRY_CLUSTER_ENTRY_SNAPSHOT`, and `null` otherwise.
+- `service.snapshot(state)`, before the next poll, writes the snapshot and tells the
+  member, which lists it. `state` is a `Buffer` or a `Uint8Array`, 1 GiB at the
+  most. It returns `true`, or `false` when the member lists one at or past that position
+  already.
+
+So a program's loop is this:
+
+```js
+function start() {
+  const found = service.restore();
+  if (found.restored === constants.CAVALRY_CLUSTER_RESTORED_NO_MEMBER) {
+    setTimeout(start, 1);                        // no member with a log yet: ask again
+    return;
+  }
+  if (found.state !== null) load(found.state);   // the program's own: bytes to its state
+  turn();
+}
+function turn() {
+  service.poll(onEntry, 10);
+  if (service.snapshotDue() !== null) service.snapshot(dump());   // its state to bytes
+  setImmediate(turn);
+}
+start();
+```
+
+The state must be a function of the entries the handler was handed, and of nothing
+else: every member's service gives its own, and a start from any of them must reach
+what the others hold. A program that never calls `restore` reads the log from
+position 0 at every start, and its member's log can then not be purged.
+
+`snapshot` and `restore` wait for the driver and hold the thread while they do, as an
+add does: a second at the most for each step of a snapshot's own, the driver timeout,
+10 s, for an add or a command that a driver does not answer, and for as long as the
+snapshot's recording takes to play back at a start. Each throws `CavalryError` with
+the ABI's code: `CAVALRY_ERR_CLUSTER_NO_SNAPSHOT_DUE`,
+`CAVALRY_ERR_CLUSTER_SNAPSHOT_TOO_LONG`, `CAVALRY_ERR_CLUSTER_SNAPSHOT_FAILED` with
+the step in the message, `CAVALRY_ERR_CLUSTER_RESTORE_TOO_LATE` once the service has
+begun, and `CAVALRY_ERR_POLLING` from inside a handler. After an error of `snapshot`
+the snapshot is still due, and the program calls again or polls on.
+`conformance/node/snapshot.js` is a program that runs every call above beside three
+members.
 
 ## What it must never do
 

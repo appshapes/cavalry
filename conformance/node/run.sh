@@ -9,7 +9,10 @@
 # (conformance/log-member.sh), the client's committed log against a cluster
 # (spec/c-abi.md, version 2; ADR 0070), and then conformance/node/cluster.js, the cluster
 # round: the client's service beside each member and its session on the first driver
-# (spec/c-abi.md, versions 4 and 5; ADR 0124); and cleans up.
+# (spec/c-abi.md, versions 4 and 5; ADR 0124), and then conformance/node/snapshot.js, the
+# snapshot round: a service's snapshot and its start from one beside the same three
+# members, on the log the cluster round left (spec/c-abi.md, version 6; ADR 0149); and
+# cleans up.
 # `just conformance` runs this after conformance/python (clients/README.md; ADR 0046, card
 # 206). The runner takes `--expose-gc` so that its allocation round can read the heap after
 # a full collection.
@@ -129,6 +132,17 @@ node conformance/node/committed_log.js "$cluster/member-$member" "$member" "$rec
 echo "conformance/node: run cluster.js, a service beside each member and a session on $CAVALRY_DIR"
 node conformance/node/cluster.js "$cluster" "$CAVALRY_CLUSTER_MEMBERS" "$response" || {
     echo "conformance/node: cluster.js failed; the members said:" >&2
+    cat "$cluster"/member-*.out >&2 || true
+    exit 1
+}
+
+# The snapshot round, on the log the cluster round left: `cavalry snapshot` asks the
+# leader for a snapshot, each member's service takes one through the client, and a
+# new service beside each member starts from it (spec/c-abi.md, version 6; ADR 0146;
+# ADR 0147; ADR 0149).
+echo "conformance/node: run snapshot.js, a service's snapshot and its start from one beside each member"
+node conformance/node/snapshot.js "$cluster" target/release/cavalry || {
+    echo "conformance/node: snapshot.js failed; the members said:" >&2
     cat "$cluster"/member-*.out >&2 || true
     exit 1
 }
