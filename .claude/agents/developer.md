@@ -54,7 +54,19 @@ just docs
 just lint-docs
 ```
 
-All four pass on the head you leave the branch at, before its push. A push in the middle
+Run each gate as one Bash command and wait for its result. The workflow gives a command
+20 minutes before the tool stops it, twice the slowest gate on the runner, and turns
+background commands off, so `just test` returns its exit code in the call that started it.
+Never end your turn while a command you started is still running: the run ends with your
+turn, and the gate's result, the push after it and the body's edit go with it. Before the
+workflow raised the bound, two fix runs on 2026-11-22 (45028702893 and 45076301886) ended
+that way with `just test` still running and nothing pushed, and a third (45026715685)
+pushed its commits and ended so before it edited the body (work item 409).
+
+All four pass on the head you leave the branch at, before its push. A gate that the tool
+stops at its bound has not passed, so the head it ran on is not one to leave: leave the
+branch at the last head you pushed, where CI runs the four, and say in your comment which
+gate ran past its bound on which head. A push in the middle
 of a fix, one blocker committed and the next still to do, needs that blocker's own test
 and nothing more. CI runs the four on the head you leave, once the run's last job
 approves the `ci` run GitHub held on that push; the same job deletes the run held on an

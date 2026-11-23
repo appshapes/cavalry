@@ -245,6 +245,24 @@ jobs:
         # own commits. `fetch-depth: 0` above is what makes origin/master a commit here.
         env:
           LINT_DOCS_RANGE: origin/master...HEAD
+          # A gate is one command the session waits for (work item 409). The Bash tool's
+          # bound is 120 s unless the session asks for more, up to 600 s, and a command that
+          # outruns its bound is moved to the background, not stopped. The session then ends
+          # its turn, and with it the action's run, which does not wait for the command. Two
+          # fix runs on 2026-11-22, 45028702893 and 45076301886, ended so after about 2.5
+          # min, with `just test` still running, nothing pushed and the body unedited; a
+          # third, 45026715685, had pushed its commits and ended the same way before it
+          # edited the body. A trial on pull request 326 (run 45083441323) showed both sides:
+          # as here before, `just test` went to the background at 120 s and the session
+          # ended at 125 s; with a bound of 30 min and background commands off, it ran in the
+          # foreground and the session ended at 521 s with its result. 20 min is twice the
+          # slowest gate there with room, and keeps a hung test from holding the job's 150
+          # min for long; the session may ask for 30. With background commands off, a command
+          # past its bound is stopped and not moved, as Claude Code's tools reference says,
+          # so the session reads the failure, and it cannot start one either.
+          BASH_DEFAULT_TIMEOUT_MS: "1200000"
+          BASH_MAX_TIMEOUT_MS: "1800000"
+          CLAUDE_CODE_DISABLE_BACKGROUND_TASKS: "1"
         # Pinned by SHA like every action here (ADR 0003), and this one matters most: it runs
         # a model with repository write access. Re-resolve the current `v1` when bumping:
         #   gh api repos/anthropics/claude-code-action/git/ref/tags/v1 --jq '.object.sha'
@@ -335,6 +353,76 @@ jobs:
           # trailer is not evidence. The action still asks the agent to co-author the person
           # who triggered it; `open-pr` drops those lines when it builds the body.
 
+      # What the session did with the Bash tool, from its record, which show_full_output
+      # keeps out of the log (work item 409): the programs of each command it ran or was
+      # denied, the bound it asked for, how many results said a command had moved to the
+      # background, the session's end, duration and turns, and the tools it was denied.
+      # Nothing the model or a command wrote reaches the log: a program prints only when
+      # it is one of PROGRAMS, a tool only when it is one of TOOLS and a session's end only
+      # when it is one of ENDS, and a bound, a duration or a count only as a whole number
+      # under its ceiling; anything else prints as "(other)". The lines
+      # are printed with workflow commands stopped around them, as the reviewer's summary
+      # is (review-pull-request.yml). The repository is public.
+      # `scripts/claude-workflow-test.py` runs this step on a record written to fool it.
+      - name: What the session did with the Bash tool
+        if: ${{ !cancelled() && steps.claude.outcome != 'skipped' }}
+        continue-on-error: true
+        shell: bash
+        env:
+          EXECUTION_FILE: ${{ steps.claude.outputs.execution_file }}
+          PROGRAMS: >-
+            just cargo git gh ls cat find grep rg sed jq tail head sleep wc timeout python3
+            python bash sh awk sort uniq xargs echo printf cd perl env export rm mkdir cp mv
+            curl wget npm npx node make test tee diff touch chmod which rustup cbindgen mdbook
+          TOOLS: >-
+            Bash Read Write Edit MultiEdit Glob Grep LS NotebookEdit WebFetch WebSearch Agent
+            Task TodoWrite Skill
+          ENDS: >-
+            success error_max_turns error_during_execution error_max_budget_usd
+        run: |
+          record="${EXECUTION_FILE:-$RUNNER_TEMP/claude-execution-output.json}"
+          if [ ! -f "$record" ]; then
+            echo "No record of a session: the Code step ran none, or wrote none."
+            exit 0
+          fi
+          # One JSON array of messages, or one message per line: read either.
+          messages="$RUNNER_TEMP/session-messages.json"
+          if ! jq -s 'if length == 1 and (.[0] | type) == "array" then .[0] else . end' "$record" > "$messages" 2>/dev/null; then
+            echo "::warning::The record of the session is not JSON that jq reads, so nothing of it is printed"
+            exit 0
+          fi
+          summary="$RUNNER_TEMP/session-bash.txt"
+          jq -r --arg programs "$PROGRAMS" --arg tools "$TOOLS" --arg ends "$ENDS" '
+            def words: split(" ") | map(select(. != ""));
+            ($programs | words) as $known | ($tools | words) as $tools | ($ends | words) as $ends
+            | def programs: if type == "string" then
+                  [splits("\\s*(\\|\\||&&|\\||;|\\n)\\s*") | split(" ") | map(select(. != "")) | .[0] // empty
+                   | if IN($known[]) then . else "(other)" end] | join(" | ")
+                elif . == null then "" else "(other)" end;
+              def whole($ceiling): if type == "number" and . == floor and . >= 0 and . <= $ceiling then tostring
+                elif . == null then "default" else "(other)" end;
+              def tool: if type == "string" and IN($tools[]) then .
+                elif type == "string" and startswith("mcp__") then "(an MCP tool)" else "(other)" end;
+              def end_: if type == "string" and IN($ends[]) then . else "(other)" end;
+            "Bash calls, by program and the bound asked for:",
+            (.[] | select(.type == "assistant") | .message.content[]? | select(.type == "tool_use" and .name == "Bash")
+             | "  \(.input.command | programs), bound \(.input.timeout | whole(1800000))"),
+            "Results that said a command had moved to the background: \([.[] | select(.type == "user") | .message.content[]?
+              | select(.type == "tool_result") | (.content | tostring)
+              | select(test("did not complete within its [0-9]+s timeout and was moved to the background"))] | length)",
+            (.[] | select(.type == "result")
+             | "The session ended \(.subtype | end_), after \(.duration_ms | whole(36000000)) ms and \(.num_turns | whole(10000)) turns, with \(.permission_denials | length) denials:",
+               (.permission_denials[]? | "  \(.tool_name | tool) \(.tool_input.command | programs)"))
+          ' "$messages" > "$summary" || echo "::warning::The record of the session could not be read in full; the lines below are what was read"
+          token=$(od -An -N16 -tx1 /dev/urandom | tr -d ' \n' || true)
+          if [[ "$token" =~ ^[0-9a-f]{32}$ ]]; then
+            echo "::stop-commands::$token"
+            cat "$summary"
+            echo "::$token::"
+          else
+            echo "::warning::No token could be made to stop workflow commands, so what the session did is not printed"
+          fi
+
       # The fixer can end green without its fix landing: a narrated-only fix, or a remote
       # rejection. No push means no `synchronize`, no re-review, and a silently parked pull
       # request. Fail loud instead. Two things count as landed: a push, which moves the
@@ -370,6 +458,11 @@ jobs:
             exit 0
           fi
           echo "::error::Fix session ended without a push landing on the pull request branch (head still at the reviewed SHA $REVIEWED_SHA) and without a change to the pull request body; no re-review will fire"
+          # Say so where the author reads, since nothing else will (work item 409). With the
+          # job's own token: GitHub starts no run for the events its writes raise.
+          run_url="$GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID"
+          gh pr comment "$PR_NUMBER" --repo "$GITHUB_REPOSITORY" --body "The fix run $run_url ended without a push and without a change to this pull request's body, so no review of it follows. The review's blockers are the author's to apply now: push the fix, which starts the review, or for a blocker in the body alone, edit the body and add the \`review\` label. When a session ran, the run's step \"What the session did with the Bash tool\" says what it ran (docs/how-to/ask-the-agent.md, \"When it does not work\")." \
+            || echo "::warning::The comment that hands the blockers to the author could not be posted: they are the author's all the same, as the error above says (docs/how-to/ask-the-agent.md, \"When it does not work\")"
           exit 1
 
       # For the paths no verifier decides, a human's `@claude` comment or review, the agent

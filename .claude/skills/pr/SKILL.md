@@ -176,7 +176,9 @@ gh pr checks <number>
   `spec/README.md` (`claude.yml`, `settings.deny`; ADR 0140), so a review whose blockers
   are all there ends its run
   with "Fix session ended without a push landing ... and without a change to the pull
-  request body". These are the author's from the first review: apply them, push. A
+  request body", and the run says so in a comment on the pull request. So does a run on
+  a pull request that changes `claude.yml`, where the fixer does not run at all. These
+  are the author's from the first review: apply them, push. A
   blocker on the pull request body alone the fixer applies itself with `gh pr edit`,
   and its run asks for the review of the unchanged head (issue 11); when you edit the
   body yourself, `gh pr edit <number> --body-file <file>` and then `gh pr edit <number>
