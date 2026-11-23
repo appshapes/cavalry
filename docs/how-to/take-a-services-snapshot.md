@@ -84,26 +84,29 @@ are a service's `onTakeSnapshot` and the snapshot image of its `onStart`.
    target/release/cavalry snapshot --dir /tmp/cavalry-member-1
    ```
 
-   The command prints the snapshot's log position, 192 on a cluster that has
-   committed nothing else. The service prints `snapshot at position 192: written
-   True` within a second: its poll ended at the leader's request, and it gave its
-   state.
+   The command prints the snapshot's log position: 192 on a cluster that has
+   committed nothing but its term's first entry, and a higher one on a cluster that
+   has committed more. The service prints `snapshot at position 192: written
+   True`, with the position the command printed, within a second: its poll ended
+   at the leader's request, and it gave its state.
 
 4. Stop the service with Ctrl-C and run it again, as in step 2. You will see
-   `started at position 192 with a total of 0`: the service took its state from its
-   snapshot, and it reads the log from position 192 on.
+   `started at position 192 with a total of 0`, with that position again: the
+   service took its state from its snapshot, and it reads the log from there on.
 
 ## How to verify it worked
 
 - The second start printed the position the command printed, and not 0. A service
   is given a state only when its member lists the snapshot, so that line is the
   member's own word.
-- The total after a restart is the total before it. Send the cluster some session
-  messages between two snapshots to see a total above 0:
-  [Run a cluster in ten minutes](../tutorials/run-a-cluster.md) has a client that
-  does.
-- `just conformance` runs these calls beside three members for the Python client,
-  in `conformance/python/snapshot.py`.
+- The total the second start printed is the total at the snapshot: 0 here, since
+  no session sent the cluster a message. This service answers no session, so a
+  client that waits for a reply to each message, as the tutorial's does, is told of
+  none; `clients/python/README.md`, "The cluster service", says how a service
+  replies.
+- `just conformance` runs this page's program as these steps do, in
+  `conformance/python/howto.py`, and runs the three calls beside three members in
+  `conformance/python/snapshot.py`.
 
 ## When it does not work
 

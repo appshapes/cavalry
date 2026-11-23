@@ -81,8 +81,8 @@ their own.
 - **A snapshot round inside each client's cluster round.** Lost. The cluster round
   ends with its session's close and its services closed, and a round of 500 lines in
   each of six languages would grow by half. A round of its own runs on the log the
-  cluster round left, which gives its services a log with every kind of entry to
-  read before the request.
+  cluster round left, which gives its services a term's first entry and a session's
+  open, messages and close to read before the request.
 - **The rounds check the member's listing by its counter.** Lost. No client reads a
   counter (`spec/c-abi.md`, "Out of this version"). A new service's `restore` gives
   the state only when its member names the snapshot's recording, which the member
@@ -116,6 +116,15 @@ their own.
   snapshot" held of nothing; "read to the end" was 0.3 s of quiet; and a refused
   `snapshot_due` in the handler was not told from "none due". The second request, the
   wait on the request itself and the thread's error answer the three.
+- A second read, of that second form, found no way for the round to fail beside a
+  cluster that holds no election and none for it to pass over a broken start, and
+  found what the round does not hold: a snapshot with sessions in it, which
+  `crates/cavalry-ffi/tests/cluster_snapshot.rs` holds through the ABI. It also found
+  the how-to's program run by no gate, so `conformance/python/howto.py` runs it as
+  the page's steps do, beside three members of its own, and fails unless it prints
+  the page's three lines: `started at position 0 with a total of 0`, `snapshot at
+  position 192: written True` and, run again, `started at position 192 with a total
+  of 0`.
 - `clients/lint.py` finds no lock, no raise and no allocation in the per-message
   functions as before. None of the three calls is bound as a per-message function:
   `snapshot` and `restore` wait for the driver, and `snapshot_due`, which a loop asks

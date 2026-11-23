@@ -1193,8 +1193,9 @@ class ClusterService:
         a poll that ended at the leader's request, while `snapshot_due()` gives a
         position, and before the next poll. The service writes a recording through its
         member's driver and tells the member, which lists the snapshot; the call waits
-        for the driver, a second at the most for each step, with the GIL released and
-        the client's lock held. True when the snapshot was written and the member was
+        for the driver, a second at the most for each step of its own and the driver
+        timeout, 10 s, for an add or a command that a driver does not answer, with the
+        GIL released and the client's lock held. True when the snapshot was written and the member was
         told. False when nothing was written because the member lists a snapshot of a
         service at or past this position already, as a service that reads its member's
         log again from the start finds at every request it met before. Raises

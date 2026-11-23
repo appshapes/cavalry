@@ -230,9 +230,10 @@ else: every member's service gives its own, and a start from any of them must re
 what the others hold. A program that never calls `restore` reads the log from
 position 0 at every start, and its member's log can then not be purged.
 
-`snapshot` and `restore` wait for the driver, a second at the most for each step of
-a snapshot and for as long as the snapshot's recording takes to play back at a
-start, with the GIL released and the client's lock held ("Threads"). Each raises
+`snapshot` and `restore` wait for the driver with the GIL released and the client's
+lock held ("Threads"): a snapshot a second at the most for each step of its own, and
+the driver timeout, 10 s, for an add or a command that a driver does not answer; a
+start for as long as the snapshot's recording takes to play back. Each raises
 `CavalryError` with the ABI's code: `CAVALRY_ERR_CLUSTER_NO_SNAPSHOT_DUE`,
 `CAVALRY_ERR_CLUSTER_SNAPSHOT_TOO_LONG`, `CAVALRY_ERR_CLUSTER_SNAPSHOT_FAILED` with
 the step in the message, `CAVALRY_ERR_CLUSTER_RESTORE_TOO_LATE` once the service has

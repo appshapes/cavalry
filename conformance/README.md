@@ -77,7 +77,8 @@ The snapshot round is a runner's check of a service's snapshot and of its start 
 one (`spec/c-abi.md`, version 6, "A service's snapshot and its start";
 `spec/cluster.md`, "Snapshots"; ADR 0146, ADR 0147, ADR 0149). It runs after the
 cluster round, beside the same three members and on the log that round left, so its
-services read every kind of entry before the request. The Python runner has it, in
+services read a term's first entry and a session's open, its messages and its close
+before the request. The Python runner has it, in
 `python/snapshot.py`, which is the shape. Each other runner gains it with its
 client's calls, in a program that its `run.sh` runs after its cluster round.
 
@@ -101,7 +102,13 @@ requests, each with the state the other services held there, and is told at each
 that its member lists a snapshot there already. The program's state is a count of
 the entries read and a hash over them, 2,472 bytes, so that a snapshot holds it in
 three messages. The round's waits are bounded at 60 s, and a snapshot that the
-driver gave up at a step is given again.
+driver gave up at a step is given again. No session is open at either request: a
+snapshot that holds sessions, and a start that takes them, are held through the ABI
+by `crates/cavalry-ffi/tests/cluster_snapshot.rs`, and by no runner.
+
+The Python runner then runs the program of `docs/how-to/take-a-services-snapshot.md`
+as that page's steps do, in `python/howto.py`, beside three members of its own, and
+fails unless the program prints the three lines the page says a reader will see.
 
 The Node round is the Python round through `clients/node`, with three edges of its
 own. A service's handler that returns a promise, as an `async` handler does, has its
