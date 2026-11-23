@@ -692,6 +692,7 @@ class SessionBash(unittest.TestCase):
                  {"tool_name": "Bash\n::warning::forged in a tool name", "tool_input": {"command": "ls"}},
                  {"tool_name": TOKEN_SHAPED, "tool_input": {}},
                  {"tool_name": "mcp__github_comment__update_claude_comment", "tool_input": {}}]},
+            {"type": "result", "subtype": "success", "duration_ms": 1, "num_turns": 1, "permission_denials": -10 ** 25},
         ]
         code, lines = self.run_step(record=record)
         self.assertEqual(code, 0, lines)
@@ -706,9 +707,10 @@ class SessionBash(unittest.TestCase):
             "  (other) ls",
             "  (other) ",
             "  (an MCP tool) ",
+            "The session ended success, after 1 ms and 1 turns, with (other) denials:",
         ])
         printed = "\n".join(lines)
-        for word in (TOKEN_SHAPED, "forged", str(10 ** 38), str(10 ** 30)):
+        for word in (TOKEN_SHAPED, "forged", str(10 ** 38), str(10 ** 30), str(10 ** 25)):
             self.assertNotIn(word, printed)
 
     def test_a_record_jq_cannot_read_prints_only_the_steps_own_warning(self):

@@ -411,7 +411,7 @@ jobs:
               | select(.type == "tool_result") | (.content | tostring)
               | select(test("did not complete within its [0-9]+s timeout and was moved to the background"))] | length)",
             (.[] | select(.type == "result")
-             | "The session ended \(.subtype | end_), after \(.duration_ms | whole(36000000)) ms and \(.num_turns | whole(10000)) turns, with \(.permission_denials | length) denials:",
+             | "The session ended \(.subtype | end_), after \(.duration_ms | whole(36000000)) ms and \(.num_turns | whole(10000)) turns, with \(.permission_denials | length | whole(10000)) denials:",
                (.permission_denials[]? | "  \(.tool_name | tool) \(.tool_input.command | programs)"))
           ' "$messages" > "$summary" || echo "::warning::The record of the session could not be read in full; the lines below are what was read"
           token=$(od -An -N16 -tx1 /dev/urandom | tr -d ' \n' || true)

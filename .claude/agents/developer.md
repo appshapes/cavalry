@@ -64,7 +64,9 @@ that way with `just test` still running and nothing pushed, and a third (4502671
 pushed its commits and ended so before it edited the body (work item 409).
 
 All four pass on the head you leave the branch at, before its push. A gate that the tool
-stops at its bound has not passed, so the head it ran on is not one to leave: leave the
+stops at 20 minutes may be run once more with the Bash tool's `timeout` at 1800000, the
+30 minutes the workflow allows, as a cold cache can slow one past 20. A gate stopped at
+its bound has not passed, so the head it ran on is not one to leave: leave the
 branch at the last head you pushed, where CI runs the four, and say in your comment which
 gate ran past its bound on which head. A push in the middle
 of a fix, one blocker committed and the next still to do, needs that blocker's own test
