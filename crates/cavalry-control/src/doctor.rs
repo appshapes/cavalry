@@ -2063,35 +2063,20 @@ fn member_findings(
         }
     }
     // A request for a snapshot that the member has not taken: a toggle whose id is
-    // above the last it took. Beside a leader it is taken within a second or so, and
-    // is worth a note; beside a member that does not lead, or one of a build that
-    // takes none, it is never taken, and the operator ran the command on the wrong
-    // host (`spec/cluster.md`, "The control toggle"; ADR 0147).
+    // above the last it took. Told in the order `cavalry snapshot` asks its member:
+    // whether it leads with its election closed, and only then its build. A member of
+    // this build adds `cluster.control_toggle_taken` during its start, after its role,
+    // its election's state and its leader, so a member without the gauge is of an
+    // older build only once it leads with its election closed; before that, it is a
+    // member that does not lead. Beside a member that does not lead the request is
+    // never taken, and the operator ran the command on the wrong host; beside a
+    // leader of a build that takes none it is never taken either; beside a leader of
+    // this build it is taken within a second or so, and is worth a note
+    // (`spec/cluster.md`, "The control toggle"; ADR 0147).
     if let Some(toggle) = member.toggle {
         let waiting = match member.toggle_taken {
-            None => Some((
-                Level::Warn,
-                format!(
-                    "a `cavalry snapshot` asks member {id} for a snapshot, and the member is \
-                     of a build that takes no such request: it has no \
-                     cluster.control_toggle_taken. The command ends by itself and says so; \
-                     upgrade the member, or wait for the snapshot its leader asks for each \
-                     256 MiB of log"
-                ),
-            )),
             Some(taken) if toggle <= taken => None,
-            Some(_) if leads && closed => Some((
-                Level::Note,
-                format!(
-                    "a `cavalry snapshot` asks member {id} for a snapshot, and the member has \
-                     not taken the request yet: it takes one when it takes no snapshot of \
-                     its own and has read its committed log past its last cluster action, \
-                     within a second or so. If this note stays, a snapshot of the member's \
-                     own does not end, see cluster.snapshots_failed, or its followers have \
-                     not committed its last cluster action, see cluster-commit-waits"
-                ),
-            )),
-            Some(_) => Some((
+            _ if !(leads && closed) => Some((
                 Level::Warn,
                 match member.followed() {
                     Some(leader) => format!(
@@ -2108,6 +2093,31 @@ fn member_findings(
                          closed"
                     ),
                 },
+            )),
+            // A leader with its election closed, from here on. `cavalry snapshot`
+            // adds no request beside one without the gauge, since it reads the gauge
+            // first and refuses, so another program added this one.
+            None => Some((
+                Level::Warn,
+                format!(
+                    "a request for a snapshot waits beside member {id}, and the member is of \
+                     a build that takes none: it leads, with its election closed, and has \
+                     no cluster.control_toggle_taken, so the request is never taken here. It \
+                     stays until the program that added it removes it or ends; upgrade the \
+                     member, or wait for the snapshot it asks for by itself each 256 MiB of \
+                     log"
+                ),
+            )),
+            Some(_) => Some((
+                Level::Note,
+                format!(
+                    "a `cavalry snapshot` asks member {id} for a snapshot, and the member has \
+                     not taken the request yet: it takes one when it takes no snapshot of \
+                     its own and has read its committed log past its last cluster action, \
+                     within a second or so. If this note stays, a snapshot of the member's \
+                     own does not end, see cluster.snapshots_failed, or its followers have \
+                     not committed its last cluster action, see cluster-commit-waits"
+                ),
             )),
         };
         if let Some((level, message)) = waiting {
@@ -8114,15 +8124,43 @@ mod tests {
             found[0].message
         );
 
-        // A member of a build that takes no toggle: it has no gauge.
+        // A leader of a build that takes no toggle: it leads with its election closed
+        // and has no gauge. No `cavalry snapshot` adds a request there, so the finding
+        // does not say one did.
         let old = [(CLUSTER_ROLE, 2), (CLUSTER_ELECTION_STATE, 17)];
         let found = with_toggle("toggle-old", &old, 4);
+        assert_eq!(found.len(), 1, "{found:?}");
+        assert_eq!(found[0].level, Level::Warn);
+        assert_eq!(
+            found[0].message,
+            "a request for a snapshot waits beside member 1, and the member is of a build \
+             that takes none: it leads, with its election closed, and has no \
+             cluster.control_toggle_taken, so the request is never taken here. It stays \
+             until the program that added it removes it or ends; upgrade the member, or wait \
+             for the snapshot it asks for by itself each 256 MiB of log"
+        );
+
+        // A member with no gauge that does not lead, a follower or one whose start has
+        // not added the gauge yet: told it does not lead, as `cavalry snapshot` tells
+        // it, and not to upgrade.
+        let follower_without_gauge = &follower[..4];
+        let found = with_toggle("toggle-follower-old", follower_without_gauge, 4);
+        assert_eq!(found.len(), 1, "{found:?}");
+        assert_eq!(found[0].level, Level::Warn);
+        assert_eq!(
+            found[0].message,
+            "a `cavalry snapshot` asks member 1 for a snapshot, and the member does not lead: \
+             member 2 does. The request is never taken here, and its command ends by itself; \
+             run `cavalry snapshot` on member 2's host"
+        );
+        let electing_without_gauge = &electing[..4];
+        let found = with_toggle("toggle-electing-old", electing_without_gauge, 4);
         assert_eq!(found.len(), 1, "{found:?}");
         assert_eq!(found[0].level, Level::Warn);
         assert!(
             found[0]
                 .message
-                .contains("is of a build that takes no such request"),
+                .contains("the cluster is holding an election"),
             "{}",
             found[0].message
         );

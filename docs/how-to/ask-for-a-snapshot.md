@@ -121,10 +121,11 @@ it ends.
   reasons the note names: a snapshot of its own does not end, which its
   `cluster.snapshots_failed` line counts once the member gives the snapshot up; or
   its followers have not committed its last cluster action, which its
-  `cluster-commit-waits` line shows. As a `WARN`, the member does not lead,
-  and the line names the leader's host to run the command on, or the member is of
-  a build that takes no request, and the line says to upgrade it. The command that
-  asked ends by itself.
+  `cluster-commit-waits` line shows. As a `WARN`, either the member does not lead,
+  and the line names the leader, on whose host you run the command, or says that
+  the cluster holds an election; or the member leads and is of a build that takes
+  no request, and the line says to upgrade it. A `cavalry snapshot` that asked
+  ends by itself and removes its request.
 - Two people ask one member at the same moment. The leader may take one request
   for both: each command prints the same position, of a snapshot that the leader
   asked for after both began.

@@ -59,7 +59,8 @@ is allowed here.
   (`cluster-joining`, a note); a request for a snapshot that waits beside the
   member, the control toggle a `cavalry snapshot` adds, as a note beside a leader
   that has not taken it yet and as a warning beside a member that does not lead,
-  which names the leader, or is of a build that takes none
+  which names the leader or the election, or beside a leader of a build that takes
+  none
   (`cluster.control_toggle`; ADR 0147); a leader that lost its quorum (`cluster-quorum-lost`); a
   commit position behind the leader's own append position (`cluster-commit-waits`);
   and, with each counter's own doctor sentence from `counters.toml`, consensus messages
