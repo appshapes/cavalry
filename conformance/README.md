@@ -19,7 +19,7 @@ bounded at 10 s, and one that runs out says how far it got.
 | `python/` | Python 3, `quickstart.py` and then `readme.py`, the example of `clients/python/README.md`, then `committed_log.py` beside one of three cluster members that `run.sh` starts with `cavalry run`, then `cluster.py`, the cluster round, beside all three, then `snapshot.py`, the snapshot round, beside all three, through `run.sh` over `clients/python` | the runner's `python3`, the shared library | ADR 0046 (card 205); ADR 0124 (work item 229); ADR 0149 (work item 335) |
 | `node/` | Node, `quickstart.js` and then `readme.js`, the example of `clients/node/README.md`, then `committed_log.js` beside one of three cluster members that `run.sh` starts with `cavalry run`, then `cluster.js`, the cluster round, beside all three, then `snapshot.js`, the snapshot round, beside all three, through `run.sh` over `clients/node` | the runner's `node` and `npm`, whose own `node-gyp` builds the addon against the static library | ADR 0046 (card 206); ADR 0124 (work item 229); ADR 0149 (work item 335) |
 | `go/` | Go, the client's own `go test` (its subscription table at the bound), then `quickstart` and then `readme`, the example of `clients/go/README.md`, then, beside one of three cluster members that `run.sh` starts with `cavalry run`, the client's one test that needs a member (a committed log's open with the table full) and `committed_log`, then `cluster`, the cluster round, beside all three, through `run.sh` over `clients/go` | the runner's `go`, whose cgo builds the client against the header and the static library | ADR 0046 (card 207); ADR 0124 (work item 229) |
-| `jvm/` | Java 25, `Quickstart.java` and then `Readme.java`, the example of `clients/jvm/README.md`, then `CommittedLogRound.java` beside one of three cluster members that `run.sh` starts with `cavalry run`, then `ClusterRound.java`, the cluster round, beside all three, through `run.sh` over `clients/jvm` | the runner's `javac` and `java`, whose `java.lang.foreign` binds the shared library when the client loads | ADR 0046 (card 208); ADR 0124 (work item 229) |
+| `jvm/` | Java 25, `Quickstart.java` and then `Readme.java`, the example of `clients/jvm/README.md`, then `CommittedLogRound.java` beside one of three cluster members that `run.sh` starts with `cavalry run`, then `ClusterRound.java`, the cluster round, beside all three, then `SnapshotRound.java`, the snapshot round, beside all three, through `run.sh` over `clients/jvm` | the runner's `javac` and `java`, whose `java.lang.foreign` binds the shared library when the client loads | ADR 0046 (card 208); ADR 0124 (work item 229); ADR 0149 (work item 335) |
 | `dotnet/` | C#, `Quickstart` and then `Readme`, the example of `clients/dotnet/README.md`, then `CommittedLog` beside one of three cluster members that `run.sh` starts with `cavalry run`, then `Cluster`, the cluster round, beside all three, through `run.sh` over `clients/dotnet` | the runner's `dotnet`, whose SDK builds the client and whose runtime binds the shared library when the client loads | ADR 0046 (card 209); ADR 0124 (work item 229) |
 
 A committed log round reads beside a member whose log is one recording that begins at
@@ -128,8 +128,9 @@ one (`spec/c-abi.md`, version 6, "A service's snapshot and its start";
 cluster round, beside the same three members and on the log that round left, so its
 services read a term's first entry and a session's open, its messages and its close
 before the request. The Python runner has it, in `python/snapshot.py`, which is the
-shape, and the Node runner has it, in `node/snapshot.js`. Each other runner gains it
-with its client's calls, in a program that its `run.sh` runs after its cluster round.
+shape, and the Node and JVM runners have it, in `node/snapshot.js` and
+`jvm/SnapshotRound.java`. Each other runner gains it with its client's calls, in a
+program that its `run.sh` runs after its cluster round.
 
 A service beside each member asks where it starts and is told from the log's start,
 and a second ask is refused. Each reads an entry, and a snapshot where none is due is

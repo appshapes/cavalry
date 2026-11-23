@@ -885,6 +885,28 @@ public final class Client implements AutoCloseable {
             throw Abi.failed("cavalry_cluster_service_close", t);
         }
     }
+
+    /** A service's snapshot: a call on this client, which the service's snapshot writes its
+     * recording with, so under this client's lock; the ABI's result, with the thread's
+     * error for the caller to read. */
+    synchronized int snapshotClusterService(MemorySegment service, MemorySegment state, long length) {
+        try {
+            return (int) Abi.cavalry_cluster_service_snapshot.invokeExact(service, handle, state, length);
+        } catch (Throwable t) {
+            throw Abi.failed("cavalry_cluster_service_snapshot", t);
+        }
+    }
+
+    /** A service's start from its member's snapshot: a call on this client, under its lock;
+     * the ABI's restored code, with the thread's error for the caller to read, and the
+     * state's address and its length written through the two segments. */
+    synchronized int restoreClusterService(MemorySegment service, MemorySegment state, MemorySegment length) {
+        try {
+            return (int) Abi.cavalry_cluster_service_restore.invokeExact(service, handle, state, length);
+        } catch (Throwable t) {
+            throw Abi.failed("cavalry_cluster_service_restore", t);
+        }
+    }
 }
 '''
 
@@ -1962,8 +1984,10 @@ import java.lang.foreign.MemorySegment;
 import java.lang.invoke.MethodHandle;
 import java.lang.invoke.MethodHandles;
 import java.lang.invoke.MethodType;
+import java.util.OptionalLong;
 
 import static java.lang.foreign.ValueLayout.ADDRESS;
+import static java.lang.foreign.ValueLayout.JAVA_BYTE;
 import static java.lang.foreign.ValueLayout.JAVA_INT;
 import static java.lang.foreign.ValueLayout.JAVA_LONG;
 
@@ -2209,6 +2233,93 @@ public final class ClusterService implements AutoCloseable {
         } catch (Throwable t) {
             throw Abi.failed("cavalry_cluster_service_sessions", t);
         }
+    }
+
+    /** The log position of the snapshot the leader asked for, when the last entry of the
+     * last poll was {@link Abi#CLUSTER_ENTRY_SNAPSHOT} and the handler took it: the position
+     * after that entry, which {@link #position} is then. Empty otherwise, and from the next
+     * poll on. Empty too from inside this service's own handler, where the ABI refuses the
+     * read with {@link Abi#ERR_POLLING}: the entry's type says that the poll ends after it
+     * (spec/c-abi.md, "A service's snapshot and its start"; ADR 0149). */
+    public OptionalLong snapshotDue() {
+        try (Arena scratch = Arena.ofConfined()) {
+            MemorySegment position = scratch.allocate(JAVA_LONG);
+            boolean due = (boolean) Abi.cavalry_cluster_service_snapshot_due.invokeExact(handle, position);
+            return due ? OptionalLong.of(position.get(JAVA_LONG, 0)) : OptionalLong.empty();
+        } catch (Throwable t) {
+            throw Abi.failed("cavalry_cluster_service_snapshot_due", t);
+        }
+    }
+
+    /** Takes a snapshot of the program's state: the program's own bytes, in which the
+     * service reads nothing, 1 GiB at the most. Call it after a poll that ended at the
+     * leader's request, while {@link #snapshotDue} gives a position, and before the next
+     * poll. The service writes a recording through its member's driver and tells the
+     * member, which lists the snapshot; the call copies the array to native memory for its
+     * run and waits for the driver, a second at the most for each step of its own and the
+     * driver timeout, 10 s, for an add or a command that a driver does not answer, under the
+     * client's lock. True when the snapshot was written and the member was told; false when nothing
+     * was written because the member lists a snapshot of a service at or past this position
+     * already. Throws {@link CavalryException}: {@link Abi#ERR_CLUSTER_NO_SNAPSHOT_DUE}
+     * where none is due, {@link Abi#ERR_CLUSTER_SNAPSHOT_TOO_LONG} for a state over 1 GiB,
+     * {@link Abi#ERR_CLUSTER_SNAPSHOT_FAILED} when a step made no progress, with the step in
+     * the message, {@link Abi#ERR_POLLING} from inside a handler of this service or of one
+     * whose poll holds the client, or the client's or the driver's code. After an exception
+     * the service is as it was and the snapshot is still due: call again, or poll on. */
+    public boolean snapshot(byte[] state) {
+        int result;
+        try (Arena scratch = Arena.ofConfined()) {
+            MemorySegment bytes = state.length == 0 ? MemorySegment.NULL : scratch.allocateFrom(JAVA_BYTE, state);
+            result = client.snapshotClusterService(handle, bytes, state.length);
+        }
+        if (result < 0) {
+            throw Abi.lastError("cavalry_cluster_service_snapshot");
+        }
+        return result == 1;
+    }
+
+    /** Starts the service from the newest snapshot of a service that its member lists,
+     * before the service's first poll. With {@link Abi#CLUSTER_RESTORED_STATE}, the state
+     * is the program's state as the program gave it to {@link #snapshot}, a copy the caller
+     * owns; the service holds the sessions that were open at the snapshot's position,
+     * {@link #position} is that position, and the next poll hands over the entry after it.
+     * With {@link Abi#CLUSTER_RESTORED_FROM_START}, the state is null: the member lists no
+     * snapshot of a service, or the one it lists could not be taken, and the polls read
+     * the log from position 0. With {@link Abi#CLUSTER_RESTORED_NO_MEMBER}, the state is
+     * null: the driver hosts no member that has a log yet, and the program calls again
+     * before its first poll. A program that never calls it reads the log from position 0
+     * at every start. The call waits for the driver to play the snapshot's recording back,
+     * under the client's lock. Throws {@link CavalryException}:
+     * {@link Abi#ERR_CLUSTER_RESTORE_TOO_LATE} once a poll has opened the member's log or a
+     * call has answered a state or the log's start, {@link Abi#ERR_POLLING} from inside a
+     * handler, or the client's or the driver's code, after which the service has not
+     * started and the program calls again. */
+    public Restored restore() {
+        int restored;
+        byte[] state = null;
+        try (Arena scratch = Arena.ofConfined()) {
+            MemorySegment bytes = scratch.allocate(ADDRESS);
+            MemorySegment length = scratch.allocate(JAVA_LONG);
+            restored = client.restoreClusterService(handle, bytes, length);
+            if (restored == Abi.CLUSTER_RESTORED_STATE) {
+                // The bytes are the handle's until the service's next poll or its close
+                // (spec/c-abi.md, "Lifetimes"): copied here, before either.
+                long count = length.get(JAVA_LONG, 0);
+                state = count == 0 ? new byte[0] : bytes.get(ADDRESS, 0).reinterpret(count).toArray(JAVA_BYTE);
+            }
+        }
+        if (restored <= 0) {
+            throw Abi.lastError("cavalry_cluster_service_restore");
+        }
+        return new Restored(restored, state);
+    }
+
+    /** What {@link #restore} found for a service to start from.
+     *
+     * @param restored one of {@code Abi.CLUSTER_RESTORED_*}
+     * @param state the program's state for {@link Abi#CLUSTER_RESTORED_STATE}, a copy the
+     *     caller owns, and null for the two other codes */
+    public record Restored(int restored, byte[] state) {
     }
 
     /** Closes the service's publications and its counter, stops its read of the log and
