@@ -9,7 +9,9 @@
 # conformance/python/cluster.py, the cluster round: the client's service beside each
 # member and its session on the first driver (spec/c-abi.md, versions 4 and 5; ADR 0124);
 # then conformance/python/snapshot.py, the snapshot round, beside the same three members
-# on the log the cluster round left (spec/c-abi.md, version 6; ADR 0149); and cleans up.
+# on the log the cluster round left (spec/c-abi.md, version 6; ADR 0149); then
+# conformance/python/howto.py, the program of docs/how-to/take-a-services-snapshot.md as
+# that page's steps run it, beside three members of its own; and cleans up.
 # `just conformance` runs this after conformance/c (clients/README.md; ADR 0046, card
 # 205). Nothing is installed: ctypes is in the standard library.
 set -euo pipefail
@@ -136,5 +138,15 @@ echo "conformance/python: run snapshot.py, a service's snapshot and its start fr
 python3 conformance/python/snapshot.py "$cluster" target/release/cavalry || {
     echo "conformance/python: snapshot.py failed; the members said:" >&2
     cat "$cluster"/member-*.out >&2 || true
+    exit 1
+}
+
+# The how-to's program, as its page's steps run it, beside three members of its own:
+# the round's members list a snapshot whose state is the round's, not the page's. Its
+# fifteen ports are counted on from the sixteen above.
+echo "conformance/python: run docs/how-to/take-a-services-snapshot.md's program beside three members of its own"
+python3 conformance/python/howto.py target/release/cavalry "$cluster/how-to" "$(( start + 16 ))" || {
+    echo "conformance/python: howto.py failed; its members said:" >&2
+    cat "$cluster"/how-to/member-*.out >&2 || true
     exit 1
 }

@@ -216,6 +216,7 @@ So a program's loop is this:
 ```python
 restored, state = service.restore()
 while restored == cavalry.CAVALRY_CLUSTER_RESTORED_NO_MEMBER:
+    time.sleep(0.001)                  # no member with a log yet: ask again
     restored, state = service.restore()
 if state is not None:
     load(state)                        # the program's own: bytes to its state
@@ -246,7 +247,8 @@ can wait a switch interval, 5 ms by default, to take the GIL back after each pol
 program with such a thread has its handler note an entry whose `type` is
 `CAVALRY_CLUSTER_ENTRY_SNAPSHOT`, and asks `snapshot_due` after a poll only then.
 `conformance/python/snapshot.py` is a program that runs every call above beside
-three members.
+three members, and [Take a snapshot of a service's state](../../docs/how-to/take-a-services-snapshot.md)
+is the task from its start.
 
 ## What it must never do
 
