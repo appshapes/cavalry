@@ -163,9 +163,9 @@ service)` for each committed entry, in order:
   no session; `entry.LeaderMemberID`, for a new leadership term; and `entry.TimedOut`,
   for a session close. It is the one struct the service keeps, written for each
   entry, so copy a field out to keep it.
-  `ClusterEntrySnapshot` is the leader's request for a snapshot: the poll ends after it. This
-  client's service has no call that takes a snapshot yet, so a handler passes it
-  over, as it does `ClusterEntryOther` (`spec/c-abi.md`, "A service's snapshot and its start").
+  `ClusterEntrySnapshot` is the leader's request for a snapshot: the poll ends after
+  it, and the program gives its state to `service.Snapshot` before its next poll ("A
+  service's snapshot and its start", below).
 - `service` is the service that was polled, for `service.Reply`.
 
 What the handler returns says what becomes of the entry. `ActionContinue` takes it,
@@ -200,6 +200,81 @@ The service's `Poll` and its `Close` are calls on the client the service was mad
 (`spec/c-abi.md`, "Functions", cluster service; ADR 0123; ADR 0124).
 `conformance/go/cluster` is a program that runs three services and a session through
 every call above.
+
+### A service's snapshot and its start
+
+A service's program holds the cluster's state, and a snapshot is that state as the
+program's own bytes at one position of the log, the same beside every member. A
+service that starts again takes its state from its last snapshot and reads the log
+after it, where it would read the log from position 0 (`spec/c-abi.md`, "A service's
+snapshot and its start"; ADR 0146; ADR 0149). Three calls, none of them from inside
+the handler:
+
+- `service.Restore()`, before the first poll, returns `restored`, `state` and an
+  error. With `ClusterRestoredState`, `state` is the program's state as it gave it, a
+  copy the caller owns, never `nil`; the polls read the log from the snapshot's
+  position. With `ClusterRestoredFromStart`, `state` is `nil`, and the polls read from
+  position 0. With `ClusterRestoredNoMember`, `state` is `nil`; the driver hosts no
+  member with a log yet, and the program calls again before it polls.
+- `service.SnapshotDue()`, after a poll, returns the snapshot's log position and
+  `true` when the poll ended at the leader's request, an entry whose `Type` is
+  `ClusterEntrySnapshot`, and `false` otherwise.
+- `service.Snapshot(state)`, before the next poll, writes the snapshot and tells the
+  member, which lists it. `state` is a `[]byte`, 1 GiB at the most. It returns `true`,
+  or `false` when the member lists one at or past that position already.
+
+So a program's loop is this, where `load`, `dump`, `report`, `onEntry` and `running`
+are the program's own:
+
+```go
+func run(service *cavalry.ClusterService) error {
+	restored, state, err := service.Restore()
+	for err == nil && restored == cavalry.ClusterRestoredNoMember {
+		time.Sleep(time.Millisecond) // no member with a log yet: ask again
+		restored, state, err = service.Restore()
+	}
+	if err != nil {
+		return err // the service has not started: call Restore again before any poll, or stop
+	}
+	if state != nil {
+		load(state) // bytes to the program's state
+	}
+	for running {
+		count, err := service.Poll(onEntry, 10)
+		if err != nil {
+			return err // a *HandlerError: the handler failed, and its entry was not taken
+		}
+		if count < 0 {
+			return service.Err() // the poll stopped on a fault, which service.Fault() gives
+		}
+		if _, due := service.SnapshotDue(); due {
+			if _, err := service.Snapshot(dump()); err != nil { // the program's state to bytes
+				report(err) // nothing committed is lost: poll on, and the next request asks again
+			}
+		}
+	}
+	return nil
+}
+```
+
+The state must be a function of the entries the handler was handed, and of nothing
+else: every member's service gives its own, and a start from any of them must reach
+what the others hold. A program that never calls `Restore` reads the log from
+position 0 at every start, and its member's log can then not be purged.
+
+`Snapshot` and `Restore` wait for the driver under the client's lock ("Threads"): a
+second at the most for each step of a snapshot's own, the response timeout, 10 s, for an
+add or a command that a driver does not answer, and for as long as the snapshot's
+recording takes to play back at a start. Each returns an `*Error` with the ABI's code:
+`ErrClusterNoSnapshotDue`, `ErrClusterSnapshotTooLong`, `ErrClusterSnapshotFailed`
+with the step in the message, `ErrClusterRestoreTooLate` once the service has begun,
+and `ErrPolling` from inside a handler. After an error of `Snapshot` the snapshot is
+still due, and the program calls again or polls on. After an error of `Restore` the
+service has not started, and the program calls again or stops, as the loop does: it
+never polls, because a poll reads the log from position 0, and every `Restore` after
+it returns `ErrClusterRestoreTooLate` (`spec/c-abi.md`, "A service's snapshot and its
+start", item 4). `conformance/go/snapshot` is a program that runs every call above
+beside three members.
 
 ## What it must never do
 
@@ -425,7 +500,10 @@ make the client safe to share. A handler that calls its client must reach the AB
 which refuses the call with `ErrPolling`; behind a mutex that its own poll held, the
 same call would stop the goroutine for ever, since a `sync.Mutex` is not taken twice
 (ADR 0124, Alternatives). The service's open and its close take the client's mutex,
-as a committed log's do. A `ClusterSession`'s connect is a call on the client and
+as a committed log's do, and so do its `Snapshot` and its `Restore`: each sends
+commands with the client and waits for the driver (`spec/c-abi.md`, "Threads"; ADR
+0149), and the goroutine that polls makes them between its polls ("A service's
+snapshot and its start"). A `ClusterSession`'s connect is a call on the client and
 takes its mutex; nothing else of a session is.
 
 The table the trampoline reads subscriptions from holds 4,096 subscriptions, committed

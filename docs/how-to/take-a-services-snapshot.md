@@ -4,7 +4,7 @@ A how-to page: one task, have a cluster's service take a snapshot of its program
 state and start from it the next time it runs ([glossary](../glossary.md), "service"
 and "snapshot"). Without one, a service reads its member's log from position 0 at
 every start, and no recording of that log can be purged. The page uses the Python
-client, the first client with these calls; each client that has them has them in one
+client; each of the five clients has these calls, in one
 shape ([ADR 0149](../decisions/0149-give-each-clients-service-a-snapshot-and-a-start-from-one-with-the-state-copied-to-the-caller.md)),
 and in Rust they are `ClusterService::restore`, `snapshot_due` and `snapshot`
 (`crates/cavalry-client/README.md`). What the service writes is

@@ -1,14 +1,17 @@
 #!/usr/bin/env bash
 # Builds the driver and cavalry-ffi's shared library in release, builds the .NET client with
 # the runner's SDK (.NET 10, every warning an error: no package reference, no native shim),
-# then conformance/dotnet's Quickstart, Readme, CommittedLog and Cluster, starts a driver on a
+# then conformance/dotnet's Quickstart, Readme, CommittedLog, Cluster and Snapshot, starts a driver on a
 # directory of its own, runs Quickstart through clients/dotnet with the runner's runtime,
 # then clients/dotnet/README.md's example through Readme; then starts three cluster members
 # on the loopback, each a `cavalry run` in a member's role, and runs CommittedLog beside
 # one of them, member 1 unless it joined late (conformance/log-member.sh), the client's
 # committed log against a cluster (spec/c-abi.md, version 2; ADR 0070), and then Cluster,
 # the cluster round: the client's service beside each member and its session on the first
-# driver (spec/c-abi.md, versions 4 and 5; ADR 0124); and cleans up.
+# driver (spec/c-abi.md, versions 4 and 5; ADR 0124), and then Snapshot, the
+# snapshot round: a service's snapshot and its start from one beside the same three
+# members, on the log the cluster round left (spec/c-abi.md, version 6; ADR 0149); and
+# cleans up.
 # `just conformance` runs this after conformance/jvm
 # (clients/README.md; ADR 0046, card 209).
 set -euo pipefail
@@ -44,6 +47,7 @@ dotnet build -c Release conformance/dotnet/Quickstart/Quickstart.csproj
 dotnet build -c Release conformance/dotnet/Readme/Readme.csproj
 dotnet build -c Release conformance/dotnet/CommittedLog/CommittedLog.csproj
 dotnet build -c Release conformance/dotnet/Cluster/Cluster.csproj
+dotnet build -c Release conformance/dotnet/Snapshot/Snapshot.csproj
 
 echo "conformance/dotnet: cavalry run, in the background, on $CAVALRY_DIR"
 target/release/cavalry run &
@@ -134,6 +138,17 @@ dotnet conformance/dotnet/CommittedLog/bin/Release/net10.0/CommittedLog.dll "$cl
 echo "conformance/dotnet: run Cluster, a service beside each member and a session on $CAVALRY_DIR"
 dotnet conformance/dotnet/Cluster/bin/Release/net10.0/Cluster.dll "$cluster" "$CAVALRY_CLUSTER_MEMBERS" "$response" || {
     echo "conformance/dotnet: Cluster failed; the members said:" >&2
+    cat "$cluster"/member-*.out >&2 || true
+    exit 1
+}
+
+# The snapshot round, on the log the cluster round left: `cavalry snapshot` asks the
+# leader for a snapshot, each member's service takes one through the client, and a
+# new service beside each member starts from it (spec/c-abi.md, version 6; ADR 0146;
+# ADR 0147; ADR 0149).
+echo "conformance/dotnet: run Snapshot, a service's snapshot and its start from one beside each member"
+dotnet conformance/dotnet/Snapshot/bin/Release/net10.0/Snapshot.dll "$cluster" target/release/cavalry || {
+    echo "conformance/dotnet: Snapshot failed; the members said:" >&2
     cat "$cluster"/member-*.out >&2 || true
     exit 1
 }

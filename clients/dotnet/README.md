@@ -161,9 +161,9 @@ service)` for each committed entry, in order:
   no session; `entry.LeaderMemberId`, for a new leadership term; and `entry.TimedOut`,
   for a session close. It is the one object the service keeps, over a struct filled
   for each entry, so copy a value out to keep it.
-  `_SNAPSHOT` is the leader's request for a snapshot: the poll ends after it. This
-  client's service has no call that takes a snapshot yet, so a handler passes it
-  over, as it does `_OTHER` (`spec/c-abi.md`, "A service's snapshot and its start").
+  `_SNAPSHOT` is the leader's request for a snapshot: the poll ends after it, and
+  the program gives its state to `service.Snapshot` before its next poll ("A
+  service's snapshot and its start", below).
 - `service` is the service that was polled, for `service.Reply`.
 
 What the handler returns says what becomes of the entry. `Abi.ACTION_CONTINUE` takes
@@ -198,6 +198,75 @@ The service's `Poll` and its `Close` are calls on the client the service was mad
 `IDisposable`; close a service before its client (`spec/c-abi.md`, "Functions",
 cluster service; ADR 0123; ADR 0124). `conformance/dotnet/Cluster/Program.cs` is a
 program that runs three services and a session through every call above.
+
+### A service's snapshot and its start
+
+A service's program holds the cluster's state, and a snapshot is that state as the
+program's own bytes at one position of the log, the same beside every member. A
+service that starts again takes its state from its last snapshot and reads the log
+after it, where it would read the log from position 0 (`spec/c-abi.md`, "A service's
+snapshot and its start"; ADR 0146; ADR 0149). Three calls, none of them from inside
+the handler:
+
+- `service.Restore()`, before the first poll, returns `(Restored, State)`. With
+  `Abi.CLUSTER_RESTORED_STATE`, `State` is the program's state as it gave it, a
+  `byte[]` that is a copy the caller owns; the polls read the log from the
+  snapshot's position. With `Abi.CLUSTER_RESTORED_FROM_START`, `State` is null, and
+  the polls read from position 0. With `Abi.CLUSTER_RESTORED_NO_MEMBER`, `State` is
+  null; the driver hosts no member with a log yet, and the program calls again
+  before it polls.
+- `service.SnapshotDue()`, after a poll, is the snapshot's log position when the
+  poll ended at the leader's request, an entry whose `Type` is
+  `Abi.CLUSTER_ENTRY_SNAPSHOT`, and null otherwise.
+- `service.Snapshot(state)`, before the next poll, writes the snapshot and tells the
+  member, which lists it. `state` is a `ReadOnlySpan<byte>`, 1 GiB at the most. It
+  returns `true`, or `false` when the member lists one at or past that position already.
+
+So a program's loop is this:
+
+```csharp
+(int restored, byte[]? state) = service.Restore();
+while (restored == Abi.CLUSTER_RESTORED_NO_MEMBER)
+{
+    Thread.Sleep(1);                 // no member with a log yet: ask again
+    (restored, state) = service.Restore();
+}
+if (state != null)
+{
+    Load(state);                     // the program's own: bytes to its state
+}
+while (running)
+{
+    service.Poll(OnEntry, 10);
+    if (service.SnapshotDue() != null)
+    {
+        try
+        {
+            service.Snapshot(Dump());    // the program's own: its state to bytes
+        }
+        catch (CavalryException failed)
+        {
+            Report(failed);              // nothing committed is lost: poll on, and the
+        }                                // next request asks again
+    }
+}
+```
+
+The state must be a function of the entries the handler was handed, and of nothing
+else: every member's service gives its own, and a start from any of them must reach
+what the others hold. A program that never calls `Restore` reads the log from
+position 0 at every start, and its member's log can then not be purged.
+
+`Snapshot` and `Restore` wait for the driver under the client's lock: a second at the
+most for each step of a snapshot's own, the response timeout, 10 s, for an add or a
+command that a driver does not answer, and for as long as the snapshot's recording
+takes to play back at a start. Each throws `CavalryException` with the ABI's code:
+`Abi.ERR_CLUSTER_NO_SNAPSHOT_DUE`, `Abi.ERR_CLUSTER_SNAPSHOT_TOO_LONG`,
+`Abi.ERR_CLUSTER_SNAPSHOT_FAILED` with the step in the message,
+`Abi.ERR_CLUSTER_RESTORE_TOO_LATE` once the service has begun, and `Abi.ERR_POLLING`
+from inside a handler. After an exception of `Snapshot` the snapshot is still due, and
+the program calls again or polls on. `conformance/dotnet/Snapshot/Program.cs` is a
+program that runs every call above beside three members.
 
 ## What it must never do
 
@@ -395,7 +464,9 @@ thread that polls the service and by no other. A program whose other threads add
 command gives them a `Client` of their own, as `spec/c-abi.md`, "Threads", says for a
 program in C. The lock would be on a message's path, where another thread's add could
 hold it for up to 10 s (ADR 0124, Alternatives). The service's open and its close
-take the client's lock, as a committed log's do. A `ClusterSession`'s connect is a
+take the client's lock, as a committed log's do, and so do its `Snapshot` and its
+`Restore`, which the thread that polls makes between polls: each sends commands with
+the client and waits for the driver. A `ClusterSession`'s connect is a
 call on the client and takes its lock; nothing else of a session is.
 
 The ABI's error, `Abi.Errcode()` and `Abi.Errmsg()`, is per operating-system thread,
