@@ -7463,14 +7463,16 @@ fn resolve_in_family(
 /// The refusal of an `add subscription` whose endpoint is the control address of an
 /// open publication on this driver, its channel `resolved` (ADR 0153): another endpoint
 /// first, since closing the publication to free the address ends its linger and gives
-/// up the retransmission of its tail to its receivers on other hosts.
+/// up the rest of its tail, its first send and its retransmission, to its receivers on
+/// other hosts.
 fn open_control_address_message(endpoint: SocketAddr, reason: &str, resolved: &str) -> String {
     format!(
         "the channel's endpoint {endpoint}: the socket could not be bound: {reason}; the \
          address is the control address of a publication on this driver that is still open, \
          on {resolved}, whose socket holds it: give the subscription another endpoint; or \
          close that publication first, and the add then waits for its socket and ends its \
-         linger, so that its receivers on other hosts get no retransmission of its tail; see \
+         linger, so that its receivers on other hosts get no more of its tail, neither \
+         what flow control held back nor a retransmission; see \
          {ERRORS_DOC}"
     )
 }
