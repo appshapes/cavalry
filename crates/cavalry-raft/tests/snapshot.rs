@@ -150,10 +150,21 @@ fn round() {
     });
 }
 
-/// Runs `step`, and says on standard error how long it took when that is 200 ms or
-/// more.
+/// Runs `step`, a step of a test that waits on a driver or a disk, and says on
+/// standard error how long it took when that is 200 ms or more.
+///
+/// `CAVALRY_TEST_STEP_DELAY_MS` makes every such step that much slower, which is a
+/// runner with a slow disk on any machine: `CAVALRY_TEST_STEP_DELAY_MS=4000 cargo
+/// test -p cavalry-raft --test snapshot` passes only while no step stands the
+/// members still (work item 446).
 fn timed<T>(what: &str, step: impl FnOnce() -> T) -> T {
     let began = Instant::now();
+    if let Some(delay) = std::env::var("CAVALRY_TEST_STEP_DELAY_MS")
+        .ok()
+        .and_then(|delay| delay.parse::<u64>().ok())
+    {
+        std::thread::sleep(Duration::from_millis(delay));
+    }
     let out = step();
     if began.elapsed() >= Duration::from_millis(200) {
         eprintln!("{what} took {:?}", began.elapsed());
