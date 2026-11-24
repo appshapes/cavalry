@@ -18,6 +18,7 @@ use cavalry_proto::cluster::{
     CloseReason, EGRESS_STREAM_ID, LOG_RECORDINGS_FILE_PREFIX, LogRecording,
     MAX_LOG_RECORDINGS_LENGTH, MAX_SESSIONS, Message, Stream, TimeUnit, write_log_recordings,
 };
+use cavalry_shm::counters::CountersError;
 use cavalry_shm::counters::generated::{
     CLUSTER_APPEND_POSITION, CLUSTER_COMMIT_POSITION, CLUSTER_LEADER_MEMBER_ID,
     CLUSTER_LEADERSHIP_TERM_ID, CLUSTER_LOG_RECORDING_ID, CLUSTER_REPLIES_DROPPED,
@@ -357,13 +358,29 @@ fn poll_to_end(
 
 /// The value of the member's `cluster.replies_dropped`, or `None` while no service
 /// has added it: a service adds it when it first opens the member's log.
+///
+/// A service that closes while this reads has the driver free the counter between the
+/// read of its record and the read of its value (work item 421). The value of a freed
+/// record reads as `Unallocated`, which is the counter gone, and so is a record that
+/// another counter took meanwhile, which the second read of the record finds. Every
+/// other error of the read is a fault and fails the test.
 fn dropped(client: &Cavalry) -> Option<i64> {
     let counters = client.counters();
+    let ours = |id: u32| {
+        counters.record(id).ok().flatten().filter(|record| {
+            record.type_id() == CLUSTER_REPLIES_DROPPED.0
+                && record.key().starts_with(&MEMBER.to_le_bytes())
+        })
+    };
     (0..counters.capacity()).find_map(|id| {
-        let record = counters.record(id).ok().flatten()?;
-        (record.type_id() == CLUSTER_REPLIES_DROPPED.0
-            && record.key().starts_with(&MEMBER.to_le_bytes()))
-        .then(|| counters.read(id).expect("the counter reads"))
+        ours(id)?;
+        let value = match counters.read(id) {
+            Ok(value) => value,
+            Err(CountersError::Unallocated { .. }) => return None,
+            Err(error) => panic!("the counter reads: {error:?}"),
+        };
+        ours(id)?;
+        Some(value)
     })
 }
 
