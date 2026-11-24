@@ -143,7 +143,7 @@ fn round() {
             && now.duration_since(before) >= Duration::from_secs(1)
         {
             eprintln!(
-                "446: the members stood still for {:?}",
+                "the members stood still for {:?}",
                 now.duration_since(before)
             );
         }
@@ -156,7 +156,7 @@ fn timed<T>(what: &str, step: impl FnOnce() -> T) -> T {
     let began = Instant::now();
     let out = step();
     if began.elapsed() >= Duration::from_millis(200) {
-        eprintln!("446: {what} took {:?}", began.elapsed());
+        eprintln!("{what} took {:?}", began.elapsed());
     }
     out
 }
@@ -1511,7 +1511,7 @@ fn purge_each(dir: &Path, id: i32, recording_ids: &[i64]) {
     client.close().expect("the client closes");
     driver.close().expect("the driver closes");
     if began.elapsed() >= Duration::from_millis(200) {
-        eprintln!("446: member {id}: purge_each took {:?}", began.elapsed());
+        eprintln!("member {id}: purge_each took {:?}", began.elapsed());
     }
 }
 
