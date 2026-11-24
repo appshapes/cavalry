@@ -18,7 +18,7 @@
 
 use std::io::{BufRead, BufReader};
 use std::path::{Path, PathBuf};
-use std::process::{Command, Stdio};
+use std::process::{Child, Command, Stdio};
 use std::time::{Duration, Instant};
 
 use cavalry_driver::Driver;
@@ -39,6 +39,17 @@ const HELD: &str = "cavalry-hold-test: the module started";
 /// How long the child runs at most, should the test that started it end without
 /// killing it.
 const CHILD_LIFE: Duration = Duration::from_secs(60);
+
+/// A child process, killed and waited for when the test ends however it ends, so that
+/// a test that fails before it kills the child leaves no module holding the directory.
+struct Killed(Child);
+
+impl Drop for Killed {
+    fn drop(&mut self) {
+        let _ = self.0.kill();
+        let _ = self.0.wait();
+    }
+}
 
 struct TestDir(PathBuf);
 
@@ -102,8 +113,8 @@ fn assert_held(refused: Result<ConsensusModule, RaftError>, log_dir: &Path) {
     let text = error.to_string();
     assert!(
         text.starts_with(&format!(
-            "member refused (log-directory-held): another consensus module holds the log \
-             directory {}",
+            "member refused (log-directory-held): another process holds the lock a \
+             consensus module takes on the log directory {}",
             log_dir.display()
         )),
         "{text}"
@@ -153,14 +164,14 @@ fn a_second_module_on_a_held_log_directory_is_refused_and_writes_nothing() {
 
 /// A member's module in a process of its own, killed with `SIGKILL`: nothing of it
 /// closes, and the operating system drops its hold with the process, so the member
-/// starts again on its log directory at once, with no wait for a claim to grow old.
+/// starts again on its log directory at once: no claim is left to grow old.
 #[test]
 fn a_member_whose_process_was_killed_starts_again_on_its_log_directory() {
     let dir = TestDir::new("killed");
     let (driver_dir, log_dir) = (dir.path().join("driver"), dir.path().join("log"));
     let _driver = Driver::start(&driver_dir, &log_dir).expect("the driver starts");
     let members = members_string();
-    let mut child = Command::new(std::env::current_exe().expect("this program's path"))
+    let child = Command::new(std::env::current_exe().expect("this program's path"))
         .args([
             "a_module_in_a_process_of_its_own",
             "--exact",
@@ -175,10 +186,11 @@ fn a_member_whose_process_was_killed_starts_again_on_its_log_directory() {
         .stderr(Stdio::inherit())
         .spawn()
         .expect("the child starts");
+    let mut child = Killed(child);
     // The child's lines, read on a thread of their own so that the wait has a bound
     // whether or not a line comes. The harness writes `test <name> ... ` before the
     // test's own output, on the same line.
-    let stdout = child.stdout.take().expect("the child's standard output");
+    let stdout = child.0.stdout.take().expect("the child's standard output");
     let (lines, read) = std::sync::mpsc::channel();
     std::thread::spawn(move || {
         for line in BufReader::new(stdout).lines() {
@@ -195,11 +207,10 @@ fn a_member_whose_process_was_killed_starts_again_on_its_log_directory() {
             Ok(line) if line.contains(HELD) => break,
             Ok(_) => {}
             Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {
-                let _ = child.kill();
                 panic!("the child's module did not start within 30 s");
             }
             Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => {
-                let status = child.wait().expect("the child is waited for");
+                let status = child.0.wait().expect("the child is waited for");
                 panic!("the child ended before its module started: {status}");
             }
         }
@@ -211,16 +222,12 @@ fn a_member_whose_process_was_killed_starts_again_on_its_log_directory() {
         &log_dir,
     );
 
-    child.kill().expect("the child is killed");
-    child.wait().expect("the child is waited for");
-    let started = Instant::now();
+    // The module tries the lock once and never waits, so a start that is not refused
+    // is one that found no claim left.
+    child.0.kill().expect("the child is killed");
+    child.0.wait().expect("the child is waited for");
     let module = ConsensusModule::start(&driver_dir, &log_dir, &members, 1)
         .expect("the member starts again on its log directory once its process is killed");
-    assert!(
-        started.elapsed() < Duration::from_secs(5),
-        "the start waited {:?}: no claim outlives the process",
-        started.elapsed()
-    );
     drop(module);
 }
 

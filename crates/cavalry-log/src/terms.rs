@@ -23,9 +23,11 @@
 //! stored before it. An append syncs an entry's fields before it writes the state, so a
 //! torn append reads as an empty entry, and a checksum that fails under a written state
 //! is damage and never a crash's work. The file is created with its magic last, so a
-//! torn creation is written again and is never taken for damage, and the log directory
-//! is synced after each creation, so that a power loss does not take the file's name
-//! from it once the member has voted (ADR 0152).
+//! torn creation is written again and is never taken for damage. The log directory is
+//! synced after each creation, and again at each open of a whole file, since a kill or
+//! a fault between a creation's last two syncs leaves a whole file whose name may not
+//! be on the disk: so a power loss does not take the file's name once the member has
+//! voted (ADR 0152).
 //!
 //! Nothing here runs per message: the file is written twice per term and once per vote.
 
@@ -693,7 +695,10 @@ impl TermsFile {
     /// when there is none. A file
     /// a crash tore while it was created, shorter than its header or with a zero magic
     /// over no term and no vote, is written again, and the directory synced after it as
-    /// after a creation; a zero magic over a term or a vote is
+    /// after a creation. A whole file read syncs the directory too, once: a creation
+    /// that a kill or a fault cut off between the magic's sync and the directory's
+    /// left a whole file whose name may not be on the disk, and nothing else syncs it
+    /// (ADR 0152). A zero magic over a term or a vote is
     /// [`TermsError::NotReady`]. A candidate slot whose checksum does not match is the
     /// raise a crash tore, and the candidate term is the other slot's. An entry whose
     /// checksum fails is [`TermsError::Damaged`], the last entry's too, and an empty
@@ -783,6 +788,9 @@ impl TermsFile {
             }
             index += count as u64;
         }
+        // The name, on the disk before the member votes: a creation cut off before its
+        // directory sync left the file whole and its name perhaps not there.
+        crate::dir::sync_directory(dir).map_err(io("sync the directory of"))?;
         Ok(Self {
             path,
             file,
@@ -1542,7 +1550,7 @@ mod tests {
     /// A creation of the terms file ends with a sync of the log directory, by the
     /// code path that ends the creation of the log recordings file and of the
     /// snapshots file (ADR 0108, ADR 0128, ADR 0152), and so does the creation a
-    /// crash tore, written again; an open of a whole file syncs no directory. No test
+    /// crash tore, written again, and the open of a whole file. No test
     /// can see a sync reach the disk, so this one counts the calls of that path on
     /// its own thread.
     #[test]
@@ -1553,9 +1561,11 @@ mod tests {
         let file = TermsFile::open(&dir).expect("created");
         assert_eq!(syncs() - before, 1, "a creation by open");
         drop(file);
+        // A whole file read syncs the directory too: a creation cut off between its
+        // last two syncs left the file whole and its name perhaps not on the disk.
         let before = syncs();
         drop(TermsFile::open(&dir).expect("opened"));
-        assert_eq!(syncs() - before, 0, "an open of a whole file");
+        assert_eq!(syncs() - before, 1, "an open of a whole file");
         // A creation a crash tore: the file shorter than its header.
         let path = TermsFile::path_in(&dir);
         std::fs::write(&path, [0u8; 10]).expect("torn");

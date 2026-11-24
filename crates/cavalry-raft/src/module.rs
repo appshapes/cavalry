@@ -215,8 +215,9 @@ pub enum RaftError {
         /// The log position of the snapshot the start took its state from.
         from_position: i64,
     },
-    /// Another consensus module holds the member's log directory (`spec/durable-log.md`,
-    /// "The driver"; ADR 0152). A module holds its log directory for its life by an
+    /// Another process holds the lock a consensus module takes on the member's log
+    /// directory, normally another module (`spec/durable-log.md`, "The driver"; ADR
+    /// 0152). A module holds its log directory for its life by an
     /// exclusive advisory lock of the operating system on the directory itself, taken at
     /// its start before it reads or writes any of its files, and the operating system
     /// drops the lock when the module's process ends, however it ends. A module of any
@@ -627,12 +628,13 @@ impl core::fmt::Display for RaftError {
             }
             RaftError::LogDirectoryHeld { log_dir } => write!(
                 f,
-                "member refused ({reason}): another consensus module holds the log \
-                 directory {dir}: a cluster member runs on it, in this process or another, \
+                "member refused ({reason}): another process holds the lock a consensus \
+                 module takes on the log directory {dir}: normally a cluster member that \
+                 runs on it, in this process or another, of this member id or another, \
                  and a log directory holds one member's record of terms, of its log's \
-                 recordings and of its snapshots. Nothing was written. Stop that member \
-                 before you start this one on the directory, or start this one with a \
-                 driver and a log directory of its own; `lsof {dir}` names the process \
+                 recordings and of its snapshots. Nothing was written. Stop that process \
+                 before you start this member on the directory, or start this member with \
+                 a driver and a log directory of its own; `lsof {dir}` names the process \
                  that holds it. The hold ends with that process, however it ends, so a \
                  member whose process was killed holds nothing; see {DOC_HOLD}",
                 dir = log_dir.display()

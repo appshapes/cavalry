@@ -100,9 +100,11 @@ impl From<LayoutError> for DirError {
 
 /// Syncs the directory `dir` itself, so that a power loss does not take from it the
 /// name of a file created in it since its last sync: the step that ends the creation of
-/// each of a cluster member's three files, `terms`, `log-recordings` and `snapshots`
-/// (`spec/durable-log.md`, "The driver"; ADR 0108, ADR 0128, ADR 0152). One code path
-/// for the three, so that what one creation does the others do. A test counts its calls
+/// each of a cluster member's three files, `terms`, `log-recordings` and `snapshots`,
+/// and the one sync of an open of a whole `terms` file, for a creation cut off before
+/// its own (`spec/durable-log.md`, "The driver"; ADR 0108, ADR 0128, ADR 0152). One
+/// code path for all of them, so that what one creation does the others do. A test
+/// counts its calls
 /// on its own thread: no test can see a sync reach the disk, so it sees this path run.
 pub(crate) fn sync_directory(dir: &Path) -> io::Result<()> {
     #[cfg(test)]

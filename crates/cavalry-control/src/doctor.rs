@@ -509,9 +509,10 @@ fn log_directory_checks(log_dir: &Path, findings: &mut Vec<Finding>) -> usize {
                 message: format!(
                     "the log directory {} is on {fstype} at {mount}, an overlay or network \
                      filesystem, where a sync does not make a byte durable on this host, the \
-                     catalog's lock may not hold against another driver, and a consensus \
-                     module's lock on the directory may not hold against another member's; set \
-                     {}=<a directory on a disk of this host>, or --log-dir",
+                     catalog's lock may not hold against another driver, and a cluster \
+                     member's consensus module may not take its lock on the directory at all, \
+                     as on NFS, where a member then does not start (`log-directory-lock`); \
+                     set {}=<a directory on a disk of this host>, or --log-dir",
                     log_dir.display(),
                     LOG_DIR_KEY.env
                 ),
@@ -540,10 +541,11 @@ fn log_directory_checks(log_dir: &Path, findings: &mut Vec<Finding>) -> usize {
             check: "log-directory-held",
             level: Level::Note,
             message: format!(
-                "the log directory {} is held by a cluster member's consensus module, pid \
-                 {pid}: a second member started on it, of any member id, is refused with \
-                 `log-directory-held`; stop pid {pid} before you start another member \
-                 there, or give the other member a driver and a log directory of its own",
+                "the log directory {} is held by pid {pid}, by the lock a cluster member's \
+                 consensus module takes, so normally a member runs on it: a second member \
+                 started on it, of any member id, is refused with `log-directory-held`; \
+                 stop pid {pid} before you start another member there, or give the other \
+                 member a driver and a log directory of its own",
                 log_dir.display()
             ),
             doc: DOC_LOG_DIRECTORY_HELD,
@@ -4844,7 +4846,13 @@ mod tests {
         let report = examine_with(&dir.0, Some(&log_dir));
         let found = held(&report);
         assert_eq!(found.len(), 1, "{report}");
-        if cfg!(target_os = "linux") {
+        // On btrfs `/proc/locks` gives a subvolume's files another device number than
+        // `stat` does, so no holder is matched there, and the note says so.
+        let btrfs = matches!(
+            backing(&log_dir.canonicalize().expect("canonical")),
+            Backing::Disk { fstype, .. } if fstype == "btrfs"
+        );
+        if cfg!(target_os = "linux") && !btrfs {
             assert!(
                 found[0]
                     .message

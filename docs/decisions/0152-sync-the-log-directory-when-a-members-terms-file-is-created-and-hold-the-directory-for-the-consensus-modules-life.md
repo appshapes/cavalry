@@ -60,6 +60,14 @@ creation and for one a crash tore and the module writes again. It is one functio
 `log-recordings` and of `snapshots`. So the three creations take one code path, and
 the name of `terms` no longer depends on the files created after it.
 
+An open of a whole `terms` file syncs the directory once too, at every start. A kill,
+or a directory sync that fails, between the magic's sync and the directory's leaves
+the file whole and its name perhaps not on the disk. The next start reads a whole
+file and creates nothing, and when `log-recordings` and `snapshots` are there their
+opens create nothing either. Without this sync nothing would put the name on the
+disk, and a power loss after the member had voted could take it. The sync costs one
+directory sync per start.
+
 **A start with `log-recordings` and no `terms` is refused only with a log.** With a
 log, the start is `terms-lost`, as before. With none, the member starts as one whose
 log is empty, as on a new log directory. ADR 0145's rule is written for a member whose
@@ -69,8 +77,8 @@ that rule's two cases, and stores a new vote floor when it takes one. So the vot
 may have cast and the floor it may have stored are held as for a member that lost its
 whole directory. A refusal would send the operator to a new log directory, which gives
 the member the same state at the cost of a new driver. Since the sync above, no crash
-leaves `log-recordings` without `terms`: `terms` is created, and the directory synced,
-before the other two. So this state is the work of a person or a program that removed
+leaves `log-recordings` without `terms`: at every start `terms` is created or read,
+and the directory synced, before the other two are created. So this state is the work of a person or a program that removed
 the file, and the start treats it as a new directory would be treated.
 
 A snapshot does not move a start to the other side. A snapshot of a position above 0
@@ -97,7 +105,9 @@ module's never meet.
 
 **The refusals.** A module that finds the directory held refuses to start with
 `log-directory-held`, whatever its member id and whatever process holds the
-directory. It writes nothing. Its message names the directory, says what to do, and
+directory. It writes nothing. Its message says that another process holds the lock a
+consensus module takes, normally a member that runs there, since any process can take
+a lock of `flock(2)` on the directory. It names the directory, says what to do, and
 names `lsof <directory>`, which lists the process that holds the directory open on
 Linux and on macOS.
 
@@ -122,7 +132,7 @@ moment a member starts would refuse that member. It reports the hold in a note,
 `log-directory-held`, in three forms:
 
 - On Linux it reads `/proc/locks` and names the pid of each process that holds the
-  directory's lock.
+  directory's lock, as the lock a member's module takes.
 - On Linux, where that table shows no holder and the directory holds a `terms` file,
   so that it is a member's, it says that no holder is visible from here, and never
   that the directory is free. The kernel lists only the locks whose holder is in the
@@ -133,7 +143,8 @@ moment a member starts would refuse that member. It reports the hold in a note,
   the note says that the hold cannot be read here and names `lsof <directory>`.
 
 The finding on an overlay or network filesystem now names the module's lock beside
-the catalog's, since neither may hold there.
+the catalog's, and says that a member may not take its lock there at all, as on NFS,
+where it does not start.
 
 ## Alternatives considered
 
@@ -167,10 +178,14 @@ the catalog's, since neither may hold there.
   `a_creation_of_the_terms_file_syncs_the_log_directory_by_the_path_the_other_two_files_take`.
   It counts the calls of `dir::sync_directory` on its thread. A creation by `open` and
   by `create` each sync the directory once, and so does a creation a crash tore,
-  written again, both shorter than the header and with a zero magic. An open of a
-  whole file syncs none. The creations of `log-recordings` and `snapshots` take the
-  same path. No test sees a sync reach the disk. With the sync taken out of `terms.rs`,
-  the test fails at its first count, "a creation by open".
+  written again, both shorter than the header and with a zero magic, and so does an
+  open of a whole file. The creations of `log-recordings` and `snapshots` take the
+  same path. No test sees a sync reach the disk. With the creation's sync taken out of
+  `terms.rs`, the test fails at its first count, "a creation by open"; with the open's,
+  at "an open of a whole file".
+- The agent review of the change, before it reached origin, found that the first
+  version synced the directory only on the creation path, which left the case of the
+  creation cut off before its directory sync; the open's sync is its fix.
 - `crates/cavalry-raft/tests/log_directory.rs`:
   - `a_second_module_on_a_held_log_directory_is_refused_and_writes_nothing` starts two
     modules, member ids 1 and 2, on a directory that a module of member 1 holds. Each
@@ -178,8 +193,9 @@ the catalog's, since neither may hold there.
     were, and member 1 starts once the first module is dropped.
   - `a_member_whose_process_was_killed_starts_again_on_its_log_directory` runs member
     1's module in a child process, as a client of the test's driver. While the child
-    runs, a start in the test's process is refused. After `SIGKILL` the start succeeds
-    at once, well under its 5 s bound.
+    runs, a start in the test's process is refused. After `SIGKILL` the start
+    succeeds. The start tries the lock once and never waits, so a start that is not
+    refused found no claim left.
   - With the lock taken out of `hold_log_dir`, both tests fail.
   - `a_member_whose_terms_file_is_gone_beside_no_log_starts_with_its_log_empty` stores
     a candidate term of 7 and a vote floor of 4096 and starts the member once. It then
@@ -206,8 +222,8 @@ the catalog's, since neither may hold there.
 - Each of a member's three files has one writer, as the catalog has. A second member
   is refused at its start, with a reason and a remedy, and no longer overwrites the
   first member's files.
-- A start on a log directory costs one more `open` and one `flock`. A creation of
-  `terms` costs one more directory sync, once per member's directory. Nothing runs per
+- A start on a log directory costs one more `open`, one `flock` and one directory
+  sync. A creation of `terms` costs one more directory sync. Nothing runs per
   message.
 - Mixed versions: a module of an earlier tree takes no lock, so the refusal holds only
   between modules of this tree or later, on one directory. A module of this tree that
@@ -219,7 +235,7 @@ the catalog's, since neither may hold there.
   says.
 - On an overlay or network filesystem, a lock of the operating system may not hold
   across hosts. `cavalry doctor --log-dir` already warns about such a directory, and
-  the warning now names both locks.
+  the warning now names both locks, and that a member there may be refused.
 - `doctor` names the module's pid on Linux alone, and only for a holder in its own pid
   namespace and on a filesystem whose device numbers match. Elsewhere, and from
   another container, the refusal's `lsof`, run where the member runs, is the way to

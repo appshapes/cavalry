@@ -649,7 +649,11 @@ The consensus module is the terms file's only writer, from its own thread (ADR
 member's first message: every field after the magic, both candidate slots at −1 under
 their checksums, and a sync, then the magic and a sync, then a sync of the log
 directory, so that a power loss does not take the file's name from a directory in
-which the member has since stored a candidate term or recorded a term (ADR 0152). A
+which the member has since stored a candidate term or recorded a term (ADR 0152). At
+each start that reads a whole terms file the module syncs the log directory once
+too, before anything else: a kill or a fault between a creation's magic sync and
+its directory sync leaves a whole file whose name may not be on the disk, and no
+later creation syncs it. A
 terms file shorter than its header, or whose magic is zero while it holds no whole
 entry, no slot whose checksum matches holds a candidate term of 0 or more, and the
 vote floor slot's checksum does not match, was torn while the module created it, and

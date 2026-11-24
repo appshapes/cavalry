@@ -258,10 +258,10 @@ committed once a quorum, two of three, has it on disk.
   log were in it. Start the member with the log directory it had, whole. If the file
   is lost, do as for a directory with no `log-recordings` file, above. Do not put an
   older copy of the file back.
-- `member refused (log-directory-held)`: another consensus module holds the
-  member's log directory. A member runs on it, started by `cavalry run` or by a
-  program that embeds a member as a client of the host's driver, with this member id
-  or another. A log directory holds one member's files, so this member did not start,
+- `member refused (log-directory-held)`: another process holds the lock a
+  consensus module takes on the member's log directory. Normally a member runs on
+  it, started by `cavalry run` or by a program that embeds a member as a client of
+  the host's driver, with this member id or another. A log directory holds one member's files, so this member did not start,
   and it wrote nothing. `cavalry doctor --log-dir <path>` names the holder's pid on
   Linux (`log-directory-held`), and `lsof <path>` names it on any host. Stop that
   process before you start this member on the directory, or start this member with a
