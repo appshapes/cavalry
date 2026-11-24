@@ -74,7 +74,11 @@ list's bound rises from one close per publication and one remove per endpoint by
 request per publication.
 
 **What a subscriber of the cut publication sees.** A destination's receiver that had
-not read the publication's tail gets no retransmission of it. Its image sees no more
+not yet received the whole of the publication's tail gets no more of it. The sender
+drops the publication on its next sweep, whether or not its sender position has
+reached the end of stream position. So the rest of the tail is neither sent nor
+retransmitted: a receiver that flow control held back misses what was not yet sent,
+and a receiver that lost frames misses their retransmission. Its image sees no more
 frames. It reports that absence as it does when the publisher's driver stops: by the
 image's liveness timeout and an `unavailable image`, never as a stream that ended
 whole. The absence is reported, never silent (invariant 1).
@@ -123,8 +127,9 @@ for publications.
   publication's status messages and NAKs, and the subscription's data frames, can
   reach the wrong socket.
 - **End every control channel's linger at the close.** It lost because it gives up
-  the tail's retransmission for every publication, where this decision gives it up
-  only when the same driver needs the address back.
+  the rest of the tail, its first send and its retransmission, for every
+  publication, where this decision gives it up only when the same driver needs the
+  address back.
 
 ## Evidence
 
@@ -166,8 +171,9 @@ for publications.
 
 - A member that led and steps down follows the next leader at once, with no failed
   duty cycle and no 5 s wait.
-- A remote receiver of a control channel's closed publication can lose the tail's
-  retransmission when a client of the publisher's driver subscribes on that address.
+- A remote receiver of a control channel's closed publication can lose the rest of
+  the tail, its first send or its retransmission, when a client of the publisher's
+  driver subscribes on that address.
   `subscription.lingers_ended` counts it, and its `doctor` text names the cause and
   what to do outside a cluster.
 - The conductor gains one sender request, `EndLinger`, and one flag on a closed
