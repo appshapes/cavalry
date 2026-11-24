@@ -494,7 +494,20 @@ end-of-stream flag ends the linger when it arrives, since the one receiver it co
 from has the stream to its end. On a control channel it does not: one destination's end
 of stream says nothing of another's, whose receiver may still be NAKing the tail, so
 the publication lingers for the linger timeout, which is Aeron's rule for a
-multi-destination publication (ADR 0054). Once
+multi-destination publication (ADR 0054). One thing ends a control channel's linger
+before its time: an `add subscription` on the same driver whose endpoint is the
+channel's control address, while every publication on that send endpoint is closed
+("The receiver", the endpoints; ADR 0153). The driver ends the linger of each such
+publication then, counted in `subscription.lingers_ended`, so that the socket goes and
+the subscription binds the address. Any client of the driver can cause it, by
+subscribing on that address, to another client's closed publication. A destination's
+receiver that had not read the publication's tail gets no retransmission of it: its
+image sees no more frames, and it reports that absence as it does when the publisher's
+driver stops, by the image's liveness timeout and an `unavailable image`, never as a
+stream that ended whole. A cluster member does this when it led and now follows another
+leader on its own `log` endpoint (`spec/cluster.md`, "The log"), and loses nothing by
+it: the tail a follower lacks from the leader that stepped down is the next leader's to
+supply, or is no part of the log the cluster committed. Once
 the publication is closed and the sender position has reached the end of stream
 position, the condition under which its heartbeats carry EOS, a status message with the
 send-setup flag is ignored and counted in `sender.status_messages_rejected`: a setup
@@ -682,7 +695,17 @@ and its close a receive endpoint takes no subscription, though it stays active w
 the receiver retires its images: an `add subscription` on its channel then waits for
 the close, as one that meets the endpoint closing does (`spec/client-protocol.md`,
 "Commands"; ADR 0049, ADR 0068), and binds the endpoint again, so that it is given no
-image that is being retired and its stream's session sits out no cool-down. Closing
+image that is being retired and its stream's session sits out no cool-down. An `add
+subscription` whose endpoint a send endpoint on the same driver holds as its control
+address, the same port on the same address or on a wildcard address on either side,
+waits in the same way, with the same bound, when every publication on that send
+endpoint is closed: their linger ends then ("The sender"; ADR 0153), and the add runs
+once the sender has dropped the socket and binds the address. While a publication on
+that send endpoint is open, the add is refused with error code 4, and its message
+names the publication's channel, since the address is that publication's; a
+publication that opens there while the add waits refuses the add then. An
+`add publication` whose control address a receive endpoint on the same driver still
+holds, the other order, is refused with error code 4 in this version. Closing
 is `channel.status` 2: the socket is
 closed, the endpoint's five counters are freed after the counter reuse timeout
 (`spec/client-protocol.md`, "Liveness and timeouts"), and the registry slot is returned,

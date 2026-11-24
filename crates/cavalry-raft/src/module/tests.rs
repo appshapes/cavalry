@@ -959,6 +959,36 @@ fn a_recording_armed_before_its_image_is_told_at_the_join_and_counted() {
     );
 }
 
+/// A leader that leaves its log and joins the log again at once as a follower, as a
+/// leader does that steps down and follows another (work item 445). Its log
+/// publication's control address is its own `log` endpoint, which its subscription as
+/// a follower binds, and the closed publication lingers there for the linger, 5 s on a
+/// control channel: the driver ends that linger for the subscription and holds the add
+/// until the publication's socket is gone, so the join neither fails nor waits for it.
+#[test]
+fn a_leader_that_leaves_its_log_joins_it_again_at_once_as_a_follower() {
+    let mut leader = leader("lead-then-follow");
+    leader
+        .module
+        .io
+        .add_log(0, 0)
+        .expect("the driver takes the commands")
+        .expect("the log has its recording");
+    leader.append(b"one", 0);
+    until_stopped("the log is given up", || leader.module.io.remove_log());
+    let started = Instant::now();
+    leader
+        .module
+        .io
+        .join_log()
+        .expect("the member that led joins the log as a follower");
+    assert!(
+        started.elapsed() < Duration::from_secs(2),
+        "the join waited {:?}, the publication's linger",
+        started.elapsed()
+    );
+}
+
 /// Card 269. A follower joins the log with two commands, and an image that arrives
 /// between them is there before the recording is armed: the recording then begins
 /// at what the image had received, past its join position. The test makes the gap
