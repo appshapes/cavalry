@@ -29,7 +29,10 @@ directory either version wrote opens under the other in place. Version 6 adds th
 vote floor, a slot of the terms file's header that a cluster member writes once, when
 it takes a leader with its log empty, and below which it withholds its vote (ADR
 0145; `spec/cluster.md`, "A member that lost its log"); the slot was reserved bytes
-that a reader of version 5 ignores.
+that a reader of version 5 ignores. Within version 6, a member's consensus module syncs
+the log directory after it creates the terms file, as it does after it creates the log
+recordings file and the snapshots file, and holds the directory by a lock for its
+life, so that the three files have one writer (ADR 0152); no byte of any file changes.
 
 Integers are little-endian; offsets and lengths are in bytes; signed fields are two's
 complement; a timestamp is nanoseconds since the Unix epoch as an i64. A position is
@@ -465,8 +468,10 @@ holds it, stopped and whole, is the check of the member that starts from it.
 
 ## The driver
 
-The driver is the directory's only writer; how it keeps a second driver out is its own
-rule, not this page's. It creates the catalog's header in the page's order, every field
+The driver is the only writer of the catalog, the segment files and the time indexes;
+how it keeps a second driver out is its own rule, not this page's. A cluster member's
+consensus module writes the other three files, and holds the directory as this section
+says below. The driver creates the catalog's header in the page's order, every field
 and a sync, then the magic and a sync; a catalog shorter than its header, or whose magic
 is zero while it holds no whole slot, was torn while the driver created it, and the
 driver writes the header again; a zero magic over whole slots is damage, and the driver
@@ -628,15 +633,29 @@ position a sync covered (`spec/client-protocol.md`, "Commands"; `spec/cluster.md
 version 5 wrote, is recovered from its files alone, and after a power loss its tail is
 what that version left.
 
+A cluster member's consensus module holds the log directory for its life, by an
+exclusive advisory lock of the operating system on the directory itself, taken at
+the member's start before the module reads or writes any of the three files below
+(ADR 0152). The operating system drops the lock when the module's process ends,
+however it ends, so no hold outlives its module and a member whose process was killed
+starts again on its directory at once. The driver's lock is on the catalog, so the
+two never meet. A module that finds the directory held refuses to start with
+`log-directory-held`, whatever its member id, and one whose filesystem refuses the
+lock refuses with `log-directory-lock`; either writes nothing. So each of the three
+files has one writer, as the catalog has.
+
 The consensus module is the terms file's only writer, from its own thread (ADR
 0060). It creates the file as the driver creates the catalog's header, before the
 member's first message: every field after the magic, both candidate slots at −1 under
-their checksums, and a sync, then the magic and a sync. A terms file shorter than its
-header, or whose magic is zero while it holds no whole entry, no slot whose checksum
-matches holds a candidate term of 0 or more, and the vote floor slot's checksum does
-not match, was torn while the module created it, and the module writes the header
-again; a zero magic over a whole entry, over such a slot or over a vote floor is
-damage, since creation writes none of them, and the member refuses to start with
+their checksums, and a sync, then the magic and a sync, then a sync of the log
+directory, so that a power loss does not take the file's name from a directory in
+which the member has since stored a candidate term or recorded a term (ADR 0152). A
+terms file shorter than its header, or whose magic is zero while it holds no whole
+entry, no slot whose checksum matches holds a candidate term of 0 or more, and the
+vote floor slot's checksum does not match, was torn while the module created it, and
+the module writes the header again, the directory's sync included; a zero magic over
+a whole entry, over such a slot or over a vote floor is damage, since creation writes
+none of them, and the member refuses to start with
 `not-ready`. The module appends an entry in two synced writes, before
 the member reports an append position for the term: the checksum and the fields,
 bytes 4 to 32, and a sync, then the state, 1, and a sync, so that a crash between the

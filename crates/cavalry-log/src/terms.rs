@@ -23,7 +23,9 @@
 //! stored before it. An append syncs an entry's fields before it writes the state, so a
 //! torn append reads as an empty entry, and a checksum that fails under a written state
 //! is damage and never a crash's work. The file is created with its magic last, so a
-//! torn creation is written again and is never taken for damage.
+//! torn creation is written again and is never taken for damage, and the log directory
+//! is synced after each creation, so that a power loss does not take the file's name
+//! from it once the member has voted (ADR 0152).
 //!
 //! Nothing here runs per message: the file is written twice per term and once per vote.
 
@@ -634,8 +636,10 @@ impl TermsFile {
 
     /// Creates the file in `dir` with its header, the candidate term −1 and no entry:
     /// every field after the magic, synced, then the magic, synced, so that a creation a
-    /// crash tears is told from damage by its zero magic. A file already there is
-    /// [`TermsError::Io`].
+    /// crash tears is told from damage by its zero magic; then the directory `dir`,
+    /// synced, so that a power loss does not take the file's name from a directory in
+    /// which the member has since stored a candidate term or recorded a term (ADR
+    /// 0152). A file already there is [`TermsError::Io`].
     pub fn create(dir: &Path) -> Result<Self, TermsError> {
         let path = Self::path_in(dir);
         let file = OpenOptions::new()
@@ -648,7 +652,7 @@ impl TermsFile {
                 path: path.clone(),
                 source,
             })?;
-        Self::write_header(&file, &path)?;
+        Self::write_header(&file, dir, &path)?;
         Ok(Self::created(path, file))
     }
 
@@ -665,8 +669,10 @@ impl TermsFile {
 
     /// Writes the created header over whatever the file holds, the way the catalog's is
     /// written (`spec/durable-log.md`, "The driver"): the file emptied, every field
-    /// after the magic and a sync, then the magic and a sync.
-    fn write_header(file: &File, path: &Path) -> Result<(), TermsError> {
+    /// after the magic and a sync, then the magic and a sync; then a sync of the
+    /// directory `dir`, the step that ends the creation of the log recordings file and
+    /// of the snapshots file too, by the same code (ADR 0152).
+    fn write_header(file: &File, dir: &Path, path: &Path) -> Result<(), TermsError> {
         let io = |what: &'static str| {
             let path = path.to_path_buf();
             move |source| TermsError::Io { what, path, source }
@@ -678,14 +684,16 @@ impl TermsFile {
         file.sync_all().map_err(io("sync"))?;
         file.write_all_at(&encoded[..8], 0)
             .map_err(io("write the magic of"))?;
-        file.sync_all().map_err(io("sync"))
+        file.sync_all().map_err(io("sync"))?;
+        crate::dir::sync_directory(dir).map_err(io("sync the directory of"))
     }
 
     /// Opens the file in `dir`, reading its header and every entry up to an empty last
     /// one, which a torn append left and the next write overwrites, and creates the file
     /// when there is none. A file
     /// a crash tore while it was created, shorter than its header or with a zero magic
-    /// over no term and no vote, is written again; a zero magic over a term or a vote is
+    /// over no term and no vote, is written again, and the directory synced after it as
+    /// after a creation; a zero magic over a term or a vote is
     /// [`TermsError::NotReady`]. A candidate slot whose checksum does not match is the
     /// raise a crash tore, and the candidate term is the other slot's. An entry whose
     /// checksum fails is [`TermsError::Damaged`], the last entry's too, and an empty
@@ -728,7 +736,7 @@ impl TermsFile {
                 && !TermsHeader::slots(&header).iter().flatten().any(voted)
                 && decode_slot(&header, FLOOR_OFFSET).is_none());
         if torn_creation {
-            Self::write_header(&file, &path)?;
+            Self::write_header(&file, dir, &path)?;
             return Ok(Self::created(path, file));
         }
         let header = TermsHeader::parse(&header, file_length)?;
@@ -1529,5 +1537,54 @@ mod tests {
         file.set_candidate_term(9).expect("raised");
         assert_eq!(slots(&path), [Some(8), Some(9)]);
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A creation of the terms file ends with a sync of the log directory, by the
+    /// code path that ends the creation of the log recordings file and of the
+    /// snapshots file (ADR 0108, ADR 0128, ADR 0152), and so does the creation a
+    /// crash tore, written again; an open of a whole file syncs no directory. No test
+    /// can see a sync reach the disk, so this one counts the calls of that path on
+    /// its own thread.
+    #[test]
+    fn a_creation_of_the_terms_file_syncs_the_log_directory_by_the_path_the_other_two_files_take() {
+        let syncs = crate::dir::directory_syncs;
+        let dir = dir("directory-sync");
+        let before = syncs();
+        let file = TermsFile::open(&dir).expect("created");
+        assert_eq!(syncs() - before, 1, "a creation by open");
+        drop(file);
+        let before = syncs();
+        drop(TermsFile::open(&dir).expect("opened"));
+        assert_eq!(syncs() - before, 0, "an open of a whole file");
+        // A creation a crash tore: the file shorter than its header.
+        let path = TermsFile::path_in(&dir);
+        std::fs::write(&path, [0u8; 10]).expect("torn");
+        let before = syncs();
+        drop(TermsFile::open(&dir).expect("written again"));
+        assert_eq!(syncs() - before, 1, "a torn creation written again");
+        // A zero magic over the created fields: torn after the first sync.
+        let mut bytes = std::fs::read(&path).expect("read");
+        bytes[..8].copy_from_slice(&[0u8; 8]);
+        std::fs::write(&path, &bytes).expect("torn");
+        let before = syncs();
+        drop(TermsFile::open(&dir).expect("written again"));
+        assert_eq!(
+            syncs() - before,
+            1,
+            "a zero magic over a creation written again"
+        );
+        let other = self::dir("directory-sync-create");
+        let before = syncs();
+        drop(TermsFile::create(&other).expect("created"));
+        assert_eq!(syncs() - before, 1, "a creation by create");
+        // The two other files of a member end their creation on the same path.
+        let before = syncs();
+        drop(crate::recordings::RecordingsFile::open(&other, 0).expect("created"));
+        assert_eq!(syncs() - before, 1, "the log recordings file");
+        let before = syncs();
+        drop(crate::snapshots::SnapshotsFile::open(&other, 0).expect("created"));
+        assert_eq!(syncs() - before, 1, "the snapshots file");
+        let _ = std::fs::remove_dir_all(&dir);
+        let _ = std::fs::remove_dir_all(&other);
     }
 }

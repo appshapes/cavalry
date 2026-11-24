@@ -98,6 +98,30 @@ impl From<LayoutError> for DirError {
     }
 }
 
+/// Syncs the directory `dir` itself, so that a power loss does not take from it the
+/// name of a file created in it since its last sync: the step that ends the creation of
+/// each of a cluster member's three files, `terms`, `log-recordings` and `snapshots`
+/// (`spec/durable-log.md`, "The driver"; ADR 0108, ADR 0128, ADR 0152). One code path
+/// for the three, so that what one creation does the others do. A test counts its calls
+/// on its own thread: no test can see a sync reach the disk, so it sees this path run.
+pub(crate) fn sync_directory(dir: &Path) -> io::Result<()> {
+    #[cfg(test)]
+    DIRECTORY_SYNCS.with(|syncs| syncs.set(syncs.get() + 1));
+    File::open(dir).and_then(|dir| dir.sync_all())
+}
+
+#[cfg(test)]
+thread_local! {
+    /// The calls of [`sync_directory`] on this thread.
+    static DIRECTORY_SYNCS: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
+}
+
+/// The calls of [`sync_directory`] this thread has made.
+#[cfg(test)]
+pub(crate) fn directory_syncs() -> u64 {
+    DIRECTORY_SYNCS.with(std::cell::Cell::get)
+}
+
 fn io<'a>(what: &'static str, path: &'a Path) -> impl FnOnce(io::Error) -> DirError + 'a {
     move |source| DirError::Io {
         what,
