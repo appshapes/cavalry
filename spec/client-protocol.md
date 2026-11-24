@@ -281,7 +281,9 @@ What the driver does with each, after the checks of "What the driver rejects":
   with nothing registered and no event sent until the receiver has closed it, and then
   runs as if it had just arrived, as an `add subscription` waits for a closing
   endpoint: it holds a slot of the publications registry, goes with a client that
-  closes or times out first, and is counted in `publication.add_deferred`; one still
+  closes or times out first, and is counted in `publication.add_deferred`, those
+  waiting now in `publication.add_deferred_waiting`; it runs, with the adds of either
+  kind held behind the same endpoint, in the order they arrived; one still
   waiting once the closing endpoint wait has passed is code 4, counted in
   `publication.add_deferred_timed_out`, with nothing registered. While a subscription
   is still on that endpoint the add is code 4 at once, its message naming the

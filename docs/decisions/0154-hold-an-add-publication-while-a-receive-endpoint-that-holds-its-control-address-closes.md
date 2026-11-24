@@ -48,10 +48,31 @@ The wait is ADR 0049's, for the other order:
 - one still waiting at the bound is code 4, with a message of its own that names both
   causes and what to do for each;
 - one whose client closes or times out first goes with the client;
-- one that waits again after a close keeps the moment it first arrived.
+- one that waits again after a close keeps the moment it first arrived, and is
+  counted once;
+- the adds held behind one receive endpoint run at its close in the order they
+  arrived, subscriptions and publications together, so that the first to ask has the
+  address. A subscription held after a publication then meets an open publication's
+  control address, and is refused as ADR 0153 says.
 
-A new counter, `publication.add_deferred` (id 190), counts the adds held, and
-`publication.add_deferred_timed_out` (id 191) counts those refused at the bound.
+Three counters count it:
+
+- `publication.add_deferred` (id 190), the adds held, once each;
+- `publication.add_deferred_timed_out` (id 191), those refused at the bound;
+- the gauge `publication.add_deferred_waiting` (id 192), those waiting now, so that
+  `cavalry doctor` can tell a publications registry full of held adds from one full of
+  publications, as `subscription.add_deferred_waiting` does for subscriptions.
+
+The counting once also applies to the adds that ADR 0049 and ADR 0153 hold: an add
+run again at a close and held again was counted a second time in
+`subscription.add_deferred`, and is not now.
+
+**No version moves.** A client sees the answers it saw before, `publication ready` or
+code 4, and one of them later. No byte of a command, an event, a frame or a shared
+layout changes. ADR 0049 kept `spec/client-protocol.md` and `spec/udp.md` at their
+versions for the same kind of change, and the conformance suite, which runs every
+client against the pages' bytes and answers, has nothing new to hold. The wait is the
+driver's, and the driver's tests hold it.
 
 **An address that a live subscription holds is refused at once.** While a
 subscription is still on the receive endpoint, the address is that subscription's, and
@@ -97,9 +118,19 @@ which the add waits.
 
   With the wait taken out, the test fails.
 - `an_add_publication_that_waits_past_the_closing_endpoint_wait_is_code_4`: with the
-  receiver held, the add is code 4 at the bound and not a millisecond before.
-  `publication.add_deferred_timed_out` counts it, and the close that comes later
-  registers nothing.
+  receiver held, the add is code 4 at the bound and not a millisecond before. Its
+  message names the address, `publication.add_deferred_timed_out` counts it, and the
+  close that comes later registers nothing.
+- `held_adds_behind_one_receive_endpoint_run_in_the_order_they_arrived`: a publication
+  held first and a subscription held after it, behind one receive endpoint. At the
+  close the publication binds, and the subscription is refused as an open
+  publication's address is. Each is counted once. With subscriptions run first, as in
+  the first version, the test fails.
+- The agent review before the push found one defect in the first version: the held
+  subscriptions ran before the held publications at a close, so a later subscription
+  could take the address from a publication held first. It also found four smaller
+  points, all taken: the address in the timed-out add's message, the waiting gauge,
+  counting a held add once, and saying why no version moves.
 
 ## Consequences
 

@@ -51,12 +51,12 @@ use cavalry_shm::counters::generated::{
     COMMAND_RING_REJECTED_TAIL, COMMAND_RING_UNBLOCKED, CONDUCTOR_IDLE_STRATEGY,
     DRIVER_LOG_CREATE_FAILED, DRIVER_REGISTRY_FULL, IMAGE_HWM_POSITION, IMAGE_REBUILD_POSITION,
     IMAGE_REMOVED, LOG_BUFFER_REJECTED_POSITION, LOG_BUFFER_REJECTED_TAIL,
-    PUBLICATION_ADD_DEFERRED, PUBLICATION_ADD_DEFERRED_TIMED_OUT, PUBLICATION_LIMIT,
-    PUBLICATION_POSITION, PUBLICATION_UNBLOCKED, RECORDING_ARMED, RECORDING_ARMED_DROPPED,
-    RECORDING_ARMED_FAILED, RECORDING_ARMED_STARTED, RECORDING_BYTES, RECORDING_CATALOG_FULL,
-    RECORDING_CATALOG_TRUNCATED, RECORDING_CUT_TO_SYNCED, RECORDING_DELETED,
-    RECORDING_FILES_REMOVED, RECORDING_INDEX_REWRITTEN, RECORDING_INVALIDATED, RECORDING_POSITION,
-    RECORDING_RECOVERED, RECORDING_RETENTION_FAILED, RECORDING_SLOT_DROPPED,
+    PUBLICATION_ADD_DEFERRED, PUBLICATION_ADD_DEFERRED_TIMED_OUT, PUBLICATION_ADD_DEFERRED_WAITING,
+    PUBLICATION_LIMIT, PUBLICATION_POSITION, PUBLICATION_UNBLOCKED, RECORDING_ARMED,
+    RECORDING_ARMED_DROPPED, RECORDING_ARMED_FAILED, RECORDING_ARMED_STARTED, RECORDING_BYTES,
+    RECORDING_CATALOG_FULL, RECORDING_CATALOG_TRUNCATED, RECORDING_CUT_TO_SYNCED,
+    RECORDING_DELETED, RECORDING_FILES_REMOVED, RECORDING_INDEX_REWRITTEN, RECORDING_INVALIDATED,
+    RECORDING_POSITION, RECORDING_RECOVERED, RECORDING_RETENTION_FAILED, RECORDING_SLOT_DROPPED,
     RECORDING_START_FAILED, RECORDING_STARTED, RECORDING_STOPPED, RECORDING_SYNCED_POSITION,
     RECORDING_TRUNCATED, REPLAY_ENDED, REPLAY_FAILED, REPLAY_NOT_CONNECTED, REPLAY_POSITION,
     REPLAY_START_FAILED, REPLAY_STARTED, REPLAY_STOPPED, SENDER_BYTES_UNSENT,
@@ -514,6 +514,8 @@ struct PendingPublication {
     /// The channel as the command carried it, so the add runs again as it arrived.
     channel: Vec<u8>,
     exclusive: bool,
+    /// The control address it waits to bind, for the message at the bound.
+    address: SocketAddr,
     /// The receive endpoint the add waits for.
     behind_receive: i64,
     /// When the conductor read the add, on the driver's clock.
@@ -825,6 +827,7 @@ struct Statics {
     subscription_lingers_ended: Counter,
     publication_add_deferred: Counter,
     publication_add_deferred_timed_out: Counter,
+    publication_add_deferred_waiting: Counter,
     image_removed: Counter,
 }
 
@@ -868,6 +871,7 @@ impl Statics {
             subscription_lingers_ended: get(SUBSCRIPTION_LINGERS_ENDED)?,
             publication_add_deferred: get(PUBLICATION_ADD_DEFERRED)?,
             publication_add_deferred_timed_out: get(PUBLICATION_ADD_DEFERRED_TIMED_OUT)?,
+            publication_add_deferred_waiting: get(PUBLICATION_ADD_DEFERRED_WAITING)?,
             image_removed: get(IMAGE_REMOVED)?,
         })
     }
@@ -918,6 +922,9 @@ pub(crate) struct Conductor {
     /// The `add publication` commands waiting for a receive endpoint that holds their
     /// control address to close (ADR 0154), bounded by the publications registry.
     pending_publications: Vec<PendingPublication>,
+    /// True while held adds run again at an endpoint's close, so that one held again
+    /// is not counted twice in `subscription.add_deferred` or `publication.add_deferred`.
+    replaying_held: bool,
     images: Vec<Image>,
     recordings: Vec<RecordingEntry>,
     /// At most one per endpoint and stream a live subscription holds, so the
@@ -1054,6 +1061,7 @@ impl Conductor {
             subscriptions: Vec::with_capacity(spec::MAX_SUBSCRIPTIONS),
             pending_subscriptions: Vec::with_capacity(spec::MAX_SUBSCRIPTIONS),
             pending_publications: Vec::with_capacity(spec::MAX_PUBLICATIONS),
+            replaying_held: false,
             images: Vec::with_capacity(spec::MAX_IMAGES),
             recordings: Vec::with_capacity(spec::MAX_RECORDINGS),
             armed_recordings: Vec::with_capacity(spec::MAX_SUBSCRIPTIONS),
@@ -2043,10 +2051,16 @@ impl Conductor {
                     stream_id,
                     channel: raw.to_vec(),
                     exclusive,
+                    address: target.address,
                     behind_receive,
                     arrived: now_nanos(),
                 });
-                self.statics.publication_add_deferred.increment();
+                // Once per command: one run again behind another endpoint is the same
+                // command held still.
+                if !self.replaying_held {
+                    self.statics.publication_add_deferred.increment();
+                }
+                self.count_waiting_publications();
                 return;
             }
             let resolved = match entry.interface {
@@ -2808,26 +2822,13 @@ impl Conductor {
                         // now, in the order they arrived, each as if it had just arrived:
                         // the first binds the address (ADR 0153).
                         // One that waits again keeps the moment it arrived, so that its
-                        // wait has one bound in all.
+                        // wait has one bound in all, and is counted once.
                         let mut due = Vec::with_capacity(self.pending_subscriptions.len());
                         due.extend(self.pending_subscriptions.extract_if(.., |pending| {
                             pending.behind_send == Some(registration_id)
                         }));
                         self.count_waiting_adds();
-                        for pending in due {
-                            self.add_subscription(
-                                pending.client_id,
-                                pending.correlation_id,
-                                pending.stream_id,
-                                &pending.channel,
-                                now,
-                            );
-                            if let Some(again) = self.pending_subscriptions.last_mut()
-                                && again.correlation_id == pending.correlation_id
-                            {
-                                again.arrived = pending.arrived;
-                            }
-                        }
+                        self.run_held_adds(due, Vec::new(), now);
                     }
                 }
             }
@@ -3251,6 +3252,7 @@ impl Conductor {
             self.pending_publications
                 .extract_if(.., |pending| waited(pending)),
         );
+        self.count_waiting_publications();
         let answered = due.len();
         for pending in due {
             self.statics.publication_add_deferred_timed_out.increment();
@@ -3258,7 +3260,7 @@ impl Conductor {
                 pending.correlation_id,
                 ErrorCode::ChannelEndpointError,
                 &format!(
-                    "the channel's control address: a receive endpoint on this driver still \
+                    "the channel's control address {}: a receive endpoint on this driver still \
                      holds it after the {} s this add waited, its subscriptions removed and \
                      its images still being retired or its socket still with the receiver, \
                      so the publication cannot bind it; if a recording of one of its images \
@@ -3270,6 +3272,7 @@ impl Conductor {
                      receiver thread is behind, starved of CPU or busy: give the driver's \
                      threads the CPU they need; then add the publication again; see \
                      {ERRORS_DOC}",
+                    pending.address,
                     spec::CLOSING_ENDPOINT_WAIT.as_secs()
                 ),
             );
@@ -3285,6 +3288,16 @@ impl Conductor {
         self.statics
             .subscription_add_deferred_waiting
             .set(i64::try_from(self.pending_subscriptions.len()).unwrap_or(i64::MAX));
+    }
+
+    /// Stores how many `add publication` commands wait for a receive endpoint now in
+    /// `publication.add_deferred_waiting`, after every change to the list, so that
+    /// `cavalry doctor` can tell a publications registry full of waiting adds from one
+    /// full of publications (ADR 0154).
+    fn count_waiting_publications(&self) {
+        self.statics
+            .publication_add_deferred_waiting
+            .set(i64::try_from(self.pending_publications.len()).unwrap_or(i64::MAX));
     }
 
     /// Answers every `add subscription` that has waited [`spec::CLOSING_ENDPOINT_WAIT`]
@@ -3465,7 +3478,11 @@ impl Conductor {
                 arrived: now_nanos(),
                 behind_send,
             });
-            self.statics.subscription_add_deferred.increment();
+            // Once per command: one run again at a close and held again is the same
+            // command held still.
+            if !self.replaying_held {
+                self.statics.subscription_add_deferred.increment();
+            }
             self.count_waiting_adds();
             return;
         }
@@ -3846,47 +3863,30 @@ impl Conductor {
                         }
                         // The adds that waited for this endpoint's close run now, in
                         // the order they arrived, each as if it had just arrived: the
-                        // first binds the endpoint again (ADR 0049). They leave the
-                        // list in one pass, which keeps the others in their order.
-                        let mut due = Vec::with_capacity(self.pending_subscriptions.len());
-                        due.extend(self.pending_subscriptions.extract_if(.., |pending| {
-                            pending.endpoint == closed_endpoint
-                                && pending.interface == closed_interface
-                        }));
+                        // first binds the endpoint again (ADR 0049), or, for a
+                        // publication that waited for its control address, binds that
+                        // (ADR 0154). Subscriptions and publications run in one order,
+                        // by when each arrived, so that the first to ask has the address.
+                        // They leave the lists in one pass each, which keeps the others
+                        // in their order; one held again keeps its first arrival.
+                        let mut subscriptions =
+                            Vec::with_capacity(self.pending_subscriptions.len());
+                        subscriptions.extend(self.pending_subscriptions.extract_if(
+                            ..,
+                            |pending| {
+                                pending.endpoint == closed_endpoint
+                                    && pending.interface == closed_interface
+                            },
+                        ));
                         self.count_waiting_adds();
-                        for pending in due {
-                            self.add_subscription(
-                                pending.client_id,
-                                pending.correlation_id,
-                                pending.stream_id,
-                                &pending.channel,
-                                now,
-                            );
-                        }
-                        // The publications that waited for this endpoint's socket run
-                        // now, in the order they arrived; one that waits again keeps the
-                        // moment it arrived (ADR 0154).
-                        let mut due = Vec::with_capacity(self.pending_publications.len());
-                        due.extend(
+                        let mut publications = Vec::with_capacity(self.pending_publications.len());
+                        publications.extend(
                             self.pending_publications.extract_if(.., |pending| {
                                 pending.behind_receive == registration_id
                             }),
                         );
-                        for pending in due {
-                            self.add_publication(
-                                pending.client_id,
-                                pending.correlation_id,
-                                pending.stream_id,
-                                &pending.channel,
-                                pending.exclusive,
-                                now,
-                            );
-                            if let Some(again) = self.pending_publications.last_mut()
-                                && again.correlation_id == pending.correlation_id
-                            {
-                                again.arrived = pending.arrived;
-                            }
-                        }
+                        self.count_waiting_publications();
+                        self.run_held_adds(subscriptions, publications, now);
                     }
                 }
             }
@@ -4465,6 +4465,7 @@ impl Conductor {
         self.count_waiting_adds();
         self.pending_publications
             .retain(|pending| pending.client_id != client_id);
+        self.count_waiting_publications();
         let registrations: Vec<(usize, i64)> = self
             .publications
             .iter()
@@ -4910,6 +4911,65 @@ impl Conductor {
             self.sender_request(sender::Request::EndLinger { registration_id });
         }
         Some(endpoint_id)
+    }
+
+    /// Runs held adds again, subscriptions and publications in one order by when each
+    /// arrived, each as if it had just arrived; one held again keeps its first arrival
+    /// and is not counted again (ADR 0049, ADR 0153, ADR 0154).
+    fn run_held_adds(
+        &mut self,
+        subscriptions: Vec<PendingSubscription>,
+        publications: Vec<PendingPublication>,
+        now: i64,
+    ) {
+        self.replaying_held = true;
+        let mut subscriptions = subscriptions.into_iter().peekable();
+        let mut publications = publications.into_iter().peekable();
+        loop {
+            let subscription_first = match (subscriptions.peek(), publications.peek()) {
+                (Some(subscription), Some(publication)) => {
+                    subscription.arrived <= publication.arrived
+                }
+                (Some(_), None) => true,
+                (None, Some(_)) => false,
+                (None, None) => break,
+            };
+            if subscription_first {
+                let Some(pending) = subscriptions.next() else {
+                    break;
+                };
+                self.add_subscription(
+                    pending.client_id,
+                    pending.correlation_id,
+                    pending.stream_id,
+                    &pending.channel,
+                    now,
+                );
+                if let Some(again) = self.pending_subscriptions.last_mut()
+                    && again.correlation_id == pending.correlation_id
+                {
+                    again.arrived = pending.arrived;
+                }
+            } else {
+                let Some(pending) = publications.next() else {
+                    break;
+                };
+                self.add_publication(
+                    pending.client_id,
+                    pending.correlation_id,
+                    pending.stream_id,
+                    &pending.channel,
+                    pending.exclusive,
+                    now,
+                );
+                if let Some(again) = self.pending_publications.last_mut()
+                    && again.correlation_id == pending.correlation_id
+                {
+                    again.arrived = pending.arrived;
+                }
+            }
+        }
+        self.replaying_held = false;
     }
 
     /// A publication opened on the send endpoint `endpoint_id`: the adds that waited for
@@ -18618,12 +18678,14 @@ mod receiving {
             .add_publication(1, 5, STREAM, control.as_bytes(), true, h.now);
         assert_eq!(h.conductor.pending_publications.len(), 1);
         assert_eq!(h.counter(PUBLICATION_ADD_DEFERRED), 1);
+        assert_eq!(h.counter(PUBLICATION_ADD_DEFERRED_WAITING), 1);
         assert!(
             h.conductor.publications.is_empty(),
             "nothing registered yet"
         );
         assert!(h.cycle_until(|h| !h.conductor.publications.is_empty()));
         assert_eq!(h.last_error(5), None);
+        assert_eq!(h.counter(PUBLICATION_ADD_DEFERRED_WAITING), 0);
         assert!(h.conductor.pending_publications.is_empty());
         assert!(
             h.conductor.receive_endpoints.is_empty(),
@@ -18633,6 +18695,50 @@ mod receiving {
         assert_eq!(h.conductor.send_endpoints[0].state, ChannelState::Active);
         assert!(h.conductor.send_endpoints[0].target.control);
         assert_eq!(h.counter(PUBLICATION_ADD_DEFERRED_TIMED_OUT), 0);
+    }
+
+    /// A publication add and a subscription add held behind one receive endpoint run, at
+    /// its close, in the order they arrived (ADR 0154): the publication, held first,
+    /// binds the address as its control address; the subscription, held after it, then
+    /// meets an open publication's control address and is refused with that message
+    /// (ADR 0153). Each held command is counted once.
+    #[test]
+    fn held_adds_behind_one_receive_endpoint_run_in_the_order_they_arrived() {
+        let mut h = Harness::new("udp-held-in-order");
+        let port = free_port();
+        let endpoint = format!("cavalry:udp?endpoint=127.0.0.1:{port}");
+        let control = format!("cavalry:udp?control=127.0.0.1:{port}|control-mode=manual");
+        h.conductor
+            .add_subscription(1, 2, STREAM, endpoint.as_bytes(), h.now);
+        assert_eq!(h.last_error(2), None);
+        h.cycle();
+        let now = h.now;
+        h.conductor.remove_subscription(1, 3, 2, now);
+        h.conductor
+            .add_publication(1, 4, STREAM, control.as_bytes(), true, now);
+        h.conductor
+            .add_subscription(1, 5, STREAM, endpoint.as_bytes(), now);
+        assert_eq!(h.conductor.pending_publications.len(), 1);
+        assert_eq!(h.conductor.pending_subscriptions.len(), 1);
+        assert!(h.cycle_until(|h| !h.conductor.publications.is_empty()));
+        let (code, message) = h.last_error(5).expect("the later subscription is refused");
+        assert_eq!(code, 4, "{message}");
+        assert!(
+            message
+                .contains("the control address of a publication on this driver that is still open"),
+            "{message}"
+        );
+        assert!(
+            h.conductor
+                .publications
+                .iter()
+                .any(|publication| publication.registration_id == 4),
+            "the publication, held first, has the address"
+        );
+        assert!(h.conductor.pending_publications.is_empty());
+        assert!(h.conductor.pending_subscriptions.is_empty());
+        assert_eq!(h.counter(PUBLICATION_ADD_DEFERRED), 1);
+        assert_eq!(h.counter(SUBSCRIPTION_ADD_DEFERRED), 1);
     }
 
     /// An `add publication` that has waited the closing endpoint wait for a receive
@@ -18666,6 +18772,7 @@ mod receiving {
         assert_eq!(code, 4, "{message}");
         assert!(
             message.contains("a receive endpoint on this driver still holds it after the 5 s")
+                && message.contains(&format!("127.0.0.1:{port}"))
                 && message.contains("add the publication again"),
             "{message}"
         );

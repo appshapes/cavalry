@@ -710,7 +710,10 @@ port on the same address or a wildcard, waits with nothing registered when that
 endpoint's last subscription has been removed, its images being retired or its socket
 with the receiver, and runs as it arrived once the receiver has closed it, under the
 same bound; it holds a slot of the publications registry meanwhile, and is counted in
-`publication.add_deferred` (ADR 0154). A cluster member that followed on its `log`
+`publication.add_deferred`, and those waiting now in `publication.add_deferred_waiting`
+(ADR 0154). The adds held behind one receive endpoint, subscriptions and publications,
+run at its close in the order they arrived, so that the first to ask has the
+address. A cluster member that followed on its `log`
 endpoint and now leads binds that address so. While a subscription is still on that
 receive endpoint, the add is refused with error code 4 at once, and its message names
 the subscription's channel, since the address is that subscription's. Closing

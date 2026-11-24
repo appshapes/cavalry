@@ -1862,6 +1862,14 @@ scope = "static"
 doc = "`add publication` commands that waited the closing endpoint wait, 5 s, for a receive endpoint that held their control address to close, and were answered with code 4, with nothing registered; the close that came later ran nothing for them (spec/client-protocol.md, Commands, Liveness and timeouts; ADR 0154)."
 doctor = "A receive endpoint on this host held a publication's control address for 5 s after its last subscription went, its images still being retired or its socket still with the receiver, so the publication's add was refused with code 4. If a recording of one of its images had not yet stopped, the image's log was kept until the recorder had written up to where the image stopped, and a recording.position that does not move is a recorder behind a slow or failing disk: check recording.write_failed and the log directory's disk with `cavalry doctor`, or stop the recording before removing the stream's last subscription. Otherwise the driver's receiver thread is behind, starved of CPU under a cgroup quota or busy: give the driver's threads the CPU they need. Then add the publication again."
 
+[[counter]]
+id = 192
+name = "publication.add_deferred_waiting"
+kind = "gauge"
+scope = "static"
+doc = "`add publication` commands waiting now for a receive endpoint that holds their control address to close, each holding a slot of the publications registry until the close runs it, its client goes or the closing endpoint wait refuses it (spec/client-protocol.md, Commands, Sizes; ADR 0154)."
+doctor = ""
+
 # A cluster member's role (spec/cluster.md, "Roles and the election"; ADR 0052, feature
 # 3). A member is a candidate (ADR 0077, ADR 0081) from its nomination until it
 # leads, loses its ballot, votes for another, follows another member that won its
