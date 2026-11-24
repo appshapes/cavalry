@@ -696,12 +696,14 @@ the receiver retires its images: an `add subscription` on its channel then waits
 the close, as one that meets the endpoint closing does (`spec/client-protocol.md`,
 "Commands"; ADR 0049, ADR 0068), and binds the endpoint again, so that it is given no
 image that is being retired and its stream's session sits out no cool-down. An `add
-subscription` whose endpoint is the control address of a send endpoint on the same
-driver waits in the same way, with the same bound, when every publication on that send
+subscription` whose endpoint a send endpoint on the same driver holds as its control
+address, the same port on the same address or on a wildcard address on either side,
+waits in the same way, with the same bound, when every publication on that send
 endpoint is closed: their linger ends then ("The sender"; ADR 0153), and the add runs
 once the sender has dropped the socket and binds the address. While a publication on
 that send endpoint is open, the add is refused with error code 4, and its message
-names the publication's channel, since the address is that publication's. An
+names the publication's channel, since the address is that publication's; a
+publication that opens there while the add waits refuses the add then. An
 `add publication` whose control address a receive endpoint on the same driver still
 holds, the other order, is refused with error code 4 in this version. Closing
 is `channel.status` 2: the socket is

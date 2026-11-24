@@ -189,7 +189,8 @@ The daemon: conductor, sender, receiver and idle strategies. Data plane.
   in `subscription.lingers_ended`, and the add binds the address once the sender has
   dropped the socket, so a cluster member that led follows another leader at once on
   its own `log` endpoint; while a publication on it is open, the add is code 4 with a
-  message that names that publication's channel (ADR 0153). A setup
+  message that names that publication's channel, and a publication that opens there
+  while an add waits refuses that add then (ADR 0153). A setup
   frame for that stream goes back to the
   conductor, which creates the image, a log of type 2 under `images/` at the position
   the setup names with a registration id of its own, allocates its two counters and a

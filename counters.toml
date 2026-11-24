@@ -993,14 +993,14 @@ name = "subscription.add_deferred_timed_out"
 kind = "counter"
 scope = "static"
 doc = "`add subscription` commands that waited the closing endpoint wait, 5 s, for a `cavalry:udp` channel's previous receive endpoint to close, its images still being retired or its socket still with the receiver, or for a closed publication's control socket on the endpoint's address to go with the sender, and were answered with code 4, with nothing registered; the close that came later ran nothing for them (spec/client-protocol.md, Commands, Liveness and timeouts; ADR 0049; ADR 0068; ADR 0153)."
-doctor = "A channel's previous receive endpoint did not close within 5 s of an add on it, its images still being retired or its socket still with the receiver, so the add was refused with code 4. If a recording of one of its images had not yet stopped, the image's log was kept until the recorder had written up to where the image stopped, and a recording.position that does not move is a recorder behind a slow or failing disk: check recording.write_failed and the log directory's disk with `cavalry doctor`, or stop the recording before removing the stream's last subscription. Otherwise the driver's receiver thread is behind, starved of CPU under a cgroup quota or busy: give the driver's threads the CPU they need. Then add the subscription again."
+doctor = "A channel's previous receive endpoint, or a closed publication's control socket on the endpoint's address, did not go within 5 s of an add on it, so the add was refused with code 4; the add's message says which. A receive endpoint stays while its images are being retired or its socket is with the receiver; a closed publication stays until a recording of it has stopped. If a recording had not yet stopped, the log was kept until the recorder had written up to its end, and a recording.position that does not move is a recorder behind a slow or failing disk: check recording.write_failed and the log directory's disk with `cavalry doctor`, or stop the recording first. Otherwise the driver's receiver or sender thread is behind, starved of CPU under a cgroup quota or busy: give the driver's threads the CPU they need. Then add the subscription again."
 
 [[counter]]
 id = 100
 name = "subscription.add_deferred_waiting"
 kind = "gauge"
 scope = "static"
-doc = "`add subscription` commands waiting now for a `cavalry:udp` channel's previous receive endpoint to close, each holding a slot of the subscriptions registry until the close runs it, its client goes or the closing endpoint wait refuses it (spec/client-protocol.md, Commands, Sizes; ADR 0049)."
+doc = "`add subscription` commands waiting now for a `cavalry:udp` channel's previous receive endpoint to close, or for a closed publication's control socket on the endpoint's address to go, each holding a slot of the subscriptions registry until the close runs it, its client goes, a publication opening on that address refuses it, or the closing endpoint wait refuses it (spec/client-protocol.md, Commands, Sizes; ADR 0049; ADR 0153)."
 doctor = ""
 
 # The image's life (spec/udp.md, "The receiver", step 5; ADR 0042): the receiver moves

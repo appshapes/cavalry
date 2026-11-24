@@ -58,7 +58,20 @@ drop comes after that, past ADR 0049's bound of 5 s from the add.
 **An address that an open publication holds is refused.** When a publication on that
 send endpoint is still open, the add is code 4 at once, as before. Its message now
 says that the address is the control address of an open publication on this driver,
-and names that publication's channel.
+and names that publication's channel. It offers another endpoint first: closing the
+publication instead ends its linger. A publication that opens on that send endpoint
+while an add waits keeps the socket, so the waiting add is refused then, with the same
+message, and not after the wait.
+
+**Which address counts.** The add's endpoint and the control address match when the
+port is the same and the addresses are the same, or either is a wildcard, since a
+socket on the wildcard takes the port on every address.
+
+**The sender's queue keeps a bound.** The end of a linger is a sender request, which
+waits in the conductor's list of the sender's deferred requests when the sender's
+queue is full. Each closed publication is sent the request once at most, so that
+list's bound rises from one close per publication and one remove per endpoint by one
+request per publication.
 
 **What a subscriber of the cut publication sees.** A destination's receiver that had
 not read the publication's tail gets no retransmission of it. Its image sees no more
@@ -133,6 +146,19 @@ for publications.
 - A scratch test before the change, one driver on macOS: a publication on
   `control=127.0.0.1:P` was closed, and a subscription on `endpoint=127.0.0.1:P` was
   refused from 1.3 ms after the close, then succeeded after 5.05 s, on its 91st try.
+- `a_publication_that_opens_on_the_address_an_add_waits_for_refuses_the_add_at_once`:
+  a publication that opens on the endpoint while an add waits refuses the add at once,
+  with the open publication's message. It fails with that refusal taken out.
+  `a_control_address_holds_the_same_port_on_its_address_or_a_wildcard` holds the
+  address match.
+- The agent review before the push found two defects in the first version, and both
+  are fixed here. The end of a linger went to the sender's deferred list past that
+  list's bound. A publication that opened on the endpoint while an add waited left
+  the add to time out with a message about a thread that is behind. It also found
+  five smaller points, all taken: the counters' and the timed-out add's texts for the
+  sender's case, the wildcard match, the adds re-run when the socket goes being only
+  the ones that waited for it, with their first arrival kept, and the refusal's advice
+  in order.
 - `src/module/tests.rs`'s other order, a follower that leaves its log and leads at
   once, is refused 3 times in 3 on 127.0.0.1:29003. That test is work item 447's.
 

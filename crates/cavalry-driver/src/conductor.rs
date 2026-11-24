@@ -97,11 +97,13 @@ const DEFERRED_CAPACITY: usize = 2 * spec::MAX_RECORDINGS;
 /// plays and a recording stops once.
 const REPLAYER_DEFERRED_CAPACITY: usize = 3 * spec::MAX_REPLAYS;
 
-/// The sender's deferred requests' bound: one close per publication the sender may
-/// hold, a client's or a replay's over `cavalry:udp` (ADR 0043), and one remove per
-/// endpoint, since an add that finds no room in the sender's queue is refused with code
-/// 10 and never deferred (ADR 0041).
-const SENDER_DEFERRED_CAPACITY: usize = spec::MAX_SENDER_PUBLICATIONS + spec::MAX_SEND_ENDPOINTS;
+/// The sender's deferred requests' bound: one close and one end of its linger per
+/// publication the sender may hold, a client's or a replay's over `cavalry:udp` (ADR
+/// 0043, ADR 0153), and one remove per endpoint, since an add that finds no room in the
+/// sender's queue is refused with code 10 and never deferred (ADR 0041). A publication's
+/// linger is ended once at most: `UdpPublication::linger_end_sent`.
+const SENDER_DEFERRED_CAPACITY: usize =
+    2 * spec::MAX_SENDER_PUBLICATIONS + spec::MAX_SEND_ENDPOINTS;
 
 /// The receiver's deferred requests' bound: a remove per subscription and per endpoint,
 /// an image or a refusal per session record in progress, and a reader's attach or
@@ -494,6 +496,19 @@ struct PendingSubscription {
     /// When the conductor read the add, on the driver's clock: the closing endpoint
     /// wait is measured from here.
     arrived: i64,
+    /// The send endpoint whose socket holds the address as its control address, which
+    /// the add waits for instead of a receive endpoint (ADR 0153).
+    behind_send: Option<i64>,
+}
+
+/// Whether a socket bound to `control`, a control address, holds `endpoint` for a
+/// receive socket: the same port, and the same address or either one unspecified, a
+/// wildcard that takes the port on every address (ADR 0153).
+fn holds_address(control: SocketAddr, endpoint: SocketAddr) -> bool {
+    control.port() == endpoint.port()
+        && (control.ip() == endpoint.ip()
+            || control.ip().is_unspecified()
+            || endpoint.ip().is_unspecified())
 }
 
 /// One receive endpoint the conductor bound: the resolved channel, the socket's
@@ -909,7 +924,8 @@ pub(crate) struct Conductor {
     deferred: VecDeque<Request>,
     /// The sender's queues (ADR 0041).
     sender: SenderLink,
-    /// The sender's closes and endpoint removes its request queue had no room for, kept
+    /// The sender's closes, ends of a linger and endpoint removes its request queue had
+    /// no room for, kept
     /// and bounded as `deferred` is, at [`SENDER_DEFERRED_CAPACITY`]; while it holds
     /// any, `add publication` on a `cavalry:udp` channel is code 10.
     sender_deferred: VecDeque<sender::Request>,
@@ -2352,6 +2368,9 @@ impl Conductor {
         };
         self.send(if exclusive { &exclusive_ready } else { &ready });
         self.publications.push(publication);
+        // An open publication on an endpoint whose socket held adds were waiting for
+        // keeps the socket: those adds are answered now (ADR 0153).
+        self.refuse_adds_behind(endpoint_id);
     }
 
     /// Undoes a send endpoint opened for an `add publication` that failed after it: the
@@ -2608,7 +2627,7 @@ impl Conductor {
 
     /// Offers a request to the sender, or keeps it for the next cycle when the queue is
     /// full or earlier requests are still waiting, so that the sender sees them in order.
-    /// Only closes and endpoint removes come here, bounded by
+    /// Only closes, ends of a linger and endpoint removes come here, bounded by
     /// [`SENDER_DEFERRED_CAPACITY`]; an add that finds no room is refused instead.
     fn sender_request(&mut self, request: sender::Request) {
         let request = if self.sender_deferred.is_empty() {
@@ -2624,7 +2643,7 @@ impl Conductor {
         };
         debug_assert!(
             self.sender_deferred.len() < SENDER_DEFERRED_CAPACITY,
-            "the sender's deferred requests passed one close per publication and one remove per endpoint"
+            "the sender's deferred requests passed one close and one end of linger per publication and one remove per endpoint"
         );
         self.sender_deferred.push_back(request);
     }
@@ -2696,22 +2715,25 @@ impl Conductor {
                         // The adds that waited for a control address this socket held run
                         // now, in the order they arrived, each as if it had just arrived:
                         // the first binds the address (ADR 0153).
-                        if entry.target.control {
-                            let address = entry.target.address;
-                            let mut due = Vec::with_capacity(self.pending_subscriptions.len());
-                            due.extend(
-                                self.pending_subscriptions
-                                    .extract_if(.., |pending| pending.endpoint == address),
+                        // One that waits again keeps the moment it arrived, so that its
+                        // wait has one bound in all.
+                        let mut due = Vec::with_capacity(self.pending_subscriptions.len());
+                        due.extend(self.pending_subscriptions.extract_if(.., |pending| {
+                            pending.behind_send == Some(registration_id)
+                        }));
+                        self.count_waiting_adds();
+                        for pending in due {
+                            self.add_subscription(
+                                pending.client_id,
+                                pending.correlation_id,
+                                pending.stream_id,
+                                &pending.channel,
+                                now,
                             );
-                            self.count_waiting_adds();
-                            for pending in due {
-                                self.add_subscription(
-                                    pending.client_id,
-                                    pending.correlation_id,
-                                    pending.stream_id,
-                                    &pending.channel,
-                                    now,
-                                );
+                            if let Some(again) = self.pending_subscriptions.last_mut()
+                                && again.correlation_id == pending.correlation_id
+                            {
+                                again.arrived = pending.arrived;
                             }
                         }
                     }
@@ -3156,23 +3178,37 @@ impl Conductor {
             self.send_error(
                 pending.correlation_id,
                 ErrorCode::ChannelEndpointError,
-                &format!(
-                    "the channel's endpoint {}: the previous endpoint on it has not \
-                     closed in the {} s this add waited, a receive endpoint's images still \
-                     being retired or its socket still with the receiver, or a closed \
-                     publication's control socket on that address still with the sender, \
-                     so a new one cannot be bound; if a \
-                     recording of one of its images has not yet stopped, the image's log is \
-                     kept until the recorder has written up to where the image stopped and \
-                     the recorder is behind, on a slow or failing disk: check \
-                     recording.write_failed and the log directory's disk with `cavalry \
-                     doctor`, or stop the recording before removing the stream's last \
-                     subscription; otherwise the driver's receiver or sender thread is \
-                     behind, starved of CPU or busy: give the driver's threads the CPU they \
-                     need; then add the subscription again; see {ERRORS_DOC}",
-                    pending.endpoint,
-                    spec::CLOSING_ENDPOINT_WAIT.as_secs()
-                ),
+                &if pending.behind_send.is_some() {
+                    format!(
+                        "the channel's endpoint {}: the control socket of a closed publication \
+                         on this driver still holds the address after the {} s this add \
+                         waited, so the subscription cannot bind it; a closed publication \
+                         stays until a recording of it has stopped, and a recorder behind a \
+                         slow or failing disk holds it: check recording.write_failed and the \
+                         log directory's disk with `cavalry doctor`, or stop the recording \
+                         before the publication is closed; otherwise the driver's sender \
+                         thread is behind, starved of CPU or busy: give the driver's threads \
+                         the CPU they need; then add the subscription again; see {ERRORS_DOC}",
+                        pending.endpoint,
+                        spec::CLOSING_ENDPOINT_WAIT.as_secs()
+                    )
+                } else {
+                    format!(
+                        "the channel's endpoint {}: the previous receive endpoint on it has not \
+                         closed in the {} s this add waited, its images still being retired or \
+                         its socket still with the receiver, so a new one cannot be bound; if a \
+                         recording of one of its images has not yet stopped, the image's log is \
+                         kept until the recorder has written up to where the image stopped and \
+                         the recorder is behind, on a slow or failing disk: check \
+                         recording.write_failed and the log directory's disk with `cavalry \
+                         doctor`, or stop the recording before removing the stream's last \
+                         subscription; otherwise the driver's receiver thread is behind, starved \
+                         of CPU or busy: give the driver's threads the CPU they need; then add \
+                         the subscription again; see {ERRORS_DOC}",
+                        pending.endpoint,
+                        spec::CLOSING_ENDPOINT_WAIT.as_secs()
+                    )
+                },
             );
         }
         answered
@@ -3265,14 +3301,14 @@ impl Conductor {
         // waits for the socket as for a receive endpoint's, inside the same bound (ADR
         // 0153). A cluster member that led and now follows does this on its own log
         // endpoint. One whose publication is open is no wait: the bind below refuses it.
-        let held_by_sender = if open.is_none() {
+        let behind_send = if open.is_none() {
             self.release_control_address(endpoint)
         } else {
-            false
+            None
         };
         if open.is_none()
             && (leaving
-                || held_by_sender
+                || behind_send.is_some()
                 || self.receive_endpoints.iter().any(|entry| {
                     entry.endpoint == endpoint
                         && entry.interface == interface
@@ -3287,6 +3323,7 @@ impl Conductor {
                 endpoint,
                 interface,
                 arrived: now_nanos(),
+                behind_send,
             });
             self.statics.subscription_add_deferred.increment();
             self.count_waiting_adds();
@@ -3334,25 +3371,20 @@ impl Conductor {
                         // A publication of this driver that is open holds the address as
                         // its control address: the operator's port is that publication's
                         // until it closes (ADR 0153).
-                        let message =
-                            match self.send_endpoints.iter().find(|entry| {
-                                entry.target.control && entry.target.address == endpoint
-                            }) {
-                                Some(entry) => format!(
-                                    "the channel's endpoint {endpoint}: the socket could not be \
-                                 bound: {error}; the address is the control address of a \
-                                 publication on this driver that is still open, on {}, whose \
-                                 socket holds it: close that publication first, and the add \
-                                 waits for its socket, or give the subscription another \
-                                 endpoint; see {ERRORS_DOC}",
-                                    entry.target.resolved()
-                                ),
-                                None => format!(
-                                    "the channel's endpoint {endpoint}: the socket could not be \
+                        let message = match self.send_endpoints.iter().find(|entry| {
+                            entry.target.control && holds_address(entry.target.address, endpoint)
+                        }) {
+                            Some(entry) => open_control_address_message(
+                                endpoint,
+                                &error.to_string(),
+                                &entry.target.resolved(),
+                            ),
+                            None => format!(
+                                "the channel's endpoint {endpoint}: the socket could not be \
                                  opened or bound: {error}; check that the address is this host's \
                                  and its port is free; see {ERRORS_DOC}"
-                                ),
-                            };
+                            ),
+                        };
                         self.send_error(correlation_id, ErrorCode::ChannelEndpointError, &message);
                         return;
                     }
@@ -4674,17 +4706,14 @@ impl Conductor {
     /// and each is counted in `subscription.lingers_ended`. A send endpoint already
     /// closing holds the address until the sender drops its socket, with nothing to
     /// end. One with an open publication is no wait.
-    fn release_control_address(&mut self, address: SocketAddr) -> bool {
-        let Some(entry) = self
+    fn release_control_address(&mut self, address: SocketAddr) -> Option<i64> {
+        let entry = self
             .send_endpoints
             .iter()
-            .find(|entry| entry.target.control && entry.target.address == address)
-        else {
-            return false;
-        };
+            .find(|entry| entry.target.control && holds_address(entry.target.address, address))?;
         let (endpoint_id, state) = (entry.registration_id, entry.state);
         if state == ChannelState::Closing {
-            return true;
+            return Some(endpoint_id);
         }
         let on_endpoint = |publication: &Publication| {
             publication
@@ -4697,7 +4726,7 @@ impl Conductor {
             .iter()
             .any(|publication| on_endpoint(publication) && publication.closing.is_none())
         {
-            return false;
+            return None;
         }
         let mut ended = Vec::with_capacity(spec::MAX_SENDER_PUBLICATIONS);
         for publication in self.publications.iter_mut().filter(|p| on_endpoint(p)) {
@@ -4714,7 +4743,46 @@ impl Conductor {
             self.statics.subscription_lingers_ended.increment();
             self.sender_request(sender::Request::EndLinger { registration_id });
         }
-        true
+        Some(endpoint_id)
+    }
+
+    /// A publication opened on the send endpoint `endpoint_id`: the adds that waited for
+    /// that endpoint's socket to go are answered now, with the refusal an add meets on an
+    /// open publication's control address, since the socket stays while the publication
+    /// is open (ADR 0153).
+    fn refuse_adds_behind(&mut self, endpoint_id: i64) {
+        if !self
+            .pending_subscriptions
+            .iter()
+            .any(|pending| pending.behind_send == Some(endpoint_id))
+        {
+            return;
+        }
+        let Some(resolved) = self
+            .send_endpoints
+            .iter()
+            .find(|entry| entry.registration_id == endpoint_id)
+            .map(|entry| entry.target.resolved())
+        else {
+            return;
+        };
+        let mut refused = Vec::with_capacity(self.pending_subscriptions.len());
+        refused.extend(
+            self.pending_subscriptions
+                .extract_if(.., |pending| pending.behind_send == Some(endpoint_id)),
+        );
+        self.count_waiting_adds();
+        for pending in refused {
+            self.send_error(
+                pending.correlation_id,
+                ErrorCode::ChannelEndpointError,
+                &open_control_address_message(
+                    pending.endpoint,
+                    "a publication opened on it while the add waited",
+                    &resolved,
+                ),
+            );
+        }
     }
 
     /// One fewer publication on the endpoint; the last one's close closes the endpoint:
@@ -6483,6 +6551,15 @@ impl Conductor {
             udp,
         });
         let publication_index = self.publications.len() - 1;
+        // A replay's publication open on a send endpoint whose socket held adds were
+        // waiting for keeps the socket, as a client's does (ADR 0153).
+        if let Some(endpoint_id) = self.publications[publication_index]
+            .udp
+            .as_ref()
+            .map(|udp| udp.endpoint_id)
+        {
+            self.refuse_adds_behind(endpoint_id);
+        }
         {
             let entry = &mut self.replays[index];
             entry.state = ReplayState::Live;
@@ -7381,6 +7458,21 @@ fn resolve_in_family(
                 .to_string(),
         ))
     }
+}
+
+/// The refusal of an `add subscription` whose endpoint is the control address of an
+/// open publication on this driver, its channel `resolved` (ADR 0153): another endpoint
+/// first, since closing the publication to free the address ends its linger and gives
+/// up the retransmission of its tail to its receivers on other hosts.
+fn open_control_address_message(endpoint: SocketAddr, reason: &str, resolved: &str) -> String {
+    format!(
+        "the channel's endpoint {endpoint}: the socket could not be bound: {reason}; the \
+         address is the control address of a publication on this driver that is still open, \
+         on {resolved}, whose socket holds it: give the subscription another endpoint; or \
+         close that publication first, and the add then waits for its socket and ends its \
+         linger, so that its receivers on other hosts get no retransmission of its tail; see \
+         {ERRORS_DOC}"
+    )
 }
 
 /// The message of error code 10 for the sender's request queue with no room, or with
@@ -9264,6 +9356,66 @@ mod recording {
         assert_eq!(h.counter(SUBSCRIPTION_LINGERS_ENDED), 1);
     }
 
+    /// An add that waits for a closed publication's control socket, and a publication
+    /// that opens on that send endpoint before its socket goes (ADR 0055 lets it join
+    /// the endpoint during the linger): the socket stays while that publication is open,
+    /// so the waiting add is refused at once, with the message an add meets on an open
+    /// publication's control address, and not after the 5 s wait with a message that
+    /// blames a thread that is behind (ADR 0153).
+    #[test]
+    fn a_publication_that_opens_on_the_address_an_add_waits_for_refuses_the_add_at_once() {
+        let mut h = Harness::new("udp-mdc-linger-reopened");
+        let control = control_channel();
+        let address = control
+            .trim_start_matches("cavalry:udp?control=")
+            .split('|')
+            .next()
+            .expect("the control address")
+            .to_string();
+        let endpoint = format!("cavalry:udp?endpoint={address}");
+        let now = h.now;
+        h.conductor
+            .add_publication(1, 2, 7, control.as_bytes(), false, now);
+        assert_eq!(h.last_error(2), None);
+        h.sender.duty_cycle(now_nanos());
+        h.conductor.remove_publication(1, 3, 2, now_nanos());
+        h.conductor
+            .add_subscription(1, 4, 7, endpoint.as_bytes(), now_nanos());
+        assert_eq!(h.conductor.pending_subscriptions.len(), 1);
+        // Before the sender has dropped the socket, another publication opens on it.
+        h.conductor
+            .add_publication(1, 5, 8, control.as_bytes(), false, now_nanos());
+        let (code, message) = h.last_error(4).expect("the waiting add is refused");
+        assert_eq!(code, ErrorCode::ChannelEndpointError as i32);
+        assert!(
+            message.contains("a publication opened on it while the add waited")
+                && message.contains("give the subscription another endpoint"),
+            "{message}"
+        );
+        assert!(h.conductor.pending_subscriptions.is_empty());
+        assert_eq!(h.counter(SUBSCRIPTION_ADD_DEFERRED_TIMED_OUT), 0);
+        assert!(
+            h.conductor
+                .publications
+                .iter()
+                .any(|publication| publication.registration_id == 5),
+            "the publication opened"
+        );
+    }
+
+    /// The address a control socket holds for a receive socket: the same port, and the
+    /// same address or a wildcard on either side (ADR 0153).
+    #[test]
+    fn a_control_address_holds_the_same_port_on_its_address_or_a_wildcard() {
+        let at = |text: &str| text.parse::<SocketAddr>().expect("an address");
+        assert!(holds_address(at("127.0.0.1:4000"), at("127.0.0.1:4000")));
+        assert!(holds_address(at("127.0.0.1:4000"), at("0.0.0.0:4000")));
+        assert!(holds_address(at("0.0.0.0:4000"), at("127.0.0.1:4000")));
+        assert!(holds_address(at("127.0.0.1:4000"), at("[::]:4000")));
+        assert!(!holds_address(at("127.0.0.1:4000"), at("127.0.0.1:4001")));
+        assert!(!holds_address(at("127.0.0.1:4000"), at("127.0.0.2:4000")));
+    }
+
     /// An `add publication` on a control channel whose send endpoint is closing (ADR
     /// 0055): one during the last publication's linger opens its publication on the
     /// endpoint that is still active; one after the linger has ended and before the
@@ -9563,9 +9715,13 @@ mod recording {
         }
         assert_eq!(
             h.conductor.sender_deferred.len(),
-            SENDER_DEFERRED_CAPACITY - spec::MAX_REPLAY_PUBLICATIONS,
+            SENDER_DEFERRED_CAPACITY
+                - spec::MAX_REPLAY_PUBLICATIONS
+                - spec::MAX_SENDER_PUBLICATIONS,
             "and one remove per endpoint; the rest of the bound is a close per replay \
-             publication over cavalry:udp (ADR 0043)"
+             publication over cavalry:udp (ADR 0043), and an end of the linger per \
+             publication, which a control channel's closed publication is sent once at \
+             most (ADR 0153)"
         );
         assert_eq!(
             h.conductor.sender_deferred.capacity(),

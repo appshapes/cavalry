@@ -383,11 +383,12 @@ What the driver does with each, after the checks of "What the driver rejects":
   timeouts" has passed since the driver read it is code 4, the bind it would have
   made, with nothing registered, and the close that comes later runs nothing for it
   (ADR 0049; ADR 0068 for an endpoint whose images are still being retired). An add
-  whose endpoint is the control address of a send endpoint on the driver, every
+  whose endpoint a send endpoint on the driver holds as its control address, every
   publication on it closed, waits in the same way and under the same bound: the driver
   ends those publications' linger, counted in `subscription.lingers_ended`, and the add
   runs once the sender has dropped the socket. While a publication on it is open the
-  add is code 4 at once, its message naming that publication's channel (`spec/udp.md`,
+  add is code 4 at once, its message naming that publication's channel, and a
+  publication that opens there while the add waits makes it code 4 then (`spec/udp.md`,
   "The sender", "The receiver"; ADR 0153).
 - **remove subscription.** The driver removes the subscription and every image it has,
   frees their position counters, and answers `operation success`; an image over UDP
