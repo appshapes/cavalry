@@ -572,6 +572,12 @@ pub const CLUSTER_TRUNCATION_OWED: CounterId = CounterId(188);
 /// `subscription.lingers_ended`, a static counter: Closed `cavalry:udp` publications whose linger the driver ended before its time, because an `add subscription` on this driver named as its endpoint the control address their send endpoint's socket held, with every publication on that endpoint closed: the add waits, as subscription.add_deferred counts it, until the socket is gone, and then binds the address (spec/udp.md, The sender, The receiver; ADR 0153). A cluster member that led and now follows another leader does this on its own log endpoint.
 pub const SUBSCRIPTION_LINGERS_ENDED: CounterId = CounterId(189);
 
+/// `publication.add_deferred`, a static counter: `add publication` and `add exclusive publication` commands on a `cavalry:udp` control channel whose control address a receive endpoint on this driver still held, its last subscription removed and its images being retired or its socket still with the receiver, held with nothing registered until the receiver closed it and then run as if they had just arrived (spec/udp.md, The receiver; spec/client-protocol.md, Commands; ADR 0154). A cluster member that followed on its log endpoint and now leads does this.
+pub const PUBLICATION_ADD_DEFERRED: CounterId = CounterId(190);
+
+/// `publication.add_deferred_timed_out`, a static counter: `add publication` commands that waited the closing endpoint wait, 5 s, for a receive endpoint that held their control address to close, and were answered with code 4, with nothing registered; the close that came later ran nothing for them (spec/client-protocol.md, Commands, Liveness and timeouts; ADR 0154).
+pub const PUBLICATION_ADD_DEFERRED_TIMED_OUT: CounterId = CounterId(191);
+
 /// Every entry of `counters.toml`, in the file's order.
 pub const COUNTERS: &[CounterDef] = &[
     CounterDef {
@@ -2085,5 +2091,21 @@ pub const COUNTERS: &[CounterDef] = &[
         scope: Scope::Static,
         doc: "Closed `cavalry:udp` publications whose linger the driver ended before its time, because an `add subscription` on this driver named as its endpoint the control address their send endpoint's socket held, with every publication on that endpoint closed: the add waits, as subscription.add_deferred counts it, until the socket is gone, and then binds the address (spec/udp.md, The sender, The receiver; ADR 0153). A cluster member that led and now follows another leader does this on its own log endpoint.",
         doctor: "A subscription on this host took the control address of a publication its driver had closed, so that publication's linger was cut short: a receiver on another host that had not yet received the whole of the publication's tail got no more of it, neither what flow control had held back nor a retransmission, and saw its image end without it, as when the publisher stops. On a cluster member that stepped down and follows a new leader this is expected, since the new leader's log carries what the old one did not commit. Elsewhere, give the subscription an endpoint of its own, or close the publication 5 s, the linger, before the subscription is added.",
+    },
+    CounterDef {
+        id: PUBLICATION_ADD_DEFERRED,
+        name: "publication.add_deferred",
+        kind: Kind::Counter,
+        scope: Scope::Static,
+        doc: "`add publication` and `add exclusive publication` commands on a `cavalry:udp` control channel whose control address a receive endpoint on this driver still held, its last subscription removed and its images being retired or its socket still with the receiver, held with nothing registered until the receiver closed it and then run as if they had just arrived (spec/udp.md, The receiver; spec/client-protocol.md, Commands; ADR 0154). A cluster member that followed on its log endpoint and now leads does this.",
+        doctor: "",
+    },
+    CounterDef {
+        id: PUBLICATION_ADD_DEFERRED_TIMED_OUT,
+        name: "publication.add_deferred_timed_out",
+        kind: Kind::Counter,
+        scope: Scope::Static,
+        doc: "`add publication` commands that waited the closing endpoint wait, 5 s, for a receive endpoint that held their control address to close, and were answered with code 4, with nothing registered; the close that came later ran nothing for them (spec/client-protocol.md, Commands, Liveness and timeouts; ADR 0154).",
+        doctor: "A receive endpoint on this host held a publication's control address for 5 s after its last subscription went, its images still being retired or its socket still with the receiver, so the publication's add was refused with code 4. If a recording of one of its images had not yet stopped, the image's log was kept until the recorder had written up to where the image stopped, and a recording.position that does not move is a recorder behind a slow or failing disk: check recording.write_failed and the log directory's disk with `cavalry doctor`, or stop the recording before removing the stream's last subscription. Otherwise the driver's receiver thread is behind, starved of CPU under a cgroup quota or busy: give the driver's threads the CPU they need. Then add the publication again.",
     },
 ];

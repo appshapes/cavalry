@@ -50,7 +50,8 @@ use cavalry_shm::counters::generated::{
     CLIENT_PROTOCOL_REJECTED_COMMAND, CLIENT_TIMED_OUT, COMMAND_RING_REJECTED_RECORD,
     COMMAND_RING_REJECTED_TAIL, COMMAND_RING_UNBLOCKED, CONDUCTOR_IDLE_STRATEGY,
     DRIVER_LOG_CREATE_FAILED, DRIVER_REGISTRY_FULL, IMAGE_HWM_POSITION, IMAGE_REBUILD_POSITION,
-    IMAGE_REMOVED, LOG_BUFFER_REJECTED_POSITION, LOG_BUFFER_REJECTED_TAIL, PUBLICATION_LIMIT,
+    IMAGE_REMOVED, LOG_BUFFER_REJECTED_POSITION, LOG_BUFFER_REJECTED_TAIL,
+    PUBLICATION_ADD_DEFERRED, PUBLICATION_ADD_DEFERRED_TIMED_OUT, PUBLICATION_LIMIT,
     PUBLICATION_POSITION, PUBLICATION_UNBLOCKED, RECORDING_ARMED, RECORDING_ARMED_DROPPED,
     RECORDING_ARMED_FAILED, RECORDING_ARMED_STARTED, RECORDING_BYTES, RECORDING_CATALOG_FULL,
     RECORDING_CATALOG_TRUNCATED, RECORDING_CUT_TO_SYNCED, RECORDING_DELETED,
@@ -501,6 +502,24 @@ struct PendingSubscription {
     behind_send: Option<i64>,
 }
 
+/// An `add publication` on a control channel held, with nothing registered and no event
+/// sent, while a receive endpoint on this driver that is leaving or closing still holds
+/// its control address, until the receiver has closed that endpoint (ADR 0154): a
+/// member that followed on its `log` endpoint and now leads binds the same address. It
+/// holds a slot of the publications registry, and the closing endpoint wait bounds it.
+struct PendingPublication {
+    client_id: i64,
+    correlation_id: i64,
+    stream_id: i32,
+    /// The channel as the command carried it, so the add runs again as it arrived.
+    channel: Vec<u8>,
+    exclusive: bool,
+    /// The receive endpoint the add waits for.
+    behind_receive: i64,
+    /// When the conductor read the add, on the driver's clock.
+    arrived: i64,
+}
+
 /// Whether a socket bound to `control`, a control address, holds `endpoint` for a
 /// receive socket: the same port, and the same address or either one unspecified, a
 /// wildcard that takes the port on every address (ADR 0153).
@@ -804,6 +823,8 @@ struct Statics {
     subscription_add_deferred_timed_out: Counter,
     subscription_add_deferred_waiting: Counter,
     subscription_lingers_ended: Counter,
+    publication_add_deferred: Counter,
+    publication_add_deferred_timed_out: Counter,
     image_removed: Counter,
 }
 
@@ -845,6 +866,8 @@ impl Statics {
             subscription_add_deferred_timed_out: get(SUBSCRIPTION_ADD_DEFERRED_TIMED_OUT)?,
             subscription_add_deferred_waiting: get(SUBSCRIPTION_ADD_DEFERRED_WAITING)?,
             subscription_lingers_ended: get(SUBSCRIPTION_LINGERS_ENDED)?,
+            publication_add_deferred: get(PUBLICATION_ADD_DEFERRED)?,
+            publication_add_deferred_timed_out: get(PUBLICATION_ADD_DEFERRED_TIMED_OUT)?,
             image_removed: get(IMAGE_REMOVED)?,
         })
     }
@@ -892,6 +915,9 @@ pub(crate) struct Conductor {
     subscriptions: Vec<Subscription>,
     /// Adds waiting for a closing receive endpoint, in arrival order (ADR 0049).
     pending_subscriptions: Vec<PendingSubscription>,
+    /// The `add publication` commands waiting for a receive endpoint that holds their
+    /// control address to close (ADR 0154), bounded by the publications registry.
+    pending_publications: Vec<PendingPublication>,
     images: Vec<Image>,
     recordings: Vec<RecordingEntry>,
     /// At most one per endpoint and stream a live subscription holds, so the
@@ -1027,6 +1053,7 @@ impl Conductor {
             ),
             subscriptions: Vec::with_capacity(spec::MAX_SUBSCRIPTIONS),
             pending_subscriptions: Vec::with_capacity(spec::MAX_SUBSCRIPTIONS),
+            pending_publications: Vec::with_capacity(spec::MAX_PUBLICATIONS),
             images: Vec::with_capacity(spec::MAX_IMAGES),
             recordings: Vec::with_capacity(spec::MAX_RECORDINGS),
             armed_recordings: Vec::with_capacity(spec::MAX_SUBSCRIPTIONS),
@@ -1191,6 +1218,9 @@ impl Conductor {
         // an add waits only while the list holds it (ADR 0049).
         if !self.pending_subscriptions.is_empty() {
             work += self.time_out_pending_subscriptions(now);
+        }
+        if !self.pending_publications.is_empty() {
+            work += self.time_out_pending_publications(now);
         }
         work += self.flush_receiver_deferred();
         if !self.udp_images.is_empty() {
@@ -1772,14 +1802,22 @@ impl Conductor {
         exclusive: bool,
         now: i64,
     ) {
+        let raw = channel;
         let Some(channel) = self.check_channel(correlation_id, channel, "the channel") else {
             return;
         };
         if let Channel::Udp(udp) = channel {
-            self.add_udp_publication(client_id, correlation_id, stream_id, udp, exclusive, now);
+            self.add_udp_publication(
+                client_id,
+                correlation_id,
+                stream_id,
+                (udp, raw),
+                exclusive,
+                now,
+            );
             return;
         }
-        if self.registration_count >= spec::MAX_PUBLICATIONS {
+        if self.publications_full() {
             self.registry_full(correlation_id, "publications", spec::MAX_PUBLICATIONS);
             return;
         }
@@ -1963,23 +2001,77 @@ impl Conductor {
     /// publication is connected by the first status message and not before, so no image
     /// is made and the limit stays at the sender position until the sender says so. A
     /// registry at capacity, a counters file with no free record, or a sender's queue
-    /// with no room is code 10, with nothing registered.
+    /// with no room is code 10, with nothing registered. A control address that a
+    /// receive endpoint on this driver holds is held for that endpoint's close while
+    /// its last subscription is gone, and refused at once while one is on it (ADR 0154).
     fn add_udp_publication(
         &mut self,
         client_id: i64,
         correlation_id: i64,
         stream_id: i32,
-        channel: UdpChannel<'_>,
+        (channel, raw): (UdpChannel<'_>, &[u8]),
         exclusive: bool,
         now: i64,
     ) {
-        if self.registration_count >= spec::MAX_PUBLICATIONS {
+        if self.publications_full() {
             self.registry_full(correlation_id, "publications", spec::MAX_PUBLICATIONS);
             return;
         }
         let Some(target) = self.resolve_target(correlation_id, &channel) else {
             return;
         };
+        // A control address that a receive endpoint on this driver holds: while the
+        // endpoint is leaving or closing its socket goes within a receiver cycle, so the
+        // add waits for it, as an `add subscription` waits for a closing endpoint; while
+        // a subscription is on it the address is that subscription's, and the add is
+        // refused at once (ADR 0154). A member that followed on its `log` endpoint and
+        // now leads meets the first.
+        if target.control
+            && self.open_send_endpoint_index(target).is_none()
+            && let Some(entry) = self
+                .receive_endpoints
+                .iter()
+                .find(|entry| holds_address(target.address, entry.endpoint))
+        {
+            let going = entry.state == ChannelState::Closing
+                || (entry.state == ChannelState::Active && entry.subscription_count == 0);
+            if going {
+                let behind_receive = entry.registration_id;
+                self.pending_publications.push(PendingPublication {
+                    client_id,
+                    correlation_id,
+                    stream_id,
+                    channel: raw.to_vec(),
+                    exclusive,
+                    behind_receive,
+                    arrived: now_nanos(),
+                });
+                self.statics.publication_add_deferred.increment();
+                return;
+            }
+            let resolved = match entry.interface {
+                Some(interface) => {
+                    format!(
+                        "cavalry:udp?endpoint={}|interface={interface}",
+                        entry.endpoint
+                    )
+                }
+                None => format!("cavalry:udp?endpoint={}", entry.endpoint),
+            };
+            self.send_error(
+                correlation_id,
+                ErrorCode::ChannelEndpointError,
+                &format!(
+                    "the channel's control address {}: the address is the endpoint of a \
+                     subscription on this driver that is still open, on {resolved}, whose \
+                     socket holds it: give the publication another control address; or \
+                     remove that subscription first, and the add then waits for its \
+                     endpoint to close; see {ERRORS_DOC}",
+                    target.address
+                ),
+            );
+            return;
+        }
         let flow_control = channel.flow_control();
         let ssc = channel.spies_simulate_connection();
         // The term length the channel names, the spec's UDP term when it names none
@@ -3137,6 +3229,54 @@ impl Conductor {
         self.subscriptions.len() + self.pending_subscriptions.len() >= spec::MAX_SUBSCRIPTIONS
     }
 
+    /// Whether the publications registry is at capacity: its registrations and the adds
+    /// waiting for a receive endpoint that holds their control address, which hold a
+    /// slot each (`spec/client-protocol.md`, "Sizes"; ADR 0154).
+    fn publications_full(&self) -> bool {
+        self.registration_count + self.pending_publications.len() >= spec::MAX_PUBLICATIONS
+    }
+
+    /// Answers every `add publication` that has waited [`spec::CLOSING_ENDPOINT_WAIT`] for
+    /// a receive endpoint that holds its control address to close with code 4, the bind
+    /// it would have made, and counts it; nothing is registered, and the close that comes
+    /// later runs nothing for it (ADR 0154). Returns how many it answered.
+    fn time_out_pending_publications(&mut self, now: i64) -> usize {
+        let wait = spec::nanos(spec::CLOSING_ENDPOINT_WAIT);
+        let waited = |pending: &PendingPublication| now.saturating_sub(pending.arrived) >= wait;
+        if !self.pending_publications.iter().any(waited) {
+            return 0;
+        }
+        let mut due = Vec::with_capacity(self.pending_publications.len());
+        due.extend(
+            self.pending_publications
+                .extract_if(.., |pending| waited(pending)),
+        );
+        let answered = due.len();
+        for pending in due {
+            self.statics.publication_add_deferred_timed_out.increment();
+            self.send_error(
+                pending.correlation_id,
+                ErrorCode::ChannelEndpointError,
+                &format!(
+                    "the channel's control address: a receive endpoint on this driver still \
+                     holds it after the {} s this add waited, its subscriptions removed and \
+                     its images still being retired or its socket still with the receiver, \
+                     so the publication cannot bind it; if a recording of one of its images \
+                     has not yet stopped, the image's log is kept until the recorder has \
+                     written up to where the image stopped and the recorder is behind, on a \
+                     slow or failing disk: check recording.write_failed and the log \
+                     directory's disk with `cavalry doctor`, or stop the recording before \
+                     removing the stream's last subscription; otherwise the driver's \
+                     receiver thread is behind, starved of CPU or busy: give the driver's \
+                     threads the CPU they need; then add the publication again; see \
+                     {ERRORS_DOC}",
+                    spec::CLOSING_ENDPOINT_WAIT.as_secs()
+                ),
+            );
+        }
+        answered
+    }
+
     /// Stores how many adds wait for a closing receive endpoint now in
     /// `subscription.add_deferred_waiting`, after every change to the list, so that
     /// `cavalry doctor` can tell a registry full of waiting adds from one full of
@@ -3723,6 +3863,30 @@ impl Conductor {
                                 now,
                             );
                         }
+                        // The publications that waited for this endpoint's socket run
+                        // now, in the order they arrived; one that waits again keeps the
+                        // moment it arrived (ADR 0154).
+                        let mut due = Vec::with_capacity(self.pending_publications.len());
+                        due.extend(
+                            self.pending_publications.extract_if(.., |pending| {
+                                pending.behind_receive == registration_id
+                            }),
+                        );
+                        for pending in due {
+                            self.add_publication(
+                                pending.client_id,
+                                pending.correlation_id,
+                                pending.stream_id,
+                                &pending.channel,
+                                pending.exclusive,
+                                now,
+                            );
+                            if let Some(again) = self.pending_publications.last_mut()
+                                && again.correlation_id == pending.correlation_id
+                            {
+                                again.arrived = pending.arrived;
+                            }
+                        }
                     }
                 }
             }
@@ -4299,6 +4463,8 @@ impl Conductor {
         self.pending_subscriptions
             .retain(|pending| pending.client_id != client_id);
         self.count_waiting_adds();
+        self.pending_publications
+            .retain(|pending| pending.client_id != client_id);
         let registrations: Vec<(usize, i64)> = self
             .publications
             .iter()
@@ -18410,6 +18576,104 @@ mod receiving {
         assert_eq!(h.counter(CHANNEL_OPENED), 1);
         assert_eq!(h.counter(CHANNEL_CLOSED), 1);
         assert_eq!(h.counter(SUBSCRIPTION_ADD_DEFERRED_TIMED_OUT), 1);
+    }
+
+    /// An `add publication` on a control channel whose control address a receive
+    /// endpoint on this driver holds (ADR 0154). While a subscription is on the endpoint
+    /// the add is refused at once, with a message that names that subscription's
+    /// channel. Once its last subscription is removed the add waits, with nothing
+    /// registered, counted in `publication.add_deferred`, and runs as it arrived when the
+    /// receiver has closed the endpoint: the publication binds the address. A member
+    /// that followed on its `log` endpoint and now leads does this.
+    #[test]
+    fn an_add_publication_on_a_leaving_receive_endpoints_address_waits_for_its_close() {
+        let mut h = Harness::new("udp-control-behind-receive");
+        let port = free_port();
+        let endpoint = format!("cavalry:udp?endpoint=127.0.0.1:{port}");
+        let control = format!("cavalry:udp?control=127.0.0.1:{port}|control-mode=manual");
+        h.conductor
+            .add_subscription(1, 2, STREAM, endpoint.as_bytes(), h.now);
+        assert_eq!(h.last_error(2), None);
+        h.cycle();
+
+        // A subscription on it: refused at once, naming the subscription's channel.
+        let now = h.now;
+        h.conductor
+            .add_publication(1, 3, STREAM, control.as_bytes(), true, now);
+        let (code, message) = h
+            .last_error(3)
+            .expect("refused while the subscription is on it");
+        assert_eq!(code, 4, "{message}");
+        assert!(
+            message.contains("the endpoint of a subscription on this driver that is still open")
+                && message.contains(&endpoint),
+            "{message}"
+        );
+        assert!(h.conductor.pending_publications.is_empty());
+        assert_eq!(h.counter(PUBLICATION_ADD_DEFERRED), 0);
+
+        // Its last subscription removed: the add waits for the close, then binds.
+        h.conductor.remove_subscription(1, 4, 2, now);
+        h.conductor
+            .add_publication(1, 5, STREAM, control.as_bytes(), true, h.now);
+        assert_eq!(h.conductor.pending_publications.len(), 1);
+        assert_eq!(h.counter(PUBLICATION_ADD_DEFERRED), 1);
+        assert!(
+            h.conductor.publications.is_empty(),
+            "nothing registered yet"
+        );
+        assert!(h.cycle_until(|h| !h.conductor.publications.is_empty()));
+        assert_eq!(h.last_error(5), None);
+        assert!(h.conductor.pending_publications.is_empty());
+        assert!(
+            h.conductor.receive_endpoints.is_empty(),
+            "the receive endpoint closed"
+        );
+        assert_eq!(h.conductor.send_endpoints.len(), 1);
+        assert_eq!(h.conductor.send_endpoints[0].state, ChannelState::Active);
+        assert!(h.conductor.send_endpoints[0].target.control);
+        assert_eq!(h.counter(PUBLICATION_ADD_DEFERRED_TIMED_OUT), 0);
+    }
+
+    /// An `add publication` that has waited the closing endpoint wait for a receive
+    /// endpoint that holds its control address, the receiver held for the whole wait, is
+    /// answered with code 4, counted, with nothing registered; and the receiver's close
+    /// afterwards registers nothing for it (ADR 0154).
+    #[test]
+    fn an_add_publication_that_waits_past_the_closing_endpoint_wait_is_code_4() {
+        let mut h = Harness::new("udp-control-behind-receive-wait");
+        let port = free_port();
+        let endpoint = format!("cavalry:udp?endpoint=127.0.0.1:{port}");
+        let control = format!("cavalry:udp?control=127.0.0.1:{port}|control-mode=manual");
+        h.conductor
+            .add_subscription(1, 2, STREAM, endpoint.as_bytes(), h.now);
+        assert_eq!(h.last_error(2), None);
+        h.cycle();
+        let now = h.now;
+        h.conductor.remove_subscription(1, 3, 2, now);
+        h.conductor
+            .add_publication(1, 4, STREAM, control.as_bytes(), false, now);
+        assert_eq!(h.conductor.pending_publications.len(), 1);
+        // The receiver runs no cycle. A millisecond inside the bound the add still
+        // waits; at the bound it is code 4.
+        let arrived = h.conductor.pending_publications[0].arrived;
+        let wait = spec::nanos(spec::CLOSING_ENDPOINT_WAIT);
+        h.conductor.duty_cycle(arrived + wait - MS);
+        assert_eq!(h.last_error(4), None);
+        assert_eq!(h.conductor.pending_publications.len(), 1);
+        h.conductor.duty_cycle(arrived + wait);
+        let (code, message) = h.last_error(4).expect("refused at the bound");
+        assert_eq!(code, 4, "{message}");
+        assert!(
+            message.contains("a receive endpoint on this driver still holds it after the 5 s")
+                && message.contains("add the publication again"),
+            "{message}"
+        );
+        assert!(h.conductor.pending_publications.is_empty());
+        assert_eq!(h.counter(PUBLICATION_ADD_DEFERRED_TIMED_OUT), 1);
+        // The close that comes later registers nothing for it.
+        assert!(h.cycle_until(|h| h.conductor.receive_endpoints.is_empty()));
+        assert!(h.conductor.publications.is_empty(), "nothing registered");
     }
 
     /// A `cavalry:ipc` add counts the waiting adds against the subscriptions registry
