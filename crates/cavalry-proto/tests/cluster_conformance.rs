@@ -11,11 +11,11 @@ use cavalry_proto::cluster::{
     ClusterError, CommitPosition, EMPTY_MEMBER, EventCode, LogRecording, LogRecordings, LogReport,
     MAX_LOG_RECORDINGS, MAX_LOG_RECORDINGS_LENGTH, MAX_MEMBERS, Member, MemberPosition, Message,
     NewLeadershipTermAction, NextFields, RecordedTerms, ReplayEnd, ReplicationStop, ServiceTimers,
-    SnapshotMark, Stream, TermFields, TermSpan, TimeUnit, TimerEventIs, VERSION, Vote, VoteAnswer,
-    VoteRequest, answered_term, ballot, candidate, canvass_position_action, commit_position,
-    entry_position, log_at_least, new_leadership_term_action, next_fields, parse_members, quorum,
-    replay_end, replication_record, replication_stop, request_vote, takes_leader, votes_in_term,
-    withheld_vote, withholds, write_log_recordings,
+    SnapshotMark, Stream, TermFields, TermSpan, TimeUnit, TimerEventIs, TimerWord, VERSION, Vote,
+    VoteAnswer, VoteRequest, answered_term, ballot, candidate, canvass_position_action,
+    commit_position, entry_position, log_at_least, new_leadership_term_action, next_fields,
+    parse_members, quorum, replay_end, replication_record, replication_stop, request_vote,
+    takes_leader, votes_in_term, withheld_vote, withholds, write_log_recordings,
 };
 use serde_json::{Map, Value, json};
 
@@ -462,9 +462,25 @@ fn log_recordings_vector(name: &str, vector: &Value) {
 }
 
 /// A timers vector (`spec/cluster.md`, "The service", "Timers"): each step is taken by
-/// one table, which refuses, hands over and holds what the vector's fields say.
+/// one table, which refuses, hands over, holds and tells what the vector's fields say.
 fn timers_vector(name: &str, vector: &Value) {
     let mut timers = Box::new(ServiceTimers::new());
+    // The program's calls while it handles one entry: whether each schedule was refused.
+    let calls = |timers: &mut ServiceTimers, step: &Value| -> Vec<Value> {
+        let mut refused = Vec::new();
+        for call in step["calls"].as_array().map_or(&[][..], Vec::as_slice) {
+            match call["call"].as_str().expect("call") {
+                "schedule" => refused.push(Value::from(
+                    timers
+                        .schedule(int(call, "id"), int(call, "deadline"))
+                        .is_err(),
+                )),
+                "cancel" => timers.cancel(int(call, "id")),
+                other => panic!("unknown call {other}"),
+            }
+        }
+        refused
+    };
     for (index, step) in vector["steps"]
         .as_array()
         .expect("steps")
@@ -473,57 +489,55 @@ fn timers_vector(name: &str, vector: &Value) {
     {
         let at = format!("{name}: step {index}");
         let fields = &step["fields"];
+        let taken = step.get("taken").and_then(Value::as_bool).unwrap_or(true);
+        let mut dropped = 0;
+        let mut refused = None;
         match step["op"].as_str().expect("op") {
-            "schedule" => {
-                let refused = timers
-                    .schedule(int(step, "id"), int(step, "deadline"))
-                    .is_err();
-                assert_eq!(Value::from(refused), fields["refused"], "{at}: refused");
+            "entry" => {
+                timers.begin_entry();
+                refused = Some(Value::Array(calls(&mut timers, step)));
+                dropped += timers.end_entry(taken);
             }
             "fill" => {
-                let refused = (0..int(step, "count"))
-                    .filter(|id| timers.schedule(*id, int(step, "deadline") + id).is_err())
-                    .count();
-                assert_eq!(Value::from(refused), fields["refused"], "{at}: refused");
+                let mut count = 0;
+                for id in 0..int(step, "count") {
+                    timers.begin_entry();
+                    count += usize::from(timers.schedule(id, int(step, "deadline") + id).is_err());
+                    dropped += timers.end_entry(true);
+                }
+                assert_eq!(Value::from(count), fields["refused"], "{at}: refused");
             }
-            "cancel" => {
-                timers.cancel(int(step, "id"));
+            "empty" => {
+                timers.begin_entry();
+                for id in 0..int(step, "count") {
+                    timers.cancel(id);
+                }
+                dropped += timers.end_entry(true);
             }
             "event" => {
-                let id = int(step, "id");
-                let handed = timers.begin_event(id, int(step, "timestamp")) == TimerEventIs::Handed;
+                let is = timers.begin_event(int(step, "id"), int(step, "timestamp"));
+                let handed = is == TimerEventIs::Handed;
                 assert_eq!(Value::from(handed), fields["handed"], "{at}: handed");
                 if handed {
-                    // The handler: what it does with the timer's id and with another's.
-                    if let Some(inside) = step.get("schedule_inside") {
-                        let refused = timers
-                            .schedule(int(inside, "id"), int(inside, "deadline"))
-                            .is_err();
-                        assert_eq!(
-                            Value::from(refused),
-                            fields["refused_inside"],
-                            "{at}: refused inside"
-                        );
-                    }
-                    if step.get("cancel_inside").is_some() {
-                        timers.cancel(id);
-                    }
-                    if let Some(deadline) = step.get("reschedule") {
-                        timers
-                            .schedule(id, deadline.as_i64().expect("a deadline"))
-                            .expect("a pending id is scheduled at any count");
-                    }
-                    let taken = step.get("taken").and_then(Value::as_bool).unwrap_or(true);
-                    let pending = timers.end_event(taken);
-                    assert_eq!(
-                        pending,
-                        !taken || step.get("reschedule").is_some(),
-                        "{at}: whether the timer is pending after its event"
-                    );
+                    refused = Some(Value::Array(calls(&mut timers, step)));
+                    dropped += timers.end_entry(taken);
+                } else {
+                    dropped += timers.end_entry(true);
                 }
             }
+            "history" => timers.hold(),
+            "refresh" => timers.tell_all_again(),
             other => panic!("{at}: unknown op {other}"),
         }
+        if let Some(refused) = refused {
+            let expected = fields.get("refused").cloned().unwrap_or(json!([]));
+            assert_eq!(refused, expected, "{at}: refused");
+        }
+        let expected = fields
+            .get("cancels_dropped")
+            .and_then(Value::as_u64)
+            .unwrap_or(0);
+        assert_eq!(dropped as u64, expected, "{at}: cancels dropped");
         if let Some(count) = fields.get("pending_count") {
             assert_eq!(Value::from(timers.len()), *count, "{at}: pending count");
         } else {
@@ -534,6 +548,35 @@ fn timers_vector(name: &str, vector: &Value) {
             let pending_is_empty = pending.is_empty();
             assert_eq!(Value::Array(pending), fields["pending"], "{at}: pending");
             assert_eq!(timers.is_empty(), pending_is_empty, "{at}: empty");
+        }
+        if step.get("stream").and_then(Value::as_bool).unwrap_or(true) {
+            // The stream takes everything the service has to tell, in its order.
+            let mut words = Vec::new();
+            while let Some(word) = timers.next_word() {
+                words.push(match word {
+                    TimerWord::Cancel { correlation_id } => json!({ "cancel": correlation_id }),
+                    TimerWord::Schedule {
+                        correlation_id,
+                        deadline,
+                    } => json!({ "schedule": correlation_id, "deadline": deadline }),
+                });
+                // A word the table did not give changes nothing; the one it gave is taken.
+                timers.told(TimerWord::Cancel {
+                    correlation_id: i64::MIN,
+                });
+                timers.told(word);
+                assert!(words.len() <= 4096, "{at}: the words do not end");
+            }
+            if let Some(count) = fields.get("words_count") {
+                assert_eq!(Value::from(words.len()), *count, "{at}: words count");
+            } else {
+                assert_eq!(Value::Array(words), fields["words"], "{at}: words");
+            }
+        } else {
+            assert!(
+                fields.get("words").is_none(),
+                "{at}: a stream that takes nothing"
+            );
         }
     }
 }

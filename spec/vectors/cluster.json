@@ -5337,14 +5337,27 @@
       "name": "timer-handed-once",
       "steps": [
         {
-          "op": "schedule",
-          "id": 7,
-          "deadline": 1793600000100,
+          "op": "entry",
+          "calls": [
+            {
+              "call": "schedule",
+              "id": 7,
+              "deadline": 1793600000100
+            }
+          ],
           "fields": {
-            "refused": false,
+            "refused": [
+              false
+            ],
             "pending": [
               {
                 "id": 7,
+                "deadline": 1793600000100
+              }
+            ],
+            "words": [
+              {
+                "schedule": 7,
                 "deadline": 1793600000100
               }
             ]
@@ -5356,7 +5369,12 @@
           "timestamp": 1793600000100,
           "fields": {
             "handed": true,
-            "pending": []
+            "pending": [],
+            "words": [
+              {
+                "cancel": 7
+              }
+            ]
           }
         },
         {
@@ -5365,7 +5383,8 @@
           "timestamp": 1793600000200,
           "fields": {
             "handed": false,
-            "pending": []
+            "pending": [],
+            "words": []
           }
         }
       ]
@@ -5375,14 +5394,27 @@
       "name": "timer-event-early",
       "steps": [
         {
-          "op": "schedule",
-          "id": 7,
-          "deadline": 1793600000100,
+          "op": "entry",
+          "calls": [
+            {
+              "call": "schedule",
+              "id": 7,
+              "deadline": 1793600000100
+            }
+          ],
           "fields": {
-            "refused": false,
+            "refused": [
+              false
+            ],
             "pending": [
               {
                 "id": 7,
+                "deadline": 1793600000100
+              }
+            ],
+            "words": [
+              {
+                "schedule": 7,
                 "deadline": 1793600000100
               }
             ]
@@ -5399,7 +5431,8 @@
                 "id": 7,
                 "deadline": 1793600000100
               }
-            ]
+            ],
+            "words": []
           }
         },
         {
@@ -5408,7 +5441,12 @@
           "timestamp": 1793600000150,
           "fields": {
             "handed": true,
-            "pending": []
+            "pending": [],
+            "words": [
+              {
+                "cancel": 7
+              }
+            ]
           }
         }
       ]
@@ -5423,28 +5461,52 @@
           "timestamp": 1793600000000,
           "fields": {
             "handed": false,
-            "pending": []
+            "pending": [],
+            "words": []
           }
         },
         {
-          "op": "schedule",
-          "id": 7,
-          "deadline": 1793600000100,
+          "op": "entry",
+          "calls": [
+            {
+              "call": "schedule",
+              "id": 7,
+              "deadline": 1793600000100
+            }
+          ],
           "fields": {
-            "refused": false,
+            "refused": [
+              false
+            ],
             "pending": [
               {
                 "id": 7,
+                "deadline": 1793600000100
+              }
+            ],
+            "words": [
+              {
+                "schedule": 7,
                 "deadline": 1793600000100
               }
             ]
           }
         },
         {
-          "op": "cancel",
-          "id": 7,
+          "op": "entry",
+          "calls": [
+            {
+              "call": "cancel",
+              "id": 7
+            }
+          ],
           "fields": {
-            "pending": []
+            "pending": [],
+            "words": [
+              {
+                "cancel": 7
+              }
+            ]
           }
         },
         {
@@ -5453,7 +5515,8 @@
           "timestamp": 1793600000100,
           "fields": {
             "handed": false,
-            "pending": []
+            "pending": [],
+            "words": []
           }
         }
       ]
@@ -5463,28 +5526,54 @@
       "name": "timer-scheduled-again-for-later",
       "steps": [
         {
-          "op": "schedule",
-          "id": 7,
-          "deadline": 1793600000100,
+          "op": "entry",
+          "calls": [
+            {
+              "call": "schedule",
+              "id": 7,
+              "deadline": 1793600000100
+            }
+          ],
           "fields": {
-            "refused": false,
+            "refused": [
+              false
+            ],
             "pending": [
               {
                 "id": 7,
+                "deadline": 1793600000100
+              }
+            ],
+            "words": [
+              {
+                "schedule": 7,
                 "deadline": 1793600000100
               }
             ]
           }
         },
         {
-          "op": "schedule",
-          "id": 7,
-          "deadline": 1793600000500,
+          "op": "entry",
+          "calls": [
+            {
+              "call": "schedule",
+              "id": 7,
+              "deadline": 1793600000500
+            }
+          ],
           "fields": {
-            "refused": false,
+            "refused": [
+              false
+            ],
             "pending": [
               {
                 "id": 7,
+                "deadline": 1793600000500
+              }
+            ],
+            "words": [
+              {
+                "schedule": 7,
                 "deadline": 1793600000500
               }
             ]
@@ -5501,7 +5590,8 @@
                 "id": 7,
                 "deadline": 1793600000500
               }
-            ]
+            ],
+            "words": []
           }
         },
         {
@@ -5510,7 +5600,12 @@
           "timestamp": 1793600000500,
           "fields": {
             "handed": true,
-            "pending": []
+            "pending": [],
+            "words": [
+              {
+                "cancel": 7
+              }
+            ]
           }
         }
       ]
@@ -5520,28 +5615,54 @@
       "name": "timer-scheduled-again-for-earlier",
       "steps": [
         {
-          "op": "schedule",
-          "id": 7,
-          "deadline": 1793600000500,
+          "op": "entry",
+          "calls": [
+            {
+              "call": "schedule",
+              "id": 7,
+              "deadline": 1793600000500
+            }
+          ],
           "fields": {
-            "refused": false,
+            "refused": [
+              false
+            ],
             "pending": [
               {
                 "id": 7,
+                "deadline": 1793600000500
+              }
+            ],
+            "words": [
+              {
+                "schedule": 7,
                 "deadline": 1793600000500
               }
             ]
           }
         },
         {
-          "op": "schedule",
-          "id": 7,
-          "deadline": 1793600000100,
+          "op": "entry",
+          "calls": [
+            {
+              "call": "schedule",
+              "id": 7,
+              "deadline": 1793600000100
+            }
+          ],
           "fields": {
-            "refused": false,
+            "refused": [
+              false
+            ],
             "pending": [
               {
                 "id": 7,
+                "deadline": 1793600000100
+              }
+            ],
+            "words": [
+              {
+                "schedule": 7,
                 "deadline": 1793600000100
               }
             ]
@@ -5553,7 +5674,12 @@
           "timestamp": 1793600000100,
           "fields": {
             "handed": true,
-            "pending": []
+            "pending": [],
+            "words": [
+              {
+                "cancel": 7
+              }
+            ]
           }
         }
       ]
@@ -5563,14 +5689,27 @@
       "name": "timer-due-at-once",
       "steps": [
         {
-          "op": "schedule",
-          "id": -3,
-          "deadline": -1,
+          "op": "entry",
+          "calls": [
+            {
+              "call": "schedule",
+              "id": -3,
+              "deadline": -1
+            }
+          ],
           "fields": {
-            "refused": false,
+            "refused": [
+              false
+            ],
             "pending": [
               {
                 "id": -3,
+                "deadline": -1
+              }
+            ],
+            "words": [
+              {
+                "schedule": -3,
                 "deadline": -1
               }
             ]
@@ -5582,7 +5721,12 @@
           "timestamp": 0,
           "fields": {
             "handed": true,
-            "pending": []
+            "pending": [],
+            "words": [
+              {
+                "cancel": -3
+              }
+            ]
           }
         }
       ]
@@ -5592,14 +5736,27 @@
       "name": "timer-event-twice",
       "steps": [
         {
-          "op": "schedule",
-          "id": 7,
-          "deadline": 1793600000100,
+          "op": "entry",
+          "calls": [
+            {
+              "call": "schedule",
+              "id": 7,
+              "deadline": 1793600000100
+            }
+          ],
           "fields": {
-            "refused": false,
+            "refused": [
+              false
+            ],
             "pending": [
               {
                 "id": 7,
+                "deadline": 1793600000100
+              }
+            ],
+            "words": [
+              {
+                "schedule": 7,
                 "deadline": 1793600000100
               }
             ]
@@ -5611,7 +5768,12 @@
           "timestamp": 1793600000100,
           "fields": {
             "handed": true,
-            "pending": []
+            "pending": [],
+            "words": [
+              {
+                "cancel": 7
+              }
+            ]
           }
         },
         {
@@ -5620,7 +5782,8 @@
           "timestamp": 1793600000101,
           "fields": {
             "handed": false,
-            "pending": []
+            "pending": [],
+            "words": []
           }
         }
       ]
@@ -5630,14 +5793,27 @@
       "name": "timer-repeats",
       "steps": [
         {
-          "op": "schedule",
-          "id": 7,
-          "deadline": 1793600000100,
+          "op": "entry",
+          "calls": [
+            {
+              "call": "schedule",
+              "id": 7,
+              "deadline": 1793600000100
+            }
+          ],
           "fields": {
-            "refused": false,
+            "refused": [
+              false
+            ],
             "pending": [
               {
                 "id": 7,
+                "deadline": 1793600000100
+              }
+            ],
+            "words": [
+              {
+                "schedule": 7,
                 "deadline": 1793600000100
               }
             ]
@@ -5647,12 +5823,27 @@
           "op": "event",
           "id": 7,
           "timestamp": 1793600000100,
-          "reschedule": 1793600000200,
+          "calls": [
+            {
+              "call": "schedule",
+              "id": 7,
+              "deadline": 1793600000200
+            }
+          ],
           "fields": {
             "handed": true,
+            "refused": [
+              false
+            ],
             "pending": [
               {
                 "id": 7,
+                "deadline": 1793600000200
+              }
+            ],
+            "words": [
+              {
+                "schedule": 7,
                 "deadline": 1793600000200
               }
             ]
@@ -5669,20 +5860,129 @@
                 "id": 7,
                 "deadline": 1793600000200
               }
-            ]
+            ],
+            "words": []
           }
         },
         {
           "op": "event",
           "id": 7,
           "timestamp": 1793600000200,
-          "reschedule": 1793600000300,
+          "calls": [
+            {
+              "call": "schedule",
+              "id": 7,
+              "deadline": 1793600000300
+            }
+          ],
           "fields": {
             "handed": true,
+            "refused": [
+              false
+            ],
             "pending": [
               {
                 "id": 7,
                 "deadline": 1793600000300
+              }
+            ],
+            "words": [
+              {
+                "schedule": 7,
+                "deadline": 1793600000300
+              }
+            ]
+          }
+        }
+      ]
+    },
+    {
+      "kind": "timers",
+      "name": "timer-repeats-with-one-deadline",
+      "steps": [
+        {
+          "op": "entry",
+          "calls": [
+            {
+              "call": "schedule",
+              "id": 7,
+              "deadline": 1793600000000
+            }
+          ],
+          "fields": {
+            "refused": [
+              false
+            ],
+            "pending": [
+              {
+                "id": 7,
+                "deadline": 1793600000000
+              }
+            ],
+            "words": [
+              {
+                "schedule": 7,
+                "deadline": 1793600000000
+              }
+            ]
+          }
+        },
+        {
+          "op": "event",
+          "id": 7,
+          "timestamp": 1793600000001,
+          "calls": [
+            {
+              "call": "schedule",
+              "id": 7,
+              "deadline": 1793600000000
+            }
+          ],
+          "fields": {
+            "handed": true,
+            "refused": [
+              false
+            ],
+            "pending": [
+              {
+                "id": 7,
+                "deadline": 1793600000000
+              }
+            ],
+            "words": [
+              {
+                "schedule": 7,
+                "deadline": 1793600000000
+              }
+            ]
+          }
+        },
+        {
+          "op": "event",
+          "id": 7,
+          "timestamp": 1793600000002,
+          "calls": [
+            {
+              "call": "schedule",
+              "id": 7,
+              "deadline": 1793600000000
+            }
+          ],
+          "fields": {
+            "handed": true,
+            "refused": [
+              false
+            ],
+            "pending": [
+              {
+                "id": 7,
+                "deadline": 1793600000000
+              }
+            ],
+            "words": [
+              {
+                "schedule": 7,
+                "deadline": 1793600000000
               }
             ]
           }
@@ -5694,15 +5994,42 @@
       "name": "timer-event-not-taken",
       "steps": [
         {
-          "op": "schedule",
-          "id": 7,
-          "deadline": 1793600000100,
+          "op": "entry",
+          "calls": [
+            {
+              "call": "schedule",
+              "id": 7,
+              "deadline": 1793600000100
+            },
+            {
+              "call": "schedule",
+              "id": 9,
+              "deadline": 1793600000900
+            }
+          ],
           "fields": {
-            "refused": false,
+            "refused": [
+              false,
+              false
+            ],
             "pending": [
               {
                 "id": 7,
                 "deadline": 1793600000100
+              },
+              {
+                "id": 9,
+                "deadline": 1793600000900
+              }
+            ],
+            "words": [
+              {
+                "schedule": 7,
+                "deadline": 1793600000100
+              },
+              {
+                "schedule": 9,
+                "deadline": 1793600000900
               }
             ]
           }
@@ -5718,24 +6045,79 @@
               {
                 "id": 7,
                 "deadline": 1793600000100
+              },
+              {
+                "id": 9,
+                "deadline": 1793600000900
               }
-            ]
+            ],
+            "words": []
           }
         },
         {
           "op": "event",
           "id": 7,
           "timestamp": 1793600000100,
+          "calls": [
+            {
+              "call": "schedule",
+              "id": 7,
+              "deadline": 1793600000900
+            },
+            {
+              "call": "schedule",
+              "id": 3,
+              "deadline": 1793600000000
+            },
+            {
+              "call": "cancel",
+              "id": 9
+            }
+          ],
           "taken": false,
-          "reschedule": 1793600000900,
+          "fields": {
+            "handed": true,
+            "refused": [
+              false,
+              false
+            ],
+            "pending": [
+              {
+                "id": 7,
+                "deadline": 1793600000100
+              },
+              {
+                "id": 9,
+                "deadline": 1793600000900
+              }
+            ],
+            "words": []
+          }
+        },
+        {
+          "op": "event",
+          "id": 7,
+          "timestamp": 1793600000100,
+          "calls": [
+            {
+              "call": "cancel",
+              "id": 7
+            }
+          ],
+          "taken": false,
           "fields": {
             "handed": true,
             "pending": [
               {
                 "id": 7,
                 "deadline": 1793600000100
+              },
+              {
+                "id": 9,
+                "deadline": 1793600000900
               }
-            ]
+            ],
+            "words": []
           }
         },
         {
@@ -5744,7 +6126,17 @@
           "timestamp": 1793600000100,
           "fields": {
             "handed": true,
-            "pending": []
+            "pending": [
+              {
+                "id": 9,
+                "deadline": 1793600000900
+              }
+            ],
+            "words": [
+              {
+                "cancel": 7
+              }
+            ]
           }
         }
       ]
@@ -5754,14 +6146,27 @@
       "name": "timer-cancelled-by-its-own-handler",
       "steps": [
         {
-          "op": "schedule",
-          "id": 7,
-          "deadline": 1793600000100,
+          "op": "entry",
+          "calls": [
+            {
+              "call": "schedule",
+              "id": 7,
+              "deadline": 1793600000100
+            }
+          ],
           "fields": {
-            "refused": false,
+            "refused": [
+              false
+            ],
             "pending": [
               {
                 "id": 7,
+                "deadline": 1793600000100
+              }
+            ],
+            "words": [
+              {
+                "schedule": 7,
                 "deadline": 1793600000100
               }
             ]
@@ -5771,10 +6176,20 @@
           "op": "event",
           "id": 7,
           "timestamp": 1793600000100,
-          "cancel_inside": true,
+          "calls": [
+            {
+              "call": "cancel",
+              "id": 7
+            }
+          ],
           "fields": {
             "handed": true,
-            "pending": []
+            "pending": [],
+            "words": [
+              {
+                "cancel": 7
+              }
+            ]
           }
         },
         {
@@ -5783,7 +6198,315 @@
           "timestamp": 1793600000100,
           "fields": {
             "handed": false,
-            "pending": []
+            "pending": [],
+            "words": []
+          }
+        }
+      ]
+    },
+    {
+      "kind": "timers",
+      "name": "timer-scheduled-and-cancelled-by-its-own-handler",
+      "steps": [
+        {
+          "op": "entry",
+          "calls": [
+            {
+              "call": "schedule",
+              "id": 7,
+              "deadline": 1793600000100
+            }
+          ],
+          "fields": {
+            "refused": [
+              false
+            ],
+            "pending": [
+              {
+                "id": 7,
+                "deadline": 1793600000100
+              }
+            ],
+            "words": [
+              {
+                "schedule": 7,
+                "deadline": 1793600000100
+              }
+            ]
+          }
+        },
+        {
+          "op": "event",
+          "id": 7,
+          "timestamp": 1793600000100,
+          "calls": [
+            {
+              "call": "schedule",
+              "id": 7,
+              "deadline": 1793600000500
+            },
+            {
+              "call": "cancel",
+              "id": 7
+            }
+          ],
+          "fields": {
+            "handed": true,
+            "refused": [
+              false
+            ],
+            "pending": [],
+            "words": [
+              {
+                "cancel": 7
+              }
+            ]
+          }
+        },
+        {
+          "op": "event",
+          "id": 7,
+          "timestamp": 1793600000500,
+          "fields": {
+            "handed": false,
+            "pending": [],
+            "words": []
+          }
+        }
+      ]
+    },
+    {
+      "kind": "timers",
+      "name": "timer-cancelled-and-scheduled-by-its-own-handler",
+      "steps": [
+        {
+          "op": "entry",
+          "calls": [
+            {
+              "call": "schedule",
+              "id": 7,
+              "deadline": 1793600000100
+            }
+          ],
+          "fields": {
+            "refused": [
+              false
+            ],
+            "pending": [
+              {
+                "id": 7,
+                "deadline": 1793600000100
+              }
+            ],
+            "words": [
+              {
+                "schedule": 7,
+                "deadline": 1793600000100
+              }
+            ]
+          }
+        },
+        {
+          "op": "event",
+          "id": 7,
+          "timestamp": 1793600000100,
+          "calls": [
+            {
+              "call": "cancel",
+              "id": 7
+            },
+            {
+              "call": "schedule",
+              "id": 7,
+              "deadline": 1793600000500
+            }
+          ],
+          "fields": {
+            "handed": true,
+            "refused": [
+              false
+            ],
+            "pending": [
+              {
+                "id": 7,
+                "deadline": 1793600000500
+              }
+            ],
+            "words": [
+              {
+                "schedule": 7,
+                "deadline": 1793600000500
+              }
+            ]
+          }
+        },
+        {
+          "op": "event",
+          "id": 7,
+          "timestamp": 1793600000500,
+          "fields": {
+            "handed": true,
+            "pending": [],
+            "words": [
+              {
+                "cancel": 7
+              }
+            ]
+          }
+        }
+      ]
+    },
+    {
+      "kind": "timers",
+      "name": "timer-handler-changes-other-timers",
+      "steps": [
+        {
+          "op": "entry",
+          "calls": [
+            {
+              "call": "schedule",
+              "id": 5,
+              "deadline": 1793600000500
+            },
+            {
+              "call": "schedule",
+              "id": 7,
+              "deadline": 1793600000100
+            },
+            {
+              "call": "schedule",
+              "id": 9,
+              "deadline": 1793600000500
+            }
+          ],
+          "fields": {
+            "refused": [
+              false,
+              false,
+              false
+            ],
+            "pending": [
+              {
+                "id": 5,
+                "deadline": 1793600000500
+              },
+              {
+                "id": 7,
+                "deadline": 1793600000100
+              },
+              {
+                "id": 9,
+                "deadline": 1793600000500
+              }
+            ],
+            "words": [
+              {
+                "schedule": 5,
+                "deadline": 1793600000500
+              },
+              {
+                "schedule": 7,
+                "deadline": 1793600000100
+              },
+              {
+                "schedule": 9,
+                "deadline": 1793600000500
+              }
+            ]
+          }
+        },
+        {
+          "op": "event",
+          "id": 7,
+          "timestamp": 1793600000100,
+          "calls": [
+            {
+              "call": "schedule",
+              "id": 1,
+              "deadline": 1793600000001
+            },
+            {
+              "call": "cancel",
+              "id": 5
+            },
+            {
+              "call": "schedule",
+              "id": 8,
+              "deadline": 1793600000008
+            },
+            {
+              "call": "cancel",
+              "id": 9
+            }
+          ],
+          "fields": {
+            "handed": true,
+            "refused": [
+              false,
+              false
+            ],
+            "pending": [
+              {
+                "id": 1,
+                "deadline": 1793600000001
+              },
+              {
+                "id": 8,
+                "deadline": 1793600000008
+              }
+            ],
+            "words": [
+              {
+                "cancel": 5
+              },
+              {
+                "cancel": 7
+              },
+              {
+                "cancel": 9
+              },
+              {
+                "schedule": 1,
+                "deadline": 1793600000001
+              },
+              {
+                "schedule": 8,
+                "deadline": 1793600000008
+              }
+            ]
+          }
+        },
+        {
+          "op": "event",
+          "id": 1,
+          "timestamp": 1793600000001,
+          "fields": {
+            "handed": true,
+            "pending": [
+              {
+                "id": 8,
+                "deadline": 1793600000008
+              }
+            ],
+            "words": [
+              {
+                "cancel": 1
+              }
+            ]
+          }
+        },
+        {
+          "op": "event",
+          "id": 8,
+          "timestamp": 1793600000008,
+          "fields": {
+            "handed": true,
+            "pending": [],
+            "words": [
+              {
+                "cancel": 8
+              }
+            ]
           }
         }
       ]
@@ -5793,43 +6516,30 @@
       "name": "timers-several",
       "steps": [
         {
-          "op": "schedule",
-          "id": 9,
-          "deadline": 1793600000300,
+          "op": "entry",
+          "calls": [
+            {
+              "call": "schedule",
+              "id": 9,
+              "deadline": 1793600000300
+            },
+            {
+              "call": "schedule",
+              "id": -2,
+              "deadline": 1793600000100
+            },
+            {
+              "call": "schedule",
+              "id": 4,
+              "deadline": 1793600000200
+            }
+          ],
           "fields": {
-            "refused": false,
-            "pending": [
-              {
-                "id": 9,
-                "deadline": 1793600000300
-              }
-            ]
-          }
-        },
-        {
-          "op": "schedule",
-          "id": -2,
-          "deadline": 1793600000100,
-          "fields": {
-            "refused": false,
-            "pending": [
-              {
-                "id": -2,
-                "deadline": 1793600000100
-              },
-              {
-                "id": 9,
-                "deadline": 1793600000300
-              }
-            ]
-          }
-        },
-        {
-          "op": "schedule",
-          "id": 4,
-          "deadline": 1793600000200,
-          "fields": {
-            "refused": false,
+            "refused": [
+              false,
+              false,
+              false
+            ],
             "pending": [
               {
                 "id": -2,
@@ -5841,6 +6551,20 @@
               },
               {
                 "id": 9,
+                "deadline": 1793600000300
+              }
+            ],
+            "words": [
+              {
+                "schedule": -2,
+                "deadline": 1793600000100
+              },
+              {
+                "schedule": 4,
+                "deadline": 1793600000200
+              },
+              {
+                "schedule": 9,
                 "deadline": 1793600000300
               }
             ]
@@ -5861,17 +6585,32 @@
                 "id": 9,
                 "deadline": 1793600000300
               }
+            ],
+            "words": [
+              {
+                "cancel": 4
+              }
             ]
           }
         },
         {
-          "op": "cancel",
-          "id": 9,
+          "op": "entry",
+          "calls": [
+            {
+              "call": "cancel",
+              "id": 9
+            }
+          ],
           "fields": {
             "pending": [
               {
                 "id": -2,
                 "deadline": 1793600000100
+              }
+            ],
+            "words": [
+              {
+                "cancel": 9
               }
             ]
           }
@@ -5887,7 +6626,8 @@
                 "id": -2,
                 "deadline": 1793600000100
               }
-            ]
+            ],
+            "words": []
           }
         },
         {
@@ -5896,7 +6636,144 @@
           "timestamp": 1793600000300,
           "fields": {
             "handed": true,
-            "pending": []
+            "pending": [],
+            "words": [
+              {
+                "cancel": -2
+              }
+            ]
+          }
+        }
+      ]
+    },
+    {
+      "kind": "timers",
+      "name": "timers-entry-not-taken",
+      "steps": [
+        {
+          "op": "entry",
+          "calls": [
+            {
+              "call": "schedule",
+              "id": 1,
+              "deadline": 1793600000000
+            },
+            {
+              "call": "schedule",
+              "id": 2,
+              "deadline": 1793600000000
+            }
+          ],
+          "fields": {
+            "refused": [
+              false,
+              false
+            ],
+            "pending": [
+              {
+                "id": 1,
+                "deadline": 1793600000000
+              },
+              {
+                "id": 2,
+                "deadline": 1793600000000
+              }
+            ],
+            "words": [
+              {
+                "schedule": 1,
+                "deadline": 1793600000000
+              },
+              {
+                "schedule": 2,
+                "deadline": 1793600000000
+              }
+            ]
+          }
+        },
+        {
+          "op": "entry",
+          "calls": [
+            {
+              "call": "schedule",
+              "id": 3,
+              "deadline": 1793600000000
+            },
+            {
+              "call": "cancel",
+              "id": 1
+            },
+            {
+              "call": "schedule",
+              "id": 2,
+              "deadline": 1793600000009
+            }
+          ],
+          "taken": false,
+          "fields": {
+            "refused": [
+              false,
+              false
+            ],
+            "pending": [
+              {
+                "id": 1,
+                "deadline": 1793600000000
+              },
+              {
+                "id": 2,
+                "deadline": 1793600000000
+              }
+            ],
+            "words": []
+          }
+        },
+        {
+          "op": "entry",
+          "calls": [
+            {
+              "call": "schedule",
+              "id": 3,
+              "deadline": 1793600000000
+            },
+            {
+              "call": "cancel",
+              "id": 1
+            },
+            {
+              "call": "schedule",
+              "id": 2,
+              "deadline": 1793600000009
+            }
+          ],
+          "fields": {
+            "refused": [
+              false,
+              false
+            ],
+            "pending": [
+              {
+                "id": 2,
+                "deadline": 1793600000009
+              },
+              {
+                "id": 3,
+                "deadline": 1793600000000
+              }
+            ],
+            "words": [
+              {
+                "cancel": 1
+              },
+              {
+                "schedule": 2,
+                "deadline": 1793600000009
+              },
+              {
+                "schedule": 3,
+                "deadline": 1793600000000
+              }
+            ]
           }
         }
       ]
@@ -5911,25 +6788,47 @@
           "deadline": 1793600000000,
           "fields": {
             "refused": 0,
-            "pending_count": 1024
+            "pending_count": 1024,
+            "words_count": 1024
           }
         },
         {
-          "op": "schedule",
-          "id": 1024,
-          "deadline": 1793600000000,
+          "op": "entry",
+          "calls": [
+            {
+              "call": "schedule",
+              "id": 1024,
+              "deadline": 1793600000000
+            }
+          ],
           "fields": {
-            "refused": true,
-            "pending_count": 1024
+            "refused": [
+              true
+            ],
+            "pending_count": 1024,
+            "words": []
           }
         },
         {
-          "op": "schedule",
-          "id": 0,
-          "deadline": 1793600000009,
+          "op": "entry",
+          "calls": [
+            {
+              "call": "schedule",
+              "id": 0,
+              "deadline": 1793600000009
+            }
+          ],
           "fields": {
-            "refused": false,
-            "pending_count": 1024
+            "refused": [
+              false
+            ],
+            "pending_count": 1024,
+            "words": [
+              {
+                "schedule": 0,
+                "deadline": 1793600000009
+              }
+            ]
           }
         },
         {
@@ -5938,7 +6837,8 @@
           "timestamp": 1793600000008,
           "fields": {
             "handed": false,
-            "pending_count": 1024
+            "pending_count": 1024,
+            "words": []
           }
         },
         {
@@ -5947,41 +6847,90 @@
           "timestamp": 1793600000009,
           "fields": {
             "handed": true,
-            "pending_count": 1023
+            "pending_count": 1023,
+            "words": [
+              {
+                "cancel": 0
+              }
+            ]
           }
         },
         {
-          "op": "schedule",
-          "id": 1024,
-          "deadline": 1793600000000,
+          "op": "entry",
+          "calls": [
+            {
+              "call": "schedule",
+              "id": 1024,
+              "deadline": 1793600000000
+            }
+          ],
           "fields": {
-            "refused": false,
-            "pending_count": 1024
+            "refused": [
+              false
+            ],
+            "pending_count": 1024,
+            "words": [
+              {
+                "schedule": 1024,
+                "deadline": 1793600000000
+              }
+            ]
           }
         },
         {
-          "op": "schedule",
-          "id": 1025,
-          "deadline": 1793600000000,
+          "op": "entry",
+          "calls": [
+            {
+              "call": "schedule",
+              "id": 1025,
+              "deadline": 1793600000000
+            }
+          ],
           "fields": {
-            "refused": true,
-            "pending_count": 1024
+            "refused": [
+              true
+            ],
+            "pending_count": 1024,
+            "words": []
           }
         },
         {
-          "op": "cancel",
-          "id": 5,
+          "op": "entry",
+          "calls": [
+            {
+              "call": "cancel",
+              "id": 5
+            }
+          ],
           "fields": {
-            "pending_count": 1023
+            "pending_count": 1023,
+            "words": [
+              {
+                "cancel": 5
+              }
+            ]
           }
         },
         {
-          "op": "schedule",
-          "id": 1025,
-          "deadline": 1793600000000,
+          "op": "entry",
+          "calls": [
+            {
+              "call": "schedule",
+              "id": 1025,
+              "deadline": 1793600000000
+            }
+          ],
           "fields": {
-            "refused": false,
-            "pending_count": 1024
+            "refused": [
+              false
+            ],
+            "pending_count": 1024,
+            "words": [
+              {
+                "schedule": 1025,
+                "deadline": 1793600000000
+              }
+            ]
           }
         }
       ]
@@ -5996,30 +6945,803 @@
           "deadline": 1793600000000,
           "fields": {
             "refused": 0,
-            "pending_count": 1024
+            "pending_count": 1024,
+            "words_count": 1024
           }
         },
         {
           "op": "event",
           "id": 3,
           "timestamp": 1793600000003,
-          "schedule_inside": {
-            "id": -1,
-            "deadline": 1793600000000
-          },
+          "calls": [
+            {
+              "call": "schedule",
+              "id": -1,
+              "deadline": 1793600000000
+            }
+          ],
           "fields": {
             "handed": true,
-            "refused_inside": true,
-            "pending_count": 1023
+            "refused": [
+              true
+            ],
+            "pending_count": 1023,
+            "words": [
+              {
+                "cancel": 3
+              }
+            ]
           }
         },
         {
-          "op": "schedule",
-          "id": -1,
+          "op": "entry",
+          "calls": [
+            {
+              "call": "schedule",
+              "id": -1,
+              "deadline": 1793600000000
+            }
+          ],
+          "fields": {
+            "refused": [
+              false
+            ],
+            "pending_count": 1024,
+            "words": [
+              {
+                "schedule": -1,
+                "deadline": 1793600000000
+              }
+            ]
+          }
+        }
+      ]
+    },
+    {
+      "kind": "timers",
+      "name": "timers-at-the-bound-entry-not-taken",
+      "steps": [
+        {
+          "op": "fill",
+          "count": 1024,
           "deadline": 1793600000000,
           "fields": {
-            "refused": false,
-            "pending_count": 1024
+            "refused": 0,
+            "pending_count": 1024,
+            "words_count": 1024
+          }
+        },
+        {
+          "op": "entry",
+          "calls": [
+            {
+              "call": "schedule",
+              "id": -1,
+              "deadline": 1793600000000
+            },
+            {
+              "call": "cancel",
+              "id": 5
+            }
+          ],
+          "taken": false,
+          "fields": {
+            "refused": [
+              true
+            ],
+            "pending_count": 1024,
+            "words": []
+          }
+        },
+        {
+          "op": "entry",
+          "calls": [
+            {
+              "call": "schedule",
+              "id": -1,
+              "deadline": 1793600000000
+            },
+            {
+              "call": "cancel",
+              "id": 5
+            }
+          ],
+          "fields": {
+            "refused": [
+              true
+            ],
+            "pending_count": 1023,
+            "words": [
+              {
+                "cancel": 5
+              }
+            ]
+          }
+        },
+        {
+          "op": "entry",
+          "calls": [
+            {
+              "call": "schedule",
+              "id": -1,
+              "deadline": 1793600000000
+            }
+          ],
+          "fields": {
+            "refused": [
+              false
+            ],
+            "pending_count": 1024,
+            "words": [
+              {
+                "schedule": -1,
+                "deadline": 1793600000000
+              }
+            ]
+          }
+        }
+      ]
+    },
+    {
+      "kind": "timers",
+      "name": "timers-told-when-the-stream-takes",
+      "steps": [
+        {
+          "op": "entry",
+          "calls": [
+            {
+              "call": "schedule",
+              "id": 1,
+              "deadline": 1793600000000
+            },
+            {
+              "call": "schedule",
+              "id": 2,
+              "deadline": 1793600000000
+            }
+          ],
+          "fields": {
+            "refused": [
+              false,
+              false
+            ],
+            "pending": [
+              {
+                "id": 1,
+                "deadline": 1793600000000
+              },
+              {
+                "id": 2,
+                "deadline": 1793600000000
+              }
+            ],
+            "words": [
+              {
+                "schedule": 1,
+                "deadline": 1793600000000
+              },
+              {
+                "schedule": 2,
+                "deadline": 1793600000000
+              }
+            ]
+          }
+        },
+        {
+          "op": "entry",
+          "calls": [
+            {
+              "call": "schedule",
+              "id": 1,
+              "deadline": 1793600000005
+            }
+          ],
+          "stream": false,
+          "fields": {
+            "refused": [
+              false
+            ],
+            "pending": [
+              {
+                "id": 1,
+                "deadline": 1793600000005
+              },
+              {
+                "id": 2,
+                "deadline": 1793600000000
+              }
+            ]
+          }
+        },
+        {
+          "op": "entry",
+          "calls": [
+            {
+              "call": "cancel",
+              "id": 2
+            }
+          ],
+          "stream": false,
+          "fields": {
+            "pending": [
+              {
+                "id": 1,
+                "deadline": 1793600000005
+              }
+            ]
+          }
+        },
+        {
+          "op": "entry",
+          "calls": [
+            {
+              "call": "schedule",
+              "id": 2,
+              "deadline": 1793600000007
+            }
+          ],
+          "stream": false,
+          "fields": {
+            "refused": [
+              false
+            ],
+            "pending": [
+              {
+                "id": 1,
+                "deadline": 1793600000005
+              },
+              {
+                "id": 2,
+                "deadline": 1793600000007
+              }
+            ]
+          }
+        },
+        {
+          "op": "entry",
+          "calls": [
+            {
+              "call": "schedule",
+              "id": 3,
+              "deadline": 1793600000000
+            }
+          ],
+          "stream": false,
+          "fields": {
+            "refused": [
+              false
+            ],
+            "pending": [
+              {
+                "id": 1,
+                "deadline": 1793600000005
+              },
+              {
+                "id": 2,
+                "deadline": 1793600000007
+              },
+              {
+                "id": 3,
+                "deadline": 1793600000000
+              }
+            ]
+          }
+        },
+        {
+          "op": "entry",
+          "calls": [
+            {
+              "call": "cancel",
+              "id": 3
+            }
+          ],
+          "stream": false,
+          "fields": {
+            "pending": [
+              {
+                "id": 1,
+                "deadline": 1793600000005
+              },
+              {
+                "id": 2,
+                "deadline": 1793600000007
+              }
+            ]
+          }
+        },
+        {
+          "op": "entry",
+          "calls": [],
+          "fields": {
+            "pending": [
+              {
+                "id": 1,
+                "deadline": 1793600000005
+              },
+              {
+                "id": 2,
+                "deadline": 1793600000007
+              }
+            ],
+            "words": [
+              {
+                "cancel": 2
+              },
+              {
+                "cancel": 3
+              },
+              {
+                "schedule": 1,
+                "deadline": 1793600000005
+              },
+              {
+                "schedule": 2,
+                "deadline": 1793600000007
+              }
+            ]
+          }
+        }
+      ]
+    },
+    {
+      "kind": "timers",
+      "name": "timers-cancels-held-at-the-bound",
+      "steps": [
+        {
+          "op": "fill",
+          "count": 1024,
+          "deadline": 1793600000000,
+          "fields": {
+            "refused": 0,
+            "pending_count": 1024,
+            "words_count": 1024
+          }
+        },
+        {
+          "op": "empty",
+          "count": 1024,
+          "stream": false,
+          "fields": {
+            "pending": []
+          }
+        },
+        {
+          "op": "entry",
+          "calls": [
+            {
+              "call": "schedule",
+              "id": 0,
+              "deadline": 1793600000000
+            },
+            {
+              "call": "schedule",
+              "id": 1,
+              "deadline": 1793600000000
+            }
+          ],
+          "stream": false,
+          "fields": {
+            "refused": [
+              false,
+              false
+            ],
+            "pending": [
+              {
+                "id": 0,
+                "deadline": 1793600000000
+              },
+              {
+                "id": 1,
+                "deadline": 1793600000000
+              }
+            ]
+          }
+        },
+        {
+          "op": "entry",
+          "calls": [
+            {
+              "call": "cancel",
+              "id": 0
+            }
+          ],
+          "stream": false,
+          "fields": {
+            "cancels_dropped": 1,
+            "pending": [
+              {
+                "id": 1,
+                "deadline": 1793600000000
+              }
+            ]
+          }
+        },
+        {
+          "op": "entry",
+          "calls": [
+            {
+              "call": "cancel",
+              "id": 1
+            }
+          ],
+          "stream": false,
+          "fields": {
+            "cancels_dropped": 1,
+            "pending": []
+          }
+        },
+        {
+          "op": "entry",
+          "calls": [],
+          "fields": {
+            "pending": [],
+            "words_count": 1024
+          }
+        }
+      ]
+    },
+    {
+      "kind": "timers",
+      "name": "timers-history",
+      "steps": [
+        {
+          "op": "entry",
+          "calls": [
+            {
+              "call": "schedule",
+              "id": 1,
+              "deadline": 1793600000100
+            },
+            {
+              "call": "schedule",
+              "id": 2,
+              "deadline": 1793600000200
+            }
+          ],
+          "fields": {
+            "refused": [
+              false,
+              false
+            ],
+            "pending": [
+              {
+                "id": 1,
+                "deadline": 1793600000100
+              },
+              {
+                "id": 2,
+                "deadline": 1793600000200
+              }
+            ],
+            "words": [
+              {
+                "schedule": 1,
+                "deadline": 1793600000100
+              },
+              {
+                "schedule": 2,
+                "deadline": 1793600000200
+              }
+            ]
+          }
+        },
+        {
+          "op": "history",
+          "fields": {
+            "pending": [
+              {
+                "id": 1,
+                "deadline": 1793600000100
+              },
+              {
+                "id": 2,
+                "deadline": 1793600000200
+              }
+            ],
+            "words": []
+          }
+        },
+        {
+          "op": "entry",
+          "calls": [
+            {
+              "call": "schedule",
+              "id": 3,
+              "deadline": 1793600000300
+            },
+            {
+              "call": "cancel",
+              "id": 1
+            }
+          ],
+          "fields": {
+            "refused": [
+              false
+            ],
+            "pending": [
+              {
+                "id": 2,
+                "deadline": 1793600000200
+              },
+              {
+                "id": 3,
+                "deadline": 1793600000300
+              }
+            ],
+            "words": []
+          }
+        },
+        {
+          "op": "event",
+          "id": 2,
+          "timestamp": 1793600000200,
+          "fields": {
+            "handed": true,
+            "pending": [
+              {
+                "id": 3,
+                "deadline": 1793600000300
+              }
+            ],
+            "words": []
+          }
+        },
+        {
+          "op": "event",
+          "id": 9,
+          "timestamp": 1793600000000,
+          "fields": {
+            "handed": false,
+            "pending": [
+              {
+                "id": 3,
+                "deadline": 1793600000300
+              }
+            ],
+            "words": []
+          }
+        },
+        {
+          "op": "refresh",
+          "fields": {
+            "pending": [
+              {
+                "id": 3,
+                "deadline": 1793600000300
+              }
+            ],
+            "words": [
+              {
+                "schedule": 3,
+                "deadline": 1793600000300
+              }
+            ]
+          }
+        },
+        {
+          "op": "entry",
+          "calls": [
+            {
+              "call": "cancel",
+              "id": 3
+            }
+          ],
+          "fields": {
+            "pending": [],
+            "words": [
+              {
+                "cancel": 3
+              }
+            ]
+          }
+        }
+      ]
+    },
+    {
+      "kind": "timers",
+      "name": "timers-refresh",
+      "steps": [
+        {
+          "op": "entry",
+          "calls": [
+            {
+              "call": "schedule",
+              "id": 1,
+              "deadline": 1793600000100
+            },
+            {
+              "call": "schedule",
+              "id": 2,
+              "deadline": 1793600000200
+            }
+          ],
+          "fields": {
+            "refused": [
+              false,
+              false
+            ],
+            "pending": [
+              {
+                "id": 1,
+                "deadline": 1793600000100
+              },
+              {
+                "id": 2,
+                "deadline": 1793600000200
+              }
+            ],
+            "words": [
+              {
+                "schedule": 1,
+                "deadline": 1793600000100
+              },
+              {
+                "schedule": 2,
+                "deadline": 1793600000200
+              }
+            ]
+          }
+        },
+        {
+          "op": "refresh",
+          "fields": {
+            "pending": [
+              {
+                "id": 1,
+                "deadline": 1793600000100
+              },
+              {
+                "id": 2,
+                "deadline": 1793600000200
+              }
+            ],
+            "words": [
+              {
+                "schedule": 1,
+                "deadline": 1793600000100
+              },
+              {
+                "schedule": 2,
+                "deadline": 1793600000200
+              }
+            ]
+          }
+        },
+        {
+          "op": "entry",
+          "calls": [
+            {
+              "call": "schedule",
+              "id": 2,
+              "deadline": 1793600000250
+            },
+            {
+              "call": "schedule",
+              "id": 3,
+              "deadline": 1793600000300
+            }
+          ],
+          "stream": false,
+          "fields": {
+            "refused": [
+              false,
+              false
+            ],
+            "pending": [
+              {
+                "id": 1,
+                "deadline": 1793600000100
+              },
+              {
+                "id": 2,
+                "deadline": 1793600000250
+              },
+              {
+                "id": 3,
+                "deadline": 1793600000300
+              }
+            ]
+          }
+        },
+        {
+          "op": "refresh",
+          "stream": false,
+          "fields": {
+            "pending": [
+              {
+                "id": 1,
+                "deadline": 1793600000100
+              },
+              {
+                "id": 2,
+                "deadline": 1793600000250
+              },
+              {
+                "id": 3,
+                "deadline": 1793600000300
+              }
+            ]
+          }
+        },
+        {
+          "op": "refresh",
+          "fields": {
+            "pending": [
+              {
+                "id": 1,
+                "deadline": 1793600000100
+              },
+              {
+                "id": 2,
+                "deadline": 1793600000250
+              },
+              {
+                "id": 3,
+                "deadline": 1793600000300
+              }
+            ],
+            "words": [
+              {
+                "schedule": 1,
+                "deadline": 1793600000100
+              },
+              {
+                "schedule": 2,
+                "deadline": 1793600000250
+              },
+              {
+                "schedule": 3,
+                "deadline": 1793600000300
+              }
+            ]
+          }
+        },
+        {
+          "op": "event",
+          "id": 1,
+          "timestamp": 1793600000100,
+          "fields": {
+            "handed": true,
+            "pending": [
+              {
+                "id": 2,
+                "deadline": 1793600000250
+              },
+              {
+                "id": 3,
+                "deadline": 1793600000300
+              }
+            ],
+            "words": [
+              {
+                "cancel": 1
+              }
+            ]
+          }
+        },
+        {
+          "op": "refresh",
+          "fields": {
+            "pending": [
+              {
+                "id": 2,
+                "deadline": 1793600000250
+              },
+              {
+                "id": 3,
+                "deadline": 1793600000300
+              }
+            ],
+            "words": [
+              {
+                "schedule": 2,
+                "deadline": 1793600000250
+              },
+              {
+                "schedule": 3,
+                "deadline": 1793600000300
+              }
+            ]
           }
         }
       ]

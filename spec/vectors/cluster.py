@@ -1130,121 +1130,264 @@ MAX_LOG_RECORDINGS = 1025
 # ---- a service's timers ("The service", "Timers") ------------------------------------------
 
 MAX_SERVICE_TIMERS = 1024
+MAX_UNSENT_TIMER_CANCELS = 1024
 
 
 def timers(name, steps):
-    """A service's pending timers through `steps`, each a dict with an `op`:
+    """A service's timers through `steps`, and what it tells its member. Each step is a dict with an `op`:
 
-    - `schedule`, an `id` and a `deadline`: refused when the id is not pending and the table is full;
-    - `fill`, a `count` and a `deadline`: a schedule of each id from 0 to the count less one, in that
-      order, the id's deadline being the deadline plus the id; its fields say how many were `refused`;
-    - `cancel`, an `id`;
-    - `event`, an `id` and a `timestamp`: handed to the program when the timer is pending with a deadline
-      at or before the timestamp. With `taken` false the handler does not take the event, and the timer
-      is pending as before; with `reschedule`, a deadline, the handler schedules the id again while it
-      handles the event; with `cancel_inside`, it cancels the id there; with `schedule_inside`, an id
-      and a deadline, it schedules another timer there, and the fields say whether that was
-      `refused_inside`.
+    - `entry`: the program is handed an entry that is no timer event, and makes the `calls`, each a
+      `schedule` of an `id` with a `deadline` or a `cancel` of an `id`. A schedule is refused when the
+      id is not pending and the table is full. With `taken` false the program does not take the entry:
+      every timer is as it was before, and the member is told nothing of it.
+    - `event`, an `id` and a `timestamp`: handed to the program when the timer is pending with a
+      deadline at or before the timestamp, and then the program makes the `calls` and takes the event
+      or does not, as for an entry. A timer whose event was taken is pending no more unless the last
+      call for its id scheduled it.
+    - `fill`, a `count` and a `deadline`: an entry taken for each id from 0 to the count less one, in
+      that order, each with one schedule of the id for the deadline plus the id.
+    - `empty`, a `count`: one entry taken, which cancels each id from 0 to the count less one.
+    - `history`: the service begins to read history, and holds everything back from its member.
+    - `refresh`: the service sends every pending timer again, as it does when it has read its
+      history and at each timer refresh interval after.
 
-    After every step the vector gives the pending timers in the rising order of their ids, or, when
-    more than eight are pending, their `pending_count` alone."""
-    pending, out = {}, []
+    A step with `stream` false is one the consensus module stream takes no message after: what the
+    service has to tell stays, and is told after a later step.
+
+    The fields that follow each step: `refused`, for each schedule call in order whether it was
+    refused, or how many of a fill's were; `handed`, for an event; `pending`, the timers in the rising
+    order of their ids, or `pending_count` when more than eight are pending; `words`, what the stream
+    took after the step, in order, each a `cancel` of an id or a `schedule` of an id with a deadline,
+    or `words_count` when more than eight; and `cancels_dropped`, when the step dropped cancels that
+    were held for the member."""
+    pending, unsent, cancels, held, out = {}, set(), [], False, []
+
+    def call(made, refused):
+        if made["call"] == "schedule":
+            full = made["id"] not in pending and len(pending) >= MAX_SERVICE_TIMERS
+            refused.append(full)
+            if not full:
+                pending[made["id"]] = made["deadline"]
+        elif made["call"] == "cancel":
+            pending.pop(made["id"], None)
+        else:
+            raise AssertionError(made)
+
+    def take(before, handed=None, stays=False):
+        """What a taken entry leaves for the member, and how many cancels it dropped."""
+        dropped = 0
+        gone = sorted(i for i in before if i not in pending)
+        changed = {i for i in pending if before.get(i) != pending[i]}
+        if handed is not None and stays:
+            changed.add(handed)
+        unsent.update(changed)
+        unsent.intersection_update(pending)
+        if held:
+            return 0
+        for i in gone:
+            if len(cancels) >= MAX_UNSENT_TIMER_CANCELS:
+                cancels.pop(0)
+                dropped += 1
+            cancels.append(i)
+        return dropped
+
     for step in steps:
-        op, fields = step["op"], {}
-        if op == "schedule":
-            refused = step["id"] not in pending and len(pending) >= MAX_SERVICE_TIMERS
-            if not refused:
-                pending[step["id"]] = step["deadline"]
-            fields["refused"] = refused
+        op, fields, dropped = step["op"], {}, 0
+        if op == "entry":
+            before, refused = dict(pending), []
+            for made in step.get("calls", []):
+                call(made, refused)
+            if step.get("taken", True):
+                dropped = take(before)
+            else:
+                pending.clear()
+                pending.update(before)
+            if refused:
+                fields["refused"] = refused
         elif op == "fill":
-            refused = 0
+            count = 0
             for i in range(step["count"]):
-                if i not in pending and len(pending) >= MAX_SERVICE_TIMERS:
-                    refused += 1
-                else:
-                    pending[i] = step["deadline"] + i
-            fields["refused"] = refused
-        elif op == "cancel":
-            pending.pop(step["id"], None)
+                before, refused = dict(pending), []
+                call({"call": "schedule", "id": i, "deadline": step["deadline"] + i}, refused)
+                count += refused[0]
+                dropped += take(before)
+            fields["refused"] = count
+        elif op == "empty":
+            before = dict(pending)
+            for i in range(step["count"]):
+                pending.pop(i, None)
+            dropped = take(before)
         elif op == "event":
-            handed = step["id"] in pending and pending[step["id"]] <= step["timestamp"]
-            fields["handed"] = handed
-            if handed and "schedule_inside" in step:
-                inside = step["schedule_inside"]
-                refused = inside["id"] not in pending and len(pending) >= MAX_SERVICE_TIMERS
-                if not refused:
-                    pending[inside["id"]] = inside["deadline"]
-                fields["refused_inside"] = refused
-            if handed and step.get("taken", True):
-                if "reschedule" in step:
-                    pending[step["id"]] = step["reschedule"]
+            before, refused = dict(pending), []
+            due = step["id"] in pending and pending[step["id"]] <= step["timestamp"]
+            fields["handed"] = due
+            if due:
+                stays = False
+                for made in step.get("calls", []):
+                    if made["id"] == step["id"]:
+                        # The timer stays in the table, and counts, until the event is taken.
+                        stays = made["call"] == "schedule"
+                        if stays:
+                            pending[step["id"]] = made["deadline"]
+                            refused.append(False)
+                    else:
+                        call(made, refused)
+                if step.get("taken", True):
+                    if not stays:
+                        del pending[step["id"]]
+                    dropped = take(before, step["id"], stays)
                 else:
-                    del pending[step["id"]]
+                    pending.clear()
+                    pending.update(before)
+            if refused:
+                fields["refused"] = refused
+        elif op == "history":
+            held = True
+            cancels.clear()
+        elif op == "refresh":
+            held = False
+            unsent.update(pending)
         else:
             raise AssertionError(op)
+        if dropped:
+            fields["cancels_dropped"] = dropped
         if len(pending) > 8:
             fields["pending_count"] = len(pending)
         else:
             fields["pending"] = [{"id": i, "deadline": pending[i]} for i in sorted(pending)]
+        if step.get("stream", True):
+            words = []
+            if not held:
+                words = [{"cancel": i} for i in cancels]
+                words += [{"schedule": i, "deadline": pending[i]} for i in sorted(unsent)]
+                cancels.clear()
+                unsent.clear()
+            if len(words) > 8:
+                fields["words_count"] = len(words)
+            else:
+                fields["words"] = words
         out.append(dict(step, fields=fields))
     return {"kind": "timers", "name": name, "steps": out}
 
 
 def schedule(id_, deadline):
-    return {"op": "schedule", "id": id_, "deadline": deadline}
+    return {"call": "schedule", "id": id_, "deadline": deadline}
 
 
 def cancel(id_):
-    return {"op": "cancel", "id": id_}
+    return {"call": "cancel", "id": id_}
 
 
-def event(id_, timestamp, **more):
-    return dict({"op": "event", "id": id_, "timestamp": timestamp}, **more)
+def entry(*calls, **more):
+    return dict({"op": "entry", "calls": list(calls)}, **more)
 
 
+def event(id_, timestamp, *calls, **more):
+    step = {"op": "event", "id": id_, "timestamp": timestamp}
+    if calls:
+        step["calls"] = list(calls)
+    return dict(step, **more)
+
+
+FILL = {"op": "fill", "count": MAX_SERVICE_TIMERS, "deadline": TS}
 VECTORS += [
-    # Handed once, at or after the deadline, and never again.
-    timers("timer-handed-once", [schedule(7, TS + 100), event(7, TS + 100), event(7, TS + 200)]),
-    # An event before the deadline is passed over and the timer stays; the next one hands it.
-    timers("timer-event-early", [schedule(7, TS + 100), event(7, TS + 99), event(7, TS + 150)]),
+    # Handed once, at or after the deadline, and never again. The member is told of the timer, and
+    # that it is pending no more; an event that is passed over tells it nothing.
+    timers("timer-handed-once", [entry(schedule(7, TS + 100)), event(7, TS + 100), event(7, TS + 200)]),
+    # An event before the deadline is passed over and the timer stays; the next event hands it over.
+    timers("timer-event-early", [entry(schedule(7, TS + 100)), event(7, TS + 99), event(7, TS + 150)]),
     # An event for a timer nobody scheduled, and one after its cancel: passed over.
-    timers("timer-event-of-no-timer", [event(7, TS), schedule(7, TS + 100), cancel(7), event(7, TS + 100)]),
+    timers("timer-event-of-no-timer", [event(7, TS), entry(schedule(7, TS + 100)), entry(cancel(7)),
+                                       event(7, TS + 100)]),
     # Scheduling a pending id sets its deadline: an event that was due by the first deadline alone is
     # passed over, as a leader whose service is behind its log appends it.
     timers("timer-scheduled-again-for-later",
-           [schedule(7, TS + 100), schedule(7, TS + 500), event(7, TS + 100), event(7, TS + 500)]),
+           [entry(schedule(7, TS + 100)), entry(schedule(7, TS + 500)), event(7, TS + 100),
+            event(7, TS + 500)]),
     timers("timer-scheduled-again-for-earlier",
-           [schedule(7, TS + 500), schedule(7, TS + 100), event(7, TS + 100)]),
+           [entry(schedule(7, TS + 500)), entry(schedule(7, TS + 100)), event(7, TS + 100)]),
     # A deadline in the past is due at once, and a negative id and a negative deadline are values.
-    timers("timer-due-at-once", [schedule(-3, -1), event(-3, 0)]),
+    timers("timer-due-at-once", [entry(schedule(-3, -1)), event(-3, 0)]),
     # Two events for one schedule, as two leaders append them: the second is passed over.
-    timers("timer-event-twice", [schedule(7, TS + 100), event(7, TS + 100), event(7, TS + 101)]),
-    # A timer that repeats: its handler schedules its id again while it handles the event.
-    timers("timer-repeats", [schedule(7, TS + 100), event(7, TS + 100, reschedule=TS + 200),
-                             event(7, TS + 150), event(7, TS + 200, reschedule=TS + 300)]),
-    # A handler that does not take the event is handed it again, with the timer as it was before,
-    # whatever the handler did with its id.
-    timers("timer-event-not-taken", [schedule(7, TS + 100), event(7, TS + 100, taken=False),
-                                     event(7, TS + 100, taken=False, reschedule=TS + 900),
-                                     event(7, TS + 100)]),
-    # A handler that cancels the id of the event it handles: pending no more once it has taken the event.
-    timers("timer-cancelled-by-its-own-handler", [schedule(7, TS + 100), event(7, TS + 100, cancel_inside=True),
-                                                  event(7, TS + 100)]),
+    timers("timer-event-twice", [entry(schedule(7, TS + 100)), event(7, TS + 100), event(7, TS + 101)]),
+    # A timer that repeats: its handler schedules its id again while it handles the event. The member
+    # is told each time, with the same deadline too: only a schedule timer takes its mark off.
+    timers("timer-repeats", [entry(schedule(7, TS + 100)), event(7, TS + 100, schedule(7, TS + 200)),
+                             event(7, TS + 150), event(7, TS + 200, schedule(7, TS + 300))]),
+    timers("timer-repeats-with-one-deadline",
+           [entry(schedule(7, TS)), event(7, TS + 1, schedule(7, TS)), event(7, TS + 2, schedule(7, TS))]),
+    # A handler that does not take the event is handed it again, with every timer as it was before,
+    # whatever the handler did: with the event's own timer, with one below it and with one above.
+    timers("timer-event-not-taken",
+           [entry(schedule(7, TS + 100), schedule(9, TS + 900)),
+            event(7, TS + 100, taken=False),
+            event(7, TS + 100, schedule(7, TS + 900), schedule(3, TS), cancel(9), taken=False),
+            event(7, TS + 100, cancel(7), taken=False),
+            event(7, TS + 100)]),
+    # What a handler does with the id of the event it handles: the last call decides.
+    timers("timer-cancelled-by-its-own-handler",
+           [entry(schedule(7, TS + 100)), event(7, TS + 100, cancel(7)), event(7, TS + 100)]),
+    timers("timer-scheduled-and-cancelled-by-its-own-handler",
+           [entry(schedule(7, TS + 100)), event(7, TS + 100, schedule(7, TS + 500), cancel(7)),
+            event(7, TS + 500)]),
+    timers("timer-cancelled-and-scheduled-by-its-own-handler",
+           [entry(schedule(7, TS + 100)), event(7, TS + 100, cancel(7), schedule(7, TS + 500)),
+            event(7, TS + 500)]),
+    # A handler that schedules and cancels timers below and above the one it handles.
+    timers("timer-handler-changes-other-timers",
+           [entry(schedule(5, TS + 500), schedule(7, TS + 100), schedule(9, TS + 500)),
+            event(7, TS + 100, schedule(1, TS + 1), cancel(5), schedule(8, TS + 8), cancel(9)),
+            event(1, TS + 1), event(8, TS + 8)]),
     # Several timers: each event is for its own id, and the pending ones are in the order of their ids.
-    timers("timers-several", [schedule(9, TS + 300), schedule(-2, TS + 100), schedule(4, TS + 200),
-                              event(4, TS + 250), cancel(9), event(9, TS + 300), event(-2, TS + 300)]),
-    # At the bound: a schedule of another id is refused and changes nothing, one of a pending id is taken,
-    # and a cancel makes room.
+    timers("timers-several",
+           [entry(schedule(9, TS + 300), schedule(-2, TS + 100), schedule(4, TS + 200)),
+            event(4, TS + 250), entry(cancel(9)), event(9, TS + 300), event(-2, TS + 300)]),
+    # An entry that is not taken leaves no timer changed and tells the member nothing.
+    timers("timers-entry-not-taken",
+           [entry(schedule(1, TS), schedule(2, TS)),
+            entry(schedule(3, TS), cancel(1), schedule(2, TS + 9), taken=False),
+            entry(schedule(3, TS), cancel(1), schedule(2, TS + 9))]),
+    # At the bound: a schedule of another id is refused and changes nothing, one of a pending id is
+    # taken, and a cancel makes room.
     timers("timers-at-the-bound",
-           [{"op": "fill", "count": MAX_SERVICE_TIMERS, "deadline": TS},
-            schedule(MAX_SERVICE_TIMERS, TS), schedule(0, TS + 9), event(0, TS + 8), event(0, TS + 9),
-            schedule(MAX_SERVICE_TIMERS, TS), schedule(MAX_SERVICE_TIMERS + 1, TS), cancel(5),
-            schedule(MAX_SERVICE_TIMERS + 1, TS)]),
+           [FILL, entry(schedule(MAX_SERVICE_TIMERS, TS)), entry(schedule(0, TS + 9)), event(0, TS + 8),
+            event(0, TS + 9), entry(schedule(MAX_SERVICE_TIMERS, TS)),
+            entry(schedule(MAX_SERVICE_TIMERS + 1, TS)), entry(cancel(5)),
+            entry(schedule(MAX_SERVICE_TIMERS + 1, TS))]),
     # While a program handles a timer's event the timer still counts toward the bound: a schedule of
     # another id there is refused, and one made once the event is taken is not.
     timers("timers-at-the-bound-inside-a-handler",
-           [{"op": "fill", "count": MAX_SERVICE_TIMERS, "deadline": TS},
-            event(3, TS + 3, schedule_inside={"id": -1, "deadline": TS}), schedule(-1, TS)]),
+           [FILL, event(3, TS + 3, schedule(-1, TS)), entry(schedule(-1, TS))]),
+    # At the bound, an entry that is refused a schedule, cancels another timer and is not taken is
+    # refused the same schedule when it is handed the entry again: the cancel did not stand.
+    timers("timers-at-the-bound-entry-not-taken",
+           [FILL, entry(schedule(-1, TS), cancel(5), taken=False), entry(schedule(-1, TS), cancel(5)),
+            entry(schedule(-1, TS))]),
+    # What the member is told once a stream that took nothing takes again: the last deadline of a
+    # timer and no earlier one; every cancel before any schedule, so a cancel before the schedule of
+    # its id that followed it; and of a timer that was scheduled and cancelled meanwhile, its cancel.
+    timers("timers-told-when-the-stream-takes",
+           [entry(schedule(1, TS), schedule(2, TS)),
+            entry(schedule(1, TS + 5), stream=False), entry(cancel(2), stream=False),
+            entry(schedule(2, TS + 7), stream=False), entry(schedule(3, TS), stream=False),
+            entry(cancel(3), stream=False), entry()]),
+    # The cancels held for a stream that takes nothing: 1,024, and the oldest dropped for the next.
+    timers("timers-cancels-held-at-the-bound",
+           [FILL, {"op": "empty", "count": MAX_UNSENT_TIMER_CANCELS, "stream": False},
+            entry(schedule(0, TS), schedule(1, TS), stream=False),
+            entry(cancel(0), stream=False), entry(cancel(1), stream=False), entry()]),
+    # A service that reads history tells its member nothing, and at the end of it every pending timer.
+    timers("timers-history",
+           [entry(schedule(1, TS + 100), schedule(2, TS + 200)), {"op": "history"},
+            entry(schedule(3, TS + 300), cancel(1)), event(2, TS + 200), event(9, TS),
+            {"op": "refresh"}, entry(cancel(3))]),
+    # Every pending timer again at a refresh, whatever the member was sent before: a timer the stream
+    # has not taken yet is sent once, with the deadline it has then.
+    timers("timers-refresh",
+           [entry(schedule(1, TS + 100), schedule(2, TS + 200)), {"op": "refresh"},
+            entry(schedule(2, TS + 250), schedule(3, TS + 300), stream=False),
+            {"op": "refresh", "stream": False}, {"op": "refresh"}, event(1, TS + 100),
+            {"op": "refresh"}]),
 ]
 
 
