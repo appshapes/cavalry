@@ -270,8 +270,14 @@ fn run(seed: u64, filled: i64, low: i64, span: u64, steps: usize) -> (usize, usi
             }
             _ => {}
         }
-        // The stream takes a few of the words, or none.
-        for _ in 0..draw.below(4) {
+        // The stream takes a few of the words, or none, and now and then all of
+        // them, so that the words of the last timers of a full table are compared.
+        let takes = if draw.below(16) == 0 {
+            2 * MAX_SERVICE_TIMERS as u64
+        } else {
+            draw.below(4)
+        };
+        for _ in 0..takes {
             let Some(word) = timers.next_word() else {
                 break;
             };
@@ -519,23 +525,60 @@ fn a_refresh_inside_a_handling_is_kept_for_its_end_and_a_clear_keeps_the_hold() 
             timers.told(word);
         }
     }
-    // A clear of a table with a cancel held, a handling open and a refresh waiting
-    // leaves nothing of them, and a service that was reading history reads it still.
+    // A clear of a table with a cancel held, a handling open, a refresh waiting and
+    // words told in order leaves nothing of them.
+    for id in 10..16 {
+        timers.begin_entry();
+        timers.schedule(id, id).expect("room");
+        assert_eq!(timers.end_entry(true), 0);
+    }
+    for _ in 0..5 {
+        let word = timers.next_word().expect("a timer to tell");
+        timers.told(word);
+    }
     timers.begin_entry();
     timers.cancel(1);
     assert_eq!(timers.end_entry(true), 0);
-    timers.hold();
+    assert_eq!(
+        timers.next_word(),
+        Some(TimerWord::Cancel { correlation_id: 1 }),
+        "a cancel is held"
+    );
     timers.begin_entry();
     timers.schedule(5, 50).expect("room");
     timers.tell_all_again();
     timers.clear();
     assert!(timers.is_empty());
+    assert_eq!(timers.next_word(), None, "no cancel is held after a clear");
     assert_eq!(
         timers.end_entry(true),
         0,
         "no handling is open after a clear"
     );
+    assert_eq!(
+        timers.next_word(),
+        None,
+        "no refresh waited through a clear"
+    );
+    // Timers taken after it are told from the first, though more words than there
+    // are timers now were told before it.
+    for id in [7, 8, 9] {
+        assert_eq!(timers.load(id, id * 10), Ok(()));
+    }
+    for id in [7, 8, 9] {
+        let word = TimerWord::Schedule {
+            correlation_id: id,
+            deadline: id * 10,
+        };
+        assert_eq!(timers.next_word(), Some(word));
+        timers.told(word);
+    }
+    assert_eq!(timers.next_word(), None);
+    // A service that was reading history reads it still after a clear.
+    timers.hold();
+    timers.clear();
     assert_eq!(timers.load(7, 70), Ok(()));
+    timers.tell_all_again();
     assert_eq!(timers.next_word(), None, "history is read still");
     timers.release();
     assert_eq!(

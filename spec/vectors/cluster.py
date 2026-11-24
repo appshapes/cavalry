@@ -1,13 +1,15 @@
 #!/usr/bin/env python3
-"""Write spec/vectors/cluster.json: the test vectors for spec/cluster.md, version 1.
+"""Write spec/vectors/cluster.json: the test vectors for spec/cluster.md, version 2.
 The reference encoder, standard library only. Run from the repository root:
 
     python3 spec/vectors/cluster.py
 
-Three kinds (spec/cluster.md, "Vectors"): `message` vectors carry one message of a
+Five kinds (spec/cluster.md, "Vectors"): `message` vectors carry one message of a
 stream and the fields a reader decodes or the error it reports; `members` vectors a
 members string and what it parses to; `arithmetic` vectors inputs and the fields that
-follow. See spec/README.md, "Conventions".
+follow; `timers` vectors the steps a service takes and what follows each; `log
+recordings` vectors a file of a member's log's recordings and what a reader decodes.
+See spec/README.md, "Conventions".
 """
 
 import json

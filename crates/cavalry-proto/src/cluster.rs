@@ -3628,11 +3628,15 @@ impl Timers {
 /// [`ServiceTimers::told`] takes one off once the consensus module stream has taken
 /// its message.
 ///
-/// What it costs a service's reading: nothing for an entry whose handler touches no
-/// timer; for one that does, a copy of the pending timers at the handler's first
+/// What it costs a service's reading: nothing for an entry that is no timer event
+/// and whose handler touches no timer, and nothing for a timer event that is
+/// passed over. A timer event that is handed over costs the move of the timers
+/// above its own, 17 bytes for each, when its handler touches no timer. A handler
+/// that schedules or cancels costs a copy of the pending timers at its first
 /// change, 17 bytes for each, a move of as much for a timer put in or taken out,
-/// and one pass over both copies when the handling ends; and for telling a member
-/// every timer again, one pass over the table.
+/// and one pass over both copies when the handling ends. Telling a member every
+/// timer again is one pass over the table, and a read with nothing to tell reads
+/// none of it.
 ///
 /// ```
 /// use cavalry_proto::cluster::{ServiceTimers, TimerEventIs, TimerWord};
@@ -3869,7 +3873,15 @@ impl ServiceTimers {
             }
             Some((correlation_id, TimerEventIs::Handed)) => {
                 if let Ok(index) = self.now.find(correlation_id) {
-                    self.save();
+                    if !self.saved {
+                        // The handler changed no timer: the one handed over is taken
+                        // out where it is, with no copy and no pass over the table.
+                        self.now.remove(index);
+                        if index < self.scan_from {
+                            self.scan_from -= 1;
+                        }
+                        return self.hold_cancel(correlation_id);
+                    }
                     self.now.remove(index);
                 }
             }
@@ -3879,7 +3891,8 @@ impl ServiceTimers {
             return dropped;
         }
         self.saved = false;
-        self.scan_from = 0;
+        // The first timer that is marked, for the next search to begin at.
+        let mut first = self.now.len;
         // What the entry changed, by one pass over the two tables in the order of the
         // ids: a timer that was pending and is not is a cancel for the member; one
         // that is new, or has another deadline, is marked; any other keeps its mark.
@@ -3898,6 +3911,9 @@ impl ServiceTimers {
                     let mark = self.before.unsent.get(was).copied().unwrap_or(true);
                     if let Some(unsent) = self.now.unsent.get_mut(is) {
                         *unsent = !same || mark;
+                        if *unsent {
+                            first = first.min(is);
+                        }
                     }
                     was += 1;
                     is += 1;
@@ -3913,6 +3929,7 @@ impl ServiceTimers {
                 (_, Some(_)) => {
                     if let Some(unsent) = self.now.unsent.get_mut(is) {
                         *unsent = true;
+                        first = first.min(is);
                     }
                     is += 1;
                 }
@@ -3924,7 +3941,9 @@ impl ServiceTimers {
             && let Some(unsent) = self.now.unsent.get_mut(index)
         {
             *unsent = true;
+            first = first.min(index);
         }
+        self.scan_from = first;
         dropped
     }
 

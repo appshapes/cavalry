@@ -200,7 +200,8 @@ position 0 is the log's first new leadership term event.
   second reading of the rule, a model over a map, under seeded calls: 8 seeds of
   4,000 handlings over nine ids and 8 of 600 with the table one short of its
   bound, with refreshes between handlings and inside them, the two compared after
-  every handling and after the words the stream then takes. Its first run found
+  every handling and after the words the stream then takes, which is now and then
+  all of them. Its first run found
   that the table told its member of earlier entries while a handler ran, until
   the handler's first change.
 - A seeded search in memory, run before this ADR's first review, in the pattern of
@@ -276,12 +277,16 @@ position 0 is the log's first new leadership term event.
 - No measurement of latency: nothing calls the table at this change, so it adds no
   code that a message passes through yet. What the table costs a service's reading
   when the service's library calls it, in the change after this one: nothing for
-  an entry whose handler touches no timer; for one that does, a copy of the
-  pending timers at the handler's first change, 17 bytes for each and 17,408 at
-  the bound, a move of as much for a timer put in or taken out, and one pass over
-  both copies when the handling ends; and for a refresh one pass over the table,
-  once a second. The member's check for a due timer is one compare in a duty cycle
-  while nothing has changed. The changes that add the callers measure both.
+  an entry that is no timer event and whose handler touches no timer, and nothing
+  for an event that is passed over; for an event that is handed over to a handler
+  that touches no timer, the move of the timers above its own, 17 bytes for each;
+  for a handler that schedules or cancels, a copy of the pending timers at its
+  first change, 17 bytes for each and 17,408 at the bound, a move of as much for
+  a timer put in or taken out, and one pass over both copies when the handling
+  ends; for a refresh one pass over the table, once a second; and for a read with
+  nothing to tell, none of the table. The member's check for a due timer is one
+  compare in a duty cycle while nothing has changed. The changes that add the
+  callers measure both.
 
 ## Consequences
 
@@ -325,8 +330,10 @@ position 0 is the log's first new leadership term event.
   the calls: the member's table, the leader's events, the counters of the page's
   "Counters", the `cavalry doctor` finding for a leader with no service beside it
   and the service's library land in the change after this one, with the search.
-  Until then no program can schedule a timer, so nothing of version 2 can be
-  asked of a member that it does not do.
+  In a cluster of this build alone no program can schedule a timer. Beside
+  members of a later build, a member of this build that leads appends no timer
+  event, so timers wait while it leads, as they do under a leader of version 1,
+  though it writes version 2.
 - The C ABI moves to version 7 with the two calls and the entry kind, in an ADR of
   its own, and the five clients follow.
 - Revisit: when a service runs in a process that its member starts, for the member
