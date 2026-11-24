@@ -258,6 +258,26 @@ committed once a quorum, two of three, has it on disk.
   log were in it. Start the member with the log directory it had, whole. If the file
   is lost, do as for a directory with no `log-recordings` file, above. Do not put an
   older copy of the file back.
+- `member refused (log-directory-held)`: another process holds the lock a
+  consensus module takes on the member's log directory. Normally a member runs on
+  it, started by `cavalry run` or by a program that embeds a member as a client of
+  the host's driver, with this member id or another. A log directory holds one member's files, so this member did not start,
+  and it wrote nothing. `cavalry doctor --log-dir <path>` names the holder's pid on
+  Linux (`log-directory-held`), and `lsof <path>` names it on any host. Stop that
+  process before you start this member on the directory, or start this member with a
+  driver and a log directory of its own. A member whose process ended, however it
+  ended, holds nothing, so a killed member starts again at once.
+- `member refused (log-directory-lock)`: the member's log directory could not be
+  opened, or its filesystem refused the lock by which a member holds it. Nothing was
+  written, and the member does not start without the lock, as a driver does not
+  start without its own. A network filesystem refuses it: on NFS an exclusive lock
+  of `flock(2)` needs a descriptor open for writing, which a directory never is, so
+  a member that ran on NFS before ADR 0152 meets this at its first start under it.
+  `cavalry doctor --log-dir <path>` warns of such a directory in
+  `log-directory-backing`. Give the member a log directory on a disk of this host:
+  stop its driver, copy the whole directory there, and start the driver and the
+  member on the copy. In an upgrade one member at a time, do this for each member
+  before you upgrade it.
 - `cavalry run: member refused (listed-recording)`: the `catalog` in the member's
   log directory does not hold the recordings that its `log-recordings` file names.
   The message names the recording and what the catalog holds in its place. The

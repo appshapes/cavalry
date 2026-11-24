@@ -737,9 +737,7 @@ impl RecordingsFile {
         file.write_all_at(&header[..8], 0)
             .map_err(io("write the magic of"))?;
         file.sync_all().map_err(io("sync"))?;
-        File::open(dir)
-            .and_then(|dir| dir.sync_all())
-            .map_err(io("sync the directory of"))
+        crate::dir::sync_directory(dir).map_err(io("sync the directory of"))
     }
 
     /// Whether this open wrote the file: there was none, or a crash had torn the one

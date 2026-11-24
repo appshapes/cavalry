@@ -4048,7 +4048,12 @@ fn a_start_stops_a_recording_its_driver_went_on_making() {
         ..
     } = pair;
     // The process is lost: nothing of the module runs again, and nothing of it is
-    // closed, so no stop is sent. Its driver, and the leader's log, go on.
+    // closed, so no stop is sent. Its driver, and the leader's log, go on. The
+    // operating system drops the lock of a process that ends (ADR 0152), which a
+    // test that goes on running models by dropping the hold alone.
+    let mut member = member;
+    let unlocked = std::fs::File::open(&member_log_dir).expect("the directory opens");
+    drop(std::mem::replace(&mut member._log_dir_hold, unlocked));
     std::mem::forget(member);
     let catalog = CatalogReader::open(&member_log_dir).expect("the catalog opens");
     assert!(

@@ -115,6 +115,7 @@ const DOC_MEMBERS: &str = "docs/reference/cluster.md#members-and-streams";
 const DOC_LOG: &str = "docs/reference/cluster.md#the-log";
 const DOC_LOG_RECORDINGS: &str = "docs/reference/cluster.md#the-logs-recordings";
 const DOC_KEPT_LOG: &str = "docs/reference/durable-log.md#log-recordings";
+const DOC_HOLD: &str = "docs/reference/durable-log.md#the-driver";
 /// What an operator does with a member whose log directory is lost (`spec/cluster.md`,
 /// "A member that lost its log"; ADR 0145), the words of each refusal that leaves a
 /// member out of the cluster for want of the log directory it had.
@@ -213,6 +214,30 @@ pub enum RaftError {
         end_position: i64,
         /// The log position of the snapshot the start took its state from.
         from_position: i64,
+    },
+    /// Another process holds the lock a consensus module takes on the member's log
+    /// directory, normally another module (`spec/durable-log.md`, "The driver"; ADR
+    /// 0152). A module holds its log directory for its life by an
+    /// exclusive advisory lock of the operating system on the directory itself, taken at
+    /// its start before it reads or writes any of its files, and the operating system
+    /// drops the lock when the module's process ends, however it ends. A module of any
+    /// member id is refused, in this process or another: a log directory holds one
+    /// member's files, and two modules would each write them from their own copy. The
+    /// start wrote nothing.
+    LogDirectoryHeld {
+        /// The log directory.
+        log_dir: PathBuf,
+    },
+    /// The member's log directory could not be opened, or its filesystem refused the
+    /// lock by which the module holds it ([`RaftError::LogDirectoryHeld`]). The start
+    /// wrote nothing.
+    LogDirectoryLock {
+        /// The log directory.
+        log_dir: PathBuf,
+        /// What was being done: `open` or `lock`.
+        what: &'static str,
+        /// The operating system's reason.
+        source: std::io::Error,
     },
     /// The `terms` file could not be read or written.
     Terms(TermsError),
@@ -330,10 +355,10 @@ pub enum ListedFound {
 
 impl RaftError {
     /// The reason's name: `members`, `member`, `recordings`, `snapshots`,
-    /// `terms-lost`, `log-forgotten`, `listed-recording`, `log-short`, `terms`,
-    /// `catalog`, `client`, `poll`, `unsupported`, `payload-too-long`,
-    /// `ingress-endpoints`, `offer`, `append`, `stop-timeout`, `start-stop-timeout`
-    /// or `log-recordings`.
+    /// `terms-lost`, `log-forgotten`, `listed-recording`, `log-short`,
+    /// `log-directory-held`, `log-directory-lock`, `terms`, `catalog`, `client`,
+    /// `poll`, `unsupported`, `payload-too-long`, `ingress-endpoints`, `offer`,
+    /// `append`, `stop-timeout`, `start-stop-timeout` or `log-recordings`.
     pub const fn reason(&self) -> &'static str {
         match self {
             RaftError::Members(_) => "members",
@@ -344,6 +369,8 @@ impl RaftError {
             RaftError::LogForgotten { .. } => "log-forgotten",
             RaftError::ListedRecording { .. } => "listed-recording",
             RaftError::LogShort { .. } => "log-short",
+            RaftError::LogDirectoryHeld { .. } => "log-directory-held",
+            RaftError::LogDirectoryLock { .. } => "log-directory-lock",
             RaftError::Terms(_) => "terms",
             RaftError::Catalog(_) => "catalog",
             RaftError::Client(_) => "client",
@@ -599,6 +626,37 @@ impl core::fmt::Display for RaftError {
                 }
                 write!(f, "; see {DOC_LOG}")
             }
+            RaftError::LogDirectoryHeld { log_dir } => write!(
+                f,
+                "member refused ({reason}): another process holds the lock a consensus \
+                 module takes on the log directory {dir}: normally a cluster member that \
+                 runs on it, in this process or another, of this member id or another, \
+                 and a log directory holds one member's record of terms, of its log's \
+                 recordings and of its snapshots. Nothing was written. Stop that process \
+                 before you start this member on the directory, or start this member with \
+                 a driver and a log directory of its own; `lsof {dir}` names the process \
+                 that holds it. The hold ends with that process, however it ends, so a \
+                 member whose process was killed holds nothing; see {DOC_HOLD}",
+                dir = log_dir.display()
+            ),
+            RaftError::LogDirectoryLock {
+                log_dir,
+                what,
+                source,
+            } => write!(
+                f,
+                "member refused ({reason}): cannot {what} the log directory {dir} to hold \
+                 it: {source}. A consensus module holds its log directory by an advisory \
+                 lock of the operating system, so that no second module writes there, \
+                 and does not start without it, as a driver does not start without its \
+                 lock on the catalog. Nothing was written. A network filesystem refuses \
+                 it: on NFS an exclusive lock of flock(2) needs a descriptor open for \
+                 writing, which a directory never is. Give the member a log directory on \
+                 a disk of this host: stop its driver, copy the whole directory there, \
+                 and start the driver and the member on the copy. `cavalry doctor \
+                 --log-dir {dir}` says what the directory is on; see {DOC_HOLD}",
+                dir = log_dir.display()
+            ),
             RaftError::StopTimeout { recording_id } => write!(
                 f,
                 "member stopped ({reason}): the member stopped recording {recording_id} as \
@@ -680,6 +738,7 @@ impl std::error::Error for RaftError {
             RaftError::Poll(fault) => Some(fault),
             RaftError::Offer(error) => Some(error),
             RaftError::LogRecordings { source, .. } => Some(source),
+            RaftError::LogDirectoryLock { source, .. } => Some(source),
             _ => None,
         }
     }
@@ -2985,6 +3044,31 @@ pub struct ConsensusModule {
     /// The clock of the last duty cycle, which an offer between two cycles is stamped
     /// with: the clock is read once a cycle and never per entry.
     clock: Clock,
+    /// The module's hold on its log directory, the directory opened and locked
+    /// ([`hold_log_dir`]; ADR 0152). The last field, so that it is dropped after the
+    /// member's files are closed.
+    _log_dir_hold: std::fs::File,
+}
+
+/// Takes a consensus module's hold on its log directory (`spec/durable-log.md`, "The
+/// driver"; ADR 0152): an exclusive advisory lock of the operating system on the
+/// directory itself, tried once. The driver's lock is on the directory's catalog (ADR
+/// 0025), so the two never meet. The operating system drops the lock with the file this
+/// returns, or with the process however it ends, so no hold outlives its module.
+fn hold_log_dir(log_dir: &Path) -> Result<std::fs::File, RaftError> {
+    let refused = |what, source| RaftError::LogDirectoryLock {
+        log_dir: log_dir.to_path_buf(),
+        what,
+        source,
+    };
+    let dir = std::fs::File::open(log_dir).map_err(|source| refused("open", source))?;
+    match dir.try_lock() {
+        Ok(()) => Ok(dir),
+        Err(std::fs::TryLockError::WouldBlock) => Err(RaftError::LogDirectoryHeld {
+            log_dir: log_dir.to_path_buf(),
+        }),
+        Err(std::fs::TryLockError::Error(source)) => Err(refused("lock", source)),
+    }
 }
 
 impl ConsensusModule {
@@ -2999,6 +3083,12 @@ impl ConsensusModule {
     /// written into it: `log_dir` must be the directory the driver in `dir` was started
     /// with, whose catalog says where each of the member's recordings of the log
     /// begins (ADR 0093).
+    ///
+    /// The module holds `log_dir` for its life, by an exclusive advisory lock of the
+    /// operating system on the directory itself, taken before it reads or writes any
+    /// of its files and dropped with the module, or with its process however that
+    /// ends (ADR 0152). A directory another module holds, of any member id and in any
+    /// process, is [`RaftError::LogDirectoryHeld`], and nothing is written into it.
     ///
     /// On the log directory it kept the member takes up its log (`spec/cluster.md`, "A
     /// member's start"; ADR 0089, ADR 0108): the candidate term it stored, its record
@@ -3090,6 +3180,10 @@ impl ConsensusModule {
         // the `terms` file, which is created when it is not there, so that a
         // directory the module refuses is left as it was.
         let catalog = CatalogReader::open(log_dir.as_ref())?;
+        // The module's hold on the directory, before it reads or writes any of its
+        // files: a second module on it is refused here, and every check below reads
+        // files that no other module is writing (ADR 0152).
+        let log_dir_hold = hold_log_dir(log_dir.as_ref())?;
         // A `terms` file that is not there is created, for a member on a new log
         // directory. A directory that holds a recording of the log is not new: its
         // member recorded a term before it recorded an entry, so its `terms` file was
@@ -3325,6 +3419,7 @@ impl ConsensusModule {
             log_recordings_unwritten: 0,
             started,
             clock: read_clock(started),
+            _log_dir_hold: log_dir_hold,
         })
     }
 

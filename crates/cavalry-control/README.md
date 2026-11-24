@@ -19,7 +19,12 @@ is allowed here.
   ring read-only, as their pages say a reader does, and every finding names the docs
   anchor that explains it (`CLAUDE.md`, invariant 4). The checks of the configuration
   keys are here: the filesystem under the driver directory (`driver-directory-backing`)
-  and under the log directory (`log-directory-backing`), the idle strategy the running
+  and under the log directory (`log-directory-backing`), on Linux the pid of the
+  cluster member's consensus module that holds the log directory, read from
+  `/proc/locks` without trying the lock, and for a member's directory with no holder
+  visible, that none is visible from here, or elsewhere that the hold cannot be read
+  here, never that the directory is free (`log-directory-held`, ADR 0152), the idle
+  strategy the running
   conductor recorded in its counter against the host's isolated CPUs
   (`conductor-idle-strategy`), and the two cluster keys, checked together and against
   the members string (`cluster-members`, `cluster-member-id`): each host name of the
