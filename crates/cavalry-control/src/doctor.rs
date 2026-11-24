@@ -84,6 +84,8 @@ const DOC_RING_FULL: &str = "docs/reference/command-ring.md#when-the-ring-is-ful
 const DOC_RING_REJECTS: &str = "docs/reference/command-ring.md#what-a-reader-rejects";
 const DOC_COUNTERS_FULL: &str = "docs/reference/counters-file.md#when-the-file-is-full";
 const DOC_COUNTERS: &str = "docs/reference/counters.md";
+/// Where a consensus module's hold on its log directory is stated (ADR 0152).
+const DOC_LOG_DIRECTORY_HELD: &str = "docs/reference/durable-log.md#the-driver";
 const DOC_COUNTERS_REJECTS: &str = "docs/reference/counters-file.md#what-a-reader-rejects";
 /// The host findings point at the bench host's page until a page on tuning a host for
 /// Cavalry exists: it is the one page that says how each setting is changed.
@@ -506,9 +508,11 @@ fn log_directory_checks(log_dir: &Path, findings: &mut Vec<Finding>) -> usize {
                 level: Level::Warn,
                 message: format!(
                     "the log directory {} is on {fstype} at {mount}, an overlay or network \
-                     filesystem, where a sync does not make a byte durable on this host and the \
-                     catalog's lock may not hold against another driver; set {}=<a directory on \
-                     a disk of this host>, or --log-dir",
+                     filesystem, where a sync does not make a byte durable on this host, the \
+                     catalog's lock may not hold against another driver, and a cluster \
+                     member's consensus module may not take its lock on the directory at all, \
+                     as on NFS, where a member then does not start (`log-directory-lock`); \
+                     set {}=<a directory on a disk of this host>, or --log-dir",
                     log_dir.display(),
                     LOG_DIR_KEY.env
                 ),
@@ -526,6 +530,53 @@ fn log_directory_checks(log_dir: &Path, findings: &mut Vec<Finding>) -> usize {
             ),
             doc: LOG_DIR_KEY.anchor,
         }),
+    }
+    // Who holds the directory, read without trying its lock, which would refuse a
+    // member that started at that moment (ADR 0152). Only Linux has the table, and it
+    // shows only the holders it can: it never says that a directory is free.
+    checks += 1;
+    let holders = flock_holders(log_dir);
+    for pid in &holders {
+        findings.push(Finding {
+            check: "log-directory-held",
+            level: Level::Note,
+            message: format!(
+                "the log directory {} is held by pid {pid}, by the lock a cluster member's \
+                 consensus module takes, so normally a member runs on it: a second member \
+                 started on it, of any member id, is refused with `log-directory-held`; \
+                 stop pid {pid} before you start another member there, or give the other \
+                 member a driver and a log directory of its own",
+                log_dir.display()
+            ),
+            doc: DOC_LOG_DIRECTORY_HELD,
+        });
+    }
+    if holders.is_empty() && log_dir.join(cavalry_log::terms::FILE_NAME).is_file() {
+        let message = if cfg!(target_os = "linux") {
+            format!(
+                "no process that holds the log directory {dir}, a cluster member's, is visible \
+                 from here: /proc/locks lists only the locks of processes in doctor's pid \
+                 namespace, so a member in another container is not shown, and on btrfs it \
+                 gives a subvolume's files another device number; so a member may hold it \
+                 all the same. `lsof {dir}`, run where the member runs, names the process \
+                 that holds it",
+                dir = log_dir.display()
+            )
+        } else {
+            format!(
+                "whether a consensus module holds the log directory {dir}, a cluster \
+                 member's, cannot be read here: doctor does not try the lock, since a try \
+                 refuses a member that starts at that moment, and this platform has no \
+                 table of locks; `lsof {dir}` names a process that holds it",
+                dir = log_dir.display()
+            )
+        };
+        findings.push(Finding {
+            check: "log-directory-held",
+            level: Level::Note,
+            message,
+            doc: DOC_LOG_DIRECTORY_HELD,
+        });
     }
     // Writable, without writing: the driver creates the catalog and every segment file in
     // the directory, so the directory's mode bits must let this user add entries; and
@@ -3333,6 +3384,60 @@ fn backing_check(dir: &Path, findings: &mut Vec<Finding>) -> usize {
     1
 }
 
+/// The pids that hold a lock of `flock(2)` on `path`, from `/proc/locks` on Linux:
+/// how doctor names the consensus module that holds a log directory without trying
+/// the lock itself (ADR 0152). Elsewhere there is no such table, and none is named.
+fn flock_holders(path: &Path) -> Vec<u32> {
+    if !cfg!(target_os = "linux") {
+        return Vec::new();
+    }
+    let (Ok(metadata), Ok(locks)) = (
+        std::fs::metadata(path),
+        std::fs::read_to_string("/proc/locks"),
+    ) else {
+        return Vec::new();
+    };
+    flock_holders_in(
+        &locks,
+        std::os::unix::fs::MetadataExt::dev(&metadata),
+        std::os::unix::fs::MetadataExt::ino(&metadata),
+    )
+}
+
+/// [`flock_holders`] from the text of `/proc/locks`, as `proc(5)` lays a line out: an
+/// ordinal and a colon, the lock's kind, `FLOCK` for one of `flock(2)`, `ADVISORY`,
+/// `READ` or `WRITE`, the holder's pid, then the file as its device's major and minor
+/// numbers in hexadecimal and its inode in decimal, joined by colons, then the range.
+/// A lock that waits for one is written after `->`, and holds nothing.
+fn flock_holders_in(locks: &str, dev: u64, ino: u64) -> Vec<u32> {
+    // The device number's encoding on Linux, as `makedev(3)` builds it.
+    let major = ((dev >> 8) & 0xfff) | ((dev >> 32) & 0xffff_f000);
+    let minor = (dev & 0xff) | ((dev >> 12) & 0xffff_ff00);
+    let mut pids = Vec::new();
+    for line in locks.lines() {
+        let fields: Vec<&str> = line.split_whitespace().collect();
+        let [_, "FLOCK", _, _, pid, file, ..] = fields.as_slice() else {
+            continue;
+        };
+        let mut parts = file.split(':');
+        let (Some(file_major), Some(file_minor), Some(file_ino), None) =
+            (parts.next(), parts.next(), parts.next(), parts.next())
+        else {
+            continue;
+        };
+        let same = u64::from_str_radix(file_major, 16) == Ok(major)
+            && u64::from_str_radix(file_minor, 16) == Ok(minor)
+            && file_ino.parse::<u64>() == Ok(ino);
+        if same
+            && let Ok(pid) = pid.parse::<u32>()
+            && !pids.contains(&pid)
+        {
+            pids.push(pid);
+        }
+    }
+    pids
+}
+
 /// What `path` is on, from `/proc/self/mountinfo` on Linux.
 fn backing(path: &Path) -> Backing {
     if !cfg!(target_os = "linux") {
@@ -4656,6 +4761,115 @@ mod tests {
                 found.message
             );
         }
+    }
+
+    /// The pids `/proc/locks` names as holders of a lock of `flock(2)` on one file
+    /// (ADR 0152): a lock that waits, a lock of another kind, and one of another inode
+    /// or another device hold nothing of it, and a pid that holds it twice is named
+    /// once. The device numbers are encoded as `makedev(3)` encodes them, a major and a
+    /// minor past their low bits among them.
+    #[test]
+    fn the_holders_of_a_files_flock_are_read_from_proc_locks() {
+        let makedev = |major: u64, minor: u64| {
+            ((major & 0xffff_f000) << 32)
+                | ((major & 0xfff) << 8)
+                | ((minor & 0xffff_ff00) << 12)
+                | (minor & 0xff)
+        };
+        let locks = "\
+1: FLOCK  ADVISORY  WRITE 4242 08:02:1311234 0 EOF
+1: -> FLOCK  ADVISORY  WRITE 999 08:02:1311234 0 EOF
+2: POSIX  ADVISORY  WRITE 5151 08:02:1311234 0 EOF
+3: FLOCK  ADVISORY  WRITE 6161 08:02:1311235 0 EOF
+4: FLOCK  ADVISORY  WRITE 7171 08:03:1311234 0 EOF
+5: OFDLCK ADVISORY  READ  -1 103:01:77 0 EOF
+6: FLOCK  ADVISORY  WRITE 8181 103:01:77 0 EOF
+7: FLOCK  ADVISORY  READ  4242 08:02:1311234 0 EOF
+8: FLOCK  ADVISORY  WRITE 10 1000:100:3 0 EOF
+";
+        assert_eq!(
+            flock_holders_in(locks, makedev(8, 2), 1_311_234),
+            vec![4242]
+        );
+        assert_eq!(flock_holders_in(locks, makedev(259, 1), 77), vec![8181]);
+        assert_eq!(flock_holders_in(locks, makedev(4096, 256), 3), vec![10]);
+        assert!(flock_holders_in(locks, makedev(8, 2), 5).is_empty());
+        assert!(flock_holders_in("", makedev(8, 2), 1_311_234).is_empty());
+    }
+
+    /// On Linux doctor names the process that holds a log directory by the lock a
+    /// consensus module takes, a note, and it never tries the lock itself: the holder
+    /// keeps it. For a member's directory that no visible process holds it says that
+    /// none is visible from here on Linux, and that the hold cannot be read elsewhere,
+    /// and never that the directory is free. A directory of no member, held by none,
+    /// gives no note (ADR 0152).
+    #[test]
+    fn a_log_directory_a_module_holds_is_a_note_that_names_its_pid_on_linux() {
+        let dir = TestDir::new("log-dir-held");
+        let log_dir = dir.0.join("log");
+        std::fs::create_dir_all(&log_dir).expect("the log directory");
+        let held = |report: &Report| -> Vec<Finding> {
+            report
+                .findings
+                .iter()
+                .filter(|finding| finding.check == "log-directory-held")
+                .cloned()
+                .collect()
+        };
+        let report = examine_with(&dir.0, Some(&log_dir));
+        assert!(held(&report).is_empty(), "no member's, no note: {report}");
+
+        // A member's directory, held by none.
+        std::fs::write(log_dir.join("terms"), b"").expect("a terms file");
+        let report = examine_with(&dir.0, Some(&log_dir));
+        let found = held(&report);
+        assert_eq!(found.len(), 1, "{report}");
+        assert_eq!(found[0].level, Level::Note);
+        assert_eq!(found[0].doc, DOC_LOG_DIRECTORY_HELD);
+        let unseen = if cfg!(target_os = "linux") {
+            "is visible from here"
+        } else {
+            "cannot be read here"
+        };
+        assert!(
+            found[0].message.contains(unseen)
+                && found[0]
+                    .message
+                    .contains(&format!("`lsof {}`", log_dir.display()))
+                && !found[0].message.contains("free"),
+            "{}",
+            found[0].message
+        );
+
+        let hold = std::fs::File::open(&log_dir).expect("the directory opens");
+        hold.try_lock().expect("the lock is taken");
+        let report = examine_with(&dir.0, Some(&log_dir));
+        let found = held(&report);
+        assert_eq!(found.len(), 1, "{report}");
+        // On btrfs `/proc/locks` gives a subvolume's files another device number than
+        // `stat` does, so no holder is matched there, and the note says so.
+        let btrfs = matches!(
+            backing(&log_dir.canonicalize().expect("canonical")),
+            Backing::Disk { fstype, .. } if fstype == "btrfs"
+        );
+        if cfg!(target_os = "linux") && !btrfs {
+            assert!(
+                found[0]
+                    .message
+                    .contains(&format!("pid {}", std::process::id()))
+                    && found[0].message.contains("`log-directory-held`"),
+                "{}",
+                found[0].message
+            );
+        } else {
+            assert!(found[0].message.contains(unseen), "{}", found[0].message);
+        }
+        let other = std::fs::File::open(&log_dir).expect("the directory opens");
+        assert!(
+            matches!(other.try_lock(), Err(std::fs::TryLockError::WouldBlock)),
+            "doctor left the holder's lock as it was"
+        );
+        drop(hold);
     }
 
     /// The `log.dir` key's check on the path's length: over the limit a segment roll
