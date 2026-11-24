@@ -3,13 +3,14 @@
 - **Status:** Accepted
 - **Date:** 2026-11-23
 - **Invariants affected:** 1, 2, 3, 4, 6
-- **Supersedes:** one sentence of ADR 0136's decision, "Within a major no version
+- **Supersedes:** of ADR 0136's Decision, the sentence "Within a major no version
   changes a layout, a template's id, an enumeration's values, a check of 'What a
-  reader rejects', or what an entry does to the state computed from the log",
-  which ADR 0147 took by its letter and point 8 below restates; the rest of ADR
-  0136 stands. It also does what ADR 0136's Revisit asks of the first version
-  that adds an entry, "for when a leader may use it", and takes `spec/cluster.md`
-  from version 1 to version 2, 0.2.0.
+  reader rejects', or what an entry does to the state computed from the log", which
+  point 8 restates, as `spec/cluster.md`, "Versions and the upgrade", held it and
+  ADR 0147 took it by its letter; the rest of ADR 0136 stands. It also does what
+  ADR 0136's Revisit asks of the first version that adds an entry, "for when a
+  leader may use it", and takes `spec/cluster.md` from version 1 to version 2,
+  0.2.0.
 
 ## Context
 
