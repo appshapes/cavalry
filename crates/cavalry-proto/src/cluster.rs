@@ -3628,6 +3628,12 @@ impl Timers {
 /// [`ServiceTimers::told`] takes one off once the consensus module stream has taken
 /// its message.
 ///
+/// What it costs a service's reading: nothing for an entry whose handler touches no
+/// timer; for one that does, a copy of the pending timers at the handler's first
+/// change, 17 bytes for each, a move of as much for a timer put in or taken out,
+/// and one pass over both copies when the handling ends; and for telling a member
+/// every timer again, one pass over the table.
+///
 /// ```
 /// use cavalry_proto::cluster::{ServiceTimers, TimerEventIs, TimerWord};
 ///
@@ -3664,6 +3670,12 @@ pub struct ServiceTimers {
     saved: bool,
     // Whether an entry is being handled: nothing is told until its handling ends.
     handling: bool,
+    // Whether every pending timer is to be marked when the handling ends: a refresh
+    // that came while an entry was being handled.
+    again: bool,
+    // No timer below this index is marked: where the search for the next timer to
+    // tell begins, so that telling every timer is one pass over the table.
+    scan_from: usize,
     // The cancels the member has not been sent, oldest first, in a ring.
     cancels: [i64; MAX_UNSENT_TIMER_CANCELS],
     cancels_head: usize,
@@ -3692,6 +3704,8 @@ impl ServiceTimers {
             before: Timers::new(),
             saved: false,
             handling: false,
+            again: false,
+            scan_from: 0,
             cancels: [0; MAX_UNSENT_TIMER_CANCELS],
             cancels_head: 0,
             cancels_len: 0,
@@ -3826,10 +3840,21 @@ impl ServiceTimers {
     pub fn end_entry(&mut self, taken: bool) -> usize {
         let event = self.event.take();
         self.handling = false;
+        let dropped = self.end(event, taken);
+        if self.again {
+            self.again = false;
+            self.mark_all();
+        }
+        dropped
+    }
+
+    // What `end_entry` does to the timers, before a refresh that waited for it.
+    fn end(&mut self, event: Option<(i64, TimerEventIs)>, taken: bool) -> usize {
         if !taken {
             if self.saved {
                 self.now.copy_from(&self.before);
                 self.saved = false;
+                self.scan_from = 0;
             }
             return 0;
         }
@@ -3854,6 +3879,7 @@ impl ServiceTimers {
             return dropped;
         }
         self.saved = false;
+        self.scan_from = 0;
         // What the entry changed, by one pass over the two tables in the order of the
         // ids: a timer that was pending and is not is a cancel for the member; one
         // that is new, or has another deadline, is marked; any other keeps its mark.
@@ -3945,15 +3971,17 @@ impl ServiceTimers {
     }
 
     /// Removes every timer, and everything still to tell the member: a service that
-    /// passes a snapshot over starts with none.
+    /// passes a snapshot over starts with none. A service that was reading history
+    /// ([`ServiceTimers::hold`]) is reading it still.
     pub fn clear(&mut self) {
         self.now.len = 0;
         self.saved = false;
         self.handling = false;
+        self.again = false;
+        self.scan_from = 0;
         self.event = None;
         self.cancels_head = 0;
         self.cancels_len = 0;
-        self.held = false;
     }
 
     /// Holds everything back from the member, and forgets the cancels held for it: a
@@ -3961,25 +3989,53 @@ impl ServiceTimers {
     /// opened its log, tells its member nothing of them, since what they schedule
     /// and cancel a service before it told the member, or is long past.
     /// [`ServiceTimers::next_word`] gives nothing until
-    /// [`ServiceTimers::tell_all_again`], which the service calls at the end of that
+    /// [`ServiceTimers::release`], which the service calls when it has read that
     /// history.
     pub fn hold(&mut self) {
         self.held = true;
+        self.again = false;
         self.cancels_head = 0;
         self.cancels_len = 0;
     }
 
-    /// Marks every pending timer not yet sent to the member: the service sends each
-    /// again, as it does when it has read the history it found when it opened its
-    /// member's log, and at each timer refresh interval after
-    /// ([`TIMER_REFRESH_INTERVAL_NS`]). It ends [`ServiceTimers::hold`]. A timer
-    /// that is marked already stays marked, so a stream that takes nothing holds no
-    /// more for a second call than for the first.
-    pub fn tell_all_again(&mut self) {
+    /// Ends [`ServiceTimers::hold`]: the service has read its history, and sends its
+    /// member every pending timer, as [`ServiceTimers::tell_all_again`] marks them.
+    pub fn release(&mut self) {
         self.held = false;
+        self.tell_all_again();
+    }
+
+    /// Marks every pending timer not yet sent to the member: the service sends each
+    /// again, as it does at each timer refresh interval
+    /// ([`TIMER_REFRESH_INTERVAL_NS`]). A timer that is marked already stays
+    /// marked, so a stream that takes nothing holds no more for a second call than
+    /// for the first. Nothing while the service reads history, which
+    /// [`ServiceTimers::release`] ends with every timer marked. While an entry is
+    /// being handled the timers are marked when its handling ends, taken or not.
+    pub fn tell_all_again(&mut self) {
+        if self.held {
+            return;
+        }
+        if self.handling || self.saved {
+            self.again = true;
+            return;
+        }
+        self.mark_all();
+    }
+
+    fn mark_all(&mut self) {
         if let Some(unsent) = self.now.unsent.get_mut(..self.now.len) {
             unsent.fill(true);
         }
+        self.scan_from = 0;
+    }
+
+    // The index of the first timer that is marked, at or after `scan_from`, below
+    // which none is.
+    fn first_unsent(&self) -> Option<usize> {
+        let from = self.scan_from.min(self.now.len);
+        let unsent = self.now.unsent.get(from..self.now.len).unwrap_or(&[]);
+        Some(from + unsent.iter().position(|unsent| *unsent)?)
     }
 
     /// The next thing to tell the member: the oldest cancel held, and with none
@@ -3997,8 +4053,7 @@ impl ServiceTimers {
             let correlation_id = *self.cancels.get(self.cancels_head)?;
             return Some(TimerWord::Cancel { correlation_id });
         }
-        let unsent = self.now.unsent.get(..self.now.len).unwrap_or(&[]);
-        let index = unsent.iter().position(|unsent| *unsent)?;
+        let index = self.first_unsent()?;
         Some(TimerWord::Schedule {
             correlation_id: *self.now.ids.get(index)?,
             deadline: *self.now.deadlines.get(index)?,
@@ -4026,9 +4081,14 @@ impl ServiceTimers {
             } => {
                 if let Ok(index) = self.now.find(correlation_id)
                     && self.now.deadlines.get(index) == Some(&deadline)
-                    && let Some(unsent) = self.now.unsent.get_mut(index)
                 {
-                    *unsent = false;
+                    let first = self.first_unsent();
+                    if let Some(unsent) = self.now.unsent.get_mut(index) {
+                        *unsent = false;
+                    }
+                    if first == Some(index) {
+                        self.scan_from = index + 1;
+                    }
                 }
             }
         }

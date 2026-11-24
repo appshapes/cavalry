@@ -702,8 +702,8 @@ timeout, which is a member that is not running. The service asks the stop of a
 recording that has not stopped, reports the failure to its program, counts it in
 `cluster.service_snapshots_failed`, and reads on when its program next reads. A
 service adds its counters ("Counters", the ones a service adds) before its
-publications, at the first of its first snapshot and the first entry that leaves
-it something to tell its member of a timer ("The service", "Timers"), so that a
+publications, at the first of its first snapshot and the first thing it has to
+tell its member of a timer ("The service", "Timers"), so that a
 publication the driver refuses there is counted. A counter that the
 driver refuses is the one failure that is not counted: there is no counter yet to
 count it in, the service reports it to its program, and its next snapshot, or its
@@ -1664,7 +1664,7 @@ invariant 3; ADR 0136). Within a major no version changes the layout of a messag
 or of an entry, a template's id or the values of an enumeration. And none changes,
 for a member, a client or a service of an earlier version of the major, which
 messages it rejects ("What a reader rejects") or what an entry does to the state
-it computes from the log. So a member reads every message of its major by the
+it computes from the log. So a member reads every message it is sent by the
 layouts of its own version, the header's version is 0 in every version of major 0,
 and every member's log holds the same bytes at the same positions, whatever the
 versions of the member that wrote it and of the members that recorded it. A
@@ -1673,8 +1673,10 @@ entry that every version of the major names and accepts, and the checks its own
 readers make of them, where no member, client or service of an earlier version is
 sent what it rejects. The version that adds says when a leader may append the
 entry, and what an application does before its program first makes use of it (ADR
-0136; ADR 0151). A version that must change what the first two sentences hold is
-another major. It writes another header version, which a reader of major 0
+0136; ADR 0151). A version that must change a layout, a template's id or an
+enumeration's values, or which messages an earlier version rejects or what an
+entry does to the state an earlier version computes, is another major. It writes
+another header version, which a reader of major 0
 rejects in every message ("What a reader rejects"), and its members form no
 cluster with members of major 0.
 
@@ -2174,9 +2176,9 @@ a service that reads from position 0 is handed first, and a service that starts
 from a snapshot has its timers from the snapshot ("Snapshots", "A service's
 start"). A timer that repeats is scheduled again by the handling of its own event.
 Each event is an entry of the log, 64 bytes of it: a program that schedules a
-deadline at or before the event's timestamp from each handling is handed an event
-in each of its leader's duty cycles, and the log grows by that much for as long as
-it does so.
+deadline at or before the event's timestamp from each handling is handed the next
+event as soon as its leader has been told and the event is committed and read, and
+the log grows by an event each time for as long as the program does so.
 
 **A timer event.** A service that reads a timer event hands it to its program when
 the timer of that correlation id is pending with a deadline at or before the
@@ -2199,8 +2201,10 @@ handed the same event again, which is the same handing.
 
 **What a service tells its member.** The service holds one publication on
 `cavalry:ipc` and the consensus module stream, the one its service acks are on
-("Snapshots"), from the first of its first snapshot and the first entry that
-leaves it something to tell its member, to its close. A driver that refuses that
+("Snapshots"), from the first of its first snapshot and the first thing it has to
+tell its member of a timer, to its close: a timer that an entry it took left
+pending, a cancel, or the timers of the snapshot it started from, which it has to
+tell when it has read its history, though it reads no entry. A driver that refuses that
 publication, or the counters the service adds before it ("Snapshots", "A
 service's snapshot"), fails no call of the program and changes no timer: the
 service reports the refusal to its program from that read, and adds them again at
@@ -2247,8 +2251,10 @@ cancel for it: what those entries scheduled and cancelled a service before it to
 the member, or is long past. It has read its history at the first of two moments:
 when it reads an entry that is no history; and when it has read to that append
 position, which is at once for a service that opens the log at or past it. A
-member whose log was cut below that position holds, from the cut on, entries of a
-later term, so one of the two comes. The service then sends by rule 2, which for a
+member whose log was cut below that position may hold no entry up to it for as
+long as it follows. It leads only in a later term, whose first entry is no
+history: a service beside a member that leads has read its history once it has
+read that entry. The service then sends by rule 2, which for a
 service that started from a snapshot is the snapshot's timers and what the
 entries after it made of them.
 
@@ -2272,7 +2278,8 @@ of a service's snapshots"), whatever its role. It keeps for each correlation id
 the deadline last scheduled, and a cancel timer removes the id. It holds at most
 the member's timers of "Values", twice a service's. A schedule timer for an id it
 does not hold, with that many held, replaces the timer whose event the member
-appended longest ago ("The leader's timer events"). With no such timer the member
+appended longest ago ("The leader's timer events"), which
+`cluster.timers_replaced` counts. With no such timer the member
 holds more than its service has pending, so some of what it holds is pending
 nowhere, and it cannot tell which: it removes every timer, keeps the one it was
 sent, and counts that in `cluster.timers_cleared`; its service sends the pending
@@ -2461,6 +2468,7 @@ that a reader of a counters file knows which transition it saw.
 | `cluster.truncation_owed` | a gauge: the position of the truncation the member owes, −1 while it owes none: while it is at or above 0 the member does not nominate, reads a new leadership term only once the truncation has finished, and asks for the truncation again each duty cycle ("Messages during an election"; ADR 0148) |
 | `cluster.timers` | a gauge: how many timers the member holds, each told to it by the service beside it in a schedule timer and not since removed ("The service", "Timers"; ADR 0151) |
 | `cluster.timer_events` | a timer event the member appended while it led, for a timer it held whose deadline its clock had reached ("Timers") |
+| `cluster.timers_replaced` | a schedule timer for which the member gave up the timer whose event it appended longest ago, its table at the member's timers of "Values"; where that timer is pending still its service sends it again ("Timers") |
 | `cluster.timers_cleared` | a schedule timer at which the member removed every timer it held, its table at the member's timers of "Values" with no timer in it whose event the member had appended; it keeps the timer it was sent, and its service sends the pending ones again ("Timers") |
 | `cluster.service_timers` | a gauge: how many timers are pending in the service beside the member; the service adds the counter, with its member's id as the key, when it adds its other counters ("Snapshots", "A service's snapshot"; "Timers") |
 | `cluster.service_timer_events_passed_over` | a timer event the service beside the member read and did not hand to its program: its timer was not pending, or was pending with a later deadline; the service adds the counter, with its member's id as the key ("Timers") |
@@ -2593,23 +2601,26 @@ encoder. Each vector has a `kind`:
   term and base; the position after an entry from the position it begins at, its
   length and the MTU length.
 - `timers`: the `steps` a service takes in order, and what it tells its member.
-  A step is an `entry` that is no timer event, with the `calls` its handler makes,
-  each a `schedule` of an id with a deadline or a `cancel` of an id, and `taken`
-  false when the handler does not take it; an `event` with an id and a timestamp,
-  with the calls of its handler and `taken` likewise when it is handed over; a
-  `fill`, an entry taken for each id from 0 to its count less one, each with one
-  schedule; an `empty`, one entry taken that cancels each of those ids; `history`,
-  at which the service begins to read history; or `refresh`, at which it sends
-  every pending timer again, as at the end of its history. A step with
-  `stream` false is one after which the consensus module stream takes nothing.
-  For each step the `fields` that follow: for each schedule in order whether it was
-  `refused`, or how many of a fill's were; whether an event was `handed` to the
-  program; the `pending` timers in the rising order of their ids, each an id and a
-  deadline, or their count when more than eight are pending; the `words` the
-  stream took after the step, in order, each a `cancel` of an id or a `schedule`
-  of an id with a deadline, or their count when more than eight; and how many
-  cancels the step dropped. Three vectors are at the bound of a service's timers,
-  and one at the bound of its unsent cancels.
+  A step has an `op`. `entry` is an entry that is no timer event, with the `calls`
+  its handler makes, each a `schedule` of an `id` with a `deadline` or a `cancel`
+  of an `id`, and `taken` false when the handler does not take it. `event` is a
+  timer event with an `id` and a `timestamp`, and the `calls` and `taken` of its
+  handler when it is handed over. `fill` is an entry taken for each id from 0 to
+  its `count` less one, in that order, each with one schedule of the id for the
+  step's `deadline` plus the id. `empty` is one entry taken that cancels each id
+  from 0 to its `count` less one. `history` is the service beginning to read
+  history, `history-ends` its end, and `refresh` a timer refresh interval that
+  has passed. A step with `stream` false is one after which the consensus module
+  stream takes nothing. For each step the `fields` that follow: `refused`, for
+  each schedule in order whether it was refused, or how many of a fill's were;
+  `handed`, whether an event was handed to the program; `pending`, the timers in
+  the rising order of their ids, each an id and a deadline, or `pending_count`
+  when more than eight are pending; `words`, what the stream took after the step,
+  in order, each a `cancel` of an id or a `schedule` of an id with a deadline, or,
+  when more than eight, `words_count` and the first two as `words_first`, and
+  neither for a step with `stream` false; and `cancels_dropped`, how many cancels
+  the step dropped, when it dropped any. Three vectors are at the bound of a
+  service's timers, and one at the bound of its unsent cancels.
 - `log recordings`: the `bytes` of a file of a member's log's recordings, the `member`
   id in its name, and the `fields` a conforming reader decodes, the member id, the
   live recording id, the live start position and the `entries`, each a recording id,
@@ -2619,7 +2630,8 @@ encoder. Each vector has a `kind`:
 
 A conforming implementation decodes every valid vector to its fields, encodes those
 fields to the same bytes, parses every members string, computes every arithmetic
-vector's fields from its inputs, answers every read of a file of recordings, and
+vector's fields from its inputs, takes every step of a timers vector to its
+fields, answers every read of a file of recordings, and
 reports the named reason for every invalid one.
 
 ## Out of this version

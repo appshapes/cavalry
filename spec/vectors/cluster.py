@@ -1147,9 +1147,11 @@ def timers(name, steps):
     - `fill`, a `count` and a `deadline`: an entry taken for each id from 0 to the count less one, in
       that order, each with one schedule of the id for the deadline plus the id.
     - `empty`, a `count`: one entry taken, which cancels each id from 0 to the count less one.
-    - `history`: the service begins to read history, and holds everything back from its member.
-    - `refresh`: the service sends every pending timer again, as it does when it has read its
-      history and at each timer refresh interval after.
+    - `history`: the service begins to read history: it holds everything back from its member, and
+      forgets the cancels it held for it.
+    - `history-ends`: the service has read its history, and sends every pending timer.
+    - `refresh`: a timer refresh interval has passed, and the service sends every pending timer
+      again; nothing while it reads history.
 
     A step with `stream` false is one the consensus module stream takes no message after: what the
     service has to tell stays, and is told after a later step.
@@ -1158,8 +1160,9 @@ def timers(name, steps):
     refused, or how many of a fill's were; `handed`, for an event; `pending`, the timers in the rising
     order of their ids, or `pending_count` when more than eight are pending; `words`, what the stream
     took after the step, in order, each a `cancel` of an id or a `schedule` of an id with a deadline,
-    or `words_count` when more than eight; and `cancels_dropped`, when the step dropped cancels that
-    were held for the member."""
+    or, when more than eight, `words_count` and the first two of them as `words_first`; and
+    `cancels_dropped`, when the step dropped cancels that were held for the member. A step with
+    `stream` false has neither `words` nor `words_count`."""
     pending, unsent, cancels, held, out = {}, set(), [], False, []
 
     def call(made, refused):
@@ -1244,9 +1247,12 @@ def timers(name, steps):
         elif op == "history":
             held = True
             cancels.clear()
-        elif op == "refresh":
+        elif op == "history-ends":
             held = False
             unsent.update(pending)
+        elif op == "refresh":
+            if not held:
+                unsent.update(pending)
         else:
             raise AssertionError(op)
         if dropped:
@@ -1264,6 +1270,7 @@ def timers(name, steps):
                 unsent.clear()
             if len(words) > 8:
                 fields["words_count"] = len(words)
+                fields["words_first"] = words[:2]
             else:
                 fields["words"] = words
         out.append(dict(step, fields=fields))
@@ -1356,8 +1363,10 @@ VECTORS += [
             entry(schedule(MAX_SERVICE_TIMERS + 1, TS))]),
     # While a program handles a timer's event the timer still counts toward the bound: a schedule of
     # another id there is refused, and one made once the event is taken is not.
+    # So does a timer that its own handler cancelled.
     timers("timers-at-the-bound-inside-a-handler",
-           [FILL, event(3, TS + 3, schedule(-1, TS)), entry(schedule(-1, TS))]),
+           [FILL, event(3, TS + 3, schedule(-1, TS)), entry(schedule(-1, TS)),
+            event(4, TS + 4, cancel(4), schedule(-2, TS)), entry(schedule(-2, TS))]),
     # At the bound, an entry that is refused a schedule, cancels another timer and is not taken is
     # refused the same schedule when it is handed the entry again: the cancel did not stand.
     timers("timers-at-the-bound-entry-not-taken",
@@ -1376,11 +1385,12 @@ VECTORS += [
            [FILL, {"op": "empty", "count": MAX_UNSENT_TIMER_CANCELS, "stream": False},
             entry(schedule(0, TS), schedule(1, TS), stream=False),
             entry(cancel(0), stream=False), entry(cancel(1), stream=False), entry()]),
-    # A service that reads history tells its member nothing, and at the end of it every pending timer.
+    # A service that reads history tells its member nothing, at a refresh neither, forgets the
+    # cancel it held, and at the end of its history sends every pending timer.
     timers("timers-history",
-           [entry(schedule(1, TS + 100), schedule(2, TS + 200)), {"op": "history"},
-            entry(schedule(3, TS + 300), cancel(1)), event(2, TS + 200), event(9, TS),
-            {"op": "refresh"}, entry(cancel(3))]),
+           [entry(schedule(1, TS + 100), schedule(2, TS + 200)), entry(cancel(1), stream=False),
+            {"op": "history"}, entry(schedule(3, TS + 300)), event(2, TS + 200), event(9, TS),
+            {"op": "refresh"}, {"op": "history-ends"}, entry(cancel(3))]),
     # Every pending timer again at a refresh, whatever the member was sent before: a timer the stream
     # has not taken yet is sent once, with the deadline it has then.
     timers("timers-refresh",

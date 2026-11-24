@@ -49,7 +49,8 @@ event for a timer whose deadline its clock has reached. What the member holds is
 soft state, in no snapshot, and the service sends it every pending timer again
 each second, so that nothing the member lacks or holds wrongly lasts longer. The
 service's snapshot holds its timers. This is version 2 of
-`spec/cluster.md`, 0.2.0, which adds and changes nothing of version 1. In detail:
+`spec/cluster.md`, 0.2.0, which adds to version 1 and changes nothing of it. In
+detail:
 
 1. **A service holds the pending timers**, each a correlation id and a deadline in
    the cluster's time. Its program schedules and cancels from inside its handling
@@ -191,15 +192,17 @@ position 0 is the log's first new leadership term event.
   event's timer, one below it and one above; an entry that is not taken; three at
   the bound of 1,024, one of them the refused schedule, the cancel and the entry
   not taken that the first form got wrong; a stream that takes nothing; the
-  cancels held at their bound; a service that reads history; and a refresh.
+  cancels held at their bound; a service that reads history, with a cancel held
+  and a refresh inside it; and a refresh.
   `crates/cavalry-proto/tests/cluster_conformance.rs` runs every one against
   `ServiceTimers`, which holds the table in itself and allocates nothing.
 - `crates/cavalry-proto/tests/cluster_timers.rs` runs `ServiceTimers` against a
   second reading of the rule, a model over a map, under seeded calls: 8 seeds of
   4,000 handlings over nine ids and 8 of 600 with the table one short of its
-  bound, the two compared after every handling and after every word the stream
-  takes. Its first run found that the table told its member of earlier entries
-  while a handler ran, until the handler's first change.
+  bound, with refreshes between handlings and inside them, the two compared after
+  every handling and after the words the stream then takes. Its first run found
+  that the table told its member of earlier entries while a handler ran, until
+  the handler's first change.
 - A seeded search in memory, run before this ADR's first review, in the pattern of
   `crates/cavalry-raft/tests/lost_log_search.rs`. It is
   `crates/cavalry-raft/tests/timer_search.rs`, which lands in the change after this
@@ -234,10 +237,12 @@ position 0 is the log's first new leadership term event.
 - One seed of the 300, seed 23, ends with two members whose elections have not
   closed after 100 s with nothing cut, lost or late, and a leader that commits
   nothing. The search makes none of its last checks for such a seed, counts it,
-  and fails when more than one seed in twenty ends so. It is no timer's doing: a
-  timer event passes the checks of any entry a leader appends for itself. It is
-  noted on work item 420, with the seeds of earlier forms that left one member
-  out.
+  and fails when more than one seed in twenty ends so. That it is the cluster's
+  and no timer's is an argument and no run: a timer event passes the checks of
+  any entry a leader appends for itself, and what the search adds to the cluster
+  is a cut-off leader that goes on appending. It is noted on work item 420, with
+  the seeds of earlier forms that left one member out, and 420 is where it is
+  found out.
 - What the search changed in the rule. A service that started beside a running
   member and read its history told its member each old schedule on the way, and a
   leader appended an event for each: a service now tells its member nothing while
@@ -257,9 +262,7 @@ position 0 is the log's first new leadership term event.
   no failing run and are not there for one. With no resend at the end of history, the next
   refresh does it within a second. And a service that tells its member while it
   reads history costs entries that every service passes over, which the search
-  does not count against a seed; its one failing seed, seed 23, ended with two
-  members whose elections had not closed after 100 s with nothing cut or lost,
-  which is the cluster's and is noted on work item 420.
+  does not count against a seed.
 - The mutations are what took the second form out. With no answer to a
   passed-over event, with no resend when a member said it began again, and with
   no unmarking at an election's close, each in turn, seeds 1 to 60 of that form's
@@ -270,10 +273,15 @@ position 0 is the log's first new leadership term event.
   and keeps what its handler did: `timer-event-not-taken`. A timer that its own
   handler scheduled again for the deadline it had, told to the member only when
   the deadline changed: `timer-repeats-with-one-deadline`.
-- No measurement of latency: this change adds no code that a message passes
-  through. The member's check for a due timer is one compare in a duty cycle while
-  nothing has changed, and comes with the member's side, as does the one compare
-  of a clock's reading in each of a service's reads.
+- No measurement of latency: nothing calls the table at this change, so it adds no
+  code that a message passes through yet. What the table costs a service's reading
+  when the service's library calls it, in the change after this one: nothing for
+  an entry whose handler touches no timer; for one that does, a copy of the
+  pending timers at the handler's first change, 17 bytes for each and 17,408 at
+  the bound, a move of as much for a timer put in or taken out, and one pass over
+  both copies when the handling ends; and for a refresh one pass over the table,
+  once a second. The member's check for a due timer is one compare in a duty cycle
+  while nothing has changed. The changes that add the callers measure both.
 
 ## Consequences
 
@@ -282,8 +290,9 @@ position 0 is the log's first new leadership term event.
   service passes over: `cluster.service_timer_events_passed_over` counts them, and
   each costs 64 bytes of the log, a 32-byte frame header and the event.
 - A program that schedules a timer for a deadline already past from each handling
-  of that timer's event is handed an event in each of its leader's duty cycles,
-  and the log grows by 64 bytes for each. Nothing bounds that but the program.
+  of that timer's event is handed the next event as soon as its leader is told
+  and the event is committed and read, and the log grows by 64 bytes for each.
+  Nothing bounds that but the program.
 - Timers wait while no member leads, while the leader is of version 0 or 1, and
   while no service runs beside the leader, though a service runs beside every
   other member. Feature 4 (work item 364) decides when a leader steps down; a
@@ -311,6 +320,13 @@ position 0 is the log's first new leadership term event.
   with `cluster.timer_events`.
 - A member holds timers that are pending in no service, marked, until their places
   are needed: `cluster.timers` may be above `cluster.service_timers`.
+- This change is the page, the vectors, the codecs and the service's table. A
+  member of this build writes version 2 and holds no timer yet, and no service has
+  the calls: the member's table, the leader's events, the counters of the page's
+  "Counters", the `cavalry doctor` finding for a leader with no service beside it
+  and the service's library land in the change after this one, with the search.
+  Until then no program can schedule a timer, so nothing of version 2 can be
+  asked of a member that it does not do.
 - The C ABI moves to version 7 with the two calls and the entry kind, in an ADR of
   its own, and the five clients follow.
 - Revisit: when a service runs in a process that its member starts, for the member

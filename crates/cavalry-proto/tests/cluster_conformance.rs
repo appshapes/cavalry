@@ -526,6 +526,7 @@ fn timers_vector(name: &str, vector: &Value) {
                 }
             }
             "history" => timers.hold(),
+            "history-ends" => timers.release(),
             "refresh" => timers.tell_all_again(),
             other => panic!("{at}: unknown op {other}"),
         }
@@ -569,12 +570,18 @@ fn timers_vector(name: &str, vector: &Value) {
             }
             if let Some(count) = fields.get("words_count") {
                 assert_eq!(Value::from(words.len()), *count, "{at}: words count");
+                let first: Vec<Value> = words.iter().take(2).cloned().collect();
+                assert_eq!(
+                    Value::Array(first),
+                    fields["words_first"],
+                    "{at}: first words"
+                );
             } else {
                 assert_eq!(Value::Array(words), fields["words"], "{at}: words");
             }
         } else {
             assert!(
-                fields.get("words").is_none(),
+                fields.get("words").is_none() && fields.get("words_count").is_none(),
                 "{at}: a stream that takes nothing"
             );
         }

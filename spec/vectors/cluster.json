@@ -6789,7 +6789,17 @@
           "fields": {
             "refused": 0,
             "pending_count": 1024,
-            "words_count": 1024
+            "words_count": 1024,
+            "words_first": [
+              {
+                "schedule": 0,
+                "deadline": 1793600000000
+              },
+              {
+                "schedule": 1,
+                "deadline": 1793600000001
+              }
+            ]
           }
         },
         {
@@ -6946,7 +6956,17 @@
           "fields": {
             "refused": 0,
             "pending_count": 1024,
-            "words_count": 1024
+            "words_count": 1024,
+            "words_first": [
+              {
+                "schedule": 0,
+                "deadline": 1793600000000
+              },
+              {
+                "schedule": 1,
+                "deadline": 1793600000001
+              }
+            ]
           }
         },
         {
@@ -6994,6 +7014,56 @@
               }
             ]
           }
+        },
+        {
+          "op": "event",
+          "id": 4,
+          "timestamp": 1793600000004,
+          "calls": [
+            {
+              "call": "cancel",
+              "id": 4
+            },
+            {
+              "call": "schedule",
+              "id": -2,
+              "deadline": 1793600000000
+            }
+          ],
+          "fields": {
+            "handed": true,
+            "refused": [
+              true
+            ],
+            "pending_count": 1023,
+            "words": [
+              {
+                "cancel": 4
+              }
+            ]
+          }
+        },
+        {
+          "op": "entry",
+          "calls": [
+            {
+              "call": "schedule",
+              "id": -2,
+              "deadline": 1793600000000
+            }
+          ],
+          "fields": {
+            "refused": [
+              false
+            ],
+            "pending_count": 1024,
+            "words": [
+              {
+                "schedule": -2,
+                "deadline": 1793600000000
+              }
+            ]
+          }
         }
       ]
     },
@@ -7008,7 +7078,17 @@
           "fields": {
             "refused": 0,
             "pending_count": 1024,
-            "words_count": 1024
+            "words_count": 1024,
+            "words_first": [
+              {
+                "schedule": 0,
+                "deadline": 1793600000000
+              },
+              {
+                "schedule": 1,
+                "deadline": 1793600000001
+              }
+            ]
           }
         },
         {
@@ -7294,7 +7374,17 @@
           "fields": {
             "refused": 0,
             "pending_count": 1024,
-            "words_count": 1024
+            "words_count": 1024,
+            "words_first": [
+              {
+                "schedule": 0,
+                "deadline": 1793600000000
+              },
+              {
+                "schedule": 1,
+                "deadline": 1793600000001
+              }
+            ]
           }
         },
         {
@@ -7375,7 +7465,15 @@
           "calls": [],
           "fields": {
             "pending": [],
-            "words_count": 1024
+            "words_count": 1024,
+            "words_first": [
+              {
+                "cancel": 2
+              },
+              {
+                "cancel": 3
+              }
+            ]
           }
         }
       ]
@@ -7426,13 +7524,27 @@
           }
         },
         {
-          "op": "history",
+          "op": "entry",
+          "calls": [
+            {
+              "call": "cancel",
+              "id": 1
+            }
+          ],
+          "stream": false,
           "fields": {
             "pending": [
               {
-                "id": 1,
-                "deadline": 1793600000100
-              },
+                "id": 2,
+                "deadline": 1793600000200
+              }
+            ]
+          }
+        },
+        {
+          "op": "history",
+          "fields": {
+            "pending": [
               {
                 "id": 2,
                 "deadline": 1793600000200
@@ -7448,10 +7560,6 @@
               "call": "schedule",
               "id": 3,
               "deadline": 1793600000300
-            },
-            {
-              "call": "cancel",
-              "id": 1
             }
           ],
           "fields": {
@@ -7503,6 +7611,18 @@
         },
         {
           "op": "refresh",
+          "fields": {
+            "pending": [
+              {
+                "id": 3,
+                "deadline": 1793600000300
+              }
+            ],
+            "words": []
+          }
+        },
+        {
+          "op": "history-ends",
           "fields": {
             "pending": [
               {
