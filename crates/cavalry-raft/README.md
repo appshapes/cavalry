@@ -78,6 +78,17 @@ commit path runs per message.
   leadership term says in `is startup` whether its leader leads it from its first
   election since it started (ADR 0089). The consensus module builds its core so, with a
   seed from the operating system mixed with the member id (ADR 0104).
+- Holds the member's log directory for the module's life (ADR 0152). At its start,
+  before it reads or writes `terms`, `log-recordings` or `snapshots`, the module
+  takes an exclusive advisory lock of the operating system on the directory itself,
+  tried once. The operating system drops it when the module's process ends, however
+  it ends, so a member whose process was killed starts again at once. A second module
+  on the directory, of any member id and in any process, is refused with
+  `RaftError::LogDirectoryHeld`, `log-directory-held`, and writes nothing; a
+  filesystem that refuses the lock gives `RaftError::LogDirectoryLock`. The driver's
+  own lock is on the catalog, so the two never meet. A start whose `terms` file is
+  gone beside its other files, with no log, starts with its log empty, which ADR
+  0145's rule keeps from a second vote; with a log it is `terms-lost`.
 - Starts a member on the log directory it kept (ADR 0108). The module lists the
   recordings that hold the member's log in the file `log-recordings` in its log
   directory, each write synced, and counts a recording toward the append position
