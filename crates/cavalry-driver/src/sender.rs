@@ -174,12 +174,22 @@ pub(crate) enum Request {
     /// once the sender position reaches the end, answers NAKs through the linger, and
     /// answers with [`Reply::Closed`] when the linger passes, or on a channel with an
     /// endpoint when a status message with the end of stream flag arrives first (ADR
-    /// 0054).
+    /// 0054), or when the conductor ends the linger with [`Request::EndLinger`] (ADR
+    /// 0153).
     Close {
         /// The publication.
         registration_id: i64,
         /// The end of stream position the conductor stored.
         end_of_stream_position: i64,
+    },
+    /// The linger of a closed publication ends now, as at its end (`spec/udp.md`, "The
+    /// sender"; ADR 0153): an `add subscription` on this driver needs the address the
+    /// publication's control socket holds, and every publication on that endpoint is
+    /// closed. Answered with [`Reply::Closed`] on this cycle's sweep; a publication not
+    /// closed, or one the sender no longer holds, is left as it is.
+    EndLinger {
+        /// The publication.
+        registration_id: i64,
     },
     /// The recording a publication on a channel that names `ssc=true` follows while no
     /// receiver answers, or none once that recording has stopped (`spec/udp.md`, "The
@@ -349,8 +359,12 @@ struct Live {
     closing: Option<(i64, i64)>,
     /// A status message with the end of stream flag arrived after the close, on a
     /// channel with an endpoint; never set on a control channel, whose publication
-    /// lingers for the linger timeout (ADR 0054).
+    /// lingers for the linger timeout (ADR 0054) unless the conductor ends it (ADR
+    /// 0153).
     end_of_stream_acknowledged: bool,
+    /// The conductor ended the linger after the close, for a subscription that needs the
+    /// control address (ADR 0153).
+    linger_ended: bool,
     /// A frame to send met no window: `sender.flow_control_limited` counts the entry.
     limited: bool,
     /// The channel's `fc`: how the sender limit moves on status messages (ADR 0053).
@@ -931,6 +945,7 @@ impl Sender {
                     retransmit: None,
                     closing: None,
                     end_of_stream_acknowledged: false,
+                    linger_ended: false,
                     limited: false,
                     flow_control: add.flow_control,
                     receivers: add.receiver_table,
@@ -960,6 +975,16 @@ impl Sender {
                     // ended: closed at once, so the conductor's close completes, as a
                     // remove of an endpoint it does not hold is answered.
                     None => self.reply(Reply::Closed { registration_id }),
+                }
+            }
+            Request::EndLinger { registration_id } => {
+                if let Some(live) = self
+                    .live
+                    .iter_mut()
+                    .find(|live| live.registration_id == registration_id)
+                    && live.closing.is_some()
+                {
+                    live.linger_ended = true;
                 }
             }
             Request::Follow {
@@ -1527,9 +1552,12 @@ impl Sender {
         }
 
         // 6. The end of the linger: the linger timeout since the close, or on a channel
-        //    with an endpoint a status message with the end of stream flag (ADR 0054).
+        //    with an endpoint a status message with the end of stream flag (ADR 0054),
+        //    or the conductor's end of it for a subscription on the control address
+        //    (ADR 0153).
         if let Some((_, closed_at)) = live.closing
             && (live.end_of_stream_acknowledged
+                || live.linger_ended
                 || now.saturating_sub(closed_at) >= spec::nanos(LINGER))
             && self.pending.len() < PENDING_REPLIES
         {

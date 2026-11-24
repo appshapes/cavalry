@@ -161,7 +161,9 @@ The daemon: conductor, sender, receiver and idle strategies. Data plane.
   among them, a receiver dropped after 5 s without a status message (ADR 0053). A
   control channel's closed publication lingers for the linger timeout, 5 s, whatever a
   destination's status message says, since one destination's end of stream says
-  nothing of another's, which may still be NAKing the tail (ADR 0054); a receiver
+  nothing of another's, which may still be NAKing the tail (ADR 0054), unless a
+  subscription on the same driver needs its control address, when the conductor ends
+  it (ADR 0153); a receiver
   whose stream ended stays in a closed publication's `min` table until the linger
   ends, so that `sender.flow_control_receivers` still counts it (ADR 0056). Every
   step has its counter, `sender.*`, `publication.connected` and
@@ -181,7 +183,13 @@ The daemon: conductor, sender, receiver and idle strategies. Data plane.
   closing endpoint wait, 5 s, a receiver starved that long or a retired image's
   recording not yet stopped, its recorder behind, is code 4 with nothing registered,
   the message naming both causes and what to do for each, counted in
-  `subscription.add_deferred_timed_out` (ADR 0049, ADR 0068); a setup
+  `subscription.add_deferred_timed_out` (ADR 0049, ADR 0068). An add whose endpoint
+  is the control address of a send endpoint on the driver, every publication on it
+  closed, waits the same way: the conductor ends those publications' linger, counted
+  in `subscription.lingers_ended`, and the add binds the address once the sender has
+  dropped the socket, so a cluster member that led follows another leader at once on
+  its own `log` endpoint; while a publication on it is open, the add is code 4 with a
+  message that names that publication's channel (ADR 0153). A setup
   frame for that stream goes back to the
   conductor, which creates the image, a log of type 2 under `images/` at the position
   the setup names with a registration id of its own, allocates its two counters and a
