@@ -112,15 +112,53 @@ struct Member {
 fn start_member(dir: &Path, members: &str, id: i32) -> Member {
     let driver_dir = dir.join(format!("member-{id}"));
     let log_dir = dir.join(format!("member-{id}-log"));
-    let driver = Driver::start(&driver_dir, &log_dir).expect("the driver starts");
-    let module = ConsensusModule::start(&driver_dir, &log_dir, members, id)
-        .expect("the member starts, on a new log directory or on the one it kept");
+    let driver = timed(&format!("member {id}: Driver::start"), || {
+        Driver::start(&driver_dir, &log_dir).expect("the driver starts")
+    });
+    let module = timed(&format!("member {id}: ConsensusModule::start"), || {
+        ConsensusModule::start(&driver_dir, &log_dir, members, id)
+            .expect("the member starts, on a new log directory or on the one it kept")
+    });
     Member {
         driver,
         module,
         dir: driver_dir,
         log_dir,
     }
+}
+
+thread_local! {
+    /// When this test's members last ran a round of duty cycles.
+    static LAST_ROUND: std::cell::Cell<Option<Instant>> = const { std::cell::Cell::new(None) };
+}
+
+/// Notes a round of the members' duty cycles, and says on standard error when the
+/// members stood still for a second or more before it: one thread drives them all,
+/// so a step of the test that waits, a start, a stop, a replay, a snapshot, stops
+/// every member, and the cluster's timeouts are of real time.
+fn round() {
+    LAST_ROUND.with(|last| {
+        let now = Instant::now();
+        if let Some(before) = last.replace(Some(now))
+            && now.duration_since(before) >= Duration::from_secs(1)
+        {
+            eprintln!(
+                "446: the members stood still for {:?}",
+                now.duration_since(before)
+            );
+        }
+    });
+}
+
+/// Runs `step`, and says on standard error how long it took when that is 200 ms or
+/// more.
+fn timed<T>(what: &str, step: impl FnOnce() -> T) -> T {
+    let began = Instant::now();
+    let out = step();
+    if began.elapsed() >= Duration::from_millis(200) {
+        eprintln!("446: {what} took {:?}", began.elapsed());
+    }
+    out
 }
 
 /// Drives every member's duty cycle until `done`, or fails with `what`.
@@ -137,6 +175,7 @@ fn run_until(members: &mut [Member], what: &str, mut done: impl FnMut(&[Member])
                 .collect::<Vec<_>>(),
             describe(members)
         );
+        round();
         let mut work = 0;
         for member in members.iter_mut() {
             work += member.module.do_work().expect("the member's duty cycle");
@@ -1376,8 +1415,12 @@ fn snapshot_everywhere(members: &mut [Member]) -> i64 {
 /// Stops `member`, its module and then its driver, and gives back its id.
 fn stop(member: Member) -> i32 {
     let id = member.module.member_id();
-    member.module.close().expect("the member closes");
-    member.driver.close().expect("the driver closes");
+    timed(&format!("member {id}: module close"), || {
+        member.module.close().expect("the member closes");
+    });
+    timed(&format!("member {id}: driver close"), || {
+        member.driver.close().expect("the driver closes");
+    });
     id
 }
 
@@ -1389,6 +1432,7 @@ fn purge(dir: &Path, id: i32, recording_id: i64) {
 
 /// [`purge`] for several recordings, with one driver.
 fn purge_each(dir: &Path, id: i32, recording_ids: &[i64]) {
+    let began = Instant::now();
     let driver_dir = dir.join(format!("member-{id}"));
     let log_dir = dir.join(format!("member-{id}-log"));
     let driver =
@@ -1401,6 +1445,9 @@ fn purge_each(dir: &Path, id: i32, recording_ids: &[i64]) {
     }
     client.close().expect("the client closes");
     driver.close().expect("the driver closes");
+    if began.elapsed() >= Duration::from_millis(200) {
+        eprintln!("446: member {id}: purge_each took {:?}", began.elapsed());
+    }
 }
 
 /// Where the recordings a member's record names divide at `position`: the index of
@@ -1853,10 +1900,11 @@ impl Service {
     /// The program gives the service its state for the snapshot that is due at
     /// `position`.
     fn give(&mut self, position: i64) {
-        let taken = self
-            .service
-            .snapshot(&mut self.client, &self.state)
-            .expect("the service's snapshot");
+        let taken = timed(&format!("member {}: a service's snapshot", self.id), || {
+            self.service
+                .snapshot(&mut self.client, &self.state)
+                .expect("the service's snapshot")
+        });
         self.taken.push((position, taken));
     }
 
@@ -1892,6 +1940,7 @@ fn run_with_services(
                 .map(|m| format!("{:?} {:?}", m.module, m.module.service_snapshot_counts()))
                 .collect::<Vec<_>>()
         );
+        round();
         let mut work = 0;
         for member in members.iter_mut() {
             work += member.module.do_work().expect("the member's duty cycle");
@@ -2882,7 +2931,8 @@ fn a_member_and_its_service_start_from_their_snapshots_on_a_log_purged_below_the
         describe(&members)
     );
     members.push(again);
-    assert_eq!(run_until_settled(&mut members, end), end);
+    let settled = run_until_settled(&mut members, end);
+    assert_eq!(settled, end, "{}", describe(&members));
     let (service, restored) = Service::restored_beside(&members[2]);
     assert_eq!(restored, Restored::State(entries(4)));
     assert_eq!(service.service.position(), position);
