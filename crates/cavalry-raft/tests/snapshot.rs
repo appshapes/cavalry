@@ -30,6 +30,11 @@ use cavalry_raft::{
 };
 use cavalry_shm::counters::CountersReader;
 use cavalry_shm::counters::generated::{
+    CLUSTER_ELECTION_CAUSE, CLUSTER_ELECTIONS, CLUSTER_ELECTIONS_CLOSED, CLUSTER_ELECTIONS_FAILED,
+    CLUSTER_LEADER_HEARTBEAT_TIMEOUTS, CLUSTER_LEADER_QUORUM_LOSSES, CLUSTER_LEADER_STEP_DOWNS,
+    CLUSTER_SESSIONS_TIMED_OUT,
+};
+use cavalry_shm::counters::generated::{
     CLUSTER_LOG_PURGE_POSITION, CLUSTER_MESSAGES_REJECTED, CLUSTER_SERVICE_ACKS_REJECTED,
     CLUSTER_SERVICE_SNAPSHOT_POSITION, CLUSTER_SERVICE_SNAPSHOT_RECORDING_ID,
     CLUSTER_SERVICE_SNAPSHOT_START_POSITION, CLUSTER_SERVICE_SNAPSHOTS_FAILED,
@@ -125,11 +130,12 @@ fn run_until(members: &mut [Member], what: &str, mut done: impl FnMut(&[Member])
         keep_sessions_alive(members);
         assert!(
             Instant::now() < deadline,
-            "{what}: {:?}",
+            "{what}: {:?}; {}",
             members
                 .iter()
                 .map(|m| format!("{:?} {:?}", m.module, m.module.snapshot_counts()))
-                .collect::<Vec<_>>()
+                .collect::<Vec<_>>(),
+            describe(members)
         );
         let mut work = 0;
         for member in members.iter_mut() {
@@ -236,10 +242,39 @@ fn offer_entries(members: &mut [Member], from: i64, count: i64) {
                         member.module.do_work().expect("the member's duty cycle");
                     }
                 }
-                Err(other) => panic!("{other}"),
+                Err(other) => panic!("{other}: {}", describe(members)),
             }
         }
     }
+}
+
+/// What each member says of itself and of its elections, for a failure's message:
+/// its role, its election's state, its term and its positions, and the counters
+/// that say why it last held an election (`spec/cluster.md`, "Counters").
+fn describe(members: &[Member]) -> String {
+    members
+        .iter()
+        .map(|member| {
+            format!(
+                "{:?} elections {} closed {} failed {} cause {} heartbeat timeouts {} quorum \
+                 losses {} step downs {} sessions timed out {} snapshots {:?}",
+                member.module,
+                counter(member, CLUSTER_ELECTIONS.0),
+                counter(member, CLUSTER_ELECTIONS_CLOSED.0),
+                counter(member, CLUSTER_ELECTIONS_FAILED.0),
+                counter(member, CLUSTER_ELECTION_CAUSE.0),
+                counter(member, CLUSTER_LEADER_HEARTBEAT_TIMEOUTS.0),
+                counter(member, CLUSTER_LEADER_QUORUM_LOSSES.0),
+                counter(member, CLUSTER_LEADER_STEP_DOWNS.0),
+                counter(member, CLUSTER_SESSIONS_TIMED_OUT.0),
+                listed(member)
+                    .iter()
+                    .map(|entry| (entry.service_id, entry.log_position))
+                    .collect::<Vec<_>>(),
+            )
+        })
+        .collect::<Vec<_>>()
+        .join("; ")
 }
 
 /// The leader, `members[0]`, asks for a snapshot, a back-pressured ask made again once
@@ -2839,7 +2874,13 @@ fn a_member_and_its_service_start_from_their_snapshots_on_a_log_purged_below_the
     // The member starts from its snapshot, on the log that is left, and its service
     // from its own: the program is given its state at the snapshot's position.
     let again = start_member(dir.path(), &members_string, id);
-    assert_eq!(again.module.session_log_position(), position);
+    assert_eq!(
+        again.module.session_log_position(),
+        position,
+        "the member that started again: {}; the two that ran on: {}; the log ended at {end}",
+        describe(std::slice::from_ref(&again)),
+        describe(&members)
+    );
     members.push(again);
     assert_eq!(run_until_settled(&mut members, end), end);
     let (service, restored) = Service::restored_beside(&members[2]);
