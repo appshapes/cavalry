@@ -3,10 +3,13 @@
 - **Status:** Accepted
 - **Date:** 2026-11-23
 - **Invariants affected:** 1, 2, 3, 4, 6
-- **Supersedes:** none. It does what ADR 0136's Revisit asks of the first version
-  that adds an entry, "for when a leader may use it", and rewrites one sentence of
-  `spec/cluster.md`, "Versions and the upgrade", that ADR 0136 wrote and ADR 0147
-  took by its letter. It takes `spec/cluster.md` from version 1 to version 2, 0.2.0.
+- **Supersedes:** one sentence of ADR 0136's decision, "Within a major no version
+  changes a layout, a template's id, an enumeration's values, a check of 'What a
+  reader rejects', or what an entry does to the state computed from the log",
+  which ADR 0147 took by its letter and point 8 below restates; the rest of ADR
+  0136 stands. It also does what ADR 0136's Revisit asks of the first version
+  that adds an entry, "for when a leader may use it", and takes `spec/cluster.md`
+  from version 1 to version 2, 0.2.0.
 
 ## Context
 
@@ -206,7 +209,7 @@ position 0 is the log's first new leadership term event.
   the handler's first change.
 - A seeded search in memory, run before this ADR's first review, in the pattern of
   `crates/cavalry-raft/tests/lost_log_search.rs`. It is
-  `crates/cavalry-raft/tests/timer_search.rs`, which lands in the change after this
+  `crates/cavalry-raft/tests/timer_search.rs`, which lands in a change after this
   one with the member's table it needs, and it was run from the branch that holds
   both. Three members of `cavalry_raft::memory::Cluster` under loss and delay, with
   members halted, cut from each other and started again, and a leader cut off from
@@ -276,7 +279,7 @@ position 0 is the log's first new leadership term event.
   the deadline changed: `timer-repeats-with-one-deadline`.
 - No measurement of latency: nothing calls the table at this change, so it adds no
   code that a message passes through yet. What the table costs a service's reading
-  when the service's library calls it, in the change after this one: nothing for
+  when the service's library calls it, in a change after this one: nothing for
   an entry that is no timer event and whose handler touches no timer, and nothing
   for an event that is passed over; for an event that is handed over to a handler
   that touches no timer, the move of the timers above its own, 17 bytes for each;
@@ -329,7 +332,7 @@ position 0 is the log's first new leadership term event.
   member of this build writes version 2 and holds no timer yet, and no service has
   the calls: the member's table, the leader's events, the counters of the page's
   "Counters", the `cavalry doctor` finding for a leader with no service beside it
-  and the service's library land in the change after this one, with the search.
+  and the service's library land in the changes after this one, with the search.
   In a cluster of this build alone no program can schedule a timer. Beside
   members of a later build, a member of this build that leads appends no timer
   event, so timers wait while it leads, as they do under a leader of version 1,
