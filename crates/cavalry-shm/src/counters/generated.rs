@@ -299,13 +299,13 @@ pub const IMAGE_UNSUBSCRIBED: CounterId = CounterId(96);
 /// `image.removed`, a static counter: Retired images whose log the conductor unlinked after unavailable image went to the subscriptions that remained and their counters were freed (spec/udp.md, The receiver, step 5).
 pub const IMAGE_REMOVED: CounterId = CounterId(97);
 
-/// `subscription.add_deferred`, a static counter: `add subscription` commands on a `cavalry:udp` channel whose previous receive endpoint had lost its last subscription and had not yet closed, its images still being retired or its socket still with the receiver, held with nothing registered until the receiver closed it and then run as if they had just arrived (spec/client-protocol.md, Commands; ADR 0049; ADR 0068).
+/// `subscription.add_deferred`, a static counter: `add subscription` commands on a `cavalry:udp` channel whose previous receive endpoint had lost its last subscription and had not yet closed, its images still being retired or its socket still with the receiver, or whose endpoint was the control address of a send endpoint whose publications were all closed, held with nothing registered until the receiver or the sender closed the socket and then run as if they had just arrived (spec/client-protocol.md, Commands; ADR 0049; ADR 0068; ADR 0153).
 pub const SUBSCRIPTION_ADD_DEFERRED: CounterId = CounterId(98);
 
-/// `subscription.add_deferred_timed_out`, a static counter: `add subscription` commands that waited the closing endpoint wait, 5 s, for a `cavalry:udp` channel's previous receive endpoint to close, its images still being retired or its socket still with the receiver, and were answered with code 4, with nothing registered; the close that came later ran nothing for them (spec/client-protocol.md, Commands, Liveness and timeouts; ADR 0049; ADR 0068).
+/// `subscription.add_deferred_timed_out`, a static counter: `add subscription` commands that waited the closing endpoint wait, 5 s, for a `cavalry:udp` channel's previous receive endpoint to close, its images still being retired or its socket still with the receiver, or for a closed publication's control socket on the endpoint's address to go with the sender, and were answered with code 4, with nothing registered; the close that came later ran nothing for them (spec/client-protocol.md, Commands, Liveness and timeouts; ADR 0049; ADR 0068; ADR 0153).
 pub const SUBSCRIPTION_ADD_DEFERRED_TIMED_OUT: CounterId = CounterId(99);
 
-/// `subscription.add_deferred_waiting`, a static gauge: `add subscription` commands waiting now for a `cavalry:udp` channel's previous receive endpoint to close, each holding a slot of the subscriptions registry until the close runs it, its client goes or the closing endpoint wait refuses it (spec/client-protocol.md, Commands, Sizes; ADR 0049).
+/// `subscription.add_deferred_waiting`, a static gauge: `add subscription` commands waiting now for a `cavalry:udp` channel's previous receive endpoint to close, or for a closed publication's control socket on the endpoint's address to go, each holding a slot of the subscriptions registry until the close runs it, its client goes, a publication opening on that address refuses it, or the closing endpoint wait refuses it (spec/client-protocol.md, Commands, Sizes; ADR 0049; ADR 0153).
 pub const SUBSCRIPTION_ADD_DEFERRED_WAITING: CounterId = CounterId(100);
 
 /// `sender.flow_control_receivers_timed_out`, a static counter: Receivers dropped from a min publication's table for no status message within the flow control receiver timeout, 5 s; one dropped because its last status message carried end of stream, as every receiver's does after a clean close, is not counted; the sender limit then follows the slowest of the receivers that remain (spec/udp.md, The sender; ADR 0053, ADR 0054).
@@ -568,6 +568,9 @@ pub const CLUSTER_TRUNCATIONS_FAULTED: CounterId = CounterId(187);
 
 /// `cluster.truncation_owed`, a client gauge: The position one cluster member owes a truncation of its log to, -1 while it owes none: a truncation on a new leader's word whose command or write faulted after the member's recordings began to be cut, cluster.truncations_faulted. While it is at or above 0 the member does not nominate itself, reads a new leadership term only once the truncation has finished, and asks for the truncation again each duty cycle. A member started again owes none (spec/cluster.md, Messages during an election; ADR 0148). key and label as cluster.elections.
 pub const CLUSTER_TRUNCATION_OWED: CounterId = CounterId(188);
+
+/// `subscription.lingers_ended`, a static counter: Closed `cavalry:udp` publications whose linger the driver ended before its time, because an `add subscription` on this driver named as its endpoint the control address their send endpoint's socket held, with every publication on that endpoint closed: the add waits, as subscription.add_deferred counts it, until the socket is gone, and then binds the address (spec/udp.md, The sender, The receiver; ADR 0153). A cluster member that led and now follows another leader does this on its own log endpoint.
+pub const SUBSCRIPTION_LINGERS_ENDED: CounterId = CounterId(189);
 
 /// Every entry of `counters.toml`, in the file's order.
 pub const COUNTERS: &[CounterDef] = &[
@@ -1360,7 +1363,7 @@ pub const COUNTERS: &[CounterDef] = &[
         name: "subscription.add_deferred",
         kind: Kind::Counter,
         scope: Scope::Static,
-        doc: "`add subscription` commands on a `cavalry:udp` channel whose previous receive endpoint had lost its last subscription and had not yet closed, its images still being retired or its socket still with the receiver, held with nothing registered until the receiver closed it and then run as if they had just arrived (spec/client-protocol.md, Commands; ADR 0049; ADR 0068).",
+        doc: "`add subscription` commands on a `cavalry:udp` channel whose previous receive endpoint had lost its last subscription and had not yet closed, its images still being retired or its socket still with the receiver, or whose endpoint was the control address of a send endpoint whose publications were all closed, held with nothing registered until the receiver or the sender closed the socket and then run as if they had just arrived (spec/client-protocol.md, Commands; ADR 0049; ADR 0068; ADR 0153).",
         doctor: "",
     },
     CounterDef {
@@ -1368,15 +1371,15 @@ pub const COUNTERS: &[CounterDef] = &[
         name: "subscription.add_deferred_timed_out",
         kind: Kind::Counter,
         scope: Scope::Static,
-        doc: "`add subscription` commands that waited the closing endpoint wait, 5 s, for a `cavalry:udp` channel's previous receive endpoint to close, its images still being retired or its socket still with the receiver, and were answered with code 4, with nothing registered; the close that came later ran nothing for them (spec/client-protocol.md, Commands, Liveness and timeouts; ADR 0049; ADR 0068).",
-        doctor: "A channel's previous receive endpoint did not close within 5 s of an add on it, its images still being retired or its socket still with the receiver, so the add was refused with code 4. If a recording of one of its images had not yet stopped, the image's log was kept until the recorder had written up to where the image stopped, and a recording.position that does not move is a recorder behind a slow or failing disk: check recording.write_failed and the log directory's disk with `cavalry doctor`, or stop the recording before removing the stream's last subscription. Otherwise the driver's receiver thread is behind, starved of CPU under a cgroup quota or busy: give the driver's threads the CPU they need. Then add the subscription again.",
+        doc: "`add subscription` commands that waited the closing endpoint wait, 5 s, for a `cavalry:udp` channel's previous receive endpoint to close, its images still being retired or its socket still with the receiver, or for a closed publication's control socket on the endpoint's address to go with the sender, and were answered with code 4, with nothing registered; the close that came later ran nothing for them (spec/client-protocol.md, Commands, Liveness and timeouts; ADR 0049; ADR 0068; ADR 0153).",
+        doctor: "A channel's previous receive endpoint, or a closed publication's control socket on the endpoint's address, did not go within 5 s of an add on it, so the add was refused with code 4; the add's message says which. A receive endpoint stays while its images are being retired or its socket is with the receiver; a closed publication stays until a recording of it has stopped. If a recording had not yet stopped, the log was kept until the recorder had written up to its end, and a recording.position that does not move is a recorder behind a slow or failing disk: check recording.write_failed and the log directory's disk with `cavalry doctor`, or stop the recording first. Otherwise the driver's receiver or sender thread is behind, starved of CPU under a cgroup quota or busy: give the driver's threads the CPU they need. Then add the subscription again.",
     },
     CounterDef {
         id: SUBSCRIPTION_ADD_DEFERRED_WAITING,
         name: "subscription.add_deferred_waiting",
         kind: Kind::Gauge,
         scope: Scope::Static,
-        doc: "`add subscription` commands waiting now for a `cavalry:udp` channel's previous receive endpoint to close, each holding a slot of the subscriptions registry until the close runs it, its client goes or the closing endpoint wait refuses it (spec/client-protocol.md, Commands, Sizes; ADR 0049).",
+        doc: "`add subscription` commands waiting now for a `cavalry:udp` channel's previous receive endpoint to close, or for a closed publication's control socket on the endpoint's address to go, each holding a slot of the subscriptions registry until the close runs it, its client goes, a publication opening on that address refuses it, or the closing endpoint wait refuses it (spec/client-protocol.md, Commands, Sizes; ADR 0049; ADR 0153).",
         doctor: "",
     },
     CounterDef {
@@ -2074,5 +2077,13 @@ pub const COUNTERS: &[CounterDef] = &[
         scope: Scope::Client,
         doc: "The position one cluster member owes a truncation of its log to, -1 while it owes none: a truncation on a new leader's word whose command or write faulted after the member's recordings began to be cut, cluster.truncations_faulted. While it is at or above 0 the member does not nominate itself, reads a new leadership term only once the truncation has finished, and asks for the truncation again each duty cycle. A member started again owes none (spec/cluster.md, Messages during an election; ADR 0148). key and label as cluster.elections.",
         doctor: "This member is out of the log until a truncation of its log finishes: it neither leads, joins a log nor replicates a term, so the cluster tolerates one failed member fewer meanwhile. It asks for the truncation again at each duty cycle, so this lasts while the fault does: `cavalry run` prints the error for the member. Mend what the error names, a driver that does not answer or a log directory that refuses writes; or, when the member's cycles keep failing until `cavalry run` gives it up, start it again on the log directory it kept: its start makes that directory agree with itself, and the next leader asks for what the fault left uncut.",
+    },
+    CounterDef {
+        id: SUBSCRIPTION_LINGERS_ENDED,
+        name: "subscription.lingers_ended",
+        kind: Kind::Counter,
+        scope: Scope::Static,
+        doc: "Closed `cavalry:udp` publications whose linger the driver ended before its time, because an `add subscription` on this driver named as its endpoint the control address their send endpoint's socket held, with every publication on that endpoint closed: the add waits, as subscription.add_deferred counts it, until the socket is gone, and then binds the address (spec/udp.md, The sender, The receiver; ADR 0153). A cluster member that led and now follows another leader does this on its own log endpoint.",
+        doctor: "A subscription on this host took the control address of a publication its driver had closed, so that publication's linger was cut short: a receiver on another host that had not yet received the whole of the publication's tail got no more of it, neither what flow control had held back nor a retransmission, and saw its image end without it, as when the publisher stops. On a cluster member that stepped down and follows a new leader this is expected, since the new leader's log carries what the old one did not commit. Elsewhere, give the subscription an endpoint of its own, or close the publication 5 s, the linger, before the subscription is added.",
     },
 ];
