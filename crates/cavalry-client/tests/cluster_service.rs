@@ -1324,8 +1324,14 @@ fn a_poll_of_a_closed_client_is_the_clients_close_for_a_service_that_reads_its_l
             poll(&mut service, &mut client, &mut seen);
             !seen.entries.is_empty()
         });
+        let end = member.end;
         member.close();
         ends_on_the_clients_close(&mut service, &mut client);
-        assert_eq!(seen.entries.len(), 1, "round {round}");
+        assert_eq!(
+            service.position(),
+            end,
+            "round {round}: the entry taken before the close is taken"
+        );
+        assert_eq!(service.snapshot_due(), None, "round {round}");
     }
 }

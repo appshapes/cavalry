@@ -1325,6 +1325,8 @@ impl ClusterService {
     /// a program's loop needs no other look at its client: it ends on that error, as
     /// `crates/cavalry/examples/adder-service.rs` does. The entries the handler took
     /// before the close are taken: [`position`](Self::position) is after the last.
+    /// An error of another kind that a poll meets in the call in which its client
+    /// closes is reported as the close.
     pub fn poll<F>(
         &mut self,
         client: &mut Cavalry,
@@ -1334,6 +1336,8 @@ impl ClusterService {
     where
         F: FnMut(&Committed<'_>, &mut Replies<'_>) -> Action,
     {
+        // A program that reads on has let the snapshot go, whatever the poll finds.
+        self.due = None;
         let closed = |reason| ClusterError::Client(ClientError::Closed(reason));
         if let Some(reason) = client.closed() {
             return Err(closed(reason));
@@ -1356,8 +1360,6 @@ impl ClusterService {
     where
         F: FnMut(&Committed<'_>, &mut Replies<'_>) -> Action,
     {
-        // A program that reads on has let the snapshot go.
-        self.due = None;
         if self.log.is_none() {
             let Some(log) = client.committed_log(self.position)? else {
                 return Ok(0);

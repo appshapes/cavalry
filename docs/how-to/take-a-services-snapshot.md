@@ -53,7 +53,12 @@ are a service's `onTakeSnapshot` and the snapshot image of its `onStart`.
                total = int.from_bytes(state, "little")
            print(f"started at position {service.position()} with a total of {total}", flush=True)
            while True:
-               service.poll(on_entry, 10)
+               if service.poll(on_entry, 10) < 0:
+                   # The poll stopped. Code 102, CAVALRY_ERR_CLOSED, is the close of this
+                   # service's client, as when the member's driver stops.
+                   code, _, _ = service.fault()
+                   print(f"ended at position {service.position()} with a total of {total}: code {code}", flush=True)
+                   break
                # A poll that ended at the leader's request: the state as it is there.
                position = service.snapshot_due()
                if position is not None:
