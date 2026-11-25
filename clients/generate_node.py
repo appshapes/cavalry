@@ -1874,14 +1874,23 @@ class Subscription {
     check("cavalry_subscription_fault", addon.cavalry_subscription_fault(this.handle, f.buffer));
     return { code: f.int32("code"), sessionId: f.int32("session_id"), position: f.int64("position") };
   }
+  /** How many images the subscription has, or -1 where the ABI refuses the call: from inside
+   * a handler of this subscription's own poll, with CAVALRY_ERR_POLLING as the thread's
+   * error, and for a subscription that is closed. */
   imageCount() { return addon.cavalry_subscription_image_count(this.handle); }
   imageAtIndex(index) {
     const pointer = addon.cavalry_subscription_image_at_index(this.handle, index);
     return pointer === null ? null : new Image(pointer);
   }
+  /** Every image, valid until the next poll or close. Where the ABI refuses the count, from
+   * inside a handler of this subscription's own poll or for a subscription that is closed,
+   * it throws `CavalryError` with the ABI's code, CAVALRY_ERR_POLLING from inside the
+   * handler: a refusal is no empty array (README, "What it must never do"). */
   images() {
+    const count = this.imageCount();
+    if (count < 0) throw error("cavalry_subscription_image_count");
     const images = [];
-    for (let i = 0; i < this.imageCount(); i++) images.push(this.imageAtIndex(i));
+    for (let i = 0; i < count; i++) images.push(this.imageAtIndex(i));
     return images;
   }
   get isConnected() { return addon.cavalry_subscription_is_connected(this.handle); }

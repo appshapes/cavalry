@@ -1196,6 +1196,9 @@ class Subscription:
         return fault.code, fault.session_id, fault.position
 
     def image_count(self):
+        """How many images the subscription has, or -1 where the ABI refuses the call: from
+        inside a handler of this subscription's own poll, with `CAVALRY_ERR_POLLING` as
+        the thread's error, and for a subscription that is closed."""
         return self._abi.cavalry_subscription_image_count(self._handle)
 
     def image_at_index(self, index):
@@ -1203,7 +1206,15 @@ class Subscription:
         return Image(self._abi, pointer) if pointer else None
 
     def images(self):
-        return [self.image_at_index(i) for i in range(self.image_count())]
+        """Every image, valid until the next poll or close. Where the ABI refuses the
+        count, from inside a handler of this subscription's own poll or for a
+        subscription that is closed, it raises `CavalryError` with the ABI's code,
+        `CAVALRY_ERR_POLLING` from inside the handler: a refusal is no empty list
+        (README, "What it must never do")."""
+        count = self.image_count()
+        if count < 0:
+            raise _error(self._abi, "cavalry_subscription_image_count")
+        return [self.image_at_index(i) for i in range(count)]
 
     @property
     def is_connected(self):

@@ -1933,7 +1933,9 @@ func (s *Subscription) Fault() (code int32, sessionID int32, position int64, err
 	return int32(f.code), int32(f.session_id), int64(f.position), nil
 }
 
-// ImageCount is how many images the subscription has.
+// ImageCount is how many images the subscription has, or -1 where the ABI refuses the
+// call: from inside a handler of this subscription's own poll, with ErrPolling as the
+// thread's error, and for a subscription that is closed.
 func (s *Subscription) ImageCount() int { return int(C.cavalry_subscription_image_count(s.handle)) }
 
 // ImageAt is the image at index, with its constants copied now, or nil. An index below
@@ -1960,9 +1962,18 @@ func (s *Subscription) ImageAt(index int) (*Image, error) {
 		InitialTermID: int32(k.initial_term_id)}, nil
 }
 
-// Images is every image, valid until the next poll or close.
+// Images is every image, valid until the next poll or close. Where the ABI refuses the
+// count, from inside a handler of this subscription's own poll or for a subscription that
+// is closed, it returns the ABI's *Error, with ErrPolling from inside the handler, and no
+// slice: a refusal is no empty slice (README, "What it must never do"). The goroutine is
+// held to its OS thread for the call, so that the error read is the count's own.
 func (s *Subscription) Images() ([]*Image, error) {
-	count := s.ImageCount()
+	runtime.LockOSThread()
+	defer runtime.UnlockOSThread()
+	count := int(C.cavalry_subscription_image_count(s.handle))
+	if count < 0 {
+		return nil, lastError("cavalry_subscription_image_count")
+	}
 	images := make([]*Image, 0, count)
 	for i := 0; i < count; i++ {
 		image, err := s.ImageAt(i)
