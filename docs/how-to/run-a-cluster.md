@@ -154,10 +154,24 @@ committed once a quorum, two of three, has it on disk.
    192; it follows member 0; its last election began because the member started`,
    with the id of the member that leads now in place of 0.
 
-   Do this for a member that was stopped, or whose process was ended. Do not do it
-   for a member whose host lost power, or whose operating system crashed, while the
-   member ran: "When it does not work" says why, under "The member's host lost
-   power".
+   Do the same for a member that was stopped, whose process was ended, or whose host
+   lost power or whose operating system crashed while it ran. After such a crash its
+   driver cuts each recording that was being made to the position the recording had
+   synced, and counts each cut in `recording.cut_to_synced`. While that driver runs,
+   `cavalry doctor` on it prints a `WARN` line for the counter, which explains the
+   cut and asks nothing of you unless the count climbs at every start: then the
+   line says to find what stops the driver without `close`. A host that lost power
+   starts again, and the directories of this page are under `/tmp`, which macOS and
+   many Linux systems empty when a host starts. When this page's one host empties
+   it, the three members' directories go together, and no member is left with the
+   cluster's log: start the three again as a new cluster, with the commands of step
+   3, as step 6 does. What the cluster had committed is gone with them. On three
+   hosts, keep each log directory on storage that outlives its host, as the
+   prerequisites say. A member whose log directory is gone all the same starts as
+   one whose directory has no `log-recordings` file, under "When it does not work",
+   while the other two run. That section, under "The member's host lost power", also
+   names the one member that starts on a new log directory instead: one that ran a
+   driver of an earlier version when the power was lost.
 
 ## How to verify it worked
 
@@ -367,10 +381,18 @@ committed once a quorum, two of three, has it on disk.
   ([ADR 0144](../decisions/0144-keep-a-recordings-synced-position-in-its-time-index-and-cut-a-recording-a-crash-left-live-to-it.md)).
   This holds for a recording that this version's driver was making. A driver of an
   earlier version, version 4 of the durable log or before, kept no synced position,
-  so a recording it was making when the power was lost cannot be cut. When the member
-  ran such a driver at the loss, do not start it on that log directory again, even
-  under a newer driver: start it on a new log directory, as for a directory with
-  no `log-recordings` file, above.
+  so a recording it was making when the power was lost cannot be cut. No release of
+  Cavalry carries such a driver: it is a build of `master` that does not hold commit
+  dfbbe930, `287: Cut a recording a crash left live to the position it had synced`,
+  of 2026-11-22. The date alone does not tell: `master` has earlier commits of that
+  day. In the checkout the driver was built from, at the commit it was built at,
+  `git merge-base --is-ancestor dfbbe930 HEAD` exits with 0 when the build holds
+  that commit. It exits with 1, or prints a `fatal:` line and exits with 128, for
+  such a build. A shallow checkout lacks old commits and prints `fatal:` for any
+  build: run `git fetch --unshallow` in it first.
+  When the member ran such a driver at the loss, do not start it on that log
+  directory again, even under a newer driver: start it on a new log directory, as
+  for a directory with no `log-recordings` file, above.
 - `cavalry run: the cluster member stopped, so the driver stops`, and the process
   exits with 1. The member could not go on, so `cavalry run` gave it up and closed
   its driver: a driver that runs on with the cluster's keys set and no member is
