@@ -43,6 +43,7 @@ package that differs.
 """
 
 import ctypes
+import enum
 import json
 import os
 import re
@@ -50,6 +51,7 @@ import shutil
 import subprocess
 import sys
 import tempfile
+import threading
 import unittest
 from unittest import mock
 
@@ -332,6 +334,31 @@ class Package(unittest.TestCase):
             self.assertEqual(abi.calls, [cavalry.ABORT], shown)
         self.assertEqual(service.poll(taking, 16), 3)  # and the next poll takes the entries
 
+        # An int outside int32 is no action either, and is not passed to the ABI, where
+        # ctypes would pass its low 32 bits: 2 ** 32 + 2 would be BREAK, which takes the
+        # entry and ends the poll, and 2 ** 32 + 1 ABORT, with nothing raised (work item
+        # 460). The message shows the value, or its size where Python writes no digits.
+        self.assertEqual((ctypes.c_int32(2 ** 32 + cavalry.BREAK).value, ctypes.c_int32(2 ** 32 + cavalry.ABORT).value),
+                         (cavalry.BREAK, cavalry.ABORT))
+        for value, shown in ((2 ** 32 + cavalry.BREAK, "4294967298"), (2 ** 32 + cavalry.ABORT, "4294967297"),
+                             (2 ** 31, "2147483648"), (-(2 ** 31) - 1, "-2147483649"),
+                             (10 ** 5000, "an int of 16610 bits")):
+            del abi.calls[:]
+            with self.assertRaises(cavalry.HandlerError) as raised:
+                service.poll(lambda body, entry, service_: value, 16)
+            error = raised.exception
+            self.assertEqual((error.fragments, error.raised, error.cluster), (0, 1, "service"), shown)
+            self.assertIsInstance(error.__cause__, cavalry.CavalryError)
+            self.assertEqual(error.__cause__.code, cavalry.CAVALRY_ERR_CLUSTER_ACTION)
+            self.assertIn(f"the entry handler returned {shown}, which is no action", error.__cause__.message)
+            self.assertEqual(abi.calls, [cavalry.ABORT], shown)
+        for value in (2 ** 31 - 1, -(2 ** 31)):  # the ends of the range are passed, and the ABI refuses them
+            del abi.calls[:]
+            with self.assertRaises(cavalry.HandlerError):
+                service.poll(lambda body, entry, service_: value, 16)
+            self.assertEqual(abi.calls, [value, cavalry.ABORT])
+        self.assertEqual(service.poll(taking, 16), 3)
+
         # An exception that is not an `Exception` aborts the entry too, and is raised as itself.
         del abi.calls[:]
 
@@ -357,14 +384,15 @@ class Package(unittest.TestCase):
             self.assertIn(name, gen.PER_MESSAGE)
 
     def test_every_integer_argument_of_a_command_or_an_add_is_refused_outside_its_range(self):
-        """Work item 460. ctypes passes a Python int that a parameter cannot hold as its low
-        bits, another value, with nothing said: a truncate at 2 ** 64 + 5 was a truncate at
-        5. The binding gives every integer parameter of a function that is not per-message
-        a checking type made from the header's type and the parameter's name, which
-        refuses what the parameter cannot hold before the ABI is called. A per-message
-        function keeps the plain type, and the generator's list says who reads each of its
-        integer parameters."""
-        cavalry = load_package()
+        """Work item 460 (ADR 0162). ctypes passes a Python int that a parameter cannot hold
+        as its low bits, another value, with nothing said: a truncate at 2 ** 64 + 5 was a
+        truncate at 5. The binding gives every integer parameter of a function that is not
+        per-message a checking type made from the header's type and the parameter's name,
+        which refuses what the parameter cannot hold before the ABI is called, and passes
+        an integer in range exactly: an `int`, a value with an `__index__` as a numpy
+        integer has, a member of an `IntEnum`, and a value of the parameter's own ctypes
+        type. A `bool` is refused. A per-message function keeps the plain type."""
+        load_package()
         abi = sys.modules["cavalry._abi"]
         plain = tuple(getattr(ctypes, name) for name in gen.INTEGER_CTYPES)
 
@@ -372,29 +400,57 @@ class Package(unittest.TestCase):
             def __index__(self):
                 return 7
 
+        class Seven(enum.IntEnum):
+            SEVEN = 7
+
+        class Liar(int):
+            """An `int` whose comparisons say it is in every range."""
+
+            def __le__(self, other):
+                return True
+
+            __ge__ = __lt__ = __gt__ = __le__
+
         expected = [(fn.name, param.name) for fn in self.header.functions if fn.name not in gen.PER_MESSAGE
                     for param in fn.params if gen.ctype(param.type, self.header, function_param=True) in gen.INTEGER_CTYPES]
-        self.assertGreaterEqual(len(expected), 19)
+        self.assertEqual(len(expected), 19)
         checked = []
         for name, (restype, argtypes) in abi.FUNCTIONS.items():
             for argtype in argtypes:
                 if name in abi.PER_MESSAGE:
-                    self.assertFalse(hasattr(argtype, "from_param") and hasattr(argtype, "parameter"), name)
+                    self.assertFalse(hasattr(argtype, "parameter"), name)
                     continue
                 self.assertNotIn(argtype, plain, f"{name} takes a bare integer")
                 if not hasattr(argtype, "parameter"):
                     continue
                 checked.append((name, argtype.parameter))
-                for held in (argtype.least, argtype.greatest, 0):
-                    self.assertEqual(argtype.from_param(held).value, held, (name, argtype.parameter))
-                for refused, error in ((argtype.least - 1, OverflowError), (argtype.greatest + 1, OverflowError),
-                                       (2 ** 64 + 5, OverflowError), (10 ** 5000, OverflowError), (1.5, TypeError),
-                                       (True, TypeError), (None, TypeError), ("7", TypeError), (Indexed(), TypeError)):
+                least, greatest, where = argtype.least, argtype.greatest, (name, argtype.parameter)
+                for held in (least, greatest, 0):
+                    taken = argtype.from_param(held)
+                    self.assertIs(type(taken), argtype.ctype, where)
+                    self.assertEqual(taken.value, held, where)
+                for like in (Indexed(), Seven.SEVEN, Liar(7)):
+                    self.assertEqual(argtype.from_param(like).value, 7, where)
+                own = argtype.ctype(7)
+                self.assertIs(argtype.from_param(own), own, where)
+                for refused, error in ((least - 1, OverflowError), (greatest + 1, OverflowError),
+                                       (2 ** 64 + 5, OverflowError), (-(2 ** 64) - 5, OverflowError),
+                                       (10 ** 5000, OverflowError), (Liar(2 ** 64 + 5), OverflowError),
+                                       (1.5, TypeError), (7.0, TypeError), (True, TypeError), (False, TypeError),
+                                       (None, TypeError), ("7", TypeError), (b"7", TypeError)):
                     with self.assertRaises(error) as raised:
                         argtype.from_param(refused)
                     message = str(raised.exception)
-                    self.assertTrue(message.startswith(f"{argtype.parameter}: an int from {argtype.least} to "
-                                                       f"{argtype.greatest} expected, "), message)
+                    # The parameter and its range first, then what was wrong with the value,
+                    # then what to do and the section that explains it (CLAUDE.md).
+                    self.assertTrue(message.startswith(f"{argtype.parameter}: an int from {least} to {greatest} "
+                                                       f"expected, "), message)
+                    if error is OverflowError:
+                        side = "below" if int.__index__(refused) < least else "above"
+                        self.assertIn(f", and the one given is {side} that range; ctypes would pass its low "
+                                      f"{8 * ctypes.sizeof(argtype.ctype)} bits, another value. ", message)
+                    else:
+                        self.assertIn(f", and a {type(refused).__name__} was given. ", message)
                     self.assertTrue(message.endswith("Pass an int in that range. See "
                                                      "clients/python/README.md#what-it-must-never-do"), message)
         self.assertEqual(checked, expected)
@@ -412,9 +468,11 @@ class Package(unittest.TestCase):
         absolute = ctypes.CDLL(None).llabs
         absolute.restype, absolute.argtypes = ctypes.c_int64, [ctypes.c_int64]
         self.assertEqual(absolute(2 ** 64 + 5), 5)
+        self.assertEqual(absolute(Indexed()), 7)  # what ctypes did with an integer-like value, and still does
         absolute.argtypes = [position]
-        self.assertEqual(absolute(-7), 7)
-        for refused in (2 ** 64 + 5, 2 ** 63, -(2 ** 63) - 1, 1.5, True):
+        for held, answer in ((-7, 7), (Indexed(), 7), (Seven.SEVEN, 7), (ctypes.c_int64(-9), 9)):
+            self.assertEqual(absolute(held), answer)
+        for refused in (2 ** 64 + 5, 2 ** 63, -(2 ** 63) - 1, Liar(2 ** 64 + 5), 1.5, True):
             with self.assertRaises(ctypes.ArgumentError) as raised:
                 absolute(refused)
             self.assertIn("position: an int from -9223372036854775808 to 9223372036854775807 expected",
@@ -423,85 +481,163 @@ class Package(unittest.TestCase):
             slugs = {re.sub(r"[^a-z0-9 -]", "", line.lstrip("#").strip().lower()).replace(" ", "-")
                      for line in f if line.startswith("#")}
         self.assertIn("what-it-must-never-do", slugs)
-        self.assertEqual(cavalry._RANGE_NEXT, abi._NEXT)
+        # A scalar that no checking type reads fails the generator: a `bool` parameter.
+        with_bool = gen.parse(self.text.replace("int cavalry_stop_replay(cavalry_t *client,",
+                                                "int cavalry_stop_replay(cavalry_t *client, bool now,", 1))
+        self.assertNotEqual(with_bool.functions, self.header.functions)
+        with self.assertRaises(SystemExit) as failed:
+            gen.write_python(with_bool)
+        self.assertIn("cavalry_stop_replay's now is a bool, which ctypes converts", str(failed.exception))
 
-    def test_a_per_message_functions_integer_is_read_by_the_client_and_the_generator_says_by_whom(self):
-        """Work item 460, on a message's path, where the binding's types stay plain: a
-        claim's length and a poll's fragment limit are read by `_size`, a reply's session
-        and the reserved value by `_int64`, and the action a handler returned is held to
-        an int32 in the trampoline, which raises nothing. The generator fails on a
-        per-message function's integer parameter that its list does not name."""
+    def test_a_per_message_functions_integer_is_read_by_the_client_and_the_generator_holds_its_list(self):
+        """Work item 460 (ADR 0162), on a message's path, where the binding's types stay
+        plain. Each per-message function that takes its caller's integer refuses one its
+        parameter cannot hold before the ABI is called, and passes an integer in range as
+        the exact `int` it is: a claim's length and each of the four polls' fragment limit
+        through `_size`, the reserved value, a reply's session and a timer's id and
+        deadline through `_int64`. The generator fails on a list,
+        `PER_MESSAGE_INTEGERS`, that the header or the client's text does not bear out."""
         cavalry = load_package()
         size_max = 2 ** (8 * ctypes.sizeof(ctypes.c_size_t)) - 1
-        for held in (0, 1, size_max):
-            self.assertEqual(cavalry._size(held, "length"), held)
-        for refused, error in ((-1, OverflowError), (size_max + 1, OverflowError), (10 ** 5000, OverflowError),
-                               (1.5, TypeError), (True, TypeError), (None, TypeError)):
-            with self.assertRaises(error) as raised:
-                cavalry._size(refused, "fragment_limit")
-            message = str(raised.exception)
-            self.assertTrue(message.startswith(f"fragment_limit: an int from 0 to {size_max} expected"), message)
-            self.assertTrue(message.endswith("See clients/python/README.md#what-it-must-never-do"), message)
-        for refused, error in ((2 ** 63, OverflowError), (1.5, TypeError)):
-            with self.assertRaises(error) as raised:
-                cavalry._int64(refused, "session_id", cavalry._RANGE_NEXT)
-            self.assertTrue(str(raised.exception).endswith("See clients/python/README.md#what-it-must-never-do"))
+        int64 = (-(2 ** 63), 2 ** 63 - 1)
+
+        class Indexed:
+            def __index__(self):
+                return 7
+
+        class Seven(enum.IntEnum):
+            SEVEN = 7
+
+        class Liar(int):
+            def __le__(self, other):
+                return True
+
+            __ge__ = __lt__ = __gt__ = __le__
 
         class Abi:
-            """A service's ABI whose poll hands one entry over and records each action."""
+            """Every function of the ABI: a `_constants` call answers 0 and gives its
+            struct a channel where it has one, and every other call is recorded and
+            answers -1."""
 
             def __init__(self):
-                self.actions = []
-                self.replies = []
-                self.reserved = []
+                self.calls = []
 
-            def cavalry_cluster_entry_values(self, header, values):
-                return 0
-
-            def cavalry_cluster_service_action(self, handle, action):
-                self.actions.append(action)
-                return 0 if action in (cavalry.ABORT, cavalry.BREAK, cavalry.CONTINUE) else -1
-
-            def cavalry_cluster_service_poll(self, handle, client, trampoline, clientd, fragment_limit):
-                trampoline(None, 0, 0, 1)
-                return 0
-
-            def cavalry_cluster_service_reply(self, handle, session_id, message, length):
-                self.replies.append(session_id)
-                return cavalry.CAVALRY_CLUSTER_REPLY_SENT
+            def __getattr__(self, name):
+                def call(*arguments):
+                    if name.endswith("_constants"):
+                        constants = arguments[1]._obj
+                        if hasattr(constants, "channel"):
+                            constants.channel = b"cavalry:ipc"
+                        return 0
+                    self.calls.append((name, arguments))
+                    return -1
+                return call
 
         class Client:
             _handle = 1
+            _lock = threading.Lock()
 
-        # An action that ctypes would pass as ABORT, its low 32 bits, never reaches the
-        # ABI: the trampoline aborts the entry, and poll raises for what is no action.
         abi = Abi()
-        service = cavalry.ClusterService(abi, 2, Client())
-        for no_action in (2 ** 32 + cavalry.ABORT, -(2 ** 31) - 1):
-            del abi.actions[:]
-            with self.assertRaises(cavalry.HandlerError):
-                service.poll(lambda body, entry, service_: no_action, 16)
-            self.assertEqual(abi.actions, [cavalry.ABORT])
-        self.assertEqual(ctypes.c_int32(2 ** 32 + cavalry.ABORT).value, cavalry.ABORT)
-        # A reply's session and a poll's fragment limit that are out of range reach no ABI.
-        with self.assertRaises(OverflowError):
-            service.reply(2 ** 64 + 5, b"x")
-        self.assertEqual(abi.replies, [])
-        del abi.actions[:]
-        with self.assertRaises(OverflowError):
-            service.poll(lambda body, entry, service_: None, -1)
-        self.assertEqual(abi.actions, [])
-        # The generator's list: every integer parameter of a per-message function, and
-        # nothing the header lacks.
-        named = sorted(gen.PER_MESSAGE_INTEGERS)
-        found = sorted((fn.name, param.name) for fn in self.header.functions if fn.name in gen.PER_MESSAGE
-                       for param in fn.params
-                       if gen.ctype(param.type, self.header, function_param=True) in gen.INTEGER_CTYPES)
-        self.assertEqual(named, found)
-        self.assertLessEqual(set(gen.PER_MESSAGE_INTEGERS.values()),
-                             {"_size", "_int64", "the client's own", "the trampoline"})
-        # That each named reader is called where the list says is `clients/lint-test.py`'s,
-        # `test_each_per_message_function_reads_the_integer_its_caller_gives`.
+        publication = cavalry.Publication(abi, 2)
+        subscription = cavalry.Subscription(abi, 3)
+        log = cavalry.CommittedLog(abi, 4, Client())
+        session = cavalry.ClusterSession(abi, 5)
+        service = cavalry.ClusterService(abi, 6, Client())
+
+        def handler(*arguments):
+            return None
+
+        # (the call with the argument in place, the ABI function, where the argument is among
+        # the ABI call's, the parameter's name, its range)
+        cases = [
+            (lambda v: publication.try_claim(v), "cavalry_publication_try_claim", 1, "length", (0, size_max)),
+            (lambda v: publication.set_reserved_value(v), "cavalry_buffer_claim_set_reserved_value", 1, "value", int64),
+            (lambda v: subscription.poll(handler, v), "cavalry_subscription_poll", 3, "fragment_limit", (0, size_max)),
+            (lambda v: log.poll(handler, v), "cavalry_committed_log_poll", 3, "fragment_limit", (0, size_max)),
+            (lambda v: session.poll(handler, v), "cavalry_cluster_session_poll", 3, "fragment_limit", (0, size_max)),
+            (lambda v: service.poll(handler, v), "cavalry_cluster_service_poll", 4, "fragment_limit", (0, size_max)),
+            (lambda v: service.reply(v, b"m"), "cavalry_cluster_service_reply", 1, "session_id", int64),
+            (lambda v: service.schedule_timer(v, 7), "cavalry_cluster_service_schedule_timer", 1, "correlation_id",
+             int64),
+            (lambda v: service.schedule_timer(7, v), "cavalry_cluster_service_schedule_timer", 2, "deadline", int64),
+            (lambda v: service.cancel_timer(v), "cavalry_cluster_service_cancel_timer", 1, "correlation_id", int64),
+        ]
+        self.assertEqual(sorted({(function, parameter) for _, function, _, parameter, _ in cases}),
+                         sorted(key for key, by in gen.PER_MESSAGE_INTEGERS.items() if by in ("_size", "_int64")))
+        for call, function, at, parameter, (least, greatest) in cases:
+            where = (function, parameter)
+            anchor = "a-services-timers" if "timer" in function else "what-it-must-never-do"
+            own = ctypes.c_size_t(7) if least == 0 else ctypes.c_int64(7)
+            for held in (least, greatest, 7, Indexed(), Seven.SEVEN, Liar(7), own):
+                del abi.calls[:]
+                call(held)
+                self.assertEqual([name for name, _ in abi.calls], [function], where)
+                passed = abi.calls[0][1][at]
+                if held is own:
+                    self.assertIs(passed, own, where)
+                else:
+                    self.assertIs(type(passed), int, where)  # the exact int, whatever gave it
+                    self.assertEqual(passed, int.__index__(held.__index__()), where)
+            for refused, error in ((least - 1, OverflowError), (greatest + 1, OverflowError),
+                                   (2 ** 64 + 5, OverflowError), (10 ** 5000, OverflowError),
+                                   (Liar(2 ** 64 + 5), OverflowError), (1.5, TypeError), (7.0, TypeError),
+                                   (True, TypeError), (False, TypeError), (None, TypeError), ("7", TypeError)):
+                del abi.calls[:]
+                with self.assertRaises(error) as raised:
+                    call(refused)
+                self.assertEqual(abi.calls, [], where)  # nothing reached the ABI
+                message = str(raised.exception)
+                self.assertTrue(message.startswith(f"{parameter}: an int from {least} to {greatest} expected, "
+                                                   f"{'a size_t' if least == 0 else 'an int64'}, and "), message)
+                if error is OverflowError:
+                    side = "below" if int.__index__(refused) < least else "above"
+                    self.assertIn(f"the one given is {side} that range; ctypes would pass ", message)
+                else:
+                    self.assertIn(f"a {type(refused).__name__} was given. ", message)
+                self.assertIn("Pass an int in that range", message)
+                self.assertTrue(message.endswith(f"See clients/python/README.md#{anchor}"), message)
+
+        # The generator's list against the header and the client's text.
+        gen.check_per_message_integers(self.header, gen.PER_MESSAGE_INTEGERS, gen.PYTHON_CLIENT)
+        self.assertEqual(len(gen.PER_MESSAGE_INTEGERS), 14)
+        key = ("cavalry_publication_try_claim", "length")
+        guard = '            length = _size(length, "length")\n'
+        self.assertEqual(gen.PYTHON_CLIENT.count(guard), 1)
+        without = {k: v for k, v in gen.PER_MESSAGE_INTEGERS.items() if k != key}
+        for integers, client, said in (
+                (without, gen.PYTHON_CLIENT, "does not say who reads cavalry_publication_try_claim's length"),
+                ({**gen.PER_MESSAGE_INTEGERS, ("cavalry_truncate_recording", "position"): "_int64"}, gen.PYTHON_CLIENT,
+                 "names cavalry_truncate_recording's position that is no integer parameter of a per-message"),
+                ({**gen.PER_MESSAGE_INTEGERS, ("cavalry_publication_try_claim", "size"): "_size"}, gen.PYTHON_CLIENT,
+                 "names cavalry_publication_try_claim's size that is no integer parameter"),
+                ({**gen.PER_MESSAGE_INTEGERS, key: "nobody"}, gen.PYTHON_CLIENT,
+                 "says 'nobody' reads cavalry_publication_try_claim's length"),
+                ({**gen.PER_MESSAGE_INTEGERS, key: "the client's own"}, gen.PYTHON_CLIENT,
+                 "says the client's own reads cavalry_publication_try_claim's length, and the function"),
+                ({**gen.PER_MESSAGE_INTEGERS, key: "_int64"}, gen.PYTHON_CLIENT,
+                 "says _int64 reads cavalry_publication_try_claim's length, and the function"),
+                ({**gen.PER_MESSAGE_INTEGERS, ("cavalry_publication_offer", "length"): "_size"}, gen.PYTHON_CLIENT,
+                 "says _size reads cavalry_publication_offer's length, and the function"),
+                (gen.PER_MESSAGE_INTEGERS, gen.PYTHON_CLIENT.replace(guard, "            pass\n"),
+                 "says _size reads cavalry_publication_try_claim's length, and the function"),
+                (gen.PER_MESSAGE_INTEGERS,
+                 gen.PYTHON_CLIENT.replace("not _INT32_MIN <= action <= _INT32_MAX", "False"),
+                 "says the trampoline reads cavalry_cluster_service_action's action, and the function"),
+                (gen.PER_MESSAGE_INTEGERS,
+                 gen.PYTHON_CLIENT.replace("self._abi.cavalry_cluster_session_offer(self._handle, message, len(message))",
+                                           "self._abi.cavalry_cluster_session_offer(self._handle, message, length)"),
+                 "says the client's own reads cavalry_cluster_session_offer's length, and the function")):
+            with self.assertRaises(SystemExit) as failed:
+                gen.check_per_message_integers(self.header, integers, client)
+            self.assertIn(said, str(failed.exception))
+        # And `write_python` makes the check: with a line taken out, nothing is written.
+        kept = gen.PER_MESSAGE_INTEGERS
+        try:
+            gen.PER_MESSAGE_INTEGERS = without
+            with self.assertRaises(SystemExit):
+                gen.write_python(self.header)
+        finally:
+            gen.PER_MESSAGE_INTEGERS = kept
 
     def test_a_cluster_services_timer_calls_are_one_abi_call_each_and_return_its_answer(self):
         """The Python cluster service's timers (ADR 0157): `schedule_timer` and
@@ -537,23 +673,21 @@ class Package(unittest.TestCase):
         self.assertEqual(abi.calls, [("schedule", 2, most, least), ("schedule", 2, 0, 1_700_000_000_050),
                                      ("schedule", 2, 7, 7), ("cancel", 2, least), ("cancel", 2, 7)])
         made = list(abi.calls)
-        class Indexed:
-            def __index__(self):
-                return 7
-
         for refused, error in ((most + 1, OverflowError), (least - 1, OverflowError), (2 ** 64 + 5, OverflowError),
                                (10 ** 5000, OverflowError),  # no digits in the message: Python writes none this long
                                (1.5, TypeError), (7.0, TypeError), ("7", TypeError), (None, TypeError),
-                               (True, TypeError), (False, TypeError), (Indexed(), TypeError)):
+                               (True, TypeError), (False, TypeError)):
             for call in (lambda: service.schedule_timer(refused, 7), lambda: service.schedule_timer(7, refused),
                          lambda: service.cancel_timer(refused)):
                 with self.assertRaises(error) as raised:
                     call()
                 message = str(raised.exception)
-                self.assertIn("an int64", message)
+                self.assertIn(f": an int from {least} to {most} expected, an int64, and ", message)
                 # CLAUDE.md: the message says what to do next and names the anchor that
                 # explains it, a heading of the README.
-                self.assertIn("Pass an int from -(2 ** 63) to 2 ** 63 - 1", message)
+                self.assertIn("Pass an int in that range: for a timer's id, one the program chose, such as "
+                              "entry.session_id; for a deadline, the cluster's time in milliseconds, such as "
+                              "entry.timestamp + round(seconds * 1000).", message)
                 self.assertTrue(message.endswith("See clients/python/README.md#a-services-timers"), message)
         self.assertEqual(abi.calls, made)  # nothing reached the ABI
         with open(os.path.join(gen.ROOT, "clients", "python", "README.md"), encoding="utf-8") as f:

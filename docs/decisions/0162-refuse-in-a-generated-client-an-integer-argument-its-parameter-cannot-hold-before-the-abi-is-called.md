@@ -27,7 +27,11 @@ parameter cannot hold into another one, with nothing said.
   bits of the rest. `client.truncateRecording(id, NaN)` reaches the ABI as a truncate
   at 0.
 - **Go, the JVM and .NET** pass typed 64-bit and 32-bit integers, which their
-  compilers hold to the parameter's type. They have no such conversion.
+  compilers hold to the parameter's type. One conversion remains in them: a count or
+  a length is a signed integer in each language and a `size_t` in the ABI, and the
+  cast each client makes keeps the bits, so a negative one reaches the ABI as a count
+  near 2^64. `TryClaim(-1)` is a claim of 2^64 − 1 bytes, and `Poll(handler, -1)` a
+  poll with no limit.
 
 Work item 419 met this for a timer's id and its deadline and closed it for those two
 arguments alone: a reader in the Python client, `_int64`, and one in the Node addon,
@@ -48,12 +52,18 @@ integer argument that its parameter cannot hold, and a value that is no integer 
 the runtime, is refused before the ABI is called, with an error that names the
 parameter, its range, what to pass, and the section of the client's README that says
 this rule. The rule covers every function of a client that passes a caller's integer
-to the ABI, per-message or not. It is stated once in each client's README, in "What
-it must never do".
+to the ABI, per-message or not. It is stated once in the Python and in the Node
+client's README, in "What it must never do".
 
 **Python.** Who refuses depends on the function, so that a message's path gains no
 call.
 
+- An integer is an `int`, or a value with an `__index__`, such as a numpy integer or
+  an `IntEnum`'s member, read as the exact `int` it gives. A value of the
+  parameter's own `ctypes` type is passed as it is. `ctypes` passed all of these
+  exactly, and they are passed still. A `float` is refused, as `ctypes` refused it.
+  A `bool` is refused, though `ctypes` passed it as 0 or 1: `True` as a position or
+  a length is a mistake, as it is no action for a service's handler.
 - A function that is not per-message, an add, a command, a close: the binding gives
   each of its integer parameters a checking type, `_checked(ctype, name)` in
   `_abi.py`, in place of the plain `ctypes` type. The generator writes it from the
@@ -62,15 +72,17 @@ call.
   argument; the refusal reaches the caller as `ctypes.ArgumentError`.
 - A per-message function keeps the plain type. It tests its own argument in line, a
   type and two comparisons, and calls a reader, `_size` or `_int64`, only for a value
-  that failed the test; the reader raises `OverflowError` or `TypeError`, or returns
-  a value that is an `int`'s subclass in range.
+  that failed the test. The reader raises `OverflowError` or `TypeError`, or returns
+  what the function passes on: the exact `int` of an integer in range. An `int` in
+  range costs no call.
 - The generator holds a list, `PER_MESSAGE_INTEGERS`, of every integer parameter of a
   per-message function with who reads it: a reader, the package's own `len` of a
   message, or the trampoline, which holds the action a service's handler returned to
   an int32 and treats one outside it as no action. The generator fails on a
-  per-message integer parameter that the list does not name.
-- A `bool` is refused, though it is an `int` to Python: `True` as a position is a
-  mistake. An `int`'s subclass otherwise, such as an `IntEnum`'s member, is passed.
+  per-message integer parameter that the list does not name, on a line for anything
+  else, and on a line that the text of the function that makes the ABI call does not
+  bear out. It also fails on a parameter of a scalar type that no checking type
+  reads, a `bool` today.
 
 **Node.** The addon is to call neither `napi_get_value_int64` nor
 `napi_get_value_int32`. Every integer argument is to be read by the reader the timers
@@ -83,15 +95,20 @@ says the value is no number, so a number costs one N-API call, as its conversion
 This is the second pull request of work item 460. On this ADR's date the Node client
 still converts as the Context says.
 
-**The lint.** `clients/lint.py` allows a per-message function a raise in one place:
-the own body of an argument reader that the rule names, for the functions the rule
-names with it, on a line before the function's ABI call or as an argument of it. A
-reader called from a trampoline, from a function the rule does not name, or after the
-ABI call is a finding, as a raise anywhere else on the path is. For Python the rule
-names `_int64` with a service's `schedule_timer`, `cancel_timer` and `reply` and a
-publication's `set_reserved_value`, and `_size` with `try_claim` and the four polls.
+**The lint.** `clients/lint.py` allows a per-message function a raise in one place
+before its ABI call: the own body of an argument reader that the rule names, for the
+functions the rule names with it, on a line before the function's ABI call or as an
+argument of it. A reader called from a trampoline, from a function the rule does not
+name for it, or after the ABI call, a poll's among them, is a finding, as a raise
+anywhere else on the path is. For Python the rule names `_int64` with a service's
+`schedule_timer`, `cancel_timer` and `reply` and a publication's
+`set_reserved_value`, and `_size` with `try_claim` and the four polls. The raise ADR
+0046 gives a poll for its handler's exception, once its ABI call has returned, is as
+it was.
 
-**Go, the JVM and .NET** change nothing, and their READMEs say nothing new.
+**Go, the JVM and .NET** are held to the rule and break it in the one place the
+Context names, a negative count or length. Work item 465 closes that. This ADR
+changes nothing in them, and their READMEs say nothing new until it lands.
 
 ## Alternatives considered
 
@@ -109,9 +126,14 @@ publication's `set_reserved_value`, and `_size` with `try_claim` and the four po
   call into Python for every integer argument of every claim and every poll, on the
   path invariant 2 budgets, to refuse a value that a correct program never passes.
   The test in line makes no call for a value in range.
-- **A reader called for every per-message argument**, as `schedule_timer` calls
-  `_int64`. A call per claim where the test in line has none. The timers keep their
-  call: a schedule and a cancel are a handler's commands, not each message's path.
+- **A reader called for every per-message argument**, as work item 419's
+  `schedule_timer` called `_int64`. A call per claim and per poll where the test in
+  line has none. The two timer calls now test in line as the rest do, so that one
+  sentence says what every per-message function does.
+- **Refuse what is no `int`, an object with an `__index__` among them**, as work item
+  419's reader did. A numpy integer in range was passed exactly before this change,
+  and is no mistake. The rule is about the value that reaches the ABI, and that value
+  is the caller's.
 - **In Node, keep `int64_arg` as N-API converts and read exactly only what matters.**
   The same list, with the same fault. The exact reader costs a number the same one
   call.
@@ -175,10 +197,14 @@ generator fails on a per-message integer parameter that its list does not name.
 
 ## Consequences
 
-- A program that passed a `float`, a `bool` or an out-of-range `int` to the Python
-  client, or a fraction, a `NaN` or an out-of-range number to the Node client, and
-  had it converted, is now refused. That is the change's purpose, and it is a
-  breaking one for such a program; `changelog.d/` says so.
+- A program that passed the Python client an `int` its parameter cannot hold had
+  another value passed, and is now refused. That is the change's purpose.
+- Two programs that had nothing converted are refused too, and `changelog.d/` says
+  so. One passed a `bool`, which reached the ABI as 0 or 1. The other catches
+  `ctypes.ArgumentError` for a `float` given to a per-message function, which is now
+  a `TypeError`.
+- The Node client's second pull request will refuse a fraction, a `NaN`, an infinity
+  and an out-of-range number, each of which N-API converted.
 - The Python client refuses with two kinds of error by the function called:
   `ctypes.ArgumentError` from a command, and `OverflowError` or `TypeError` from a
   per-message function. One kind would need either the call the per-message path is
@@ -192,14 +218,20 @@ generator fails on a per-message integer parameter that its list does not name.
   behind the header, in either direction, so it cannot go stale in silence.
 - The lint's allowance is wider by one reader and seven callers. It is still a raise
   before the ABI call for a caller's own mistake, and the lint's tests hold each edge
-  of it: another function, a trampoline, a call after the ABI's.
+  of it for both readers: another function, the other reader's function, a
+  trampoline, a helper between, a call after the ABI's. The lint reads a function's
+  text, so a reader reached through an alias or a closure is not seen, as no call so
+  reached is; that limit is older than this ADR.
+- The Go, the JVM and the .NET client do not hold the rule for a negative count until
+  work item 465 lands.
 - A new client for a runtime that converts integers, should Cavalry gain one, is held
   to this rule by its README's section and its conformance runner; no gate finds such
   a runtime by itself.
 
 ## References
 
-- Work item 460, and work item 419, whose two readers this generalizes.
+- Work item 460; work item 419, whose two readers this generalizes; and work item
+  465, for a negative count in the Go, the JVM and the .NET client.
 - ADR 0046, "The client's own code", for the check this supersedes on one point; ADR
   0157 for the timers whose id and deadline were read first.
 - `clients/python/README.md` and `clients/node/README.md`, "What it must never do".

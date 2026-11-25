@@ -149,7 +149,8 @@ RULES = {
         # with nothing said: a timer's id and its deadline (ADR 0157), a reply's session
         # and a claim's reserved value are int64, and a claim's length and a poll's
         # fragment limit are counts (work item 460; clients/python/README.md, "What it
-        # must never do"). The two offers' lengths are the package's own `len(message)`,
+        # must never do"). The lengths of the two offers and of a reply are the package's own
+        # `len(message)`,
         # and the action a handler returns is held to its range in the trampoline, which
         # raises nothing.
         "readers": {"_int64": ["ClusterService.schedule_timer", "ClusterService.cancel_timer",
@@ -596,8 +597,11 @@ def python_findings(language: str, path: str, rules: dict) -> list[str]:
                 findings.extend(reader_findings(package, where, node, line, what))
                 continue
             for k, how in package.reach(what).items():
-                if kind == "call-allowed" and k == "raise":
-                    continue  # a helper poll calls after the ABI has returned may raise the handler's exception
+                if kind == "call-allowed" and k == "raise" and what not in readers:
+                    # A helper poll calls after the ABI has returned may raise the handler's
+                    # exception. An argument reader is no such helper: it refuses before the
+                    # ABI is called, for the functions the rule names with it.
+                    continue
                 findings.append(f"{where} calls {what} at line {line}, and {how}: {WHY[k]}; {HELP}")
     return findings
 

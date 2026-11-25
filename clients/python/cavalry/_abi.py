@@ -10,6 +10,7 @@ parameter cannot hold before the ABI is called.
 """
 
 import ctypes
+import operator
 from ctypes import (CFUNCTYPE, POINTER, Structure, c_bool, c_char_p, c_int, c_int8, c_int32,
                     c_int64, c_size_t, c_uint8, c_uint16, c_void_p)
 
@@ -292,30 +293,34 @@ _NEXT = "Pass an int in that range. See clients/python/README.md#what-it-must-ne
 
 def _checked(ctype, name):
     """The argument type of the integer parameter `name`, whose C type is `ctype`: what
-    ctypes hands the ABI for an `int` the parameter can hold, and a refusal, before the ABI
-    is called, for anything else. ctypes itself passes an `int` outside the range as its
-    low bits, another value, with nothing said: a position, a recording's id or a stream's
-    id that the caller did not name. A `bool` is no `int` here, and neither is an object
-    that only has an `__index__`. ctypes reports the refusal as `ctypes.ArgumentError`,
-    whose text holds the `TypeError` or the `OverflowError` raised here, the parameter's
-    name first. The message is built on the refusal alone, and without the value's digits,
-    which Python refuses to write for a very long int."""
+    ctypes hands the ABI for an integer the parameter can hold, and a refusal, before the
+    ABI is called, for anything else. ctypes itself passes an `int` outside the range as
+    its low bits, another value, with nothing said: a position, a recording's id or a
+    stream's id that the caller did not name. An integer is an `int`, or a value with an
+    `__index__`, such as a numpy integer, read as the exact `int` it gives; a value of
+    the parameter's own ctypes type is passed as it is. A `bool` is refused, though
+    Python counts it an `int`: `True` as a position is a mistake. ctypes reports the
+    refusal as `ctypes.ArgumentError`, whose text holds the `TypeError` or the
+    `OverflowError` raised here, the parameter's name first. The message is built on the
+    refusal alone, and without the value's digits, which Python refuses to write for a
+    very long int."""
     bits = 8 * ctypes.sizeof(ctype)
     signed = ctype(-1).value < 0
     least, greatest = (-(1 << (bits - 1)), (1 << (bits - 1)) - 1) if signed else (0, (1 << bits) - 1)
-    kind = f"{'a signed' if signed else 'an unsigned'} {bits}-bit integer"
-    held = f"an int from {least} to {greatest} expected, {kind}"
+    held = f"an int from {least} to {greatest} expected, {'a signed' if signed else 'an unsigned'} {bits}-bit integer"
 
     class Checked:
         @staticmethod
         def from_param(value):
-            if not isinstance(value, int) or isinstance(value, bool):
+            if isinstance(value, ctype):
+                return value
+            if isinstance(value, bool) or not hasattr(type(value), "__index__"):
                 raise TypeError(f"{name}: {held}, and a {type(value).__name__} was given. {_NEXT}")
-            if not least <= value <= greatest:
-                raise OverflowError(f"{name}: {held}, and the one given takes {value.bit_length()} bits"
-                                    f"{' and is below zero' if value < 0 else ''}; ctypes would pass its low "
-                                    f"{bits} bits, another value. {_NEXT}")
-            return ctype(value)
+            exact = int.__index__(operator.index(value))  # an exact int, whatever subclass gave it
+            if not least <= exact <= greatest:
+                raise OverflowError(f"{name}: {held}, and the one given is {'below' if exact < least else 'above'} "
+                                    f"that range; ctypes would pass its low {bits} bits, another value. {_NEXT}")
+            return ctype(exact)
 
     Checked.ctype, Checked.parameter, Checked.least, Checked.greatest = ctype, name, least, greatest
     Checked.__name__ = Checked.__qualname__ = f"_checked_{name}_{'i' if signed else 'u'}{bits}"
