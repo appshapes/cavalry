@@ -254,7 +254,8 @@ ADR 0157):
   `ctypes` would pass such an `int` as its low 64 bits, another timer or a deadline
   long past, and say nothing. Either message names the argument, says what to pass,
   such as `entry.timestamp + round(seconds * 1000)` for a deadline, and names this
-  section. Raised in the handler, it aborts the entry as any exception of the
+  section. Every other integer argument of the package is held to its range as
+  well ("What it must never do"). Raised in the handler, it aborts the entry as any exception of the
   handler's does ("The exception").
 - **At most 1,024 pending.** A program with more deadlines than that keeps them
   in its own state and schedules one timer, for the earliest: when it is handed
@@ -358,12 +359,47 @@ is the task from its start.
   `Header.values` with the `Header` properties that call it, for Python's forms of each (`threading`'s locks,
   `async def`, `await`, `raise`, and building `CavalryError`), in their own bodies and
   in every function of the package they call, such as `_check`; `just lint` fails on
-  any of them. The one raise on that path is in `_int64`, the reader of a timer's
-  id and deadline, which `schedule_timer` and `cancel_timer` alone may call, and
-  which refuses a value that is no int64 before the ABI is called ("A service's
-  timers"). `Header.values()` is None when the ABI refuses the header's pointer,
+  any of them. The raises on that path are in the two argument readers, `_int64` and
+  `_size`, which refuse an integer argument its parameter cannot hold before the ABI
+  is called (the next rule); the lint allows each reader its raise for the functions
+  the rule names and no other, and none in a trampoline. `Header.values()` is None when the ABI refuses the header's pointer,
   which inside the handler's call it cannot. Otherwise it is the one frame struct the
   header keeps, rewritten by each call, so copy a field out to keep it.
+- Never pass the ABI another integer than the caller gave. `ctypes` converts a
+  Python `int` that a C parameter cannot hold by keeping its low bits, and says
+  nothing: a truncate at `2 ** 64 + 96` would be a truncate at 96, which cuts a
+  recording after its first frame, and a subscription to stream `2 ** 32 + 1001`
+  one to stream 1001. So every integer argument is held to its parameter's range
+  before the ABI is called: −2^63 to 2^63 − 1 for an int64 (a position, a
+  recording's id, a replay's length and its session, a service's session, the
+  reserved value, a timer's id and its deadline), −2^31 to 2^31 − 1 for an int32 (a
+  stream id), and 0 to 2^64 − 1, the greatest `size_t`, for a count or a length (a
+  fragment limit, a claim's length, an image's index). A value that is no `int`,
+  a `float` such as `96.0` and a `bool` among them, is refused the same way; an
+  `int`'s subclass in range, such as an `IntEnum`'s member, is passed. Who refuses
+  depends on the function, so that a message's path gains no call:
+  - An add, a command and every other function that is not per-message: the
+    binding's checking type, `_checked` in `_abi.py`, which the generator writes
+    from the header's type for each integer parameter. `ctypes` calls it as it
+    converts the argument, so the refusal reaches the caller as
+    `ctypes.ArgumentError`, with the message after the argument's number.
+  - `try_claim`, `set_reserved_value`, the four `poll`s, `reply` and the two calls
+    of a timer: the package's readers, `_size` and `_int64`, which raise
+    `OverflowError`, or `TypeError` for what is no `int`. Each function tests its
+    argument in line, a type and two comparisons, and calls its reader only for a
+    value that failed the test.
+
+  Every message names the parameter and its range, says to pass an `int` in that
+  range, and names this section; a timer's names "A service's timers". Two kinds of
+  integer on a message's path are not an argument and have no reader: the length of
+  a message offered or replied is the package's own `len` of it, and the action a
+  service's handler returned is held to an int32 in the trampoline, where one
+  outside it is no action and aborts the entry (the rule on a failed handler,
+  below). The generator fails on a per-message function's integer parameter that
+  its list, `PER_MESSAGE_INTEGERS`, does not account for; `clients/generate-test.py`
+  holds each refusal, through `ctypes` itself for a checking type, and the
+  conformance runner refuses a truncate, two purges and an add through the package
+  against a recording that the replay then reads whole.
 - Never raise for an `Offer` code: `try_claim` and `offer` return the position after
   the frame or the code below zero (`cavalry.BACK_PRESSURED`, `NOT_CONNECTED`,
   `ADMIN_ACTION`, `CLOSED`, `MAX_POSITION_EXCEEDED`, `ERROR`), as the ABI does; the
