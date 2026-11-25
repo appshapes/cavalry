@@ -239,7 +239,9 @@ of Cavalry, on the directory that Brigade's server keeps
 N+1 is the tree under test. The older builds are the trees that Brigade's servers in
 production have run, constants of the script: 620a2e29, the pin of Brigade's server
 0.9.0, which they ran until 2026-11-24, and d265af82, the pin of server 0.10.0, which
-they run since. `CAVALRY_DIRECTORY_FROM=<commit>` names one other in their place. ADR
+they run since. `CAVALRY_DIRECTORY_FROM=<commit>` names one other in their place, which
+writes one directory alone, in the pinned shape or, with
+`CAVALRY_DIRECTORY_SHAPE=moved-to`, in server 0.10.0's. ADR
 0141 and [ADR 0156](../docs/decisions/0156-hold-in-the-upgrade-gate-every-directory-a-server-holds-each-trees-alone-and-the-trees-in-turn.md)
 say when a tree is added and when it goes.
 Each older tree is exported with `git archive` into `target/upgrade/<its first 8 hex
@@ -266,7 +268,9 @@ which purges the first two recordings. A build that opens a directory another wr
 reads back every record left, appends nine, and releases once more. The script does
 each directory twice. In the first, the last run is stopped as a server's clean stop
 does. In the second, it is killed with `SIGKILL`, which leaves its last recording live
-in the catalog. For each directory, as the older builds left it, the script then holds
+in the catalog. The directory written in turn is done a third time, with 620a2e29's
+last run killed and d265af82's stopped, so that d265af82 recovers the recording that
+620a2e29 left live. For each directory, as the older builds left it, the script then holds
 with N+1's programs:
 
 - `cavalry run` starts on it, and `cavalry replay` plays each recording that is left

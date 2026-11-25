@@ -50,7 +50,10 @@ three:
 - 620a2e29 then d265af82 in place;
 - d265af82 alone.
 
-Each is written twice, once with its last run stopped and once killed. A tree that
+Each is written with its last run stopped, and again killed. The directory written in
+turn is written a third time with the first tree's last run killed, so that the second
+tree recovers a recording the first left live: a server that went back to its copy
+under 0.9.0, crashed, and then moved to 0.10.0 again would do that. A tree that
 opens a directory another wrote begins where that one ended. It reads back every
 record left, appends, and releases the oldest recording, so that its writes and purges
 reach across the two trees, as a server's do.
@@ -68,7 +71,8 @@ When servers move to a third tree, the chain of trees in turn grows by it, and t
 tree's alone is added.
 
 **By hand.** `CAVALRY_DIRECTORY_FROM=<commit>` still names one tree, which writes one
-directory alone, in server 0.9.0's shape. It is for a run by hand against a commit
+directory alone, in server 0.9.0's shape, or in server 0.10.0's when
+`CAVALRY_DIRECTORY_SHAPE=moved-to` is set. It is for a run by hand against a commit
 that no server runs, such as this tree's own last commit.
 
 ## Alternatives considered

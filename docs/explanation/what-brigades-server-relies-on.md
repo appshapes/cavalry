@@ -159,7 +159,8 @@ gate", has the steps, and
 [ADR 0141](../decisions/0141-open-in-place-a-log-directory-written-by-the-tree-that-servers-run-and-build-that-tree-on-every-run.md)
 the decision. A change to the format of the durable log passes that gate in the pull
 request that makes it. The gate builds each tree that the servers in production have
-run, and keeps one while a server holds a directory that only that tree wrote
+run, and keeps one while a server holds a directory that the tree wrote any part of,
+alone or before another tree
 ([ADR 0156](../decisions/0156-hold-in-the-upgrade-gate-every-directory-a-server-holds-each-trees-alone-and-the-trees-in-turn.md), work item 441).
 
 The gate builds the feed's files, `tests/feed/` and the example that drives them, in

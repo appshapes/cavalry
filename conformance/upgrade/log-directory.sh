@@ -26,7 +26,9 @@
 #   `server-v0.10.0`, which both servers run since 2026-11-24.
 #
 # CAVALRY_DIRECTORY_FROM, when it is set, names one commit, a hash, a tag or a branch,
-# which takes the place of both: one older build, one directory that it writes alone.
+# which takes the place of both: one older build, one directory that it writes alone,
+# in the shape CAVALRY_DIRECTORY_SHAPE names, `pinned` when it is not set or
+# `moved-to`, the shape server 0.10.0 writes.
 #
 # Each older tree is exported with `git archive` to target/upgrade/<its first 8 hex
 # digits>/src and built into target/upgrade/<the same>/target, as
@@ -40,8 +42,10 @@
 #
 # The directories
 #
-# Three directories, each twice: once with the last run stopped and once with it
-# killed. Each is one that a server holds or may hold (ADR 0156):
+# Three directories, each that a server holds or may hold (ADR 0156). Each is written
+# with its last run stopped, and again with it killed; the one that two builds write in
+# turn a third time, with the first build's last run killed and the second's stopped,
+# so that the second recovers a recording the first left live:
 #
 # - 0.9.0: written by 620a2e29 alone, in server 0.9.0's shape. The copy each server
 #   keeps as its way back.
@@ -89,6 +93,7 @@
 #
 #   conformance/upgrade/log-directory.sh                                  the three directories
 #   CAVALRY_DIRECTORY_FROM=<commit> conformance/upgrade/log-directory.sh  one, by the commit named
+#   CAVALRY_DIRECTORY_FROM=d265af82 CAVALRY_DIRECTORY_SHAPE=moved-to conformance/upgrade/log-directory.sh
 #   CAVALRY_DIRECTORY_FROM=HEAD conformance/upgrade/log-directory.sh      this tree's changes over its last commit
 #
 # The script's directories are under one made by `mktemp` in the temporary directory,
@@ -236,8 +241,13 @@ resolve() {
 if [ -n "${CAVALRY_DIRECTORY_FROM:-}" ]; then
     from=$(git rev-parse --verify --quiet "$CAVALRY_DIRECTORY_FROM^{commit}") \
         || fail "CAVALRY_DIRECTORY_FROM is \`$CAVALRY_DIRECTORY_FROM\`, which names no commit of this repository; give a hash, a tag or a branch that \`git rev-parse\` resolves, or unset it to take the trees the servers in production have run"
+    named_shape=${CAVALRY_DIRECTORY_SHAPE:-pinned}
+    case "$named_shape" in
+        pinned | moved-to) ;;
+        *) fail "CAVALRY_DIRECTORY_SHAPE is \`$named_shape\`; it takes \`pinned\`, server 0.9.0's shape, or \`moved-to\`, server 0.10.0's" ;;
+    esac
     trees=$from
-    directories="${from:0:8}=${from:0:8}:pinned"
+    directories="${from:0:8}=${from:0:8}:$named_shape"
     say "the older build is ${from:0:8}, named by CAVALRY_DIRECTORY_FROM: $(git log -1 --format=%s "$from")"
 else
     resolve "$zero_nine" "the commit Brigade's server 0.9.0 pins"
@@ -464,8 +474,11 @@ root=$(mktemp -d "${base%/}/cavalry-log-directory.XXXXXX")
 for directory in $directories; do
     name=${directory%%=*}
     writers=$(echo "${directory#*=}" | tr , ' ')
+    first_writer=${writers%% *}
     last_writer=${writers##* }
-    for ending in stopped killed; do
+    endings="stopped killed"
+    [ "$first_writer" = "$last_writer" ] || endings="$endings first-killed"
+    for ending in $endings; do
         dir="$root/$name-$ending"
         mkdir "$dir"
         : >"$dir/appended"
@@ -478,9 +491,13 @@ for directory in $directories; do
         for writer in $writers; do
             build=${writer%%:*}
             shape=${writer#*:}
-            # Only the last writer's last run ends as this directory's ending: the
-            # servers stopped cleanly before they moved to the next build.
-            if [ "$writer" = "$last_writer" ]; then how=$ending; else how=stopped; fi
+            # `killed` kills the last writer's last run, as a crash under the build a
+            # server runs now; `first-killed` kills the first writer's, so that the next
+            # build recovers the recording it left live, as a server that crashed on its
+            # way-back copy and then upgraded again would. Every other run stops.
+            how=stopped
+            if [ "$ending" = killed ] && [ "$writer" = "$last_writer" ]; then how=killed; fi
+            if [ "$ending" = first-killed ] && [ "$writer" = "$first_writer" ]; then how=killed; fi
             step="a ($name, $ending: $build writes in the $shape shape)"
             if [ "$next_id" = 0 ]; then
                 start_feed "$build" "$shape" "$build-run-1" 1
@@ -519,7 +536,7 @@ for directory in $directories; do
         for entry in $kept; do
             [ "$(field "$entry" 4)" -le "$longest" ] || longest=$(field "$entry" 4)
         done
-        say "a. $name, $ending: $wrote; the last run was $ending, and recordings $(for entry in $kept; do printf '%s ' "$(field "$entry" 1)"; done)are left, from position $earliest"
+        say "a. $name, $ending: $wrote; the runs ended $ending, and recordings $(for entry in $kept; do printf '%s ' "$(field "$entry" 1)"; done)are left, from position $earliest"
 
         step="b ($name, $ending: cavalry run and cavalry replay of N+1 on the directory)"
         "$(program newer cavalry)" run --dir "$dir/driver" --log-dir "$dir/log" >"$dir/N+1-driver.out" 2>&1 &
