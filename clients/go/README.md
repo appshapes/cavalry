@@ -374,6 +374,28 @@ beside three members.
   those of `shim.c`, the C trampoline and the poll, for C's (`pthread_mutex_*`,
   `pthread_rwlock_*`, `mtx_*`). `just lint` fails on any of them, in the function's
   own body or in a function of the package it calls.
+- Never pass the ABI another count than the caller gave
+  ([ADR 0164](../../docs/decisions/0164-refuse-a-count-below-zero-in-the-go-the-jvm-and-the-dotnet-client-before-the-abi-is-called.md)).
+  The ABI takes a count or a length as a `size_t`, and the package's functions take
+  an `int`, as `len` gives one: an `int` below zero, converted for the ABI, is a
+  count near 2^64. `TryClaim(-1)` would be a claim of 2^64 − 1 bytes, which the ABI
+  refuses with a length the caller never gave, and `Poll(handler, -1)` a poll with
+  no limit. So the count crosses to `shim.c` as an int64, which holds every `int`,
+  and the shim refuses one below zero before the ABI is called. The refusal is the
+  function's own failure, with no panic: `TryClaim` returns the ABI's code for an
+  error, and each of the four `Poll`s −1, and `Err` is an `*Error` whose `Code` is
+  `ErrNegative`. That code is the client's own and none of the ABI's, whose codes
+  are above zero (`spec/c-abi.md`, "Error codes"); `Fn` is the ABI function the call
+  would have made, and `Message` names the parameter as the function names it,
+  `length` or `fragmentLimit`, the value given, what to pass and this section.
+  `ImageAt` with an index below zero returns the same `*Error` as its error. A count
+  from 0 costs one comparison in the shim. A limit below zero is refused, and not
+  read as a poll that takes nothing: a poll loop that takes nothing for ever would
+  say nothing. An `int32` and an `int64` that the ABI takes as such, a
+  stream id, a position, a timer's id, are held to their type by the compiler.
+  `clients/generate-test.py` compiles `shim.c` against a stand-in for the ABI and
+  drives each count below zero and from zero, and the conformance runner makes each
+  refusal through the built library.
 - Never return an error for an `Offer` code: `TryClaim` and `Offer` return the position
   after the frame or the code below zero (`PublicationNotConnected`,
   `PublicationBackPressured`, `PublicationAdminAction`, `PublicationClosed`,
