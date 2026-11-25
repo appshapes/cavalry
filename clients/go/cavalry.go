@@ -1550,8 +1550,8 @@ func (v *ClusterService) Reply(sessionID int64, message []byte) int32 {
 // is due at once. A handler that returns ActionAbort, or panics, is handed its entry again
 // with every timer as it was before that handling. A program schedules its first timer only
 // once every member of its cluster, with the service beside it, runs version 2 of the
-// cluster protocol, and from that entry on no member is stepped back: a service of version 1
-// hands its program no timer, so the two would compute two states from one log. From
+// cluster protocol or a later one, and from that entry on no member is stepped back to
+// version 1: a service of version 1 hands its program no timer, so the two would compute two states from one log. From
 // outside the handler it is -1, and Err says ErrClusterNoEntry. One cgo call, to shim.c's
 // one ABI call, which allocates nothing and waits for nothing: the service tells its member
 // after the handler has taken the entry, in Poll.
