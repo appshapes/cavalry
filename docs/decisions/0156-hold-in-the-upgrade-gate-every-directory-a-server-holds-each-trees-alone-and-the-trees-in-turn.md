@@ -3,10 +3,12 @@
 - **Status:** Accepted
 - **Date:** 2026-11-25
 - **Invariants affected:** 1, 3, 6
-- **Supersedes:** none. Extends ADR 0141, whose Revisit clause fired on 2026-11-24:
-  "a server in production runs a tree other than 620a2e29". ADR 0141's rule for which
-  trees the gate builds stands, and this decision says how the gate holds more than
-  one.
+- **Supersedes:** ADR 0141 on one point, its rule for when a tree leaves the gate:
+  "removed when no server holds a directory that only that tree wrote". This
+  decision's rule, under Decision, takes its place. The rest of ADR 0141 stands, its
+  rule for when a tree comes among it. ADR 0141's Revisit clause fired on 2026-11-24,
+  "a server in production runs a tree other than 620a2e29", and this decision also
+  says how the gate holds more than one tree.
 
 ## Context
 
@@ -35,11 +37,14 @@ production, and no directory in it was written by two trees in turn.
 ## Decision
 
 **The gate builds every tree that the servers in production have run.** Today those
-are 620a2e29 and d265af82, two constants of the script. ADR 0141's rule decides when a
-tree comes and goes: a tree comes when a server in production runs it. It stays while
-a server holds a directory that the tree wrote any part of, alone or before another
-tree. So 620a2e29 stays while the servers' directories, and the copies taken under
-0.9.0, exist.
+are 620a2e29 and d265af82, two constants of the script. A tree comes when a server in
+production runs it, as ADR 0141 says. When a tree leaves is this decision's rule, and
+it replaces ADR 0141's: a tree stays while a server holds a directory that the tree
+wrote any part of, alone or before another tree. ADR 0141 removed a tree once no
+server held a directory that only that tree wrote. Under that rule 620a2e29 would
+leave once the copies taken under 0.9.0 are gone, while each server's own directory
+still holds what 620a2e29 wrote. Under this rule 620a2e29 stays while a server's own
+directory, or a copy taken under 0.9.0, exists.
 
 **The gate writes every directory that a server holds or may hold.** That is each
 tree's directory alone, in its server's shape, and one directory written by the trees
@@ -87,6 +92,12 @@ that no server runs, such as this tree's own last commit.
   open and write on a directory an older tree wrote, which is what every server in
   production did on 2026-11-24. A recovery or a catalog change that only shows when
   version 5 writes on version 2's files would pass.
+- **Keep ADR 0141's rule for when a tree leaves:** removed when no server holds a
+  directory that only that tree wrote. Lost: it removes 620a2e29 once the copies taken
+  under 0.9.0 are gone, while each server's own directory still holds what 620a2e29
+  wrote, a catalog that version 2 created among it. Without 620a2e29 the gate cannot
+  write the directory in turn, so a change that cannot follow 620a2e29 and then
+  d265af82 would pass.
 - **Keep step a in server 0.9.0's shape for every tree,** as the run by hand of
   2026-11-24 did. Lost: d265af82 writes terms of 1 MiB under `ssc=true` in production,
   and a gate that never has it write those does not hold what the servers hold.

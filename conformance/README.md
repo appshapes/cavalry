@@ -242,8 +242,9 @@ production have run, constants of the script: 620a2e29, the pin of Brigade's ser
 they run since. `CAVALRY_DIRECTORY_FROM=<commit>` names one other in their place, which
 writes one directory alone, in the pinned shape or, with
 `CAVALRY_DIRECTORY_SHAPE=moved-to`, in server 0.10.0's. ADR
-0141 and [ADR 0156](../docs/decisions/0156-hold-in-the-upgrade-gate-every-directory-a-server-holds-each-trees-alone-and-the-trees-in-turn.md)
-say when a tree is added and when it goes.
+0141 says when a tree is added, and
+[ADR 0156](../docs/decisions/0156-hold-in-the-upgrade-gate-every-directory-a-server-holds-each-trees-alone-and-the-trees-in-turn.md),
+which takes the place of ADR 0141's rule on that point, when it goes.
 Each older tree is exported with `git archive` into `target/upgrade/<its first 8 hex
 digits>/` and built there on every run, as `upgrade/run.sh` builds its own. Each build
 is `cavalry` and one example, `feed-directory`. The older trees have no such example:
