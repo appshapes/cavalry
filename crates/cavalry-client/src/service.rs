@@ -1913,6 +1913,20 @@ impl ClusterService {
         Ok(())
     }
 
+    /// Stores what the service has counted of its timers into its counters of them,
+    /// where it has added them and they hold something else: a few compares when
+    /// nothing changed. A store that fails is made again at the next call.
+    fn store_counts(&mut self, counts: (i64, i64, i64)) {
+        if counts != self.timer_counts.stored
+            && let Some(counters) = self.timer_counters.as_ref()
+            && counters.pending.store_release(counts.0).is_ok()
+            && counters.passed_over.store_release(counts.1).is_ok()
+            && counters.cancels_dropped.store_release(counts.2).is_ok()
+        {
+            self.timer_counts.stored = counts;
+        }
+    }
+
     /// Tells the member on this service's driver of its timers, on the consensus
     /// module stream, and stores the service's counters of them (`spec/cluster.md`,
     /// "The service", "Timers", "What a service tells its member"; ADR 0151): a
@@ -1926,11 +1940,18 @@ impl ClusterService {
     /// costs.
     ///
     /// It adds the service's counters, and then its publication on the consensus
-    /// module stream, the first time there is something to tell or a passed-over
-    /// event to count. A driver that refuses one of them fails no call of the
-    /// program's inside a handler and changes no timer: the error is this poll's,
-    /// reported to the program, and the next poll with something to tell or to
-    /// count adds what is missing (ADR 0159).
+    /// module stream, at the moments the page names and at no other: the first
+    /// thing there is to tell and the first passed-over event to count (the third,
+    /// the first snapshot, is [`snapshot`](Self::snapshot)'s). A service that reads
+    /// history with timers pending, and has passed no event over, has nothing to
+    /// tell and adds neither: what it counts is stored only into counters that an
+    /// earlier snapshot or read added, and its gauge appears when it has read its
+    /// history and tells its member its timers. A cancel dropped is never a moment
+    /// of its own, since one is dropped only for a cancel held, which is something
+    /// to tell. A driver that refuses a counter or the publication fails no call of
+    /// the program's inside a handler and changes no timer: the error is this
+    /// poll's, reported to the program, and the next poll with something to tell
+    /// or an event passed over adds what is missing (ADR 0159).
     ///
     /// A poll of a service with no timer pending, nothing to tell and nothing new
     /// to count costs a few compares here, and reads no clock.
@@ -1948,7 +1969,11 @@ impl ClusterService {
             self.timer_counts.cancels_dropped,
         );
         let telling = self.timers.next_word().is_some();
-        if !telling && counts == self.timer_counts.stored {
+        // An event passed over that the counters do not hold yet.
+        let passed_over = counts.1 != self.timer_counts.stored.1;
+        if !telling && !passed_over {
+            // None of the page's moments: nothing is added.
+            self.store_counts(counts);
             return Ok(());
         }
         let Some(member) = self.member.as_ref() else {
@@ -1962,14 +1987,7 @@ impl ClusterService {
             &mut self.snapshot_counters,
             &mut self.timer_counters,
         )?;
-        if counts != self.timer_counts.stored
-            && let Some(counters) = self.timer_counters.as_ref()
-            && counters.pending.store_release(counts.0).is_ok()
-            && counters.passed_over.store_release(counts.1).is_ok()
-            && counters.cancels_dropped.store_release(counts.2).is_ok()
-        {
-            self.timer_counts.stored = counts;
-        }
+        self.store_counts(counts);
         // The publication, from the first thing to tell and the first event passed
         // over.
         let stream = match self.member_stream.take() {
