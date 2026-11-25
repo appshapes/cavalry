@@ -10,8 +10,8 @@
 //     Closed <the driver's process id>
 //
 // The client attaches to the driver at CAVALRY_DIR, and the program stops that driver
-// itself, with SIGTERM to the process id it was given, sent by the system's `kill`, since
-// .NET's own Process.Kill sends a signal the driver cannot answer. A failed check prints
+// itself, with SIGTERM to the process id it was given, sent by the system's /bin/kill,
+// since .NET's own Process.Kill sends a signal the driver cannot answer. A failed check prints
 // what failed and exits 1; the wait is bounded at 60 s. The .NET base library only (ADR
 // 0003).
 
@@ -84,11 +84,11 @@ static class ClosedRound
 
         // 2. The driver stops. Until the client has seen it, a poll takes nothing; the
         // first poll that fails is the close, and nothing else.
-        using (Process? kill = Process.Start(new ProcessStartInfo("kill") { ArgumentList = { "-TERM", pid.ToString() } }))
+        using (Process? kill = Process.Start(new ProcessStartInfo("/bin/kill") { ArgumentList = { "-TERM", pid.ToString() } }))
         {
             if (kill == null || !kill.WaitForExit(10_000) || kill.ExitCode != 0)
             {
-                Fail($"the driver, process {pid}, could not be asked to stop: `kill -TERM {pid}` did not exit 0");
+                Fail($"the driver, process {pid}, could not be asked to stop: `/bin/kill -TERM {pid}` did not exit 0");
             }
         }
         long until = Stopwatch.GetTimestamp() + Stopwatch.Frequency * WAIT_SECONDS;
