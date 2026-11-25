@@ -1841,7 +1841,8 @@ Version 3 adds by that rule ("A member that lost its log", "The floor answer"; A
 leader of version 3 sends a floor answer only to a member whose append position set
 the flag, so no member of an earlier version is sent one. A leader of version 2
 answers no flag, so a member of version 3 that holds a vote floor clears it only
-once a leader of version 3 leads, and withholds until then. A member of version 2
+once it has taken an answer of a leader of version 3 in this run, and withholds until
+then. A member of version 2
 that holds a floor clears it by the two conditions of ADR 0161 beside a leader of
 either version, as it did. A member of version 3 stepped back to version 2 can still
 be sent an answer that its run of version 3 asked for, in flight at its stop. It
@@ -1877,8 +1878,10 @@ is at or past it. A member of a later build holds a floor that an earlier build
 stored, and withholds, until it joins a leader's live log, which an upgrade one member
 at a time gives it once its election closes. A cluster whose members are stopped and
 started on the later build all at once, with a floor held by every member a quorum
-could elect, elects no leader until one of them runs the earlier build again ("A
-member that lost its log"; ADR 0161). An upgrade to version 3 begins once no member
+could elect, elects no leader until one of them runs the earlier build again, and the
+others a build of ADR 0161 of version 2, which clears its floor at the join with no
+answer, before any of them runs version 3 ("A member that lost its log"; ADR 0161, ADR
+0163). An upgrade to version 3 begins once no member
 holds a vote floor. A member that holds one when an upgrade has begun, one that lost
 its log directory during it, withholds as above. If it runs version 3 and the
 leader version 2, its floor clears only under a leader of version 3: in a cluster of
@@ -2637,7 +2640,7 @@ that a reader of a counters file knows which transition it saw.
 | Value | This version |
 | --- | --- |
 | schema id, header version | 1, 0 |
-| protocol version | 512, version 2 in semantic form, 0.2.0; a member reads every version whose major is 0 ("Versions and the upgrade") |
+| protocol version | 768, version 3 in semantic form, 0.3.0; a member reads every version whose major is 0 ("Versions and the upgrade") |
 | stream ids | log 100, ingress 101, egress 102, log replay 103, service log 104, consensus module 105, service snapshot 106, snapshot 107, consensus 108, service snapshot replay 109, which is none of Aeron's. In Aeron 104 is the service stream, which carries the consensus module's messages to a service; here it carries the log a service reads ("The service") |
 | members | at most 8, at least one of them a voter; a ninth is `members-count`, and a string of standbys alone `members-voters` |
 | member id | 0 to 2147483647, unique |

@@ -123,8 +123,8 @@ only to a member that asked, and to that list it adds a use for a reserved bit o
 `flags` field, which every version of the major ignores. No layout changes, and every
 header's version stays 0. A member and a client of version 3 write 768.
 
-- A member of version 3 that holds a floor clears it only once a leader of version 3
-  leads, and withholds until then. A member of version 2 that holds one clears it by ADR
+- A member of version 3 that holds a floor clears it only once it has taken an answer
+  of a leader of version 3 in this run, and withholds until then. A member of version 2 that holds one clears it by ADR
   0161's two conditions, as it did.
 - A member of version 3 stepped back to version 2 can still be sent an answer its run of
   version 3 asked for, in flight at its stop. It rejects it with the reason `template`
@@ -214,21 +214,24 @@ All runs were on an Apple M-series laptop, macOS 26, in the in-memory cluster of
 - **An answer to an earlier run**, in the eight steps too: the leader's first answer to
   the run that acknowledged the entries, written at the floor before they were
   appended, is held back and reaches the present run with the held frame. The member
-  ignores it, counted in `cluster.floor_answers_ignored`. With the session comparison
+  ignores it at once, counted once in `cluster.floor_answers_ignored`, before it joins.
+  With the session comparison
   taken out of the take, the check of every step fails the test as above: "member 2
   leads with a log that differs from what was committed".
 - **Asking under each term**: `a_member_asks_for_a_floor_answer_under_each_term_it_holds_none_from`
   in `crates/cavalry-raft/tests/floor_answer.rs`, one member through the stub. It asks
   while it holds a floor, ignores and counts answers for another session or member,
   stops asking once answered for its term, asks again under the next term, keeps the
-  lower answer, and clears at it. With the ask tied to the run alone, as in the first
-  build, it fails: "under a term it holds no answer from, it asks again".
+  lower answer, which a later answer of that term above its log does not move, and
+  clears at it. With the ask tied to the run alone, as in the first build, it fails:
+  "under a term it holds no answer from, it asks again". With the latest answer kept in
+  place of the lowest, it fails: "the lowest answer it took".
 - **A lost answer**: `a_floor_answer_lost_on_its_way_is_sent_again_in_the_next_interval`.
   A new cluster's followers hold their floors for two seconds while every answer is
-  lost and the leader keeps answering each interval. Once the answers get through, the
-  next ones clear both floors.
+  lost and the leader keeps answering each interval, and no more than once an interval
+  for each follower. Once the answers get through, the next ones clear both floors.
 - **The rest of `cavalry-raft`**, its tests over three drivers in `tests/cluster.rs`
-  among them, passes, in 394 s in a debug build. The tests that drive one core through a
+  among them, passes in `just test`. The tests that drive one core through a
   stub take their leader's answer where they follow a term with an empty log, as
   `tests/common/mod.rs`, `follow_term`, does.
 - **ADR 0145's and ADR 0148's regression seeds, proven again** on this rule, each from a
@@ -236,16 +239,28 @@ All runs were on an Apple M-series laptop, macOS 26, in the in-memory cluster of
   - `lost_log_search`, with the term condition of ADR 0145's one voting case taken out:
     seeds 779, 1573 and 2983 find two members leading one term, `[4, 4]`, `[2, 2]` and
     `[4, 4]`; seed 1 passes.
-  - `faulted_truncation_search`, with ADR 0148's rule taken out: FAULTED_SEEDS_PLACEHOLDER
+  - `faulted_truncation_search`, with ADR 0148's rule taken out: seed 96 finds member 0
+    joining a log while its log is cut short of the end it reported, at 53,671 ms, and
+    seed 482 finds member 2 doing so, at 40,628 ms; seed 1 faults no truncation. Seed
+    13, which ADR 0148 named, no longer reaches that case on this rule, whose answers
+    moved its paths. A scan of seeds 301 to 1,500 with the rule taken out found 11 that
+    do, the first 482, which takes 13's place among the search's seeds.
 - **Wide runs on this rule**, release builds: `lost_log_search` seeds 1 to 500 pass, in
-  330 s; `faulted_truncation_search` seeds 1 to 300 pass, in 191 s; `timer_search` seeds
-  1 to 200 pass, in 853 s, with every seed's quorum settled at its end.
+  326 s; `faulted_truncation_search` seeds 1 to 300 pass, in 200 s; `timer_search` seeds
+  1 to 200 pass, in 791 s, with every seed's quorum settled at its end.
 - **The rule's other holders**: the `clears-vote-floor` vectors, now with the answer,
   and the encoding vectors of template 58 and of an append position with the floor flag,
   347 vectors in all, which the generator and the JSON agree on; and `doctor`'s floor
   test, which names a member of version 3 that no leader has answered and one short of
   its answer.
-- **Gates:** GATES_PLACEHOLDER
+- **The upgrade gate**, `conformance/upgrade/`, ran N, the last commit of version 2,
+  beside N+1, this one, through each of its steps: a cluster of N, one member upgraded
+  and following, an election between the two builds that elected the member at N, then
+  the rest upgraded, every service at the client's total and the three logs replaying
+  alike. `doctor` of N+1 named each member's version, 2 or 3.
+- **Gates:** `just lint`, `just docs`, `just lint-docs` over the branch's range, a check
+  of the workspace for Linux, `just test`, `just conformance` and `just replay-check`
+  pass on the branch's head.
 
 ## Consequences
 
@@ -282,8 +297,10 @@ All runs were on an Apple M-series laptop, macOS 26, in the in-memory cluster of
   `Consensus::on_message_in`, with its frame's session id.
 - `cavalry doctor` names a member of a build before ADR 0161 that holds a floor at or
   past its log, which that build never clears and a later build withholds on, so that
-  an upgrade to version 3 waits until it runs a build of ADR 0161 or later, which clears
-  it at its next join.
+  an upgrade to version 3 waits until it runs the last build of version 2, of ADR 0161,
+  which clears it at its next join with no answer needed. ADR 0161's way back from an
+  all-at-once upgrade starts the others on that build too, and not on version 3, whose
+  members would wait beside the older leader for an answer it never sends.
 - Revisit when a member's consensus publications may share a session id across its runs,
   as a driver that reused ids would make them; when a later major carries a value of
   the member's run, which would let the answer rest on no property of the driver; and

@@ -70,7 +70,7 @@ pub const HEADER_VERSION: u16 = 0;
 pub const HEADER_LENGTH: usize = 8;
 
 /// A protocol version field's value for this version, in semantic form: the major
-/// times 65536, the minor times 256 and the patch, added. It is 0.2.0, the page's
+/// times 65536, the minor times 256 and the patch, added. It is 0.3.0, the page's
 /// version being the minor while the major is 0. A reader reads every version of its
 /// major (`spec/cluster.md`, "Encoding").
 pub const PROTOCOL_VERSION: i32 = (VERSION as i32) << 8;
@@ -1208,7 +1208,8 @@ pub const CLOSE_REASON_NONE: i32 = i32::MIN;
 pub const APPEND_POSITION_FLAG_CATCHUP: u8 = 0x01;
 
 /// The floor bit of an append position's flags, from version 3: the follower holds a
-/// vote floor and has taken no floor answer in this run, and asks its leader for one
+/// vote floor and has taken no floor answer for the term it follows, in this run, and
+/// asks its leader for one
 /// (`spec/cluster.md`, "Append position, template 54", "The floor answer"; ADR 0163).
 /// A reader of an earlier version ignores it, as it ignores every reserved bit.
 pub const APPEND_POSITION_FLAG_FLOOR: u8 = 0x02;
