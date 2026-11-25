@@ -236,41 +236,62 @@ It is no client's runner either: it holds `CLAUDE.md`'s invariant 1 across two b
 of Cavalry, on the directory that Brigade's server keeps
 ([What does Brigade's server rely on?](../docs/explanation/what-brigades-server-relies-on.md)).
 
-N+1 is the tree under test. N is the commit that Brigade's servers in production run,
-620a2e29, the pin of Brigade's server 0.9.0, a constant of the script;
-`CAVALRY_DIRECTORY_FROM=<commit>` names another. Server 0.10.0 and Brigade's `master`
-pin later commits, which no server in production runs yet, and ADR 0141's Revisit
-clause says when N changes.
-N is exported with `git archive` into `target/upgrade/<N's first 8 hex digits>/` and
-built there on every run, as `upgrade/run.sh` builds its own. Each build is `cavalry`
-and one example, `feed-directory`. N has no such example: the script copies this
-tree's `crates/cavalry/examples/feed-directory.rs` and `crates/cavalry/tests/feed/`
-into N's exported tree first. Those files are the server's use of Cavalry, which `just
-test` runs, and they use no call that N lacks. So the script fails at its second build
-when a change makes them use one, and says what to do then.
+N+1 is the tree under test. The older builds are the trees that Brigade's servers in
+production have run, constants of the script: 620a2e29, the pin of Brigade's server
+0.9.0, which they ran until 2026-11-24, and d265af82, the pin of server 0.10.0, which
+they run since. `CAVALRY_DIRECTORY_FROM=<commit>` names one other in their place, which
+writes one directory alone, in the pinned shape or, with
+`CAVALRY_DIRECTORY_SHAPE=moved-to`, in server 0.10.0's. ADR 0141 says when a tree is
+added.
+[ADR 0156](../docs/decisions/0156-hold-in-the-upgrade-gate-every-directory-a-server-holds-each-trees-alone-and-the-trees-in-turn.md)
+says when it goes, in place of ADR 0141's rule for that.
+Each older tree is exported with `git archive` into `target/upgrade/<its first 8 hex
+digits>/` and built there on every run, as `upgrade/run.sh` builds its own. Each build
+is `cavalry` and one example, `feed-directory`. 620a2e29 has no such example, and
+d265af82 has an older copy of it and of `crates/cavalry/tests/feed/`. The script puts
+this tree's `crates/cavalry/examples/feed-directory.rs` and `crates/cavalry/tests/feed/`
+in place in each exported tree first, over the older copy in d265af82's. Those files
+are the server's use of Cavalry, which `just test` runs, and they use no call that
+either tree lacks. So the script fails at an older build when a change makes them use one, and
+says what to do then.
 
-N writes a log directory as a server writes its own, in the pinned shape, the one of
-server 0.9.0: two runs, 20 records, four recordings, and two releases that purge the
-first two recordings. The script does this twice. The first directory's last run is
-stopped as a server's clean stop does. The second's is killed with `SIGKILL`, which leaves its last
-recording live in the catalog. For each directory, as N left it, the script then holds
+The older builds write three log directories as a server writes its own, each one a
+server holds or may hold:
+
+- 620a2e29 alone, in the pinned shape, server 0.9.0's: the copy each server keeps as
+  its way back.
+- 620a2e29, stopped, then d265af82 in place, which reads back what 620a2e29 left and
+  writes in the shape server 0.10.0 moved to, `ssc=true` with `term-length=1m`: what
+  each server holds now.
+- d265af82 alone, in that shape: what a server first installed at 0.10.0 holds.
+
+The first build to write a directory appends 20 records in two runs and releases twice,
+which purges the first two recordings. A build that opens a directory another wrote
+reads back every record left, appends nine, and releases once more. The script does
+each directory twice. In the first, the last run is stopped as a server's clean stop
+does. In the second, it is killed with `SIGKILL`, which leaves its last recording live
+in the catalog. The directory written in turn is done a third time, with 620a2e29's
+last run killed and d265af82's stopped, so that d265af82 recovers the recording that
+620a2e29 left live. For each directory, as the older builds left it, the script then holds
 with N+1's programs:
 
 - `cavalry run` starts on it, and `cavalry replay` plays each recording that is left
-  from its start to the position N answered.
-- The feed, in the pinned shape, begins at the last position N answered. It read N's
-  catalog before its driver started, as Brigade's server 0.10.0 does, and found terms
-  of 16 MiB. It reads back every record N left, each once, in order, at its position. A
-  read from position 0, which N purged, is refused. It appends five records.
-- The feed, in the shape server 0.10.0 moved to, `ssc=true` with `term-length=1m`, begins
-  where that ended, reads back N's records and those five, and appends five more.
-- One more run reads all of it back: recordings that two builds wrote, in terms of two
-  lengths.
+  from its start to the position its writer answered.
+- The feed, in the pinned shape, begins at the last position answered. It read the
+  catalog before its driver started, as Brigade's server 0.10.0 does, and found the
+  longest term among the recordings left: 16 MiB where one of 620a2e29's is left, 1 MiB
+  where d265af82 wrote alone. It reads back every record left, each once, in order, at
+  its position. A read from position 0, which was purged, is refused. It appends five
+  records.
+- The feed, in the shape server 0.10.0 moved to, begins where that ended, reads back
+  what is left and those five, and appends five more.
+- One more run reads all of it back: recordings that two or three builds wrote, in
+  terms of two lengths.
 
 A record read back is held to the line the feed's process wrote when it appended the
 record: its length, a digest of its bytes and the position after it
-(`crates/cavalry/tests/feed/process.rs`). So N+1's read is held to what N was
-answered, and not to what N reads back. Every wait is bounded at 60 s. A failure prints
+(`crates/cavalry/tests/feed/process.rs`). So N+1's read is held to what each older
+build was answered, and not to what that build reads back. Every wait is bounded at 60 s. A failure prints
 the step and each program's output, leaves the script's directory, and exits 1. The
 script's header says how to run it by hand.
 

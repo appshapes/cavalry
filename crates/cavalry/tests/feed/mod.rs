@@ -71,7 +71,8 @@ pub struct Shape {
 }
 
 /// The shape of Brigade's server 0.9.0 and of every release before it, which pin
-/// Cavalry at 620a2e29 and which the servers in production run: a publication with no
+/// Cavalry at 620a2e29 and which the servers in production ran until 2026-11-24: a
+/// publication with no
 /// connected receiver refuses every offer and a recording does not count as one, so the
 /// server subscribes to its own feed, added as a destination; and a channel names no
 /// term length, so a log is three terms of 16 MiB. The log directories those servers
