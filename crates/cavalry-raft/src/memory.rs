@@ -1804,7 +1804,11 @@ impl Cluster {
     /// That is the frame of `spec/cluster.md`, "Taking a leader", that a member started
     /// again reads though it was written before its start (ADR 0145, ADR 0161). One is
     /// held for each pair armed, and a pair armed again while it is armed is armed
-    /// once; past [`MAX_HELD_BACK`] pairs a hold is not armed.
+    /// once; past [`MAX_HELD_BACK`] pairs a hold is not armed. Past [`MAX_HELD_BACK`]
+    /// frames held, a pair still armed has its new leadership term sent as any message
+    /// is, and stays armed. [`Cluster::release_held_back`] hands a frame to a full
+    /// in-flight queue as `send` does: lost and counted in
+    /// [`Cluster::full_queue_losses`].
     pub fn hold_back_new_leadership_term(&mut self, from: i32, to: i32) {
         let index = |id: i32| self.world.disks.iter().position(|disk| disk.id == id);
         if let (Some(from), Some(to)) = (index(from), index(to))

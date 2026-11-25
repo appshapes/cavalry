@@ -309,7 +309,10 @@ All runs on an Apple M-series laptop, macOS 26, in the in-memory cluster of
   zeros after it, and the module writes nothing else there. A member can store a floor
   again after it cleared one, when a later leader's term empties its log.
 - The in-memory cluster gains a frame held back, `Cluster::hold_back_new_leadership_term`
-  and `Cluster::release_held_back`, bounded at eight, and a replay rate,
+  and `Cluster::release_held_back`, bounded at eight pairs armed and eight frames held,
+  each bound tested at capacity by
+  `the_new_leadership_terms_held_back_in_memory_hold_their_bound`
+  (`crates/cavalry-raft/tests/elected_replication.rs`), and a replay rate,
   `Cluster::set_replay_rate`, unlimited unless a test lowers it, so that a test can stop
   a leader while a member's catch-up is part way through a span, as a replay over a
   driver brings its frames over time. Neither changes what the searches draw.
