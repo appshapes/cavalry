@@ -103,8 +103,8 @@ says the value is no number, so a number costs one N-API call, as its conversion
 This is the second pull request of work item 460. On this ADR's date the Node client
 still converts as the Context says.
 
-**The lint.** `clients/lint.py` allows a per-message function a raise in one place
-before its ABI call: the own body of an argument reader that the rule names, for the
+**The lint.** For the Python client, `clients/lint.py` allows a per-message function
+a raise in one place before its ABI call: the own body of an argument reader that the rule names, for the
 functions the rule names with it, on a line before the function's ABI call or as an
 argument of it. A reader called from a trampoline, from a function the rule does not
 name for it, or after the ABI call, a poll's among them, is a finding, as a raise
@@ -112,7 +112,10 @@ anywhere else on the path is. For Python the rule names `_int64` with a service'
 `schedule_timer`, `cancel_timer` and `reply` and a publication's
 `set_reserved_value`, and `_size` with `try_claim` and the four polls. The raise ADR
 0046 gives a poll for its handler's exception, once its ABI call has returned, is as
-it was.
+it was. The Node addon's readers are exempt by name, as they have been since its lint
+was written, wherever they are called. The second pull request is to hold them as
+well: to a function that N-API calls with the caller's arguments, before its call of
+the ABI.
 
 **Go, the JVM and .NET** are held to the rule and break it in the one place the
 Context names, a negative count or length. Work item 465 closes that. This ADR
