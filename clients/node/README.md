@@ -488,8 +488,9 @@ members.
   `CAVALRY_ERR_NO_CLAIM` and the ABI reads no freed handle through the struct's
   `publication` (`spec/c-abi.md`, "Which claim a struct names").
 - Never read a refusal as an answer. A `poll` from inside a handler of the same
-  subscription returns −1 with `CAVALRY_ERR_POLLING`, and the poll in progress goes
-  on. A committed log's handler is held to the same rule. From inside it, a `poll` of
+  subscription returns −1 with `CAVALRY_ERR_POLLING`, `subscription.imageCount()`
+  returns −1 there and `subscription.images()` throws `CavalryError` with that code,
+  where it returned an empty array, and the poll in progress goes on. A committed log's handler is held to the same rule. From inside it, a `poll` of
   the same log, `log.position()` and `log.commitPosition()` return −1, `log.isEnded`
   is `false`, `log.failedAt()`, `log.withdrawnAt()` and `log.faulted()` are `null`,
   and `log.fault()` and `log.close()` throw `CavalryError`, each with

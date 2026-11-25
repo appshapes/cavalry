@@ -449,8 +449,10 @@ beside three members.
   through the struct's `publication` (`spec/c-abi.md`, "Which claim a struct names").
 - Never read a refusal as an answer. A `Poll` from inside a handler of the same
   subscription returns −1 with `ErrPolling` in `Err`, or with `ErrNegative` for a
-  fragment limit below zero, which the client refuses first, and the poll in progress
-  goes on. A committed log's handler is held to the same rule. From inside it, a `Poll` of
+  fragment limit below zero, which the client refuses first, `subscription.ImageCount()`
+  returns −1 there and `subscription.Images()` returns the ABI's `*Error` with
+  `ErrPolling` and no slice, where it panicked on a capacity of −1, and the poll in
+  progress goes on. A committed log's handler is held to the same rule. From inside it, a `Poll` of
   the same log, `log.Position()` and `log.CommitPosition()` return −1, `log.IsEnded()`
   is `false`, `log.FailedAt()`, `log.WithdrawnAt()` and `log.Faulted()` are zeros and
   `false`, and `log.Fault()` and `log.Close()` return an `*Error`, each with

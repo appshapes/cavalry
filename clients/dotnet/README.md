@@ -446,7 +446,10 @@ program that runs every call above beside three members.
   `Abi.ERR_NO_CLAIM` and the ABI reads no freed handle through the struct's
   `publication` (`spec/c-abi.md`, "Which claim a struct names").
 - Never read a refusal as an answer. A `Poll` from inside a handler of the same
-  subscription returns −1 with `Abi.ERR_POLLING`, and the poll in progress goes on. A
+  subscription returns −1 with `Abi.ERR_POLLING`, `subscription.ImageCount()` returns
+  −1 there and `subscription.Images()` throws `CavalryException` with that code,
+  where it threw `ArgumentOutOfRangeException` for a capacity of −1, and the poll in
+  progress goes on. A
   committed log's handler is held to the same rule. From inside it, a `Poll` of the
   same log, `log.Position()` and `log.CommitPosition()` return −1, `log.IsEnded()` is
   `false`, `log.FailedAt()`, `log.WithdrawnAt()` and `log.Faulted()` are `null`, and
