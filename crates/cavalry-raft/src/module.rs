@@ -44,8 +44,8 @@ use cavalry_proto::cluster::{
     CONSENSUS_STREAM_ID, ClusterAction, EGRESS_STREAM_ID, EMPTY_MEMBER, Endpoint,
     INGRESS_STREAM_ID, LOG_RECORDINGS_FILE_PREFIX, LOG_RECORDINGS_TMP_SUFFIX, LOG_REPLAY_STREAM_ID,
     LOG_STREAM_ID, LogRecording, LogRecordingsError, MAX_LOG_RECORDINGS_LENGTH, MAX_MEMBERS,
-    MembersError, Message, PROTOCOL_VERSION, SERVICE_SNAPSHOT_STREAM_ID, SNAPSHOT_STREAM_ID,
-    Stream, parse_members, write_log_recordings,
+    MAX_TIMER_EVENTS_PER_DUTY_CYCLE, MembersError, Message, PROTOCOL_VERSION,
+    SERVICE_SNAPSHOT_STREAM_ID, SNAPSHOT_STREAM_ID, Stream, parse_members, write_log_recordings,
 };
 use cavalry_proto::udp::UDP_TERM_LENGTH;
 use cavalry_shm::counters::CounterId;
@@ -69,6 +69,7 @@ use crate::snapshot::{
     self, ModuleSnapshot, OpenError, SERVICE_ACK_LIMIT, ServiceSnapshotCounts, SnapshotCounts,
     SnapshotDue,
 };
+use crate::timers::{ModuleTimers, TimerCounts};
 use crate::toggle::ControlToggle;
 
 /// The longest payload [`ConsensusModule::offer`] takes: what one frame of the log
@@ -3034,6 +3035,9 @@ pub struct ConsensusModule {
     /// The member's side of the control toggle, by which a command on its host asks
     /// it for a snapshot: its look in the counters file and its two gauges.
     toggle: ControlToggle,
+    /// The timers the service beside this member told it of, and its four counters
+    /// of them (`spec/cluster.md`, "The service", "Timers"; ADR 0151).
+    timers: ModuleTimers,
     io: ClientIo,
     counters: Counters,
     messages_rejected: u64,
@@ -3358,6 +3362,8 @@ impl ConsensusModule {
         // The two gauges a command reads its answer in, after the snapshots' own
         // (ADR 0147).
         let toggle = ControlToggle::open(&mut client, member_id)?;
+        // And its timers' counters: a member that starts holds no timer.
+        let timers = ModuleTimers::open(&mut client, member_id)?;
         let started = Instant::now();
         Ok(Self {
             core,
@@ -3370,6 +3376,7 @@ impl ConsensusModule {
             snapshot,
             snapshot_asked_at: from,
             toggle,
+            timers,
             io: ClientIo {
                 client,
                 terms,
@@ -3550,6 +3557,8 @@ impl ConsensusModule {
         // and listed here. Its error, a stream that stopped or a list that could
         // not be written, is returned after the core's own.
         let acks_work = self.work_service_acks();
+        // And the timer events that are due, while this member leads.
+        let timers_work = self.append_timer_events();
         // The file of the log's recordings is written before the counter names a
         // recording it did not name (`spec/cluster.md`, "The service"; ADR 0103). A
         // file that could not be written leaves the counter at −1, and the next
@@ -3580,28 +3589,36 @@ impl ConsensusModule {
             &self.sessions,
         );
         self.snapshot.store();
+        self.timers.store();
         let work = read + stepped?;
         listed?;
         written?;
         asked?;
         toggled?;
-        Ok(work + session_work? + snapshot_work? + acks_work?)
+        Ok(work + session_work? + snapshot_work? + acks_work? + timers_work?)
     }
 
     /// Reads the consensus module stream, at most [`SERVICE_ACK_LIMIT`] messages a
     /// duty cycle, and lists a service's snapshot for each service ack that names
     /// one the member can hold (`spec/cluster.md`, "The member's list of a service's
-    /// snapshots"; ADR 0131). A message that is no service ack is counted as
-    /// rejected. The member answers nothing: a service does not wait for it.
+    /// snapshots"; ADR 0131). A schedule timer and a cancel timer change the
+    /// member's timers, whatever its role (`spec/cluster.md`, "The service",
+    /// "Timers", "The member's timers"; ADR 0151). A message that is none of the
+    /// three is counted as rejected. The member answers nothing: a service does not
+    /// wait for it.
     ///
-    /// Nothing here runs for a message of the log. A cycle that reads no ack costs
-    /// the poll of an empty stream, and an ack costs a read of the catalog and a
-    /// write and a sync of the snapshots file, once in a snapshot interval.
+    /// Nothing here runs for a message of the log. A cycle that reads nothing costs
+    /// the poll of an empty stream; an ack costs a read of the catalog and a write
+    /// and a sync of the snapshots file, once in a snapshot interval; and a timer
+    /// message costs a search of the member's table and, for a new id, a move in
+    /// it. A cycle that read a message is followed by the next at once, so a
+    /// service's refresh of 1,024 timers is read in about a hundred cycles.
     fn work_service_acks(&mut self) -> Result<usize, RaftError> {
         let mut acks = [None; SERVICE_ACK_LIMIT];
-        let (read, rejected) = self
+        let timers = &mut self.timers;
+        let (read, told, rejected) = self
             .snapshot
-            .read_acks(&mut acks)
+            .read_acks(&mut acks, |word| timers.take(word))
             .map_err(RaftError::Poll)?;
         self.messages_rejected = self.messages_rejected.saturating_add(rejected);
         let commit_position = self.core.commit_position();
@@ -3628,7 +3645,59 @@ impl ConsensusModule {
                 .list_service(*ack, held, commit_position, term)
                 .map_err(RaftError::Snapshots)?;
         }
-        Ok(read)
+        Ok(read + told)
+    }
+
+    /// Appends a timer event for each timer this member holds whose deadline its
+    /// wall clock has reached, the earliest first and at most
+    /// [`MAX_TIMER_EVENTS_PER_DUTY_CYCLE`], while it leads with its election closed
+    /// (`spec/cluster.md`, "The service", "Timers", "The leader's timer events";
+    /// ADR 0151), and of two that are due with one deadline the lower correlation
+    /// id first (ADR 0158). It marks each with the position at which its event
+    /// begins, so that it appends no second event for it until a schedule timer
+    /// names it again. An event the back-pressured log does not take is appended on
+    /// a later cycle, and its timer is not marked. A member that does not lead
+    /// appends none.
+    ///
+    /// A cycle with no timer due costs one compare while the table has not changed
+    /// since the last look: the table keeps its earliest deadline. After a timer
+    /// message or an append, the next look scans the table once, 2,048 slots at the
+    /// most.
+    fn append_timer_events(&mut self) -> Result<usize, RaftError> {
+        let leads =
+            self.core.role() == Role::Leader && self.core.election_state() == ElectionState::Closed;
+        if !leads {
+            return Ok(0);
+        }
+        let mut appended = 0;
+        while appended < MAX_TIMER_EVENTS_PER_DUTY_CYCLE {
+            let Some(correlation_id) = self.timers.due(self.clock.time_ms) else {
+                break;
+            };
+            // Where the event begins, if the log takes it.
+            let begins = self
+                .io
+                .log_publication
+                .as_ref()
+                .and_then(|publication| publication.position().ok())
+                .unwrap_or(0);
+            if self
+                .core
+                .timer_event(self.clock, correlation_id, &mut self.io)?
+                .is_err()
+            {
+                break;
+            }
+            self.timers.appended(correlation_id, begins);
+            appended += 1;
+        }
+        Ok(appended)
+    }
+
+    /// What this member has counted of its timers, and how many it holds
+    /// (`cluster.timers`).
+    pub fn timer_counts(&self) -> (TimerCounts, usize) {
+        (self.timers.counts(), self.timers.len())
     }
 
     /// Appends the cluster action that asks every member for a snapshot when this

@@ -1870,6 +1870,38 @@ scope = "static"
 doc = "`add publication` commands waiting now for a receive endpoint that holds their control address to close, each holding a slot of the publications registry until the close runs it, its client goes or the closing endpoint wait refuses it (spec/client-protocol.md, Commands, Sizes; ADR 0154)."
 doctor = ""
 
+[[counter]]
+id = 193
+name = "cluster.timers"
+kind = "gauge"
+scope = "client"
+doc = "How many timers one cluster member holds: each told to it by the service beside it in a schedule timer on the consensus module stream, and not since removed by a cancel timer, replaced or cleared. At most 2,048. What a member holds is no state it computes from the log: it is in no snapshot, a member that starts holds none, and the service sends every pending timer again each second (spec/cluster.md, The service, Timers; ADR 0151). key and label as cluster.elections."
+doctor = ""
+
+[[counter]]
+id = 194
+name = "cluster.timer_events"
+kind = "counter"
+scope = "client"
+doc = "Timer events one cluster member appended while it led with its election closed, each for a timer it held whose deadline its wall clock had reached, at most 10 in a duty cycle. The member keeps the timer, marked, and appends no second event for it until a schedule timer names it again (spec/cluster.md, The service, Timers, The leader's timer events; ADR 0151). key and label as cluster.elections."
+doctor = ""
+
+[[counter]]
+id = 195
+name = "cluster.timers_replaced"
+kind = "counter"
+scope = "client"
+doc = "Schedule timers for which one cluster member gave up a timer it held: its table held 2,048 and the timer was the one whose event the member appended longest ago. Where that timer is pending still, the service sends it again within a second (spec/cluster.md, The service, Timers, The member's timers; ADR 0151). key and label as cluster.elections."
+doctor = ""
+
+[[counter]]
+id = 196
+name = "cluster.timers_cleared"
+kind = "counter"
+scope = "client"
+doc = "Schedule timers at which one cluster member removed every timer it held: its table held 2,048 with no timer in it whose event the member had appended, so that it held more than its service has pending and could not tell which. It kept the timer it was sent, and its service sends the pending ones again within a second (spec/cluster.md, The service, Timers, The member's timers; ADR 0151). key and label as cluster.elections."
+doctor = "This member's table of timers was full, 2,048, with no timer in it whose event the member had appended: more than the service beside it can have pending, so some of them pending nowhere. It removed them all and kept the one it was sent. No timer is lost: a service sends every pending timer again each second (spec/cluster.md, The service, Timers), and a timer may be late by that much. A count that keeps rising is a service whose cancels do not reach this member: check that the service beside it runs and reads its log."
+
 # A cluster member's role (spec/cluster.md, "Roles and the election"; ADR 0052, feature
 # 3). A member is a candidate (ADR 0077, ADR 0081) from its nomination until it
 # leads, loses its ballot, votes for another, follows another member that won its

@@ -25,11 +25,12 @@
 //! can have pending, so some of what it holds is pending nowhere: it removes every
 //! timer and takes the new one, and the service beside it sends the pending ones
 //! again within a timer refresh interval.
-//!
-//! This module is the table. The consensus module holds none yet: it reads no
-//! schedule timer and appends no timer event.
 
-use cavalry_proto::cluster::MAX_MEMBER_TIMERS;
+use cavalry_client::{Cavalry, ClientError, Counter};
+use cavalry_proto::cluster::{MAX_MEMBER_TIMERS, TimerWord};
+use cavalry_shm::counters::generated::{
+    CLUSTER_TIMER_EVENTS, CLUSTER_TIMERS, CLUSTER_TIMERS_CLEARED, CLUSTER_TIMERS_REPLACED,
+};
 
 /// No position: a timer that has no mark.
 const NONE: i64 = -1;
@@ -40,14 +41,12 @@ pub enum Scheduled {
     /// The member holds the timer with the deadline given.
     Held,
     /// The member holds it in the place of the timer whose event it appended longest
-    /// ago, its table being at its bound: what `spec/cluster.md` gives the counter
-    /// `cluster.timers_replaced` for.
+    /// ago, its table being at its bound, which `cluster.timers_replaced` counts.
     Replaced,
     /// The table was at its bound with no timer in it whose event the member had
-    /// appended: the member removed every timer and holds this one alone, which is
-    /// what `spec/cluster.md` gives the counter `cluster.timers_cleared` for. The
-    /// service beside it sends every pending timer again within a timer refresh
-    /// interval.
+    /// appended: the member removed every timer and holds this one alone, which
+    /// `cluster.timers_cleared` counts. The service beside it sends every pending
+    /// timer again within a timer refresh interval.
     Cleared,
 }
 
@@ -88,8 +87,7 @@ impl MemberTimers {
         }
     }
 
-    /// How many timers the member holds: the value `spec/cluster.md` gives the
-    /// counter `cluster.timers`.
+    /// How many timers the member holds: what `cluster.timers` holds.
     pub fn len(&self) -> usize {
         self.len
     }
@@ -249,6 +247,111 @@ impl MemberTimers {
     pub fn clear(&mut self) {
         self.len = 0;
         self.earliest = Some(i64::MAX);
+    }
+}
+
+/// What a member has counted of its timers ("Counters"): the events it appended,
+/// the timers it gave up for a schedule timer at its bound, and the times it removed
+/// every timer there.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct TimerCounts {
+    /// `cluster.timer_events`.
+    pub events: u64,
+    /// `cluster.timers_replaced`.
+    pub replaced: u64,
+    /// `cluster.timers_cleared`.
+    pub cleared: u64,
+}
+
+/// A consensus module's timers: the table, what the member counted, and its four
+/// counters, each with the value it last stored.
+#[derive(Debug)]
+pub(crate) struct ModuleTimers {
+    table: MemberTimers,
+    counts: TimerCounts,
+    counters: [(Counter, i64); 4],
+}
+
+impl ModuleTimers {
+    /// A member's timers at its start: none, and its counters added at 0.
+    pub(crate) fn open(client: &mut Cavalry, member_id: i32) -> Result<Self, ClientError> {
+        let mut add = |id: i32, name: &str| {
+            let counter =
+                client.add_counter(id, &member_id.to_le_bytes(), &format!("{name} {member_id}"))?;
+            counter.store_release(0)?;
+            Ok::<_, ClientError>((counter, 0))
+        };
+        Ok(Self {
+            counters: [
+                add(CLUSTER_TIMERS.0, "cluster.timers")?,
+                add(CLUSTER_TIMER_EVENTS.0, "cluster.timer_events")?,
+                add(CLUSTER_TIMERS_REPLACED.0, "cluster.timers_replaced")?,
+                add(CLUSTER_TIMERS_CLEARED.0, "cluster.timers_cleared")?,
+            ],
+            table: MemberTimers::new(),
+            counts: TimerCounts::default(),
+        })
+    }
+
+    /// Takes what a service told the member of one timer.
+    pub(crate) fn take(&mut self, word: TimerWord) {
+        match word {
+            TimerWord::Schedule {
+                correlation_id,
+                deadline,
+            } => match self.table.schedule(correlation_id, deadline) {
+                Scheduled::Held => {}
+                Scheduled::Replaced => {
+                    self.counts.replaced = self.counts.replaced.saturating_add(1);
+                }
+                Scheduled::Cleared => {
+                    self.counts.cleared = self.counts.cleared.saturating_add(1);
+                }
+            },
+            TimerWord::Cancel { correlation_id } => {
+                self.table.cancel(correlation_id);
+            }
+        }
+    }
+
+    /// The timer to append an event for at `now_ms`, the cluster's time by this
+    /// member's clock: the one with the earliest deadline at or before it that has
+    /// no mark.
+    pub(crate) fn due(&mut self, now_ms: i64) -> Option<i64> {
+        self.table.due(now_ms)
+    }
+
+    /// Marks the timer whose event the member appended, at `position`, and counts
+    /// the event.
+    pub(crate) fn appended(&mut self, correlation_id: i64, position: i64) {
+        self.table.appended(correlation_id, position);
+        self.counts.events = self.counts.events.saturating_add(1);
+    }
+
+    /// What the member has counted.
+    pub(crate) const fn counts(&self) -> TimerCounts {
+        self.counts
+    }
+
+    /// How many timers the member holds: `cluster.timers`.
+    pub(crate) fn len(&self) -> usize {
+        self.table.len()
+    }
+
+    /// Stores each counter whose value changed since it was last stored.
+    pub(crate) fn store(&mut self) {
+        let count = |value: u64| i64::try_from(value).unwrap_or(i64::MAX);
+        let values = [
+            i64::try_from(self.table.len()).unwrap_or(i64::MAX),
+            count(self.counts.events),
+            count(self.counts.replaced),
+            count(self.counts.cleared),
+        ];
+        for ((counter, last), value) in self.counters.iter_mut().zip(values) {
+            if value != *last && counter.store_release(value).is_ok() {
+                *last = value;
+            }
+        }
     }
 }
 

@@ -581,6 +581,18 @@ pub const PUBLICATION_ADD_DEFERRED_TIMED_OUT: CounterId = CounterId(191);
 /// `publication.add_deferred_waiting`, a static gauge: `add publication` commands waiting now for a receive endpoint that holds their control address to close, each holding a slot of the publications registry until the close runs it, its client goes or the closing endpoint wait refuses it (spec/client-protocol.md, Commands, Sizes; ADR 0154).
 pub const PUBLICATION_ADD_DEFERRED_WAITING: CounterId = CounterId(192);
 
+/// `cluster.timers`, a client gauge: How many timers one cluster member holds: each told to it by the service beside it in a schedule timer on the consensus module stream, and not since removed by a cancel timer, replaced or cleared. At most 2,048. What a member holds is no state it computes from the log: it is in no snapshot, a member that starts holds none, and the service sends every pending timer again each second (spec/cluster.md, The service, Timers; ADR 0151). key and label as cluster.elections.
+pub const CLUSTER_TIMERS: CounterId = CounterId(193);
+
+/// `cluster.timer_events`, a client counter: Timer events one cluster member appended while it led with its election closed, each for a timer it held whose deadline its wall clock had reached, at most 10 in a duty cycle. The member keeps the timer, marked, and appends no second event for it until a schedule timer names it again (spec/cluster.md, The service, Timers, The leader's timer events; ADR 0151). key and label as cluster.elections.
+pub const CLUSTER_TIMER_EVENTS: CounterId = CounterId(194);
+
+/// `cluster.timers_replaced`, a client counter: Schedule timers for which one cluster member gave up a timer it held: its table held 2,048 and the timer was the one whose event the member appended longest ago. Where that timer is pending still, the service sends it again within a second (spec/cluster.md, The service, Timers, The member's timers; ADR 0151). key and label as cluster.elections.
+pub const CLUSTER_TIMERS_REPLACED: CounterId = CounterId(195);
+
+/// `cluster.timers_cleared`, a client counter: Schedule timers at which one cluster member removed every timer it held: its table held 2,048 with no timer in it whose event the member had appended, so that it held more than its service has pending and could not tell which. It kept the timer it was sent, and its service sends the pending ones again within a second (spec/cluster.md, The service, Timers, The member's timers; ADR 0151). key and label as cluster.elections.
+pub const CLUSTER_TIMERS_CLEARED: CounterId = CounterId(196);
+
 /// Every entry of `counters.toml`, in the file's order.
 pub const COUNTERS: &[CounterDef] = &[
     CounterDef {
@@ -2118,5 +2130,37 @@ pub const COUNTERS: &[CounterDef] = &[
         scope: Scope::Static,
         doc: "`add publication` commands waiting now for a receive endpoint that holds their control address to close, each holding a slot of the publications registry until the close runs it, its client goes or the closing endpoint wait refuses it (spec/client-protocol.md, Commands, Sizes; ADR 0154).",
         doctor: "",
+    },
+    CounterDef {
+        id: CLUSTER_TIMERS,
+        name: "cluster.timers",
+        kind: Kind::Gauge,
+        scope: Scope::Client,
+        doc: "How many timers one cluster member holds: each told to it by the service beside it in a schedule timer on the consensus module stream, and not since removed by a cancel timer, replaced or cleared. At most 2,048. What a member holds is no state it computes from the log: it is in no snapshot, a member that starts holds none, and the service sends every pending timer again each second (spec/cluster.md, The service, Timers; ADR 0151). key and label as cluster.elections.",
+        doctor: "",
+    },
+    CounterDef {
+        id: CLUSTER_TIMER_EVENTS,
+        name: "cluster.timer_events",
+        kind: Kind::Counter,
+        scope: Scope::Client,
+        doc: "Timer events one cluster member appended while it led with its election closed, each for a timer it held whose deadline its wall clock had reached, at most 10 in a duty cycle. The member keeps the timer, marked, and appends no second event for it until a schedule timer names it again (spec/cluster.md, The service, Timers, The leader's timer events; ADR 0151). key and label as cluster.elections.",
+        doctor: "",
+    },
+    CounterDef {
+        id: CLUSTER_TIMERS_REPLACED,
+        name: "cluster.timers_replaced",
+        kind: Kind::Counter,
+        scope: Scope::Client,
+        doc: "Schedule timers for which one cluster member gave up a timer it held: its table held 2,048 and the timer was the one whose event the member appended longest ago. Where that timer is pending still, the service sends it again within a second (spec/cluster.md, The service, Timers, The member's timers; ADR 0151). key and label as cluster.elections.",
+        doctor: "",
+    },
+    CounterDef {
+        id: CLUSTER_TIMERS_CLEARED,
+        name: "cluster.timers_cleared",
+        kind: Kind::Counter,
+        scope: Scope::Client,
+        doc: "Schedule timers at which one cluster member removed every timer it held: its table held 2,048 with no timer in it whose event the member had appended, so that it held more than its service has pending and could not tell which. It kept the timer it was sent, and its service sends the pending ones again within a second (spec/cluster.md, The service, Timers, The member's timers; ADR 0151). key and label as cluster.elections.",
+        doctor: "This member's table of timers was full, 2,048, with no timer in it whose event the member had appended: more than the service beside it can have pending, so some of them pending nowhere. It removed them all and kept the one it was sent. No timer is lost: a service sends every pending timer again each second (spec/cluster.md, The service, Timers), and a timer may be late by that much. A count that keeps rising is a service whose cancels do not reach this member: check that the service beside it runs and reads its log.",
     },
 ];

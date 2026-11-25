@@ -2295,7 +2295,8 @@ told it since. `cluster.timers` holds how many.
 appends a timer event for a timer it holds whose deadline is at or before the
 cluster's time, the milliseconds of its wall clock, the clock that stamps every
 entry it appends ("Values"), with its term, the timer's correlation id and that
-time as the timestamp: earliest deadline first, at most the timer events of
+time as the timestamp: earliest deadline first, and of two that are due with one
+deadline the lower correlation id first (ADR 0158), at most the timer events of
 "Values" in a duty cycle, and one the log does not take is appended in a later
 duty cycle. So an event's timestamp is never below the deadline its leader held.
 The member keeps the timer, marked as one whose event it appended, and appends no
