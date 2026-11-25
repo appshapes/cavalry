@@ -29,7 +29,7 @@ directory either version wrote opens under the other in place. Version 6 adds th
 vote floor, a slot of the terms file's header that a cluster member writes when it
 takes a leader with its log empty, and that it withholds its vote while it holds (ADR 0145;
 `spec/cluster.md`, "A member that lost its log"); within version 6 the member clears
-the slot to zeros once it has joined the live log with its log at or past the floor,
+the slot to zeros once it has joined a leader's live log,
 which a reader reads as no floor, as a slot a creation left (ADR 0161); the slot was
 reserved bytes
 that a reader of version 5 ignores. Within version 6, a member's consensus module syncs

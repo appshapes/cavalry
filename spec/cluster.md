@@ -1637,7 +1637,7 @@ directory beside the others is safe while each other member holds the log it kep
 a new leadership term its leader's sender held back by flow control among the
 frames it reads ("Taking a leader"; ADR 0161). It takes a leader once it has heard
 every other voter, or voted that leader in, it joins and replicates the log, and it
-withholds its vote until it has joined the live log with its log at or past its vote
+withholds its vote until it has joined the live log, which clears its vote
 floor ("A member that lost its log"; ADR 0145, ADR 0161). It waits, taking no leader,
 while another voter is stopped. And beside a member that holds no log either, one
 that never caught up, while the member that holds the log is stopped, the two elect

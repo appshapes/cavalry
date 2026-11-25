@@ -82,12 +82,12 @@ const IMAGE_LIVENESS_TIMEOUT_NS: u64 = 10_000_000_000;
 /// connect timeout (`spec/client-protocol.md`, "Values").
 const REPLAY_CONNECT_TIMEOUT_NS: u64 = 5_000_000_000;
 
-/// One consensus message between two members.
 /// The most new leadership terms the in-memory cluster holds back at once, and the
 /// most pairs it holds them back for: one for each ordered pair of the most members a
 /// cluster has would be more than a test needs.
 pub const MAX_HELD_BACK: usize = 8;
 
+/// One consensus message between two members.
 struct Flight {
     deliver_at_ns: u64,
     to: usize,
@@ -1849,11 +1849,14 @@ impl Cluster {
         let due = self.world.clock.now_ns.saturating_add(STEP_NS);
         let mut kept = Vec::with_capacity(MAX_HELD_BACK);
         for mut flight in self.world.held_back.drain(..) {
-            if flight.to == to {
+            if flight.to != to {
+                kept.push(flight);
+            } else if self.world.net.len() >= IN_FLIGHT_CAPACITY {
+                // Full: lost, as `send` loses a message the queue has no room for.
+                self.world.full_queue_losses = self.world.full_queue_losses.saturating_add(1);
+            } else {
                 flight.deliver_at_ns = due;
                 self.world.net.push_back(flight);
-            } else {
-                kept.push(flight);
             }
         }
         self.world.held_back = kept;

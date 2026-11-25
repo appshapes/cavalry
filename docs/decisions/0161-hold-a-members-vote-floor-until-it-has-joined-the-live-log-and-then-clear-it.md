@@ -200,6 +200,24 @@ All runs on an Apple M-series laptop, macOS 26, in the in-memory cluster of
   does in the same election. If the first leader stops before a follower has joined,
   that follower withholds as a member that never caught up does, which ADR 0145's
   Consequences already count as a new cluster's cost.
+- A floor that a build of ADR 0145 stored, which that build never clears, counts again
+  under this one. A member that lost its log while it ran such a build, long since
+  caught up, withholds after its first start under this build until it joins a live
+  log, which it does in its first cycles while a leader runs, and which clears the
+  floor for good. If the cluster has no leader then, and the members that could elect
+  one hold such floors, they withhold until a member without a floor runs, or until
+  ADR 0145's one case lets them vote. That costs liveness, never a committed entry,
+  and it ends at each such member's first join. Two other ways were weighed:
+  - Clearing at a member's start a floor its log is already past, as ADR 0145's rule
+    would have let it vote, reopens the case this decision closes, for a member started
+    again between its floor and its join.
+  - Marking which build wrote a floor needs a new field in the terms file, and so a
+    new version of `spec/durable-log.md`.
+
+  `cavalry doctor` tells the two builds apart. A member of the build before registers
+  no `cluster.vote_floors_cleared`, and doctor names it only while its log is below
+  its floor, as that build's rule has it. It names a member of this build for as long
+  as it holds a floor.
 - ADR 0145's one case in which a withholding member votes, every voter heard and the
   candidate at least each, is unchanged, so a cluster in which two members lost their
   logs and the third holds the whole log still elects.

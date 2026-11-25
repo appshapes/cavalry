@@ -241,9 +241,8 @@ pub trait Io {
     fn store_vote_floor(&mut self, position: i64) -> Result<(), Self::Fault>;
 
     /// Clears the member's vote floor, durably: once, when in this run the member has
-    /// joined a leader's live log with its append position at or past the floor, so
-    /// that its log holds every entry it could have acknowledged before it came back
-    /// (ADR 0161). [`Io::vote_floor`] reads −1 from then on. A clear that a crash tore
+    /// joined a leader's live log after it stored the floor, so that its log holds every
+    /// committed entry it could have acknowledged before it came back (ADR 0161). [`Io::vote_floor`] reads −1 from then on. A clear that a crash tore
     /// reads as no floor too, which is what it was to leave.
     fn clear_vote_floor(&mut self) -> Result<(), Self::Fault>;
 
@@ -1006,9 +1005,9 @@ pub struct Consensus {
     /// as long as which it withholds its vote and seeks none; −1 for none (ADR 0145,
     /// ADR 0161).
     vote_floor: i64,
-    /// Whether, in this run, this member has joined a leader's live log, going to
-    /// follower ready, with its append position at the live image's join position:
-    /// what clears its vote floor (ADR 0161).
+    /// Whether, in this run and since it last stored a vote floor, this member has joined
+    /// a leader's live log, going to follower ready, with its append position at the
+    /// live image's join position: what clears its vote floor (ADR 0161).
     live_joined: bool,
     /// The position of the truncation this member owes, −1 for none: one whose command
     /// or write faulted, from the fault until a truncation to that position finishes,
@@ -2596,6 +2595,9 @@ impl Consensus {
         if self.log_empty() && self.vote_floor < 0 && leader_log_position >= 0 {
             io.store_vote_floor(leader_log_position)?;
             self.vote_floor = leader_log_position;
+            // A join before the floor was stored, in this run, holds nothing of it:
+            // only the join that follows clears it.
+            self.live_joined = false;
         }
         Ok(())
     }
