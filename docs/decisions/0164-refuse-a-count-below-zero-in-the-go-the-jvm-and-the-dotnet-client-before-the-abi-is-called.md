@@ -121,7 +121,59 @@ the four polls and the image at an index of the Go, the JVM and the .NET client.
 
 ## Evidence
 
-@@EVIDENCE@@
+All of it is from one laptop, macOS on Apple silicon, on 2026-11-25; none is from the
+bench hosts.
+
+**What the ABI answers to such a count** is in the Context: run against a driver at
+`master`'s library, through the Python client's plain `ctypes` types for the
+per-message functions.
+
+**That each client refuses, through its real runtime.** The quickstart runner of each
+of the three clients makes a claim of −1 bytes, a poll with a fragment limit of −1
+whose handler fails the run if it is called, and a lookup of the image at index −1,
+against a driver, with a publication and a subscription that have just carried 1,000
+messages. The Go runner reads the ABI's code for an error from the claim and −1 from
+the poll, each with an `Err` whose code is `ErrNegative` and whose message begins with
+the parameter's name and ends with the README's section, and the same error from
+`ImageAt`. The JVM runner catches `IllegalArgumentException` three times and the .NET
+runner `ArgumentOutOfRangeException` with the parameter as its `ParamName`. Each
+runner then goes on to its other rounds and passes.
+
+**That the shim refuses before the ABI.** `clients/generate-test.py` compiles the Go
+client's `shim.c` against a stand-in for the ABI that counts its calls. For each of
+the five functions and each of −1, −2^31 and the least int64 the shim answers the
+error code, calls the ABI no time, and keeps the client's code, the ABI function's
+name and the whole message; for each of 0, 5, 2^31 − 1 and the greatest int64 it calls
+the ABI once with that count.
+
+**That the lint holds the allowance.** `clients/lint-test.py` has one test for each of
+the JVM and the .NET client: the committed package passes; the reader called by
+another per-message method, by an upcall, after the claim's ABI call and after a
+poll's, and a lock in the reader, are each a finding; a renamed reader is a stale
+rule.
+
+**What a message's path pays.** Each runner's latency round sends 100,000 messages
+over `cavalry:ipc`, one at a time on one thread, unpinned, and reports the time from
+the publisher's clock read to the handler's first. The clock steps by 41 or 42 ns.
+`master`'s client and the changed one ran in turn, five runs each, the lowest and the
+highest run of each:
+
+| | p50 | p99 | p99.99 | max |
+| --- | --- | --- | --- | --- |
+| Go, `master` | 83 to 125 ns | 167 to 375 ns | 3,584 to 12,083 ns | 7,042 to 105,167 ns |
+| Go, changed | 125 ns | 208 to 250 ns | 3,500 to 9,917 ns | 11,250 to 45,209 ns |
+| JVM, `master` | 125 to 208 ns | 1,083 to 1,708 ns | 27,708 to 47,875 ns | 424,417 to 877,667 ns |
+| JVM, changed | 125 to 167 ns | 958 to 2,208 ns | 22,625 to 47,000 ns | 411,958 to 825,208 ns |
+| .NET, `master` | 42 ns | 125 to 209 ns | 3,042 to 6,500 ns | 123,792 to 375,750 ns |
+| .NET, changed | 42 to 83 ns | 125 to 292 ns | 3,292 to 6,041 ns | 136,875 to 246,167 ns |
+
+The Go runner's median read 83 or 84 ns in two of `master`'s five runs and 125 ns in
+all five of the changed client's: one step of the clock, in a statistic that sits on a
+step's edge. One .NET run of the changed client read a median one step higher. The
+p99.99 and the max of each changed client are inside the spread of `master`'s runs but
+for the Go client's lowest max. Five runs of a laptop do not tell a comparison with
+zero from the clock's step, and no run's number is a bound. No row of the nightly
+bench covers these clients; each runner's report is where its cost is seen.
 
 ## Consequences
 
