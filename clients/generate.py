@@ -67,8 +67,9 @@ PER_MESSAGE = (
 # construction; "the trampoline" is the action a handler returned, which the trampoline
 # holds to its range and refuses as no action. `check_per_message_integers` holds the list
 # to the header and to the client's text: the generator fails on a per-message function's
-# integer parameter with no line here, on a line for anything else, and on a line whose
-# reader, `len` or range test is not in the function that makes the ABI call.
+# integer parameter with no line here, on a line for anything else, on a reader that is not
+# the one for the parameter's C type, and on a line whose test in line and reader, `len` or
+# range test is not what the function does before it hands the ABI that argument.
 PER_MESSAGE_INTEGERS = {
     ("cavalry_publication_try_claim", "length"): "_size",
     ("cavalry_buffer_claim_set_reserved_value", "value"): "_int64",
@@ -260,46 +261,94 @@ def python_argtype(fn: Function, param: Param, header: Header) -> str:
     return plain
 
 
+def call_arguments(text: str, at: int) -> list[str]:
+    """The arguments of the call whose opening parenthesis is at `text[at - 1]`, split at
+    the commas that are in no bracket of their own, each stripped."""
+    arguments, depth, start = [], 0, at
+    for i in range(at, len(text)):
+        c = text[i]
+        if c in "([{":
+            depth += 1
+        elif c in ")]}":
+            if depth == 0:
+                arguments.append(text[start:i].strip())
+                return arguments
+            depth -= 1
+        elif c == "," and depth == 0:
+            arguments.append(text[start:i].strip())
+            start = i + 1
+    raise SystemExit("generate: a call in the Python client's text has no closing parenthesis")
+
+
+# Who may read a per-message function's integer parameter, by its ctypes type, and the test
+# in line that a reader's function makes before it calls the reader.
+PER_MESSAGE_READERS = {
+    "_size": (("c_size_t",), "0 <= {0} <= _SIZE_MAX"),
+    "_int64": (("c_int64",), "_INT64_MIN <= {0} <= _INT64_MAX"),
+    "the client's own": (("c_size_t",), None),
+    "the trampoline": (("c_int", "c_int32"), None),
+}
+
+
 def check_per_message_integers(header: Header, integers: dict, client: str) -> None:
     """Fail unless `integers`, the generator's `PER_MESSAGE_INTEGERS`, names every integer
-    parameter of every per-message function of the header and nothing else, and the
-    client's text does what each line says in the function that makes the ABI call: a
-    reader's line reads the parameter into itself before the call, `the client's own` is a
-    `len` in the call, and `the trampoline` holds the value to an int32 before it."""
-    wanted = {(fn.name, p.name) for fn in header.functions if fn.name in PER_MESSAGE for p in fn.params
+    parameter of every per-message function of the header and nothing else, each with a
+    reader for its C type, and the client's text does what each line says at every call of
+    the function. A reader's line: the function makes the whole test in line and reads the
+    parameter into itself, before the call, and the call's argument is the parameter.
+    `the client's own`: the call's argument is a `len`. `the trampoline`: the call's
+    argument is the parameter, held to an int32 before the call, or the client's own
+    `ABORT`. It reads the text as text: a test under a condition that is never true is not
+    seen for what it is, and `clients/lint-test.py` and `clients/generate-test.py` hold
+    what each function does."""
+    wanted = {(fn.name, p.name): ctype(p.type, header, function_param=True)
+              for fn in header.functions if fn.name in PER_MESSAGE for p in fn.params
               if ctype(p.type, header, function_param=True) in INTEGER_CTYPES}
-    unread = sorted(f"{name}'s {param}" for name, param in wanted - set(integers))
-    stale = sorted(f"{name}'s {param}" for name, param in set(integers) - wanted)
+    unread = sorted(f"{name}'s {param}" for name, param in set(wanted) - set(integers))
+    stale = sorted(f"{name}'s {param}" for name, param in set(integers) - set(wanted))
     if unread or stale:
         raise SystemExit(f"generate: PER_MESSAGE_INTEGERS in clients/generate.py does not say who reads "
                          f"{', '.join(unread) or 'nothing'}, and names {', '.join(stale) or 'nothing'} that is no "
                          f"integer parameter of a per-message function of the header: a per-message function's "
                          f"integer parameter is read by one of the client's argument readers, or the list says "
                          f"why it needs none")
+    parameters = {fn.name: [p.name for p in fn.params] for fn in header.functions}
     for (name, param), by in sorted(integers.items()):
+        if by not in PER_MESSAGE_READERS:
+            raise SystemExit(f"generate: PER_MESSAGE_INTEGERS in clients/generate.py says {by!r} reads {name}'s "
+                             f"{param}: say `_size`, `_int64`, `the client's own` or `the trampoline`")
+        types, test = PER_MESSAGE_READERS[by]
+        if wanted[(name, param)] not in types:
+            raise SystemExit(f"generate: PER_MESSAGE_INTEGERS in clients/generate.py says {by} reads {name}'s "
+                             f"{param}, which is a {wanted[(name, param)]}: {by} reads a {' or a '.join(types)}, and "
+                             f"would pass ctypes a value this parameter cannot hold")
         call = f"self._abi.{name}("
         if call not in client:
             raise SystemExit(f"generate: the Python client's text does not call {name}, which PER_MESSAGE_INTEGERS "
                              f"in clients/generate.py names: update the list")
         at = client.find(call)
         while at >= 0:
-            # The function the call is in, up to the call, and the call's arguments.
+            # The function the call is in, up to the call, and the argument given for the parameter.
             function = client[:at].rsplit("\n    def ", 1)[-1]
-            arguments = client[at + len(call):].split(")\n", 1)[0]
-            at = client.find(call, at + 1)
-            if by in ("_size", "_int64"):
-                held = f'{param} = {by}({param}, "{param}"' in function
+            arguments = call_arguments(client, at + len(call))
+            if len(arguments) != len(parameters[name]):
+                raise SystemExit(f"generate: the Python client calls {name} with {len(arguments)} arguments, and "
+                                 f"the header gives it {len(parameters[name])} parameters")
+            argument = arguments[parameters[name].index(param)]
+            if test is not None:
+                guard = (f"        if type({param}) is not int or not {test.format(param)}:\n"
+                         f"            {param} = {by}({param}, \"{param}\"")
+                held = argument == param and guard in function
             elif by == "the client's own":
-                held = "len(" in arguments
-            elif by == "the trampoline":
-                held = f"not _INT32_MIN <= {param} <= _INT32_MAX" in function
+                held = argument.startswith("len(") and argument.endswith(")")
             else:
-                raise SystemExit(f"generate: PER_MESSAGE_INTEGERS in clients/generate.py says {by!r} reads {name}'s "
-                                 f"{param}: say `_size`, `_int64`, `the client's own` or `the trampoline`")
+                held = argument == "ABORT" or (argument == param
+                                               and f"not _INT32_MIN <= {param} <= _INT32_MAX" in function)
             if not held:
                 raise SystemExit(f"generate: PER_MESSAGE_INTEGERS in clients/generate.py says {by} reads {name}'s "
                                  f"{param}, and the function of the Python client that calls {name} does not do "
                                  f"that before the call: read the parameter there, or correct the list")
+            at = client.find(call, at + 1)
 
 
 # The checking argument type of the generated binding, written into `_abi.py` as it is.
@@ -307,16 +356,38 @@ CHECKED = '''# What a refusal tells the caller to do next, and the section that 
 _NEXT = "Pass an int in that range. See clients/python/README.md#what-it-must-never-do"
 
 
+def _exact(value, own):
+    """What ctypes is to be handed for `value`, the argument of an integer parameter whose
+    ctypes type is `own`: the exact `int` that `value` is, or a value of `own` as it is,
+    or None for what is no integer. An integer is an `int`, or a value with an
+    `__index__`, such as a numpy integer or an `IntEnum`'s member, read through
+    `int.__index__`, so that a subclass which answers comparisons its own way is read as
+    the number it is. An object that says what ctypes is to pass for it, with ctypes'
+    `_as_parameter_`, is read as that. ctypes passed each of these exactly, and they are
+    passed still. A `bool` is no integer here, though Python counts it an `int` and ctypes
+    passed it as 0 or 1: `True` as a position or a length is a mistake. Neither is a
+    `float`, a `str`, `None` or a ctypes value of another type, each of which ctypes
+    refused."""
+    if isinstance(value, own):
+        return value
+    given = getattr(value, "_as_parameter_", value)
+    if isinstance(given, own):
+        return given
+    if isinstance(given, bool):
+        return None
+    try:
+        return int.__index__(operator.index(given))
+    except TypeError:  # no `__index__`, or one that does not give an int
+        return None
+
+
 def _checked(ctype, name):
     """The argument type of the integer parameter `name`, whose C type is `ctype`: what
     ctypes hands the ABI for an integer the parameter can hold, and a refusal, before the
     ABI is called, for anything else. ctypes itself passes an `int` outside the range as
     its low bits, another value, with nothing said: a position, a recording's id or a
-    stream's id that the caller did not name. An integer is an `int`, or a value with an
-    `__index__`, such as a numpy integer, read as the exact `int` it gives; a value of
-    the parameter's own ctypes type is passed as it is. A `bool` is refused, though
-    Python counts it an `int`: `True` as a position is a mistake. ctypes reports the
-    refusal as `ctypes.ArgumentError`, whose text holds the `TypeError` or the
+    stream's id that the caller did not name. What an integer is, is `_exact`'s. ctypes
+    reports the refusal as `ctypes.ArgumentError`, whose text holds the `TypeError` or the
     `OverflowError` raised here, the parameter's name first. The message is built on the
     refusal alone, and without the value's digits, which Python refuses to write for a
     very long int."""
@@ -328,11 +399,11 @@ def _checked(ctype, name):
     class Checked:
         @staticmethod
         def from_param(value):
-            if isinstance(value, ctype):
-                return value
-            if isinstance(value, bool) or not hasattr(type(value), "__index__"):
+            exact = _exact(value, ctype)
+            if exact is None:
                 raise TypeError(f"{name}: {held}, and a {type(value).__name__} was given. {_NEXT}")
-            exact = int.__index__(operator.index(value))  # an exact int, whatever subclass gave it
+            if type(exact) is not int:
+                return exact  # a value of the parameter's own ctypes type
             if not least <= exact <= greatest:
                 raise OverflowError(f"{name}: {held}, and the one given is {'below' if exact < least else 'above'} "
                                     f"that range; ctypes would pass its low {bits} bits, another value. {_NEXT}")
@@ -482,7 +553,6 @@ its poll is a call on that client (spec/c-abi.md, "Threads").
 """
 
 import ctypes
-import operator
 import os
 import sys
 import threading
@@ -652,20 +722,18 @@ def _size(value, name):
     # caller, a claim's length and a poll's fragment limit: the exact `int` that `value`
     # is, when a `size_t` holds it, and otherwise a raise before the ABI is called. ctypes
     # passes a negative int as a count near 2 ** 64, and an int above the range as its
-    # low bits. An integer is an `int`, or a value with an `__index__`, such as a numpy
-    # integer; a `ctypes.c_size_t` is returned as it is; a `bool` is refused, as
-    # `_abi._checked` refuses one. A command's and an add's integer arguments are read by
-    # the binding's own checking types (`_abi._checked`). A per-message function tests its
-    # own argument in line, a type and two comparisons, and calls its reader only for a
-    # value that fails them, so that a message's path gains no call: the reader then
-    # raises, or returns what the function passes on.
-    if isinstance(value, ctypes.c_size_t):
-        return value
-    if isinstance(value, bool) or not hasattr(type(value), "__index__"):
+    # low bits. What an integer is, is the binding's (`_abi._exact`): an `int` or a value
+    # with an `__index__`, and no `bool`; a `ctypes.c_size_t` is returned as it is. A
+    # command's and an add's integer arguments are read by the binding's own checking
+    # types (`_abi._checked`). A per-message function tests its own argument in line, a
+    # type and two comparisons, and calls its reader only for a value that fails them,
+    # so that a message's path gains no call: the reader then raises, or returns what
+    # the function passes on.
+    exact = _abi._exact(value, ctypes.c_size_t)
+    if exact is None:
         raise TypeError(f"{name}: an int from 0 to {_SIZE_MAX} expected, a size_t, and a {type(value).__name__} was "
                         f"given. {_RANGE_NEXT}")
-    exact = int.__index__(operator.index(value))  # an exact int, whatever subclass gave it
-    if not 0 <= exact <= _SIZE_MAX:
+    if type(exact) is int and not 0 <= exact <= _SIZE_MAX:
         raise OverflowError(f"{name}: an int from 0 to {_SIZE_MAX} expected, a size_t, and the one given is "
                             f"{'below' if exact < 0 else 'above'} that range; ctypes would pass another value, its "
                             f"low bits. {_RANGE_NEXT}")
@@ -682,13 +750,11 @@ def _int64(value, name, next=_RANGE_NEXT):
     # `_size`'s: a `bool` is refused, as it is no action for a handler, since `True`
     # would be timer 1. A message is built on the refusal alone, and without the value's
     # digits, which Python refuses to write for a very long int.
-    if isinstance(value, ctypes.c_int64):
-        return value
-    if isinstance(value, bool) or not hasattr(type(value), "__index__"):
+    exact = _abi._exact(value, ctypes.c_int64)
+    if exact is None:
         raise TypeError(f"{name}: an int from {_INT64_MIN} to {_INT64_MAX} expected, an int64, and a "
                         f"{type(value).__name__} was given. {next}")
-    exact = int.__index__(operator.index(value))  # an exact int, whatever subclass gave it
-    if not _INT64_MIN <= exact <= _INT64_MAX:
+    if type(exact) is int and not _INT64_MIN <= exact <= _INT64_MAX:
         raise OverflowError(f"{name}: an int from {_INT64_MIN} to {_INT64_MAX} expected, an int64, and the one given "
                             f"is {'below' if exact < _INT64_MIN else 'above'} that range; ctypes would pass its low "
                             f"64 bits, another value. {next}")
@@ -1765,9 +1831,11 @@ class ClusterService:
             if interrupt is not None:
                 raise interrupt
             if pending is None:
-                # Python writes no digits for a very long int, which is no action either.
-                long = type(refused) is int and refused.bit_length() > 64
-                shown = f"an int of {refused.bit_length()} bits" if long else repr(refused)
+                try:
+                    shown = repr(refused)
+                except ValueError:  # Python writes no digits for a very long int, which is no action either
+                    shown = (f"an int of {refused.bit_length()} bits" if isinstance(refused, int)
+                             else f"a {type(refused).__name__} whose text Python does not write")
                 pending = CavalryError(
                     "cavalry_cluster_service_action", _abi.CAVALRY_ERR_CLUSTER_ACTION,
                     f"the entry handler returned {shown}, which is no action: return nothing or cavalry.CONTINUE "

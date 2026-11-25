@@ -14,8 +14,9 @@
 ## Context
 
 A generated client passes its caller's integers to the C ABI through its runtime's
-foreign-call layer, and two of the five runtimes convert an integer that the C
-parameter cannot hold into another one, with nothing said.
+foreign-call layer, and each of the five runtimes converts an integer that the C
+parameter cannot hold into another one, with nothing said: two of them any integer,
+and three of them one kind.
 
 - **Python, `ctypes`.** A function's `argtypes` entry of `c_int64`, `c_int32` or
   `c_size_t` takes any `int` and keeps its low bits. `client.truncate_recording(id,
@@ -52,18 +53,21 @@ integer argument that its parameter cannot hold, and a value that is no integer 
 the runtime, is refused before the ABI is called, with an error that names the
 parameter, its range, what to pass, and the section of the client's README that says
 this rule. The rule covers every function of a client that passes a caller's integer
-to the ABI, per-message or not. It is stated once in the Python and in the Node
-client's README, in "What it must never do".
+to the ABI, per-message or not. It is stated once in the Python client's README, in
+"What it must never do", and is to be stated there in the Node client's with its
+change.
 
 **Python.** Who refuses depends on the function, so that a message's path gains no
 call.
 
 - An integer is an `int`, or a value with an `__index__`, such as a numpy integer or
   an `IntEnum`'s member, read as the exact `int` it gives. A value of the
-  parameter's own `ctypes` type is passed as it is. `ctypes` passed all of these
-  exactly, and they are passed still. A `float` is refused, as `ctypes` refused it.
-  A `bool` is refused, though `ctypes` passed it as 0 or 1: `True` as a position or
-  a length is a mistake, as it is no action for a service's handler.
+  parameter's own `ctypes` type is passed as it is, and an object that names what
+  `ctypes` passes for it, with `ctypes`' `_as_parameter_`, is read as that. `ctypes`
+  passed all of these exactly, and they are passed still. A `float`, a `str`, `None`
+  and a `ctypes` value of another type are refused, as `ctypes` refused them. A
+  `bool` is refused, though `ctypes` passed it as 0 or 1: `True` as a position or a
+  length is a mistake, as it is no action for a service's handler.
 - A function that is not per-message, an add, a command, a close: the binding gives
   each of its integer parameters a checking type, `_checked(ctype, name)` in
   `_abi.py`, in place of the plain `ctypes` type. The generator writes it from the
@@ -80,9 +84,13 @@ call.
   message, or the trampoline, which holds the action a service's handler returned to
   an int32 and treats one outside it as no action. The generator fails on a
   per-message integer parameter that the list does not name, on a line for anything
-  else, and on a line that the text of the function that makes the ABI call does not
-  bear out. It also fails on a parameter of a scalar type that no checking type
-  reads, a `bool` today.
+  else, and on a reader that is not the one for the parameter's C type. For each line
+  it reads the client's text at every call of the function: a reader's line needs the
+  whole test in line and the read before the call, and the parameter itself as the
+  call's argument; the package's own needs a `len` as that argument. It reads text,
+  so a test under a condition that is never true is not seen for what it is; the
+  tests of each function hold what it does. The generator also fails on a parameter
+  of a scalar type that no checking type reads, a `bool` today.
 
 **Node.** The addon is to call neither `napi_get_value_int64` nor
 `napi_get_value_int32`. Every integer argument is to be read by the reader the timers
@@ -170,39 +178,52 @@ refusals of this change added to the runner and the client left as `master` has 
 
 With the change, the Python runner refuses a truncate, two purges and an add with an
 integer outside its parameter's range, and a truncate at a `float`, and the replay
-then reads the 1,000 messages at their positions: 20 runs of 20.
+then reads the 1,000 messages at their positions: ten runs of ten.
 
 **What a message's path pays in Python.** The runner's latency round sends 100,000
-messages over `cavalry:ipc`, one at a time on one thread, unpinned, and reports the
-time from the publisher's clock read before the commit to the handler's first clock
-read. Each message makes one `try_claim` and one `poll`, so two of the tests in line.
-The clock steps by 41 or 42 ns. Ten runs of `master`'s client and twenty of the
-changed one, in the same two hours, the lowest and the highest run of each:
+messages over `cavalry:ipc`, one at a time on one thread, unpinned. It reports the
+time from the publisher's clock read, which follows the claim and precedes the
+commit, to the handler's first clock read. That interval holds the commit, the poll
+and the call of the handler, and so one of this change's tests in line, the poll's.
+The clock steps by 41 or 42 ns. `master`'s client and the changed one ran in turn,
+ten runs each, so that both saw the same minutes; the lowest and the highest run of
+each:
 
 | | p50 | p99 | p99.99 | max |
 | --- | --- | --- | --- | --- |
-| `master`, 10 runs | 750 to 792 ns | 959 to 1,334 ns | 4,500 to 43,458 ns | 12,000 to 201,792 ns |
-| changed, 20 runs | 791 to 833 ns | 958 to 1,084 ns | 4,334 to 11,750 ns | 14,375 to 136,125 ns |
+| `master`, 10 runs | 750 to 792 ns | 917 to 1,250 ns | 3,708 to 9,875 ns | 12,250 to 138,375 ns |
+| changed, 10 runs | 791 to 792 ns | 1,000 to 1,042 ns | 5,417 to 11,709 ns | 16,000 to 141,083 ns |
 
-The median is one step of the clock higher: 750 ns in six of `master`'s ten runs and
-in none of the changed client's twenty, of which nineteen read 791 or 792 ns. That is
-the two tests. The p99, the p99.99 and the max of the changed client's runs are
-inside the spread of `master`'s. These are a laptop's runs, and no run's number is a
-bound.
+The median is up to one step of the clock higher: 750 ns in four of `master`'s ten
+runs and in none of the changed client's. The p99 and the max of the changed
+client's runs are inside the spread of `master`'s. Its p99.99 is higher at both ends,
+by about 1,700 and 1,800 ns, in a statistic that ten of 100,000 samples lie above. Two
+earlier series, run apart and not in turn, read the other way: `master`'s ten runs
+had a p99.99 of 4,500 to 43,458 ns and the changed client's twenty 4,334 to
+11,750 ns. These runs do not tell a shift of that size at p99.99 from the laptop's
+own spread, and no run's number is a bound. The series ran before this change's
+last edits, which touched what a refused or an integer-like value meets and no test
+in line.
 
 **That the gates hold it.** `clients/generate-test.py` holds every refusal of every
-checking type at each end of its range, through `ctypes` itself for one, and the two
-readers; `clients/lint-test.py` holds the allowance's edges for both readers; and the
-generator fails on a per-message integer parameter that its list does not name.
+checking type at each end of its range, through `ctypes` itself for one, and calls
+each per-message function with what it refuses and what it passes over a stand-in
+ABI. `clients/lint-test.py` holds the allowance's edges for both readers. Each was
+tried against changes that should fail it: seven of the lint's reader rule and seven
+of the generator's readers and its check, and each failed a test. An independent
+read of the change found that the first version refused a value with an `__index__`,
+which `ctypes` had passed exactly, and that the lint's tests held the allowance for
+one reader alone; both are as this ADR says now.
 
 ## Consequences
 
 - A program that passed the Python client an `int` its parameter cannot hold had
   another value passed, and is now refused. That is the change's purpose.
-- Two programs that had nothing converted are refused too, and `changelog.d/` says
-  so. One passed a `bool`, which reached the ABI as 0 or 1. The other catches
-  `ctypes.ArgumentError` for a `float` given to a per-message function, which is now
-  a `TypeError`.
+- A program that had nothing converted meets the change in two places, and
+  `changelog.d/` says so. A `bool`, which reached the ABI as 0 or 1, is now refused.
+  A value that is no integer, a `float`, a `str` or `None`, given to a per-message
+  function, was refused by `ctypes` with `ctypes.ArgumentError`, and is now refused
+  with a `TypeError`.
 - The Node client's second pull request will refuse a fraction, a `NaN`, an infinity
   and an out-of-range number, each of which N-API converted.
 - The Python client refuses with two kinds of error by the function called:

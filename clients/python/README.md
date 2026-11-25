@@ -378,9 +378,10 @@ is the task from its start.
   a value with an `__index__`, such as a numpy integer or an `IntEnum`'s member:
   it is read as the exact `int` it gives, and passed when that is in range, as
   `ctypes` passed it before. A value of the parameter's own `ctypes` type, a
-  `ctypes.c_int64` for an int64, is passed as it is. Anything else is refused. A
-  `float` such as `96.0` was refused by `ctypes` already, and still is. A `bool`
-  was passed as 0 or 1 and is now refused: `True` as a position or a length is a
+  `ctypes.c_int64` for an int64, is passed as it is, and an object with `ctypes`'
+  `_as_parameter_` is read as what that names. Anything else is refused. A
+  `float` such as `96.0`, a `str` and `None` were refused by `ctypes` already, and
+  still are. A `bool` was passed as 0 or 1 and is now refused: `True` as a position or a length is a
   mistake, as it is no action for a service's handler. Who refuses depends on the
   function, so that a message's path gains no call:
   - An add, a command and every other function that is not per-message: the
@@ -401,8 +402,9 @@ is the task from its start.
   service's handler returned is held to an int32 in the trampoline, where one
   outside it is no action and aborts the entry (the rule on a failed handler,
   below). The generator fails on a per-message function's integer parameter that
-  its list, `PER_MESSAGE_INTEGERS`, does not account for, and on a line of the
-  list that the function's text does not bear out; `clients/generate-test.py`
+  its list, `PER_MESSAGE_INTEGERS`, does not account for, on a reader that is not
+  the one for the parameter's C type, and on a line whose test and read, or whose
+  `len`, is not in the text of the function at the ABI call's argument; `clients/generate-test.py`
   holds each refusal, through `ctypes` itself for a checking type, and the
   conformance runner makes five such calls through the package, two truncates, two
   purges and an add, against a recording that the replay then reads whole.

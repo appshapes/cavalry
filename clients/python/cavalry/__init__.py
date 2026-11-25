@@ -19,7 +19,6 @@ its poll is a call on that client (spec/c-abi.md, "Threads").
 """
 
 import ctypes
-import operator
 import os
 import sys
 import threading
@@ -189,20 +188,18 @@ def _size(value, name):
     # caller, a claim's length and a poll's fragment limit: the exact `int` that `value`
     # is, when a `size_t` holds it, and otherwise a raise before the ABI is called. ctypes
     # passes a negative int as a count near 2 ** 64, and an int above the range as its
-    # low bits. An integer is an `int`, or a value with an `__index__`, such as a numpy
-    # integer; a `ctypes.c_size_t` is returned as it is; a `bool` is refused, as
-    # `_abi._checked` refuses one. A command's and an add's integer arguments are read by
-    # the binding's own checking types (`_abi._checked`). A per-message function tests its
-    # own argument in line, a type and two comparisons, and calls its reader only for a
-    # value that fails them, so that a message's path gains no call: the reader then
-    # raises, or returns what the function passes on.
-    if isinstance(value, ctypes.c_size_t):
-        return value
-    if isinstance(value, bool) or not hasattr(type(value), "__index__"):
+    # low bits. What an integer is, is the binding's (`_abi._exact`): an `int` or a value
+    # with an `__index__`, and no `bool`; a `ctypes.c_size_t` is returned as it is. A
+    # command's and an add's integer arguments are read by the binding's own checking
+    # types (`_abi._checked`). A per-message function tests its own argument in line, a
+    # type and two comparisons, and calls its reader only for a value that fails them,
+    # so that a message's path gains no call: the reader then raises, or returns what
+    # the function passes on.
+    exact = _abi._exact(value, ctypes.c_size_t)
+    if exact is None:
         raise TypeError(f"{name}: an int from 0 to {_SIZE_MAX} expected, a size_t, and a {type(value).__name__} was "
                         f"given. {_RANGE_NEXT}")
-    exact = int.__index__(operator.index(value))  # an exact int, whatever subclass gave it
-    if not 0 <= exact <= _SIZE_MAX:
+    if type(exact) is int and not 0 <= exact <= _SIZE_MAX:
         raise OverflowError(f"{name}: an int from 0 to {_SIZE_MAX} expected, a size_t, and the one given is "
                             f"{'below' if exact < 0 else 'above'} that range; ctypes would pass another value, its "
                             f"low bits. {_RANGE_NEXT}")
@@ -219,13 +216,11 @@ def _int64(value, name, next=_RANGE_NEXT):
     # `_size`'s: a `bool` is refused, as it is no action for a handler, since `True`
     # would be timer 1. A message is built on the refusal alone, and without the value's
     # digits, which Python refuses to write for a very long int.
-    if isinstance(value, ctypes.c_int64):
-        return value
-    if isinstance(value, bool) or not hasattr(type(value), "__index__"):
+    exact = _abi._exact(value, ctypes.c_int64)
+    if exact is None:
         raise TypeError(f"{name}: an int from {_INT64_MIN} to {_INT64_MAX} expected, an int64, and a "
                         f"{type(value).__name__} was given. {next}")
-    exact = int.__index__(operator.index(value))  # an exact int, whatever subclass gave it
-    if not _INT64_MIN <= exact <= _INT64_MAX:
+    if type(exact) is int and not _INT64_MIN <= exact <= _INT64_MAX:
         raise OverflowError(f"{name}: an int from {_INT64_MIN} to {_INT64_MAX} expected, an int64, and the one given "
                             f"is {'below' if exact < _INT64_MIN else 'above'} that range; ctypes would pass its low "
                             f"64 bits, another value. {next}")
@@ -1302,9 +1297,11 @@ class ClusterService:
             if interrupt is not None:
                 raise interrupt
             if pending is None:
-                # Python writes no digits for a very long int, which is no action either.
-                long = type(refused) is int and refused.bit_length() > 64
-                shown = f"an int of {refused.bit_length()} bits" if long else repr(refused)
+                try:
+                    shown = repr(refused)
+                except ValueError:  # Python writes no digits for a very long int, which is no action either
+                    shown = (f"an int of {refused.bit_length()} bits" if isinstance(refused, int)
+                             else f"a {type(refused).__name__} whose text Python does not write")
                 pending = CavalryError(
                     "cavalry_cluster_service_action", _abi.CAVALRY_ERR_CLUSTER_ACTION,
                     f"the entry handler returned {shown}, which is no action: return nothing or cavalry.CONTINUE "

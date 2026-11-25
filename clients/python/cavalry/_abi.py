@@ -291,16 +291,38 @@ cavalry_fragment_handler_t = CFUNCTYPE(None, c_void_p, c_void_p, c_size_t, c_voi
 _NEXT = "Pass an int in that range. See clients/python/README.md#what-it-must-never-do"
 
 
+def _exact(value, own):
+    """What ctypes is to be handed for `value`, the argument of an integer parameter whose
+    ctypes type is `own`: the exact `int` that `value` is, or a value of `own` as it is,
+    or None for what is no integer. An integer is an `int`, or a value with an
+    `__index__`, such as a numpy integer or an `IntEnum`'s member, read through
+    `int.__index__`, so that a subclass which answers comparisons its own way is read as
+    the number it is. An object that says what ctypes is to pass for it, with ctypes'
+    `_as_parameter_`, is read as that. ctypes passed each of these exactly, and they are
+    passed still. A `bool` is no integer here, though Python counts it an `int` and ctypes
+    passed it as 0 or 1: `True` as a position or a length is a mistake. Neither is a
+    `float`, a `str`, `None` or a ctypes value of another type, each of which ctypes
+    refused."""
+    if isinstance(value, own):
+        return value
+    given = getattr(value, "_as_parameter_", value)
+    if isinstance(given, own):
+        return given
+    if isinstance(given, bool):
+        return None
+    try:
+        return int.__index__(operator.index(given))
+    except TypeError:  # no `__index__`, or one that does not give an int
+        return None
+
+
 def _checked(ctype, name):
     """The argument type of the integer parameter `name`, whose C type is `ctype`: what
     ctypes hands the ABI for an integer the parameter can hold, and a refusal, before the
     ABI is called, for anything else. ctypes itself passes an `int` outside the range as
     its low bits, another value, with nothing said: a position, a recording's id or a
-    stream's id that the caller did not name. An integer is an `int`, or a value with an
-    `__index__`, such as a numpy integer, read as the exact `int` it gives; a value of
-    the parameter's own ctypes type is passed as it is. A `bool` is refused, though
-    Python counts it an `int`: `True` as a position is a mistake. ctypes reports the
-    refusal as `ctypes.ArgumentError`, whose text holds the `TypeError` or the
+    stream's id that the caller did not name. What an integer is, is `_exact`'s. ctypes
+    reports the refusal as `ctypes.ArgumentError`, whose text holds the `TypeError` or the
     `OverflowError` raised here, the parameter's name first. The message is built on the
     refusal alone, and without the value's digits, which Python refuses to write for a
     very long int."""
@@ -312,11 +334,11 @@ def _checked(ctype, name):
     class Checked:
         @staticmethod
         def from_param(value):
-            if isinstance(value, ctype):
-                return value
-            if isinstance(value, bool) or not hasattr(type(value), "__index__"):
+            exact = _exact(value, ctype)
+            if exact is None:
                 raise TypeError(f"{name}: {held}, and a {type(value).__name__} was given. {_NEXT}")
-            exact = int.__index__(operator.index(value))  # an exact int, whatever subclass gave it
+            if type(exact) is not int:
+                return exact  # a value of the parameter's own ctypes type
             if not least <= exact <= greatest:
                 raise OverflowError(f"{name}: {held}, and the one given is {'below' if exact < least else 'above'} "
                                     f"that range; ctypes would pass its low {bits} bits, another value. {_NEXT}")

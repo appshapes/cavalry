@@ -352,6 +352,16 @@ class Package(unittest.TestCase):
             self.assertEqual(error.__cause__.code, cavalry.CAVALRY_ERR_CLUSTER_ACTION)
             self.assertIn(f"the entry handler returned {shown}, which is no action", error.__cause__.message)
             self.assertEqual(abi.calls, [cavalry.ABORT], shown)
+        class Long(int):
+            pass
+
+        for value, shown in ((Long(10 ** 5000), "an int of 16610 bits"),
+                             ([10 ** 5000], "a list whose text Python does not write")):
+            del abi.calls[:]
+            with self.assertRaises(cavalry.HandlerError) as raised:
+                service.poll(lambda body, entry, service_: value, 16)
+            self.assertIn(f"the entry handler returned {shown}, which is no action", raised.exception.__cause__.message)
+            self.assertEqual(abi.calls, [cavalry.ABORT], shown)
         for value in (2 ** 31 - 1, -(2 ** 31)):  # the ends of the range are passed, and the ABI refuses them
             del abi.calls[:]
             with self.assertRaises(cavalry.HandlerError):
@@ -411,6 +421,19 @@ class Package(unittest.TestCase):
 
             __ge__ = __lt__ = __gt__ = __le__
 
+        class Passes:
+            """An object that says what ctypes passes for it, in ctypes' own way."""
+
+            def __init__(self, value):
+                self._as_parameter_ = value
+
+        class NoIndex:
+            __index__ = None
+
+        class TextIndex:
+            def __index__(self):
+                return "7"
+
         expected = [(fn.name, param.name) for fn in self.header.functions if fn.name not in gen.PER_MESSAGE
                     for param in fn.params if gen.ctype(param.type, self.header, function_param=True) in gen.INTEGER_CTYPES]
         self.assertEqual(len(expected), 19)
@@ -433,6 +456,16 @@ class Package(unittest.TestCase):
                     self.assertEqual(argtype.from_param(like).value, 7, where)
                 own = argtype.ctype(7)
                 self.assertIs(argtype.from_param(own), own, where)
+                self.assertIs(argtype.from_param(Passes(own)), own, where)
+                self.assertEqual(argtype.from_param(Passes(7)).value, 7, where)
+                # A ctypes value of another type is not the parameter's: ctypes refused
+                # one before, and a value of 32 bits is not handed over for 64.
+                other = ctypes.c_int64(7) if argtype.ctype is not ctypes.c_int64 else ctypes.c_int32(7)
+                for refused in (other, ctypes.c_double(7), Passes(other), NoIndex(), TextIndex()):
+                    with self.assertRaises(TypeError) as raised:
+                        argtype.from_param(refused)
+                    self.assertTrue(str(raised.exception).startswith(f"{argtype.parameter}: an int from {least} to "
+                                                                     f"{greatest} expected, "), raised.exception)
                 for refused, error in ((least - 1, OverflowError), (greatest + 1, OverflowError),
                                        (2 ** 64 + 5, OverflowError), (-(2 ** 64) - 5, OverflowError),
                                        (10 ** 5000, OverflowError), (Liar(2 ** 64 + 5), OverflowError),
@@ -469,10 +502,12 @@ class Package(unittest.TestCase):
         absolute.restype, absolute.argtypes = ctypes.c_int64, [ctypes.c_int64]
         self.assertEqual(absolute(2 ** 64 + 5), 5)
         self.assertEqual(absolute(Indexed()), 7)  # what ctypes did with an integer-like value, and still does
+        self.assertEqual(absolute(Passes(-5)), 5)
         absolute.argtypes = [position]
-        for held, answer in ((-7, 7), (Indexed(), 7), (Seven.SEVEN, 7), (ctypes.c_int64(-9), 9)):
+        for held, answer in ((-7, 7), (Indexed(), 7), (Seven.SEVEN, 7), (ctypes.c_int64(-9), 9), (Passes(-5), 5)):
             self.assertEqual(absolute(held), answer)
-        for refused in (2 ** 64 + 5, 2 ** 63, -(2 ** 63) - 1, Liar(2 ** 64 + 5), 1.5, True):
+        for refused in (2 ** 64 + 5, 2 ** 63, -(2 ** 63) - 1, Liar(2 ** 64 + 5), 1.5, True, ctypes.c_int32(7),
+                        Passes(2 ** 64 + 5)):
             with self.assertRaises(ctypes.ArgumentError) as raised:
                 absolute(refused)
             self.assertIn("position: an int from -9223372036854775808 to 9223372036854775807 expected",
@@ -513,6 +548,19 @@ class Package(unittest.TestCase):
                 return True
 
             __ge__ = __lt__ = __gt__ = __le__
+
+        class Passes:
+            """An object that says what ctypes passes for it, in ctypes' own way."""
+
+            def __init__(self, value):
+                self._as_parameter_ = value
+
+        class NoIndex:
+            __index__ = None
+
+        class TextIndex:
+            def __index__(self):
+                return "7"
 
         class Abi:
             """Every function of the ABI: a `_constants` call answers 0 and gives its
@@ -567,17 +615,28 @@ class Package(unittest.TestCase):
         for call, function, at, parameter, (least, greatest) in cases:
             where = (function, parameter)
             anchor = "a-services-timers" if "timer" in function else "what-it-must-never-do"
-            own = ctypes.c_size_t(7) if least == 0 else ctypes.c_int64(7)
-            for held in (least, greatest, 7, Indexed(), Seven.SEVEN, Liar(7), own):
+            own, other = ((ctypes.c_size_t(7), ctypes.c_int64(7)) if least == 0
+                          else (ctypes.c_int64(7), ctypes.c_int32(7)))
+            for held in (least, greatest, 7, Indexed(), Seven.SEVEN, Liar(7), own, Passes(7), Passes(own)):
                 del abi.calls[:]
                 call(held)
                 self.assertEqual([name for name, _ in abi.calls], [function], where)
                 passed = abi.calls[0][1][at]
-                if held is own:
-                    self.assertIs(passed, own, where)
+                if held is own or (type(held) is Passes and held._as_parameter_ is own):
+                    self.assertIs(passed, own, where)  # the parameter's own ctypes type, as it is
                 else:
                     self.assertIs(type(passed), int, where)  # the exact int, whatever gave it
-                    self.assertEqual(passed, int.__index__(held.__index__()), where)
+                    self.assertEqual(passed, 7 if type(held) is Passes else int.__index__(held.__index__()), where)
+            # What ctypes refused before is refused still, with the parameter's name: a
+            # ctypes value of another type, and an `__index__` that gives no int.
+            for refused in (other, ctypes.c_double(7), Passes(other), Passes(7.0), NoIndex(), TextIndex()):
+                del abi.calls[:]
+                with self.assertRaises(TypeError) as raised:
+                    call(refused)
+                self.assertEqual(abi.calls, [], where)
+                self.assertTrue(str(raised.exception).startswith(f"{parameter}: an int from {least} to {greatest} "
+                                                                 f"expected, "), raised.exception)
+                self.assertIn(f"and a {type(refused).__name__} was given. ", str(raised.exception))
             for refused, error in ((least - 1, OverflowError), (greatest + 1, OverflowError),
                                    (2 ** 64 + 5, OverflowError), (10 ** 5000, OverflowError),
                                    (Liar(2 ** 64 + 5), OverflowError), (1.5, TypeError), (7.0, TypeError),
@@ -602,31 +661,56 @@ class Package(unittest.TestCase):
         self.assertEqual(len(gen.PER_MESSAGE_INTEGERS), 14)
         key = ("cavalry_publication_try_claim", "length")
         guard = '            length = _size(length, "length")\n'
-        self.assertEqual(gen.PYTHON_CLIENT.count(guard), 1)
         without = {k: v for k, v in gen.PER_MESSAGE_INTEGERS.items() if k != key}
+        reply = "self._abi.cavalry_cluster_service_reply(self._handle, session_id, message, len(message))"
+        offer = "self._abi.cavalry_publication_offer(self._handle, message, len(message))"
+        test = "        if type(length) is not int or not 0 <= length <= _SIZE_MAX:\n"
+        for text in (guard, reply, offer, test):
+            self.assertEqual(gen.PYTHON_CLIENT.count(text), 1, text)
+        listed = gen.PER_MESSAGE_INTEGERS
         for integers, client, said in (
                 (without, gen.PYTHON_CLIENT, "does not say who reads cavalry_publication_try_claim's length"),
-                ({**gen.PER_MESSAGE_INTEGERS, ("cavalry_truncate_recording", "position"): "_int64"}, gen.PYTHON_CLIENT,
+                ({**listed, ("cavalry_truncate_recording", "position"): "_int64"}, gen.PYTHON_CLIENT,
                  "names cavalry_truncate_recording's position that is no integer parameter of a per-message"),
-                ({**gen.PER_MESSAGE_INTEGERS, ("cavalry_publication_try_claim", "size"): "_size"}, gen.PYTHON_CLIENT,
+                ({**listed, ("cavalry_publication_try_claim", "size"): "_size"}, gen.PYTHON_CLIENT,
                  "names cavalry_publication_try_claim's size that is no integer parameter"),
-                ({**gen.PER_MESSAGE_INTEGERS, key: "nobody"}, gen.PYTHON_CLIENT,
+                ({**listed, key: "nobody"}, gen.PYTHON_CLIENT,
                  "says 'nobody' reads cavalry_publication_try_claim's length"),
-                ({**gen.PER_MESSAGE_INTEGERS, key: "the client's own"}, gen.PYTHON_CLIENT,
+                # A reader is for its C type: `_int64` would pass a length of -1 on to a size_t.
+                ({**listed, key: "_int64"}, gen.PYTHON_CLIENT.replace(guard, '            length = _int64(length, "length")\n'),
+                 "says _int64 reads cavalry_publication_try_claim's length, which is a c_size_t: _int64 reads a c_int64"),
+                ({**listed, ("cavalry_cluster_service_reply", "session_id"): "_size"}, gen.PYTHON_CLIENT,
+                 "says _size reads cavalry_cluster_service_reply's session_id, which is a c_int64"),
+                ({**listed, ("cavalry_cluster_service_reply", "session_id"): "the client's own"}, gen.PYTHON_CLIENT,
+                 "says the client's own reads cavalry_cluster_service_reply's session_id, which is a c_int64"),
+                ({**listed, ("cavalry_cluster_service_action", "action"): "_int64"}, gen.PYTHON_CLIENT,
+                 "says _int64 reads cavalry_cluster_service_action's action, which is a c_int"),
+                # What the list says is what the function does, for the argument it names.
+                ({**listed, key: "the client's own"}, gen.PYTHON_CLIENT,
                  "says the client's own reads cavalry_publication_try_claim's length, and the function"),
-                ({**gen.PER_MESSAGE_INTEGERS, key: "_int64"}, gen.PYTHON_CLIENT,
-                 "says _int64 reads cavalry_publication_try_claim's length, and the function"),
-                ({**gen.PER_MESSAGE_INTEGERS, ("cavalry_publication_offer", "length"): "_size"}, gen.PYTHON_CLIENT,
+                ({**listed, ("cavalry_publication_offer", "length"): "_size"}, gen.PYTHON_CLIENT,
                  "says _size reads cavalry_publication_offer's length, and the function"),
-                (gen.PER_MESSAGE_INTEGERS, gen.PYTHON_CLIENT.replace(guard, "            pass\n"),
+                (listed, gen.PYTHON_CLIENT.replace(guard, "            pass\n"),
                  "says _size reads cavalry_publication_try_claim's length, and the function"),
-                (gen.PER_MESSAGE_INTEGERS,
-                 gen.PYTHON_CLIENT.replace("not _INT32_MIN <= action <= _INT32_MAX", "False"),
+                (listed, gen.PYTHON_CLIENT.replace(test, "        if type(length) is not int:\n"),
+                 "says _size reads cavalry_publication_try_claim's length, and the function"),
+                (listed, gen.PYTHON_CLIENT.replace(test, "        if not 0 <= length <= _SIZE_MAX:\n"),
+                 "says _size reads cavalry_publication_try_claim's length, and the function"),
+                (listed, gen.PYTHON_CLIENT.replace("self._abi.cavalry_publication_try_claim(self._handle, length, ",
+                                                   "self._abi.cavalry_publication_try_claim(self._handle, size, "),
+                 "says _size reads cavalry_publication_try_claim's length, and the function"),
+                (listed, gen.PYTHON_CLIENT.replace("not _INT32_MIN <= action <= _INT32_MAX", "False"),
                  "says the trampoline reads cavalry_cluster_service_action's action, and the function"),
-                (gen.PER_MESSAGE_INTEGERS,
-                 gen.PYTHON_CLIENT.replace("self._abi.cavalry_cluster_session_offer(self._handle, message, len(message))",
-                                           "self._abi.cavalry_cluster_session_offer(self._handle, message, length)"),
-                 "says the client's own reads cavalry_cluster_session_offer's length, and the function")):
+                (listed, gen.PYTHON_CLIENT.replace("self._abi.cavalry_cluster_service_action(self._handle, ABORT)",
+                                                   "self._abi.cavalry_cluster_service_action(self._handle, BREAK)"),
+                 "says the trampoline reads cavalry_cluster_service_action's action, and the function"),
+                (listed, gen.PYTHON_CLIENT.replace(offer, offer.replace("len(message)", "length")),
+                 "says the client's own reads cavalry_publication_offer's length, and the function"),
+                # A `len` elsewhere in the call does not stand for the argument's own.
+                (listed, gen.PYTHON_CLIENT.replace(offer, offer.replace("message, len(message)", "message[:len(message)], length")),
+                 "says the client's own reads cavalry_publication_offer's length, and the function"),
+                (listed, gen.PYTHON_CLIENT.replace(reply, reply.replace("len(message)", "len(message), 0")),
+                 "calls cavalry_cluster_service_reply with 5 arguments, and the header gives it 4")):
             with self.assertRaises(SystemExit) as failed:
                 gen.check_per_message_integers(self.header, integers, client)
             self.assertIn(said, str(failed.exception))
