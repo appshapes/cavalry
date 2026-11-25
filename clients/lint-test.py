@@ -76,6 +76,7 @@ and a missing file says to generate.
 """
 
 import os
+import re
 import shutil
 import sys
 import tempfile
@@ -239,8 +240,12 @@ class Clients(unittest.TestCase):
         for name in ("ClusterService.schedule_timer", "ClusterService.cancel_timer"):
             self.assertTrue(any(name in f and "raises" in f for f in found), found)
 
-    CANCEL_TIMER = ("        return self._abi.cavalry_cluster_service_cancel_timer(self._handle, "
-                    "_int64(correlation_id, \"correlation_id\"))\n")
+    CANCEL_TIMER = "        return self._abi.cavalry_cluster_service_cancel_timer(self._handle, correlation_id)\n"
+    TRY_CLAIM = "        result = self._abi.cavalry_publication_try_claim(self._handle, length, self._claim_ref)\n"
+    SUBSCRIPTION_POLL = ("            fragments = self._abi.cavalry_subscription_poll(self._handle, self._trampoline, "
+                         "None, fragment_limit)\n")
+    INT64 = "def _int64(value, name, next=_RANGE_NEXT):\n"
+    SIZE = "def _size(value, name):\n"
 
     def test_the_argument_reader_may_raise_and_no_other_helper_of_a_timer_call_may(self):
         """`_int64` refuses a timer's id or deadline that is no int64 before the ABI is
@@ -263,52 +268,145 @@ class Clients(unittest.TestCase):
                            ("    _check(library(), 'cavalry_x', 0)\n", "calls _check")):
             with self.subTest(line=line):
                 self.setUp()
-                self.edit("def _int64(value, name):\n", "def _int64(value, name):\n" + line)
+                self.edit(self.INT64, self.INT64 + line)
                 found = lint.findings(self.tmp)
-                for name in ("ClusterService.schedule_timer", "ClusterService.cancel_timer"):
+                for name in ("ClusterService.schedule_timer", "ClusterService.cancel_timer", "ClusterService.reply",
+                             "Publication.set_reserved_value"):
                     self.assertTrue(any(name in f and "_int64" in f and said in f for f in found), found)
                 self.assertTrue(all("_int64" in f for f in found), found)
+                self.setUp()
+                self.edit(self.SIZE, self.SIZE + line)
+                found = lint.findings(self.tmp)
+                for name in ("Publication.try_claim", "Subscription.poll", "CommittedLog.poll", "ClusterSession.poll",
+                             "ClusterService.poll"):
+                    self.assertTrue(any(name in f and "_size" in f and said in f for f in found), found)
+                self.assertTrue(all("_size" in f for f in found), found)
 
     def test_the_argument_reader_is_called_before_the_abi_or_as_its_argument(self):
-        """A reader refuses an argument before the ABI is called: a call of it on a
-        line after the function's ABI call, on the ABI's own answer here, is a
-        finding."""
-        self.edit(self.CANCEL_TIMER,
-                  "        answered = self._abi.cavalry_cluster_service_cancel_timer(self._handle, correlation_id)\n"
-                  "        return _int64(answered, \"correlation_id\")\n")
-        [finding] = lint.findings(self.tmp)
-        self.assertIn("ClusterService.cancel_timer", finding)
-        self.assertIn("after its call of the ABI", finding)
+        """A reader refuses an argument before the ABI is called: a call of either
+        reader on a line after its function's ABI call, on the ABI's own answer here, is
+        a finding. That holds in a poll too, which may raise its handler's exception
+        once the ABI has returned: a reader is not that raise, whether the rule names it
+        for the poll, as `_size`, or does not, as `_int64`. As an argument of the ABI
+        call a reader is none."""
+        for name, old, new, said in (
+                ("ClusterService.cancel_timer", self.CANCEL_TIMER,
+                 "        answered = self._abi.cavalry_cluster_service_cancel_timer(self._handle, correlation_id)\n"
+                 "        return _int64(answered, \"correlation_id\")\n", "after its call of the ABI"),
+                ("Publication.try_claim", self.TRY_CLAIM, self.TRY_CLAIM + "        _size(result, 'length')\n",
+                 "after its call of the ABI"),
+                ("Subscription.poll", self.SUBSCRIPTION_POLL,
+                 self.SUBSCRIPTION_POLL + "            _size(fragments, 'fragment_limit')\n", "after its call of the ABI"),
+                ("Subscription.poll", self.SUBSCRIPTION_POLL,
+                 self.SUBSCRIPTION_POLL + "            _int64(fragments, 'fragment_limit')\n", "calls _int64")):
+            with self.subTest(name=name, new=new):
+                self.setUp()
+                self.edit(old, new)
+                found = lint.findings(self.tmp)  # one for each ABI call the reader comes after: a poll has two
+                self.assertTrue(found and all(name in f and said in f for f in found), found)
+        self.setUp()
+        self.edit(self.CANCEL_TIMER, "        return self._abi.cavalry_cluster_service_cancel_timer("
+                                     "self._handle, _int64(correlation_id, \"correlation_id\"))\n")
+        self.edit(self.TRY_CLAIM, "        result = self._abi.cavalry_publication_try_claim("
+                                  "self._handle, _size(length, 'length'), self._claim_ref)\n")
+        self.assertEqual(lint.findings(self.tmp), [])
 
-    def test_the_argument_reader_is_for_the_functions_the_rule_names_and_no_trampoline(self):
-        """Only the schedule and the cancel of a timer may call the reader. In a
-        trampoline its raise would be lost in the call-back, and a reply that called it
-        would raise where the rule has named no reader for it."""
-        self.edit("    def _on_entry(self, clientd, buffer, length, header):\n",
-                  "    def _on_entry(self, clientd, buffer, length, header):\n        _int64(length, 'length')\n")
-        self.edit("    def reply(self, session_id, message):\n",
-                  "    def reply(self, session_id, message):\n        _int64(session_id, 'session_id')\n")
-        found = lint.findings(self.tmp)
-        self.assertEqual(len(found), 2, found)
-        for name in ("ClusterService._on_entry", "ClusterService.reply"):
-            self.assertTrue(any(name in f and "calls _int64" in f and "raises" in f for f in found), found)
+    def test_an_argument_reader_is_for_the_functions_the_rule_names_and_no_trampoline(self):
+        """Only the functions the rule names beside a reader may call it. In a trampoline
+        its raise would be lost in the call-back; a commit that called the int64's reader,
+        and a publication's offer that called the count's, would raise where the rule has
+        named no reader for them; and a function named for one reader may not call the
+        other, a reply the count's or a claim the int64's."""
+        edits = (("ClusterService._on_entry", "_int64", "    def _on_entry(self, clientd, buffer, length, header):\n",
+                  "        _int64(length, 'length')\n"),
+                 ("Subscription._on_fragment", "_size", "    def _on_fragment(self, clientd, buffer, length, header):\n",
+                  "        _size(length, 'length')\n"),
+                 ("Publication.commit", "_int64", "    def commit(self):\n", "        _int64(0, 'position')\n"),
+                 ("ClusterService.reply", "_size", "    def reply(self, session_id, message):\n",
+                  "        _size(session_id, 'session_id')\n"),
+                 ("Publication.try_claim", "_int64", "    def try_claim(self, length):\n",
+                  "        _int64(length, 'length')\n"))
+        for name, reader, signature, call in edits:
+            with self.subTest(name=name):
+                self.setUp()
+                with open(self.file, encoding="utf-8") as f:
+                    text = f.read()
+                at = text.index(signature, text.index(f"\nclass {name.split('.')[0]}"))
+                # After the method's docstring, where it has one: its first statement.
+                end = at + len(signature)
+                if text[end:].lstrip().startswith('"""'):
+                    end = text.index('"""\n', text.index('"""', end) + 3) + 4
+                with open(self.file, "w", encoding="utf-8") as f:
+                    f.write(text[:end] + call + text[end:])
+                found = lint.findings(self.tmp)
+                self.assertEqual(len(found), 1, found)
+                self.assertTrue(name in found[0] and f"calls {reader}" in found[0] and "raises" in found[0], found)
+        self.setUp()
+        self.edit("        return self._abi.cavalry_publication_offer(self._handle, message, len(message))\n",
+                  "        return self._abi.cavalry_publication_offer(self._handle, message, "
+                  "_size(len(message), 'length'))\n")
+        [finding] = lint.findings(self.tmp)
+        self.assertTrue("Publication.offer" in finding and "calls _size" in finding and "raises" in finding, finding)
+
+    def test_each_per_message_function_reads_the_integer_its_caller_gives(self):
+        """The readers the committed package calls, in the function that calls each: a
+        claim's length and each poll's fragment limit through `_size`, a reply's session,
+        the reserved value and a timer's id and deadline through `_int64`. Each function
+        tests its argument in line and calls its reader, on the next line, only for a
+        value that fails the test; the reader's answer is what it passes on, and the
+        ABI's call comes after. A wrapper that dropped its reader would pass ctypes an
+        int that it wraps."""
+        with open(self.file, encoding="utf-8") as f:
+            text = f.read()
+        size = "0 <= {0} <= _SIZE_MAX", '_size({0}, "{0}")'
+        int64 = "_INT64_MIN <= {0} <= _INT64_MAX", '_int64({0}, "{0}")'
+        timer = "_INT64_MIN <= {0} <= _INT64_MAX", '_int64({0}, "{0}", _TIMER_NEXT)'
+        for cls, method, parameter, (held, read) in (
+                ("Publication", "try_claim", "length", size),
+                ("Publication", "set_reserved_value", "value", int64),
+                ("Subscription", "poll", "fragment_limit", size),
+                ("CommittedLog", "poll", "fragment_limit", size),
+                ("ClusterSession", "poll", "fragment_limit", size),
+                ("ClusterService", "poll", "fragment_limit", size),
+                ("ClusterService", "reply", "session_id", int64),
+                ("ClusterService", "schedule_timer", "correlation_id", timer),
+                ("ClusterService", "schedule_timer", "deadline", timer),
+                ("ClusterService", "cancel_timer", "correlation_id", timer)):
+            with self.subTest(method=f"{cls}.{method}", parameter=parameter):
+                body = re.split(rf"\nclass {cls}\b", text, maxsplit=1)[1].split("\nclass ", 1)[0]
+                body = body.split(f"\n    def {method}(", 1)[1].split("\n    def ", 1)[0]
+                guard = (f"        if type({parameter}) is not int or not {held.format(parameter)}:\n"
+                         f"            {parameter} = {read.format(parameter)}\n")
+                self.assertEqual(body.count(guard), 1, body)
+                self.assertEqual(body.count(f"{read.split('(')[0]}({parameter}, "), 1)
+                self.assertLess(body.index(guard), body.index("self._abi."))
 
     def test_the_argument_reader_reached_through_a_helper_is_a_raise(self):
-        self.edit("def _int64(value, name):\n",
-                  "def _id(value):\n    return _int64(value, 'correlation_id')\n\n\ndef _int64(value, name):\n")
+        """A function between a per-message function and its reader is no reader: its
+        call is a raise on the path, for either reader."""
+        self.edit(self.INT64, "def _id(value):\n    return _int64(value, 'correlation_id')\n\n\n" + self.INT64)
         self.edit(self.CANCEL_TIMER,
                   "        return self._abi.cavalry_cluster_service_cancel_timer(self._handle, _id(correlation_id))\n")
         [finding] = lint.findings(self.tmp)
         self.assertIn("ClusterService.cancel_timer", finding)
         self.assertIn("calls _id", finding)
+        self.setUp()
+        self.edit(self.SIZE, "def _count(value):\n    return _size(value, 'length')\n\n\n" + self.SIZE)
+        self.edit(self.TRY_CLAIM, "        result = self._abi.cavalry_publication_try_claim("
+                                  "self._handle, _count(length), self._claim_ref)\n")
+        [finding] = lint.findings(self.tmp)
+        self.assertIn("Publication.try_claim", finding)
+        self.assertIn("calls _count", finding)
 
     def test_an_argument_reader_the_package_does_not_have_is_a_stale_rule(self):
-        self.edit("def _int64(value, name):\n", "def _int64_argument(value, name):\n")
-        self.edit("_int64(correlation_id, \"correlation_id\")", "_int64_argument(correlation_id, \"correlation_id\")",
-                  count=2)
-        self.edit("_int64(deadline, \"deadline\")", "_int64_argument(deadline, \"deadline\")")
+        self.edit(self.INT64, "def _int64_argument(value, name, next=_RANGE_NEXT):\n")
+        self.edit("_int64(correlation_id, \"correlation_id\", _TIMER_NEXT)",
+                  "_int64_argument(correlation_id, \"correlation_id\", _TIMER_NEXT)", count=2)
+        self.edit("_int64(deadline, \"deadline\", _TIMER_NEXT)", "_int64_argument(deadline, \"deadline\", _TIMER_NEXT)")
+        self.edit(self.SIZE, "def _count(value, name):\n")
         found = lint.findings(self.tmp)
         self.assertTrue(any("the argument reader _int64 is not in" in f for f in found), found)
+        self.assertTrue(any("the argument reader _size is not in" in f for f in found), found)
         # The renamed function is no reader, so its raise is one on the path again.
         self.assertTrue(any("ClusterService.schedule_timer" in f and "calls _int64_argument" in f for f in found), found)
 

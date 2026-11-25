@@ -13,14 +13,16 @@ forms, and so does every function of the package they call. For Python those
 forms are `threading`'s locks and anything else of `threading`, `async def`, `await`,
 `raise`, and building one of the package's own exceptions. One raise is not one, as a
 throw in the Node addon's argument readers below is none: a `raise` statement in the own
-body of the argument reader, `_int64`, which refuses a timer's id or deadline that is no
-int64, since ctypes would pass an int outside the range as its low 64 bits, another
-value. The allowance is that and no more. The reader is held to every other form,
+body of an argument reader, `_int64` or `_size`, which refuses an integer that the ABI's
+parameter cannot hold, since ctypes would pass an int outside the range as its low bits,
+another value. The allowance is that and no more. A reader is held to every other form,
 building one of the package's exceptions and whatever a function it calls does among
-them; only the functions the rule names beside it may call it, the schedule and the
-cancel of a service's timer, and a trampoline is none of them, since a raise there is
-lost in the call-back; and each call of it is an argument of the function's ABI call or
-on a line before it, so that nothing is refused after the ABI was called. For JavaScript,
+them; only the functions the rule names beside it may call it, a per-message function
+that takes an integer from its caller, and a trampoline is none of them, since a raise
+there is lost in the call-back; and each call of it is an argument of the function's ABI
+call or on a line before it, so that nothing is refused after the ABI was called. A
+function that is not per-message has its integer arguments read by the binding's own
+checking types, which `clients/generate-test.py` holds. For JavaScript,
 read from
 `clients/node/index.js` without a parser, by a tokenizer that drops comments and strings
 and matches braces, they are `async` on the function, `await`, `Promise`, `.then(`,
@@ -140,13 +142,21 @@ RULES = {
                         ("CommittedLog.poll", "cavalry_committed_log_poll"),
                         ("ClusterSession.poll", "cavalry_cluster_session_poll"),
                         ("ClusterService.poll", "cavalry_cluster_service_poll")],
-        # The argument reader, and the per-message functions that may call it: a `raise`
-        # in its own body is none on their path, for an argument the ABI's parameter
-        # cannot take, before the ABI is called, as the Node addon's readers throw. A
-        # timer's id and its deadline are int64, and ctypes passes a Python int outside
-        # that range as its low 64 bits with nothing said (ADR 0157;
-        # clients/python/README.md, "A service's timers").
-        "readers": {"_int64": ["ClusterService.schedule_timer", "ClusterService.cancel_timer"]},
+        # The argument readers, and the per-message functions that may call each: a
+        # `raise` in a reader's own body is none on their path, for an argument the ABI's
+        # parameter cannot take, before the ABI is called, as the Node addon's readers
+        # throw. ctypes passes a Python int outside a parameter's range as its low bits
+        # with nothing said: a timer's id and its deadline (ADR 0157), a reply's session
+        # and a claim's reserved value are int64, and a claim's length and a poll's
+        # fragment limit are counts (work item 460; clients/python/README.md, "What it
+        # must never do"). The lengths of the two offers and of a reply are the package's own
+        # `len(message)`,
+        # and the action a handler returns is held to its range in the trampoline, which
+        # raises nothing.
+        "readers": {"_int64": ["ClusterService.schedule_timer", "ClusterService.cancel_timer",
+                               "ClusterService.reply", "Publication.set_reserved_value"],
+                    "_size": ["Publication.try_claim", "Subscription.poll", "CommittedLog.poll",
+                              "ClusterSession.poll", "ClusterService.poll"]},
     },
     # The Node client calls the ABI through its addon (clients/node/README.md): the addon's
     # `poll` is the one `cavalry_subscription_poll` call, and the header's fields are read
@@ -587,8 +597,11 @@ def python_findings(language: str, path: str, rules: dict) -> list[str]:
                 findings.extend(reader_findings(package, where, node, line, what))
                 continue
             for k, how in package.reach(what).items():
-                if kind == "call-allowed" and k == "raise":
-                    continue  # a helper poll calls after the ABI has returned may raise the handler's exception
+                if kind == "call-allowed" and k == "raise" and what not in readers:
+                    # A helper poll calls after the ABI has returned may raise the handler's
+                    # exception. An argument reader is no such helper: it refuses before the
+                    # ABI is called, for the functions the rule names with it.
+                    continue
                 findings.append(f"{where} calls {what} at line {line}, and {how}: {WHY[k]}; {HELP}")
     return findings
 
