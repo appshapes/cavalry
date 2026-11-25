@@ -251,6 +251,10 @@ func onEntry(body []byte, entry *cavalry.ClusterEntryValues, service *cavalry.Cl
 }
 ```
 
+The block is a fragment, and nothing runs it: `expire` is the program's own. A whole
+program, in Python, which `just conformance` runs, is in [Schedule a timer in a
+cluster's service](../../docs/how-to/schedule-a-services-timer.md).
+
 Three rules come with them (`spec/cluster.md`, "The service", "Timers"; ADR 0151;
 ADR 0157). An id and a deadline are `int64`, which is the ABI's own type, so the
 compiler holds what the Python and the Node clients check at the call.
