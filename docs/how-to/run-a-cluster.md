@@ -198,7 +198,12 @@ committed once a quorum, two of three, has it on disk.
   chain, each member's log is replayed through a driver of its own, across its
   recordings where it holds two, and the gate
   fails unless the three members' lines hash the same and their payloads are the ones
-  the leader was offered, in order (`scripts/replay-check.sh`).
+  the leader was offered, in order (`scripts/replay-check.sh`). Its last step holds
+  a service's timers the same way: three members with a program beside each that
+  schedules 200 timers, one program started again from its snapshot, the leader
+  stopped while half of them are pending, and a program that reads the log from
+  position 0, and the gate fails unless the two members left and that replay were
+  handed the same 200 timers, each once, at the same positions and times.
 - A program beside a member reads the entries as the cluster commits them:
   [Read a cluster's committed log from a service](read-the-committed-log.md).
 - To have the cluster take a snapshot now, and not at the next 256 MiB of its log:

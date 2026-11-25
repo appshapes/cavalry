@@ -124,7 +124,12 @@ conformance:
 # entries while a service beside each reads the committed log (ADR 0066), a driver on
 # each member's directories replays that member's recording, and the script fails
 # unless the three members' lines hash the same, each service's lines are its
-# member's, and their payloads are the ones the leader was offered. What CI runs on
+# member's, and their payloads are the ones the leader was offered. Then a service's
+# timers (ADR 0151): three members and a program beside each that schedules 200
+# timers, one program started again from its snapshot, the leader stopped while half
+# are pending, and a program that reads the log from position 0; the script fails
+# unless the two members left and the replay were handed the same 200 timers at the
+# same positions and times, each once. What CI runs on
 # Linux and macOS. docs/how-to/replay-a-recording.md, docs/how-to/run-a-cluster.md and
 # docs/how-to/read-the-committed-log.md are the pages.
 replay-check:
