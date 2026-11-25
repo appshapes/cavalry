@@ -224,6 +224,11 @@ starts after that, with 12 to 15 GiB free again.
   both alike. The loop of the gate alone is not part of the comparison: the
   one-tree form has no record there to compare with.
 
+  What the round costs is stated before it runs. Forty jobs in CI's own order, at
+  the 14 to 15 minutes a job in that order took in this ADR's round 5b (run
+  45563204036), come to about 10 hours of macOS runner time. Each runner lost adds
+  up to the job's 30-minute bound.
+
 ## References
 
 - Work item 441, which carried this decision; work item 456, the fault, part of
