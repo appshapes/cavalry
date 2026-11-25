@@ -1693,10 +1693,10 @@ fn cluster_checks(
         for member in &members {
             member_findings(member, cluster, findings);
         }
-        // The nine of `member_findings`, the vote floor's (ADR 0145), the control
-        // toggle's (ADR 0147) and the owed truncation's (ADR 0148) among them, and one
-        // for each of the member's counts.
-        checks += 9 + MEMBER_COUNTS.len();
+        // The ten of `member_findings`, the vote floor's (ADR 0145), the control
+        // toggle's (ADR 0147), the owed truncation's (ADR 0148) and the leader's
+        // timers' (ADR 0151) among them, and one for each of the member's counts.
+        checks += 10 + MEMBER_COUNTS.len();
     }
     if sessions {
         stale.sort_by_key(|(session, counter, _)| (*session, counter.0));
@@ -2229,42 +2229,30 @@ fn member_findings(
     // wait while it leads (`spec/cluster.md`, "The service", "Timers"; ADR 0151). A
     // service that has timers pending sends each to its member again every second, so
     // a leader with none beside a service with some is a member that is not told, or
-    // does not read what it is told: the gauge's text, with both counts. A leader
-    // with no service beside it that has added the service's gauge may have an
-    // application that schedules none, which nothing in the counters file tells from
-    // a service that does not run: a note, which says what to check and for whom.
+    // does not read what it is told: the gauge's text, with both counts. A service
+    // tells its member nothing while it reads its history after a start, so one run
+    // may catch that: the finding asks for a second. A leader beside which no
+    // service has added the gauge is told of in nothing: an application that
+    // schedules no timer looks the same in the counters file, and a service adds
+    // the gauge only with its first timer.
     if leads
         && closed
         && member.timers == Some(0)
+        && let Some(pending) = member.service_timers.filter(|pending| *pending > 0)
         && let Some(def) = COUNTERS.iter().find(|def| def.id == CLUSTER_TIMERS)
     {
-        match member.service_timers {
-            Some(pending) if pending > 0 => findings.push(Finding {
-                check: def.name,
-                level: Level::Warn,
-                message: format!(
-                    "the leader, member {id}, holds no timer, its {} is 0, and the service \
-                     beside it has {pending} pending, its cluster.service_timers: where a \
-                     second run of doctor says the same, the member is not told of them, \
-                     and they wait while it leads. {}",
-                    def.name, def.doctor
-                ),
-                doc: DOC_CLUSTER,
-            }),
-            Some(_) => {}
-            None => findings.push(Finding {
-                check: "cluster-leader-told-of-no-timer",
-                level: Level::Note,
-                message: format!(
-                    "the leader, member {id}, holds no timer, and no service beside it has \
-                     added cluster.service_timers: where the application schedules timers, \
-                     they wait while this member leads, so check that the service beside it \
-                     runs and reads its log. Where the application schedules none, there is \
-                     nothing to act on"
-                ),
-                doc: DOC_CLUSTER,
-            }),
-        }
+        findings.push(Finding {
+            check: def.name,
+            level: Level::Warn,
+            message: format!(
+                "the leader, member {id}, holds no timer, its {} is 0, and the service \
+                 beside it has {pending} pending, its cluster.service_timers: where a \
+                 second run of doctor says the same, the member is not told of them, \
+                 and they wait while it leads. {}",
+                def.name, def.doctor
+            ),
+            doc: DOC_CLUSTER,
+        });
     }
     for (counter, value) in MEMBER_COUNTS.iter().zip(member.counts) {
         let Some(def) = COUNTERS.iter().find(|def| def.id == *counter) else {
@@ -7859,10 +7847,11 @@ mod tests {
     }
 
     /// A leader that holds no timer is named when the service beside it has timers
-    /// pending, with both counts and what to check; one beside which no service has
-    /// added its gauge is told of in a note; a leader that holds timers, a leader
-    /// beside a service with none pending, a follower and a member of a build
-    /// without the gauge are told of in nothing (ADR 0151). A member that removed
+    /// pending, with both counts and what to check; a leader beside which no service
+    /// has added its gauge, as beside an application that schedules no timer, a
+    /// leader that holds timers, a leader beside a service with none pending, a
+    /// follower and a member of a build without the gauge are told of in nothing
+    /// (ADR 0151). A member that removed
     /// every timer it held, and a service that dropped a cancel, are reported with
     /// what they mean.
     #[test]
@@ -7904,24 +7893,9 @@ mod tests {
             untold.message
         );
         assert_eq!(untold.doc, DOC_CLUSTER);
-        // No service beside the leader has added its gauge: a note.
-        let findings = checks("timers-no-service", &leader(&[(CLUSTER_TIMERS, 0)]));
-        let note = findings
-            .iter()
-            .find(|finding| finding.check == "cluster-leader-told-of-no-timer")
-            .unwrap_or_else(|| panic!("{findings:?}"));
-        assert_eq!(note.level, Level::Note);
-        assert!(
-            note.message.starts_with(
-                "the leader, member 1, holds no timer, and no service beside it has added \
-                 cluster.service_timers: where the application schedules timers, they wait \
-                 while this member leads"
-            ),
-            "{}",
-            note.message
-        );
-        // Nothing of timers for: a leader that holds some, a leader beside a service
-        // with none pending, a member of a build without the gauge, and a follower.
+        // Nothing of timers for: a leader beside which no service has added its
+        // gauge, a leader that holds some, a leader beside a service with none
+        // pending, a member of a build without the gauge, and a follower.
         let follower = [
             (CLUSTER_ROLE, 0),
             (CLUSTER_ELECTION_STATE, 17),
@@ -7933,6 +7907,7 @@ mod tests {
             (CLUSTER_SERVICE_TIMERS, 3),
         ];
         for (name, counters) in [
+            ("timers-no-service", leader(&[(CLUSTER_TIMERS, 0)])),
             (
                 "timers-held",
                 leader(&[(CLUSTER_TIMERS, 3), (CLUSTER_SERVICE_TIMERS, 3)]),
@@ -7948,8 +7923,7 @@ mod tests {
             assert!(
                 !findings
                     .iter()
-                    .any(|finding| finding.check == "cluster.timers"
-                        || finding.check == "cluster-leader-told-of-no-timer"),
+                    .any(|finding| finding.check == "cluster.timers"),
                 "{name}: {findings:?}"
             );
         }
@@ -8550,7 +8524,7 @@ mod tests {
 
         // A follower that follows: the note alone, with who it is and what it knows.
         let (checks, findings) = cluster_findings("cluster-follower", 1, &follower);
-        assert_eq!(checks, 26);
+        assert_eq!(checks, 27);
         assert_eq!(findings.len(), 1, "{findings:?}");
         assert_eq!(findings[0].check, "cluster-member");
         assert_eq!(findings[0].level, Level::Note);
@@ -8727,7 +8701,7 @@ mod tests {
         let dir = TestDir::new("cluster-session-member");
         let reader = session_file(&dir, 7, 2, Some((1, &follower)));
         let mut findings = Vec::new();
-        assert_eq!(cluster_checks(&reader, true, None, &mut findings), 27);
+        assert_eq!(cluster_checks(&reader, true, None, &mut findings), 28);
         let found: Vec<&str> = findings.iter().map(|finding| finding.check).collect();
         assert_eq!(
             found,

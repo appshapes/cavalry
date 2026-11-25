@@ -609,18 +609,15 @@ committed once a quorum, two of three, has it on disk.
   `cavalry run` printed for each fault says which.
 - `WARN cluster.timers`: this member leads and holds no timer, while the service
   beside it has timers pending; the line names how many. A service sends its member
-  every pending timer again each second, so a first run of `cavalry doctor` may
-  catch the second after a member started. When a second run says the same, the
+  every pending timer again each second, and tells it nothing while it reads its
+  history after a start, so a first run of `cavalry doctor` may catch the second
+  after a member started or a service that is still reading. When a second run,
+  after the service has read its log to its end, says the same, the
   member is not told: an application's timers wait while this member leads, since
   only a leader appends a timer's event. Check that the service beside this member
   runs and reads its log, and that `cluster.messages_rejected` on this host does
   not rise, which is a service of another build than its member
   ([ADR 0151](../decisions/0151-give-a-clusters-service-timers-that-every-service-decides-from-the-log.md)).
-- `note cluster-leader-told-of-no-timer`: this member leads and holds no timer,
-  and no service beside it has added `cluster.service_timers`. Where the
-  application schedules timers, they wait while this member leads: start the
-  service beside it, or find why it does not read its log. Where the application
-  schedules none, there is nothing to act on.
 - `WARN cluster.timers_cleared`: this member's table of timers was full, 2,048,
   with no timer in it whose event the member had appended. That is more than the
   service beside it can have pending, so some of them were pending nowhere, and
