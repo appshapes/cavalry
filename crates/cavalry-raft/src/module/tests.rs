@@ -4777,6 +4777,14 @@ fn a_message_that_arrives_in_init_is_acted_on_after_it() {
 /// here, since a leader's log publication takes no entry until a member has joined
 /// it.
 fn three(test: &str) -> (TestDir, Vec<(Driver, ConsensusModule)>) {
+    let (dir, members, _) = three_on_ports(test);
+    (dir, members)
+}
+
+/// [`three`], with the ports the members string gives them: member `id`'s five
+/// endpoints are `ports[id * 5..id * 5 + 5]`, its consensus endpoint the second, and
+/// its driver directory `member-<id>` under the test's.
+fn three_on_ports(test: &str) -> (TestDir, Vec<(Driver, ConsensusModule)>, Vec<u16>) {
     let dir = TestDir::new(test);
     let ports = free_ports(15);
     let members = (0..3)
@@ -4825,7 +4833,153 @@ fn three(test: &str) -> (TestDir, Vec<(Driver, ConsensusModule)>) {
         .position(|(_, module)| module.role() == Role::Leader)
         .expect("one member leads");
     started.swap(0, leader);
-    (dir, started)
+    (dir, started, ports)
+}
+
+/// Three members elected, every election closed, and a follower that alone runs its
+/// duty cycle from here on, sent requests for a vote by a peer's client on its own
+/// driver: request `i`, for the term `offsets[i].1` above the follower's own, on
+/// publication `offsets[i].0` of `publications`, each publication an image of its own
+/// on the follower's consensus stream, all from the other follower's id. The peer reads
+/// the follower's stream beside it until every request has arrived, so that the
+/// follower's next poll finds them all. The follower is the cluster's second member.
+/// What [`requests_in_one_poll`] leaves the test: the cluster, the follower's term and
+/// its candidate term before the requests, and what must outlive the reads.
+struct Requested {
+    members: Vec<(Driver, ConsensusModule)>,
+    term: i64,
+    candidate_term: i64,
+    _peer: Cavalry,
+    _sent: Vec<Publication>,
+    _dir: TestDir,
+}
+
+fn requests_in_one_poll(test: &str, publications: usize, offsets: &[(usize, i64)]) -> Requested {
+    let (dir, mut members, ports) = three_on_ports(test);
+    let follower = &mut members[1].1;
+    let follower_id = follower.member_id();
+    let candidate_member_id = members[2].1.member_id();
+    let follower = &mut members[1].1;
+    let term = follower.leadership_term_id();
+    let candidate_term = follower.io.terms.candidate_term();
+    assert_eq!(follower.election_state(), ElectionState::Closed);
+    assert_eq!(follower.role(), Role::Follower);
+    assert!(candidate_term <= term, "no ballot above the term");
+
+    let index = usize::try_from(follower_id).expect("a member id");
+    let channel = format!("cavalry:udp?endpoint=127.0.0.1:{}", ports[index * 5 + 1]);
+    let mut peer = Cavalry::connect_to(dir.0.join(format!("member-{follower_id}")))
+        .expect("the peer's client");
+    // Exclusive publications, so that each is a session, and an image, of its own.
+    let mut sent: Vec<Publication> = (0..publications)
+        .map(|_| {
+            peer.add_exclusive_publication(&channel, CONSENSUS_STREAM_ID)
+                .expect("the peer publishes to the follower")
+        })
+        .collect();
+    let mut beside = peer
+        .add_subscription(&channel, CONSENSUS_STREAM_ID)
+        .expect("the peer reads the follower's stream");
+    // Each publication is joined by the follower's subscription before it sends.
+    wait_for(
+        "the follower's stream takes the peer's publications",
+        || {
+            follower.do_work().expect("the follower's duty cycle");
+            sent.iter().all(Publication::is_connected).then_some(())
+        },
+    );
+    let sessions: Vec<i32> = sent.iter().map(Publication::session_id).collect();
+    let mut bytes = [0u8; 128];
+    for &(publication, above) in offsets {
+        let request = Message::RequestVote {
+            log_leadership_term_id: -1,
+            log_position: 0,
+            candidate_term_id: term + above,
+            candidate_member_id,
+            protocol_version: 0,
+        };
+        let length = request.write(&mut bytes).expect("a request vote");
+        wait_for("the request is taken", || {
+            sent[publication].offer(&bytes[..length]).ok()
+        });
+    }
+    let mut arrived = 0;
+    wait_for("every request has arrived", || {
+        beside
+            .poll(
+                |_, header| {
+                    if sessions.contains(&header.session_id()) {
+                        arrived += 1;
+                    }
+                },
+                16,
+            )
+            .expect("the peer's poll");
+        (arrived == offsets.len()).then_some(())
+    });
+    Requested {
+        members,
+        term,
+        candidate_term,
+        _peer: peer,
+        _sent: sent,
+        _dir: dir,
+    }
+}
+
+/// A message that moves the member to init in the middle of a poll leaves the rest of
+/// that poll on the stream, and the member acts on it once it has left init (work
+/// item 282; `spec/cluster.md`, "Messages during an election" and "Messages outside an
+/// election"). Before, the rest of the batch was handed to a core in init, which acts
+/// on nothing, and nothing counted it. A follower whose election closed is sent two
+/// requests for a vote on one publication, read in one poll. The first is for the term
+/// above the follower's own: the follower holds an election, beginning at init, and
+/// takes no candidate term. The second is for a term 70 above its own. The cycle that
+/// reads them leaves the follower in init, with its candidate term unchanged. Once it
+/// canvasses it reads the second request and takes that term, which the member's own
+/// ballots, one term above the last, cannot reach in the test's ten seconds: only a
+/// request left on the stream gives it.
+#[test]
+fn the_rest_of_a_poll_after_a_message_that_moves_the_member_to_init_is_acted_on_after_it() {
+    let mut requested = requests_in_one_poll("rest-of-a-poll", 1, &[(0, 1), (0, 70)]);
+    let (term, candidate_term) = (requested.term, requested.candidate_term);
+    let follower = &mut requested.members[1].1;
+    follower.do_work().expect("the follower's duty cycle");
+    assert_eq!(follower.election_state(), ElectionState::Init);
+    assert_eq!(
+        follower.io.terms.candidate_term(),
+        candidate_term,
+        "the request that moved the follower to init raises no candidate term"
+    );
+    // The second request was sent once, so only a follower that left it on the stream
+    // can take its term now.
+    wait_for("the second request is acted on after init", || {
+        follower.do_work().expect("the follower's duty cycle");
+        (follower.io.terms.candidate_term() >= term + 70).then_some(())
+    });
+    assert_eq!(follower.messages_rejected, 0);
+}
+
+/// The same across images: a message of another image that the poll would hand over
+/// after one that moved the member to init stays on the stream too, as the controlled
+/// poll leaves a fragment it is told to abort. The two requests come on two
+/// publications, each an image, for 30 and 70 terms above the follower's own, and the
+/// poll may read either image first. The one it reads first moves the follower to init,
+/// its election closed, and the other is acted on once the follower canvasses: its
+/// candidate term reaches 30 above its term at the least, which its own ballots cannot.
+#[test]
+fn a_message_of_another_image_after_one_that_moves_the_member_to_init_is_acted_on_after_it() {
+    let mut requested = requests_in_one_poll("rest-of-a-poll-images", 2, &[(0, 30), (1, 70)]);
+    let (term, candidate_term) = (requested.term, requested.candidate_term);
+    let follower = &mut requested.members[1].1;
+    follower.do_work().expect("the follower's duty cycle");
+    assert_eq!(follower.election_state(), ElectionState::Init);
+    assert_eq!(follower.io.terms.candidate_term(), candidate_term);
+    wait_for("the other image's request is acted on after init", || {
+        follower.do_work().expect("the follower's duty cycle");
+        (follower.io.terms.candidate_term() >= term + 30).then_some(())
+    });
+    assert_eq!(follower.messages_rejected, 0);
 }
 
 /// Runs every member's duty cycle `cycles` times.

@@ -3464,18 +3464,22 @@ impl ConsensusModule {
         // election"): what has arrived stays on the stream for the cycle after the
         // member has left init. Init can last several cycles, while a recording's
         // stop is asked and not yet read, and a message polled in it would be taken
-        // from the stream and acted on by nobody. One case is left: a message of a
-        // batch can itself move the core to init, by a term above the member's own
-        // or a step that fails its election, and the rest of that batch is then
-        // handed to a core in init, which acts on none of it, with no count. Leaving
-        // it on the stream needs a poll that can stop inside a batch, which the
-        // client does not have (card 282).
+        // from the stream and acted on by nobody. A message of a batch can itself
+        // move the core to init, by a term above the member's own or a step that
+        // fails its election. So the stream is read by a controlled poll (ADR 0114),
+        // and the read stops there: the message that moved the core is taken, and
+        // ends its image's read, and every fragment the call hands over after it, of
+        // any image, is left where it is, to be read once the member has left init
+        // (work item 282).
         let read = if core.election_state() == ElectionState::Init {
             0
         } else {
             consensus
-                .poll(
+                .controlled_poll(
                     |body, header| {
+                        if core.election_state() == ElectionState::Init {
+                            return Action::Abort;
+                        }
                         // A consensus message is one frame; a fragment of something longer
                         // is none of this page's, and is counted as a message that failed
                         // its length.
@@ -3494,6 +3498,11 @@ impl ConsensusModule {
                                 }
                             }
                             _ => *messages_rejected += 1,
+                        }
+                        if core.election_state() == ElectionState::Init {
+                            Action::Break
+                        } else {
+                            Action::Continue
                         }
                     },
                     CONSENSUS_POLL_LIMIT,
