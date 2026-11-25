@@ -9,7 +9,15 @@
 //! at the position the recorder had synced, zeroes what lay past it, counts the cut,
 //! and every frame read back from the start to the stop is one the recorder wrote,
 //! whole. The full cases come first; a crash that left nothing past the sync, and a
-//! crash before the first sync, follow.
+//! crash before the first sync, follow. Then the two cases where the unsynced tail
+//! crosses a roll into the next segment file: the synced position in the middle of
+//! the segment before the roll, and the synced position at the next segment's base
+//! (work item 405). A segment file is 128 MiB, and those tests cross one by padding
+//! frames, whose bytes the recorder writes as their 32-byte header alone, one header
+//! per 64 KiB term: each test writes under 150 KiB. On a file system that keeps a file
+//! sparse, as APFS and ext4 do, each header still takes a whole block of the file
+//! system, 4 KiB, so a test's two segment files take about 8 MiB of the disk while
+//! it runs, against the 256 MiB of their lengths.
 
 use std::fs::{self, OpenOptions};
 use std::os::unix::fs::FileExt;
@@ -19,7 +27,7 @@ use cavalry_log::catalog::CatalogReader;
 use cavalry_log::dir::{LogDir, Recovery};
 use cavalry_log::layout::{
     Descriptor, HEADER_LENGTH, IndexHeader, Recording, SEGMENT_FILE_LENGTH, SYNCED_SLOT_OFFSETS,
-    State, index_file_name, locate,
+    State, index_file_name, locate, segment_file_name,
 };
 use cavalry_log::recorder::RecordingWriter;
 use cavalry_proto::frame::{DataFrameHeader, Flags, FrameType};
@@ -33,6 +41,8 @@ const FRAME: usize = 64;
 /// Frames in one block the recorder writes: one 4 KiB page.
 const PER_BLOCK: usize = 64;
 const BLOCK: usize = FRAME * PER_BLOCK;
+/// The length of a segment file, and so the base of the second.
+const SEGMENT: i64 = SEGMENT_FILE_LENGTH as i64;
 
 /// A directory of its own per test, removed when the guard drops.
 struct TestDir(PathBuf);
@@ -119,29 +129,33 @@ fn frame(found: &Descriptor, position: i64) -> [u8; FRAME] {
     bytes
 }
 
+/// Recording 0 started at position 0 in the directory `log` holds.
+fn started(log: &mut LogDir) -> RecordingWriter {
+    log.start(
+        &Recording {
+            recording_id: 0,
+            start_timestamp: NOW,
+            start_position: 0,
+            initial_term_id: 3,
+            term_length: TERM,
+            mtu_length: 1408,
+            session_id: SESSION,
+            stream_id: STREAM,
+            channel: "cavalry:ipc",
+            source_identity: "cavalry:ipc",
+        },
+        NOW,
+    )
+    .expect("the recording starts")
+}
+
 /// A recording started at position 0, written `synced` blocks and synced, then
 /// written `unsynced` blocks more, and dropped without a stop, as a crash leaves it:
 /// the directory, the descriptor, the synced position and the position written to.
 fn crashed(test: &str, synced: usize, unsynced: usize) -> (TestDir, Descriptor, i64, i64) {
     let dir = TestDir::new(test);
     let (mut log, _) = LogDir::open(dir.path(), NOW).expect("the directory opens");
-    let mut writer = log
-        .start(
-            &Recording {
-                recording_id: 0,
-                start_timestamp: NOW,
-                start_position: 0,
-                initial_term_id: 3,
-                term_length: TERM,
-                mtu_length: 1408,
-                session_id: SESSION,
-                stream_id: STREAM,
-                channel: "cavalry:ipc",
-                source_identity: "cavalry:ipc",
-            },
-            NOW,
-        )
-        .expect("the recording starts");
+    let mut writer = started(&mut log);
     let found = writer.descriptor().clone();
     let mut now = NOW;
     write_blocks(&mut writer, &found, synced, &mut now);
@@ -162,18 +176,81 @@ fn crashed(test: &str, synced: usize, unsynced: usize) -> (TestDir, Descriptor, 
     (dir, found, synced_position, written)
 }
 
+/// Writes `blocks` blocks of frames, each 2 ms after the one before: more than the
+/// index interval, so the recorder appends an index entry for each.
 fn write_blocks(writer: &mut RecordingWriter, found: &Descriptor, blocks: usize, now: &mut i64) {
     for _ in 0..blocks {
-        let mut block = Vec::with_capacity(BLOCK);
-        let mut position = writer.position();
-        for _ in 0..PER_BLOCK {
-            block.extend_from_slice(&frame(found, position));
-            position += FRAME as i64;
-        }
         *now += 2 * MS;
         writer
-            .write(&block, BLOCK, *now)
+            .write(&block(found, writer.position()), BLOCK, *now)
             .expect("the block is written");
+    }
+}
+
+/// The block of frames the recorder writes at `position`: one page of them.
+fn block(found: &Descriptor, mut position: i64) -> Vec<u8> {
+    let mut block = Vec::with_capacity(BLOCK);
+    for _ in 0..PER_BLOCK {
+        block.extend_from_slice(&frame(found, position));
+        position += FRAME as i64;
+    }
+    block
+}
+
+/// The position of the last entry in the recording's time index.
+fn last_indexed(dir: &TestDir, found: &Descriptor) -> i64 {
+    let entries = fs::read(dir.index(found.recording_id())).expect("the index reads");
+    let last = entries[HEADER_LENGTH..]
+        .as_chunks::<16>()
+        .0
+        .last()
+        .expect("the index holds an entry");
+    i64::from_le_bytes(last[8..16].try_into().expect("8"))
+}
+
+/// Writes padding frames from the writer's position to `to`, each to the end of its
+/// term at most, as the recorder writes a padding block: the 32-byte header alone,
+/// the position moving by the frame's length. The time does not move, so no index
+/// entry is appended for them.
+fn padded_to(writer: &mut RecordingWriter, found: &Descriptor, to: i64, now: i64) {
+    assert!(
+        to >= writer.position() && to % 32 == 0,
+        "padding goes forward to a frame's alignment"
+    );
+    while writer.position() < to {
+        let position = writer.position();
+        let left_in_term = i64::from(TERM) - position % i64::from(TERM);
+        let length = left_in_term.min(to - position) as usize;
+        writer
+            .write(&pad(found, position, length), length, now)
+            .expect("the padding is written");
+    }
+    assert_eq!(writer.position(), to);
+}
+
+/// The header of a padding frame of `length` bytes at `position`.
+fn pad(found: &Descriptor, position: i64, length: usize) -> [u8; 32] {
+    let located = locate(found, position).expect("a position of the recording");
+    DataFrameHeader::new(FrameType::Pad, Flags::UNFRAGMENTED, length)
+        .expect("a header")
+        .with_term_offset(located.term_offset)
+        .with_term_id(located.term_id)
+        .with_session_id(found.session_id())
+        .with_stream_id(found.stream_id())
+        .to_bytes()
+}
+
+/// Holds that the whole-term padding frames from position 0 to `to`, a term's start,
+/// are as the recorder wrote them: recovery left the segment below the cut alone.
+fn padding_kept(dir: &TestDir, found: &Descriptor, to: i64) {
+    let mut position = 0;
+    while position < to {
+        assert_eq!(
+            dir.read(found, position, 32),
+            pad(found, position, TERM as usize),
+            "the padding frame at {position} is kept"
+        );
+        position += i64::from(TERM);
     }
 }
 
@@ -181,6 +258,12 @@ fn write_blocks(writer: &mut RecordingWriter, found: &Descriptor, blocks: usize,
 /// reader then finds: the recording stopped at `stop`, every frame from the start
 /// to it the one the recorder wrote there, and only zeros past it in its segment.
 fn recovered(dir: &TestDir, found: &Descriptor, stop: i64) -> Recovery {
+    recovered_from(dir, found, 0, stop)
+}
+
+/// [`recovered`], with the frames the recorder wrote whole checked from `from`: below
+/// it lie padding frames, whose bodies the recorder never writes.
+fn recovered_from(dir: &TestDir, found: &Descriptor, from: i64, stop: i64) -> Recovery {
     let (_log, recovery) = LogDir::open(dir.path(), NOW + 10_000 * MS).expect("it opens again");
     let stopped = dir.descriptor(found.recording_id());
     assert_eq!(stopped.state(), State::Valid, "the recording is no damage");
@@ -189,7 +272,7 @@ fn recovered(dir: &TestDir, found: &Descriptor, stop: i64) -> Recovery {
         stop,
         "it stops where it had synced"
     );
-    let mut position = 0;
+    let mut position = from;
     while position < stop {
         assert_eq!(
             dir.read(found, position, FRAME),
@@ -421,6 +504,133 @@ fn a_crash_before_the_first_sync_leaves_an_empty_recording_not_damage() {
         dir.descriptor(found.recording_id()).stop_timestamp(),
         NOW,
         "an empty recording's stop timestamp is its start timestamp"
+    );
+}
+
+/// The synced position in the middle of a segment, and the recorder written on to the
+/// end of it, rolled into the next, and written there before the crash: the roll
+/// synced the full segment's data and not the synced position, which stays where the
+/// last sync left it. The bytes past it in its own segment are zeroed, all the way to
+/// the segment's end, and the next segment, which lies wholly past the stop, is
+/// removed.
+#[test]
+fn a_tail_that_rolled_into_the_next_segment_is_cut_in_its_segment_and_the_next_is_removed() {
+    let dir = TestDir::new("rolled-past-the-sync");
+    let (mut log, _) = LogDir::open(dir.path(), NOW).expect("the directory opens");
+    let mut writer = started(&mut log);
+    let found = writer.descriptor().clone();
+    let mut now = NOW;
+    let middle = SEGMENT / 2;
+    padded_to(&mut writer, &found, middle, now);
+    write_blocks(&mut writer, &found, 4, &mut now);
+    assert!(writer.sync_now(now).expect("the sync"), "there was a sync");
+    let synced = writer.synced_position();
+    assert_eq!(synced, middle + 4 * BLOCK as i64);
+    write_blocks(&mut writer, &found, 3, &mut now);
+    padded_to(&mut writer, &found, SEGMENT, now);
+    write_blocks(&mut writer, &found, 3, &mut now);
+    assert_eq!(writer.position(), SEGMENT + 3 * BLOCK as i64);
+    assert_eq!(
+        writer.synced_position(),
+        synced,
+        "the roll moved no synced position"
+    );
+    let next = dir
+        .path()
+        .join(segment_file_name(found.recording_id(), SEGMENT));
+    assert!(next.exists(), "the recorder rolled into the next segment");
+    let last_term = SEGMENT - i64::from(TERM);
+    assert_ne!(
+        dir.read(&found, last_term, FRAME),
+        [0u8; FRAME],
+        "a padding frame begins the segment's last term"
+    );
+    // The crash: no stop, the slot reads live.
+    drop(writer);
+    drop(log);
+    assert_eq!(
+        recovered_from(&dir, &found, middle, synced),
+        Recovery {
+            files_removed: 1,
+            ..CUT
+        }
+    );
+    padding_kept(&dir, &found, middle);
+    // Every padding frame past the stop, at each term's start to the segment's end.
+    let mut position = middle + i64::from(TERM);
+    while position < SEGMENT {
+        assert_eq!(
+            dir.read(&found, position, 32),
+            [0u8; 32],
+            "the bytes past the stop are zeroed to the segment's end, at {position}"
+        );
+        position += i64::from(TERM);
+    }
+    assert!(
+        !next.exists(),
+        "the next segment lay past the stop and is gone"
+    );
+}
+
+/// The synced position at the next segment's base: the recorder filled the segment,
+/// rolled, synced, and wrote into the next before the crash. Nothing in the full
+/// segment lies past the stop, so it is left whole, and the next segment, which
+/// begins at the stop, is removed. The tail is written within the millisecond after
+/// the sync, so the recorder appended no index entry for it, and the frame at the
+/// next segment's base alone says the recorder wrote past the sync: it counts the
+/// cut, and with the next segment gone no file holds it afterwards.
+#[test]
+fn a_tail_past_a_sync_at_the_next_segments_base_removes_that_segment_and_keeps_the_full_one() {
+    let dir = TestDir::new("synced-at-the-roll");
+    let (mut log, _) = LogDir::open(dir.path(), NOW).expect("the directory opens");
+    let mut writer = started(&mut log);
+    let found = writer.descriptor().clone();
+    let mut now = NOW;
+    let last_term = SEGMENT - i64::from(TERM);
+    padded_to(&mut writer, &found, last_term, now);
+    write_blocks(&mut writer, &found, TERM as usize / BLOCK, &mut now);
+    assert_eq!(writer.position(), SEGMENT, "the segment is full");
+    let next = dir
+        .path()
+        .join(segment_file_name(found.recording_id(), SEGMENT));
+    assert!(next.exists(), "the recorder rolled into the next segment");
+    assert!(writer.sync_now(now).expect("the sync"), "there was a sync");
+    assert_eq!(
+        writer.synced_position(),
+        SEGMENT,
+        "synced at the next segment's base"
+    );
+    let within_the_interval = now + MS / 2;
+    for _ in 0..3 {
+        writer
+            .write(
+                &block(&found, writer.position()),
+                BLOCK,
+                within_the_interval,
+            )
+            .expect("the block is written");
+    }
+    assert_eq!(writer.position(), SEGMENT + 3 * BLOCK as i64);
+    // The crash: no stop, the slot reads live.
+    drop(writer);
+    drop(log);
+    assert_eq!(
+        last_indexed(&dir, &found),
+        SEGMENT,
+        "no index entry lies past the sync"
+    );
+    assert_eq!(
+        recovered_from(&dir, &found, last_term, SEGMENT),
+        Recovery {
+            files_removed: 1,
+            index_rewritten: 0,
+            ..CUT
+        }
+    );
+    padding_kept(&dir, &found, last_term);
+    assert!(
+        !next.exists(),
+        "the next segment began at the stop and is gone"
     );
 }
 
