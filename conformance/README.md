@@ -244,7 +244,9 @@ writes one directory alone, in the pinned shape or, with
 `CAVALRY_DIRECTORY_SHAPE=moved-to`, in server 0.10.0's. On CI's macOS runner the script
 builds 620a2e29 alone and writes server 0.9.0's directory alone, as it did before work
 item 441: with the three directories written all seven ways, that runner lost
-communication with GitHub partway through `just conformance` in 2 of 8 jobs.
+communication with GitHub partway through `just conformance` in 2 of 8 jobs. With
+one tree it lost it too, in 2 of `master`'s 39 jobs: one tree does not prevent the
+loss, and the gap between the two forms is not shown.
 Linux, which the servers in production run, writes all seven.
 [ADR 0160](../docs/decisions/0160-keep-the-log-directorys-gate-on-one-tree-on-cis-macos-runner-and-track-the-lost-runner-as-a-fault-of-its-own.md) says
 why the exception stays, and work item 456 tracks the lost runner itself. ADR 0141

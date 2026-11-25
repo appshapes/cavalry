@@ -164,9 +164,9 @@ request that makes it. The gate builds each tree that the servers in production 
 run, and keeps one while a server holds a directory that the tree wrote any part of,
 alone or before another tree
 ([ADR 0156](../decisions/0156-hold-in-the-upgrade-gate-every-directory-a-server-holds-each-trees-alone-and-the-trees-in-turn.md), work item 441). On CI's macOS runner it builds
-620a2e29 alone and writes server 0.9.0's directory alone, as it did before: with the
-three directories written all seven ways, that runner was lost partway through `just
-conformance`
+620a2e29 alone and writes server 0.9.0's directory alone, as it did before. That
+runner was lost partway through `just conformance` more often with the three
+directories written all seven ways than with one tree, which loses it too
 ([ADR 0160](../decisions/0160-keep-the-log-directorys-gate-on-one-tree-on-cis-macos-runner-and-track-the-lost-runner-as-a-fault-of-its-own.md), work item 456).
 
 The gate builds the feed's files, `tests/feed/` and the example that drives them, in
