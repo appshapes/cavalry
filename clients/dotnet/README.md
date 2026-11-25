@@ -452,7 +452,8 @@ program that runs every call above beside three members.
   threw `ArgumentOutOfRangeException` for a capacity of −1 and `ImageAt` returned
   `null`: the ABI answers no image for a refusal as for an index past the count, so
   the client asks the count, and the count's refusal is the answer. The three answer
-  the same way after the subscription's own `Close()`, with `Abi.ERR_NULL`. A
+  the same way after the subscription's own `Close()`, with `Abi.ERR_NULL`. A handler
+  that asks throws at that line, as for any exception of its own ("The exception"). A
   committed log's handler is held to the same rule. From inside it, a `Poll` of the
   same log, `log.Position()` and `log.CommitPosition()` return −1, `log.IsEnded()` is
   `false`, `log.FailedAt()`, `log.WithdrawnAt()` and `log.Faulted()` are `null`, and

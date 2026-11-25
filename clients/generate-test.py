@@ -408,22 +408,31 @@ class Package(unittest.TestCase):
         cavalry = load_package()
 
         class Abi:
-            """A subscription's ABI: a count the test sets, no image at any index, and the
-            thread's error as the ABI leaves it after a refused count."""
+            """A subscription's ABI: a count the test sets, an image at each index below
+            `present` and none past it, and a thread's error with the code for a call
+            during a poll and a message of this stand-in's own, with a real anchor."""
 
             def __init__(self):
                 self.count = 2
+                self.present = 0
                 self.asked = []
+                self.counted = 0
 
             def cavalry_subscription_constants(self, handle, constants):
                 constants._obj.channel = b"cavalry:ipc"
                 return 0
 
             def cavalry_subscription_image_count(self, handle):
+                self.counted += 1
                 return self.count
 
             def cavalry_subscription_image_at_index(self, handle, index):
                 self.asked.append(index)
+                return 1000 + index if index < self.present else 0
+
+            def cavalry_image_constants(self, pointer, constants):
+                constants._obj.source_identity = b"127.0.0.1:40123"
+                constants._obj.session_id = pointer
                 return 0
 
             def cavalry_errcode(self):
@@ -434,11 +443,21 @@ class Package(unittest.TestCase):
 
         abi = Abi()
         subscription = cavalry.Subscription(abi, 3)
-        # A count from zero, with no image at an index the stand-in is asked for: the
-        # list has that many entries, and an index past the count is None, no refusal.
+        # Two images that are there: the list asks the count once and each image once,
+        # and no count is asked for an image the ABI handed over.
+        abi.present = 2
+        self.assertEqual([image.session_id for image in subscription.images()], [1000, 1001])
+        self.assertEqual((abi.asked, abi.counted), ([0, 1], 1))
+        self.assertEqual(subscription.image_at_index(1).session_id, 1001)
+        self.assertEqual(abi.counted, 1)
+        # No image at an index: the count is asked, and a count from zero means the index
+        # is past it, None and no refusal. The stand-in's list then has None entries, which
+        # the ABI's own count and images do not give outside a poll.
+        self.assertIsNone(subscription.image_at_index(7))
+        self.assertEqual(abi.counted, 2)
+        abi.present, abi.asked = 0, []
         self.assertEqual(subscription.images(), [None, None])
         self.assertEqual(abi.asked, [0, 1])
-        self.assertIsNone(subscription.image_at_index(7))
         abi.count = 0
         self.assertEqual(subscription.images(), [])
         for refused in (-1, -2):

@@ -10,9 +10,11 @@
   `CavalryException`, where the list threw a bare exception of its runtime for a
   capacity of −1 and the image was `null`. The Python client's `images()` and
   `image_at_index` raise `CavalryError` and the Node client's `images()` and
-  `imageAtIndex` throw it, where they returned an empty list and no image: a Python
-  or a Node handler that asks for its own subscription's images now raises at that
-  line, and its `poll` raises `HandlerError` once the ABI has returned. The image
-  count itself still returns −1 there. Each client's README has the rule, in "What it
+  `imageAtIndex` throw it, where they returned an empty list and no image. So a
+  handler that asked for its own subscription's images and went on now fails at that
+  line, and its `poll` raises `HandlerError`, or throws `HandlerException`, once the
+  ABI has returned: a Python or a Node handler for the list or the image, a JVM or a
+  .NET handler for the image at an index. The image count itself still returns −1
+  there. Each client's README has the rule, in "What it
   must never do"
   ([the Go client's](clients/go/README.md#what-it-must-never-do)).

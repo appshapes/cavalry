@@ -495,7 +495,8 @@ members.
   an index past the count, so the client asks the count, and the count's refusal is
   the answer. The three answer the same way after the subscription's own `close()`,
   with `CAVALRY_ERR_NULL`. A handler that asks throws at that line, as for any
-  exception of its own ("The exception"). A committed log's handler is held to the same rule. From inside it, a `poll` of
+  exception of its own ("The exception"). A committed log's handler is held to the
+  same rule. From inside it, a `poll` of
   the same log, `log.position()` and `log.commitPosition()` return −1, `log.isEnded`
   is `false`, `log.failedAt()`, `log.withdrawnAt()` and `log.faulted()` are `null`,
   and `log.fault()` and `log.close()` throw `CavalryError`, each with

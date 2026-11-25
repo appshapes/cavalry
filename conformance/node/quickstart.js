@@ -445,7 +445,8 @@ function edges(client) {
     nested.push([subscription.poll(nestedHandler, 10), addon.cavalry_errcode()]);
     for (const ask of [() => subscription.images(), () => subscription.imageAtIndex(0)]) {
       try {
-        listed.push([subscription.imageCount(), `answered ${JSON.stringify(ask())}`, 0, false]);
+        const answered = ask(); // asked before the count, whose own refusal would set the same error
+        listed.push([subscription.imageCount(), `answered ${JSON.stringify(answered)}`, 0, false]);
       } catch (refusedList) {
         listed.push([subscription.imageCount(), refusedList.fn, refusedList.code,
           String(refusedList.message).includes("cavalry_subscription_image_count refused (polling)")]);

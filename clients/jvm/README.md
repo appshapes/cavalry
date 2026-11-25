@@ -433,7 +433,8 @@ that runs every call above beside three members.
   threw `IllegalArgumentException` for a capacity of −1 and `imageAt` returned
   `null`: the ABI answers no image for a refusal as for an index past the count, so
   the client asks the count, and the count's refusal is the answer. The three answer
-  the same way after the subscription's own `close()`, with `Abi.ERR_NULL`. A
+  the same way after the subscription's own `close()`, with `Abi.ERR_NULL`. A handler
+  that asks throws at that line, as for any exception of its own ("The exception"). A
   committed log's handler is held to the same rule. From inside it, a `poll` of the
   same log, `log.position()` and `log.commitPosition()` return −1, `log.isEnded()` is
   `false`, `log.failedAt()`, `log.withdrawnAt()` and `log.faulted()` are empty, and

@@ -355,7 +355,8 @@ def edges(client):
         nested.append((subscription.poll(nested_handler, 10), cavalry.library().cavalry_errcode()))
         for ask in (subscription.images, lambda: subscription.image_at_index(0)):
             try:
-                listed.append((subscription.image_count(), ask()))
+                answered = ask()  # asked before the count, whose own refusal would set the same error
+                listed.append((subscription.image_count(), answered))
             except cavalry.CavalryError as refused_list:
                 listed.append((subscription.image_count(), refused_list.function, refused_list.code,
                                refused_list.message.startswith("cavalry_subscription_image_count refused (polling)")))

@@ -1207,7 +1207,9 @@ class Subscription:
         refuses the call, from inside a handler of this subscription's own poll or after
         this subscription's own `close()`, it raises `CavalryError`, as `images` does.
         The ABI answers a refusal and an index past the count alike, with no image, and a
-        success clears no error, so the count is asked: its refusal is the answer."""
+        success clears no error, so the count is asked: its refusal is the answer. An
+        `index` that is no integer a `size_t` holds is refused before the ABI is called,
+        as every integer argument is (README, "What it must never do")."""
         pointer = self._abi.cavalry_subscription_image_at_index(self._handle, index)
         if pointer:
             return Image(self._abi, pointer)

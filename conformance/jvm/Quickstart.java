@@ -415,7 +415,8 @@ public final class Quickstart {
             nested.add(new int[] {count, Abi.errcode()});
             for (java.util.function.Supplier<Object> ask : asks) {
                 try {
-                    listed.add(subscription.imageCount() + " answered " + ask.get());
+                    Object answered = ask.get(); // asked before the count, whose own refusal would set the same error
+                    listed.add(subscription.imageCount() + " answered " + answered);
                 } catch (CavalryException refusedList) {
                     listed.add(subscription.imageCount() + " " + refusedList.function() + " " + refusedList.code() + " "
                         + refusedList.abiMessage().startsWith("cavalry_subscription_image_count refused (polling)"));

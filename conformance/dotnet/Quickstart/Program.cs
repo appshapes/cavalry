@@ -496,7 +496,8 @@ public static class Quickstart
             {
                 try
                 {
-                    listed.Add(subscription.ImageCount() + " answered " + ask());
+                    object? answered = ask(); // asked before the count, whose own refusal would set the same error
+                    listed.Add(subscription.ImageCount() + " answered " + answered);
                 }
                 catch (CavalryException refusedList)
                 {
