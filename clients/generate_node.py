@@ -98,9 +98,21 @@ def js_value(value: str) -> str:
 
 # ------------------------------------------------------------------ the addon
 
-def c_arg(param, header, index: int, lines: list, struct_names: set, opaque: set) -> str:
-    """The C statements that read JS argument `index` as `param`, appended to `lines`; returns
-    the C expression to pass. Pairs are handled by the caller."""
+# The int64 parameters that are read exactly: a timer's id and its deadline (ADR 0157). A
+# position or a length that a number carries with a fraction is a caller's mistake that the
+# ABI answers for; a timer's id that N-API truncated is another timer, and its deadline
+# another time, with nothing said. `int64_exact_arg` refuses a number that is no safe
+# integer before the ABI is called.
+EXACT_INT64 = {
+    ("cavalry_cluster_service_schedule_timer", "correlation_id"),
+    ("cavalry_cluster_service_schedule_timer", "deadline"),
+    ("cavalry_cluster_service_cancel_timer", "correlation_id"),
+}
+
+
+def c_arg(param, header, index: int, lines: list, struct_names: set, opaque: set, function: str = "") -> str:
+    """The C statements that read JS argument `index` as `param` of `function`, appended to
+    `lines`; returns the C expression to pass. Pairs are handled by the caller."""
     t = " ".join(param.type.split())
     const = t.startswith("const ")
     base = t[6:] if const else t
@@ -134,6 +146,11 @@ def c_arg(param, header, index: int, lines: list, struct_names: set, opaque: set
     if base in SCALARS:
         reader = {"int": "int32_arg", "int32_t": "int32_arg", "int64_t": "int64_arg", "size_t": "size_arg",
                   "bool": "bool_arg", "uint8_t": "int32_arg", "uint16_t": "int32_arg", "int8_t": "int32_arg"}[base]
+        if (function, name) in EXACT_INT64:
+            if base != "int64_t":
+                raise SystemExit(f"generate_node: {function}'s {name} is read exactly as an int64, and the header "
+                                 f"declares it {t!r}")
+            reader = "int64_exact_arg"
         lines.append(f"  {base} {name} = ({base}) {reader}(env, argv[{index}], \"{name}\");")
         lines.append(f"  if (arg_failed) return NULL;")
         return name
@@ -262,7 +279,7 @@ def write_addon(header) -> str:
                 args.append(expr)
                 i += 1
                 continue
-            expr = c_arg(p, header, js_args, body, struct_names, opaque)
+            expr = c_arg(p, header, js_args, body, struct_names, opaque, fn.name)
             args.append(expr)
             js_args += 1
             i += 1
@@ -428,6 +445,27 @@ static int64_t int64_arg(napi_env env, napi_value v, const char *name) {
     return n;
   }
   type_error(env, name, "a number or a BigInt"); return 0;
+}
+
+/* An int64 that is read exactly, a timer's id or its deadline: a BigInt, as int64_arg reads
+ * one, or a number that is an integer from -(2^53 - 1) to 2^53 - 1, the integers a number
+ * carries exactly. Any other number, one with a fraction, a NaN, an infinity or one past
+ * that range, is refused with a RangeError: N-API would truncate it or give another value,
+ * and the ABI would then answer for another timer or another time. */
+static int64_t int64_exact_arg(napi_env env, napi_value v, const char *name) {
+  napi_valuetype t;
+  if (napi_typeof(env, v, &t) != napi_ok || t != napi_number) return int64_arg(env, v, name);
+  double d = 0;
+  if (napi_get_value_double(env, v, &d) == napi_ok && d >= -9007199254740991.0 && d <= 9007199254740991.0 &&
+      (double) (int64_t) d == d) {
+    return (int64_t) d;
+  }
+  char message[224];
+  snprintf(message, sizeof message, "%s: an integer from -(2 ** 53 - 1) to 2 ** 53 - 1 expected, or a BigInt for any "
+           "int64; a number with a fraction or outside that range would be passed as another value", name);
+  napi_throw_range_error(env, NULL, message);
+  arg_failed = true;
+  return 0;
 }
 
 static int32_t int32_arg(napi_env env, napi_value v, const char *name) {
@@ -2033,13 +2071,18 @@ class ClusterService {
    * quorum has committed, in order: `body` is a session message's payload, a Buffer into the
    * log valid for the call, and empty for every other entry; `entry` is the one
    * `ClusterEntryValues` this object keeps; and `service` is this object, for
-   * `service.reply(sessionId, message)`. What the handler returns says what becomes of the
+   * `service.reply(sessionId, message)` and for the program's timers,
+   * `service.scheduleTimer(correlationId, deadline)` and `service.cancelTimer(correlationId)`:
+   * a timer that is due is handed to the handler as an entry of the type
+   * CAVALRY_CLUSTER_ENTRY_TIMER, once, at one position beside every member. What the handler
+   * returns says what becomes of the
    * entry: nothing or CONTINUE takes it and the poll goes on, BREAK takes it and ends the
    * poll, and ABORT leaves it, ends the poll, and has the next poll hand it over again. A
    * handler that throws, or returns anything else, a promise included, has its entry aborted,
    * and `poll` throws `HandlerError` once the ABI has returned: an entry is taken only by a
    * handler that finished with it. `poll` returns the count of entries taken, or the ABI's -1
-   * when the poll stopped on a fault, which `fault()` reads until the next poll. */
+   * when the poll stopped, on a fault or at a client its driver closed, which `fault()` reads
+   * until the next poll. */
   constructor(handle, client) {
     this.handle = handle;
     this._client = client;
@@ -2061,14 +2104,59 @@ class ClusterService {
    * handler it is -1, with CAVALRY_ERR_CLUSTER_NO_ENTRY. One ABI call, which allocates nothing
    * and waits for nothing. */
   reply(sessionId, message) { return addon.cavalry_cluster_service_reply(this.handle, sessionId, message); }
-  /** One ABI call, and its result: the count of entries the handler took, 0 while the driver
-   * hosts no member that has a log yet, or -1 when the poll stopped on a fault, which
-   * `fault()` reads until the next poll. The poll is the service's duty cycle: it opens the
+  /** From inside the handler: schedule the timer `correlationId`, any int64 the program
+   * chooses, for `deadline` in the cluster's time, the clock of `entry.timestamp`, in
+   * milliseconds, and return what became of the schedule, never throwing for a code.
+   * CAVALRY_CLUSTER_TIMER_SCHEDULED: the timer is pending with that deadline, a new one or
+   * one that was pending, whose deadline this sets. CAVALRY_CLUSTER_TIMER_REFUSED: the
+   * service holds its 1,024 pending timers and the id is none of them, and nothing changed; a
+   * program with more deadlines than that keeps them in its own state and schedules one timer
+   * for the earliest. When the deadline has come the handler is handed an entry whose `type`
+   * is CAVALRY_CLUSTER_ENTRY_TIMER and whose `correlationId` is this id, as a BigInt: once, at
+   * one position beside every member, never before its deadline and never after its cancel. A
+   * deadline at or before the entry's time is due at once. A handler that returns ABORT, or
+   * throws, is handed its entry again with every timer as it was before that handling. A
+   * program schedules its first timer only once every member of its cluster, with the service
+   * beside it, runs version 2 of the cluster protocol, and from that entry on no member is
+   * stepped back: a service of version 1 hands its program no timer, so the two would compute
+   * two states from one log. From outside the handler it is -1, with
+   * CAVALRY_ERR_CLUSTER_NO_ENTRY. An id and a deadline are each a BigInt, any int64, or a
+   * number that is an integer from -(2 ** 53 - 1) to 2 ** 53 - 1, as `entry.timestamp + 50`
+   * is: a BigInt outside int64, and a number with a fraction or outside that range, a NaN
+   * among them, throw a RangeError before the ABI is called, inside the handler or outside
+   * it, and a value that is neither a TypeError, since either would be passed as another
+   * value. One ABI call, which allocates nothing and waits for nothing: the service tells its
+   * member after the handler has taken the entry, in the poll (`poll`). */
+  scheduleTimer(correlationId, deadline) {
+    return addon.cavalry_cluster_service_schedule_timer(this.handle, correlationId, deadline);
+  }
+  /** From inside the handler: the timer `correlationId` is pending no more, and its event,
+   * where the log holds one, is handed to no program. A timer that is not pending is no
+   * error. Returns 0, and -1 with CAVALRY_ERR_CLUSTER_NO_ENTRY from outside the handler. An
+   * id that is no int64 is refused before the ABI is called, as `scheduleTimer` refuses one.
+   * One ABI call, which allocates nothing and waits for nothing. */
+  cancelTimer(correlationId) { return addon.cavalry_cluster_service_cancel_timer(this.handle, correlationId); }
+  /** One ABI call, and its result: the count of entries the service took, 0 while the driver,
+   * one that runs, hosts no member that has a log yet, or -1 when the poll stopped, which
+   * `fault()` reads until the next poll. A poll with a client that its driver closed,
+   * `Client.closed()` giving the reason, as when the member's driver has stopped, is -1 with
+   * CAVALRY_ERR_CLOSED as `fault()`'s code, at every poll: a program's loop ends on it. A
+   * poll the ABI refuses before it reads is -1 too, with the thread's error set and `fault()`
+   * left as it was: CAVALRY_ERR_NULL after the program's own `Client.close()`, which freed
+   * the client, and CAVALRY_ERR_POLLING from a handler, below. A timer event whose timer is
+   * not pending, or not yet due, is taken and handed to no handler, so the count may be more
+   * than the handler was called. The poll is the service's duty cycle: it opens the
    * member's log, follows the log's sessions, and holds a publication to each open session
    * while the service answers. Those are commands sent with the service's client, at a
    * session's opening, where a term's leader changes and at a recording's end, and the poll
    * waits for the driver's answer to each on the calling thread; none is sent for a session
-   * message. When the handler threw, or returned what is no action, or the runtime kept the
+   * message. Six more are sent once in a service's life, at the most: its five counters and
+   * its publication to its member, in the poll in which the program first schedules a timer
+   * or the service first passes a timer event over, after that poll's entries, where a
+   * snapshot has not added them already; that poll returns -1 with the driver's refusal of
+   * one of them, after the entries its handler took are taken. After that the poll tells the
+   * member what each taken entry changed, and every pending timer again each second, by
+   * offers that wait for nothing. When the handler threw, or returned what is no action, or the runtime kept the
    * entry from it, the addon's trampoline aborted the entry and this throws `HandlerError`
    * with `cluster` "service" after the ABI call returns: its `fragments` is the count of
    * entries taken before that entry, and its `cause` the handler's exception, a
@@ -2440,6 +2528,11 @@ export class ClusterService {
   poll(handler: ServiceHandler, fragmentLimit: number): number;
   /** One of `constants.CAVALRY_CLUSTER_REPLY_*`, or -1 from outside the handler. */
   reply(sessionId: number | bigint, message: Buffer | Uint8Array): number;
+  /** `constants.CAVALRY_CLUSTER_TIMER_SCHEDULED` or `_REFUSED`, or -1 from outside the handler.
+   * A number is an integer no greater in magnitude than `Number.MAX_SAFE_INTEGER`; any int64 is a bigint. */
+  scheduleTimer(correlationId: number | bigint, deadline: number | bigint): number;
+  /** 0, or -1 from outside the handler. */
+  cancelTimer(correlationId: number | bigint): number;
   fault(): { code: number; sessionId: number; position: number };
   position(): number;
   answers(): boolean;

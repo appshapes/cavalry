@@ -138,6 +138,27 @@ static int64_t int64_arg(napi_env env, napi_value v, const char *name) {
   type_error(env, name, "a number or a BigInt"); return 0;
 }
 
+/* An int64 that is read exactly, a timer's id or its deadline: a BigInt, as int64_arg reads
+ * one, or a number that is an integer from -(2^53 - 1) to 2^53 - 1, the integers a number
+ * carries exactly. Any other number, one with a fraction, a NaN, an infinity or one past
+ * that range, is refused with a RangeError: N-API would truncate it or give another value,
+ * and the ABI would then answer for another timer or another time. */
+static int64_t int64_exact_arg(napi_env env, napi_value v, const char *name) {
+  napi_valuetype t;
+  if (napi_typeof(env, v, &t) != napi_ok || t != napi_number) return int64_arg(env, v, name);
+  double d = 0;
+  if (napi_get_value_double(env, v, &d) == napi_ok && d >= -9007199254740991.0 && d <= 9007199254740991.0 &&
+      (double) (int64_t) d == d) {
+    return (int64_t) d;
+  }
+  char message[224];
+  snprintf(message, sizeof message, "%s: an integer from -(2 ** 53 - 1) to 2 ** 53 - 1 expected, or a BigInt for any "
+           "int64; a number with a fraction or outside that range would be passed as another value", name);
+  napi_throw_range_error(env, NULL, message);
+  arg_failed = true;
+  return 0;
+}
+
 static int32_t int32_arg(napi_env env, napi_value v, const char *name) {
   int32_t n = 0;
   if (napi_get_value_int32(env, v, &n) != napi_ok) { type_error(env, name, "a number"); return 0; }
@@ -1258,9 +1279,9 @@ static napi_value fn_cavalry_cluster_service_schedule_timer(napi_env env, napi_c
   if (!read_args(env, info, 3, &argc, argv, "cavalry_cluster_service_schedule_timer")) return NULL;
   cavalry_cluster_service_t *service = (cavalry_cluster_service_t *) external_arg(env, argv[0], "service");
   if (arg_failed) return NULL;
-  int64_t correlation_id = (int64_t) int64_arg(env, argv[1], "correlation_id");
+  int64_t correlation_id = (int64_t) int64_exact_arg(env, argv[1], "correlation_id");
   if (arg_failed) return NULL;
-  int64_t deadline = (int64_t) int64_arg(env, argv[2], "deadline");
+  int64_t deadline = (int64_t) int64_exact_arg(env, argv[2], "deadline");
   if (arg_failed) return NULL;
   int result = cavalry_cluster_service_schedule_timer(service, correlation_id, deadline);
   return make_int32(env, (int32_t) result);
@@ -1271,7 +1292,7 @@ static napi_value fn_cavalry_cluster_service_cancel_timer(napi_env env, napi_cal
   if (!read_args(env, info, 2, &argc, argv, "cavalry_cluster_service_cancel_timer")) return NULL;
   cavalry_cluster_service_t *service = (cavalry_cluster_service_t *) external_arg(env, argv[0], "service");
   if (arg_failed) return NULL;
-  int64_t correlation_id = (int64_t) int64_arg(env, argv[1], "correlation_id");
+  int64_t correlation_id = (int64_t) int64_exact_arg(env, argv[1], "correlation_id");
   if (arg_failed) return NULL;
   int result = cavalry_cluster_service_cancel_timer(service, correlation_id);
   return make_int32(env, (int32_t) result);
