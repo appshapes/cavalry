@@ -67,7 +67,7 @@ The `extern "C"` ABI and its cbindgen header. Data plane, and the other crate wh
   timer for the earliest. Both calls send nothing, wait for nothing and allocate
   nothing, and a handler that aborts its entry is handed it again with every timer
   as it was. A program schedules its first timer only once every member of its
-  cluster runs version 2 of the cluster protocol (`spec/c-abi.md`, version 7;
+  cluster runs version 2 of the cluster protocol or a later one (`spec/c-abi.md`, version 7;
   `spec/cluster.md`, "The service", "Timers"; ADR 0151; ADR 0157).
 - Takes a service's snapshot and starts a service from one, for a program in C. The
   poll ends after the leader's request for a snapshot, which the handler is handed

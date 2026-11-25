@@ -36,14 +36,16 @@ committed once a quorum, two of three, has it on disk.
   others, has no record of them. It takes a leader only once it has heard every
   other member, so it waits, and `cluster.leaders_withheld` rises, while another
   member is stopped. Then it replicates the log, and it withholds its vote and seeks no
-  leadership until it has caught up and joined its leader's live log, which clears the
-  vote floor `cluster.vote_floor` holds and counts it in `cluster.vote_floors_cleared`
+  leadership until it has caught up, joined its leader's live log, and reached the
+  position its leader answered it with, which clears the vote floor
+  `cluster.vote_floor` holds and counts it in `cluster.vote_floors_cleared`
   ([ADR 0145](../decisions/0145-withhold-the-vote-of-a-member-that-lost-its-log-until-it-holds-what-the-cluster-held.md),
-  [ADR 0161](../decisions/0161-hold-a-members-vote-floor-until-it-has-joined-the-live-log-and-then-clear-it.md)).
+  [ADR 0161](../decisions/0161-hold-a-members-vote-floor-until-it-has-joined-the-live-log-and-then-clear-it.md),
+  [ADR 0163](../decisions/0163-clear-a-vote-floor-only-on-a-leaders-answer-to-the-present-run.md)).
   Until it has caught up, the cluster tolerates one failed member fewer. That is
   safe while each other member holds the log it kept, a new leadership term that the
-  leader's sender held back by flow control included, but for the one case work item
-  463 holds. It is not safe in one case:
+  leader's sender held back by flow control included, and a report of its earlier run
+  that reaches the leader late included. It is not safe in one case:
   another member that holds no log
   either, because it started late and has not yet caught up, while the member that
   holds the log is stopped. The two then elect as a new cluster does. A volume spares
@@ -111,7 +113,7 @@ committed once a quorum, two of three, has it on disk.
    started`. Every line then names the members that the member's own string gives a
    vote to, `; its members string gives a vote to members 0, 1 and 2`, the same on
    the three, and the version of the cluster protocol that the member runs, `; it
-   runs version 2 of the cluster protocol, 0.2.0`. The term is 1 or more where two
+   runs version 3 of the cluster protocol, 0.3.0`. The term is 1 or more where two
    members asked for votes at the same moment and another ballot was taken. Each
    line ends with `; see` and the page that explains it, as every finding does.
 
@@ -462,8 +464,8 @@ committed once a quorum, two of three, has it on disk.
   each other, whatever their versions, as during an upgrade. So a rejected consensus
   message is usually from a member of another major, and the member may canvass with
   no leader for as long as that member runs. `cavalry doctor` on each member names the
-  version that member runs, in its `note cluster-member` line: `it runs version 2 of
-  the cluster protocol, 0.2.0`, where the major is the first number of `0.2.0`. Of
+  version that member runs, in its `note cluster-member` line: `it runs version 3 of
+  the cluster protocol, 0.3.0`, where the major is the first number of `0.3.0`. Of
   a member that has no `cluster.protocol_version` counter, `doctor` says that `it
   runs a build older than that counter: version 0 of the cluster protocol, or the
   first build of version 1`. Both are of major 0. Start every member on one major:
@@ -579,14 +581,21 @@ committed once a quorum, two of three, has it on disk.
   member whose line differs with the cluster's string. A member whose host holds
   an older string prints no `WARN cluster-voters`. The count stays until this
   member starts again: [Promote a standby to a voter](promote-a-standby.md).
-- `WARN cluster.vote_floor`: this member took a leader with its log empty, and it has
-  not both caught up past its vote floor and joined its leader's live log since it
-  started; the line says how many bytes
-  its `cluster.append_position` is short of its vote floor, or that it is at or past
-  it. It lost its log directory, it joined a new cluster after the first term began,
-  or it is a new cluster's follower that has not joined yet. Until it joins the live
-  log, it withholds its vote and seeks no leadership, so the cluster elects a leader
-  only while both other members run. A member at or past its floor withholds still
+- `WARN cluster.vote_floor`: this member took a leader with its log empty, and since
+  it started it has not caught up past its vote floor and its leader's answer to its
+  present run, and joined its leader's live log. The line says one of four things:
+  - how many bytes its `cluster.append_position` is short of its vote floor;
+  - that no leader has answered it yet: a leader of a version of the cluster protocol
+    before 3 answers none, so it waits for a leader of version 3 (see
+    [Upgrade a cluster](upgrade-a-cluster.md));
+  - how many bytes it is short of its leader's answer, which it reaches as it
+    catches up;
+  - or that it has not yet joined the live log.
+
+  It lost its log directory, it joined a new cluster after the first term began,
+  or it is a new cluster's follower that has not been answered yet. Until its floor
+  clears, it withholds its vote and seeks no leadership, so the cluster elects a
+  leader only while both other members run. A member at or past its floor withholds still
   after a start that came before it joined: it waits for the live log too, not for
   the position alone. It catches up and joins from its leader by itself, and the line goes once
   it has. If its leader is lost for good before it joins, no member that prints this
@@ -609,7 +618,8 @@ committed once a quorum, two of three, has it on disk.
   no longer begins at position 0, and it cannot catch up: start the cluster again as a
   new cluster, every member on a new log directory
   ([ADR 0145](../decisions/0145-withhold-the-vote-of-a-member-that-lost-its-log-until-it-holds-what-the-cluster-held.md),
-  [ADR 0161](../decisions/0161-hold-a-members-vote-floor-until-it-has-joined-the-live-log-and-then-clear-it.md)).
+  [ADR 0161](../decisions/0161-hold-a-members-vote-floor-until-it-has-joined-the-live-log-and-then-clear-it.md),
+  [ADR 0163](../decisions/0163-clear-a-vote-floor-only-on-a-leaders-answer-to-the-present-run.md)).
   A standby that starts on an empty log directory stores a vote floor too, and
   `cavalry doctor` prints no line for it: a standby has no vote to withhold. Once
   it is promoted to a voter ([Promote a standby to a voter](promote-a-standby.md)),
