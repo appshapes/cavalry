@@ -1356,7 +1356,8 @@ cluster committed, by the vote rule ("Logs compared"); a leader that a later ter
 deposed, whose log would give the member nothing, is not taken. The live log reaches
 the member in an image made at that leader's sender position ("Members and streams";
 `spec/udp.md`, "The receiver", steps 1 and 2), and a follower goes to follower ready
-only with its append position at its live image's join position (states 13 and 15).
+only with its append position at or past its live image's join position (states 13
+and 15).
 So the join holds every entry the leader's sender had sent the member before it came
 back, since a sender's position never goes back, and a later leader's term begins past
 every such entry the cluster committed. The floor holds every entry the leader had
@@ -1368,9 +1369,15 @@ own driver (`spec/udp.md`, "The channel URI"), so it may hold an entry the sende
 not yet sent, and the live image may then join below it. For a
 message the leader's sender held back from the member's earlier image ("Taking a
 leader"), or one at position 0, the floor holds less, and the join holds what the
-sender had sent. Neither holds an entry the member had from a replay before the
-sender sent it, on the floor of a message held back, when the leader counts the
-member's acknowledgement of it only after the member came back (work item 463). A
+sender had sent. Follower catch-up's commit target holds a third set. A member had a
+replay in its earlier run only from a leader whose log was above position 0, and a
+held-back message it reads now was written after the one it followed then, so it is
+above 0 too. The member, its log empty, catches up again, and does not leave follower
+catch-up before its append position reaches the commit position it was told when it
+read the leader's stop catch-up (state 13). None of the three holds an entry the member
+had from a replay before the sender sent it, on the floor of a message held back, when
+the leader counts the member's acknowledgement of it so late that the commit position
+the member was told then does not reach it (work item 463). A
 member reads its floor at its start with its candidate term, so a member that
 stops before it has cleared its floor withholds after its next start until it has
 joined the live log in that run, even with its append position at or past the floor.

@@ -3,13 +3,18 @@
 - **Status:** Accepted
 - **Date:** 2026-11-25
 - **Invariants affected:** 1, 3
-- **Supersedes:** ADR 0145 on two points: what ends a vote floor, "once the member's
-  append position reaches its floor ... it votes as any voter does", with "a floor is
-  never lowered", since the member now also has to join the live log, and then clears
-  the floor; and "a message whose log position is 0 ... gives no floor". The rest of
-  ADR 0145 stands: the floor's store before the first term, its slot, and the
-  comparison of the member's log with the floor, which stays as one of two
-  conditions.
+- **Supersedes:** ADR 0145 on three points:
+  - What ends a vote floor: "a member whose append position has reached its floor ...
+    votes as any voter does from then on", with "The floor is never lowered". The
+    member now also has to join the live log, and then clears the floor.
+  - The slot "written once and synced": it is now written once with each floor and
+    once with zeros after it.
+  - "A message whose log position is 0, a new cluster's first leader's, gives no
+    floor": it now gives a floor of 0.
+
+  The rest of ADR 0145 stands: the floor's store before the first term, its slot's
+  place and checksum, and the comparison of the member's log with the floor, which
+  stays as one of two conditions.
 
 ## Context
 
@@ -54,7 +59,9 @@ reads −1 once it has. It votes as any voter does from then on.
 
 **Which condition holds which entries.** The join holds what the leader's live sender
 had sent the member. The floor from a new leadership term written after the member's
-start holds what the leader had appended. Each holds a case the other does not.
+start holds what the leader had appended. Each holds a case the other does not, and
+follower catch-up's commit target, which ADR 0145 did not need to name, holds what the
+leader had committed and told the member.
 
 - The leader the member joins holds every entry the cluster committed. The member took
   it by the rules of "Taking a leader" (ADR 0145), whose second case keeps out a leader
@@ -62,10 +69,10 @@ start holds what the leader had appended. Each holds a case the other does not.
 - **The join.** That leader's live log reaches a member started on a new driver in a
   new image, made at the sender's position (`spec/udp.md`, "The receiver", steps 1 and
   2), which ADR 0145's second fact already rests on. A follower goes to follower ready
-  only with its append position at its live image's join position: state 15 checks it,
-  and state 13 goes on until the member's log reaches the live recording's start. A
-  sender's position never goes back, so the join holds every entry the sender sent the
-  member before it came back. A later leader's term begins past every such entry the
+  only with its append position at or past its live image's join position: state 15
+  checks it, and state 13 goes on until the member's log reaches the live recording's
+  start. A sender's position never goes back, so the join holds every entry the sender
+  sent the member before it came back. A later leader's term begins past every such entry the
   cluster committed, since it holds them by the vote rule. This is what holds the case
   of work item 411: a new leadership term the sender held back from the member's image
   before its start gives a floor below an entry the sender had since sent it.
@@ -81,10 +88,19 @@ start holds what the leader had appended. Each holds a case the other does not.
   the entry with it: the leader keeps a member's latest report with no check of which
   run sent it. A member cleared by the join alone would then vote without the entry.
   The floor keeps it withholding until its log holds the entry.
-- **Neither.** A held-back message's floor, an entry the member had from a replay
-  before the sender sent it, and its acknowledgement counted after the member came
-  back, all three together. Work item 463 holds that case, by having the leader count
-  a report from the member's present run only.
+- **Catch-up's commit target.** A member had a replay in its earlier run only from a
+  leader whose log was above position 0 when it wrote the message the member followed,
+  and a held-back message the member reads now was written after that one, so it is
+  above 0 too. A member that comes back on it with its log empty is below the leader's
+  log and catches up again, and state 13 is not left before its append position
+  reaches the commit position it was told when it read the leader's stop catch-up.
+  That holds an entry from a replay before the sender sent it, on a held-back
+  message's floor, when the leader committed it and told the member so before then.
+- **None of the three.** A held-back message's floor, an entry the member had from a
+  replay before the sender sent it, and its acknowledgement counted so late that the
+  entry was not yet committed in the commit position the member was told when it read
+  stop catch-up: in practice, counted after the member came back. Work item 463 holds
+  that case, by having the leader count a report from the member's present run only.
 
 **Which held-back frames reach a member at all.** A member whose log is empty reads a
 new leadership term only when its log leadership term id is −1: the leader wrote it in
@@ -230,8 +246,7 @@ All runs on an Apple M-series laptop, macOS 26, in the in-memory cluster of
   member: a held-back new leadership term can still give a floor below such an entry,
   but the member votes only after it has joined the live log, which reaches it at or
   past that entry.
-- One case is left, the three together of the Decision's last point, and work item 463
-  holds it.
+- One case is left, the Decision's last point, and work item 463 holds it.
 - A member that lost its log withholds until it is on the live log and its log is at
   or past its floor. While its leader runs, that is the same catch-up, since a follower
   joins the live log once it has caught up. A member that caught up and was stopped
@@ -246,9 +261,10 @@ All runs on an Apple M-series laptop, macOS 26, in the in-memory cluster of
   tell those followers from a member that lost its log beside a member that never had
   one, and there electing would lose what the lost leader holds. The way out is the
   operator's, in `docs/how-to/run-a-cluster.md` and `cluster.vote_floor`'s doctor
-  text: when every member still running is at position 0, no running member holds an
-  entry, and the cluster is started again as a new cluster, which gives up whatever the
-  lost leader held.
+  text. First every stopped voter is started on the log directory it kept. Then, when
+  every voter but the lost leader runs at position 0, none holds an entry, and the
+  cluster is started again as a new cluster, which gives up whatever the lost leader
+  held.
 - A floor that a build of ADR 0145 stored, which that build never clears, counts again
   under this one. A member that lost its log while it ran such a build, long since
   caught up, withholds after its first start under this build until it joins a live
@@ -258,9 +274,10 @@ All runs on an Apple M-series laptop, macOS 26, in the in-memory cluster of
   so for that join. A cluster stopped whole and started on this build at once, with
   such a floor on every member a quorum could elect, elects no leader, since a member
   that withholds never stands. No build has been released, so the way out is written
-  down and not built: start one of those members on the build before, which votes and
-  stands once its log is at or past its floor, and upgrade it again once the others
-  have joined its live log. Two other ways were weighed:
+  down and not built. With every voter running, start on the build before the member
+  whose log is at least every other's. It votes and stands once its log is at or past
+  its floor, and the others vote for it by ADR 0145's one case. Upgrade it again once
+  they have joined its live log. Two other ways were weighed:
   - Clearing at a member's start a floor its log is already past, as ADR 0145's rule
     would have let it vote, reopens the case this decision closes, for a member started
     again between its floor and its join.

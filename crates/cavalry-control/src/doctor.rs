@@ -2220,7 +2220,7 @@ fn member_findings(
         } else {
             format!(
                 "its cluster.append_position {append}, at or past it, and it has not yet \
-                 joined its leader's live log since it started"
+                 joined its leader's live log since it last started or stored the floor"
             )
         };
         findings.push(Finding {
@@ -8110,7 +8110,7 @@ mod tests {
             floor.message.starts_with(
                 "member 2's cluster.vote_floor is 1048576 and its cluster.append_position \
                  1048576, at or past it, and it has not yet joined its leader's live log \
-                 since it started: "
+                 since it last started or stored the floor: "
             ),
             "{}",
             floor.message

@@ -2837,7 +2837,10 @@ pub const fn withholds(own: LogReport, vote_floor: i64, log_heard: bool) -> bool
 /// floor holds every entry the leader had appended when it wrote the new leadership
 /// term the member took, one the member acknowledged from a replay of the leader's
 /// recording before the sender sent it among them. A floor from a frame the leader
-/// held back, or a floor of 0, holds less, and the join holds the rest.
+/// held back, or a floor of 0, holds less: the join holds what the sender had sent,
+/// and follower catch-up holds the member until its log reaches the commit position it
+/// was told, all but an entry whose acknowledgement the leader counts later still
+/// (work item 463).
 pub const fn clears_vote_floor(vote_floor: i64, joined: bool, append_position: i64) -> bool {
     vote_floor >= 0 && joined && append_position >= vote_floor
 }

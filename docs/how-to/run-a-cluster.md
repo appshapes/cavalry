@@ -42,7 +42,8 @@ committed once a quorum, two of three, has it on disk.
   [ADR 0161](../decisions/0161-hold-a-members-vote-floor-until-it-has-joined-the-live-log-and-then-clear-it.md)).
   Until it has caught up, the cluster tolerates one failed member fewer. That is
   safe while each other member holds the log it kept, a new leadership term that the
-  leader's sender held back by flow control included. It is not safe in one case:
+  leader's sender held back by flow control included, but for the one case work item
+  463 holds. It is not safe in one case:
   another member that holds no log
   either, because it started late and has not yet caught up, while the member that
   holds the log is stopped. The two then elect as a new cluster does. A volume spares
@@ -589,16 +590,19 @@ committed once a quorum, two of three, has it on disk.
   after a start that came before it joined: it waits for the live log too, not for
   the position alone. It catches up and joins from its leader by itself, and the line goes once
   it has. If its leader is lost for good before it joins, no member that prints this
-  line can stand in the election that follows:
-  - When every member still running prints it with a `cluster.append_position` of 0,
-    as a new cluster's followers do whose first leader was lost, no running member
-    holds an entry: whatever the cluster committed is on the lost leader alone. Start
-    the cluster again as a new cluster, every member on a new log directory, which
-    gives up what that leader held.
+  line can stand in the election that follows. First start every stopped voter on
+  the log directory it kept: a quorum of voters that hold the log elects without this
+  member. Then:
+  - When every voter but the lost leader runs and prints this line with a
+    `cluster.append_position` of 0, as a new cluster's followers do whose first leader
+    was lost, no voter that runs holds an entry: whatever the cluster committed is on
+    the lost leader alone. Start the cluster again as a new cluster, every member on a
+    new log directory, which gives up what that leader held.
   - When the members were upgraded all at once from a build before ADR 0161, each
-    holds the floor that build stored and never cleared. Start one of them again on
-    the build before, which votes and stands once its log is at or past its floor.
-    Once the others have joined its live log, upgrade it again
+    holds the floor that build stored and never cleared. With every voter running,
+    start again on the build before the member whose `cluster.append_position` is at
+    least every other's. It votes and stands once its log is at or past its floor,
+    and the others vote for it. Once they have joined its live log, upgrade it again
     ([Upgrade a cluster](upgrade-a-cluster.md)).
 
   If the bytes short stay the same while the cluster appends, its leader's log
