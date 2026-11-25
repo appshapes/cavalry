@@ -2,17 +2,18 @@
 # Builds the driver and cavalry-ffi's shared library in release, compiles the JVM client
 # with the runner's javac (Java 25 or later, every lint a warning and every warning an
 # error: no build tool, no dependency), then conformance/jvm's Quickstart, Readme,
-# CommittedLogRound, ClusterRound and SnapshotRound, starts a driver on a directory of its own, runs Quickstart through
+# CommittedLogRound, ClusterRound, SnapshotRound and ClosedRound, starts a driver on a directory of its own, runs Quickstart through
 # clients/jvm with the runner's java, then clients/jvm/README.md's example through Readme;
 # then starts three cluster members on the loopback, each a `cavalry run` in a member's
 # role, and runs CommittedLogRound beside one of them, member 1 unless it joined late
 # (conformance/log-member.sh), the client's committed log against a cluster
 # (spec/c-abi.md, version 2; ADR 0070), and then ClusterRound, the cluster round: the
 # client's service beside each member and its session on the first driver
-# (spec/c-abi.md, versions 4 and 5; ADR 0124), and then SnapshotRound, the
+# (spec/c-abi.md, versions 4, 5 and 7; ADR 0124; ADR 0157), and then SnapshotRound, the
 # snapshot round: a service's snapshot and its start from one beside the same three
-# members, on the log the cluster round left (spec/c-abi.md, version 6; ADR 0149); and
-# cleans up.
+# members, on the log the cluster round left (spec/c-abi.md, version 6; ADR 0149); then
+# ClosedRound, the closed round: a service's poll after its driver's stop, on the first
+# driver, which the program stops itself (ADR 0155); and cleans up.
 # `just conformance` runs this after conformance/go (clients/README.md; ADR 0046, card
 # 208).
 set -euo pipefail
@@ -47,7 +48,7 @@ rm -rf clients/jvm/build/classes conformance/jvm/build
 javac --release 25 -Xlint:all -Werror -d clients/jvm/build/classes clients/jvm/src/com/appshapes/cavalry/*.java
 javac --release 25 -Xlint:all -Werror -cp clients/jvm/build/classes -d conformance/jvm/build \
     conformance/jvm/Quickstart.java conformance/jvm/Readme.java conformance/jvm/CommittedLogRound.java \
-    conformance/jvm/ClusterRound.java conformance/jvm/SnapshotRound.java
+    conformance/jvm/ClusterRound.java conformance/jvm/SnapshotRound.java conformance/jvm/ClosedRound.java
 
 echo "conformance/jvm: cavalry run, in the background, on $CAVALRY_DIR"
 target/release/cavalry run &
@@ -155,3 +156,10 @@ java --enable-native-access=ALL-UNNAMED -cp clients/jvm/build/classes:conformanc
     cat "$cluster"/member-*.out >&2 || true
     exit 1
 }
+
+# The closed round, last, since it stops the first driver: a poll of a service whose
+# client is closed is one answer, -1 with CAVALRY_ERR_CLOSED (spec/c-abi.md, "cluster
+# service"; ADR 0155). The program sends the driver its SIGTERM, by the process id.
+echo "conformance/jvm: run ClosedRound, a service's poll after its driver's stop, on $CAVALRY_DIR"
+java --enable-native-access=ALL-UNNAMED -cp clients/jvm/build/classes:conformance/jvm/build ClosedRound "$driver_pid"
+wait "$driver_pid" 2>/dev/null || true

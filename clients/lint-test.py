@@ -952,6 +952,7 @@ class Clients(unittest.TestCase):
                      "cavalry_go_offer", "cavalry_go_poll", "cavalry_go_committed_log_poll",
                      "cavalry_go_cluster_session_offer", "cavalry_go_cluster_session_poll",
                      "cavalry_go_cluster_service_reply", "cavalry_go_cluster_service_poll",
+                     "cavalry_go_cluster_service_schedule_timer", "cavalry_go_cluster_service_cancel_timer",
                      "cavalry_go_service_trampoline"):
             self.assertTrue(any(f"go: {name} " in f and "calls cavalry_go_keep" in f and "pthread_mutex_*" in f
                                 for f in found), (name, found))
@@ -995,6 +996,25 @@ class Clients(unittest.TestCase):
         self.assertEqual(len(found), 4, found)
         for name in ("ClusterSession.Offer", "ClusterService.Reply", "cavalryGoReply", "cavalryGoClusterEntry"):
             self.assertTrue(any(f"go: {name} (" in f and "panics" in f for f in found), (name, found))
+
+    def test_a_panic_in_a_go_services_timer_calls_fails_and_so_does_a_missing_one(self):
+        """ScheduleTimer and CancelTimer return a code (ADR 0157): neither panics, and
+        both are held to the rules by name."""
+        self.edit_go("func (v *ClusterService) ScheduleTimer(correlationID, deadline int64) int32 {\n",
+                     "func (v *ClusterService) ScheduleTimer(correlationID, deadline int64) int32 {\n\tpanic(\"no\")\n")
+        self.edit_go("func (v *ClusterService) CancelTimer(correlationID int64) int32 {\n",
+                     "func (v *ClusterService) CancelTimer(correlationID int64) int32 {\n\tpanic(\"no\")\n")
+        found = lint.findings(self.tmp)
+        self.assertEqual(len(found), 2, found)
+        for name in ("ClusterService.ScheduleTimer", "ClusterService.CancelTimer"):
+            self.assertTrue(any(f"go: {name} (" in f and "panics" in f for f in found), (name, found))
+        self.setUp()
+        self.edit_go("func (v *ClusterService) ScheduleTimer(", "func (v *ClusterService) Schedule(")
+        self.edit_go("func (v *ClusterService) CancelTimer(", "func (v *ClusterService) Cancel(")
+        found = lint.findings(self.tmp)
+        self.assertEqual(len(found), 2, found)
+        for name in ("ClusterService.ScheduleTimer is not in", "ClusterService.CancelTimer is not in"):
+            self.assertTrue(any(name in f for f in found), (name, found))
 
     def test_an_allocation_where_go_calls_a_cluster_handler_fails(self):
         """deliverReply and deliverClusterEntry call the handlers, once per reply and per
@@ -1265,6 +1285,31 @@ class Clients(unittest.TestCase):
                            ("ClusterEntryValues.timedOut", "allocates byte with `new`")):
             self.assertTrue(any(f"jvm: {name} (" in f and form in f for f in found), (name, found))
 
+    def test_a_throw_in_a_jvm_services_timer_methods_fails_and_so_does_a_missing_one(self):
+        """scheduleTimer and cancelTimer return a code (ADR 0157): a check that throws in
+        the one and an allocation in the other are findings, and both are held to the
+        rules by name."""
+        self.edit_jvm("    public int scheduleTimer(long correlationId, long deadline) {\n",
+                      "    public int scheduleTimer(long correlationId, long deadline) {\n        Abi.check(\"x\", -1);\n",
+                      file="ClusterService.java")
+        self.edit_jvm("    public int cancelTimer(long correlationId) {\n",
+                      "    public int cancelTimer(long correlationId) {\n        long[] copy = new long[1];\n",
+                      file="ClusterService.java")
+        found = lint.findings(self.tmp)
+        self.assertEqual(len(found), 2, found)
+        for name, form in (("ClusterService.scheduleTimer", "calls Abi.check"),
+                           ("ClusterService.cancelTimer", "allocates long with `new`")):
+            self.assertTrue(any(f"jvm: {name} (" in f and form in f for f in found), (name, found))
+        self.setUp()
+        self.edit_jvm("    public int scheduleTimer(long correlationId, long deadline) {\n",
+                      "    public int schedule(long correlationId, long deadline) {\n", file="ClusterService.java")
+        self.edit_jvm("    public int cancelTimer(long correlationId) {\n",
+                      "    public int cancel(long correlationId) {\n", file="ClusterService.java")
+        found = lint.findings(self.tmp)
+        self.assertEqual(len(found), 2, found)
+        for name in ("ClusterService.scheduleTimer", "ClusterService.cancelTimer"):
+            self.assertTrue(any(f"{name} is not in" in f for f in found), (name, found))
+
     def test_a_missing_jvm_cluster_method_fails(self):
         """A cluster session's and a cluster service's per-message methods are held to the
         rules by name, as the others are (ADR 0124)."""
@@ -1518,6 +1563,29 @@ class Clients(unittest.TestCase):
                            ("ClusterReplyValues.Timestamp", "allocates long with `new`"),
                            ("ClusterEntryValues.TimedOut", "allocates byte with `new`")):
             self.assertTrue(any(f.startswith(f"dotnet: {name} ") and form in f for f in found), (name, found))
+
+    def test_a_throw_in_a_dotnet_services_timer_members_fails_and_so_does_a_missing_one(self):
+        """ScheduleTimer and CancelTimer return a code (ADR 0157): neither checks and
+        throws, and both are held to the rules by name."""
+        self.edit_dotnet("    public int ScheduleTimer(long correlationId, long deadline)\n    {\n",
+                         "    public int ScheduleTimer(long correlationId, long deadline)\n    {\n        Abi.Check(\"x\", -1);\n",
+                         file="ClusterService.cs")
+        self.edit_dotnet("    public int CancelTimer(long correlationId)\n    {\n",
+                         "    public int CancelTimer(long correlationId)\n    {\n        Abi.Check(\"x\", -1);\n",
+                         file="ClusterService.cs")
+        found = lint.findings(self.tmp)
+        self.assertEqual(len(found), 2, found)
+        for name in ("ClusterService.ScheduleTimer", "ClusterService.CancelTimer"):
+            self.assertTrue(any(f.startswith(f"dotnet: {name} ") and "calls Abi.Check" in f for f in found), (name, found))
+        self.setUp()
+        self.edit_dotnet("    public int ScheduleTimer(long correlationId, long deadline)\n",
+                         "    public int Schedule(long correlationId, long deadline)\n", file="ClusterService.cs")
+        self.edit_dotnet("    public int CancelTimer(long correlationId)\n",
+                         "    public int Cancel(long correlationId)\n", file="ClusterService.cs")
+        found = lint.findings(self.tmp)
+        self.assertEqual(len(found), 2, found)
+        for name in ("ClusterService.ScheduleTimer", "ClusterService.CancelTimer"):
+            self.assertTrue(any(f"{name} is not in" in f for f in found), (name, found))
 
     def test_a_missing_dotnet_cluster_member_fails(self):
         """A cluster session's and a cluster service's per-message members are held to the

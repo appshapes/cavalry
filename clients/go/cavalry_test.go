@@ -144,7 +144,7 @@ func TestTheEntryTrampolineHandsThePositionOnAndCallsNoHandlerForASlotTheTableDo
 // one past the table and an empty slot call no handler, and an entry there is answered
 // ActionAbort, since no handler took it. A session's slot hands its handler the reply's
 // two values in the one struct the session keeps. A service's slot hands its handler the
-// entry's seven values in the one struct the service keeps, and the service, and answers
+// entry's eight values in the one struct the service keeps, and the service, and answers
 // what the handler returned, whatever it is: the C trampoline passes it to the ABI, which
 // refuses what is no action. A handler that panics is counted, with its value kept, and
 // its entry is answered ActionAbort; and a slot of another kind, a session's for an entry
