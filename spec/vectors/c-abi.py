@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Write spec/vectors/c-abi.json: the vectors for spec/c-abi.md, version 6.
+"""Write spec/vectors/c-abi.json: the vectors for spec/c-abi.md, version 7.
 
 This script is the page's reference, independent of the Rust code and of the committed
 header: it lists, from the page's own tables, every opaque type, every struct with its
@@ -17,7 +17,7 @@ and a reader checks a header against them (spec/README.md, "Conventions").
 import json
 from pathlib import Path
 
-ABI_VERSION = 6
+ABI_VERSION = 7
 
 OPAQUE_TYPES = [
     "cavalry_context_t", "cavalry_t", "cavalry_publication_t", "cavalry_subscription_t",
@@ -66,11 +66,12 @@ STRUCTS = {
         ("int64_t", "session_id"), ("size_t", "max_message_length"),
     ],
     "cavalry_cluster_reply_values_t": [("int64_t", "leadership_term_id"), ("int64_t", "timestamp")],
-    # Version 5: the cluster service (ADR 0123).
+    # Version 5: the cluster service (ADR 0123). Version 7 adds the last field, a
+    # timer's id, after the fields of version 6, which keep their places (ADR 0157).
     "cavalry_cluster_entry_values_t": [
         ("int64_t", "position"), ("int64_t", "leadership_term_id"), ("int64_t", "timestamp"),
         ("int64_t", "session_id"), ("int32_t", "type"), ("int32_t", "leader_member_id"),
-        ("bool", "timed_out"),
+        ("bool", "timed_out"), ("int64_t", "correlation_id"),
     ],
 }
 
@@ -233,6 +234,10 @@ FUNCTIONS = [
        ("const uint8_t *", "state"), ("size_t", "length")),
     fn("int", "cavalry_cluster_service_restore", SERVICE, CLIENT,
        ("const uint8_t **", "state"), ("size_t *", "length")),
+    # Version 7: a service's timers (ADR 0157).
+    fn("int", "cavalry_cluster_service_schedule_timer", SERVICE, ("int64_t", "correlation_id"),
+       ("int64_t", "deadline")),
+    fn("int", "cavalry_cluster_service_cancel_timer", SERVICE, ("int64_t", "correlation_id")),
     fn("int", "cavalry_cluster_service_close", SERVICE, CLIENT),
     # errors and version
     fn("int", "cavalry_errcode"),
@@ -338,6 +343,11 @@ DEFINES = {
     "CAVALRY_CLUSTER_ENTRY_NEW_LEADERSHIP_TERM": 4,
     "CAVALRY_CLUSTER_ENTRY_OTHER": 5,
     "CAVALRY_CLUSTER_ENTRY_SNAPSHOT": 6,
+    # version 7: a timer that is handed over, after the kinds of version 6
+    "CAVALRY_CLUSTER_ENTRY_TIMER": 7,
+    # what became of a schedule of a timer
+    "CAVALRY_CLUSTER_TIMER_SCHEDULED": 1,
+    "CAVALRY_CLUSTER_TIMER_REFUSED": 2,
     # what a service found to start from, `Restored`'s three in order
     "CAVALRY_CLUSTER_RESTORED_NO_MEMBER": 1,
     "CAVALRY_CLUSTER_RESTORED_FROM_START": 2,
