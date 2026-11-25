@@ -190,7 +190,16 @@ The daemon: conductor, sender, receiver and idle strategies. Data plane.
   dropped the socket, so a cluster member that led follows another leader at once on
   its own `log` endpoint; while a publication on it is open, the add is code 4 with a
   message that names that publication's channel, and a publication that opens there
-  while an add waits refuses that add then (ADR 0153). A setup
+  while an add waits refuses that add then (ADR 0153). The other order is held too:
+  an `add publication` on a control channel whose control address a receive endpoint
+  on the driver holds, that endpoint's last subscription removed, waits for the
+  receiver's close and then binds the address, so a cluster member that followed on
+  its `log` endpoint leads at once, counted in `publication.add_deferred`, those
+  waiting in `publication.add_deferred_waiting`, the held adds of both kinds run in
+  the order they arrived, and code 4
+  at the closing endpoint wait, counted in `publication.add_deferred_timed_out`; while
+  a subscription is still on that endpoint the add is code 4 at once, its message
+  naming the subscription's channel (ADR 0154). A setup
   frame for that stream goes back to the
   conductor, which creates the image, a log of type 2 under `images/` at the position
   the setup names with a registration id of its own, allocates its two counters and a

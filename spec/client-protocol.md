@@ -275,7 +275,19 @@ What the driver does with each, after the checks of "What the driver rejects":
   with no free record, or the sender's request queue with no room for the endpoint and
   the publication, or with a remove still waiting for room (ADR 0041), is error code
   10; a log that cannot be created or sized is error code 12; a socket that cannot be
-  opened, bound or connected is code 4; a host that does not resolve is code 9.
+  opened, bound or connected is code 4; a host that does not resolve is code 9. An add
+  on a control channel whose control address a receive endpoint on the driver holds,
+  that endpoint's last subscription removed and the endpoint not yet closed, waits
+  with nothing registered and no event sent until the receiver has closed it, and then
+  runs as if it had just arrived, as an `add subscription` waits for a closing
+  endpoint: it holds a slot of the publications registry, goes with a client that
+  closes or times out first, and is counted in `publication.add_deferred`, those
+  waiting now in `publication.add_deferred_waiting`; it runs, with the adds of either
+  kind held behind the same endpoint, in the order they arrived; one still
+  waiting once the closing endpoint wait has passed is code 4, counted in
+  `publication.add_deferred_timed_out`, with nothing registered. While a subscription
+  is still on that endpoint the add is code 4 at once, its message naming the
+  subscription's channel (`spec/udp.md`, "The receiver"; ADR 0154).
 - **add exclusive publication.** As add publication, with a new session and a log of
   type 1 every time, never shared; the answer is `exclusive publication ready`.
 - **remove publication.** The command names the client's registration, the correlation
@@ -891,7 +903,7 @@ whose correlation id, registration id or client id is its own and ignores the re
 | 1 | invalid channel | the channel is not `cavalry:ipc` or a `cavalry:udp` channel this version accepts: its grammar, a parameter this version does not name, its control address, its endpoint, its `fc`, its position keys incomplete or out of range, or a multicast address (`spec/udp.md`, "What a reader rejects"); or a channel that parses where the command does not take it: `control`, `control-mode`, `fc`, `ssc`, `term-length` or a position key on an `add subscription`, `ssc`, `term-length` or a position key on a `start replay` channel, an `add publication` that would join a live publication under a different `fc`, under another `ssc`, under another term length or under different position keys, a destination command on a publication whose channel names no control address, or a destination channel that is `cavalry:ipc` or a control channel, names `interface`, `fc`, `ssc`, `term-length` or a position key, or whose endpoint has no address the control address can send to; the message names the reason and the parameter |
 | 2 | unknown subscription | remove subscription names a registration id the driver does not know, or another client's |
 | 3 | unknown publication | remove publication, add destination or remove destination names a registration id the driver does not know, or another client's |
-| 4 | channel endpoint error | a `cavalry:udp` endpoint's socket could not be opened, bound or connected, and the message carries the operating system's reason and the endpoint; or an `add subscription` waited the closing endpoint wait for its channel's previous receive endpoint to close, or for a closed publication's control socket on its endpoint's address to go, and the message names the endpoint and the wait; or an `add subscription`'s endpoint is the control address of an open publication on the driver, and the message names that publication's channel (ADR 0153) |
+| 4 | channel endpoint error | a `cavalry:udp` endpoint's socket could not be opened, bound or connected, and the message carries the operating system's reason and the endpoint; or an `add subscription` waited the closing endpoint wait for its channel's previous receive endpoint to close, or for a closed publication's control socket on its endpoint's address to go, and the message names the endpoint and the wait; or an `add subscription`'s endpoint is the control address of an open publication on the driver, and the message names that publication's channel (ADR 0153); or an `add publication` waited the closing endpoint wait for a receive endpoint that holds its control address, or its control address is the endpoint of a subscription still open on the driver, whose channel the message names (ADR 0154) |
 | 5 | unknown counter | remove counter names a registration id the driver does not know, or another client's |
 | 6 | unknown command type | the record's type is not a command of this version |
 | 7 | malformed command | the message failed a decoding check of "What the driver rejects" after its first 16 bytes were read, or start replay's length is below −1 |
@@ -925,7 +937,7 @@ values and keeps 100 and above for its own (`spec/c-abi.md`, "Error codes").
 | counter reuse timeout | 1 s | the driver | how long a freed counter's record stays reclaimed before it is allocated again (`spec/counters-file.md`); and how long after an `available image` the driver keeps the log and the position counter it names, unless the subscription is removed or the subscriber has moved the position ("Events"; ADR 0078) |
 | recording sync interval | 1 s | the driver | how long after a recording's last sync, or its start, the recorder syncs it again when it has written bytes no sync covers; a `sync recording` syncs at once, and the interval then runs from that sync (ADR 0025, ADR 0069) |
 | replay connect timeout | 5 s | the driver | a replay whose publication has had no subscriber, or over `cavalry:udp` has not been connected as `spec/udp.md`, "The sender", defines it, for this long ends with reason 2: measured from the replay's start, from the moment its last subscriber went, or over `cavalry:udp` from the moment the connection timeout passed |
-| closing endpoint wait | 5 s | the driver | an `add subscription` that has waited this long for its channel's previous receive endpoint to close, or for a closed publication's control socket on its endpoint's address to go, measured from the moment the driver read it, is answered with code 4 and registers nothing ("Commands"); half the response timeout, so that the answer reaches the client before the client reports the add lost |
+| closing endpoint wait | 5 s | the driver | an `add subscription` that has waited this long for its channel's previous receive endpoint to close, or for a closed publication's control socket on its endpoint's address to go, and an `add publication` that has waited this long for a receive endpoint that holds its control address to close, measured from the moment the driver read it, is answered with code 4 and registers nothing ("Commands"); half the response timeout, so that the answer reaches the client before the client reports the add lost |
 
 These are Aeron's values, and they are the driver's in this version. The closing
 endpoint wait is Cavalry's own (ADR 0049).
@@ -1003,7 +1015,7 @@ with error code 10 and registers nothing:
 | Registry | Capacity | Counts |
 | --- | --- | --- |
 | clients | 256 | every client id the driver has not forgotten |
-| publications | 1024 | every registration of a publication, shared or not |
+| publications | 1024 | every registration of a publication, shared or not, and every `add publication` waiting for a receive endpoint that holds its control address (ADR 0154) |
 | subscriptions | 1024 | every registration of a subscription, and every `add subscription` waiting for a closing receive endpoint or a closed publication's control socket |
 | images | 2048 | every pair of a subscription and a publication, or a subscription and an image over UDP, that match: an image over UDP shared by several subscriptions on its endpoint and stream counts once per subscription, with a `subscription.position` per pair, so that the counters bound below holds |
 | recordings | 1024 | every recording that is starting or live, one per publication or image at most |

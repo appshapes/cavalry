@@ -959,6 +959,35 @@ fn a_recording_armed_before_its_image_is_told_at_the_join_and_counted() {
     );
 }
 
+/// The other order: a member that follows, leaves its log and leads at once, as a
+/// follower does that wins an election. Its log subscription's endpoint is its own
+/// `log` endpoint, which its log publication binds as its control address, and the
+/// receive endpoint closes once the subscription is removed and its images retired
+/// (work item 447; ADR 0154): the add waits for the receive endpoint's close and
+/// binds the address then.
+#[test]
+fn a_follower_that_leaves_its_log_leads_at_once() {
+    let mut leader = leader("follow-then-lead");
+    leader
+        .module
+        .io
+        .join_log()
+        .expect("the member joins the log as a follower");
+    until_stopped("the log is left", || leader.module.io.leave_log());
+    let started = Instant::now();
+    leader
+        .module
+        .io
+        .add_log(0, 0)
+        .expect("the member that followed leads on its own log endpoint")
+        .expect("the log has its recording");
+    assert!(
+        started.elapsed() < Duration::from_secs(2),
+        "the add waited {:?}",
+        started.elapsed()
+    );
+}
+
 /// A leader that leaves its log and joins the log again at once as a follower, as a
 /// leader does that steps down and follows another (work item 445). Its log
 /// publication's control address is its own `log` endpoint, which its subscription as
