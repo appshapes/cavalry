@@ -431,10 +431,10 @@ members.
   - An int32 parameter (a stream id) takes a number that is an integer from −2^31
     to 2^31 − 1, and no BigInt.
 
-  A value of another type throws a `TypeError`. Each message names the parameter,
-  as the ABI names it where the package passes the argument straight on,
-  `recording_id` for `recordingId`, and as `fragmentLimit` for a poll's, and its
-  range, says what to pass and names this section; a timer's names "A service's timers". The types
+  A value of another type throws a `TypeError`. Each message names the parameter
+  as the method names it, `recordingId`, `fragmentLimit`, `message`
+  ([ADR 0164](../../docs/decisions/0164-refuse-a-count-below-zero-in-the-go-the-jvm-and-the-dotnet-client-before-the-abi-is-called.md)),
+  and its range, says what to pass and names this section; a timer's names "A service's timers". The types
   of `index.d.ts` say `number | bigint` for each int64 and each count, so the
   follow length, `constants.CAVALRY_FOLLOW_LENGTH`, a BigInt, is a length
   `startReplay` takes: as the number `2 ** 63` it is refused, where N-API held it

@@ -1025,8 +1025,8 @@ impl Replies<'_> {
     /// own state and schedules one timer for the earliest.
     ///
     /// A program schedules its first timer only once every member of its cluster,
-    /// with the service beside it, runs version 2 of the cluster protocol, and from
-    /// that entry on no member is stepped back to version 1: a service of version 1
+    /// with the service beside it, runs version 2 of the cluster protocol or a later
+    /// one, and from that entry on no member is stepped back to version 1: a service of version 1
     /// hands its program no timer, so the two would compute two states from one
     /// log. Nothing in a member checks it (`spec/cluster.md`, "Versions and the upgrade").
     ///
