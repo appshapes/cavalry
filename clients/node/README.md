@@ -539,10 +539,10 @@ took are taken, and the service adds them again at a later poll (ADR 0159). What
 service tells its member of its timers after that, each pending timer again every
 second among it, is offered and waits for nothing. The
 runner's cluster round reports the waits. On an Apple M5 Pro laptop (macOS 26.6.1,
-Node v24.16.0), in each of 10 runs, MEASURED_COUNT polls of three services took
+Node v24.16.0), in each of 10 runs, 7 of about 42,500 polls of three services took
 over 1 ms, where 4 of about 18,500 did in each of 25 runs before the round scheduled
 a timer. The report names the longest poll alone: in every run it was a poll in which
-a service's program first scheduled a timer, MEASURED_LONGEST ms with its six
+a service's program first scheduled a timer, 23.6 to 36.9 ms with its six
 commands, where the longest before, a poll that opened a member's log, took 7.2 to
 10.4 ms. A
 program whose event loop cannot stop for that long runs its service on a
