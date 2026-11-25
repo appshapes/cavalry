@@ -7,13 +7,17 @@
 //! [`TermsFile::append`] before the member reports an append position for a term,
 //! [`TermsFile::truncate_above`] before it reports its log leadership term id again,
 //! [`TermsFile::set_candidate_term`] before the vote or request vote that raises
-//! the candidate term is sent, [`TermsFile::set_vote_floor`] once, when the
-//! member takes a leader with its log empty, before it records a term, and
-//! [`TermsFile::clear_vote_floor`] once, when the member has joined a leader's live
-//! log; each write syncs before it returns. The vote floor is one slot, bytes 48 to 60
-//! of the header, under its own checksum: a store a crash tears reads as no floor,
-//! which the member then stores again, since it recorded no term after it, and a clear
-//! a crash tears reads as no floor, which the clear was to leave. A reader takes the
+//! the candidate term is sent, [`TermsFile::set_vote_floor`] once for each floor,
+//! when the member takes a leader with its log empty, before it records a term, and
+//! [`TermsFile::clear_vote_floor`] once after each floor, when the member has joined a
+//! leader's live log with its log at or past the floor; each write syncs before it
+//! returns. The vote floor is one slot, bytes 48 to 60 of the header, under its own
+//! checksum, and a write of it a crash tears reads as the slot before it or the slot
+//! after it. A torn store reads as no floor, which the member then stores again, since
+//! it recorded no term after it, or as the floor it stored. A torn clear reads as no
+//! floor, which the clear was to leave, or, when it wrote only bytes that were zero
+//! already, as the floor before it, which the member holds until it joins a live log
+//! again. A reader takes the
 //! entries in file order, skips a deleted one and stops at the empty last entry a crash
 //! left, an empty entry before the last being damage:
 //! [`TermsHeader::parse`] and [`TermsEntry::parse`] are the checks of "What a reader
@@ -816,10 +820,13 @@ impl TermsFile {
 
     /// Stores the vote floor in one synced write of its slot, the position and its
     /// checksum, before the member records a term with it (`spec/durable-log.md`,
-    /// "The driver"; ADR 0145). It is written once: a file whose floor is set, or a
-    /// position below 0 or not a multiple of 32, is [`TermsError::VoteFloorRefused`],
-    /// and nothing is written. A write a crash tears fails its checksum and reads as no
-    /// floor, which the member then stores again, since it has recorded no term yet.
+    /// "The driver"; ADR 0145, ADR 0161). It is written once for each floor: a file
+    /// whose floor is set, or a position below 0 or not a multiple of 32, is
+    /// [`TermsError::VoteFloorRefused`], and nothing is written; a file whose floor
+    /// [`TermsFile::clear_vote_floor`] cleared takes a new one. A write a crash tears
+    /// fails its checksum and reads as no floor, which the member then stores again,
+    /// since it has recorded no term since, unless the bytes it did not reach already
+    /// held their values, when it reads as the floor stored.
     pub fn set_vote_floor(&mut self, position: i64) -> Result<(), TermsError> {
         if self.header.vote_floor.is_some() || !is_position(position) {
             return Err(TermsError::VoteFloorRefused { position });
@@ -833,8 +840,11 @@ impl TermsFile {
     /// Clears the vote floor in one synced write of its slot as zeros, which every
     /// reader reads as no floor, as it reads a slot a creation left (`spec/durable-log.md`,
     /// "Terms"; ADR 0161). The member clears it once it has joined a leader's live
-    /// log with its log at or past the floor, so a write a crash tears reads as no
-    /// floor too, which is what the clear was to leave. A file with no floor is left as it is.
+    /// log with its log at or past the floor. A write a crash tears reads as no floor,
+    /// which is what the clear was to leave, or, when it wrote only position bytes that
+    /// were zero already and none of the checksum, as the floor before it, which the
+    /// member holds until it joins a live log again in a later run and clears then.
+    /// Both are safe. A file with no floor is left as it is.
     pub fn clear_vote_floor(&mut self) -> Result<(), TermsError> {
         if self.header.vote_floor.is_none() {
             return Ok(());
@@ -979,10 +989,11 @@ mod tests {
         dir
     }
 
-    /// The vote floor (ADR 0145): none in a created file, written once and synced,
-    /// read back after a reopen, and refused a second time or for a position no log
-    /// holds, with nothing written. A floor's slot torn by a crash reads as none, and a
-    /// zero magic over a floor is no torn creation.
+    /// The vote floor (ADR 0145): none in a created file, written once for each floor
+    /// and synced, read back after a reopen, and refused while one is held or for a
+    /// position no log holds, with nothing written. A floor's slot torn by a crash
+    /// reads as none, and a zero magic over a floor is no torn creation. The name is
+    /// ADR 0145's; a floor stored again after its clear (ADR 0161) is the next test's.
     #[test]
     fn the_vote_floor_is_stored_once_and_read_back_and_a_torn_one_reads_as_none() {
         let kept = dir("vote-floor");
@@ -993,7 +1004,7 @@ mod tests {
         assert_eq!(
             file.set_vote_floor(2 << 20).map_err(|error| error.reason()),
             Err("floor"),
-            "written once"
+            "refused while one is held"
         );
         file.append(3, 0, NO_RECORDING).expect("appended");
         drop(file);
@@ -1043,10 +1054,13 @@ mod tests {
     /// The vote floor's clear (ADR 0161): one synced write of the slot as zeros, which
     /// reads as no floor, as a slot a creation left, and stays so after a reopen. A
     /// floor of 0 is a floor, and is cleared the same way. A clear of a file with no
-    /// floor writes nothing, and a clear a crash tore, part of the zeros written, reads
-    /// as no floor too, which is what the clear was to leave.
+    /// floor writes nothing. A file whose floor was cleared takes a new floor, which
+    /// reads back after a reopen and is cleared again. A clear a crash tore reads as
+    /// the floor before it or as no floor (`spec/durable-log.md`, "Terms"): as no floor
+    /// when it changed a position byte and none of the checksum, and as the floor
+    /// before it when every byte it wrote was zero already.
     #[test]
-    fn a_vote_floor_is_cleared_to_zeros_and_a_torn_clear_reads_as_none() {
+    fn a_vote_floor_is_cleared_and_stored_again_and_a_torn_clear_reads_as_the_floor_or_none() {
         let kept = dir("vote-floor-clear");
         let mut file = TermsFile::create(&kept).expect("created");
         file.clear_vote_floor().expect("nothing to clear");
@@ -1064,16 +1078,45 @@ mod tests {
             [0u8; SLOT_LENGTH],
             "the slot is zeros"
         );
-        let file = TermsFile::open(&kept).expect("opened");
+        let mut file = TermsFile::open(&kept).expect("opened");
         assert_eq!(file.vote_floor(), None, "after a reopen");
         assert_eq!(
             file.log_leadership_term_id(),
             3,
             "the terms are as they were"
         );
+
+        // A floor stored again after its clear, as when a later leader's term empties
+        // the member's log: taken, refused a second time while it is held, read back
+        // after a reopen, and cleared again.
+        file.set_vote_floor(2 << 20)
+            .expect("a file whose floor was cleared takes a new one");
+        assert_eq!(file.vote_floor(), Some(2 << 20));
+        assert_eq!(
+            file.set_vote_floor(3 << 20).map_err(|error| error.reason()),
+            Err("floor"),
+            "refused while the new floor is held"
+        );
+        drop(file);
+        let mut file = TermsFile::open(&kept).expect("opened");
+        assert_eq!(
+            file.vote_floor(),
+            Some(2 << 20),
+            "the new floor after a reopen"
+        );
+        assert_eq!(
+            file.log_leadership_term_id(),
+            3,
+            "the terms are as they were"
+        );
+        file.clear_vote_floor().expect("cleared again");
+        drop(file);
+        let file = TermsFile::open(&kept).expect("opened");
+        assert_eq!(file.vote_floor(), None, "cleared again, after a reopen");
         drop(file);
 
-        // A clear a crash tore: the floor's position zeroed and its checksum not.
+        // A clear a crash tore after it changed a position byte and before it reached
+        // the checksum: the floor's position zeroed and its checksum not.
         let torn = dir("vote-floor-clear-torn");
         let mut file = TermsFile::create(&torn).expect("created");
         file.set_vote_floor(1 << 20).expect("stored");
@@ -1083,10 +1126,45 @@ mod tests {
         bytes[FLOOR_OFFSET..FLOOR_OFFSET + 8].copy_from_slice(&[0u8; 8]);
         std::fs::write(&path, &bytes).expect("torn");
         let file = TermsFile::open(&torn).expect("opened");
-        assert_eq!(file.vote_floor(), None, "a torn clear reads as none");
+        assert_eq!(
+            file.vote_floor(),
+            None,
+            "a torn clear that changed a byte reads as none"
+        );
         drop(file);
+
+        // A clear a crash tore after it wrote only position bytes that were zero
+        // already, and none of the checksum: all eight of a floor of 0, and the bytes of
+        // 1 << 20 other than its third, little-endian. The slot is as it was, its
+        // checksum matches, and it reads as the floor before the clear, which the member
+        // holds until it joins a live log again.
+        let unchanged = dir("vote-floor-clear-torn-unchanged");
+        for (floor, zero) in [(0, 0..8), (1 << 20, 3..8)] {
+            let mut file = TermsFile::create(&unchanged).expect("created");
+            file.set_vote_floor(floor).expect("stored");
+            drop(file);
+            let path = TermsFile::path_in(&unchanged);
+            let before = std::fs::read(&path).expect("read");
+            let mut bytes = before.clone();
+            bytes[FLOOR_OFFSET..FLOOR_OFFSET + 2].copy_from_slice(&[0u8; 2]);
+            bytes[FLOOR_OFFSET + zero.start..FLOOR_OFFSET + zero.end].fill(0);
+            assert_eq!(
+                bytes, before,
+                "every byte the torn clear wrote of {floor} was zero"
+            );
+            std::fs::write(&path, &bytes).expect("torn");
+            let file = TermsFile::open(&unchanged).expect("opened");
+            assert_eq!(
+                file.vote_floor(),
+                Some(floor),
+                "a torn clear that changed no byte reads as the floor before it"
+            );
+            drop(file);
+            std::fs::remove_file(&path).expect("removed");
+        }
         let _ = std::fs::remove_dir_all(&kept);
         let _ = std::fs::remove_dir_all(&torn);
+        let _ = std::fs::remove_dir_all(&unchanged);
     }
 
     #[test]

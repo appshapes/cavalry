@@ -1382,8 +1382,11 @@ member reads its floor at its start with its candidate term, so a member that
 stops before it has cleared its floor withholds after its next start until it has
 joined the live log in that run, even with its append position at or past the floor.
 A torn store of the
-floor leaves a member that recorded no term yet, and a torn clear leaves no floor,
-which the clear was to leave. `cluster.vote_floor` holds it, −1 for none.
+floor reads as no floor, in a member that has recorded no term since, or as the floor
+stored. A torn clear reads as no floor, which the clear was to leave, or, when it
+wrote only bytes that were zero already, as the floor before it, which the member
+holds until it has joined the live log in a later run (`spec/durable-log.md`,
+"Terms"). Both are safe. `cluster.vote_floor` holds it, −1 for none.
 
 **Taking a leader.** A leader that a later term deposed, and that has not heard of
 that term, still leads with its election closed, and answers a canvass position whose

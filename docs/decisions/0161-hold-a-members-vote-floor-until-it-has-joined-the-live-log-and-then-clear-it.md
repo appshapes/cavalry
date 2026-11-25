@@ -115,10 +115,17 @@ acknowledged entries after the leader wrote the message. So a floor of 0 is stor
 the mark is the slot, and the join does the rest.
 
 **Why a second write is safe here.** ADR 0145 wrote the floor once because a torn write
-reads as no floor, and a member with a log and no floor would vote. A torn clear also
-reads as no floor, which is exactly what the clear was to leave, at a moment when the
-member's log already holds what the floor guarded. The store is unchanged: torn, it
-leaves a member that recorded no term yet, which finds its log empty at its next start.
+reads as no floor, and a member with a log and no floor would vote. A torn clear reads
+as one of two slots, and each is safe. Most often it fails its checksum and reads as
+no floor, which is exactly what the clear was to leave, at a moment when the member's
+log already holds what the floor guarded. But the clear writes zeros, and some bytes
+of every floor's position are zero already, all eight of a floor of 0. A tear that
+wrote only such bytes and none of the checksum leaves the slot as it was, and it reads
+as the floor before the clear: the member withholds until it joins a live log again in
+a later run, and clears it then. The store is unchanged: torn, it reads as no floor in
+a member that has recorded no term since, which finds its log empty at its next start,
+or as the floor it stored. A member can store a floor again after a clear, so the store
+is refused only while a floor is held.
 
 **Why neither page's version moves.** Two pages change in their text and in no layout.
 `spec/cluster.md` changes rules of version 2: what ends a floor, a floor at position 0,
@@ -215,7 +222,9 @@ All runs on an Apple M-series laptop, macOS 26, in the in-memory cluster of
   - The `withholds` and `clears-vote-floor` vectors, the latter with the member below
     its floor once joined: 343 vectors in all, which the generator and the JSON agree
     on.
-  - `a_vote_floor_is_cleared_to_zeros_and_a_torn_clear_reads_as_none` in the terms file.
+  - `a_vote_floor_is_cleared_and_stored_again_and_a_torn_clear_reads_as_the_floor_or_none`
+    in the terms file: the clear, a new floor stored after it and read back after a
+    reopen, and both forms of a torn clear.
   - `doctor`'s floor test, for a floor held below its position, at it, and cleared,
     and a member of the build before at its floor, which it does not name.
   - Five tests of `lost_log_directory.rs` that held the floor's position after a member
