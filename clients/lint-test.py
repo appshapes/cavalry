@@ -807,12 +807,99 @@ class Clients(unittest.TestCase):
         for wrapper in wrappers:
             self.assertTrue(any(f.startswith(f"node: {wrapper} (") and "throws, `napi_throw*`" in f for f in found), found)
 
+    def test_an_addon_reader_is_for_an_entry_function_before_its_abi_call(self):
+        """The addon's argument readers throw, and their throw is none on the path where
+        it refuses an argument: in a function N-API calls with the caller's arguments,
+        one the addon's table of properties names, itself and before the ABI call it goes
+        on from (ADR 0162). A reader called by a trampoline, by a function a trampoline
+        calls whatever its name, through a helper of an entry function, or by an entry
+        function after its ABI call, is a finding, for each kind of reader. The poll from inside a handler,
+        which returns the ABI's refusal, is no call the function goes on from: the
+        handler's type is read after it in the text, and the committed addon has no
+        finding."""
+        self.assertEqual(lint.findings(self.tmp), [])
+        for function, line, said, why in (
+                ("trampoline", "(void) int_arg(s->env, NULL, \"length\", 0, 1);", "trampoline calls the argument reader int_arg",
+                 "raised into a call-back"),
+                ("cluster_trampoline", "(void) size_arg(s->env, NULL, \"length\");",
+                 "cluster_trampoline calls the argument reader size_arg", "raised into a call-back"),
+                # A function a trampoline calls, one call down and two.
+                ("cluster_action", "(void) int32_arg(s->env, result, \"action\");",
+                 "cluster_action calls the argument reader int32_arg", "by no function between"),
+                ("keep_failure", "(void) int64_arg(s->env, NULL, \"position\");",
+                 "keep_failure calls the argument reader int64_arg", "by no function between")):
+            with self.subTest(function=function):
+                self.setUp()
+                self.add_to_addon(function, line)
+                found = lint.findings(self.tmp)
+                self.assertTrue(found, function)
+                self.assertTrue(all(said in f and why in f for f in found), found)
+        # After the ABI's call, in the entry functions: a poll's own, and a wrapper's.
+        for old, new, said in (
+                ("  int count = cavalry_subscription_poll(subscription, trampoline, s, limit);\n",
+                 "  int count = cavalry_subscription_poll(subscription, trampoline, s, limit);\n"
+                 "  (void) size_arg(env, argv[3], \"fragmentLimit\");\n",
+                 "fn_poll calls the argument reader size_arg"),
+                ("  int result = cavalry_cluster_service_cancel_timer(service, correlation_id);\n",
+                 "  int result = cavalry_cluster_service_cancel_timer(service, correlation_id);\n"
+                 "  (void) int64_exact_arg(env, argv[1], \"correlation_id\");\n",
+                 "fn_cavalry_cluster_service_cancel_timer calls the argument reader int64_exact_arg")):
+            with self.subTest(said=said):
+                self.setUp()
+                self.edit(old, new, file=self.addon)
+                [finding] = lint.findings(self.tmp)
+                self.assertIn(said, finding)
+                self.assertIn("after its call of the ABI", finding)
+        # What a function is named does not make it an entry: one that the addon does not
+        # give N-API, called by a trampoline, is a function a trampoline calls.
+        handler = "static void trampoline(void *clientd, const uint8_t *buffer, size_t length, const cavalry_header_t *header) {\n"
+        self.setUp()
+        self.edit(handler, "static void fn_check(napi_env env) { (void) int_arg(env, NULL, \"length\", 0, 1); }\n\n"
+                  + handler + "  fn_check(NULL);\n", file=self.addon)
+        found = lint.findings(self.tmp)
+        self.assertTrue(found and all("trampoline calls fn_check at line" in f and "fn_check calls the argument reader "
+                                      "int_arg" in f and "by no function between" in f for f in found), found)
+        # An entry function reads its arguments itself: a helper between it and a reader,
+        # before the ABI's call or after it, is a finding.
+        poll = "  int count = cavalry_subscription_poll(subscription, trampoline, s, limit);\n"
+        entry = "static napi_value fn_poll(napi_env env, napi_callback_info info) {\n"
+        self.setUp()
+        self.edit(entry, "static size_t limit_of(napi_env env, napi_value v) { return size_arg(env, v, \"fragmentLimit\"); }\n\n"
+                  + entry + "  (void) limit_of(env, NULL);\n", file=self.addon)
+        [finding] = lint.findings(self.tmp)
+        self.assertIn("fn_poll calls limit_of at line", finding)
+        self.assertIn("limit_of calls the argument reader size_arg", finding)
+        # The ABI's call is the ABI's wherever it is made: through a function of the
+        # addon, on the same line as the reader, and the first of two.
+        for old, new in (
+                (poll, "  int count = poll_once(subscription, s, limit);\n  (void) size_arg(env, argv[3], \"fragmentLimit\");\n"),
+                (poll, poll.rstrip("\n") + " (void) size_arg(env, argv[3], \"fragmentLimit\");\n"),
+                (poll, poll + "  (void) size_arg(env, argv[3], \"fragmentLimit\");\n" + poll.replace("int count", "count"))):
+            with self.subTest(new=new):
+                self.setUp()
+                self.edit(old, new, file=self.addon)
+                if "poll_once" in new:
+                    self.edit(entry, "static int poll_once(cavalry_subscription_t *subscription, subscription_state_t *s, "
+                              "size_t limit) {\n  return cavalry_subscription_poll(subscription, trampoline, s, limit);\n}\n\n"
+                              + entry, file=self.addon)
+                [finding] = lint.findings(self.tmp)
+                self.assertIn("fn_poll calls the argument reader size_arg", finding)
+                self.assertIn("after its call of the ABI", finding)
+        # A reader's own call of another reader is its own, and a reader that is no
+        # reader by the rule is a throw wherever it is called.
+        self.setUp()
+        with open(self.addon, encoding="utf-8") as f:
+            text = f.read()
+        self.assertEqual(text.count("int_arg("), 2)  # its definition, and `int32_arg`'s call
+        self.assertEqual(text.count("int64_read("), 4)  # its definition, and the three int64 readers' calls
+
     def test_a_throw_in_a_timer_wrapper_fails_and_its_exact_reader_may_throw(self):
         """The addon's wrappers of the schedule and the cancel of a timer are on the path
-        (ADR 0157). `int64_exact_arg`, which refuses a number that is no integer a number
-        carries exactly, is an argument reader: its throw, before the ABI is called, is
-        none on the path, and the committed addon has no finding. The same reader with
-        another name is no reader, and its throw is one."""
+        (ADR 0157). `int64_exact_arg` reads a timer's id and its deadline through
+        `int64_read`, which refuses a number that is no integer a number carries exactly
+        and is an argument reader: its throw, before the ABI is called, is none on the
+        path, and the committed addon has no finding. The same reader with another name
+        is no reader, and its throw is one."""
         self.assertEqual(lint.findings(self.tmp), [])
         wrappers = ("fn_cavalry_cluster_service_schedule_timer", "fn_cavalry_cluster_service_cancel_timer")
         for wrapper in wrappers:
@@ -825,8 +912,9 @@ class Clients(unittest.TestCase):
         with open(self.addon, encoding="utf-8") as f:
             text = f.read()
         self.assertEqual(text.count("int64_exact_arg("), 4)  # its definition and the three arguments it reads
+        self.assertEqual(text.count("int64_read("), 4)  # its definition, and the call of each of the three int64 readers
         with open(self.addon, "w", encoding="utf-8") as f:
-            f.write(text.replace("int64_exact_arg(", "int64_strict("))
+            f.write(text.replace("int64_read(", "int64_strict("))
         found = lint.findings(self.tmp)
         for wrapper in wrappers:
             self.assertTrue(any(f.startswith(f"node: {wrapper} (") and "calls int64_strict" in f for f in found), found)

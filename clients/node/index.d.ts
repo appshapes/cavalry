@@ -184,15 +184,15 @@ export class Client {
   addExclusivePublication(channel: string, streamId: number): Publication;
   addSubscription(channel: string, streamId: number): Subscription;
   startRecording(channel: string, streamId: number): Recording;
-  stopRecording(recordingId: number): void;
+  stopRecording(recordingId: number | bigint): void;
   addDestination(publication: Publication, channel: string): void;
   removeDestination(publication: Publication, channel: string): void;
-  truncateRecording(recordingId: number, position: number): void;
-  purgeSegments(recordingId: number, newStartPosition: number): void;
-  purgeRecording(recordingId: number): void;
-  startReplay(recordingId: number, position: number, length: number, replayStreamId: number, channel: string): Replay;
-  stopReplay(replaySessionId: number): void;
-  committedLog(position: number): CommittedLog | null;
+  truncateRecording(recordingId: number | bigint, position: number | bigint): void;
+  purgeSegments(recordingId: number | bigint, newStartPosition: number | bigint): void;
+  purgeRecording(recordingId: number | bigint): void;
+  startReplay(recordingId: number | bigint, position: number | bigint, length: number | bigint, replayStreamId: number, channel: string): Replay;
+  stopReplay(replaySessionId: number | bigint): void;
+  committedLog(position: number | bigint): CommittedLog | null;
   connectCluster(members: string, responseChannel: string): ClusterSession;
   clusterService(): ClusterService;
   [Symbol.dispose](): void;
@@ -208,7 +208,7 @@ export class Publication {
   readonly isExclusive: boolean;
   /** The Buffer over the slice the last `tryClaim` reserved, or null. */
   claim: Buffer | null;
-  tryClaim(length: number): number;
+  tryClaim(length: number | bigint): number;
   commit(): number;
   abort(): number;
   /** Any int64: a BigInt exactly, a number below 2^53 in magnitude. */
@@ -248,10 +248,10 @@ export class Subscription {
   readonly channel: string;
   readonly registrationId: number;
   readonly streamId: number;
-  poll(handler: FragmentHandler, fragmentLimit: number): number;
+  poll(handler: FragmentHandler, fragmentLimit: number | bigint): number;
   fault(): { code: number; sessionId: number; position: number };
   imageCount(): number;
-  imageAtIndex(index: number): Image | null;
+  imageAtIndex(index: number | bigint): Image | null;
   images(): Image[];
   readonly isConnected: boolean;
   readonly isClosed: boolean;
@@ -261,7 +261,7 @@ export class Subscription {
 export class CommittedLog {
   readonly recordingId: number;
   readonly memberId: number;
-  poll(handler: EntryHandler, fragmentLimit: number): number;
+  poll(handler: EntryHandler, fragmentLimit: number | bigint): number;
   fault(): { code: number; sessionId: number; position: number };
   position(): number;
   commitPosition(): number;
@@ -283,7 +283,7 @@ export class ClusterSession {
   readonly sessionId: number;
   readonly maxMessageLength: number;
   offer(message: Buffer | Uint8Array): number;
-  poll(handler: ReplyHandler, fragmentLimit: number): number;
+  poll(handler: ReplyHandler, fragmentLimit: number | bigint): number;
   fault(): { code: number; sessionId: number; position: number };
   leadershipTermId(): number;
   leaderMemberId(): number;
@@ -309,7 +309,7 @@ export class ClusterEntryValues {
 }
 
 export class ClusterService {
-  poll(handler: ServiceHandler, fragmentLimit: number): number;
+  poll(handler: ServiceHandler, fragmentLimit: number | bigint): number;
   /** One of `constants.CAVALRY_CLUSTER_REPLY_*`, or -1 from outside the handler. */
   reply(sessionId: number | bigint, message: Buffer | Uint8Array): number;
   /** `constants.CAVALRY_CLUSTER_TIMER_SCHEDULED` or `_REFUSED`, or -1 from outside the handler.
