@@ -268,7 +268,9 @@ has taken the entry, and the poll in which a program first schedules a timer
 sends six commands more, once in a service's life ("The call").
 `conformance/python/cluster.py` schedules timers and cancels one beside three
 members; what it holds, and what rests on the library's own tests, is in
-`conformance/README.md`.
+`conformance/README.md`. [Schedule a timer in a cluster's
+service](../../docs/how-to/schedule-a-services-timer.md) is the task from its start,
+with a program that keeps any number of deadlines behind one timer.
 
 ### A service's snapshot and its start
 

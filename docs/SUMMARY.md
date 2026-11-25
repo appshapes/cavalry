@@ -36,6 +36,7 @@ under `docs/` is listed here; `just lint-docs` fails on one that is not.
 - [Read the nightly run of Brigade's server](how-to/read-the-nightly-run-of-brigades-server.md)
 - [Ask a cluster for a snapshot](how-to/ask-for-a-snapshot.md)
 - [Take a snapshot of a service's state](how-to/take-a-services-snapshot.md)
+- [Schedule a timer in a cluster's service](how-to/schedule-a-services-timer.md)
 
 # Reference
 

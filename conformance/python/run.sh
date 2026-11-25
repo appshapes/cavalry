@@ -12,7 +12,9 @@
 # then conformance/python/snapshot.py, the snapshot round, beside the same three members
 # on the log the cluster round left (spec/c-abi.md, version 6; ADR 0149); then
 # conformance/python/howto.py, the program of docs/how-to/take-a-services-snapshot.md as
-# that page's steps run it, beside three members of its own; then
+# that page's steps run it, beside three members of its own, and
+# conformance/python/howto_timers.py, the program of
+# docs/how-to/schedule-a-services-timer.md, beside three more; then
 # conformance/python/closed.py, the closed round: a service's poll after its driver's
 # stop, on the first driver, which the program stops itself (ADR 0155); and cleans up.
 # `just conformance` runs this after conformance/c (clients/README.md; ADR 0046, card
@@ -151,6 +153,16 @@ echo "conformance/python: run docs/how-to/take-a-services-snapshot.md's program 
 python3 conformance/python/howto.py target/release/cavalry "$cluster/how-to" "$(( start + 16 ))" || {
     echo "conformance/python: howto.py failed; its members said:" >&2
     cat "$cluster"/how-to/member-*.out >&2 || true
+    exit 1
+}
+
+# The timers how-to's program, as its page's steps run it, beside three members of its
+# own: the page's first position is that of a cluster that has committed nothing else.
+# Its fifteen ports are counted on from the thirty-one above.
+echo "conformance/python: run docs/how-to/schedule-a-services-timer.md's program beside three members of its own"
+python3 conformance/python/howto_timers.py target/release/cavalry "$cluster/how-to-timers" "$(( start + 31 ))" || {
+    echo "conformance/python: howto_timers.py failed; its members said:" >&2
+    cat "$cluster"/how-to-timers/member-*.out >&2 || true
     exit 1
 }
 
