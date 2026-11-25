@@ -107,6 +107,10 @@ int main(int argc, char **argv) {
 
     /* 3. Every poll after it is the same answer: a loop that polls ends. */
     for (int after = 1; after <= POLLS_AFTER; after++) {
+        /* The thread's error to another code first: a success clears nothing, so without
+         * this the code read below could be the first failed poll's. */
+        if (cavalry_committed_log_entry_position(NULL) != -1 || cavalry_errcode() != CAVALRY_ERR_NULL)
+            wrong("the position of a null header did not answer -1 with CAVALRY_ERR_NULL", cavalry_errcode());
         taken = cavalry_cluster_service_poll(service, client, on_entry, &entries, 10);
         if (taken != -1) wrong("a poll of a closed client did not return -1", taken);
         if (cavalry_errcode() != CAVALRY_ERR_CLOSED)

@@ -7,11 +7,14 @@
 # one of them, member 1 unless it joined late (conformance/log-member.sh), the client's
 # committed log against a cluster (spec/c-abi.md, version 2; ADR 0070), and then
 # conformance/python/cluster.py, the cluster round: the client's service beside each
-# member and its session on the first driver (spec/c-abi.md, versions 4 and 5; ADR 0124);
+# member and its session on the first driver (spec/c-abi.md, versions 4, 5 and 7; ADR
+# 0124; ADR 0157);
 # then conformance/python/snapshot.py, the snapshot round, beside the same three members
 # on the log the cluster round left (spec/c-abi.md, version 6; ADR 0149); then
 # conformance/python/howto.py, the program of docs/how-to/take-a-services-snapshot.md as
-# that page's steps run it, beside three members of its own; and cleans up.
+# that page's steps run it, beside three members of its own; then
+# conformance/python/closed.py, the closed round: a service's poll after its driver's
+# stop, on the first driver, which the program stops itself (ADR 0155); and cleans up.
 # `just conformance` runs this after conformance/c (clients/README.md; ADR 0046, card
 # 205). Nothing is installed: ctypes is in the standard library.
 set -euo pipefail
@@ -150,3 +153,10 @@ python3 conformance/python/howto.py target/release/cavalry "$cluster/how-to" "$(
     cat "$cluster"/how-to/member-*.out >&2 || true
     exit 1
 }
+
+# The closed round, last, since it stops the first driver: a poll of a service whose
+# client is closed is one answer, -1 with CAVALRY_ERR_CLOSED (spec/c-abi.md, "cluster
+# service"; ADR 0155). The program sends the driver its SIGTERM, by the process id.
+echo "conformance/python: run closed.py, a service's poll after its driver's stop, on $CAVALRY_DIR"
+python3 conformance/python/closed.py "$driver_pid"
+wait "$driver_pid" 2>/dev/null || true
