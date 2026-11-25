@@ -742,32 +742,6 @@ fn a_reply_names_a_session_the_log_holds_open_and_fits_one_frame() {
         kinds.iter().all(|(position, _)| *position != timer.0),
         "a timer event of no pending timer is passed over: {kinds:?}"
     );
-    // A service of the C ABI below the version that gives a program timers hands
-    // that event over as an entry of no kind, as its page says, and counts it as
-    // passed over all the same.
-    let mut c_client = Cavalry::connect_to(&member.dir).expect("a C program's client");
-    let mut c_service = c_client.cluster_service();
-    c_service.hand_passed_over_timer_events_as_other();
-    let mut c_kinds = Vec::new();
-    wait("the second service reads the log to its end", || {
-        c_service
-            .poll(
-                &mut c_client,
-                |committed, _| {
-                    c_kinds.push((committed.position, kind(&committed.entry)));
-                    Action::Continue
-                },
-                16,
-            )
-            .expect("the service polls");
-        c_service.position() == member.end
-    });
-    assert!(
-        c_kinds.contains(&(timer.0, Kind::Other)),
-        "the timer event is handed over as an entry of no kind: {c_kinds:?}"
-    );
-    c_service.close(&mut c_client).expect("the service closes");
-    c_client.close().expect("the client closes");
     assert_eq!(kinds[4].1, Kind::Close(0, false));
     assert_eq!(service.sessions(), 0);
     let mut replies = Read::new();

@@ -1,4 +1,4 @@
-# C ABI, version 6
+# C ABI, version 7
 
 The C ABI is how a program in any language but Rust reaches the client API: the
 `extern "C"` functions, the opaque handles, the structs a caller owns, the codes, the
