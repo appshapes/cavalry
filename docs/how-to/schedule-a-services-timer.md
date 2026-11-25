@@ -89,9 +89,9 @@ In Aeron, these are a service's `scheduleTimer` and `cancelTimer`, and its
    - **It schedules from inside the handler, and nowhere else.** Its deadlines are
      counted from `entry.timestamp`, the cluster's time, and from no clock of the
      program's. So the timers are a function of the log, as the program's state
-     is, and the same beside every member. `service.cancel_timer(TIMER)` takes a
-     timer back, from inside the handler too; this program always has a deadline,
-     so it never cancels.
+     is, and the same beside every member. `service.cancel_timer(TIMER)` cancels
+     a timer, from inside the handler too; this program always has a deadline, so
+     it never cancels.
    - **It schedules its first timer at the first entry it is handed.** Every log
      begins with a new leadership term at position 0, which a service that reads
      the log from its start is handed first.
@@ -104,7 +104,8 @@ In Aeron, these are a service's `scheduleTimer` and `cancelTimer`, and its
    - **Its handler takes every entry.** A handler that returns `cavalry.ABORT`, or
      raises, is handed its entry again, and the service puts its timers back as
      they were before that handling. The program's own state, `due` here, is the
-     program's to put back. A handler that can abort changes its state last.
+     program's to put back. A handler that may abort, as one does when a reply
+     answers `CAVALRY_CLUSTER_REPLY_RETRY`, decides so before it changes its state.
 
 2. Run it beside each member, in three terminals:
 
@@ -120,7 +121,8 @@ In Aeron, these are a service's `scheduleTimer` and `cancelTimer`, and its
    first deadlines from the log's first entry, two and three seconds after the
    cluster elected its first leader. A cluster that has run for longer than that
    is past both, and a deadline in the past is due at once: the two are handed
-   over with one timer event, late by as long as the cluster ran. The position is
+   over with one timer event, late by as long as the cluster ran, less the two
+   seconds and the three. The position is
    where the log ended then: 96 on a cluster that has elected one leader and
    committed nothing else, and 96 more for each leader it has elected since, so
    192 here.
@@ -128,9 +130,13 @@ In Aeron, these are a service's `scheduleTimer` and `cancelTimer`, and its
    From then on a line follows each second or two: `tick at position 256, 1 ms
    after its deadline` two seconds after the first two, `tock at position 320, 0
    ms after its deadline` a second later, and so on. Each line's position is 64
-   above the last, the size of a timer event in the log. Now and then it is 128
-   above: a leader that is told of a timer again while that timer's event is on its
-   way appends a second event, and every service passes that one over.
+   above the last, the size of a timer event in the log, with two exceptions.
+   Each six seconds a tick and a tock fall due within a millisecond or two of each
+   other: they are handed over with one event and print at one position, or the
+   later of the two follows with an event of its own, a few milliseconds late. And
+   now and then a position is 128 above the last: a leader that is told of a timer
+   again, after it appended that timer's event and before its own service was
+   handed it, appends a second event, and every service passes that one over.
 
    Every program prints the same lines, and one that starts later prints the
    earlier ones at once: it reads them from the log. The leader appends a timer's
@@ -146,12 +152,14 @@ In Aeron, these are a service's `scheduleTimer` and `cancelTimer`, and its
    are what the log makes them. Then it goes on with the two others.
 
    If the program you stopped ran beside the member that leads, the two others
-   print one more line at the most and then wait: no service tells the leader of
-   the next timer. They go on when the program runs again, and that first line is
-   late by as long as the program was stopped.
+   print the lines of one more event at the most and then wait: no service tells
+   the leader of the timer after that one. They go on when the program runs again.
+   A deadline that passed while the program was stopped is handed over late by as
+   long as it waited, and one that had not passed is on time.
 
 4. Stop the three programs with Ctrl-C when you have seen enough. The log keeps a
-   timer event for each line they printed.
+   timer event for each position they printed, and one for each event they passed
+   over.
 
 ## How to verify it worked
 
@@ -177,8 +185,11 @@ In Aeron, these are a service's `scheduleTimer` and `cancelTimer`, and its
   prints no `cluster-member` line for such a driver.
 - **The lines stop in every terminal.** The program beside the member that leads
   has stopped, or the cluster is electing a leader. Timers wait while no member
-  leads and while no service runs beside the leader, and are late by that long:
-  step 3. `cavalry doctor` with the leader's directory says which it is.
+  leads and while no service runs beside the leader: step 3. Run `cavalry doctor`
+  for each member. Where one of them says `the leader in term` and `election
+  closed`, the cluster has its leader, and the program beside that member is the
+  one that stopped: doctor has no line for a leader with no service beside it. A
+  member that prints `WARN cluster-no-leader` is in an election.
 - **A program prints `ended at position 256: code 102` and ends**, with its own
   position. A poll failed, and the program ends on a poll that fails. Code 102 is
   `CAVALRY_ERR_CLOSED`: the service's client is closed, as it is when the member's
@@ -201,8 +212,10 @@ In Aeron, these are a service's `scheduleTimer` and `cancelTimer`, and its
   its snapshot by itself, and the program's own deadlines, `due` here, are part of
   the state the program gives.
 - **A position is 128 above the last, and not 64.** The log holds a timer event
-  that every service passed over, which the leader appended when it was told of a
-  timer again while that timer's first event was on its way. Nothing is wrong, and
-  no program was handed anything for it. `cluster.service_timer_events_passed_over`
-  counts them beside each member ([the counters
-  reference](../reference/counters.md)).
+  that every service passed over. The leader appended it when it was told of a
+  timer again, after it appended that timer's first event and before its own
+  service was handed it. Nothing is wrong, and no program was handed anything for
+  it. `cluster.service_timer_events_passed_over` counts them beside each member.
+  `doctor` does not print that counter: read it from the `counters` file in the
+  driver's directory ([the counters file](../reference/counters-file.md);
+  [counters](../reference/counters.md) says what each counter means).

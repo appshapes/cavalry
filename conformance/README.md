@@ -195,12 +195,13 @@ It runs the program of `docs/how-to/schedule-a-services-timer.md` the same way, 
 `python/howto_timers.py`, beside each of three more members of its own, which have
 run for more than three seconds, as a reader's cluster has run for longer than the
 program's first deadlines. It fails unless each program opens as the page says, a
-tick and a tock at one position, the tick 1,000 ms later than the tock, and then a
-tick some timer events above, the page's own example lines being held to the same
-shape; unless the three programs print the same lines; and unless the program
-beside the member that leads, stopped and run again, prints its earlier lines again
-from the log's start and then two more that another member's program prints too,
-the second of which the leader appended after the restart.
+tick and a tock at one position, 96 for this cluster, the tick 1,000 ms later than
+the tock, and then a tick some timer events above, the page's own example lines
+being held to the same shape; unless the three programs print the same lines; and
+unless the program beside the member that leads, stopped and run again, prints its
+earlier lines again from the log's start and then three more that another member's
+program prints too, the third of which is of an event the leader appended after
+the restart.
 
 ## The upgrade gate
 

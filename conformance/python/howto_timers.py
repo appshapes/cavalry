@@ -13,15 +13,18 @@ the page:
 1. As a reader's cluster has, this one runs for more than three seconds before the
    program starts, so that both of the program's first deadlines are past.
 2. The program runs beside each of the three members. Each prints the page's opening:
-   a tick and a tock at one position, the log's end then, the tick 1,000 ms later than
-   the tock; and then a tick at a position some timer events above. The three programs
-   print the same lines. The page's own example lines are held to the same shape.
+   a tick and a tock at one position, the log's end then, which is 96 for this cluster,
+   the tick 1,000 ms later than the tock; and then a tick at a position some timer
+   events above. The three programs print the same lines. The page's own example lines
+   are held to the same shape, and its fourth to a tock some timer events above its
+   third.
 3. The program beside the member that leads is stopped with the signal Ctrl-C sends and
    run again. It prints every line it printed before, unchanged, from the log's start,
-   and then two lines that it had not printed, which another member's program prints
+   and then three lines that it had not printed, which another member's program prints
    too. The leader appends one event at the most while no service runs beside it, the
-   timer it was last told of, so the second of the two came after the restart: the
-   program goes on with the others.
+   timer it was last told of, and one event hands over two deadlines at the most, a
+   tick and a tock that fall due together. So the third of the three came after the
+   restart: the program goes on with the others.
 
 It exits 1 with what it found otherwise. The cluster is its own so that the log holds
 nothing but its first entry when the program starts. What differs from the page: the
@@ -87,6 +90,12 @@ def page():
         fail(f"the page has not one Python block indented by three spaces, or not {LINES} lines of the shape "
              "`tick at position P, N ms after its deadline`; keep these shapes so this test can find them")
     opening(said, "the page says the reader will see")
+    if len(said) > LINES:
+        third, fourth = LINE.fullmatch(said[LINES - 1]), LINE.fullmatch(said[LINES])
+        above = int(fourth.group(2)) - int(third.group(2))
+        if fourth.group(1) != "tock" or above <= 0 or above % EVENT_BYTES != 0:
+            fail(f"the page's fourth line is `{said[LINES]}`; after `{said[LINES - 1]}` the program prints a tock, "
+                 f"one or more timer events of {EVENT_BYTES} bytes above it")
     program = "\n".join(line[3:] if line.startswith("   ") else line for line in blocks[0].split("\n"))
     return program, said
 
@@ -199,12 +208,13 @@ def main():
                      f"{first[0]}; the page says the same lines beside every member")
 
         # 3. Ctrl-C beside the leader, and the program again: its earlier lines from the
-        # log's start, and then two it had not printed, which another program prints too.
-        # The leader's member holds one timer and nobody schedules it again while its
-        # service is stopped, so one event at the most is appended meanwhile, and the
-        # second new line is of an event appended once the service had told it again.
+        # log's start, and then three it had not printed, which another program prints
+        # too. The leader's member holds one timer and nobody schedules it again while
+        # its service is stopped, so one event at the most is appended meanwhile, and one
+        # event hands over a tick and a tock at the most. The third new line is then of
+        # an event appended once the service had told its member again.
         other = (leader + 1) % MEMBERS
-        more = 2
+        more = 3
         stop(services[leader][0], signal.SIGINT)
         before = [line for line in printed(services[leader][1]) if LINE.fullmatch(line)]
         again, path = run_service(leader, f"service-{leader}-again.out")
