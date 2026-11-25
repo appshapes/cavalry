@@ -125,7 +125,7 @@ def c_arg(param, header, index: int, lines: list, struct_names: set, opaque: set
     base = t[6:] if const else t
     name = param.name
     if base == "char *":
-        lines.append(f"  char {name}_buf[4096]; const char *{name} = string_arg(env, argv[{index}], {name}_buf, sizeof {name}_buf, \"{name}\");")
+        lines.append(f"  char {name}_buf[4096]; const char *{name} = string_arg(env, argv[{index}], {name}_buf, sizeof {name}_buf, \"{said(name)}\");")
         lines.append(f"  if (string_failed) return NULL;")
         return name
     if base.endswith(" **"):

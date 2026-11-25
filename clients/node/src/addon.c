@@ -1479,7 +1479,7 @@ static napi_value fn_cavalry_connect_cluster(napi_env env, napi_callback_info in
   if (arg_failed) return NULL;
   char members_buf[4096]; const char *members = string_arg(env, argv[1], members_buf, sizeof members_buf, "members");
   if (string_failed) return NULL;
-  char response_channel_buf[4096]; const char *response_channel = string_arg(env, argv[2], response_channel_buf, sizeof response_channel_buf, "response_channel");
+  char response_channel_buf[4096]; const char *response_channel = string_arg(env, argv[2], response_channel_buf, sizeof response_channel_buf, "responseChannel");
   if (string_failed) return NULL;
   int result = cavalry_connect_cluster(&session, client, members, response_channel);
   napi_value tuple; napi_create_array_with_length(env, 2, &tuple);

@@ -15,5 +15,6 @@
   version or a later one, so that a client can give a failure of its own a code the
   ABI never gives. The Go client's `ErrNegative` is −1.
 - A refusal of the Node client now names the parameter as its method names it,
-  `recordingId` and `message`, where it named the ABI's, `recording_id` and `buffer`
+  `recordingId`, `responseChannel` and `message`, where it named the ABI's,
+  `recording_id`, `response_channel` and `buffer`
   ([ADR 0164](docs/decisions/0164-refuse-a-count-below-zero-in-the-go-the-jvm-and-the-dotnet-client-before-the-abi-is-called.md)).

@@ -2551,7 +2551,15 @@ class NodePackage(unittest.TestCase):
         self.assertEqual(gen_node.said("buffer"), "message")
         self.assertEqual(sorted(re.findall(r'bytes_arg\(env, argv\[\d\], &length, "(\w+)"\);', addon)),
                          ["message", "message", "message", "state"])
-        self.assertNotRegex(addon, r'_arg\(env, argv\[\d\], (?:&length, )?"[a-z]+_[a-z_]+"')
+        # A string's name too: a response channel is `responseChannel`, as `connectCluster`
+        # names it. Every string the addon reads is pinned, so no call escapes the pin.
+        strings = re.findall(r'string_arg\(env, argv\[\d\], \w+, sizeof \w+, "(\w+)"\);', addon)
+        self.assertEqual(sorted(strings), ["channel"] * 7 + ["dir", "members", "responseChannel"])
+        self.assertEqual(len(strings), len(re.findall(r"\bstring_arg\(env, argv\[", addon)))
+        # No reader of any kind is given a name with an underscore, whatever it is passed
+        # between the argument and the name: the length a bytes reader writes, a string's
+        # buffer and its size, a struct's size and alignment.
+        self.assertNotRegex(addon, r'\b\w+_arg\(env, argv\[\d+\],[^;"]*"[A-Za-z]*_[A-Za-z_]*"')
         self.assertEqual(len(reads), len(re.findall(r"\b(?:int64_arg|int64_exact_arg|int32_arg|size_arg|int_arg)"
                                                     r"\(env, argv\[", addon)))
         # A narrower integer type, which the header has none of today, is read with its
