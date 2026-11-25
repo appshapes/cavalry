@@ -402,8 +402,17 @@ class Package(unittest.TestCase):
                          lambda: service.cancel_timer(refused)):
                 with self.assertRaises(error) as raised:
                     call()
-                self.assertIn("an int64", str(raised.exception))
+                message = str(raised.exception)
+                self.assertIn("an int64", message)
+                # CLAUDE.md: the message says what to do next and names the anchor that
+                # explains it, a heading of the README.
+                self.assertIn("Pass an int from -(2 ** 63) to 2 ** 63 - 1", message)
+                self.assertTrue(message.endswith("See clients/python/README.md#a-services-timers"), message)
         self.assertEqual(abi.calls, made)  # nothing reached the ABI
+        with open(os.path.join(gen.ROOT, "clients", "python", "README.md"), encoding="utf-8") as f:
+            slugs = {re.sub(r"[^a-z0-9 -]", "", line.lstrip("#").strip().lower()).replace(" ", "-")
+                     for line in f if line.startswith("#")}
+        self.assertIn("a-services-timers", slugs)
         # What the reader is for: through ctypes itself such an int is another value.
         self.assertEqual(ctypes.c_int64(most + 1).value, least)
         self.assertEqual(ctypes.c_int64(2 ** 64 + 5).value, 5)

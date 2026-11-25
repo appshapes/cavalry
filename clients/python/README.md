@@ -246,8 +246,10 @@ ADR 0157):
   and an `int`
   outside −2^63 to 2^63 − 1 raises `OverflowError`, before the ABI is called:
   `ctypes` would pass such an `int` as its low 64 bits, another timer or a deadline
-  long past, and say nothing. Raised in the handler, it aborts the entry as any
-  exception of the handler's does ("The exception").
+  long past, and say nothing. Either message names the argument, says what to pass,
+  such as `entry.timestamp + round(seconds * 1000)` for a deadline, and names this
+  section. Raised in the handler, it aborts the entry as any exception of the
+  handler's does ("The exception").
 - **At most 1,024 pending.** A program with more deadlines than that keeps them
   in its own state and schedules one timer, for the earliest: when it is handed
   that timer it acts on every deadline that has come and schedules the timer

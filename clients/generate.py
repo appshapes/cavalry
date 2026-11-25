@@ -489,6 +489,11 @@ def _check(abi, function, result):
 
 _INT64_MIN = -(2 ** 63)
 _INT64_MAX = 2 ** 63 - 1
+# What a refused id or deadline tells the program to do next, and the section that
+# explains it (CLAUDE.md: every error message does both).
+_INT64_NEXT = ("Pass an int from -(2 ** 63) to 2 ** 63 - 1: for a timer's id, one the program chose, such as "
+               "entry.session_id; for a deadline, the cluster's time in milliseconds, such as "
+               "entry.timestamp + round(seconds * 1000). See clients/python/README.md#a-services-timers")
 
 
 def _int64(value, name):
@@ -501,10 +506,11 @@ def _int64(value, name):
     # that a call given an int64 pays; a message is built on the refusal alone, and
     # without the value's digits, which Python refuses to write for a very long int.
     if not isinstance(value, int) or isinstance(value, bool):
-        raise TypeError(f"{name}: an int expected, an int64, and a {type(value).__name__} was given")
+        raise TypeError(f"{name}: an int expected, an int64, and a {type(value).__name__} was given. {_INT64_NEXT}")
     if not _INT64_MIN <= value <= _INT64_MAX:
         raise OverflowError(f"{name}: an int from -(2 ** 63) to 2 ** 63 - 1 expected, an int64, and the one given "
-                            f"takes {value.bit_length()} bits; ctypes would pass its low 64 bits, another value")
+                            f"takes {value.bit_length()} bits; ctypes would pass its low 64 bits, another value. "
+                            f"{_INT64_NEXT}")
     return value
 
 
