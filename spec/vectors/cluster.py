@@ -931,7 +931,7 @@ VECTORS += [
           ("clears-vote-floor-once-joined-past-its-floor", 8192, True, 12288),
           ("clears-vote-floor-of-0-once-joined", 0, True, 0),
           ("clears-vote-floor-not-before-joined", 8192, False, 12288),
-          ("clears-vote-floor-not-joined-below-its-floor", 8192, True, 4096),
+          ("clears-vote-floor-not-below-its-floor-once-joined", 8192, True, 4096),
           ("clears-vote-floor-not-with-no-floor", -1, True, 4096),
       ]],
     *[arithmetic(name, "withheld-vote", {"voters": voters, "reports": reports, "candidate": cand},

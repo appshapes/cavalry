@@ -520,7 +520,7 @@ fn a_held_back_new_leadership_term_gives_a_member_that_lost_its_log_no_vote_unti
     let floor = cluster.append_position(leader).expect("a member");
 
     // The member loses its log a first time; the leader's answer to its empty log, at
-    // `base`, is held back, and it follows on a later one.
+    // `floor`, is held back, and it follows on a later one.
     cluster.hold_back_new_leadership_term(leader, member);
     safety.wipe(&mut cluster, member);
     safety.run_until(

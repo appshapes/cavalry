@@ -3303,7 +3303,7 @@
     },
     {
       "kind": "arithmetic",
-      "name": "clears-vote-floor-not-joined-below-its-floor",
+      "name": "clears-vote-floor-not-below-its-floor-once-joined",
       "rule": "clears-vote-floor",
       "inputs": {
         "vote_floor": 8192,
