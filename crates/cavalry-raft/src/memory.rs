@@ -576,7 +576,8 @@ impl Io for MemberIo<'_> {
             return Ok(None);
         };
         // A sender a test holds is where an image joins: at the end of the last entry
-        // it sent whole, at or below where it is held, as a sender sends whole frames.
+        // it sent whole, at or below where it is held, as a sender sends whole frames,
+        // or at the term's base, its first entry's position, when it sent none whole.
         // The entries it has not sent are the ones that reach the image once it sends
         // them.
         let held = publication.sender_held_at.unwrap_or(i64::MAX);
@@ -591,7 +592,9 @@ impl Io for MemberIo<'_> {
             entries
                 .checked_sub(1)
                 .and_then(|last| publication.entries.get(last))
-                .map_or(held.min(publication.position), |entry| entry.position_after)
+                .map(|entry| entry.position_after)
+                .or_else(|| publication.entries.first().map(|entry| entry.position))
+                .unwrap_or(publication.position)
         };
         let leader = publication.leader;
         let parted = unheard_since(&self.world.disks, &self.world.cuts, leader, self.own);

@@ -1141,7 +1141,7 @@ mod tests {
         // already, and none of the checksum: all eight of a floor of 0, and the bytes of
         // 1 << 20 other than its third, little-endian. The slot is as it was, its
         // checksum matches, and it reads as the floor before the clear, which the member
-        // holds until it joins a live log again.
+        // holds until it meets the clear's conditions again.
         let unchanged = dir("vote-floor-clear-torn-unchanged");
         for (floor, zero) in [(0, 0..8), (1 << 20, 3..8)] {
             let mut file = TermsFile::create(&unchanged).expect("created");

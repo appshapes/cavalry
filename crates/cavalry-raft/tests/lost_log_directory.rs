@@ -736,6 +736,15 @@ fn a_floor_answer_keeps_a_member_from_voting_before_it_holds_what_a_late_report_
     safety.run(&mut cluster, 300);
     cluster.release_held_back(member);
     cluster.heal_between(member, leader);
+    safety.run(&mut cluster, 5);
+    assert!(
+        cluster.held_back_answers().is_empty(),
+        "the held answer was delivered"
+    );
+    let ignored_at_release = cluster
+        .counts(member)
+        .expect("a member")
+        .floor_answers_ignored;
 
     // 6. It catches up to where the live sender stands and joins the live log there,
     // below the report.
@@ -769,13 +778,9 @@ fn a_floor_answer_keeps_a_member_from_voting_before_it_holds_what_a_late_report_
     cluster.halt(leader);
     safety.run(&mut cluster, 30_000);
     assert_eq!(cluster.leader(), None, "no leader without the entries");
-    assert!(
-        cluster
-            .counts(member)
-            .expect("a member")
-            .floor_answers_ignored
-            >= 1,
-        "the answer to its earlier run, released with the held frame, is ignored"
+    assert_eq!(
+        ignored_at_release, 1,
+        "the answer to its earlier run, released with the held frame, is ignored at once"
     );
     let core = cluster.member(member).expect("a member");
     assert_eq!(core.vote_floor(), floor, "it still holds its floor");
@@ -896,7 +901,7 @@ fn a_floor_answer_lost_on_its_way_is_sent_again_in_the_next_interval() {
     for &id in &ids {
         cluster.lose_floor_answers_to(id, true);
     }
-    safety.run_until(&mut cluster, 3_000, "the first election", |cluster| {
+    let elected = safety.run_until(&mut cluster, 3_000, "the first election", |cluster| {
         settled(cluster, &ids)
     });
     let leader = cluster.leader().expect("a leader");
@@ -911,6 +916,12 @@ fn a_floor_answer_lost_on_its_way_is_sent_again_in_the_next_interval() {
     assert!(
         sent >= 4,
         "answered again each interval while they asked: {sent}"
+    );
+    // At most once each heartbeat interval, 200 ms, for each of the two followers.
+    let intervals = (elected + 2_000).div_ceil(200);
+    assert!(
+        sent <= 2 * (intervals + 1),
+        "no more than once an interval for each follower: {sent} in {intervals} intervals"
     );
 
     for &id in &ids {

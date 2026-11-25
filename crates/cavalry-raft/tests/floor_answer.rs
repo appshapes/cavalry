@@ -100,6 +100,10 @@ fn a_member_asks_for_a_floor_answer_under_each_term_it_holds_none_from() {
     member
         .on_message(at(closed + 201), &answer(2, 1, 64), &mut io)
         .expect("no fault");
+    // A later answer of that term, above its log, changes nothing: it keeps the lowest.
+    member
+        .on_message(at(closed + 201), &answer(2, 1, 128), &mut io)
+        .expect("no fault");
     assert_eq!(member.floor_answer(), 64, "the lowest answer it took");
     member.do_work(at(closed + 202), &mut io).expect("no fault");
     assert_eq!(member.vote_floor(), -1, "its log reached the answer");
