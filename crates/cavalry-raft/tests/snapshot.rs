@@ -424,12 +424,6 @@ fn listed(member: &Member) -> Vec<ListedSnapshot> {
         .to_vec()
 }
 
-/// The messages a snapshot's recording holds, each as its bytes: the recording played
-/// back whole through a client of the member's driver.
-fn replayed(member: &Member, recording_id: i64) -> Vec<Vec<u8>> {
-    replayed_in(&member.dir, recording_id)
-}
-
 /// One recording of each member, the one `which` names for it, played back while the
 /// members run: a replay waits on the driver, and three of them in a row are a long
 /// time for a cluster to stand still on a runner with a slow disk.
@@ -441,13 +435,14 @@ fn replayed_each(members: &mut [Member], which: impl Fn(&Member) -> i64) -> Vec<
     meanwhile(members, || {
         wanted
             .iter()
-            .map(|(dir, recording_id)| replayed_in(dir, *recording_id))
+            .map(|(dir, recording_id)| replayed(dir, *recording_id))
             .collect()
     })
 }
 
-/// [`replayed`], by the directory of the member's driver.
-fn replayed_in(dir: &Path, recording_id: i64) -> Vec<Vec<u8>> {
+/// The messages a snapshot's recording holds, each as its bytes: the recording played
+/// back whole through a client of the driver whose directory is `dir`, a member's.
+fn replayed(dir: &Path, recording_id: i64) -> Vec<Vec<u8>> {
     let mut client = Cavalry::connect_to(dir).expect("a client of the member's driver");
     let mut subscription = client
         .add_subscription("cavalry:ipc", REPLAY_STREAM_ID)
@@ -537,6 +532,10 @@ fn every_member_takes_the_snapshot_its_leader_asks_for_and_the_three_hold_the_sa
     let term = members[0].module.leadership_term_id();
     let mut bytes: Vec<Vec<Vec<u8>>> = Vec::new();
     let mut timestamps = Vec::new();
+    // Each member's recording, played back while the members run.
+    let mut replays = std::collections::VecDeque::from(replayed_each(&mut members, |member| {
+        listed(member)[0].recording_id
+    }));
     for (index, member) in members.iter().enumerate() {
         let id = member.module.member_id();
         assert_eq!(
@@ -580,7 +579,7 @@ fn every_member_takes_the_snapshot_its_leader_asks_for_and_the_three_hold_the_sa
         timestamps.push(snapshot.timestamp);
         // The recording holds a marker, the module's own state and a marker: no
         // session is open.
-        let messages = replayed(member, snapshot.recording_id);
+        let messages = replays.pop_front().expect("a replay for each member");
         let parsed: Vec<Message<'_>> = messages
             .iter()
             .map(|bytes| Message::parse(Stream::Snapshot, bytes).expect("a snapshot's message"))
@@ -1131,11 +1130,15 @@ fn a_snapshot_holds_the_open_sessions_in_the_order_of_their_ids_on_every_member(
     });
     let term = members[0].module.leadership_term_id();
     let mut bytes: Vec<Vec<Vec<u8>>> = Vec::new();
+    // Each member's recording, played back while the members run.
+    let mut replays = std::collections::VecDeque::from(replayed_each(&mut members, |member| {
+        listed(member)[0].recording_id
+    }));
     for member in &members {
         let id = member.module.member_id();
         let list = listed(member);
         assert_eq!(list.len(), 1, "member {id}: {list:?}");
-        let messages = replayed(member, list[0].recording_id);
+        let messages = replays.pop_front().expect("a replay for each member");
         let parsed: Vec<Message<'_>> = messages
             .iter()
             .map(|bytes| Message::parse(Stream::Snapshot, bytes).expect("a snapshot's message"))
@@ -1338,11 +1341,15 @@ fn a_connect_the_leader_accepts_before_it_reads_the_action_is_in_no_members_snap
         app_version: 0,
     };
     let mut bytes: Vec<Vec<Vec<u8>>> = Vec::new();
+    // Each member's recording, played back while the members run.
+    let mut replays = std::collections::VecDeque::from(replayed_each(&mut members, |member| {
+        listed(member)[0].recording_id
+    }));
     for member in &members {
         let id = member.module.member_id();
         let list = listed(member);
         assert_eq!(list.len(), 1, "member {id}: {list:?}");
-        let messages = replayed(member, list[0].recording_id);
+        let messages = replays.pop_front().expect("a replay for each member");
         let parsed: Vec<Message<'_>> = messages
             .iter()
             .map(|bytes| Message::parse(Stream::Snapshot, bytes).expect("a snapshot's message"))
@@ -1561,21 +1568,23 @@ fn truncate(dir: &Path, id: i32, recording_id: i64, position: i64) {
 }
 
 /// The bytes of the newest snapshot each member lists, which must be of `position`.
-fn newest_bytes(members: &[Member], position: i64) -> Vec<Vec<Vec<u8>>> {
-    members
-        .iter()
-        .map(|member| {
-            let list = listed(member);
-            let newest = list.last().expect("a listed snapshot");
-            assert_eq!(
-                newest.log_position,
-                position,
-                "member {}",
-                member.module.member_id()
-            );
-            replayed(member, newest.recording_id)
-        })
-        .collect()
+fn newest_bytes(members: &mut [Member], position: i64) -> Vec<Vec<Vec<u8>>> {
+    for member in members.iter() {
+        let list = listed(member);
+        let newest = list.last().expect("a listed snapshot");
+        assert_eq!(
+            newest.log_position,
+            position,
+            "member {}",
+            member.module.member_id()
+        );
+    }
+    replayed_each(members, |member| {
+        listed(member)
+            .last()
+            .expect("a listed snapshot")
+            .recording_id
+    })
 }
 
 #[test]
@@ -1618,7 +1627,7 @@ fn a_member_that_starts_again_takes_its_sessions_from_its_snapshot_and_reads_wha
     // on the three, the two sessions and the next session id among them.
     run_until_led(&mut members, -1);
     let second = snapshot_everywhere(&mut members);
-    let bytes = newest_bytes(&members, second);
+    let bytes = newest_bytes(&mut members, second);
     assert_eq!(
         bytes[0].len(),
         5,
@@ -1708,7 +1717,7 @@ fn a_member_whose_log_was_purged_below_its_snapshot_starts_from_the_snapshot() {
     assert_eq!(counter(&members[2], CLUSTER_SESSIONS.0), 2);
     run_until_led(&mut members, first_term);
     let second = snapshot_everywhere(&mut members);
-    let bytes = newest_bytes(&members, second);
+    let bytes = newest_bytes(&mut members, second);
     assert_eq!(
         bytes[0].len(),
         5,
@@ -2123,6 +2132,14 @@ fn a_service_takes_the_snapshot_its_leader_asks_for_and_its_member_lists_it() {
     // Every service gave the same state once, at the position its member's own
     // snapshot is of, and every member lists both with the same term, base and time.
     let mut recordings = Vec::new();
+    // Each member's recording, played back while the members run.
+    let mut replays = std::collections::VecDeque::from(replayed_each(&mut members, |member| {
+        listed(member)
+            .iter()
+            .find(|entry| entry.service_id == 0)
+            .expect("the service's snapshot")
+            .recording_id
+    }));
     for (member, service) in members.iter().zip(&services) {
         assert_eq!(service.state, state);
         assert_eq!(service.taken, [(position, true)]);
@@ -2166,7 +2183,7 @@ fn a_service_takes_the_snapshot_its_leader_asks_for_and_its_member_lists_it() {
                 rejected: 0
             }
         );
-        recordings.push(replayed(member, services.recording_id));
+        recordings.push(replays.pop_front().expect("a replay for each member"));
     }
 
     // What a service wrote: a marker, the two sessions by their ids, a marker, the
@@ -3257,10 +3274,12 @@ fn a_service_whose_driver_has_no_room_for_its_replay_has_not_started_and_asks_ag
         take_images(&mut subscription);
         freed.ended().is_some()
     });
-    let restored = again
-        .service
-        .restore(&mut again.client)
-        .expect("the service's start, once the driver has room");
+    let restored = meanwhile(&mut members, || {
+        again
+            .service
+            .restore(&mut again.client)
+            .expect("the service's start, once the driver has room")
+    });
     assert_eq!(restored, Restored::State(entries(3)));
     if let Restored::State(state) = restored {
         again.state = state;
