@@ -356,6 +356,38 @@ class Package(unittest.TestCase):
                      "cavalry_cluster_service_action"):
             self.assertIn(name, gen.PER_MESSAGE)
 
+    def test_a_cluster_services_timer_calls_are_one_abi_call_each_and_return_its_answer(self):
+        """The Python cluster service's timers (ADR 0157): `schedule_timer` and
+        `cancel_timer` are one ABI call each, with the service's handle, the id and the
+        deadline as they were given, any int64, and each returns what the ABI answered,
+        a timer code, 0 or -1, raising for none of them."""
+        cavalry = load_package()
+
+        class Abi:
+            def __init__(self):
+                self.calls = []
+                self.answers = [cavalry.CAVALRY_CLUSTER_TIMER_SCHEDULED, cavalry.CAVALRY_CLUSTER_TIMER_REFUSED, -1,
+                                0, -1]
+
+            def cavalry_cluster_service_schedule_timer(self, handle, correlation_id, deadline):
+                self.calls.append(("schedule", handle, correlation_id, deadline))
+                return self.answers.pop(0)
+
+            def cavalry_cluster_service_cancel_timer(self, handle, correlation_id):
+                self.calls.append(("cancel", handle, correlation_id))
+                return self.answers.pop(0)
+
+        abi = Abi()
+        service = cavalry.ClusterService(abi, 2, object())
+        most, least = 2 ** 63 - 1, -(2 ** 63)
+        self.assertEqual(service.schedule_timer(most, least), cavalry.CAVALRY_CLUSTER_TIMER_SCHEDULED)
+        self.assertEqual(service.schedule_timer(0, 1_700_000_000_050), cavalry.CAVALRY_CLUSTER_TIMER_REFUSED)
+        self.assertEqual(service.schedule_timer(7, 7), -1)
+        self.assertEqual(service.cancel_timer(least), 0)
+        self.assertEqual(service.cancel_timer(7), -1)
+        self.assertEqual(abi.calls, [("schedule", 2, most, least), ("schedule", 2, 0, 1_700_000_000_050),
+                                     ("schedule", 2, 7, 7), ("cancel", 2, least), ("cancel", 2, 7)])
+
     def test_a_cluster_sessions_poll_hands_every_reply_over_and_raises_after_it(self):
         """The Python cluster session (ADR 0124): the trampoline reads each reply's values
         into the one struct the session keeps before the handler runs, every reply the

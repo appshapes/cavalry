@@ -141,8 +141,8 @@ service)` for each committed entry, in order:
 - `entry` carries the entry's values: `entry.type`, one of
   `CAVALRY_CLUSTER_ENTRY_SESSION_MESSAGE`, `_SESSION_OPEN`, `_SESSION_CLOSE`,
   `_NEW_LEADERSHIP_TERM`, `_OTHER`, `_SNAPSHOT` and `_TIMER`, a timer of the program's
-  with its id in `entry.correlation_id`, which this package's programs are handed
-  none of yet, since it does not wrap the calls that schedule one; `entry.position`;
+  that is due, with its id in `entry.correlation_id`, which is 0 for every other
+  entry ("A service's timers", below); `entry.position`;
   `entry.leadership_term_id`;
   `entry.timestamp`, the cluster's time, the one clock a service reads, so that every
   member's service reaches the same state; `entry.session_id`, −1 where the entry has
@@ -151,7 +151,8 @@ service)` for each committed entry, in order:
   `_SNAPSHOT` is the leader's request for a snapshot: the poll ends after it, and
   the program gives its state to `service.snapshot` before its next poll ("A
   service's snapshot and its start", below).
-- `service` is the service that was polled, for `service.reply`.
+- `service` is the service that was polled, for `service.reply`,
+  `service.schedule_timer` and `service.cancel_timer`.
 
 What the handler returns says what becomes of the entry. `None` or `cavalry.CONTINUE`
 takes it, and the poll goes on. `cavalry.BREAK` takes it and ends the poll.
@@ -190,6 +191,65 @@ The service's poll and its close are calls on the client the service was made on
 (`spec/c-abi.md`, "Functions", cluster service; ADR 0123; ADR 0124).
 `conformance/python/cluster.py` is a program that runs three services and a session
 through every call above.
+
+### A service's timers
+
+A program that must act at a time, a session it gives up on or an order that
+expires, asks for a timer. It never reads a clock of its own: every member's
+service must reach the same state, and the cluster's time is the one clock they
+share. From inside the handler:
+
+- `service.schedule_timer(correlation_id, deadline)` schedules the timer
+  `correlation_id`, any int64 the program chooses, for `deadline`, in the cluster's
+  time, the clock of `entry.timestamp`, in milliseconds. It returns
+  `CAVALRY_CLUSTER_TIMER_SCHEDULED`: the timer is pending with that deadline,
+  whether the id was pending before or not. Or it returns
+  `CAVALRY_CLUSTER_TIMER_REFUSED`: the service holds its 1,024 pending timers, the
+  id is none of them, and nothing changed.
+- `service.cancel_timer(correlation_id)` makes the timer pending no more, and
+  returns 0, whether it was pending or not.
+
+When the deadline has come, the handler is handed an entry whose `entry.type` is
+`CAVALRY_CLUSTER_ENTRY_TIMER` and whose `entry.correlation_id` is the timer's id,
+with an empty `body`. Every member's service is handed it once, at one position of
+the log, never before its deadline and never after its cancel; `entry.timestamp`
+is at or after the deadline, and later by as long as the cluster took to commit
+the event. A timer that repeats is scheduled again by the handling of its own
+entry. A deadline at or before the entry's time is due at once.
+
+```python
+def on_entry(body, entry, service):
+    if entry.type == cavalry.CAVALRY_CLUSTER_ENTRY_SESSION_OPEN:
+        # Give the session a minute, by the cluster's clock, under an id of its own.
+        service.schedule_timer(entry.session_id, entry.timestamp + 60_000)
+    elif entry.type == cavalry.CAVALRY_CLUSTER_ENTRY_SESSION_CLOSE:
+        service.cancel_timer(entry.session_id)
+    elif entry.type == cavalry.CAVALRY_CLUSTER_ENTRY_TIMER:
+        expire(entry.correlation_id)   # the program's own: the minute is over
+```
+
+Three rules come with them (`spec/cluster.md`, "The service", "Timers"; ADR 0151;
+ADR 0157):
+
+- **Only inside the handler.** The timers are then a function of the entries
+  taken, as the program's state is, and the same beside every member. From
+  outside the handler both calls return −1, with `CAVALRY_ERR_CLUSTER_NO_ENTRY`
+  as `cavalry.library().cavalry_errcode()`. A handler that returns
+  `cavalry.ABORT`, or raises, is handed its entry again with every timer as it
+  was before that handling. The timers are part of what `service.snapshot`
+  writes and `service.restore` reads, with no call of the program's.
+- **At most 1,024 pending.** A program with more deadlines than that keeps them
+  in its own state and schedules one timer, for the earliest: when it is handed
+  that timer it acts on every deadline that has come and schedules the timer
+  again for the earliest that is left.
+- **Every member at version 2 first.** A program schedules its first timer only
+  once every member of its cluster runs version 2 of the cluster protocol
+  (`docs/how-to/upgrade-a-cluster.md`): a member of version 1 does not know a
+  timer.
+
+Both calls are one ABI call each, which allocates nothing and waits for nothing.
+`conformance/python/cluster.py` schedules a timer and cancels another beside three
+members.
 
 ### A service's snapshot and its start
 

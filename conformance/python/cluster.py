@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
-"""The Python client's cluster round (spec/c-abi.md, versions 4 and 5; ADR 0122, ADR 0123,
-ADR 0124): `cavalry.Client.cluster_service` and `cavalry.ClusterService` beside each of
+"""The Python client's cluster round (spec/c-abi.md, versions 4, 5 and 7; ADR 0122, ADR
+0123, ADR 0124, ADR 0157): `cavalry.Client.cluster_service` and `cavalry.ClusterService` beside each of
 three cluster members that `conformance/python/run.sh` started with `cavalry run`, and
 `cavalry.Client.connect_cluster` and `cavalry.ClusterSession` on the runner's first
 driver, the one at CAVALRY_DIR.
@@ -28,6 +28,10 @@ entry is aborted each time, handed over again by the next poll and answered once
 too long for a frame and a
 reply to a session that is not open; a handler that returns BREAK with two entries
 waiting; a session's handler that raises, whose reply is not handed over again; the
+program's timers, `schedule_timer` and `cancel_timer` from inside the handler: a timer
+handed to every service once, as an entry of its own type with the timer's id, at one
+position and no earlier than its deadline, a timer scheduled and cancelled in one
+handling handed to none, and both calls refused from outside the handler; the
 session's close as an entry every service is handed; a session and a service closed
 twice, and a service closed after its client.
 
@@ -54,6 +58,11 @@ WAIT_SECONDS = 60.0
 IDLE_SECONDS = 0.0002  # between duty cycles: the members run in processes of their own
 SETTLE_SECONDS = 0.3   # the time in which a second reply, or a second entry, would come
 MESSAGE = _abi.CAVALRY_CLUSTER_ENTRY_SESSION_MESSAGE
+TIMER = _abi.CAVALRY_CLUSTER_ENTRY_TIMER
+TIMER_MESSAGE = b"timer"   # the message at which each service's program schedules its timers
+TIMER_ID = 77              # the timer that is handed over
+CANCELLED_ID = 78          # the timer that is scheduled and cancelled in the same handling
+TIMER_AFTER_MS = 50        # how long after the message's entry the timers are due
 SENT = _abi.CAVALRY_CLUSTER_REPLY_SENT
 POLLING = _abi.CAVALRY_ERR_POLLING
 
@@ -106,6 +115,8 @@ class Served:
         self.edges_on = None   # a payload before whose reply a reply too long and one to no session are made
         self.edges = None
         self.break_on = ()     # payloads whose entries are taken with BREAK
+        self.timers = []       # every timer handed over: (position, correlation id, the event's time)
+        self.timer_codes = []  # what the schedules and the cancel at TIMER_MESSAGE answered
         self.polls = 0         # the report: every poll, those over a millisecond, and the longest
         self.over_a_millisecond = 0
         self.longest = (0, "no poll")
@@ -118,6 +129,10 @@ class Served:
         if entry.type != MESSAGE or entry.session_id < 0:
             if len(body) != 0:
                 fail(f"an entry that is no session's message has a payload of {len(body)} bytes: {values}")
+            if entry.type == TIMER:
+                self.timers.append((entry.position, entry.correlation_id, entry.timestamp))
+            elif entry.correlation_id != 0:
+                fail(f"an entry that is no timer has the correlation id {entry.correlation_id}: {values}")
             self.entries.append(values)
             return None
         payload = bytes(body)
@@ -149,6 +164,14 @@ class Served:
                 ("close", service.close), ("client.is_closed", lambda: client.is_closed),
                 ("client.cluster_service", client.cluster_service),
                 ("client.add_subscription", lambda: client.add_subscription("cavalry:ipc", 1229))))
+        if payload == TIMER_MESSAGE:
+            # The program's state changes at the entry it takes: two timers, due a little
+            # after it, and one of them cancelled again. Every member's service makes the
+            # same calls at the same entry.
+            deadline = entry.timestamp + TIMER_AFTER_MS
+            self.timer_codes = [service.schedule_timer(TIMER_ID, deadline),
+                                service.schedule_timer(CANCELLED_ID, deadline),
+                                service.cancel_timer(CANCELLED_ID)]
         self.codes.setdefault(payload, []).append(code)
         self.messages.setdefault(payload, []).append(values)
         self.entries.append(values)
@@ -455,6 +478,41 @@ def main():
     print("conformance/python: cluster round: a handler that raised and one that returned no action had their "
           "entries aborted, handed over again and answered once; a reply of 1,345 bytes and a reply to no session "
           "refused; BREAK took one of two entries; a reply whose handler raised is not handed over again")
+
+    # 9b. The program's timers (spec/c-abi.md, version 7; spec/cluster.md, "The service",
+    # "Timers"; ADR 0157). Each service's program schedules two timers at one message and
+    # cancels one of them: the other is handed to every service once, as an entry of its
+    # own type with the timer's id, at one position and no earlier than its deadline, and
+    # the cancelled one to none.
+    for function, call in (("schedule_timer", lambda: served[0].service.schedule_timer(1, 1)),
+                           ("cancel_timer", lambda: served[0].service.cancel_timer(1))):
+        set_another_error(abi)
+        if call() != -1 or abi.cavalry_errcode() != _abi.CAVALRY_ERR_CLUSTER_NO_ENTRY:
+            fail(f"{function} from outside the handler was not refused with CAVALRY_ERR_CLUSTER_NO_ENTRY: "
+                 f"error {abi.cavalry_errcode()}")
+    offer(session, TIMER_MESSAGE, served, answered)
+    wait("each service is handed the timer", lambda: all(s.timers for s in served), served, answered)
+    settle(served, answered)
+    scheduled = served[0].messages[TIMER_MESSAGE][0]
+    for s in served:
+        if s.timer_codes != [_abi.CAVALRY_CLUSTER_TIMER_SCHEDULED, _abi.CAVALRY_CLUSTER_TIMER_SCHEDULED, 0]:
+            fail(f"the service beside member {s.member} was answered {s.timer_codes} for two schedules and a "
+                 f"cancel; expected CAVALRY_CLUSTER_TIMER_SCHEDULED twice and 0")
+        if len(s.timers) != 1 or s.timers[0][1] != TIMER_ID:
+            fail(f"the service beside member {s.member} was handed the timers {s.timers}, each a position, an "
+                 f"id and a time; expected timer {TIMER_ID} once and timer {CANCELLED_ID}, which it cancelled, "
+                 f"never")
+        if s.timers != served[0].timers:
+            fail(f"the service beside member {s.member} was handed the timer as {s.timers[0]} and the service "
+                 f"beside member {served[0].member} as {served[0].timers[0]}; expected one position and one time")
+        if s.timers[0][2] < scheduled[3] + TIMER_AFTER_MS or s.timers[0][0] <= scheduled[1]:
+            fail(f"the service beside member {s.member} was handed the timer at position {s.timers[0][0]} and "
+                 f"time {s.timers[0][2]}; it was scheduled at position {scheduled[1]} and time {scheduled[3]} "
+                 f"for {TIMER_AFTER_MS} ms later")
+    print(f"conformance/python: cluster round: timer {TIMER_ID}, scheduled by each service at a message for "
+          f"{TIMER_AFTER_MS} ms later, handed to three services once, at position {served[0].timers[0][0]}, "
+          f"{served[0].timers[0][2] - scheduled[3]} ms after the message; timer {CANCELLED_ID}, cancelled in "
+          f"the same handling, handed to none; both calls refused from outside the handler")
 
     # 10. The session before its client. Its close is an entry every service is handed,
     # after which the log holds no session open.
