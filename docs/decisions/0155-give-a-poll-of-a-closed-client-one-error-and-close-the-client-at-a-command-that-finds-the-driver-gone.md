@@ -149,7 +149,9 @@ makes wrong. What it costs is under "Consequences".
   throwaway branches: `master`'s example, run 45530433822, 50 of 50 on Linux and 49
   of 50 on macOS, the one failure being this one; the example-only form of the
   change, run 45530437996, 50 of 50 on both; the library's change as the second
-  read found it, before that read's fixes, run 45532875913, 50 of 50 on both.
+  read found it, before that read's fixes, run 45532875913, 50 of 50 on both; with
+  that read's fixes, run 45534683647, 50 of 50 on both; and as this pull request
+  opened, run 45537312460, 50 of 50 on both.
 
 ## Consequences
 
