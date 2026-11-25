@@ -89,11 +89,12 @@ bench-compare:
 # cluster of three members on the loopback from the one to the other, one member at a
 # time. It needs the repository's whole history to name that tree. Then
 # conformance/upgrade/log-directory.sh, the log directory's half of that gate (work
-# item 362; ADR 0141): it builds the tree that Brigade's servers in production run,
-# 620a2e29, the pin of its server 0.9.0, has it write a log directory as a server
-# writes its own, with two purges in it, once stopped and once killed, and holds that
-# this tree opens each in place, reads back every record at its position and takes a
-# new recording. It needs the whole history too.
+# item 362; ADR 0141, ADR 0156): it builds the trees that Brigade's servers in
+# production have run, 620a2e29, the pin of server 0.9.0, and d265af82, the pin of
+# server 0.10.0, has them write the log directories a server holds, each tree's alone
+# and the two in turn, with purges in them, stopped and killed, and holds that this
+# tree opens each in place, reads back every record at its position and takes a new
+# recording. It needs the whole history too.
 conformance:
     cargo test -p cavalry-proto --test conformance
     cargo test -p cavalry-proto --test client_protocol_conformance

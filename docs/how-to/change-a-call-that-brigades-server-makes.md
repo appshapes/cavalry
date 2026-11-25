@@ -27,9 +27,10 @@ lists those calls and says why they are held.
 2. Decide which of two changes yours is.
    - **The server's use can keep working.** Keep it working, and go to "How to verify
      it worked". Until version 0.1.0 the server builds from a pin. The two servers in
-     production run Brigade's server 0.9.0, built at 620a2e29, and hold their teams'
-     data in the format that tree writes. Server 0.10.0 and Brigade's `master` pin
-     later commits.
+     production run Brigade's server 0.10.0, built at d265af82, since 2026-11-24. They
+     hold their teams' data in directories that server 0.9.0, built at 620a2e29, wrote
+     first and that 0.10.0 writes on, and each keeps a copy taken under 0.9.0.
+     Brigade's `master` pins what its `server/crates/brigade-log/Cargo.toml` names.
    - **The change must break the server's use.** Go on with step 3.
 
 3. Change `crates/cavalry/tests/feed/mod.rs` in the way the server's own file,
@@ -67,13 +68,15 @@ lists those calls and says why they are held.
 
 ## When it does not work
 
-- `conformance/upgrade/log-directory.sh` fails at "build N" and names
-  `crates/cavalry/tests/feed/` or `crates/cavalry/examples/feed-directory.rs`: the
-  feed's files now use a call that the tree at 620a2e29 lacks, which server 0.9.0, built
-  at that tree, cannot make either. When the change is on purpose, keep the files as
-  they last compiled against that tree under `conformance/upgrade/feed-at-620a2e29/`
-  and have the script copy those
-  ([ADR 0141](../decisions/0141-open-in-place-a-log-directory-written-by-the-tree-that-servers-run-and-build-that-tree-on-every-run.md)).
+- `conformance/upgrade/log-directory.sh` fails at "build 620a2e29" or "build d265af82"
+  and names `crates/cavalry/tests/feed/` or `crates/cavalry/examples/feed-directory.rs`:
+  the feed's files now use a call that the older tree lacks, which the server built at
+  that tree, 0.9.0 or 0.10.0, cannot make either. When the change is on purpose, keep
+  the files as they last compiled against that tree under
+  `conformance/upgrade/feed-at-<its first 8 hex digits>/` and have the script copy
+  those
+  ([ADR 0141](../decisions/0141-open-in-place-a-log-directory-written-by-the-tree-that-servers-run-and-build-that-tree-on-every-run.md),
+  [ADR 0156](../decisions/0156-hold-in-the-upgrade-gate-every-directory-a-server-holds-each-trees-alone-and-the-trees-in-turn.md)).
 
 - A test of `feed_shape.rs` fails and your change did not mean to change a call: the
   test's first comment says what it holds, and the explanation page's table says which
