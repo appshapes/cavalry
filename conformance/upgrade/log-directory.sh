@@ -8,51 +8,78 @@
 #
 # The directory is the one Brigade's server keeps: the feed of
 # docs/explanation/what-brigades-server-relies-on.md, one recorded publication whose
-# every run is a new recording. Two servers hold such a directory in production, each
-# written by the tree at 620a2e29, and the server reads it back at every start.
+# every run is a new recording. Two servers hold such a directory in production. Each
+# was written by the tree at 620a2e29 under Brigade's server 0.9.0, and since
+# 2026-11-24 by the tree at d265af82 under server 0.10.0, which each started in place
+# on it. The server reads its directory back at every start.
 #
-# The two builds
+# The builds
 #
-# N+1 is this tree as it stands, built into target/release. N is a commit:
+# N+1 is this tree as it stands, built into target/release. The older builds are the
+# trees that servers in production have run, each a commit (ADR 0141, ADR 0156):
 #
-# - CAVALRY_DIRECTORY_FROM, when it is set: a hash, a tag or a branch.
-# - Otherwise 620a2e29e04751c7a1f930132666f85b3dd58e7a, the commit that the servers
-#   in production run: the pin of Brigade's server 0.9.0, its tag `server-v0.9.0` of
-#   github.com/appshapes/brigade (`server/crates/brigade-log/Cargo.toml`). Server
-#   0.10.0 and Brigade's `master` pin later commits, which no server in production
-#   runs yet. ADR 0141 says when this line changes: when the servers in production
-#   run another tree.
+# - 620a2e29e04751c7a1f930132666f85b3dd58e7a, the pin of Brigade's server 0.9.0, its tag
+#   `server-v0.9.0` of github.com/appshapes/brigade
+#   (`server/crates/brigade-log/Cargo.toml`). The servers ran it until 2026-11-24, and
+#   each keeps a copy of its directory taken under it, as its way back.
+# - d265af823b8311ed878ae1cc3643d52a58737cdc, the pin of server 0.10.0, its tag
+#   `server-v0.10.0`, which both servers run since 2026-11-24.
 #
-# N's tree is exported with `git archive` to target/upgrade/<N's first 8 hex
+# CAVALRY_DIRECTORY_FROM, when it is set, names one commit, a hash, a tag or a branch,
+# which takes the place of both: one older build, one directory that it writes alone.
+#
+# Each older tree is exported with `git archive` to target/upgrade/<its first 8 hex
 # digits>/src and built into target/upgrade/<the same>/target, as
 # conformance/upgrade/run.sh exports and builds its own N. Each build is the binary
-# and one example: `cavalry` and `feed-directory`. N has no such example. The script
-# copies this tree's crates/cavalry/examples/feed-directory.rs and
-# crates/cavalry/tests/feed/ into N's exported tree and builds them there: the feed's
+# and one example: `cavalry` and `feed-directory`. The older trees have no such
+# example. The script copies this tree's crates/cavalry/examples/feed-directory.rs and
+# crates/cavalry/tests/feed/ into each exported tree and builds them there: the feed's
 # files use the calls of 620a2e29 and no later one, as the server's own file does in
-# its releases 0.9.0 and 0.10.0. So this script also fails, at its second build, when
-# those files stop compiling against N; step 2's message says what to do then.
+# its releases 0.9.0 and 0.10.0. So this script also fails, at an older build, when
+# those files stop compiling against that tree; step 2's message says what to do then.
 #
-# The schedule, once for a directory whose last run was stopped and once for one whose
-# last run was killed
+# The directories
 #
-# a. N writes the directory, in the pinned shape, server 0.9.0's. A first run appends
-#    six records and stops. A second run appends five, releases what a snapshot at the
-#    first run's end covers, appends five more, releases again and appends four. Each
-#    release rolls the feed, and the two purge recordings 0 and 1. The second run is
-#    then stopped as the server's clean stop does, or killed with SIGKILL, which leaves
-#    its last recording live in the catalog.
-# b. `cavalry run` of N+1 starts on the directory as N left it. `cavalry replay` of
-#    N+1 plays each recording that is left, from its start to the position N answered.
-# c. N+1's feed, in the pinned shape, begins at the last position N answered. It read
-#    N's catalog before its driver started, as server 0.10.0 does to size its room,
-#    and found terms of 16 MiB. It reads back every record N appended from the oldest
-#    recording kept, each at its position, is refused a read from before that, and
-#    appends five records.
-# d. N+1's feed, in the shape server 0.10.0 moved to, `ssc=true` with `term-length=1m`,
-#    begins where c ended, reads back N's records and c's, and appends five records.
-# e. N+1's feed begins where d ended and reads back all of it: recordings that two
-#    builds wrote, in terms of two lengths.
+# Three directories, each twice: once with the last run stopped and once with it
+# killed. Each is one that a server holds or may hold (ADR 0156):
+#
+# - 0.9.0: written by 620a2e29 alone, in server 0.9.0's shape. The copy each server
+#   keeps as its way back.
+# - 0.9.0-then-0.10.0: written by 620a2e29 in server 0.9.0's shape and stopped, as
+#   each server stopped on 2026-11-24, then opened in place by d265af82, which reads
+#   back what 620a2e29 left and writes in server 0.10.0's shape. What each server holds
+#   now.
+# - 0.10.0: written by d265af82 alone, in server 0.10.0's shape. What a server first
+#   installed at 0.10.0 holds.
+#
+# The shapes are the feed's two of crates/cavalry/tests/feed/process.rs: server
+# 0.9.0's, `pinned`, in terms of 16 MiB, and server 0.10.0's, `moved-to`, `ssc=true`
+# with `term-length=1m`.
+#
+# The schedule for each directory
+#
+# a. The older builds write the directory in turn. The first appends six records in
+#    one run and stops; in a second run it appends five, releases what a snapshot at
+#    the first run's end covers, appends five more, releases again and appends four.
+#    A build that opens a directory another wrote begins where it ended, reads back
+#    every record it left, appends five, releases the oldest recording left, and
+#    appends four. Each release rolls the feed and purges the oldest recording, which
+#    the script checks against what the feed says it let go of. The last run is
+#    stopped as the server's clean stop does, or killed with SIGKILL, which leaves its
+#    last recording live in the catalog. The script keeps what each run and each roll
+#    recorded, and which recordings are left: steps b and c are held to that.
+# b. `cavalry run` of N+1 starts on the directory as the older builds left it.
+#    `cavalry replay` of N+1 plays each recording that is left, from its start to the
+#    position its writer answered.
+# c. N+1's feed, in the pinned shape, begins at the last position answered. It read
+#    the catalog before its driver started, as server 0.10.0 does to size its room,
+#    and found the longest term among the recordings left. It reads back every record
+#    appended from the oldest recording kept, each at its position, is refused a read
+#    from before that, and appends five records.
+# d. N+1's feed, in the moved-to shape, begins where c ended, reads back what the older
+#    builds wrote and c's records, and appends five records.
+# e. N+1's feed begins where d ended and reads back all of it: recordings that two or
+#    three builds wrote, in terms of two lengths.
 #
 # What a record read back is held to is the line the feed's process wrote when it
 # appended the record: its length, a digest of its bytes and the position after it
@@ -60,8 +87,8 @@
 #
 # By hand
 #
-#   conformance/upgrade/log-directory.sh                                  N is 620a2e29
-#   CAVALRY_DIRECTORY_FROM=<commit> conformance/upgrade/log-directory.sh  N as named
+#   conformance/upgrade/log-directory.sh                                  the three directories
+#   CAVALRY_DIRECTORY_FROM=<commit> conformance/upgrade/log-directory.sh  one, by the commit named
 #   CAVALRY_DIRECTORY_FROM=HEAD conformance/upgrade/log-directory.sh      this tree's changes over its last commit
 #
 # The script's directories are under one made by `mktemp` in the temporary directory,
@@ -69,7 +96,7 @@
 # 19999 from the shell's process id, as conformance/c/run.sh counts its own. Every
 # wait is bounded at 60 s and says what it waited for. On a failure the script prints
 # the step and the reason and each program's output; it stops what it started, by
-# process id, leaves its directory and says where, and exits 1. It runs under bash
+# process id, leaves its directories and says where, and exits 1. It runs under bash
 # 3.2, which macOS has, and under bash 5.
 set -euo pipefail
 
@@ -80,8 +107,10 @@ began=$(date +%s)
 # environment holds.
 unset CAVALRY_DIR CAVALRY_CLUSTER_MEMBERS CAVALRY_CLUSTER_MEMBER_ID
 
-pinned=620a2e29e04751c7a1f930132666f85b3dd58e7a
-step="1 (name the older build)"
+# The trees that servers in production have run: server 0.9.0's pin and server 0.10.0's.
+zero_nine=620a2e29e04751c7a1f930132666f85b3dd58e7a
+zero_ten=d265af823b8311ed878ae1cc3643d52a58737cdc
+step="1 (name the older builds)"
 root=""
 # The processes the script started that have not ended, by process id.
 pids=""
@@ -97,15 +126,15 @@ fail() {
     reported=yes
     exit 1
 }
-# The path of program `$2`, `cavalry` or `feed-directory`, in build `$1`, `older` or
-# `newer`.
+# The path of program `$2`, `cavalry` or `feed-directory`, in build `$1`: `newer`, this
+# tree, or an older tree by its first 8 hex digits.
 program() {
     local release
-    if [ "$1" = older ]; then release="$older/target/release"; else release="$repo/target/release"; fi
+    if [ "$1" = newer ]; then release="$repo/target/release"; else release="$repo/target/upgrade/$1/target/release"; fi
     if [ "$2" = cavalry ]; then echo "$release/cavalry"; else echo "$release/examples/$2"; fi
 }
 # What a build is called in what the script prints.
-named() { if [ "$1" = older ]; then echo "N"; else echo "N+1"; fi; }
+named() { if [ "$1" = newer ]; then echo "N+1"; else echo "$1"; fi; }
 # Takes process `$1` out of the list of those that run.
 forget() {
     local pid kept=""
@@ -189,51 +218,127 @@ await() {
     done
 }
 
+# Sets `full` to the full hash of commit `$1`, which `$2` describes, or fails with how
+# to fetch it. It sets a variable and prints nothing, since `fail` must not run where
+# its output is captured.
+resolve() {
+    if full=$(git rev-parse --verify --quiet "$1^{commit}"); then
+        return 0
+    elif [ "$(git rev-parse --is-shallow-repository)" = true ]; then
+        fail "this repository's history is shallow and does not hold $1, $2; fetch the whole history, \`git fetch --unshallow\`, or fetch-depth: 0 in the workflow's actions/checkout, and run this again"
+    else
+        fail "this repository does not hold $1, $2 and a commit of master's history; fetch master, \`git fetch origin master\`, and run this again"
+    fi
+}
+
+# The older builds, each a full hash, and the directories, each `<name>=<writer>,...`
+# with a writer `<build's first 8 hex digits>:<shape>`, written in that order.
 if [ -n "${CAVALRY_DIRECTORY_FROM:-}" ]; then
     from=$(git rev-parse --verify --quiet "$CAVALRY_DIRECTORY_FROM^{commit}") \
-        || fail "CAVALRY_DIRECTORY_FROM is \`$CAVALRY_DIRECTORY_FROM\`, which names no commit of this repository; give a hash, a tag or a branch that \`git rev-parse\` resolves, or unset it to take the commit Brigade's server 0.9.0 pins"
-    how="named by CAVALRY_DIRECTORY_FROM"
-elif from=$(git rev-parse --verify --quiet "$pinned^{commit}"); then
-    how="the commit Brigade's server 0.9.0 pins"
-elif [ "$(git rev-parse --is-shallow-repository)" = true ]; then
-    fail "this repository's history is shallow and does not hold $pinned, the commit Brigade's server 0.9.0 pins; fetch the whole history, \`git fetch --unshallow\`, or fetch-depth: 0 in the workflow's actions/checkout, and run this again"
+        || fail "CAVALRY_DIRECTORY_FROM is \`$CAVALRY_DIRECTORY_FROM\`, which names no commit of this repository; give a hash, a tag or a branch that \`git rev-parse\` resolves, or unset it to take the trees the servers in production have run"
+    trees=$from
+    directories="${from:0:8}=${from:0:8}:pinned"
+    say "the older build is ${from:0:8}, named by CAVALRY_DIRECTORY_FROM: $(git log -1 --format=%s "$from")"
 else
-    fail "this repository does not hold $pinned, the commit Brigade's server 0.9.0 pins and a commit of master's history; fetch master, \`git fetch origin master\`, and run this again"
+    resolve "$zero_nine" "the commit Brigade's server 0.9.0 pins"
+    first=$full
+    resolve "$zero_ten" "the commit Brigade's server 0.10.0 pins"
+    second=$full
+    trees="$first $second"
+    directories="0.9.0=${first:0:8}:pinned 0.9.0-then-0.10.0=${first:0:8}:pinned,${second:0:8}:moved-to 0.10.0=${second:0:8}:moved-to"
+    say "the older builds are ${first:0:8}, which Brigade's server 0.9.0 pins, and ${second:0:8}, which server 0.10.0 pins and the servers in production run"
 fi
-short=${from:0:8}
-older="$repo/target/upgrade/$short"
-say "N is $short, $how: $(git log -1 --format=%s "$from")"
-say "N's spec/durable-log.md begins \`$(git show "$from:spec/durable-log.md" 2>/dev/null | sed -n 1p)\`; N+1 is this tree, whose page begins \`$(sed -n 1p spec/durable-log.md)\`"
+for tree in $trees; do
+    say "${tree:0:8}'s spec/durable-log.md begins \`$(git show "$tree:spec/durable-log.md" 2>/dev/null | sed -n 1p)\`"
+done
+say "N+1 is this tree, whose page begins \`$(sed -n 1p spec/durable-log.md)\`"
 
 step="2 (build N+1, this tree)"
 at=$(date +%s)
 cargo build --release -p cavalry --bin cavalry --example feed-directory
 say "built N+1 in $(( $(date +%s) - at )) s, into target/release"
 
-step="2 (build N, $short)"
-at=$(date +%s)
-# Exported beside its place and moved there whole, so that an export that was cut
-# short is never taken for the tree: the directory is there only once tar has ended.
-if [ ! -d "$older/src" ]; then
-    rm -rf "$older/src.partial"
-    mkdir -p "$older/src.partial"
-    git archive --format=tar "$from" | tar -x -f - -C "$older/src.partial"
-    mv "$older/src.partial" "$older/src"
-fi
-# The feed's files, from this tree into N's: copied when they differ, so that an
-# unchanged file keeps its time and cargo builds nothing again.
-mkdir -p "$older/src/crates/cavalry/examples" "$older/src/crates/cavalry/tests/feed"
-for file in examples/feed-directory.rs tests/feed/mod.rs tests/feed/process.rs; do
-    cmp -s "crates/cavalry/$file" "$older/src/crates/cavalry/$file" \
-        || cp "crates/cavalry/$file" "$older/src/crates/cavalry/$file"
+for tree in $trees; do
+    short=${tree:0:8}
+    older="$repo/target/upgrade/$short"
+    step="2 (build $short)"
+    at=$(date +%s)
+    # Exported beside its place and moved there whole, so that an export that was cut
+    # short is never taken for the tree: the directory is there only once tar has ended.
+    if [ ! -d "$older/src" ]; then
+        rm -rf "$older/src.partial"
+        mkdir -p "$older/src.partial"
+        git archive --format=tar "$tree" | tar -x -f - -C "$older/src.partial"
+        mv "$older/src.partial" "$older/src"
+    fi
+    # The feed's files, from this tree into the older one: copied when they differ, so
+    # that an unchanged file keeps its time and cargo builds nothing again.
+    mkdir -p "$older/src/crates/cavalry/examples" "$older/src/crates/cavalry/tests/feed"
+    for file in examples/feed-directory.rs tests/feed/mod.rs tests/feed/process.rs; do
+        cmp -s "crates/cavalry/$file" "$older/src/crates/cavalry/$file" \
+            || cp "crates/cavalry/$file" "$older/src/crates/cavalry/$file"
+    done
+    (cd "$older/src" && cargo build --release -p cavalry --bin cavalry --example feed-directory \
+        --target-dir "$older/target") \
+        || fail "$short did not build from target/upgrade/$short/src with this tree's feed in it; cargo's own message is above. When it names crates/cavalry/tests/feed/ or crates/cavalry/examples/feed-directory.rs, those files now use a call that $short does not have: the server pinned to $short cannot make that call either, so read docs/how-to/change-a-call-that-brigades-server-makes.md, \"When it does not work\", which says how this gate keeps a copy of the feed as that tree compiles it (ADR 0141)"
+    for built in cavalry feed-directory; do
+        [ -x "$(program "$short" "$built")" ] || fail "$short's build left no $(program "$short" "$built")"
+    done
+    say "built $short in $(( $(date +%s) - at )) s, from target/upgrade/$short/src into target/upgrade/$short/target, with this tree's feed-directory.rs and tests/feed/ in it"
 done
-(cd "$older/src" && cargo build --release -p cavalry --bin cavalry --example feed-directory \
-    --target-dir "$older/target") \
-    || fail "N, $short, did not build from target/upgrade/$short/src with this tree's feed in it; cargo's own message is above. When it names crates/cavalry/tests/feed/ or crates/cavalry/examples/feed-directory.rs, those files now use a call that N does not have: the server pinned to N cannot make that call either, so read docs/how-to/change-a-call-that-brigades-server-makes.md, \"When it does not work\", which says how this gate keeps a copy of the feed as N compiles it (ADR 0141)"
-for built in cavalry feed-directory; do
-    [ -x "$(program older "$built")" ] || fail "N's build left no $(program older "$built")"
-done
-say "built N in $(( $(date +%s) - at )) s, from target/upgrade/$short/src into target/upgrade/$short/target, with this tree's feed-directory.rs and tests/feed/ in it"
+
+# The recordings of the directory being written, as the script keeps them: each run
+# records into a recording of its own, the next id of the catalog, and each release
+# rolls the feed into the next. `kept` holds the recordings left, each as
+# `<id>,<from>,<to>,<term length>`, oldest first; `cur_*` is the run's recording.
+kept=""
+next_id=0
+cur_id=0
+cur_from=0
+cur_term=0
+# The length of a term in shape `$1`.
+term_of() { if [ "$1" = pinned ]; then echo 16777216; else echo 1048576; fi; }
+# Field `$2` of recording `$1`: 1 the id, 2 where it begins, 3 where it ends, 4 its term.
+field() { echo "$1" | cut -d, -f"$2"; }
+# A run in shape `$1` began at `position`: its recording is the catalog's next.
+began() {
+    cur_id=$next_id
+    next_id=$((next_id + 1))
+    cur_from=$position
+    cur_term=$(term_of "$1")
+}
+# The run's recording ended at `position`, its run stopped or killed: it is kept.
+run_ended() { kept="${kept:+$kept }$cur_id,$cur_from,$position,$cur_term"; }
+# Releases what precedes the end of the oldest recording kept, which purges it: the
+# feed rolls at `position` into the next recording, and the release lets go of every
+# recording that ends at or before that position. Fails unless the feed says it let go
+# of as many as the script counts; `$1` names the build.
+release_oldest() {
+    local at entry left="" purged=0
+    at=$(field "${kept%% *}" 3)
+    ask "release $at" released
+    run_ended
+    cur_id=$next_id
+    next_id=$((next_id + 1))
+    cur_from=$position
+    for entry in $kept; do
+        if [ "$(field "$entry" 3)" -le "$at" ]; then
+            purged=$((purged + 1))
+        else
+            left="${left:+$left }$entry"
+        fi
+    done
+    kept=$left
+    lines note | grep -q "^note let go of $purged recordings of the feed" \
+        || fail "$1's release of position $at should have let go of $purged recordings of the feed, as the script counts them; the feed said: $(lines note)"
+}
+# The records are numbered from 0 across all of a directory's runs.
+next_record=0
+# Appends `$1` records, numbered on from the last.
+append_records() {
+    append "$next_record" "$1"
+    next_record=$((next_record + $1))
+}
 
 # The feed's two addresses, counted as conformance/c/run.sh counts its own: out of
 # 10000 to 19999, from a hash of the shell's process id, never bound to be chosen.
@@ -356,90 +461,124 @@ reads_back() {
 if [ -d "${TMPDIR:-/tmp}" ]; then base=${TMPDIR:-/tmp}; else base=/tmp; fi
 root=$(mktemp -d "${base%/}/cavalry-log-directory.XXXXXX")
 
-for ending in stopped killed; do
-    dir="$root/$ending"
-    mkdir "$dir"
-    : >"$dir/appended"
+for directory in $directories; do
+    name=${directory%%=*}
+    writers=$(echo "${directory#*=}" | tr , ' ')
+    last_writer=${writers##* }
+    for ending in stopped killed; do
+        dir="$root/$name-$ending"
+        mkdir "$dir"
+        : >"$dir/appended"
+        kept=""
+        next_id=0
+        next_record=0
+        position=0
+        wrote=""
 
-    step="a ($ending: N writes the directory)"
-    start_feed older pinned "N-run-1" 1
-    [ "$answer" = 0 ] || fail "N's feed begins a new directory at position $answer, not 0"
-    append 0 6
-    first_run=$position
-    end_feed
-    start_feed older pinned "N-run-2" 1
-    [ "$answer" = "$first_run" ] || fail "N's second run begins at position $answer, and its first ended at $first_run"
-    append 6 5
-    ask "release $first_run" released
-    lines note | grep -q "^note let go of 1 recordings of the feed" \
-        || fail "N's first release purged no recording; the feed said: $(lines note)"
-    kept_from=$position
-    append 11 5
-    ask "release $kept_from" released
-    lines note | grep -q "^note let go of 1 recordings of the feed" \
-        || fail "N's second release purged no recording; the feed said: $(lines note)"
-    third_from=$position
-    append 16 4
-    written=$position
-    if [ "$ending" = stopped ]; then end_feed; else kill_feed; fi
-    say "a. $ending: N wrote 20 records to position $written in four recordings over two runs and purged recordings 0 and 1, which held the feed to position $kept_from; recordings 2, from $kept_from, and 3, from $third_from, are left, and the second run was $ending"
+        for writer in $writers; do
+            build=${writer%%:*}
+            shape=${writer#*:}
+            # Only the last writer's last run ends as this directory's ending: the
+            # servers stopped cleanly before they moved to the next build.
+            if [ "$writer" = "$last_writer" ]; then how=$ending; else how=stopped; fi
+            step="a ($name, $ending: $build writes in the $shape shape)"
+            if [ "$next_id" = 0 ]; then
+                start_feed "$build" "$shape" "$build-run-1" 1
+                [ "$answer" = 0 ] || fail "$build's feed begins a new directory at position $answer, not 0"
+                began "$shape"
+                append_records 6
+                end_feed
+                run_ended
+                start_feed "$build" "$shape" "$build-run-2" 1
+                [ "$answer" = "$position" ] || fail "$build's second run begins at position $answer, and its first ended at $position"
+                began "$shape"
+                append_records 5
+                release_oldest "$build"
+                append_records 5
+                release_oldest "$build"
+                append_records 4
+                wrote="${wrote:+$wrote; }$build wrote $next_record records in two runs to position $position, in the $shape shape"
+            else
+                start_feed "$build" "$shape" "$build-run" 1
+                [ "$answer" = "$position" ] || fail "$build's feed begins at position $answer on the directory that the build before it left at $position"
+                began "$shape"
+                earliest=$(field "${kept%% *}" 2)
+                reads_back "$earliest" "$build's feed, in the $shape shape, on what the build before it wrote,"
+                carried=$read_count
+                append_records 5
+                release_oldest "$build"
+                append_records 4
+                wrote="${wrote:+$wrote; }$build began there in place, read back the $carried records left from position $earliest, appended 9 more to position $position in the $shape shape and released the oldest recording left"
+            fi
+            if [ "$how" = stopped ]; then end_feed; else kill_feed; fi
+            run_ended
+        done
+        written=$position
+        earliest=$(field "${kept%% *}" 2)
+        longest=0
+        for entry in $kept; do
+            [ "$(field "$entry" 4)" -le "$longest" ] || longest=$(field "$entry" 4)
+        done
+        say "a. $name, $ending: $wrote; the last run was $ending, and recordings $(for entry in $kept; do printf '%s ' "$(field "$entry" 1)"; done)are left, from position $earliest"
 
-    step="b ($ending: cavalry run and cavalry replay of N+1 on the directory)"
-    "$(program newer cavalry)" run --dir "$dir/driver" --log-dir "$dir/log" >"$dir/N+1-driver.out" 2>&1 &
-    driver=$!
-    pids="$pids $driver"
-    await "$dir/N+1-driver.out" "^cavalry run: driver started on " \
-        "\`cavalry run\` of N+1 to start on the directory N wrote" "$driver"
-    replayed=""
-    for part in "2 $kept_from $third_from" "3 $third_from $written"; do
-        # shellcheck disable=SC2086  # the three numbers are split into words on purpose
-        set -- $part
-        "$(program newer cavalry)" replay --dir "$dir/driver" --log-dir "$dir/log" \
-            --recording "$1" --from "$2" >"$dir/replay-$1.out" 2>"$dir/replay-$1.err" \
-            || fail "\`cavalry replay --recording $1 --from $2\` of N+1 failed on the directory N wrote; it said: $(cat "$dir/replay-$1.err")"
-        summary=$(tail -n 1 "$dir/replay-$1.out")
-        case "$summary" in
-            *" ended at position $3: "*" messages from position $2") ;;
-            *) fail "\`cavalry replay\` of N+1 did not play recording $1 from position $2 to $3, where N left it; its last line: $summary" ;;
-        esac
-        replayed="${replayed:+$replayed and }recording $1 from $2 to $3"
+        step="b ($name, $ending: cavalry run and cavalry replay of N+1 on the directory)"
+        "$(program newer cavalry)" run --dir "$dir/driver" --log-dir "$dir/log" >"$dir/N+1-driver.out" 2>&1 &
+        driver=$!
+        pids="$pids $driver"
+        await "$dir/N+1-driver.out" "^cavalry run: driver started on " \
+            "\`cavalry run\` of N+1 to start on the directory the older builds wrote" "$driver"
+        replayed=""
+        for entry in $kept; do
+            id=$(field "$entry" 1)
+            from_at=$(field "$entry" 2)
+            to_at=$(field "$entry" 3)
+            "$(program newer cavalry)" replay --dir "$dir/driver" --log-dir "$dir/log" \
+                --recording "$id" --from "$from_at" >"$dir/replay-$id.out" 2>"$dir/replay-$id.err" \
+                || fail "\`cavalry replay --recording $id --from $from_at\` of N+1 failed on the directory the older builds wrote; it said: $(cat "$dir/replay-$id.err")"
+            summary=$(tail -n 1 "$dir/replay-$id.out")
+            case "$summary" in
+                *" ended at position $to_at: "*" messages from position $from_at") ;;
+                *) fail "\`cavalry replay\` of N+1 did not play recording $id from position $from_at to $to_at, where its writer left it; its last line: $summary" ;;
+            esac
+            replayed="${replayed:+$replayed, }recording $id from $from_at to $to_at"
+        done
+        stop "$driver" "\`cavalry run\` of N+1"
+        grep -q '^cavalry run: closed; ' "$dir/N+1-driver.out" \
+            || fail "\`cavalry run\` of N+1 was stopped with SIGTERM on the directory the older builds wrote and did not say \`cavalry run: closed\`"
+        say "b. $name, $ending: \`cavalry run\` of N+1 started on the directory as the older builds left it, and \`cavalry replay\` played $replayed"
+
+        step="c ($name, $ending: N+1's feed in the pinned shape)"
+        start_feed newer pinned "N+1-pinned"
+        [ "$answer" = "$written" ] || fail "N+1's feed begins at position $answer on the directory the older builds wrote, and the last record they answered ends at $written"
+        ask "longest" "longest"
+        [ "$answer" = "$longest" ] || fail "N+1's feed read the catalog before its driver started and found $answer bytes as the longest term of a recording there, and the longest term among the recordings left is $longest bytes"
+        reads_back "$earliest" "N+1's feed, in the pinned shape,"
+        from_older=$read_count
+        echo "read 0" >&3
+        answered "the feed's answer to \`read 0\`"
+        [ "$answer" = "failed the feed no longer holds position 0: its earliest recording after it begins at $earliest" ] \
+            || fail "N+1's feed was asked to read from position 0, which the older builds purged, and answered \`$answer\`; it must refuse, and say that its earliest recording begins at $earliest"
+        append_records 5
+        pinned_to=$position
+        end_feed
+        say "c. $name, $ending: N+1's feed, in the pinned shape, began at $written, found a longest term of $longest bytes in the catalog before its driver started, read back the $from_older records left from position $earliest, each at its position, was refused position 0, and appended 5 records to position $pinned_to"
+
+        step="d ($name, $ending: N+1's feed in the shape the server moved to)"
+        start_feed newer moved-to "N+1-moved-to"
+        [ "$answer" = "$pinned_to" ] || fail "N+1's feed, in the shape the server moved to, begins at position $answer, and the feed ended at $pinned_to"
+        reads_back "$earliest" "N+1's feed, in the shape the server moved to,"
+        append_records 5
+        moved_to=$position
+        end_feed
+        say "d. $name, $ending: N+1's feed, with ssc=true and term-length=1m, began at $pinned_to, read back $read_count records from position $earliest and appended 5 records to position $moved_to"
+
+        step="e ($name, $ending: the whole feed, read back)"
+        start_feed newer moved-to "N+1-read"
+        [ "$answer" = "$moved_to" ] || fail "N+1's feed begins at position $answer, and the feed ended at $moved_to"
+        reads_back "$earliest" "N+1's feed"
+        end_feed
+        say "e. $name, $ending: N+1's feed read back $read_count records from position $earliest to $moved_to, each once, in order, at its position: $from_older that the older builds wrote, and 10 that N+1 wrote, 5 of them in terms of 1 MiB"
     done
-    stop "$driver" "\`cavalry run\` of N+1"
-    grep -q '^cavalry run: closed; ' "$dir/N+1-driver.out" \
-        || fail "\`cavalry run\` of N+1 was stopped with SIGTERM on the directory N wrote and did not say \`cavalry run: closed\`"
-    say "b. $ending: \`cavalry run\` of N+1 started on the directory as N left it, and \`cavalry replay\` played $replayed"
-
-    step="c ($ending: N+1's feed in the pinned shape)"
-    start_feed newer pinned "N+1-pinned"
-    [ "$answer" = "$written" ] || fail "N+1's feed begins at position $answer on the directory N wrote, and N's last record answered ends at $written"
-    ask "longest" "longest"
-    [ "$answer" = 16777216 ] || fail "N+1's feed read N's catalog before its driver started and found $answer bytes as the longest term of a recording there, and N recorded each one in terms of 16 MiB, 16777216 bytes"
-    reads_back "$kept_from" "N+1's feed, in the pinned shape,"
-    from_n=$read_count
-    echo "read 0" >&3
-    answered "the feed's answer to \`read 0\`"
-    [ "$answer" = "failed the feed no longer holds position 0: its earliest recording after it begins at $kept_from" ] \
-        || fail "N+1's feed was asked to read from position 0, which N purged, and answered \`$answer\`; it must refuse, and say that its earliest recording begins at $kept_from"
-    append 20 5
-    pinned_to=$position
-    end_feed
-    say "c. $ending: N+1's feed, in the pinned shape, began at $written, found terms of 16 MiB in N's catalog before its driver started, read back the $from_n records N left from position $kept_from, each at its position, was refused position 0, and appended 5 records to position $pinned_to"
-
-    step="d ($ending: N+1's feed in the shape the server moved to)"
-    start_feed newer moved-to "N+1-moved-to"
-    [ "$answer" = "$pinned_to" ] || fail "N+1's feed, in the shape the server moved to, begins at position $answer, and the feed ended at $pinned_to"
-    reads_back "$kept_from" "N+1's feed, in the shape the server moved to,"
-    append 25 5
-    moved_to=$position
-    end_feed
-    say "d. $ending: N+1's feed, with ssc=true and term-length=1m, began at $pinned_to, read back $read_count records from position $kept_from and appended 5 records to position $moved_to"
-
-    step="e ($ending: the whole feed, read back)"
-    start_feed newer moved-to "N+1-read"
-    [ "$answer" = "$moved_to" ] || fail "N+1's feed begins at position $answer, and the feed ended at $moved_to"
-    reads_back "$kept_from" "N+1's feed"
-    end_feed
-    say "e. $ending: N+1's feed read back $read_count records from position $kept_from to $moved_to, each once, in order, at its position: $from_n that N wrote in terms of 16 MiB, and 10 that N+1 wrote, 5 of them in terms of 1 MiB"
 done
 
 step="f (stop everything)"

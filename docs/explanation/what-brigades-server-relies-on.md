@@ -9,9 +9,10 @@ to one commit
 condition 9). Three builds of the server matter here, and they pin different commits:
 
 - **Server 0.9.0**, Brigade's tag `server-v0.9.0`, pins Cavalry at 620a2e29. Two teams'
-  servers run it in production, each on a log directory it keeps.
+  servers ran it in production until 2026-11-24, each on a log directory it keeps.
 - **Server 0.10.0**, the tag `server-v0.10.0` of 2026-11-22, pins Cavalry at d265af82.
-  No server in production runs it yet.
+  Both servers run it since 2026-11-24, each started in place on the directory that
+  0.9.0 wrote.
 - **Brigade's `master`** pins what its `server/crates/brigade-log/Cargo.toml` names.
   Each night's run of the server's suite prints it
   ([Read the nightly run of Brigade's server](../how-to/read-the-nightly-run-of-brigades-server.md),
@@ -41,9 +42,9 @@ destination, recording, catalog, replay and image, are in the
   `crates/cavalry/tests/feed_held_still.rs` for what needs a process to stop. A change
   that breaks a call the server makes fails there, in the pull request that makes the
   change.
-- A log directory that the servers in production wrote, with the tree at 620a2e29,
-  opens under this tree in place: with no step by an operator, with every record read
-  back at its position. `conformance/upgrade/log-directory.sh` holds that in `just
+- A log directory that the servers in production wrote, with the tree at 620a2e29 and
+  then with the tree at d265af82, opens under this tree in place: with no step by an
+  operator, with every record read back at its position. `conformance/upgrade/log-directory.sh` holds that in `just
   conformance`.
 - Two things the server's code expects do not hold. They are under "What does not
   hold". The first is work item 372 on the Brigade Board. The second was the server's
@@ -119,9 +120,10 @@ The server imports `Cavalry`, `Driver`, `Flags`, `Image`, `NULL_LENGTH`, `Offer`
 | Purges what a snapshot covers | `Cavalry::purge_recording` | The recording's files are removed and its id is never used again. A purge is refused while a replay reads the recording, and may be sent again. |
 
 The two test programs hold every row, in both shapes where a row has two.
-`conformance/upgrade/log-directory.sh` holds the catalog row on a directory that the
-tree at 620a2e29 wrote: this tree reads it before its driver starts and finds terms of
-16 MiB.
+`conformance/upgrade/log-directory.sh` holds the catalog row on the directories that the
+trees at 620a2e29 and d265af82 wrote: this tree reads each before its driver starts and
+finds the longest term among its recordings, 16 MiB where 620a2e29 wrote one that is
+left and 1 MiB where d265af82 wrote alone.
 `feed_held_still.rs` holds what a stall and a kill show: `is_closed` after a stall, the
 reconnect under an append, the three sentences above that name a kill, and a kill
 after a term's padding. Each test says in its first comment what it holds.
@@ -130,8 +132,9 @@ after a term's padding. Each test says in its first comment what it holds.
 
 A server's log directory outlives the build that wrote it. The two servers in
 production hold directories that the tree at 620a2e29 wrote, in version 2 of the
-durable log's format. The tree that server 0.10.0 pins, d265af82, writes version 5,
-and `master` writes version 6 since 2026-11-22
+durable log's format, and that the tree at d265af82 has written on since 2026-11-24,
+in version 5. Each server also keeps a copy taken under 0.9.0, which 620a2e29 alone
+wrote. `master` writes version 6 since 2026-11-22
 ([ADR 0144](../decisions/0144-keep-a-recordings-synced-position-in-its-time-index-and-cut-a-recording-a-crash-left-live-to-it.md),
 [ADR 0145](../decisions/0145-withhold-the-vote-of-a-member-that-lost-its-log-until-it-holds-what-the-cluster-held.md)). Version 6 adds a cluster member's vote floor to its
 terms file, which a server's directory does not have.
@@ -143,23 +146,25 @@ Such a directory holds one recording for each run of the server and for each rol
 with the recordings that a snapshot covers purged. After a kill or a power cut its
 last recording is still live in the catalog.
 
-`conformance/upgrade/log-directory.sh` builds the tree at 620a2e29 on every run of
-`just conformance` and has it write such a directory, once with the last run stopped
-and once with it killed. It then holds that this tree's `cavalry run` starts on each,
-that the feed begins at the last position the older tree answered and reads back every
-record it left, that what was purged stays gone, and that the feed takes a new
+`conformance/upgrade/log-directory.sh` builds the trees at 620a2e29 and d265af82 on
+every run of `just conformance` and has them write three such directories: 620a2e29's
+alone, 620a2e29's and then d265af82's in place, as production's are, and d265af82's
+alone, as a server first installed at 0.10.0 would hold. It writes each once with the
+last run stopped and once with it killed. It then holds that this tree's `cavalry run` starts on each,
+that the feed begins at the last position the older trees answered and reads back every
+record they left, that what was purged stays gone, and that the feed takes a new
 recording in each shape.
 [`conformance/README.md`](../../conformance/README.md), "The log directory's upgrade
 gate", has the steps, and
 [ADR 0141](../decisions/0141-open-in-place-a-log-directory-written-by-the-tree-that-servers-run-and-build-that-tree-on-every-run.md)
 the decision. A change to the format of the durable log passes that gate in the pull
-request that makes it. The gate builds 620a2e29 because the servers in production run
-it. When a server in production first runs 0.10.0, the ADR's Revisit clause fires and
-the gate takes d265af82 as a second older tree (work item 371).
+request that makes it. The gate builds each tree that the servers in production have
+run, and keeps one while a server holds a directory that only that tree wrote
+([ADR 0156](../decisions/0156-hold-in-the-upgrade-gate-every-directory-a-server-holds-each-trees-alone-and-the-trees-in-turn.md), work item 441).
 
 The gate builds the feed's files, `tests/feed/` and the example that drives them, in
-the older tree too. So a change that makes those files use a call that 620a2e29 lacks
-fails there. ADR 0141 says what the gate then keeps. The server's file of 0.10.0, which
+each older tree too. So a change that makes those files use a call that 620a2e29 or
+d265af82 lacks fails there. ADR 0141 says what the gate then keeps. The server's file of 0.10.0, which
 the copy follows, uses none: the two names it added, the type `Replay` and a slot's
 `term_length`, are both in 620a2e29.
 

@@ -13,7 +13,8 @@ says which calls it uses.
 
 The server takes Cavalry's crates from this repository by git, pinned to one commit.
 Brigade's `master` pins one commit, and each release of the server pins the one it was
-built with: the servers in production run server 0.9.0, built at 620a2e29.
+built with: the servers in production run server 0.10.0, built at d265af82, since
+2026-11-24, on directories that server 0.9.0, built at 620a2e29, wrote first.
 [What does Brigade's server rely on?](../explanation/what-brigades-server-relies-on.md)
 names the builds. A change on `master` that breaks what the server calls would be seen
 on the day Brigade moves its pin, long after the change. So each night at 06:43 UTC

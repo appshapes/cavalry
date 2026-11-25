@@ -202,9 +202,10 @@ candidate's soak are those two.
 
 Brigade's server is a Rust process that embeds the driver. Its ordered log, the
 feed, is one recorded publication. It depends on Cavalry by a git dependency pinned
-to one commit. Two teams' servers run its release 0.9.0 in production, built at
-620a2e29, `master` of 2026-11-12, each on a log directory it keeps. Its release 0.10.0
-of 2026-11-22 pins d265af82, and no server in production runs it yet.
+to one commit. Two teams' servers ran its release 0.9.0 in production, built at
+620a2e29, `master` of 2026-11-12, each on a log directory it keeps. Since 2026-11-24
+both run its release 0.10.0 of 2026-11-22, built at d265af82, each started in place on
+the directory that 0.9.0 wrote.
 
 - It uses the embedded driver, an exclusive publication in manual control mode
   created at a position, a subscription to its own feed, a recording for each run, a
@@ -222,9 +223,11 @@ of 2026-11-22 pins d265af82, and no server in production runs it yet.
   which a directory with no cluster member does not have, so it changes nothing a
   server's directory holds (ADR 0145). So such a directory opens under `master`. Since 2026-11-22,
   `conformance/upgrade/log-directory.sh` holds that in every pull request: it builds
-  the tree at 620a2e29, has it write a directory as a server writes its own, and
-  opens it in place under the tree under test
-  ([ADR 0141](../decisions/0141-open-in-place-a-log-directory-written-by-the-tree-that-servers-run-and-build-that-tree-on-every-run.md)).
+  the trees at 620a2e29 and d265af82, has them write the directories a server holds,
+  each tree's alone and the two in turn, and opens each in place under the tree under
+  test
+  ([ADR 0141](../decisions/0141-open-in-place-a-log-directory-written-by-the-tree-that-servers-run-and-build-that-tree-on-every-run.md),
+  [ADR 0156](../decisions/0156-hold-in-the-upgrade-gate-every-directory-a-server-holds-each-trees-alone-and-the-trees-in-turn.md)).
   Version 5 changes one thing a server's directory keeps: after `master`'s driver
   crashes, by its process or by its host, the driver's next start cuts the recording
   that the crash left live to the position it had synced. A power loss then leaves
@@ -307,8 +310,8 @@ What has landed:
   [ADR 0142](../decisions/0142-build-brigades-server-against-master-each-night-through-a-cargo-patch.md)).
   What Brigade's server runs is held in three places. `just test` runs the server's
   use of Cavalry, copied from its code call for call, in both shapes of its feed.
-  `just conformance` builds the tree at 620a2e29, has it write a log directory as a
-  server writes its own, and opens that directory in place under the tree under
+  `just conformance` builds the trees at 620a2e29 and d265af82, has them write the
+  log directories a server holds, and opens each in place under the tree under
   test. `.github/workflows/brigade-server.yml` builds the server at Brigade's
   `master` against this `master` at 06:43 UTC each night and runs the server's own
   suite, reported and not required. What was found: two things that the server's
