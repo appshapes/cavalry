@@ -958,6 +958,38 @@ func main() {
 	mustOK(client.StopRecording(recording.RecordingID))
 	recordingID := recording.RecordingID
 	mustOK(recording.Close())
+
+	// A count below zero never reaches the ABI (work item 465; clients/go/README.md, "What
+	// it must never do"; ADR 0164). As a size_t it would be a count near 2 ** 64: the claim
+	// would be refused for a length nobody gave, and the poll would run with no limit. The
+	// shim refuses each with the client's own code, and nothing is claimed or read.
+	refusedCount := func(what string, answer int64, wanted int64, err error, parameter string) {
+		var refused *cavalry.Error
+		if answer != wanted || !errors.As(err, &refused) || refused.Code != cavalry.ErrNegative ||
+			!strings.HasPrefix(refused.Message, parameter+": an int from 0 expected") ||
+			!strings.HasSuffix(refused.Message, "See clients/go/README.md#what-it-must-never-do") {
+			fail("%s answered %d with %v; expected %d with an *Error of code ErrNegative that names %s and the "+
+				"README's section", what, answer, err, wanted, parameter)
+		}
+	}
+	refusedCount("TryClaim(-1)", ipcPub.TryClaim(-1), cavalry.PublicationError, ipcPub.Err(), "length")
+	if ipcPub.Claim != nil {
+		fail("TryClaim(-1) left a claim of %d bytes", len(ipcPub.Claim))
+	}
+	polled, pollErr := ipcSub.Poll(func(body []byte, header *cavalry.Header) {
+		fail("Poll with a fragment limit of -1 handed a fragment over")
+	}, -1)
+	if pollErr != nil {
+		fail("Poll with a fragment limit of -1 returned the error %v, which is a handler's panic alone", pollErr)
+	}
+	refusedCount("Poll(handler, -1)", int64(polled), -1, ipcSub.Err(), "fragmentLimit")
+	image, imageErr := ipcSub.ImageAt(-1)
+	if image != nil {
+		fail("ImageAt(-1) gave an image")
+	}
+	refusedCount("ImageAt(-1)", 0, 0, imageErr, "index")
+	say("a claim of -1 bytes, a poll with a fragment limit of -1 and the image at index -1 refused before the ABI " +
+		"was called, each with the code ErrNegative and its parameter's name")
 	mustOK(ipcPub.Close())
 
 	edges(client)

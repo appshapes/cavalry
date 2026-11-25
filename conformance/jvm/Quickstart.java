@@ -70,6 +70,23 @@ public final class Quickstart {
         System.exit(1);
     }
 
+    /** A call with a count below zero: it must throw IllegalArgumentException, with the
+     * parameter's name first and the README's section last. */
+    static void refusedCount(String what, String parameter, Runnable call) {
+        try {
+            call.run();
+        } catch (IllegalArgumentException refused) {
+            String said = refused.getMessage();
+            if (!said.startsWith(parameter + ": an int from 0 to 2147483647 expected")
+                || !said.endsWith("See clients/jvm/README.md#what-it-must-never-do")) {
+                fail(what + " was refused with a message that does not name " + parameter + " and the README's section: "
+                    + said);
+            }
+            return;
+        }
+        fail(what + " was not refused before the ABI was called");
+    }
+
     static void say(String what) {
         System.out.println("conformance/jvm: " + what);
     }
@@ -729,6 +746,18 @@ public final class Quickstart {
             client.stopRecording(recording.recordingId());
             long recordingId = recording.recordingId();
             recording.close();
+
+            // A count below zero never reaches the ABI (work item 465; clients/jvm/README.md,
+            // "What it must never do"; ADR 0164). As a size_t it would be a count near 2 ** 64:
+            // the claim would be refused for a length nobody gave, and the poll would run with
+            // no limit. Each throws IllegalArgumentException, with its parameter's name.
+            refusedCount("tryClaim(-1)", "length", () -> ipcPub.tryClaim(-1));
+            refusedCount("poll(handler, -1)", "fragmentLimit", () -> ipcSub.poll((body, header) ->
+                fail("a poll with a fragment limit of -1 handed a fragment over"), -1));
+            refusedCount("imageAt(-1)", "index", () -> ipcSub.imageAt(-1));
+            if (ipcPub.claim() != null) fail("tryClaim(-1) left a claim");
+            say("a claim of -1 bytes, a poll with a fragment limit of -1 and the image at index -1 refused with "
+                + "IllegalArgumentException before the ABI was called, each with its parameter's name");
             ipcPub.close();
 
             edges(client);
