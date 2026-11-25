@@ -2217,7 +2217,10 @@ fn member_findings(
     // withholds, as that build's rule has it; at or past it, it votes, and is named all
     // the same, since a later build reads that floor and withholds until it clears it
     // (ADR 0161, ADR 0163): an upgrade waits on it.
-    let older_build = member.vote_floors_cleared.is_none();
+    // A member of this build registers its counts after its gauges, so one that is
+    // starting can show a floor and no cluster.vote_floors_cleared for a moment: its
+    // cluster.floor_answer, a gauge, tells it from an older build.
+    let older_build = member.vote_floors_cleared.is_none() && member.floor_answer.is_none();
     if member.standby != Some(1)
         && let Some(floor) = member.vote_floor
         && floor >= 0
@@ -2235,9 +2238,9 @@ fn member_findings(
             format!(
                 "its cluster.append_position {append}, at or past it, in a build before ADR \
                  0161, which votes now but never clears the floor: a later build reads it at \
-                 its start and withholds until it clears it, so start this member on a build \
-                 of ADR 0161 or later, which clears it once it has joined its leader's live \
-                 log, before an upgrade to version 3 of the cluster protocol"
+                 its start and withholds until it clears it, so start this member on the last \
+                 build of version 2 of the cluster protocol, of ADR 0161, which clears it once \
+                 it has joined its leader's live log, before an upgrade to version 3"
             )
         } else if member.floor_answer.is_some_and(|answer| answer < 0) {
             format!(

@@ -583,8 +583,12 @@ committed once a quorum, two of three, has it on disk.
   member starts again: [Promote a standby to a voter](promote-a-standby.md).
 - `WARN cluster.vote_floor`: this member took a leader with its log empty, and since
   it started it has not caught up past its vote floor and its leader's answer to its
-  present run, and joined its leader's live log. The line says one of four things:
+  present run, and joined its leader's live log. The line says one of five things:
   - how many bytes its `cluster.append_position` is short of its vote floor;
+  - that it runs a build before ADR 0161, which never clears its floor: start it on
+    the last build of version 2 of the cluster protocol before an upgrade to version 3,
+    since a build of version 3 withholds on that floor until a leader of version 3
+    answers it;
   - that no leader has answered it yet: a leader of a version of the cluster protocol
     before 3 answers none, so it waits for a leader of version 3 (see
     [Upgrade a cluster](upgrade-a-cluster.md));
@@ -609,10 +613,15 @@ committed once a quorum, two of three, has it on disk.
     new log directory, which gives up what that leader held.
   - When the members were upgraded all at once from a build before ADR 0161, each
     holds the floor that build stored and never cleared. With every voter running,
-    start again on the build before the member whose `cluster.append_position` is at
-    least every other's. It votes and stands once its log is at or past its floor,
-    and the others vote for it. Once they have joined its live log, upgrade it again
-    ([Upgrade a cluster](upgrade-a-cluster.md)).
+    start again on that build before ADR 0161 the member whose
+    `cluster.append_position` is at least every other's: it votes and stands once its
+    log is at or past its floor. Start the others on the last build of version 2 of
+    the cluster protocol, a build of ADR 0161, which votes for it by the one voting
+    case and clears its floor once it has joined that leader's live log, with no
+    answer needed. Then start that member on the same build of version 2, and once
+    every member's line has gone, upgrade to version 3 one member at a time
+    ([Upgrade a cluster](upgrade-a-cluster.md)). A member of version 3 started beside
+    a leader before version 3 would wait for an answer that never comes.
 
   If the bytes short stay the same while the cluster appends, its leader's log
   no longer begins at position 0, and it cannot catch up: start the cluster again as a
