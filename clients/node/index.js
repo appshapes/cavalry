@@ -719,7 +719,8 @@ class Publication {
    * every one exactly, a number those below 2^53 in magnitude, and a BigInt outside the int64
    * range is refused with RangeError. 0, or -1 with the ABI's error. */
   setReservedValue(value) { return addon.cavalry_buffer_claim_set_reserved_value(this._claim.buffer, value); }
-  /** Offer `message`, a Buffer or any typed array: the position after it, or a code below zero. */
+  /** Offer `message`, a Buffer or another typed array but a Float16Array: the position after
+   * it, or a code below zero. */
   offer(message) { return addon.cavalry_publication_offer(this.handle, message); }
   position() {
     const result = addon.cavalry_publication_position(this.handle);
@@ -993,7 +994,7 @@ class ClusterSession {
     this.sessionId = c.int64("session_id");
     this.maxMessageLength = c.size("max_message_length");
   }
-  /** Offer the leader `message`, a Buffer or any typed array, as a publication's `offer` takes
+  /** Offer the leader `message`, a Buffer or another typed array, as a publication's `offer` takes
    * them: the position after it, or a result code below zero. ERROR with CAVALRY_ERR_TOO_LONG
    * as the thread's error is a message longer than `maxMessageLength`, and CLOSED a session
    * that is closed, for the reason `closed()` gives, or whose client is. From inside this
@@ -1103,7 +1104,7 @@ class ClusterService {
     this._state = addon.registerClusterService(this._entry);
     this._entry._state = this._state;
   }
-  /** From inside the handler: send `message`, a Buffer or any typed array, to the session
+  /** From inside the handler: send `message`, a Buffer or another typed array, to the session
    * `sessionId`, with the leadership term id and the cluster's time of the entry being
    * handled, and return what became of the reply, one of `CAVALRY_CLUSTER_REPLY_*`, never
    * throwing for a code. `_SENT`: it is on its way, or an earlier handling of the same entry
