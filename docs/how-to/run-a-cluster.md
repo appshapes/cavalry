@@ -376,7 +376,14 @@ committed once a quorum, two of three, has it on disk.
   This holds for a recording that this version's driver was making. A driver of an
   earlier version, version 4 of the durable log or before, kept no synced position,
   so a recording it was making when the power was lost cannot be cut. No release of
-  Cavalry carries such a driver: it is a build of `master` from before 2026-11-22.
+  Cavalry carries such a driver: it is a build of `master` that does not hold commit
+  dfbbe930, `287: Cut a recording a crash left live to the position it had synced`,
+  of 2026-11-22. The date alone does not tell: `master` has earlier commits of that
+  day. In the checkout the driver was built from, at the commit it was built at,
+  `git merge-base --is-ancestor dfbbe930 HEAD` exits with 0 when the build holds
+  that commit. It exits with 1, or prints a `fatal:` line and exits with 128, for
+  such a build. A shallow checkout lacks old commits and prints `fatal:` for any
+  build: run `git fetch --unshallow` in it first.
   When the member ran such a driver at the loss, do not start it on that log
   directory again, even under a newer driver: start it on a new log directory, as
   for a directory with no `log-recordings` file, above.
