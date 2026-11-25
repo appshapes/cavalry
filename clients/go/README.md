@@ -157,9 +157,8 @@ service)` for each committed entry, in order:
 - `entry` is a `*ClusterEntryValues`: `entry.Type`, one of `ClusterEntrySessionMessage`,
   `ClusterEntrySessionOpen`, `ClusterEntrySessionClose`, `ClusterEntryNewLeadershipTerm`,
   `ClusterEntryOther`, `ClusterEntrySnapshot` and `ClusterEntryTimer`, a timer of the
-  program's with its id in `entry.CorrelationID`, which this package's programs are
-  handed none of yet, since it does not wrap the calls that schedule one;
-  `entry.Position`;
+  program's that is due, with its id in `entry.CorrelationID`, which is 0 for every
+  other entry ("A service's timers", below); `entry.Position`;
   `entry.LeadershipTermID`;
   `entry.Timestamp`, the cluster's time, the one clock a service reads, so that every
   member's service reaches the same state; `entry.SessionID`, −1 where the entry has
@@ -169,13 +168,19 @@ service)` for each committed entry, in order:
   `ClusterEntrySnapshot` is the leader's request for a snapshot: the poll ends after
   it, and the program gives its state to `service.Snapshot` before its next poll ("A
   service's snapshot and its start", below).
-- `service` is the service that was polled, for `service.Reply`.
+- `service` is the service that was polled, for `service.Reply`,
+  `service.ScheduleTimer` and `service.CancelTimer`.
 
 What the handler returns says what becomes of the entry. `ActionContinue` takes it,
 and the poll goes on. `ActionBreak` takes it and ends the poll. `ActionAbort` leaves it
 and ends the poll, and the next poll hands it over again. The poll returns the count
-of entries taken, or −1 when it stopped on a fault, with `service.Err()` saying why
-and `service.Fault()` giving the fault until the next poll.
+of entries taken, or −1 when it stopped, on a fault or at a client its driver closed,
+with `service.Err()` saying why and `service.Fault()` giving the fault until the next
+poll. A poll with a client its driver closed, as when the member's driver has stopped,
+is −1 with `ErrClosed` as both, at every poll, so a program's loop ends on it (ADR
+0155). A poll the ABI refuses before it reads is −1 too, with `service.Err()` saying
+why, and leaves `service.Fault()` as it was: a poll after the program's own
+`client.Close()` and a poll from inside a handler of the same service among them.
 
 `service.Reply(sessionID, message)` answers a session from inside the handler and
 returns what became of the reply: `ClusterReplySent`; `ClusterReplyNotAnswering`, from
@@ -203,6 +208,77 @@ The service's `Poll` and its `Close` are calls on the client the service was mad
 (`spec/c-abi.md`, "Functions", cluster service; ADR 0123; ADR 0124).
 `conformance/go/cluster` is a program that runs three services and a session through
 every call above.
+
+### A service's timers
+
+A program that must act at a time, a session it gives up on or an order that
+expires, asks for a timer. It never reads a clock of its own: every member's
+service must reach the same state, and the cluster's time is the one clock they
+share. From inside the handler:
+
+- `service.ScheduleTimer(correlationID, deadline)` schedules the timer
+  `correlationID`, any `int64` the program chooses, for `deadline`, in the cluster's
+  time, the clock of `entry.Timestamp`, in milliseconds. It returns
+  `ClusterTimerScheduled`: the timer is pending with that deadline, whether the id
+  was pending before or not. Or it returns `ClusterTimerRefused`: the service holds
+  its 1,024 pending timers, the id is none of them, and nothing changed.
+- `service.CancelTimer(correlationID)` makes the timer pending no more, and returns
+  0, whether it was pending or not.
+
+When the deadline has come, the handler is handed an entry whose `entry.Type` is
+`ClusterEntryTimer` and whose `entry.CorrelationID` is the timer's id, with a `nil`
+`body`. Every member's service is handed it once, at one position of the log,
+never before its deadline and never after its cancel. `entry.Timestamp` is the
+leader's clock when it appended the timer's entry, at or after the deadline: later
+by as long as the leader's member took to be told of the timer and to reach it,
+and by more where the cluster had no leader meanwhile. The handler is called later
+again, once the entry is committed and read. A timer that repeats is scheduled
+again by the handling of its own entry. A deadline at or before the entry's time
+is due at once.
+
+```go
+func onEntry(body []byte, entry *cavalry.ClusterEntryValues, service *cavalry.ClusterService) int32 {
+	switch entry.Type {
+	case cavalry.ClusterEntrySessionOpen:
+		// Give the session a minute, by the cluster's clock, under an id of its own.
+		service.ScheduleTimer(entry.SessionID, entry.Timestamp+60000)
+	case cavalry.ClusterEntrySessionClose:
+		service.CancelTimer(entry.SessionID)
+	case cavalry.ClusterEntryTimer:
+		expire(entry.CorrelationID) // the program's own: the minute is over
+	}
+	return cavalry.ActionContinue
+}
+```
+
+Three rules come with them (`spec/cluster.md`, "The service", "Timers"; ADR 0151;
+ADR 0157). An id and a deadline are `int64`, which is the ABI's own type, so the
+compiler holds what the Python and the Node clients check at the call.
+
+- **Only inside the handler.** The timers are then a function of the entries
+  taken, as the program's state is, and the same beside every member. From
+  outside the handler both calls return −1, and `service.Err()` says
+  `ErrClusterNoEntry`. A handler that returns `ActionAbort`, or panics, is handed
+  its entry again with every timer as it was before that handling. The timers are
+  part of what `service.Snapshot` writes and `service.Restore` reads, with no call
+  of the program's.
+- **At most 1,024 pending.** A program with more deadlines than that keeps them
+  in its own state and schedules one timer, for the earliest: when it is handed
+  that timer it acts on every deadline that has come and schedules the timer
+  again for the earliest that is left.
+- **Every member at version 2 first.** A program schedules its first timer only
+  once every member of its cluster, with the service beside it, runs version 2 of
+  the cluster protocol, and from that entry on no member is stepped back to
+  version 1 (`docs/how-to/upgrade-a-cluster.md`): a service of version 1 hands its
+  program no timer, so its program would compute another state from the same log.
+
+Both calls are one cgo call each, to `shim.c`'s one ABI call, which allocates
+nothing and waits for nothing. What they changed is told to the service's member
+by the poll, once the handler has taken the entry, and the poll in which a program
+first schedules a timer sends six commands more, once in a service's life ("The
+call"). `conformance/go/cluster` schedules timers and cancels one beside three
+members; what it holds, and what rests on the library's own tests, is in
+`conformance/README.md`.
 
 ### A service's snapshot and its start
 
@@ -286,7 +362,8 @@ beside three members.
   reads the per-message functions of `cavalry.go` and `trampoline.go`, the claim, the
   reserved value, the commit, the abort, the offer, a subscription's and a committed
   log's poll, the header's values and the trampoline, a cluster session's offer and
-  poll, a cluster service's poll and reply, the two functions that call their
+  poll, a cluster service's poll and reply and the schedule and the cancel of its
+  timers, the two functions that call their
   handlers and the two exported functions the C trampolines call, for Go's forms of each (`sync`, a lock or a wait through a variable
   or a field, such as `registryMu.Lock()`, which names no `sync.`, a `go` statement, a
   channel send or receive, `select`, `panic`, and `make`, `new` and `append`), and
@@ -298,7 +375,8 @@ beside three members.
   `PublicationBackPressured`, `PublicationAdminAction`, `PublicationClosed`,
   `PublicationMaxPositionExceeded`, `PublicationError`), as the ABI does; the caller
   branches. A cluster session's `Offer` returns the same codes, and a cluster
-  service's `Reply` returns its `ClusterReply*` code, or −1 from outside the handler.
+  service's `Reply` returns its `ClusterReply*` code, `ScheduleTimer` its
+  `ClusterTimer*` code and `CancelTimer` 0, or −1 from outside the handler.
 - Never swallow the handler's panic, or a fragment: a fragment handler that panics
   keeps every later fragment of that poll reaching the handler, and `Poll` returns a
   `*HandlerError` once the ABI has returned, with the first panic's value as its
@@ -465,11 +543,19 @@ blocks in the call and the scheduler runs the program's other goroutines meanwhi
 A cluster service's `Poll` is the one per-message function that can wait for the
 driver. It sends commands with the service's client when it opens the member's log,
 at a session's opening, where a term's leader changes and at a recording's end, and
-it waits for each answer in the call, as an add does; a session message costs no
-command. The runner's cluster round reports the waits. On this laptop (Apple M5 Pro),
-in each of 25 runs, 4 of about 17,900 polls of three services took over 1 ms. The
-longest, in 23 of the runs a poll that opened a member's log, took 7.2 to 11.5 ms.
-The program's other goroutines run meanwhile.
+six more once in a service's life, at the most, its five counters and its
+publication to its member, in the poll in which its program first schedules a timer
+or the service first passes a timer event over. It waits for each answer in the
+call, as an add does; a session message costs no command. A driver that refuses one
+of the six is that poll's −1, after the entries its handler took are taken, and the
+service adds them again at a later poll (ADR 0159). What a service tells its member
+of its timers after that, each pending timer again every second among it, is
+offered and waits for nothing. The runner's cluster round reports the waits. On this
+laptop (Apple M5 Pro), in each of 10 runs, MEASURED_COUNT polls of three services
+took over 1 ms, where 4 of about 17,900 did in each of 25 runs before the round
+scheduled a timer. The report names the longest poll alone: MEASURED_LONGEST, where
+the longest before, in 23 of the 25 runs a poll that opened a member's log, took 7.2
+to 11.5 ms. The program's other goroutines run meanwhile.
 
 ### Threads
 
