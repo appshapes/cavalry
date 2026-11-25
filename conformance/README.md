@@ -48,9 +48,10 @@ first timer, some 25 ms on a laptop and more on a busy host, so the event of a
 timer that was wrongly due at once is stamped about as late as a deadline of 50 ms,
 which these rounds had first: 49 ms after the message in a run of the Python
 round. The five clients' rounds print what that was in their own run, the time of
-their timers that were due at once, beside the deadline: 38 to 61 ms across them
-on a laptop, the .NET round's the latest, since it sleeps a millisecond between
-its duty cycles. Those five rounds
+their timers that were due at once, beside the deadline. In the runs made on a
+laptop for work item 419 it was 38 to 68 ms, the .NET
+round's the latest, since it sleeps a millisecond between its duty cycles; no
+run's number is a bound. Those five rounds
 hold more of the client's own: a second schedule of the timer sets its deadline,
 where its first was an hour away; a second timer, due at once and cancelled in
 the same handling, is handed to none; the least and the greatest int64, scheduled

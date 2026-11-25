@@ -68,9 +68,9 @@ public static class ClusterRound
     // second: a service tells its member of a timer only once the poll that took the entry
     // has sent the six commands of its first timer, some 25 ms on a laptop and more on a
     // busy host, so the event of a timer that was wrongly due at once is stamped tens of
-    // milliseconds after the message, 38 to 61 ms in the five clients' rounds on a laptop,
-    // this one's the latest, and a margin of that size would let it pass. The round prints
-    // what it was in its own run.
+    // milliseconds after the message, 38 to 68 ms in the five clients' rounds as they were
+    // run on a laptop, this one's the latest, and a margin of that size would let it pass.
+    // The round prints what it was in its own run.
     const long TIMER_AFTER_MS = 1000;
     const long HOUR_MS = 3_600_000; // the deadline its first schedule gives it, which the second replaces
     const int REFRESH_MILLISECONDS = 1200; // a timer refresh interval of spec/cluster.md, "Values", 1 s, and more
