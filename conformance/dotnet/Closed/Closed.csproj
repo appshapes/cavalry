@@ -1,0 +1,21 @@
+<!-- conformance/dotnet's closed round (conformance/README.md): a console program over the
+     library at clients/dotnet, run by run.sh last, against its first driver. -->
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <TargetFramework>net10.0</TargetFramework>
+    <RootNamespace>ClosedRound</RootNamespace>
+    <AssemblyName>Closed</AssemblyName>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>disable</ImplicitUsings>
+    <TreatWarningsAsErrors>true</TreatWarningsAsErrors>
+    <InvariantGlobalization>true</InvariantGlobalization>
+    <SatelliteResourceLanguages>en</SatelliteResourceLanguages>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="../../../clients/dotnet/Cavalry.csproj" />
+  </ItemGroup>
+
+</Project>

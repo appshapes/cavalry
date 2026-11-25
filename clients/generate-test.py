@@ -3294,6 +3294,17 @@ class DotnetPackage(unittest.TestCase):
         self.assertIn("public delegate void ReplyHandler(ReadOnlySpan<byte> body, ClusterReplyValues reply);\n", handlers)
         self.assertIn("public delegate int ServiceHandler(ReadOnlySpan<byte> body, ClusterEntryValues entry, "
                       "ClusterService service);\n", handlers)
+        # A service's timers (ADR 0157): one ABI call each, with the arguments as given.
+        service = files["ClusterService.cs"]
+        self.assertIn("    public int ScheduleTimer(long correlationId, long deadline)\n    {\n"
+                      "        return Abi.cavalry_cluster_service_schedule_timer(handle, correlationId, deadline);\n    }\n",
+                      service)
+        self.assertIn("    public int CancelTimer(long correlationId)\n    {\n"
+                      "        return Abi.cavalry_cluster_service_cancel_timer(handle, correlationId);\n    }\n", service)
+        self.assertIn("internal static partial int cavalry_cluster_service_schedule_timer(nint service, long correlation_id, "
+                      "long deadline);", files["Abi.cs"])
+        self.assertIn("internal static partial int cavalry_cluster_service_cancel_timer(nint service, long correlation_id);",
+                      files["Abi.cs"])
         self.assertEqual(sorted(gen_dotnet.PER_MESSAGE_DOTNET), sorted(lint.RULES["dotnet"]["functions"]))
         self.assertEqual(sorted(lint.RULES["dotnet"]["files"]), sorted(name for name in files if name.endswith(".cs")))
 

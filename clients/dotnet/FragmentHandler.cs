@@ -31,7 +31,8 @@ public delegate void ReplyHandler(ReadOnlySpan<byte> body, ClusterReplyValues re
 /// <paramref name="body"/> is a session message's payload, a span over the log's bytes,
 /// valid for the call, and empty for every other entry; <paramref name="entry"/> is the
 /// entry's values; and <paramref name="service"/> is the service that was polled, for its
-/// <see cref="ClusterService.Reply"/>. What it returns is the entry's action:
+/// <see cref="ClusterService.Reply"/>, <see cref="ClusterService.ScheduleTimer"/> and
+/// <see cref="ClusterService.CancelTimer"/>. What it returns is the entry's action:
 /// <see cref="Abi.ACTION_CONTINUE"/> takes the entry and the poll goes on,
 /// <see cref="Abi.ACTION_BREAK"/> takes it and ends the poll, and
 /// <see cref="Abi.ACTION_ABORT"/> leaves it, ends the poll, and has the next poll hand it

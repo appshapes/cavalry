@@ -6,11 +6,9 @@ the claim, the
 reserved value, the commit and abort, the offer, the poll and the header's values, and
 the committed log's poll and an entry's position, ADR 0070, and the seven of a cluster
 session and a cluster service, the session's offer, its poll and a reply's values, and
-the service's poll, an entry's values, its reply and its action, ADR 0124, in every
-client, and the schedule and the cancel of a service's timer, ADR 0157, in the Python
-client, the Node client, the Go client and the JVM client, the four that wrap them) and each
-trampoline that
-calls the user's handler, hold no lock, no `await` and no raise, in the language's
+the service's poll, an entry's values, its reply and its action, ADR 0124, and the
+schedule and the cancel of a service's timer, ADR 0157, in every client) and each
+trampoline that calls the user's handler, hold no lock, no `await` and no raise, in the language's
 forms, and so does every function of the package they call. For Python those
 forms are `threading`'s locks and anything else of `threading`, `async def`, `await`,
 `raise`, and building one of the package's own exceptions. One raise is not one, as a
@@ -400,15 +398,18 @@ RULES = {
             "CommittedLog.Deliver",
             # A cluster session and a cluster service (ADR 0124): the session's offer, its
             # poll, its trampoline and the method that calls the handler, which reads each
-            # reply's values; the service's poll, its reply, its trampoline and the method
-            # that calls the handler, which reads each entry's values and passes the ABI the
-            # action the handler returned; and the getters of the two objects of values.
+            # reply's values; the service's poll, its reply, the schedule and the cancel of
+            # its timers (ADR 0157), its trampoline and the method that calls the handler,
+            # which reads each entry's values and passes the ABI the action the handler
+            # returned; and the getters of the two objects of values.
             "ClusterSession.Offer",
             "ClusterSession.Poll",
             "ClusterSession.OnReply",
             "ClusterSession.Deliver",
             "ClusterService.Poll",
             "ClusterService.Reply",
+            "ClusterService.ScheduleTimer",
+            "ClusterService.CancelTimer",
             "ClusterService.OnClusterEntry",
             "ClusterService.Deliver",
             "ClusterReplyValues.LeadershipTermId",

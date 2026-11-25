@@ -259,9 +259,8 @@ The client API implementation, re-exported by the `cavalry` crate. Data plane.
   back: a service of version 1 hands its program no timer, so the two would
   compute two states from one log (`spec/cluster.md`, "Versions and the upgrade"). A service
   written through the C ABI has the same timers at version 7 of the ABI
-  (`cavalry_cluster_service_schedule_timer`; ADR 0157), and so have the services of
-  the Python, Node, Go and JVM clients (each client's README, "A service's timers");
-  the .NET package does not wrap them yet.
+  (`cavalry_cluster_service_schedule_timer`; ADR 0157), and so has the service of
+  each of the five clients (each client's README, "A service's timers").
 - Starts a service from its snapshot: `ClusterService::restore(client)`, called
   before the first poll, asks the member for the newest snapshot of a service that
   it lists, plays its recording back through the member's driver, and answers

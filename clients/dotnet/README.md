@@ -155,8 +155,8 @@ service)` for each committed entry, in order:
 - `entry` is a `ClusterEntryValues`: `entry.Type`, one of
   `Abi.CLUSTER_ENTRY_SESSION_MESSAGE`, `_SESSION_OPEN`, `_SESSION_CLOSE`,
   `_NEW_LEADERSHIP_TERM`, `_OTHER`, `_SNAPSHOT` and `_TIMER`, a timer of the program's
-  with its id in `entry.CorrelationId`, which this package's programs are handed
-  none of yet, since it does not wrap the calls that schedule one; `entry.Position`;
+  that is due, with its id in `entry.CorrelationId`, which is 0 for every other
+  entry ("A service's timers", below); `entry.Position`;
   `entry.LeadershipTermId`;
   `entry.Timestamp`, the cluster's time, the one clock a service reads, so that every
   member's service reaches the same state; `entry.SessionId`, −1 where the entry has
@@ -166,13 +166,19 @@ service)` for each committed entry, in order:
   `_SNAPSHOT` is the leader's request for a snapshot: the poll ends after it, and
   the program gives its state to `service.Snapshot` before its next poll ("A
   service's snapshot and its start", below).
-- `service` is the service that was polled, for `service.Reply`.
+- `service` is the service that was polled, for `service.Reply`,
+  `service.ScheduleTimer` and `service.CancelTimer`.
 
 What the handler returns says what becomes of the entry. `Abi.ACTION_CONTINUE` takes
 it, and the poll goes on. `Abi.ACTION_BREAK` takes it and ends the poll.
 `Abi.ACTION_ABORT` leaves it and ends the poll, and the next poll hands it over again.
-The poll returns the count of entries taken, or −1 when it stopped on a fault, which
-`service.GetFault()` gives until the next poll.
+The poll returns the count of entries taken, or −1 when it stopped, on a fault or at
+a client its driver closed, which `service.GetFault()` gives until the next poll. A
+poll with a client its driver closed, as when the member's driver has stopped, is −1
+with `Abi.ERR_CLOSED` as the fault's code, at every poll, so a program's loop ends on
+it (ADR 0155). A poll the ABI refuses before it reads is −1 too, and leaves
+`service.GetFault()` as it was: a poll after the program's own `client.Close()` and a
+poll from inside a handler of the same service among them.
 
 `service.Reply(sessionId, message)` answers a session from inside the handler and
 returns what became of the reply: `Abi.CLUSTER_REPLY_SENT`;
@@ -200,6 +206,83 @@ The service's `Poll` and its `Close` are calls on the client the service was mad
 `IDisposable`; close a service before its client (`spec/c-abi.md`, "Functions",
 cluster service; ADR 0123; ADR 0124). `conformance/dotnet/Cluster/Program.cs` is a
 program that runs three services and a session through every call above.
+
+### A service's timers
+
+A program that must act at a time, a session it gives up on or an order that
+expires, asks for a timer. It never reads a clock of its own: every member's
+service must reach the same state, and the cluster's time is the one clock they
+share. From inside the handler:
+
+- `service.ScheduleTimer(correlationId, deadline)` schedules the timer
+  `correlationId`, any `long` the program chooses, for `deadline`, in the cluster's
+  time, the clock of `entry.Timestamp`, in milliseconds. It returns
+  `Abi.CLUSTER_TIMER_SCHEDULED`: the timer is pending with that deadline, whether
+  the id was pending before or not. Or it returns `Abi.CLUSTER_TIMER_REFUSED`: the
+  service holds its 1,024 pending timers, the id is none of them, and nothing
+  changed.
+- `service.CancelTimer(correlationId)` makes the timer pending no more, and returns
+  0, whether it was pending or not.
+
+When the deadline has come, the handler is handed an entry whose `entry.Type` is
+`Abi.CLUSTER_ENTRY_TIMER` and whose `entry.CorrelationId` is the timer's id, with
+an empty `body`. Every member's service is handed it once, at one position of the
+log, never before its deadline and never after its cancel. `entry.Timestamp` is
+the leader's clock when it appended the timer's entry, at or after the deadline:
+later by as long as the leader's member took to be told of the timer and to reach
+it, and by more where the cluster had no leader meanwhile. The handler is called
+later again, once the entry is committed and read. A timer that repeats is
+scheduled again by the handling of its own entry. A deadline at or before the
+entry's time is due at once.
+
+```csharp
+static int OnEntry(ReadOnlySpan<byte> body, ClusterEntryValues entry, ClusterService service)
+{
+    switch (entry.Type)
+    {
+        case Abi.CLUSTER_ENTRY_SESSION_OPEN:
+            // Give the session a minute, by the cluster's clock, under an id of its own.
+            service.ScheduleTimer(entry.SessionId, entry.Timestamp + 60_000);
+            break;
+        case Abi.CLUSTER_ENTRY_SESSION_CLOSE:
+            service.CancelTimer(entry.SessionId);
+            break;
+        case Abi.CLUSTER_ENTRY_TIMER:
+            Expire(entry.CorrelationId); // the program's own: the minute is over
+            break;
+    }
+    return Abi.ACTION_CONTINUE;
+}
+```
+
+Three rules come with them (`spec/cluster.md`, "The service", "Timers"; ADR 0151;
+ADR 0157). An id and a deadline are `long`, which is the ABI's own type, so the
+compiler holds what the Python and the Node clients check at the call.
+
+- **Only inside the handler.** The timers are then a function of the entries
+  taken, as the program's state is, and the same beside every member. From
+  outside the handler both calls return −1, with `Abi.ERR_CLUSTER_NO_ENTRY` as
+  `Abi.Errcode()`. A handler that returns `Abi.ACTION_ABORT`, or throws, is handed
+  its entry again with every timer as it was before that handling. The timers are
+  part of what `service.Snapshot` writes and `service.Restore` reads, with no call
+  of the program's.
+- **At most 1,024 pending.** A program with more deadlines than that keeps them
+  in its own state and schedules one timer, for the earliest: when it is handed
+  that timer it acts on every deadline that has come and schedules the timer
+  again for the earliest that is left.
+- **Every member at version 2 first.** A program schedules its first timer only
+  once every member of its cluster, with the service beside it, runs version 2 of
+  the cluster protocol, and from that entry on no member is stepped back to
+  version 1 (`docs/how-to/upgrade-a-cluster.md`): a service of version 1 hands its
+  program no timer, so its program would compute another state from the same log.
+
+Both calls are one ABI call each, which allocates nothing and waits for nothing.
+What they changed is told to the service's member by the poll, once the handler
+has taken the entry, and the poll in which a program first schedules a timer
+sends six commands more, once in a service's life ("The call").
+`conformance/dotnet/Cluster` schedules timers and cancels one beside three
+members; what it holds, and what rests on the library's own tests, is in
+`conformance/README.md`.
 
 ### A service's snapshot and its start
 
@@ -286,7 +369,7 @@ program that runs every call above beside three members.
   the handler. `clients/lint.py` reads the per-message members of `Publication`,
   `Subscription`, `CommittedLog`, `ClusterSession`, `ClusterService` and `Header`, the
   claim, its span, the reserved value, the commit, the abort, the offer, a session's
-  offer and a service's reply, each poll, the header's nine getters, the getters of a
+  offer and a service's reply and the schedule and the cancel of its timers, each poll, the header's nine getters, the getters of a
   reply's values and of an entry's, and each
   trampoline that calls a handler, for C#'s forms of each: `lock`, `Monitor`, `Mutex`, `Semaphore`,
   `SpinLock` and the other waits of `System.Threading`, `async`, `await`, `Task`,
@@ -302,8 +385,8 @@ program that runs every call above beside three members.
   `PUBLICATION_BACK_PRESSURED`, `PUBLICATION_ADMIN_ACTION`, `PUBLICATION_CLOSED`,
   `PUBLICATION_MAX_POSITION_EXCEEDED`, `PUBLICATION_ERROR`), as the ABI does; the
   caller branches. A cluster session's `Offer` returns the same codes, and a cluster
-  service's `Reply` returns its `Abi.CLUSTER_REPLY_*` code, or −1 from outside the
-  handler.
+  service's `Reply` returns its `Abi.CLUSTER_REPLY_*` code, `ScheduleTimer` its
+  `Abi.CLUSTER_TIMER_*` code and `CancelTimer` 0, or −1 from outside the handler.
 - Never write into a received body: the handler's `body` is a `ReadOnlySpan<byte>`, so
   the compiler refuses a write, which is what the log allows, since the subscriber maps
   it read-only and a write through it would end the process.
@@ -446,10 +529,20 @@ waits until the leader has opened the session, 20 s at most.
 A cluster service's `Poll` is the one per-message method that can wait for the
 driver. It sends commands with the service's client when it opens the member's log,
 at a session's opening, where a term's leader changes and at a recording's end, and
-it waits for each answer in the call, as an add does; a session message costs no
-command. The runner's cluster round reports the waits. On this laptop (Apple M5 Pro,
-.NET 10.0.9), in each of 25 runs, 5 or 6 of about 3,800 polls of three services took
-over 1 ms. The longest took 8.0 to 11.5 ms. The round sleeps 1 ms between its duty
+six more once in a service's life, at the most, its five counters and its
+publication to its member, in the poll in which its program first schedules a timer
+or the service first passes a timer event over. It waits for each answer in the
+call, as an add does; a session message costs no command. A driver that refuses one
+of the six is that poll's −1, after the entries its handler took are taken, and the
+service adds them again at a later poll (ADR 0159). What a service tells its member
+of its timers after that, each pending timer again every second among it, is
+offered and waits for nothing. The runner's cluster round reports the waits. On this
+laptop (Apple M5 Pro, .NET 10.0.9), in each of 10 runs, 8 of about 7,800 polls of
+three services took over 1 ms, where 5 or 6 of about 3,800 did in each of 25 runs
+before the round scheduled a timer. The report names the longest poll alone: in
+every run it was a poll in which a service's program first scheduled a timer, 23.8
+to 36.9 ms with its six commands, where the longest before took 8.0 to 11.5 ms. The
+round sleeps 1 ms between its duty
 cycles, the shortest sleep `Thread.Sleep` makes, so it counts fewer polls than another
 client's round, which sleeps 200 µs.
 

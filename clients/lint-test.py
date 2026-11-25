@@ -1564,6 +1564,29 @@ class Clients(unittest.TestCase):
                            ("ClusterEntryValues.TimedOut", "allocates byte with `new`")):
             self.assertTrue(any(f.startswith(f"dotnet: {name} ") and form in f for f in found), (name, found))
 
+    def test_a_throw_in_a_dotnet_services_timer_members_fails_and_so_does_a_missing_one(self):
+        """ScheduleTimer and CancelTimer return a code (ADR 0157): neither checks and
+        throws, and both are held to the rules by name."""
+        self.edit_dotnet("    public int ScheduleTimer(long correlationId, long deadline)\n    {\n",
+                         "    public int ScheduleTimer(long correlationId, long deadline)\n    {\n        Abi.Check(\"x\", -1);\n",
+                         file="ClusterService.cs")
+        self.edit_dotnet("    public int CancelTimer(long correlationId)\n    {\n",
+                         "    public int CancelTimer(long correlationId)\n    {\n        Abi.Check(\"x\", -1);\n",
+                         file="ClusterService.cs")
+        found = lint.findings(self.tmp)
+        self.assertEqual(len(found), 2, found)
+        for name in ("ClusterService.ScheduleTimer", "ClusterService.CancelTimer"):
+            self.assertTrue(any(f.startswith(f"dotnet: {name} ") and "calls Abi.Check" in f for f in found), (name, found))
+        self.setUp()
+        self.edit_dotnet("    public int ScheduleTimer(long correlationId, long deadline)\n",
+                         "    public int Schedule(long correlationId, long deadline)\n", file="ClusterService.cs")
+        self.edit_dotnet("    public int CancelTimer(long correlationId)\n",
+                         "    public int Cancel(long correlationId)\n", file="ClusterService.cs")
+        found = lint.findings(self.tmp)
+        self.assertEqual(len(found), 2, found)
+        for name in ("ClusterService.ScheduleTimer", "ClusterService.CancelTimer"):
+            self.assertTrue(any(f"{name} is not in" in f for f in found), (name, found))
+
     def test_a_missing_dotnet_cluster_member_fails(self):
         """A cluster session's and a cluster service's per-message members are held to the
         rules by name, as the others are (ADR 0124)."""
