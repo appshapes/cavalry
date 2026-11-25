@@ -245,8 +245,8 @@ resolve() {
 # On CI's macOS runner, when no CAVALRY_DIRECTORY_FROM is set, the gate builds 620a2e29
 # alone and writes server 0.9.0's directory alone, stopped and killed, as it did before
 # work item 441. With the three directories written all seven ways, that runner lost
-# communication with GitHub partway through `just conformance` in 2 of its first 4
-# jobs, and in none of the 60 runs before; the job then keeps no log and skips its
+# communication with GitHub partway through `just conformance` in 2 of 8 jobs, and in
+# none of the 60 runs before (ADR 0160); the job then keeps no log and skips its
 # later steps. Linux, which the servers in production run, writes all seven. ADR 0160
 # says why the exception stays, and work item 456 tracks the lost runner itself.
 on_macos_ci=
@@ -272,7 +272,7 @@ elif [ -n "$on_macos_ci" ]; then
     first=$full
     trees=$first
     directories="0.9.0=${first:0:8}:pinned"
-    say "the older build is ${first:0:8} alone, which Brigade's server 0.9.0 pins: on CI's macOS runner the gate writes server 0.9.0's directory alone, because with all seven that runner was lost partway through \`just conformance\` (work item 441)"
+    say "the older build is ${first:0:8} alone, which Brigade's server 0.9.0 pins: on CI's macOS runner the gate writes server 0.9.0's directory alone, because with all seven that runner was lost partway through \`just conformance\` (ADR 0160, work item 456)"
 else
     resolve "$zero_nine" "the commit Brigade's server 0.9.0 pins"
     first=$full

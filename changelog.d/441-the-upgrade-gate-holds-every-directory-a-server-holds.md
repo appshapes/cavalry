@@ -8,4 +8,7 @@
   killed. This tree then opens each in place and reads back every record left
   ([ADR 0156](docs/decisions/0156-hold-in-the-upgrade-gate-every-directory-a-server-holds-each-trees-alone-and-the-trees-in-turn.md);
   [conformance/README.md](conformance/README.md), "The log directory's upgrade gate";
-  work item 441).
+  work item 441). On CI's macOS runner alone, the gate writes server 0.9.0's directory
+  alone, as before: with all seven, that runner was lost in 2 of 8 jobs
+  ([ADR 0160](docs/decisions/0160-keep-the-log-directorys-gate-on-one-tree-on-cis-macos-runner-and-track-the-lost-runner-as-a-fault-of-its-own.md);
+  work item 456).

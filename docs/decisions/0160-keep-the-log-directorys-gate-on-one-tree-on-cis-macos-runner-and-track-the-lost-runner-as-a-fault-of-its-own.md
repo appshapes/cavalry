@@ -20,8 +20,10 @@ two of its first four jobs then lost their runner partway through `just conforma
 by any route. In `master`'s 60 runs before, no macOS job lost its runner.
 
 A lost runner turns `master` red, and it skips the macOS job's later steps:
-`just docs`, `just quickstart`, `just replay-check` and the bench. Each landing met it
-at about one chance in two. So pull request 352 (e7008334) had the script take its
+`just docs`, `just quickstart`, `just replay-check` and the bench. Over those first
+four jobs, each landing met it at about one chance in two; over the eight measured in
+CI's own order since, two lost, about one in four. So pull request 352 (e7008334) had
+the script take its
 one-tree form on CI's macOS runner alone. That is a gate weakened on one runner, and
 until now its reason has been only in a commit message. Its pages said that work item
 441 stays open "until they run on macOS again, or an ADR says why they do not". This
@@ -40,16 +42,17 @@ run by hand. The servers in production run Linux, and `gates (linux)` is the che
 pull request requires (ADR 0073).
 
 The lost runner becomes a fault of its own, work item 456, and work item 441 ends
-with this decision. The script's comment, `conformance/README.md` and
-`docs/explanation/what-brigades-server-relies-on.md` name that work item and this ADR,
-in place of "441 stays open".
+with this decision. The script's comment and the line it prints on that runner,
+`conformance/README.md`, `docs/explanation/what-brigades-server-relies-on.md`, row 9 of
+`docs/explanation/where-cavalry-is-and-what-is-left.md`, and work item 441's changelog
+entry name that work item and this ADR, in place of "441 stays open".
 
 ## Alternatives considered
 
 - **All seven on macOS, and run a lost job again.** Lost: a lost runner keeps no log.
   `master` is red until someone runs the job again, and in a lost job, docs,
   quickstart, replay-check and the bench do not run for that commit. At two losses in
-  seven jobs, about one landing in four would pay that.
+  eight jobs, about one landing in four would pay that.
 - **Leave work item 441 in Doing until the cause is found.** Lost: a work item parked
   in Doing reads as taken to the next session, and the experiment has no next step
   that is cheap. The fault's own work item carries the findings and what was not
@@ -73,16 +76,24 @@ watchdog sampled the runner every 15 or 30 s, and posted each sample off the run
 as a commit status. Markers, where an arm had them, were posted before each step of
 the gate.
 
-| Where the seven-directory gate ran | Runs | Runners lost |
+Each arm ran on a runner of its own, so a lost runner ended its own arm and no other.
+
+| Where the seven-directory gate ran, and the run | Runs | Runners lost |
 | --- | --- | --- |
-| CI's own job: `just lint`, `just test`, then `just conformance` (runs 45536355928, 45536715972, 45549149085, and round 5b's three, run 45563204036) | 7 | 2 |
-| The gate alone in a loop, no markers (test-times 45553732082; rounds 2, 3 and 4: runs 45556061823, 45558818935, 45560862496) | about 50 | 3 |
-| The gate alone, with a marker before each step, waited for or sent in the background (runs 45557226906 and 45558818935) | 32 | 0 |
-| The gate alone, with a pause of 10 ms before every program, or of 100 ms where d265af82 starts on what 620a2e29 left (run 45560862496) | 40 | 0 |
-| The directory written in turn alone, one arm for each ending, with markers (run 45557226906) | 24 | 0 |
-| 620a2e29 alone, and d265af82 alone in server 0.10.0's shape (run 45556061823) | 24 | 0 |
-| Linux, the gate alone in a loop (test-times 45553732082) | 15 | 0 |
-| This laptop: macOS 26.6.1 on arm64 hardware, 64 GiB, by hand and in `just conformance` | at least 10 | 0, and the machine was none the worse |
+| CI's own job, `just lint`, `just test`, then `just conformance`: run 45536355928's macOS job; 45536715972's, and that job run again; 45549149085's, and that job run again; round 5b's three arms, run 45563204036 | 8 jobs | 2: the first attempts of 45536715972 and 45549149085 |
+| The gate alone in a loop, no markers: test-times 45553732082 | at most 15 | 1 |
+| The same: round 2's seven arm, run 45556061823 | 4 | 1, in its fourth run |
+| The same: round 3's bare arm, run 45558818935 | 11 | 1, in its eleventh run |
+| The same: round 4's bare arm, on a runner first quiet, run 45560862496 | 20 | 0 |
+| The gate alone, a marker posted and answered before each step: run 45557226906's seven arm | 8 | 0 |
+| The gate alone, a marker sent in the background before each step: run 45558818935's two marker arms | 24 | 0 |
+| The gate alone, 10 ms before every program, or 100 ms where d265af82 starts on what 620a2e29 left: run 45560862496's two pause arms | 40 | 0 |
+| The directory written in turn alone, one arm for each ending, with markers: run 45557226906 | 24 | 0 |
+| 620a2e29 alone, and d265af82 alone in server 0.10.0's shape: run 45556061823 | 24 | 0 |
+| Linux, the gate alone in a loop: test-times 45553732082 | 15 | 0 |
+| This laptop, macOS 26.6.1 on arm64 hardware with 64 GiB, by hand and in `just conformance` | at least 10 | 0, and the machine was none the worse |
+
+The bare gate in a loop lost 3 runners in at most 50 runs.
 
 None of the counts where no loss was seen is large enough to show that its arm
 prevents the loss. At the bare loop's rate, about 3 in 50, zero losses in 24 or 40
