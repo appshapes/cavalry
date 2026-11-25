@@ -45,18 +45,21 @@ message it takes, for a second later, and all three are handed it once, as an
 entry of its own kind with the timer's id, at one position and no earlier than
 its deadline. The second is the check's margin: a service tells its member of a
 timer only once the poll that took the entry has sent the six commands of its
-first timer, 25 ms and more, so the event of a timer that was wrongly due at once
-is stamped tens of milliseconds after the message, and a deadline of 50 ms, which
-these rounds had first, would let it pass. The Python round and the Node round
+first timer, some 25 ms on a laptop and more on a busy host, so the event of a
+timer that was wrongly due at once is stamped about as late as a deadline of 50 ms,
+which these rounds had first: 49 ms after the message in a run of the Python
+round. The Python round and the Node round print what that was in their own run,
+the time of their timers that were due at once, beside the deadline. The Python
+round and the Node round
 hold more of the client's own: a second schedule of the timer sets its deadline,
 where its first was an hour away; a second timer, due at once and cancelled in
 the same handling, is handed to none; the least and the greatest int64, scheduled
 as ids, are handed back as they are, and in the Node round the least and the
 greatest integer a number carries exactly; both calls are refused from outside
 the handler, and an id or a deadline that is no int64 before the ABI is called,
-in Node a number with a fraction or outside those integers among them; and no
-timer is handed to a service a second time in a timer refresh interval and
-more. What a runner does not hold of a service's timers rests on the library's
+in Node a number with a fraction or outside those integers among them, from
+inside the handler too; and no timer is handed to a service a second time in a
+timer refresh interval and more. What a runner does not hold of a service's timers rests on the library's
 tests, which every client reaches through the same ABI: the bound of 1,024 and
 the refusal at it, a handling that is not taken leaving every timer as it was, a
 timer event passed over and counted, a cancel of a timer whose event is in the

@@ -69,11 +69,13 @@ const SCHEDULED = constants.CAVALRY_CLUSTER_TIMER_SCHEDULED;
 const TIMER_MESSAGE = "timer"; // the message at which each service's program schedules its timers
 const TIMER_ID = 77; // the timer that is handed over, scheduled as a number and handed back as 77n
 const CANCELLED_ID = 78; // the timer that is scheduled and cancelled in the same handling
-// How long after the message's entry the timer is due. A second, and not the C round's 50 ms:
-// a member is told of a timer only once the poll that took the entry has sent its six
-// commands, some 25 ms on a laptop and more on a busy host, so an event for a timer that was
-// wrongly due at once is stamped tens of milliseconds after the message, and a margin of 50
-// would let it pass.
+// How long after the message's entry the timer is due. A second, and not the 50 ms the C
+// round and the Python round had first: a service tells its member of a timer only once the
+// poll that took the entry has sent the six commands of its first timer, some 25 ms on a
+// laptop and more on a busy host, so the event of a timer that was wrongly due at once is
+// stamped about as late as a deadline of 50 ms, 49 ms after the message in a run of the
+// Python round, and that margin would let it pass. The round prints what it was in its own
+// run.
 const TIMER_AFTER_MS = 1000;
 const SAFE = Number.MAX_SAFE_INTEGER; // the greatest integer a number carries exactly, and an id here
 const HOUR_MS = 3600000; // the deadline its first schedule gives it, which the second replaces
@@ -155,6 +157,7 @@ class Served {
     this.timers = []; // every timer handed over: [position, correlation id, the event's time]
     this.timerAt = null; // when the last was handed over, by this process's clock
     this.timerCodes = []; // what the schedules and the cancel at TIMER_MESSAGE answered
+    this.refusedInside = "no call"; // what a schedule of an id with a fraction from inside the handler did
     this.values = null; // the object of values the handler was handed, the same one for every entry
     this.body = null; // the body of the first session's message, kept past its call
     this.polls = 0; // the report: every poll, those over a millisecond, and the longest
@@ -224,6 +227,13 @@ class Served {
       // are. An id and a deadline go as a number here and as a BigInt there, since the addon
       // reads both. Every member's service makes the same calls at
       // the same entry.
+      // Before them, an id with a fraction, which is refused here as it is outside the
+      // handler, and schedules nothing.
+      try {
+        this.refusedInside = service.scheduleTimer(1.5, entry.timestamp);
+      } catch (refused) {
+        this.refusedInside = refused;
+      }
       this.timerCodes = [
         service.scheduleTimer(TIMER_ID, entry.timestamp + HOUR_MS),
         service.scheduleTimer(BigInt(TIMER_ID), entry.timestamp + TIMER_AFTER_MS),
@@ -663,6 +673,10 @@ function main() {
       fail(`the service beside member ${s.member} was answered ${show(s.timerCodes)} for its schedules and its ` +
         `cancel; expected CAVALRY_CLUSTER_TIMER_SCHEDULED, ${SCHEDULED}, for each schedule and 0 for the cancel`);
     }
+    if (!(s.refusedInside instanceof RangeError)) {
+      fail(`the service beside member ${s.member} scheduled an id with a fraction from inside its handler and was ` +
+        `answered ${s.refusedInside}; expected a RangeError before the ABI was called`);
+    }
     const ids = s.timers.map((t) => t[1]).sort((a, b) => (a < b ? -1 : a > b ? 1 : 0));
     if (!same(ids, timerIds) || s.timers.some((t) => typeof t[1] !== "bigint")) {
       fail(`the service beside member ${s.member} was handed the timers ${show(s.timers)}, each a position, an id ` +
@@ -683,12 +697,17 @@ function main() {
     }
   }
   const timer = served[0].timers.find((t) => t[1] === BigInt(TIMER_ID));
+  // What a deadline that was ignored would have read: the time of the timers that were due
+  // at once, which the member was told of with timer 77. The deadline check above proves
+  // something for as long as this is below the deadline.
+  const atOnce = Math.max(...served[0].timers.filter((t) => t[1] !== BigInt(TIMER_ID)).map((t) => t[2])) - scheduled[3];
+  const margin = atOnce < TIMER_AFTER_MS ? "" : ", so the deadline's check proved nothing in this run";
   say(`timer ${TIMER_ID}, scheduled by each service at a message for an hour later and then for ${TIMER_AFTER_MS} ms ` +
     `later, handed to three services once, at position ${timer[0]}, ${timer[2] - scheduled[3]} ms after the ` +
     `message; the least and the greatest int64 and the least and the greatest safe integer as ids, due at once, ` +
-    `handed to each once with those ids; timer ` +
-    `${CANCELLED_ID}, due at once and cancelled in the same handling, handed to none; both calls refused from ` +
-    `outside the handler, and what is no int64 before the ABI is called`);
+    `handed to each once with those ids, ${atOnce} ms after the message${margin}; timer ${CANCELLED_ID}, due at ` +
+    `once and cancelled in the same handling, handed to none; both calls refused from outside the handler, and ` +
+    `what is no int64 before the ABI is called, from inside the handler too`);
 
   // 10. The session before its client. Its close is an entry every service is handed, after
   // which the log holds no session open.

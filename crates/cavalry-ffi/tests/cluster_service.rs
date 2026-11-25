@@ -531,8 +531,9 @@ unsafe extern "C" fn serve(
             // A program's timers, by its messages: `timer` schedules timer 77 for a
             // second after the entry, the margin by which an event for a timer that
             // was wrongly due at once would be told from it, since a member is told
-            // of a timer tens of milliseconds after the entry; `cancel` schedules
-            // timer 78 and cancels it;
+            // of a timer only after the poll that took its entry, with the commands
+            // of a first timer in it (`conformance/README.md` has the measurement);
+            // `cancel` schedules timer 78 and cancels it;
             // `fill` schedules 1,024 timers that are due in no test's time, and one
             // more.
             if payload == b"timer" {

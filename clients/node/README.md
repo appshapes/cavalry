@@ -189,9 +189,9 @@ again. The poll returns the count of entries taken, or −1 when it stopped, on 
 or at a client its driver closed, which `service.fault()` gives until the next poll.
 A poll with a client its driver closed, as when the member's driver has stopped, is −1
 with `CAVALRY_ERR_CLOSED` as the fault's code, at every poll, so a program's loop ends
-on it (ADR 0155). A poll the ABI refuses before it reads is −1 too, and leaves
-`service.fault()` as it was: a poll after the program's own `client.close()`, and a
-poll from inside a handler of the same service.
+on it (ADR 0155). A poll the ABI refuses before it reads is −1 too, and leaves `service.fault()` as it
+was: a poll after the program's own `client.close()` and a poll from inside a
+handler of the same service among them.
 
 `service.reply(sessionId, message)` answers a session from inside the handler and
 returns what became of the reply: `CAVALRY_CLUSTER_REPLY_SENT`;

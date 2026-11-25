@@ -158,10 +158,9 @@ What the handler returns says what becomes of the entry. `None` or `cavalry.CONT
 takes it, and the poll goes on. `cavalry.BREAK` takes it and ends the poll.
 `cavalry.ABORT` leaves it and ends the poll, and the next poll hands it over again.
 The poll returns the count of entries taken, or −1 when it stopped, on a fault or at
-a client its driver closed, which `service.fault()` gives until the next poll. A poll
-the ABI refuses before it reads is −1 too, and leaves `service.fault()` as it was: a
-poll after the program's own `client.close()`, and a poll from inside a handler of the
-same service.
+a client its driver closed, which `service.fault()` gives until the next poll. A poll the ABI refuses before it reads is −1 too, and leaves `service.fault()` as it
+was: a poll after the program's own `client.close()` and a poll from inside a
+handler of the same service among them.
 
 `service.reply(session_id, message)` answers a session from inside the handler and
 returns what became of the reply: `CAVALRY_CLUSTER_REPLY_SENT`;
