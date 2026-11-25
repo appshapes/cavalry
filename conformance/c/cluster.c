@@ -5,8 +5,9 @@
  * the same entry and answered once, by the service beside the leader, with the
  * entry's term and the cluster's time; and that the timer each service's program
  * schedules at that message is handed to all three once, with its id, at one
- * position and no earlier than its deadline. conformance/c/run.sh starts the three members, builds,
- * links and runs it; just conformance runs that.
+ * position and no earlier than its deadline, and that a second timer, due at once and
+ * cancelled in the same handling, is handed to none. conformance/c/run.sh starts the
+ * three members, builds, links and runs it; just conformance runs that.
  *
  *     cluster-c <cluster directory> <members string> <response channel>
  *
@@ -38,6 +39,9 @@
  * of the Python round, and that margin would let it pass. */
 #define TIMER_ID 7
 #define TIMER_AFTER_MS 1000
+/* The timer each service's program schedules as due at once and cancels in the same
+ * handling: were the cancel to miss, it would be handed over, and before the first. */
+#define CANCELLED_ID 8
 
 /* A bound on a wait, `milliseconds` from now. */
 static struct timespec after(long milliseconds) {
@@ -87,9 +91,11 @@ typedef struct {
     /* From inside the handler: a service's header carries no frame and no reply's
      * values, it carries its entry's position, and the poll holds its client. */
     int no_frame, no_reply_values, one_position, client_held;
-    /* The program's timer (spec/c-abi.md, version 7; ADR 0157): what the schedule
-     * answered, how many timers the handler was handed, and the last one's values. */
+    /* The program's timers (spec/c-abi.md, version 7; ADR 0157): what the schedule
+     * answered, what the second timer's schedule and its cancel answered, how many
+     * timers the handler was handed, and the last one's values. */
     int scheduled;
+    int cancelled_scheduled, cancelled;
     int timers;
     cavalry_cluster_entry_values_t timer;
 } served_t;
@@ -138,6 +144,10 @@ static void on_entry(void *clientd, const uint8_t *buffer, size_t length,
     s->scheduled = cavalry_cluster_service_schedule_timer(s->service, TIMER_ID,
                                                           values.timestamp + TIMER_AFTER_MS);
     if (s->scheduled < 0) fail("cavalry_cluster_service_schedule_timer");
+    s->cancelled_scheduled = cavalry_cluster_service_schedule_timer(s->service, CANCELLED_ID, values.timestamp);
+    if (s->cancelled_scheduled < 0) fail("cavalry_cluster_service_schedule_timer");
+    s->cancelled = cavalry_cluster_service_cancel_timer(s->service, CANCELLED_ID);
+    if (s->cancelled < 0) fail("cavalry_cluster_service_cancel_timer");
 }
 
 /* What the session's handler was handed. */
@@ -301,7 +311,11 @@ int main(int argc, char **argv) {
         const served_t *s = &served[i];
         if (s->scheduled != CAVALRY_CLUSTER_TIMER_SCHEDULED)
             wrong("a service's schedule of its timer was not answered CAVALRY_CLUSTER_TIMER_SCHEDULED");
-        if (s->timers != 1) wrong("a service was handed its timer more than once");
+        if (s->cancelled_scheduled != CAVALRY_CLUSTER_TIMER_SCHEDULED || s->cancelled != 0)
+            wrong("a service's schedule of its second timer was not answered CAVALRY_CLUSTER_TIMER_SCHEDULED, "
+                  "or its cancel 0");
+        if (s->timers != 1)
+            wrong("a service was handed more than one timer: its timer twice, or the one it cancelled");
         if (s->timer.correlation_id != TIMER_ID) wrong("a service was handed another timer's id");
         if (s->timer.position != served[0].timer.position ||
             s->timer.timestamp != served[0].timer.timestamp)
@@ -320,9 +334,10 @@ int main(int argc, char **argv) {
         wrong("a cancel of a timer from outside the handler was not refused with "
               "CAVALRY_ERR_CLUSTER_NO_ENTRY");
     printf("conformance/c: timer %d, scheduled by each service at the message for %d ms later, "
-           "handed to three services once, at position %" PRId64 ", %" PRId64 " ms after the message\n",
+           "handed to three services once, at position %" PRId64 ", %" PRId64 " ms after the message; "
+           "timer %d, due at once and cancelled in the same handling, handed to none\n",
            TIMER_ID, TIMER_AFTER_MS, served[0].timer.position,
-           served[0].timer.timestamp - served[0].message.timestamp);
+           served[0].timer.timestamp - served[0].message.timestamp, CANCELLED_ID);
 
     /* 6. The session before its client, and each service before its own. */
     CHECK(cavalry_cluster_session_close(session));
