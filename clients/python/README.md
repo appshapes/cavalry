@@ -231,7 +231,7 @@ def on_entry(body, entry, service):
         expire(entry.correlation_id)   # the program's own: the minute is over
 ```
 
-Three rules come with them (`spec/cluster.md`, "The service", "Timers"; ADR 0151;
+Four rules come with them (`spec/cluster.md`, "The service", "Timers"; ADR 0151;
 ADR 0157):
 
 - **Only inside the handler.** The timers are then a function of the entries
