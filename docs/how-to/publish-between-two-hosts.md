@@ -152,9 +152,9 @@ doctor](run-the-driver.md#when-it-does-not-work) explains each in full.
   names the subscriptions or the publications registry: the registry holds 1,024. An
   add held behind an endpoint that is closing takes a slot too, so the registry can
   be full while fewer are registered. **`WARN subscription.add_deferred_waiting`** or
-  **`WARN publication.add_deferred_waiting`** from `cavalry doctor` says how many adds
-  are held and what holds them, and with `driver.registry_full` above 0 that the
-  refusals are theirs. A held add is a driver thread that is behind: give the
-  driver's threads CPU, and check `recording.write_failed` and the log directory's
-  disk if a recording has not stopped. With no held adds, close the subscriptions or
-  publications that are not used.
+  **`WARN publication.add_deferred_waiting`** from `cavalry doctor` on a running driver
+  says how many adds are held and what holds them; when the refusal's message named
+  that registry, the held adds took part of its slots. A held add is a driver thread
+  that is behind: give the driver's threads CPU, and check `recording.write_failed`
+  and the log directory's disk if a recording has not stopped. Close the
+  subscriptions or publications that are not used, which frees the rest.
