@@ -711,10 +711,11 @@ class Clients(unittest.TestCase):
 
     def test_a_throw_in_a_timer_wrapper_fails_and_its_exact_reader_may_throw(self):
         """The addon's wrappers of the schedule and the cancel of a timer are on the path
-        (ADR 0157). `int64_exact_arg`, which refuses a number that is no integer a number
-        carries exactly, is an argument reader: its throw, before the ABI is called, is
-        none on the path, and the committed addon has no finding. The same reader with
-        another name is no reader, and its throw is one."""
+        (ADR 0157). `int64_exact_arg` reads a timer's id and its deadline through
+        `int64_read`, which refuses a number that is no integer a number carries exactly
+        and is an argument reader: its throw, before the ABI is called, is none on the
+        path, and the committed addon has no finding. The same reader with another name
+        is no reader, and its throw is one."""
         self.assertEqual(lint.findings(self.tmp), [])
         wrappers = ("fn_cavalry_cluster_service_schedule_timer", "fn_cavalry_cluster_service_cancel_timer")
         for wrapper in wrappers:
@@ -727,8 +728,9 @@ class Clients(unittest.TestCase):
         with open(self.addon, encoding="utf-8") as f:
             text = f.read()
         self.assertEqual(text.count("int64_exact_arg("), 4)  # its definition and the three arguments it reads
+        self.assertEqual(text.count("int64_read("), 3)  # its definition, and `int64_arg`'s and the timers' call
         with open(self.addon, "w", encoding="utf-8") as f:
-            f.write(text.replace("int64_exact_arg(", "int64_strict("))
+            f.write(text.replace("int64_read(", "int64_strict("))
         found = lint.findings(self.tmp)
         for wrapper in wrappers:
             self.assertTrue(any(f.startswith(f"node: {wrapper} (") and "calls int64_strict" in f for f in found), found)

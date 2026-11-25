@@ -1343,6 +1343,143 @@ int main(void) {
 """
 
 
+# A stand-in for the five N-API calls the addon's number readers make, around the readers
+# as the generator wrote them (work item 460): a value is a struct of its type and what it
+# holds, each call is counted, and a throw is kept, its kind and its message.
+READERS_HARNESS = r"""#include <math.h>
+#include <stdbool.h>
+#include <stdint.h>
+#include <stdio.h>
+#include <string.h>
+
+typedef enum { napi_ok, napi_number_expected, napi_bigint_expected } napi_status;
+typedef enum { napi_undefined, napi_boolean, napi_number, napi_string, napi_bigint } napi_valuetype;
+typedef struct value { napi_valuetype type; double number; int64_t low; bool lossless; } *napi_value;
+typedef void *napi_env;
+
+static int doubles, typeofs, bigints, range_errors, type_errors;
+static char thrown[512];
+
+static napi_status napi_get_value_double(napi_env env, napi_value v, double *result) {
+  (void) env; doubles++;
+  if (v->type != napi_number) return napi_number_expected;
+  *result = v->number; return napi_ok;
+}
+static napi_status napi_typeof(napi_env env, napi_value v, napi_valuetype *result) {
+  (void) env; typeofs++; *result = v->type; return napi_ok;
+}
+static napi_status napi_get_value_bigint_int64(napi_env env, napi_value v, int64_t *result, bool *lossless) {
+  (void) env; bigints++;
+  if (v->type != napi_bigint) return napi_bigint_expected;
+  *result = v->low; *lossless = v->lossless; return napi_ok;
+}
+static napi_status napi_throw_range_error(napi_env env, const char *code, const char *message) {
+  (void) env; (void) code; range_errors++; snprintf(thrown, sizeof thrown, "%s", message); return napi_ok;
+}
+static napi_status napi_throw_type_error(napi_env env, const char *code, const char *message) {
+  (void) env; (void) code; type_errors++; snprintf(thrown, sizeof thrown, "%s", message); return napi_ok;
+}
+
+static bool arg_failed;
+
+@READERS@
+
+static int failures;
+enum { TAKEN, RANGE, TYPE };
+enum { INT64, TIMER, INT32, SIZE, UINT8 };
+
+static bool ends_with(const char *text, const char *end) {
+  size_t n = strlen(text), m = strlen(end);
+  return n >= m && strcmp(text + n - m, end) == 0;
+}
+
+/* One read: the reader's answer, whether it failed, what it threw and what it asked of N-API. */
+static void read_one(const char *what, int reader, struct value v, int expected, int64_t value) {
+  doubles = typeofs = bigints = range_errors = type_errors = 0;
+  thrown[0] = 0; arg_failed = false;
+  int64_t got = 0;
+  const char *name = "position", *anchor = "see clients/node/README.md#what-it-must-never-do";
+  switch (reader) {
+    case INT64: got = int64_arg(NULL, &v, name); break;
+    case TIMER: got = int64_exact_arg(NULL, &v, name); anchor = "see clients/node/README.md#a-services-timers"; break;
+    case INT32: got = int32_arg(NULL, &v, name); break;
+    case SIZE: got = (int64_t) size_arg(NULL, &v, name); break;
+    default: got = int_arg(NULL, &v, name, 0, UINT8_MAX); break;
+  }
+  bool ok;
+  if (expected == TAKEN) {
+    /* A number costs one call; a BigInt three, since the number's call says first that it is none. */
+    ok = !arg_failed && got == value && range_errors + type_errors == 0 && doubles == 1 &&
+         (v.type == napi_number ? typeofs + bigints == 0 : typeofs == 1 && bigints == 1);
+  } else {
+    ok = arg_failed && got == 0 && range_errors == (expected == RANGE) && type_errors == (expected == TYPE) &&
+         strncmp(thrown, "position: ", 10) == 0 && ends_with(thrown, anchor);
+  }
+  if (!ok) {
+    failures++;
+    printf("FAILED %s: answered %lld, failed %d, %d range and %d type errors, calls %d %d %d, thrown: %s\n", what,
+           (long long) got, arg_failed, range_errors, type_errors, doubles, typeofs, bigints, thrown);
+  }
+}
+
+static struct value number(double d) { struct value v = { napi_number, d, 0, false }; return v; }
+static struct value bigint(int64_t low, bool lossless) { struct value v = { napi_bigint, 0, low, lossless }; return v; }
+static struct value other(napi_valuetype t) { struct value v = { t, 0, 0, false }; return v; }
+
+int main(void) {
+  const double safe = 9007199254740991.0;
+  for (int reader = INT64; reader <= TIMER; reader++) {
+    read_one("0", reader, number(0), TAKEN, 0);
+    read_one("96", reader, number(96), TAKEN, 96);
+    read_one("-1", reader, number(-1), TAKEN, -1);
+    read_one("the greatest safe integer", reader, number(safe), TAKEN, 9007199254740991LL);
+    read_one("the least safe integer", reader, number(-safe), TAKEN, -9007199254740991LL);
+    read_one("96.5", reader, number(96.5), RANGE, 0);
+    read_one("-0.5", reader, number(-0.5), RANGE, 0);
+    read_one("NaN", reader, number(NAN), RANGE, 0);
+    read_one("Infinity", reader, number(INFINITY), RANGE, 0);
+    read_one("-Infinity", reader, number(-INFINITY), RANGE, 0);
+    read_one("2 ** 53", reader, number(safe + 1), RANGE, 0);
+    read_one("-(2 ** 53)", reader, number(-safe - 1), RANGE, 0);
+    read_one("2 ** 63", reader, number(9223372036854775808.0), RANGE, 0);
+    read_one("2 ** 64 + 96", reader, number(18446744073709551616.0), RANGE, 0);
+    read_one("1e300", reader, number(1e300), RANGE, 0);
+    read_one("-1e300", reader, number(-1e300), RANGE, 0);
+    read_one("the greatest int64 as a BigInt", reader, bigint(INT64_MAX, true), TAKEN, INT64_MAX);
+    read_one("the least int64 as a BigInt", reader, bigint(INT64_MIN, true), TAKEN, INT64_MIN);
+    read_one("a BigInt past int64", reader, bigint(96, false), RANGE, 0);
+    read_one("a string", reader, other(napi_string), TYPE, 0);
+    read_one("a boolean", reader, other(napi_boolean), TYPE, 0);
+    read_one("undefined", reader, other(napi_undefined), TYPE, 0);
+  }
+  read_one("int32: 1001", INT32, number(1001), TAKEN, 1001);
+  read_one("int32: the greatest", INT32, number(2147483647.0), TAKEN, INT32_MAX);
+  read_one("int32: the least", INT32, number(-2147483648.0), TAKEN, INT32_MIN);
+  read_one("int32: 2 ** 31", INT32, number(2147483648.0), RANGE, 0);
+  read_one("int32: -(2 ** 31) - 1", INT32, number(-2147483649.0), RANGE, 0);
+  read_one("int32: 2 ** 32 + 1001", INT32, number(4294968297.0), RANGE, 0);
+  read_one("int32: 1001.5", INT32, number(1001.5), RANGE, 0);
+  read_one("int32: NaN", INT32, number(NAN), RANGE, 0);
+  read_one("int32: Infinity", INT32, number(INFINITY), RANGE, 0);
+  read_one("int32: a BigInt", INT32, bigint(1001, true), TYPE, 0);
+  read_one("int32: a string", INT32, other(napi_string), TYPE, 0);
+  read_one("size: 0", SIZE, number(0), TAKEN, 0);
+  read_one("size: the greatest safe integer", SIZE, number(safe), TAKEN, 9007199254740991LL);
+  read_one("size: a BigInt", SIZE, bigint(4096, true), TAKEN, 4096);
+  read_one("size: -1", SIZE, number(-1), RANGE, 0);
+  read_one("size: -1 as a BigInt", SIZE, bigint(-1, true), RANGE, 0);
+  read_one("size: 1.5", SIZE, number(1.5), RANGE, 0);
+  read_one("size: NaN", SIZE, number(NAN), RANGE, 0);
+  read_one("size: undefined", SIZE, other(napi_undefined), TYPE, 0);
+  read_one("uint8: 255", UINT8, number(255), TAKEN, 255);
+  read_one("uint8: 256", UINT8, number(256), RANGE, 0);
+  read_one("uint8: -1", UINT8, number(-1), RANGE, 0);
+  printf("%d failure(s)\n", failures);
+  return failures != 0;
+}
+"""
+
+
 class NodePackage(unittest.TestCase):
     """The Node package, `clients/node` (clients/node/README.md; ADR 0046, card 206)."""
 
@@ -1608,12 +1745,19 @@ class NodePackage(unittest.TestCase):
             self.assertIn("  if (arg_failed) return NULL;\n", wrapper[last:wrapper.index(call)])
         self.assertEqual(addon.count("int64_exact_arg(env, argv["), 3)
         self.assertEqual(addon.count("int64_exact_arg("), 4)
-        # The reader: a number is cast only inside the range a double carries exactly,
-        # each of its three refusals names the README's section, and none returns a value.
-        reader = addon.split("static int64_t int64_exact_arg(", 1)[1].split("\n}\n", 1)[0]
-        self.assertIn("d >= -9007199254740991.0 && d <= 9007199254740991.0 &&\n        (double) (int64_t) d == d", reader)
+        # The reader, which every int64 parameter shares since work item 460: a number is
+        # cast only inside the range a double carries exactly, each of its three refusals
+        # ends with what its caller gave it to say, a timer's with the README's section on
+        # timers, and none returns a value.
+        timer = addon.split("static int64_t int64_exact_arg(", 1)[1].split("\n}\n", 1)[0]
+        self.assertTrue(timer.rstrip().endswith("return int64_read(env, v, name, NEXT_TIMER);"), timer)
+        self.assertIn('static const char *const NEXT_TIMER = "pass an integer, such as 77 for an id or '
+                      'entry.timestamp + 50 for a deadline "\n  "50 ms after the entry, or a BigInt, such as 77n; '
+                      'see clients/node/README.md#a-services-timers";', addon)
+        reader = addon.split("static int64_t int64_read(", 1)[1].split("\n}\n", 1)[0]
+        self.assertIn("if (d >= -9007199254740991.0 && d <= 9007199254740991.0 && (double) (int64_t) d == d) "
+                      "return (int64_t) d;", reader)
         self.assertIn("napi_get_value_bigint_int64(env, v, &n, &lossless) == napi_ok && lossless", reader)
-        self.assertIn("see clients/node/README.md#a-services-timers", reader)
         self.assertEqual(reader.count('%s", name, next);'), 3)
         self.assertEqual(reader.count("napi_throw_range_error("), 2)
         self.assertEqual(reader.count("napi_throw_type_error("), 1)
@@ -1841,6 +1985,77 @@ class NodePackage(unittest.TestCase):
         # A cluster service's poll holds the JS service the same way, for the call alone.
         self.assertIn("s->self = argv[5];", addon)
 
+    def test_every_integer_argument_is_read_exactly_or_refused_before_the_abi_is_called(self):
+        """Work item 460. N-API's own conversions change a number that is no integer its
+        parameter holds, and say nothing: `napi_get_value_int64` drops a fraction, reads a
+        NaN or an infinity as 0 and holds a number past int64 to the nearest int64, and
+        `napi_get_value_int32` keeps the low 32 bits, so that a truncate at NaN was a
+        truncate at 0. The addon calls neither. Every integer parameter of every wrapper,
+        and of the addon's own polls, is read by a reader that takes an integer its
+        parameter holds and refuses the rest, a RangeError for a number or a BigInt and a
+        TypeError for another type, with the parameter's name and the README's section,
+        before the wrapper's ABI call. The readers are compiled with the runner's `cc`
+        against a stand-in for the N-API calls they make and run over each kind of value:
+        a number costs one call, as the conversion it replaces did."""
+        files = gen_node.write_node(self.header)
+        addon = files["src/addon.c"]
+        for conversion in ("napi_get_value_int64(", "napi_get_value_int32(", "napi_get_value_uint32("):
+            self.assertNotIn(conversion, addon)
+        readers = {"int": "int32_arg", "int32_t": "int32_arg", "int64_t": "int64_arg", "size_t": "size_arg"}
+        read = own = 0
+        for fn in self.header.functions:
+            wrapper = addon.split(f"static napi_value fn_{fn.name}(", 1)
+            if len(wrapper) == 1:
+                continue  # a function the package does not wrap one to one, a poll among them
+            body = wrapper[1].split("\n}\n", 1)[0]
+            for param in fn.params:
+                if "*" in param.type or param.type not in readers:
+                    self.assertFalse(param.type in ("uint8_t", "uint16_t", "int8_t") and "*" not in param.type,
+                                     f"{fn.name}'s {param.name} is {param.type}: read it with int_arg and its range")
+                    continue
+                reader = "int64_exact_arg" if (fn.name, param.name) in gen_node.EXACT_INT64 else readers[param.type]
+                line = f'{param.type} {param.name} = ({param.type}) {reader}(env, argv['
+                if param.type == "size_t" and f"size_t {param.name} = 0; const uint8_t *" in body:
+                    # The length of a message: the addon's own, the length of the bytes it
+                    # was given, which `bytes_arg` writes; no argument is read for it.
+                    self.assertIn(f"bytes_arg(env, argv[", body.split(f"size_t {param.name} = 0; const uint8_t *", 1)[1]
+                                  .split("\n", 1)[0])
+                    self.assertNotIn(line, body)
+                    own += 1
+                    continue
+                self.assertEqual(body.count(line), 1, f"{fn.name}'s {param.name}")
+                at = body.index(line)
+                self.assertTrue(body[at:].split("\n", 2)[1] == "  if (arg_failed) return NULL;", (fn.name, param.name))
+                self.assertLess(at, body.index(f"{fn.name}("), (fn.name, param.name))
+                read += 1
+        self.assertGreaterEqual(read, 20)
+        self.assertEqual(own, 4)  # a publication's offer, a session's offer, a service's reply and its snapshot
+        for poll in ("fn_poll", "fn_committedLogPoll", "fn_clusterSessionPoll", "fn_clusterServicePoll"):
+            body = addon.split(f"static napi_value {poll}(", 1)[1].split("\n}\n", 1)[0]
+            self.assertEqual(body.count('size_t limit = size_arg(env, argv['), 1, poll)
+        with open(os.path.join(gen.ROOT, "clients", "node", "README.md"), encoding="utf-8") as f:
+            slugs = {re.sub(r"[^a-z0-9 -]", "", line.lstrip("#").strip().lower()).replace(" ", "-")
+                     for line in f if line.startswith("#")}
+        self.assertLessEqual({"what-it-must-never-do", "a-services-timers"}, slugs)
+        cc = shutil.which("cc")
+        if cc is None:
+            self.skipTest("no C compiler on PATH; the Node client's install needs one, and both CI runners have it")
+        code = lint.blank(addon)
+        start = addon.index("/* What a refused integer argument tells the caller to do next")
+        end = lint.block_end(code, addon.index("{", addon.index("static size_t size_arg(")))
+        with tempfile.TemporaryDirectory() as tmp:
+            source = os.path.join(tmp, "readers.c")
+            with open(source, "w", encoding="utf-8") as f:
+                f.write(READERS_HARNESS.replace("@READERS@", addon[start:end]))
+            binary = os.path.join(tmp, "readers")
+            built = subprocess.run([cc, "-std=c11", "-Wall", "-Wextra", source, "-o", binary],
+                                   capture_output=True, text=True)
+            self.assertEqual(built.returncode, 0, built.stderr)
+            self.assertEqual(built.stderr, "")
+            ran = subprocess.run([binary], capture_output=True, text=True)
+        self.assertEqual(ran.returncode, 0, ran.stdout + ran.stderr)
+        self.assertEqual(ran.stdout, "0 failure(s)\n")
+
     def test_the_reserved_value_is_a_bigint_both_ways(self):
         """Invariant 1: the reserved value is any int64 a publisher sets, so the header's
         field reaches the handler as a BigInt, exact over the whole range, never as a number,
@@ -1852,8 +2067,10 @@ class NodePackage(unittest.TestCase):
         self.assertIn(f"    case {index}: return make_bigint64(env, f->reserved_value);", addon)
         self.assertIn("static napi_value make_bigint64(napi_env env, int64_t n) { napi_value v; "
                       "napi_create_bigint_int64(env, n, &v); return v; }", addon)
-        reader = addon.split("static int64_t int64_arg(", 1)[1].split("\n}\n", 1)[0]
-        self.assertIn("if (lossless) return n;", reader)
+        value = addon.split("static int64_t int64_arg(", 1)[1].split("\n}\n", 1)[0]
+        self.assertTrue(value.rstrip().endswith("return int64_read(env, v, name, NEXT_INT64);"), value)
+        reader = addon.split("static int64_t int64_read(", 1)[1].split("\n}\n", 1)[0]
+        self.assertIn("if (napi_get_value_bigint_int64(env, v, &n, &lossless) == napi_ok && lossless) return n;", reader)
         self.assertIn("napi_throw_range_error(env, NULL, message);", reader)
         self.assertIn(f"get reservedValue() {{ return addon.headerField(this._state, {index}); }}", files["index.js"])
         self.assertIn("  readonly reservedValue: bigint | undefined;", files["index.d.ts"])

@@ -907,7 +907,56 @@ function main(udpPort) {
     client.stopRecording(recording.recordingId);
     const recordingId = recording.recordingId;
     recording.close();
+
+    // A number that is no integer its parameter holds never reaches the ABI (work item 460;
+    // clients/node/README.md, "What it must never do"). N-API's own conversions would read a
+    // NaN or an infinity as 0, drop a fraction, hold a number past int64 to the nearest int64
+    // and keep the low 32 bits of a stream id: the truncate at NaN would cut the stopped
+    // recording to nothing and the one at 96.5 after its first frame, and the replay of step
+    // 3, which reads all of it at its positions, would end there. Each call is refused with
+    // the parameter's name, what to pass and the README's section.
+    for (const [what, parameter, kind, call] of [
+      ["a truncate at NaN", "position", RangeError, () => client.truncateRecording(recordingId, NaN)],
+      ["a truncate at 96.5", "position", RangeError, () => client.truncateRecording(recordingId, 96.5)],
+      ["a truncate at 2 ** 64 + 96", "position", RangeError, () => client.truncateRecording(recordingId, 2 ** 64 + 96)],
+      ["a truncate at a BigInt past int64", "position", RangeError,
+        () => client.truncateRecording(recordingId, 2n ** 64n + 96n)],
+      ["a truncate at a string", "position", TypeError, () => client.truncateRecording(recordingId, "96")],
+      ["a purge of the segments below Infinity", "new_start_position", RangeError,
+        () => client.purgeSegments(recordingId, Infinity)],
+      ["a purge of recording NaN", "recording_id", RangeError, () => client.purgeRecording(NaN)],
+      ["a purge of a recording whose id has a fraction", "recording_id", RangeError,
+        () => client.purgeRecording(recordingId + 0.5)],
+      ["a subscription to stream 2 ** 32 + its id", "stream_id", RangeError,
+        () => client.addSubscription("cavalry:ipc", 2 ** 32 + STREAM)],
+      ["a subscription to a stream id with a fraction", "stream_id", RangeError,
+        () => client.addSubscription("cavalry:ipc", STREAM + 0.5)],
+      ["a subscription to a stream id that is a BigInt", "stream_id", TypeError,
+        () => client.addSubscription("cavalry:ipc", BigInt(STREAM))],
+      ["a poll with a fragment limit of 1.5", "fragmentLimit", RangeError, () => ipcSub.poll(() => {}, 1.5)],
+      ["a poll with a fragment limit below zero", "fragmentLimit", RangeError, () => ipcSub.poll(() => {}, -1)],
+      ["a claim of NaN bytes", "length", RangeError, () => ipcPub.tryClaim(NaN)],
+      ["a claim of a length below zero", "length", RangeError, () => ipcPub.tryClaim(-1)]]) {
+      let answered;
+      try {
+        answered = call();
+      } catch (refused) {
+        if (!(refused instanceof kind) || !refused.message.startsWith(`${parameter}: `) ||
+            !refused.message.endsWith("see clients/node/README.md#what-it-must-never-do")) {
+          fail(`${what} was refused with ${refused}, not with a ${kind.name} that names ${parameter} and the ` +
+               `README's section`);
+        }
+        continue;
+      }
+      fail(`${what} was not refused before the ABI was called: it answered ${answered}`);
+    }
+    // The ends of a range are in it: a stream id at each end of int32 is added, and closed.
+    for (const streamId of [2 ** 31 - 1, -(2 ** 31)]) client.addSubscription("cavalry:ipc", streamId).close();
     ipcPub.close();
+    say("fifteen calls refused before the ABI was called, each with its parameter's name: truncates, purges and " +
+        "adds whose position, recording id or stream id is a number its parameter does not hold, a BigInt past " +
+        "int64, a string and a BigInt for a stream id, and polls and claims with a count that is no integer from 0; " +
+        "a stream id at each end of int32 was added");
 
     edges(client);
     reservedValues(client);

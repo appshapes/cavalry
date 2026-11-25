@@ -98,12 +98,10 @@ def js_value(value: str) -> str:
 
 # ------------------------------------------------------------------ the addon
 
-# The int64 parameters that are read exactly: a timer's id and its deadline (ADR 0157). A
-# timer's id that N-API truncated is another timer, and its deadline another time, with
-# nothing said, so `int64_exact_arg` refuses a number that is no safe integer before the
-# ABI is called. Every other int64 parameter, a session's id and a recording's among them,
-# is still read by `int64_arg`, which takes a number as N-API converts it: work item 460
-# decides those.
+# The int64 parameters whose refusal speaks of a timer: a timer's id and its deadline (ADR
+# 0157). Every integer parameter is read exactly since work item 460, a number that N-API
+# would truncate or wrap being refused before the ABI is called; `int64_exact_arg` differs
+# from `int64_arg` only in what its refusal tells the caller to pass.
 EXACT_INT64 = {
     ("cavalry_cluster_service_schedule_timer", "correlation_id"),
     ("cavalry_cluster_service_schedule_timer", "deadline"),
@@ -145,14 +143,21 @@ def c_arg(param, header, index: int, lines: list, struct_names: set, opaque: set
             return f"&{name}"
         raise SystemExit(f"generate_node: no marshalling for {t!r}")
     if base in SCALARS:
+        # Each integer type has a reader that holds a number to what the type holds: the
+        # narrow ones through `int_arg` with the type's own range.
+        narrow = {"uint8_t": ("0", "UINT8_MAX"), "uint16_t": ("0", "UINT16_MAX"), "int8_t": ("INT8_MIN", "INT8_MAX")}
         reader = {"int": "int32_arg", "int32_t": "int32_arg", "int64_t": "int64_arg", "size_t": "size_arg",
-                  "bool": "bool_arg", "uint8_t": "int32_arg", "uint16_t": "int32_arg", "int8_t": "int32_arg"}[base]
+                  "bool": "bool_arg"}.get(base)
         if (function, name) in EXACT_INT64:
             if base != "int64_t":
-                raise SystemExit(f"generate_node: {function}'s {name} is read exactly as an int64, and the header "
+                raise SystemExit(f"generate_node: {function}'s {name} is read as a timer's int64, and the header "
                                  f"declares it {t!r}")
             reader = "int64_exact_arg"
-        lines.append(f"  {base} {name} = ({base}) {reader}(env, argv[{index}], \"{name}\");")
+        if base in narrow:
+            least, greatest = narrow[base]
+            lines.append(f"  {base} {name} = ({base}) int_arg(env, argv[{index}], \"{name}\", {least}, {greatest});")
+        else:
+            lines.append(f"  {base} {name} = ({base}) {reader}(env, argv[{index}], \"{name}\");")
         lines.append(f"  if (arg_failed) return NULL;")
         return name
     raise SystemExit(f"generate_node: no marshalling for {t!r}")
@@ -428,49 +433,40 @@ static const char *string_arg(napi_env env, napi_value v, char *buf, size_t cap,
   return buf;
 }
 
-/* An int64: a number, or a BigInt, which carries every int64 exactly; a BigInt outside the
- * int64 range is refused with a RangeError, since N-API would wrap it to another value. */
-static int64_t int64_arg(napi_env env, napi_value v, const char *name) {
-  int64_t n = 0; bool lossless;
-  napi_valuetype t;
-  if (napi_typeof(env, v, &t) == napi_ok && t == napi_bigint) {
-    if (napi_get_value_bigint_int64(env, v, &n, &lossless) == napi_ok) {
-      if (lossless) return n;
-      char message[160];
-      snprintf(message, sizeof message, "%s: a BigInt from -(2n ** 63n) to 2n ** 63n - 1n expected, an int64", name);
-      napi_throw_range_error(env, NULL, message);
-      arg_failed = true;
-      return 0;
-    }
-  } else if (napi_get_value_int64(env, v, &n) == napi_ok) {
-    return n;
-  }
-  type_error(env, name, "a number or a BigInt"); return 0;
-}
+/* What a refused integer argument tells the caller to do next, and the section that says
+ * the rule: every refusal of a reader below ends with one of these. */
+static const char *const NEXT_INTEGER = "pass an integer in that range; see "
+  "clients/node/README.md#what-it-must-never-do";
+static const char *const NEXT_INT64 = "pass an integer in that range, or a BigInt for any int64; see "
+  "clients/node/README.md#what-it-must-never-do";
+static const char *const NEXT_TIMER = "pass an integer, such as 77 for an id or entry.timestamp + 50 for a deadline "
+  "50 ms after the entry, or a BigInt, such as 77n; see clients/node/README.md#a-services-timers";
 
-/* An int64 that is read exactly, a timer's id or its deadline: a BigInt in the int64 range,
- * or a number that is an integer from -(2^53 - 1) to 2^53 - 1, the integers a number
- * carries exactly. A number with a fraction, a NaN, an infinity or one outside that range,
- * and a BigInt outside int64, are refused with a RangeError: N-API would truncate the number
- * or wrap the BigInt, and the ABI would then answer for another timer or another time. Any
- * other value is a TypeError. Each refusal says what to pass and where the rule is, and none
- * reaches the ABI. The range is checked before the cast, which is undefined for a double
- * that no int64 holds. */
-static int64_t int64_exact_arg(napi_env env, napi_value v, const char *name) {
-  static const char *const next = "pass an integer, such as 77 for an id or entry.timestamp + 50 for a deadline 50 ms "
-    "after the entry, or a BigInt, such as 77n; see clients/node/README.md#a-services-timers";
+/* An int64, read exactly: a BigInt in the int64 range, or a number that is an integer from
+ * -(2^53 - 1) to 2^53 - 1, the integers a number carries exactly. A number with a fraction,
+ * a NaN, an infinity or one outside that range, and a BigInt outside int64, are refused with
+ * a RangeError: `napi_get_value_int64` drops a number's fraction, reads a NaN or an infinity
+ * as 0 and holds a number past int64 to the nearest int64, `napi_get_value_bigint_int64`
+ * keeps a BigInt's low 64 bits, and the ABI would then act on another position, another
+ * recording, another session or another timer than the caller named, with nothing said.
+ * Any other value is a TypeError. Each refusal ends with `next`, what to pass and where the
+ * rule is, and none reaches the ABI. The range is checked before the cast, which is
+ * undefined for a double that no int64 holds. A number costs the one N-API call the
+ * conversion it replaces cost, `napi_get_value_double`, which answers
+ * `napi_number_expected` for anything else: the value's type is asked only then. */
+static int64_t int64_read(napi_env env, napi_value v, const char *name, const char *next) {
   char message[448];
-  napi_valuetype t = napi_undefined;
-  if (napi_typeof(env, v, &t) == napi_ok && t == napi_number) {
-    double d = 0;
-    if (napi_get_value_double(env, v, &d) == napi_ok && d >= -9007199254740991.0 && d <= 9007199254740991.0 &&
-        (double) (int64_t) d == d) {
-      return (int64_t) d;
-    }
+  double d = 0;
+  if (napi_get_value_double(env, v, &d) == napi_ok) {
+    if (d >= -9007199254740991.0 && d <= 9007199254740991.0 && (double) (int64_t) d == d) return (int64_t) d;
     snprintf(message, sizeof message, "%s: an integer from -(2 ** 53 - 1) to 2 ** 53 - 1 expected, or a BigInt for "
              "any int64; a number with a fraction or outside that range would be passed as another value: %s", name, next);
     napi_throw_range_error(env, NULL, message);
-  } else if (t == napi_bigint) {
+    arg_failed = true;
+    return 0;
+  }
+  napi_valuetype t = napi_undefined;
+  if (napi_typeof(env, v, &t) == napi_ok && t == napi_bigint) {
     int64_t n = 0; bool lossless = false;
     if (napi_get_value_bigint_int64(env, v, &n, &lossless) == napi_ok && lossless) return n;
     snprintf(message, sizeof message, "%s: a BigInt from -(2n ** 63n) to 2n ** 63n - 1n expected, an int64; one "
@@ -484,15 +480,56 @@ static int64_t int64_exact_arg(napi_env env, napi_value v, const char *name) {
   return 0;
 }
 
-static int32_t int32_arg(napi_env env, napi_value v, const char *name) {
-  int32_t n = 0;
-  if (napi_get_value_int32(env, v, &n) != napi_ok) { type_error(env, name, "a number"); return 0; }
-  return n;
+/* An int64 parameter: a position, a recording's id, a session's id, a reserved value. */
+static int64_t int64_arg(napi_env env, napi_value v, const char *name) {
+  return int64_read(env, v, name, NEXT_INT64);
 }
 
+/* A timer's id or its deadline (ADR 0157): an int64, with what a timer's caller passes. */
+static int64_t int64_exact_arg(napi_env env, napi_value v, const char *name) {
+  return int64_read(env, v, name, NEXT_TIMER);
+}
+
+/* An integer of a narrower C type, read exactly: a number that is an integer from `least`
+ * to `greatest`, what the parameter's type holds. A number with a fraction, a NaN, an
+ * infinity or one outside the range is refused with a RangeError: `napi_get_value_int32`
+ * drops a fraction, reads a NaN or an infinity as 0 and keeps the low 32 bits of the rest,
+ * so that stream 2 ** 32 + 1001 was stream 1001. Any other value, a BigInt among them, is a
+ * TypeError. The range is checked before the cast, and a number costs one N-API call, as
+ * in `int64_read`. */
+static int64_t int_arg(napi_env env, napi_value v, const char *name, int64_t least, int64_t greatest) {
+  char message[384];
+  double d = 0;
+  if (napi_get_value_double(env, v, &d) != napi_ok) {
+    snprintf(message, sizeof message, "%s: a number expected, an integer from %lld to %lld: %s", name,
+             (long long) least, (long long) greatest, NEXT_INTEGER);
+    napi_throw_type_error(env, NULL, message);
+    arg_failed = true;
+    return 0;
+  }
+  if (d >= (double) least && d <= (double) greatest && (double) (int64_t) d == d) return (int64_t) d;
+  snprintf(message, sizeof message, "%s: an integer from %lld to %lld expected; a number with a fraction or outside "
+           "that range would be passed as another value: %s", name, (long long) least, (long long) greatest,
+           NEXT_INTEGER);
+  napi_throw_range_error(env, NULL, message);
+  arg_failed = true;
+  return 0;
+}
+
+static int32_t int32_arg(napi_env env, napi_value v, const char *name) {
+  return (int32_t) int_arg(env, v, name, INT32_MIN, INT32_MAX);
+}
+
+/* A count or a length: an int64 read exactly that is not below zero. */
 static size_t size_arg(napi_env env, napi_value v, const char *name) {
   int64_t n = int64_arg(env, v, name);
-  if (!arg_failed && n < 0) { type_error(env, name, "a non-negative size"); return 0; }
+  if (!arg_failed && n < 0) {
+    char message[256];
+    snprintf(message, sizeof message, "%s: a count or a length expected, an integer from 0: %s", name, NEXT_INT64);
+    napi_throw_range_error(env, NULL, message);
+    arg_failed = true;
+    return 0;
+  }
   return (size_t) n;
 }
 

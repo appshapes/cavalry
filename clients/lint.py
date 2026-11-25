@@ -235,7 +235,8 @@ RULES = {
                 "fn_cavalry_cluster_service_cancel_timer",
             ],
             "readers": ["read_args", "type_error", "is_nullish", "external_arg", "bytes_arg", "struct_arg",
-                        "string_arg", "int64_arg", "int64_exact_arg", "int32_arg", "size_arg", "bool_arg"],
+                        "string_arg", "int64_read", "int64_arg", "int64_exact_arg", "int_arg", "int32_arg",
+                        "size_arg", "bool_arg"],
         },
     },
     # The Go client calls the ABI through cgo (clients/go/README.md): the per-message

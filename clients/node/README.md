@@ -292,7 +292,8 @@ ADR 0157):
   outside that range, a `NaN` among them, and a BigInt outside int64, throw a
   `RangeError` before the ABI is called: N-API would pass such a number or BigInt
   as another value, another timer or another time, and say nothing. A value that
-  is neither a number nor a BigInt throws a `TypeError` there. Thrown in the
+  is neither a number nor a BigInt throws a `TypeError` there. Every other integer
+  argument of the package is read as exactly ("What it must never do"). Thrown in the
   handler, it aborts the entry as any
   exception of the handler's does ("The exception"). `entry.correlationId` comes
   back as a BigInt whatever the id was scheduled as: `77n === 77` is false, so a
@@ -407,6 +408,33 @@ members.
   `uv_mutex_*`, `uv_rwlock_*`, `napi_*threadsafe_function*`, and `napi_throw*` and
   `napi_fatal_*` outside the argument readers). `just lint` fails on any of them, in
   the function's own body or in a function of the package it calls.
+- Never pass the ABI another integer than the caller gave. N-API's own conversions
+  change a number that is no integer its parameter holds, and say nothing:
+  `napi_get_value_int64` drops a fraction, reads a `NaN` or an infinity as 0 and
+  holds a number past int64 to the nearest int64, and `napi_get_value_int32` drops
+  a fraction, reads the same two as 0 and keeps the low 32 bits of the rest. A truncate
+  at `NaN` would be a truncate at 0, which empties a recording, and a subscription
+  to stream `2 ** 32 + 1001` one to stream 1001. So the addon calls neither, and
+  its readers refuse such a value with a `RangeError` before the ABI is called:
+  - An int64 parameter (a position, a recording's id, a replay's length and its
+    session, a service's session, the reserved value, a timer's id and its
+    deadline) takes a BigInt in the int64 range, or a number that is an integer
+    from −(2^53 − 1) to 2^53 − 1, the integers a number carries exactly.
+  - A count or a length (a fragment limit, a claim's length, an image's index)
+    takes the same, from 0.
+  - An int32 parameter (a stream id) takes a number that is an integer from −2^31
+    to 2^31 − 1, and no BigInt.
+
+  A value of another type throws a `TypeError`. Each message names the parameter,
+  says what to pass and names this section; a timer's names "A service's timers".
+  The readers are the same for a per-message function and for a command, and a
+  number costs the one N-API call its conversion cost ("The call"). The action a
+  service's handler returned is held to an int32 the same way in the trampoline,
+  where one outside it is no action and aborts the entry. `clients/generate-test.py`
+  holds that every integer parameter of the addon is read by one of these readers,
+  and the conformance runner makes fifteen such calls through the built addon,
+  truncates, purges, adds, polls and claims, against a recording that the replay
+  then reads whole.
 - Never throw for an `Offer` code: `tryClaim` and `offer` return the position after
   the frame or the code below zero (`NOT_CONNECTED`, `BACK_PRESSURED`, `ADMIN_ACTION`,
   `CLOSED`, `MAX_POSITION_EXCEEDED`, `ERROR`), as the ABI does; the caller branches.
@@ -520,9 +548,13 @@ timestamp in nanoseconds or a CRC-64. So `header.reservedValue` comes back as a
 `BigInt` ("The call-back, by construction"), and `setReservedValue` takes a `BigInt`
 or a number. A `BigInt` carries every int64 exactly, and a number carries those below
 2^53 in magnitude. A `BigInt` outside the int64 range is refused with a `RangeError`,
-since N-API would otherwise wrap it to another value. A timer's id and its deadline
-are read more strictly, `int64_exact_arg` in the addon: a number must be an integer
-that a number carries exactly, or it is refused the same way ("A service's timers").
+since N-API would otherwise keep its low 64 bits, another value. Every integer
+argument is read as strictly, `int64_read` and `int_arg` in the addon: a number must
+be an integer that a number carries exactly and its parameter holds, or it is refused
+the same way ("What it must never do"). A reader makes one N-API call for a number,
+`napi_get_value_double`, where the conversion it replaces made one,
+`napi_get_value_int64` or `napi_get_value_int32`, and asks the value's type, a second
+call, only when that one answers that the value is no number.
 Node has one
 thread for JavaScript, so a call holds it for the
 call, and an add, a command or a close, which waits on the driver for up to 10 s
