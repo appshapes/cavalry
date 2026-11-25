@@ -23,7 +23,9 @@ import static java.lang.foreign.ValueLayout.JAVA_LONG;
  * A handler that throws, or returns what is no action, has its entry aborted, and
  * {@code poll} throws a {@link HandlerException} once the ABI has returned: an entry is
  * taken only by a handler that finished with it. {@link #reply} answers a session from
- * inside the handler. The handler is reached through an upcall stub this service makes
+ * inside the handler, and {@link #scheduleTimer} and {@link #cancelTimer} are the program's
+ * timers there: a timer that is due is handed to the handler as an entry of the type
+ * {@link Abi#CLUSTER_ENTRY_TIMER}, once, at one position beside every member. The handler is reached through an upcall stub this service makes
  * once from a method handle bound to itself.
  */
 @SuppressWarnings("restricted")
@@ -99,16 +101,70 @@ public final class ClusterService implements AutoCloseable {
         }
     }
 
+    /** Schedules, from inside the handler, the timer {@code correlationId}, any {@code long}
+     * the program chooses, for {@code deadline} in the cluster's time, the clock of an
+     * entry's {@code timestamp()}, in milliseconds, and returns what became of the schedule,
+     * never throwing for a code. {@link Abi#CLUSTER_TIMER_SCHEDULED}: the timer is pending
+     * with that deadline, a new one or one that was pending, whose deadline this sets.
+     * {@link Abi#CLUSTER_TIMER_REFUSED}: the service holds its 1,024 pending timers and the
+     * id is none of them, and nothing changed; a program with more deadlines than that
+     * keeps them in its own state and schedules one timer for the earliest. When the
+     * deadline has come the handler is handed an entry whose {@code type()} is
+     * {@link Abi#CLUSTER_ENTRY_TIMER} and whose {@code correlationId()} is this id: once, at
+     * one position beside every member, never before its deadline and never after its
+     * cancel. A deadline at or before the entry's time is due at once. A handler that
+     * returns {@link Abi#ACTION_ABORT}, or throws, is handed its entry again with every
+     * timer as it was before that handling. A program schedules its first timer only once
+     * every member of its cluster, with the service beside it, runs version 2 of the
+     * cluster protocol, and from that entry on no member is stepped back: a service of
+     * version 1 hands its program no timer, so the two would compute two states from one
+     * log. From outside the handler it is -1, with {@link Abi#ERR_CLUSTER_NO_ENTRY} as
+     * {@link Abi#errcode()}. One ABI call, which allocates nothing and waits for nothing:
+     * the service tells its member after the handler has taken the entry, in
+     * {@link #poll}. */
+    public int scheduleTimer(long correlationId, long deadline) {
+        try {
+            return (int) Abi.cavalry_cluster_service_schedule_timer.invokeExact(handle, correlationId, deadline);
+        } catch (Throwable t) {
+            throw Abi.failed("cavalry_cluster_service_schedule_timer", t);
+        }
+    }
+
+    /** Makes, from inside the handler, the timer {@code correlationId} pending no more: its
+     * event, where the log holds one, is handed to no program. A timer that is not pending
+     * is no error. It returns 0, and -1 with {@link Abi#ERR_CLUSTER_NO_ENTRY} from outside
+     * the handler. One ABI call, which allocates nothing and waits for nothing. */
+    public int cancelTimer(long correlationId) {
+        try {
+            return (int) Abi.cavalry_cluster_service_cancel_timer.invokeExact(handle, correlationId);
+        } catch (Throwable t) {
+            throw Abi.failed("cavalry_cluster_service_cancel_timer", t);
+        }
+    }
+
     /** Hands up to {@code fragmentLimit} committed entries to the handler: one ABI call, the
-     * count of entries the handler took, 0 while the driver hosts no member that has a log
-     * yet (or -1, with {@link Abi#errcode()} saying why: a fault, which {@link #fault()}
-     * reads until the next poll, or {@link Abi#ERR_POLLING} for a poll from inside a
-     * handler of this service, which the ABI refuses and which touches nothing here). The
+     * count of entries the service took, 0 while the driver, one that runs, hosts no member
+     * that has a log yet (or -1, with {@link Abi#errcode()} saying why: a fault, which
+     * {@link #fault()} reads until the next poll; {@link Abi#ERR_CLOSED} for a client that
+     * its driver closed, as when the member's driver has stopped, which {@code fault()}
+     * reads too and every poll after it answers again, so that a program's loop ends on it;
+     * or, with {@code fault()} left as it was, {@link Abi#ERR_NULL} for a poll after the
+     * program's own {@link Client#close}, which freed the client, and
+     * {@link Abi#ERR_POLLING} for a poll from inside a handler of this service, which the
+     * ABI refuses and which touches nothing here). A timer event whose timer is not pending, or not yet due, is taken and handed
+     * to no handler, so the count may be more than the handler was called. The
      * poll is the service's duty cycle: it opens the member's log, follows the log's
      * sessions, and holds a publication to each open session while the service answers.
      * Those are commands sent with the service's client, at a session's opening, where a
      * term's leader changes and at a recording's end, and the poll waits for the driver's
-     * answer to each; none is sent for a session message. The poll takes no lock, and it
+     * answer to each; none is sent for a session message. Six more are sent once in a
+     * service's life, at the most: its five counters and its publication to its member, in
+     * the poll in which the program first schedules a timer or the service first passes a
+     * timer event over, after that poll's entries, where a snapshot has not added them
+     * already; that poll returns -1 with the driver's refusal of one of them, after the
+     * entries its handler took are taken. After that the poll tells the member what each
+     * taken entry changed, and every pending timer again each second, by offers that wait
+     * for nothing. The poll takes no lock, and it
      * is a call on the client: no other thread uses the service's client
      * ({@link Client#clusterService}). When the handler threw, or returned what is no
      * action, its entry was aborted and this throws a {@link HandlerException} whose

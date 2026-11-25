@@ -154,8 +154,8 @@ opens the member's log when the member has one, and calls
 - `entry` is a `ClusterEntryValues`: `entry.type()`, one of
   `Abi.CLUSTER_ENTRY_SESSION_MESSAGE`, `_SESSION_OPEN`, `_SESSION_CLOSE`,
   `_NEW_LEADERSHIP_TERM`, `_OTHER`, `_SNAPSHOT` and `_TIMER`, a timer of the program's
-  with its id in `entry.correlationId()`, which this package's programs are handed
-  none of yet, since it does not wrap the calls that schedule one; `entry.position()`;
+  that is due, with its id in `entry.correlationId()`, which is 0 for every other
+  entry ("A service's timers", below); `entry.position()`;
   `entry.leadershipTermId()`;
   `entry.timestamp()`, the cluster's time, the one clock a service reads, so that
   every member's service reaches the same state; `entry.sessionId()`, −1 where the
@@ -165,13 +165,19 @@ opens the member's log when the member has one, and calls
   `_SNAPSHOT` is the leader's request for a snapshot: the poll ends after it, and
   the program gives its state to `service.snapshot` before its next poll ("A
   service's snapshot and its start", below).
-- `service` is the service that was polled, for `service.reply`.
+- `service` is the service that was polled, for `service.reply`,
+  `service.scheduleTimer` and `service.cancelTimer`.
 
 What the handler returns says what becomes of the entry. `Abi.ACTION_CONTINUE` takes
 it, and the poll goes on. `Abi.ACTION_BREAK` takes it and ends the poll.
 `Abi.ACTION_ABORT` leaves it and ends the poll, and the next poll hands it over again.
-The poll returns the count of entries taken, or −1 when it stopped on a fault, which
-`service.fault()` gives until the next poll.
+The poll returns the count of entries taken, or −1 when it stopped, on a fault or at
+a client its driver closed, which `service.fault()` gives until the next poll. A poll
+with a client its driver closed, as when the member's driver has stopped, is −1 with
+`Abi.ERR_CLOSED` as the fault's code, at every poll, so a program's loop ends on it
+(ADR 0155). A poll the ABI refuses before it reads is −1 too, and leaves
+`service.fault()` as it was: a poll after the program's own `client.close()` and a
+poll from inside a handler of the same service among them.
 
 `service.reply(sessionId, message)` answers a session from inside the handler and
 returns what became of the reply: `Abi.CLUSTER_REPLY_SENT`;
@@ -199,6 +205,76 @@ The service's `poll` and its `close` are calls on the client the service was mad
 `AutoCloseable`; close a service before its client (`spec/c-abi.md`, "Functions",
 cluster service; ADR 0123; ADR 0124). `conformance/jvm/ClusterRound.java` is a program
 that runs three services and a session through every call above.
+
+### A service's timers
+
+A program that must act at a time, a session it gives up on or an order that
+expires, asks for a timer. It never reads a clock of its own: every member's
+service must reach the same state, and the cluster's time is the one clock they
+share. From inside the handler:
+
+- `service.scheduleTimer(correlationId, deadline)` schedules the timer
+  `correlationId`, any `long` the program chooses, for `deadline`, in the cluster's
+  time, the clock of `entry.timestamp()`, in milliseconds. It returns
+  `Abi.CLUSTER_TIMER_SCHEDULED`: the timer is pending with that deadline, whether
+  the id was pending before or not. Or it returns `Abi.CLUSTER_TIMER_REFUSED`: the
+  service holds its 1,024 pending timers, the id is none of them, and nothing
+  changed.
+- `service.cancelTimer(correlationId)` makes the timer pending no more, and returns
+  0, whether it was pending or not.
+
+When the deadline has come, the handler is handed an entry whose `entry.type()` is
+`Abi.CLUSTER_ENTRY_TIMER` and whose `entry.correlationId()` is the timer's id, with
+a `body` of no bytes. Every member's service is handed it once, at one position of
+the log, never before its deadline and never after its cancel. `entry.timestamp()`
+is the leader's clock when it appended the timer's entry, at or after the
+deadline: later by as long as the leader's member took to be told of the timer and
+to reach it, and by more where the cluster had no leader meanwhile. The handler is
+called later again, once the entry is committed and read. A timer that repeats is
+scheduled again by the handling of its own entry. A deadline at or before the
+entry's time is due at once.
+
+```java
+static int onClusterEntry(MemorySegment body, ClusterEntryValues entry, ClusterService service) {
+    switch (entry.type()) {
+        // Give the session a minute, by the cluster's clock, under an id of its own.
+        case Abi.CLUSTER_ENTRY_SESSION_OPEN -> service.scheduleTimer(entry.sessionId(), entry.timestamp() + 60_000);
+        case Abi.CLUSTER_ENTRY_SESSION_CLOSE -> service.cancelTimer(entry.sessionId());
+        case Abi.CLUSTER_ENTRY_TIMER -> expire(entry.correlationId()); // the program's own: the minute is over
+        default -> { }
+    }
+    return Abi.ACTION_CONTINUE;
+}
+```
+
+Three rules come with them (`spec/cluster.md`, "The service", "Timers"; ADR 0151;
+ADR 0157). An id and a deadline are `long`, which is the ABI's own type, so the
+compiler holds what the Python and the Node clients check at the call.
+
+- **Only inside the handler.** The timers are then a function of the entries
+  taken, as the program's state is, and the same beside every member. From
+  outside the handler both calls return −1, with `Abi.ERR_CLUSTER_NO_ENTRY` as
+  `Abi.errcode()`. A handler that returns `Abi.ACTION_ABORT`, or throws, is handed
+  its entry again with every timer as it was before that handling. The timers are
+  part of what `service.snapshot` writes and `service.restore` reads, with no call
+  of the program's.
+- **At most 1,024 pending.** A program with more deadlines than that keeps them
+  in its own state and schedules one timer, for the earliest: when it is handed
+  that timer it acts on every deadline that has come and schedules the timer
+  again for the earliest that is left.
+- **Every member at version 2 first.** A program schedules its first timer only
+  once every member of its cluster, with the service beside it, runs version 2 of
+  the cluster protocol, and from that entry on no member is stepped back to
+  version 1 (`docs/how-to/upgrade-a-cluster.md`): a service of version 1 hands its
+  program no timer, so its program would compute another state from the same log.
+
+Both calls are one ABI call each, which allocates nothing and waits for nothing.
+What they changed is told to the service's member by the poll, once the handler
+has taken the entry, and the poll in which a program first schedules a timer
+sends six commands more, once in a service's life ("The call").
+`conformance/jvm/ClusterRound.java` schedules timers and cancels one beside three
+members; what it holds, and what rests on the library's own tests, is in
+`conformance/README.md`.
 
 ### A service's snapshot and its start
 
@@ -278,7 +354,7 @@ that runs every call above beside three members.
   handler. `clients/lint.py` reads the per-message methods of `Publication`,
   `Subscription`, `CommittedLog`, `ClusterSession`, `ClusterService` and `Header`, the
   claim, the reserved value, the commit, the abort, the offer, a session's offer and a
-  service's reply, each poll, the header's nine getters, the getters of a reply's
+  service's reply and the schedule and the cancel of its timers, each poll, the header's nine getters, the getters of a reply's
   values and of an entry's, and each upcall
   that calls a handler, for Java's forms of each: `synchronized`, as a modifier or a block, the lock
   classes of `java.util.concurrent` and a lock taken on any receiver (`.lock(`,
@@ -295,8 +371,8 @@ that runs every call above beside three members.
   `PUBLICATION_BACK_PRESSURED`, `PUBLICATION_ADMIN_ACTION`, `PUBLICATION_CLOSED`,
   `PUBLICATION_MAX_POSITION_EXCEEDED`, `PUBLICATION_ERROR`), as the ABI does; the
   caller branches. A cluster session's `offer` returns the same codes, and a cluster
-  service's `reply` returns its `Abi.CLUSTER_REPLY_*` code, or −1 from outside the
-  handler.
+  service's `reply` returns its `Abi.CLUSTER_REPLY_*` code, `scheduleTimer` its
+  `Abi.CLUSTER_TIMER_*` code and `cancelTimer` 0, or −1 from outside the handler.
 - Never swallow the handler's exception, or a fragment: a fragment handler that throws
   keeps every later fragment of that poll reaching the handler, and `poll` throws a
   `HandlerException` once the ABI has returned, with the first throwable as its cause
@@ -458,10 +534,19 @@ opened the session, 20 s at most.
 A cluster service's `poll` is the one per-message method that can wait for the
 driver. It sends commands with the service's client when it opens the member's log,
 at a session's opening, where a term's leader changes and at a recording's end, and
-it waits for each answer in the call, as an add does; a session message costs no
-command. The runner's cluster round reports the waits. On this laptop (Apple M5 Pro,
-Java 25.0.5), in each of 25 runs, 5 to 7 of about 17,900 polls of three services took
-over 1 ms. The longest took 7.5 to 22.2 ms.
+six more once in a service's life, at the most, its five counters and its
+publication to its member, in the poll in which its program first schedules a timer
+or the service first passes a timer event over. It waits for each answer in the
+call, as an add does; a session message costs no command. A driver that refuses one
+of the six is that poll's −1, after the entries its handler took are taken, and the
+service adds them again at a later poll (ADR 0159). What a service tells its member
+of its timers after that, each pending timer again every second among it, is
+offered and waits for nothing. The runner's cluster round reports the waits. On this
+laptop (Apple M5 Pro, Java 25.0.5), in each of 10 runs, 8 or 9 of about 36,100 polls
+of three services took over 1 ms, where 5 to 7 of about 17,900 did in each of 25
+runs before the round scheduled a timer. The report names the longest poll alone: in
+every run it was a poll in which a service's program first scheduled a timer, 22.8
+to 33.8 ms with its six commands, where the longest before took 7.5 to 22.2 ms.
 
 ### Threads
 
