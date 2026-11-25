@@ -90,8 +90,13 @@ public final class Publication implements AutoCloseable {
      * was. One ABI call; the segment is the client's one object per sent message, a slice of
      * {@code EVERYTHING} at the claim's address read as a {@code long}, since reading it as
      * an {@code ADDRESS} would make a segment of length zero first (a pointer field is 8
-     * bytes in every layout of this package). */
+     * bytes in every layout of this package). A {@code length} below zero throws
+     * {@link IllegalArgumentException} before the ABI is called (README, "What it must never
+     * do"). */
     public long tryClaim(int length) {
+        if (length < 0) {
+            Abi.negative("length", length);
+        }
         try {
             long position = (long) Abi.cavalry_publication_try_claim.invokeExact(handle, (long) length, claimStruct);
             if (position >= 0) {

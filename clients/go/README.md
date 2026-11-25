@@ -374,6 +374,29 @@ beside three members.
   those of `shim.c`, the C trampoline and the poll, for C's (`pthread_mutex_*`,
   `pthread_rwlock_*`, `mtx_*`). `just lint` fails on any of them, in the function's
   own body or in a function of the package it calls.
+- Never pass the ABI another count than the caller gave
+  ([ADR 0164](../../docs/decisions/0164-refuse-a-count-below-zero-in-the-go-the-jvm-and-the-dotnet-client-before-the-abi-is-called.md)).
+  The ABI takes a count or a length as a `size_t`, and the package's functions take
+  an `int`, as `len` gives one: an `int` below zero, converted for the ABI, is a
+  count near 2^64. `TryClaim(-1)` would be a claim of 2^64 − 1 bytes, which the ABI
+  refuses with a length the caller never gave, and `Poll(handler, -1)` a poll with
+  no limit. So the count crosses to `shim.c` as an int64, which holds every `int`,
+  and the shim refuses one below zero before the ABI is called. The refusal is the
+  function's own failure, with no panic: `TryClaim` returns the ABI's code for an
+  error, and each of the four `Poll`s −1, and `Err` is an `*Error` whose `Code` is
+  `ErrNegative`. That code is the client's own and none of the ABI's, no code of
+  which is below zero (`spec/c-abi.md`, "Error codes"); `Fn` is the ABI function the call
+  would have made, and `Message` names the parameter as the function names it,
+  `length` or `fragmentLimit`, the value given, what to pass and this section.
+  `ImageAt` with an index below zero returns the same `*Error` as its error. A count
+  from 0 costs one comparison in the shim. A limit below zero is refused, and not
+  read as a poll that takes nothing: a poll loop that takes nothing for ever would
+  say nothing. An `int32` and an `int64` that the ABI takes as such, a
+  stream id, a position, a timer's id, are held to their type by the compiler.
+  `clients/generate-test.py` compiles `shim.c` against a stand-in for the ABI and
+  drives each of the five counts below zero and from zero, and the conformance runner
+  makes three of the refusals through the built library: a claim, a subscription's
+  poll and the image at an index.
 - Never return an error for an `Offer` code: `TryClaim` and `Offer` return the position
   after the frame or the code below zero (`PublicationNotConnected`,
   `PublicationBackPressured`, `PublicationAdminAction`, `PublicationClosed`,
@@ -425,8 +448,9 @@ beside three members.
   after it answer -1 with `ErrNoClaim` in `Err` and the ABI reads no freed handle
   through the struct's `publication` (`spec/c-abi.md`, "Which claim a struct names").
 - Never read a refusal as an answer. A `Poll` from inside a handler of the same
-  subscription returns −1 with `ErrPolling` in `Err`, and the poll in progress goes
-  on. A committed log's handler is held to the same rule. From inside it, a `Poll` of
+  subscription returns −1 with `ErrPolling` in `Err`, or with `ErrNegative` for a
+  fragment limit below zero, which the client refuses first, and the poll in progress
+  goes on. A committed log's handler is held to the same rule. From inside it, a `Poll` of
   the same log, `log.Position()` and `log.CommitPosition()` return −1, `log.IsEnded()`
   is `false`, `log.FailedAt()`, `log.WithdrawnAt()` and `log.Faulted()` are zeros and
   `false`, and `log.Fault()` and `log.Close()` return an `*Error`, each with
@@ -642,6 +666,11 @@ read another thread's failure, or none. The client never reads the error that wa
   thread for the call, as after a `Header.Values` that returned `false`. The other is
   between `runtime.LockOSThread` and `runtime.UnlockOSThread` around both the failing
   call and the read.
+
+One failure of a per-message call is not the ABI's, and is read from no thread: a
+count below zero, which the shim refuses before the ABI is called. The shim writes the
+handle's kept error itself, with the code `ErrNegative`, the ABI function the call
+would have made and its own message ("What it must never do").
 
 ### The call-back, by construction
 

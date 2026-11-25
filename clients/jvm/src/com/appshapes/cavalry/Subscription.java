@@ -78,8 +78,13 @@ public final class Subscription implements AutoCloseable {
     /** Delivers up to {@code fragmentLimit} fragments to the handler: one ABI call, the count it
      * returned (or -1, with {@link Abi#errcode()} saying why: {@link Abi#ERR_POLLING} for a poll
      * from inside a handler of this subscription, which the ABI refuses and which touches
-     * nothing here), and a {@link HandlerException} when a handler call threw. */
+     * nothing here), and a {@link HandlerException} when a handler call threw. A
+     * {@code fragmentLimit} below zero throws {@link IllegalArgumentException} before the
+     * ABI is called. */
     public int poll(FragmentHandler handler, int fragmentLimit) {
+        if (fragmentLimit < 0) {
+            Abi.negative("fragmentLimit", fragmentLimit);
+        }
         if (polling) {
             try {
                 return (int) Abi.cavalry_subscription_poll.invokeExact(handle, stub, MemorySegment.NULL, (long) fragmentLimit);
@@ -151,8 +156,12 @@ public final class Subscription implements AutoCloseable {
     }
 
     /** The image at the index, with its constants copied now, or null; valid until the next
-     * poll or close. */
+     * poll or close. An {@code index} below zero throws {@link IllegalArgumentException}
+     * before the ABI is called. */
     public Image imageAt(int index) {
+        if (index < 0) {
+            Abi.negative("index", index);
+        }
         MemorySegment pointer;
         try {
             pointer = (MemorySegment) Abi.cavalry_subscription_image_at_index.invokeExact(handle, (long) index);

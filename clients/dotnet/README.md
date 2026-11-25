@@ -378,12 +378,36 @@ program that runs every call above beside three members.
   trampoline that calls a handler, for C#'s forms of each: `lock`, `Monitor`, `Mutex`, `Semaphore`,
   `SpinLock` and the other waits of `System.Threading`, `async`, `await`, `Task`,
   `ValueTask`, `.Wait(`, `.Result`, `Thread.Sleep`, a thread started, `throw`, `new`,
-  and an interpolated string. The one exception built on the path is the
-  `HandlerException` that `Poll` throws after its ABI call; a `Span<byte>` or
+  and an interpolated string. An exception is built on the path after an ABI call only
+  by a poll, once its ABI call has returned: the `HandlerException` it throws, and in a
+  service's poll the `CavalryException` for a value that is no action; a `Span<byte>` or
   `ReadOnlySpan<byte>` made with `new` over bytes the ABI handed over is a view, on the
   stack, not an allocation; and `Header`'s guard, `Ensure`, throws for a getter
-  called outside its handler call, before the ABI is reached. `just lint` fails on
-  any other, in the member's own body or in a method of the package it calls.
+  called outside its handler call, before the ABI is reached. The reader of a count,
+  `Abi.Negative`, throws for one below zero: the lint allows a call of it by the claim
+  and the four polls, which it names, on a line before the member's ABI call (the
+  next rule). A call of it by another per-message member, by a trampoline, or not
+  before the ABI call is a finding. The lint reads a member's own text for its ABI
+  call, `Abi.cavalry_*`. `just lint` fails on any other throw or exception, and on any
+  other of the forms above, in the member's own body or in a method of the package it
+  calls.
+- Never pass the ABI another count than the caller gave
+  ([ADR 0164](../../docs/decisions/0164-refuse-a-count-below-zero-in-the-go-the-jvm-and-the-dotnet-client-before-the-abi-is-called.md)).
+  The ABI takes a count or a length as a `size_t`, and the client's members take an
+  `int`, as a span's `Length` is one: an `int` below zero, cast to `nuint` for the
+  ABI, is a count near 2^64. `TryClaim(-1)` would be a claim of 2^64 − 1 bytes, which
+  the ABI refuses with a length the caller never gave, and `Poll(handler, -1)` a poll
+  with no limit. So `TryClaim`, each of the four `Poll`s and `ImageAt` test their
+  `int` in line, and one below zero throws `ArgumentOutOfRangeException` before the
+  ABI is called. The exception names the parameter as the member names it, `length`,
+  `fragmentLimit` or `index`, and its message the range, the value given, what to
+  pass and this section. A count from 0 costs the one comparison and no call. A
+  limit below zero is refused, and not read as a poll that takes nothing: a poll
+  loop that takes nothing for ever would say nothing. An `int` and a `long` that the ABI takes as
+  an int32 or an int64, a stream id, a position, a timer's id, are held to their
+  type by the compiler. `clients/generate-test.py` holds the test in each member,
+  and the conformance runner makes three of the refusals through the built library: a
+  claim, a subscription's poll and the image at an index.
 - Never throw for an `Offer` code: `TryClaim` and `Offer` return the position after
   the frame or the code below zero (`Abi.PUBLICATION_NOT_CONNECTED`,
   `PUBLICATION_BACK_PRESSURED`, `PUBLICATION_ADMIN_ACTION`, `PUBLICATION_CLOSED`,

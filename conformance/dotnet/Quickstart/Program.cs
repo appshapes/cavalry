@@ -59,6 +59,28 @@ public static class Quickstart
         Environment.Exit(1);
     }
 
+    /// <summary>A call with a count below zero: it must throw ArgumentOutOfRangeException,
+    /// for the parameter, with the client's text first in its message and the README's
+    /// section in it. The runtime adds the parameter and the value after.</summary>
+    static void RefusedCount(string what, string parameter, Action call)
+    {
+        try
+        {
+            call();
+        }
+        catch (ArgumentOutOfRangeException refused)
+        {
+            if (refused.ParamName != parameter || !refused.Message.StartsWith(parameter + ": an int from 0 to 2147483647 expected")
+                || !refused.Message.Contains("See clients/dotnet/README.md#what-it-must-never-do"))
+            {
+                Fail(what + " was refused with a message that does not name " + parameter + " and the README's section: "
+                    + refused.Message);
+            }
+            return;
+        }
+        Fail(what + " was not refused before the ABI was called");
+    }
+
     static void Say(string what)
     {
         Console.WriteLine("conformance/dotnet: " + what);
@@ -843,6 +865,17 @@ public static class Quickstart
             client.StopRecording(recording.RecordingId);
             long recordingId = recording.RecordingId;
             recording.Close();
+
+            // A count below zero never reaches the ABI (work item 465; clients/dotnet/README.md,
+            // "What it must never do"; ADR 0164). As a size_t it would be a count near 2 ** 64:
+            // the claim would be refused for a length nobody gave, and the poll would run with
+            // no limit. Each throws ArgumentOutOfRangeException, with its parameter's name.
+            RefusedCount("TryClaim(-1)", "length", () => ipcPub.TryClaim(-1));
+            RefusedCount("Poll(handler, -1)", "fragmentLimit", () => ipcSub.Poll((body, header) =>
+                Fail("a poll with a fragment limit of -1 handed a fragment over"), -1));
+            RefusedCount("ImageAt(-1)", "index", () => ipcSub.ImageAt(-1));
+            Say("a claim of -1 bytes, a poll with a fragment limit of -1 and the image at index -1 refused with "
+                + "ArgumentOutOfRangeException before the ABI was called, each with its parameter's name");
             ipcPub.Close();
 
             Edges(client);

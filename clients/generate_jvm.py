@@ -355,6 +355,18 @@ public final class Abi {
         }
     }
 
+    /** The reader of a count or a length a caller gave, for a value below zero: it throws,
+     * before the ABI is called. The ABI takes a count as a {@code size_t}, and a negative
+     * {@code int} cast for it is a count near 2 ** 64: a claim of that many bytes, or a poll
+     * with no limit, for a caller that asked for neither. A function tests its argument in
+     * line and calls this only for a value below zero, so a count in range costs no call
+     * (ADR 0164). */
+    static void negative(String name, int value) {
+        throw new IllegalArgumentException(name + ": an int from 0 to " + Integer.MAX_VALUE + " expected, a count or a "
+            + "length, and " + value + " was given; the ABI would be passed another count, near 2 ** 64. Pass a count "
+            + "that is not below zero. See clients/jvm/README.md#what-it-must-never-do");
+    }
+
     /** What a {@code catch (Throwable)} around {@code invokeExact} rethrows: the exception as it
      * is when it is this package's own, else a {@link CavalryException} naming the call, which
      * a handle that was bound cannot raise at run time. */
@@ -1002,8 +1014,13 @@ public final class Publication implements AutoCloseable {
      * was. One ABI call; the segment is the client's one object per sent message, a slice of
      * {@code EVERYTHING} at the claim's address read as a {@code long}, since reading it as
      * an {@code ADDRESS} would make a segment of length zero first (a pointer field is 8
-     * bytes in every layout of this package). */
+     * bytes in every layout of this package). A {@code length} below zero throws
+     * {@link IllegalArgumentException} before the ABI is called (README, "What it must never
+     * do"). */
     public long tryClaim(int length) {
+        if (length < 0) {
+            Abi.negative("length", length);
+        }
         try {
             long position = (long) Abi.cavalry_publication_try_claim.invokeExact(handle, (long) length, claimStruct);
             if (position >= 0) {
@@ -1204,8 +1221,13 @@ public final class Subscription implements AutoCloseable {
     /** Delivers up to {@code fragmentLimit} fragments to the handler: one ABI call, the count it
      * returned (or -1, with {@link Abi#errcode()} saying why: {@link Abi#ERR_POLLING} for a poll
      * from inside a handler of this subscription, which the ABI refuses and which touches
-     * nothing here), and a {@link HandlerException} when a handler call threw. */
+     * nothing here), and a {@link HandlerException} when a handler call threw. A
+     * {@code fragmentLimit} below zero throws {@link IllegalArgumentException} before the
+     * ABI is called. */
     public int poll(FragmentHandler handler, int fragmentLimit) {
+        if (fragmentLimit < 0) {
+            Abi.negative("fragmentLimit", fragmentLimit);
+        }
         if (polling) {
             try {
                 return (int) Abi.cavalry_subscription_poll.invokeExact(handle, stub, MemorySegment.NULL, (long) fragmentLimit);
@@ -1277,8 +1299,12 @@ public final class Subscription implements AutoCloseable {
     }
 
     /** The image at the index, with its constants copied now, or null; valid until the next
-     * poll or close. */
+     * poll or close. An {@code index} below zero throws {@link IllegalArgumentException}
+     * before the ABI is called. */
     public Image imageAt(int index) {
+        if (index < 0) {
+            Abi.negative("index", index);
+        }
         MemorySegment pointer;
         try {
             pointer = (MemorySegment) Abi.cavalry_subscription_image_at_index.invokeExact(handle, (long) index);
@@ -1461,8 +1487,13 @@ public final class CommittedLog implements AutoCloseable {
      * check or could not join: the log is ended short of its entries, and the next poll
      * returns 0 and clears the fault here; {@link #faulted()} keeps it. An entry
      * whose handler call threw was delivered and is not delivered again:
-     * {@link #position()} is past it, and past every entry this poll delivered after it. */
+     * {@link #position()} is past it, and past every entry this poll delivered after it. A
+     * {@code fragmentLimit} below zero throws {@link IllegalArgumentException} before the
+     * ABI is called. */
     public int poll(EntryHandler handler, int fragmentLimit) {
+        if (fragmentLimit < 0) {
+            Abi.negative("fragmentLimit", fragmentLimit);
+        }
         if (polling) {
             try {
                 return (int) Abi.cavalry_committed_log_poll.invokeExact(handle, stub, MemorySegment.NULL, (long) fragmentLimit);
@@ -1792,8 +1823,13 @@ public final class ClusterSession implements AutoCloseable {
      * "session". A stale reply, one of a leadership term below that of a reply this session
      * has handed over, is passed over and counted in {@link #staleReplies()}, and is not in
      * the count. Every reply the ABI hands over reaches the handler, whether or not an
-     * earlier call threw. */
+     * earlier call threw. A
+     * {@code fragmentLimit} below zero throws {@link IllegalArgumentException} before the
+     * ABI is called. */
     public int poll(ReplyHandler handler, int fragmentLimit) {
+        if (fragmentLimit < 0) {
+            Abi.negative("fragmentLimit", fragmentLimit);
+        }
         if (polling) {
             try {
                 return (int) Abi.cavalry_cluster_session_poll.invokeExact(handle, stub, MemorySegment.NULL, (long) fragmentLimit);
@@ -2151,8 +2187,13 @@ public final class ClusterService implements AutoCloseable {
      * before that entry, and its cause what the handler threw, or a
      * {@link CavalryException} with {@link Abi#ERR_CLUSTER_ACTION} and the ABI's message
      * for the value the handler returned. The next poll hands the aborted entry over
-     * again. */
+     * again. A
+     * {@code fragmentLimit} below zero throws {@link IllegalArgumentException} before the
+     * ABI is called. */
     public int poll(ServiceHandler handler, int fragmentLimit) {
+        if (fragmentLimit < 0) {
+            Abi.negative("fragmentLimit", fragmentLimit);
+        }
         if (polling) {
             try {
                 return (int) Abi.cavalry_cluster_service_poll.invokeExact(handle, client.handle(), stub, MemorySegment.NULL,

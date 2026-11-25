@@ -18,16 +18,25 @@
  * (clients/go/README.md, "The thread's error"): the ABI function that failed,
  * cavalry_errcode's code and cavalry_errmsg's message, whole, since the ABI's buffer is
  * 512 bytes with its NUL too (spec/c-abi.md, "The message"). A code of 0 is no failure
- * yet. The handle keeps one, and the shim writes it only when the call failed. */
+ * yet. The handle keeps one, and the shim writes it only when the call failed. One
+ * failure is not the ABI's: a count or a length below zero, which the shim refuses before
+ * the ABI is called, with CAVALRY_GO_ERR_NEGATIVE as the code, the ABI function it would
+ * have called, and a message of its own. */
 typedef struct cavalry_go_error_s {
   int32_t code;
   char function[48];
   char message[512];
 } cavalry_go_error_t;
 
+/* The code of a failure that is this client's own refusal, before the ABI was called, of a
+ * count or a length below zero (ADR 0164). It is none of the ABI's: no code of the ABI is
+ * below zero (spec/c-abi.md, "Error codes"). */
+#define CAVALRY_GO_ERR_NEGATIVE (-1)
+
 /* cavalry_publication_try_claim, with `error` written when it returns
- * CAVALRY_PUBLICATION_ERROR. */
-int64_t cavalry_go_try_claim(cavalry_publication_t *publication, size_t length, cavalry_buffer_claim_t *claim,
+ * CAVALRY_PUBLICATION_ERROR. A `length` below zero is refused here, before the ABI is
+ * called: CAVALRY_PUBLICATION_ERROR, with `error` written as this client's own (ADR 0164). */
+int64_t cavalry_go_try_claim(cavalry_publication_t *publication, int64_t length, cavalry_buffer_claim_t *claim,
                              cavalry_go_error_t *error);
 
 /* cavalry_buffer_claim_set_reserved_value, with `error` written when it returns -1. */
@@ -47,16 +56,18 @@ int64_t cavalry_go_offer(cavalry_publication_t *publication, const uint8_t *buff
 /* Polls `subscription` for up to `fragment_limit` fragments, calling the exported Go
  * function cavalryGoFragment for each with `index`, the subscription's 1-based index in
  * the client's table, as clientd. The ABI's result: the count, or -1, with `error`
- * written. */
-int cavalry_go_poll(cavalry_subscription_t *subscription, uintptr_t index, size_t fragment_limit,
+ * written. A `fragment_limit` below zero is refused here,
+ * before the ABI is called: -1, with `error` written as this client's own (ADR 0164). */
+int cavalry_go_poll(cavalry_subscription_t *subscription, uintptr_t index, int64_t fragment_limit,
                     cavalry_go_error_t *error);
 
 /* Polls the committed log `log` for up to `fragment_limit` entries, as cavalry_go_poll
  * polls a subscription, with `index` the log's slot in the client's table. Its
  * trampoline is the log's own: it reads each entry's position in the log and calls the
  * exported Go function cavalryGoEntry with it. The ABI's result: the count, or -1, with
- * `error` written. */
-int cavalry_go_committed_log_poll(cavalry_committed_log_t *log, uintptr_t index, size_t fragment_limit,
+ * `error` written. A `fragment_limit` below zero is refused here,
+ * before the ABI is called: -1, with `error` written as this client's own (ADR 0164). */
+int cavalry_go_committed_log_poll(cavalry_committed_log_t *log, uintptr_t index, int64_t fragment_limit,
                                   cavalry_go_error_t *error);
 
 /* cavalry_cluster_session_offer, with `error` written when it returns
@@ -68,8 +79,9 @@ int64_t cavalry_go_cluster_session_offer(cavalry_cluster_session_t *session, con
  * channel, as cavalry_go_poll polls a subscription, with `index` the session's slot in the
  * client's table. Its trampoline is the session's own: it reads each reply's values from
  * the header and calls the exported Go function cavalryGoReply with them. The ABI's
- * result: the count of replies handed over, or -1, with `error` written. */
-int cavalry_go_cluster_session_poll(cavalry_cluster_session_t *session, uintptr_t index, size_t fragment_limit,
+ * result: the count of replies handed over, or -1, with `error` written. A `fragment_limit` below zero is refused here,
+ * before the ABI is called: -1, with `error` written as this client's own (ADR 0164). */
+int cavalry_go_cluster_session_poll(cavalry_cluster_session_t *session, uintptr_t index, int64_t fragment_limit,
                                     cavalry_go_error_t *error);
 
 /* cavalry_cluster_service_reply, with `error` written when it returns -1, for a call from
@@ -92,8 +104,10 @@ int cavalry_go_cluster_service_cancel_timer(cavalry_cluster_service_t *service, 
  * unless it is CAVALRY_ACTION_CONTINUE, which the ABI does with no call. An action the ABI
  * refuses, and an entry whose values it does not give, abort the entry: the ABI's error is
  * copied into `error` in that call, and `*aborted` is 1 when the poll returns, else 0. The
- * ABI's result: the count of entries the handler took, or -1, with `error` written. */
+ * ABI's result: the count of entries the handler took, or -1, with `error` written. A
+ * `fragment_limit` below zero is refused here, before the ABI is called: -1, with `error`
+ * written as this client's own and `*aborted` 0 (ADR 0164). */
 int cavalry_go_cluster_service_poll(cavalry_cluster_service_t *service, cavalry_t *client, uintptr_t index,
-                                    size_t fragment_limit, int *aborted, cavalry_go_error_t *error);
+                                    int64_t fragment_limit, int *aborted, cavalry_go_error_t *error);
 
 #endif

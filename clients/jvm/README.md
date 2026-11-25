@@ -363,13 +363,36 @@ that runs every call above beside three members.
   that calls a handler, for Java's forms of each: `synchronized`, as a modifier or a block, the lock
   classes of `java.util.concurrent` and a lock taken on any receiver (`.lock(`,
   `.tryLock(`, `.acquire(`), a blocking wait (`wait`, `join`, `await`, `park`, `sleep`,
-  `take`), a future or an executor, a thread started, `throw` and `new`. The one
-  exception built on the path is the `HandlerException` that `poll` throws after its
-  ABI call; a `throw` inside the `catch (Throwable)` that the compiler demands around
+  `take`), a future or an executor, a thread started, `throw` and `new`. An
+  exception is built on the path after an ABI call only by a poll, once its ABI call
+  has returned: the `HandlerException` it throws, and in a service's poll the
+  `CavalryException` for a value that is no action; a `throw` inside the `catch (Throwable)` that the compiler demands around
   `invokeExact`, a block that cannot run once the handle is bound, is not one; and
   `Header`'s guard, `ensure`, throws for a getter called outside its handler call,
-  before the ABI is reached. `just lint` fails on any other, in the method's own body
-  or in a method of the package it calls.
+  before the ABI is reached. The reader of a count, `Abi.negative`, throws for one
+  below zero: the lint allows a call of it by the claim and the four polls, which it
+  names, on a line before the method's ABI call (the next rule). A call of it by
+  another per-message method, by an upcall, or not before the ABI call is a finding.
+  The lint reads a method's own text for its ABI call, `Abi.cavalry_*`.
+  `just lint` fails on any other throw or exception, and on any other of the forms
+  above, in the method's own body or in a method of the package it calls.
+- Never pass the ABI another count than the caller gave
+  ([ADR 0164](../../docs/decisions/0164-refuse-a-count-below-zero-in-the-go-the-jvm-and-the-dotnet-client-before-the-abi-is-called.md)).
+  The ABI takes a count or a length as a `size_t`, and Java has no such type: an
+  `int` below zero, cast for the ABI, is a count near 2^64. `tryClaim(-1)` would be
+  a claim of 2^64 − 1 bytes, which the ABI refuses with a length the caller never
+  gave, and `poll(handler, -1)` a poll with no limit. So `tryClaim`, each of the four
+  `poll`s and `imageAt` test their `int` in line, and one below zero throws
+  `IllegalArgumentException` before the ABI is called. The message names the
+  parameter as the method names it, `length`, `fragmentLimit` or `index`, the range,
+  the value given, what to pass and this section. A count from 0 costs the one
+  comparison and no call. A limit below zero is refused, and not read as a poll
+  that takes nothing: a poll loop that takes nothing for ever would say nothing.
+  An `int` and a `long` that the ABI takes as an int32 or an int64, a stream id, a
+  position, a timer's id, are held to their type by the compiler.
+  `clients/generate-test.py` holds the test in each method, and the conformance
+  runner makes three of the refusals through the built library: a claim, a
+  subscription's poll and the image at an index.
 - Never throw for an `Offer` code: `tryClaim` and `offer` return the position after
   the frame or the code below zero (`Abi.PUBLICATION_NOT_CONNECTED`,
   `PUBLICATION_BACK_PRESSURED`, `PUBLICATION_ADMIN_ACTION`, `PUBLICATION_CLOSED`,

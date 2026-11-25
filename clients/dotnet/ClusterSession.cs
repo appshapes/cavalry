@@ -90,9 +90,14 @@ public sealed unsafe class ClusterSession : IDisposable
     /// <c>Cluster</c> is "session". A stale reply, one of a leadership term below that of a
     /// reply this session has handed over, is passed over and counted in
     /// <see cref="StaleReplies"/>, and is not in the count. Every reply the ABI hands over
-    /// reaches the handler, whether or not an earlier call threw.</summary>
+    /// reaches the handler, whether or not an earlier call threw. A <paramref name="fragmentLimit"/> below zero throws
+    /// <see cref="ArgumentOutOfRangeException"/> before the ABI is called.</summary>
     public int Poll(ReplyHandler handler, int fragmentLimit)
     {
+        if (fragmentLimit < 0)
+        {
+            Abi.Negative(nameof(fragmentLimit), fragmentLimit);
+        }
         if (polling)
         {
             return Abi.cavalry_cluster_session_poll(handle, &OnReply, GCHandle.ToIntPtr(self), (nuint) fragmentLimit);

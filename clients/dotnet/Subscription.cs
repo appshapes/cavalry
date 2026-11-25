@@ -59,9 +59,14 @@ public sealed unsafe class Subscription : IDisposable
     /// <see cref="Abi.ERR_POLLING"/> for a poll from inside a handler of this subscription,
     /// which the ABI refuses and which touches nothing here), and a
     /// <see cref="HandlerException"/> when a handler call threw. After a close, the ABI is
-    /// handed a null handle and answers -1 with <see cref="Abi.ERR_NULL"/>.</summary>
+    /// handed a null handle and answers -1 with <see cref="Abi.ERR_NULL"/>. A <paramref name="fragmentLimit"/> below zero throws
+    /// <see cref="ArgumentOutOfRangeException"/> before the ABI is called.</summary>
     public int Poll(FragmentHandler handler, int fragmentLimit)
     {
+        if (fragmentLimit < 0)
+        {
+            Abi.Negative(nameof(fragmentLimit), fragmentLimit);
+        }
         if (polling)
         {
             return Abi.cavalry_subscription_poll(handle, &OnFragment, GCHandle.ToIntPtr(self), (nuint) fragmentLimit);
@@ -129,9 +134,14 @@ public sealed unsafe class Subscription : IDisposable
     }
 
     /// <summary>The image at the index, with its constants copied now, or null; valid until the
-    /// next poll or close.</summary>
+    /// next poll or close. An <paramref name="index"/> below zero throws
+    /// <see cref="ArgumentOutOfRangeException"/> before the ABI is called.</summary>
     public Image? ImageAt(int index)
     {
+        if (index < 0)
+        {
+            Abi.Negative(nameof(index), index);
+        }
         nint pointer = Abi.cavalry_subscription_image_at_index(handle, (nuint) index);
         return pointer == 0 ? null : new Image(pointer);
     }

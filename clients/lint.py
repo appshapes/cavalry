@@ -69,20 +69,29 @@ the same tokenizer, the forms are `synchronized`, as a modifier or a block, the 
 `java.util.concurrent` and a lock taken on any receiver, `.lock(`, `.tryLock(` or
 `.acquire(`, a blocking wait, `wait`, `join`, `await`, `park`, `sleep` or `take`, a future
 or an executor, a thread started, `throw`, building an exception, and `new`, Java's
-allocation; the one exception built on the per-message path is the `HandlerException`
-that `poll` throws after its ABI call; the compiler demands a `catch (Throwable)` around
+allocation; an exception is built on the per-message path after an ABI call only by a
+poll, once its ABI call has returned, the `HandlerException` it throws and in a service's
+poll the `CavalryException` for a value that is no action; the compiler demands a `catch (Throwable)` around
 every `invokeExact`, a block that cannot run once the handle is bound, so what that block
 throws is not a raise on the path; and `Header.ensure` is the guard that throws for a
 header read outside its handler call, before the ABI is reached, as the Node addon's
-argument readers throw for an argument the ABI cannot take.
+argument readers throw for an argument the ABI cannot take. One reader is allowed its
+throw as Python's readers are, and held as narrowly: `Abi.negative`, which refuses a count
+or a length below zero, since a negative `int` cast for the ABI's `size_t` is a count near
+2 ** 64 (ADR 0164). Only the methods the rule names beside it may call it, the claim and
+the four polls; each call of it is on a line before the method's first call of the ABI;
+and the reader is held to every other form.
 For C#, read from the files of `clients/dotnet` by the same tokenizer, the forms are
 `lock`, `Monitor`, `Mutex`, `Semaphore`, `SpinLock` and the other waits of
 `System.Threading`, `async`, `await`, `Task`, `ValueTask`, `.Wait(`, `.Result`,
 `Thread.Sleep`, a thread started, `throw`, building an exception, `new`, C#'s allocation,
 except a `Span` or `ReadOnlySpan` made over bytes the ABI handed over, which is a struct on
-the stack, and an interpolated string; the one exception built on the per-message path is
-the `HandlerException` that `Poll` throws after its ABI call, and `Header.Ensure` is the
+the stack, and an interpolated string; an exception is built on the per-message path
+after an ABI call only by a poll, once its call has returned, the `HandlerException` it
+throws and in a service's poll the `CavalryException` for a value that is no action, and `Header.Ensure` is the
 guard that throws for a header read outside its handler call, before the ABI is reached.
+`Abi.Negative` is the reader of a count below zero, allowed and held as the JVM client's.
+The Go client refuses such a count in `shim.c`, with no panic, so its rules have no reader.
 
 It fails on generated code under `clients/` in a language it has no rules for, and on a
 package in which it finds none of the per-message functions, so that a client cannot slip
@@ -384,6 +393,12 @@ RULES = {
                         ("ClusterSession.poll", "cavalry_cluster_session_poll.invokeExact"),
                         ("ClusterService.poll", "cavalry_cluster_service_poll.invokeExact")],
         "guards": ["Header.ensure"],
+        # The reader of a count or a length a caller gave, and the per-message functions that
+        # may call it: its throw, for a count below zero, before the ABI is called, is none on
+        # their path (ADR 0164). The ABI takes a count as a size_t, and a negative int cast
+        # for it is a count near 2 ** 64.
+        "readers": {"Abi.negative": ["Publication.tryClaim", "Subscription.poll", "CommittedLog.poll",
+                                     "ClusterSession.poll", "ClusterService.poll"]},
     },
     # The .NET client calls the ABI through LibraryImport stubs (clients/dotnet/README.md):
     # the per-message members are in Publication.cs, Subscription.cs and Header.cs, the
@@ -452,6 +467,9 @@ RULES = {
                         ("ClusterSession.Poll", "Abi.cavalry_cluster_session_poll"),
                         ("ClusterService.Poll", "Abi.cavalry_cluster_service_poll")],
         "guards": ["Header.Ensure"],
+        # The reader of a count or a length a caller gave, as the JVM client's (ADR 0164).
+        "readers": {"Abi.Negative": ["Publication.TryClaim", "Subscription.Poll", "CommittedLog.Poll",
+                                     "ClusterSession.Poll", "ClusterService.Poll"]},
     },
 }
 HELP = "see clients/README.md, \"What every client must pass\""
@@ -1462,6 +1480,43 @@ class JavaModule:
         return found
 
 
+TYPED_ABI_CALL = re.compile(r"(?<![\w$.])Abi\s*\.\s*cavalry_\w+")
+
+
+def typed_reader_findings(module, where: str, name: str, call_line: int, reader: str) -> list[str]:
+    """What a call of an argument reader at `call_line` of the per-message function
+    `name` of the JVM or the .NET client, one the rules let call it, still breaks (ADR
+    0164, as ADR 0162's rule for Python). The one thing allowed is the throw in the
+    reader's own body. A form of another kind in the reader, a form in a function the
+    reader calls, and a call of the reader on a line that is not before the function's
+    first call of the ABI, `Abi.cavalry_*`, are findings."""
+    findings = []
+    file, line, head, body, start, code = module.functions[name]
+    abi = TYPED_ABI_CALL.search(body)
+    if abi is not None:
+        abi_line = line_of(code, start) - 1 + body.count("\n", 0, abi.start()) + 1
+        if call_line >= abi_line:
+            findings.append(f"{where} calls the argument reader {reader} at line {call_line}, not before its call of "
+                            f"the ABI at line {abi_line}: a reader refuses an argument before the ABI is called; {HELP}")
+    for kind, at, what in module.forms(reader, None):
+        if kind == "raise":
+            continue  # the reader's own refusal
+        if kind in WHY:
+            findings.append(f"{where} calls {reader} at line {call_line}, and {reader} {what}: {WHY[kind]}; {HELP}")
+            continue
+        for k, how in module.reach(what).items():
+            findings.append(f"{where} calls {reader} at line {call_line}, and {reader} calls {what} at line {at}, "
+                            f"and {how}: {WHY[k]}; {HELP}")
+    return findings
+
+
+def stale_readers(language: str, module, rules: dict, package: str) -> list[str]:
+    """A reader the rules name and the package does not have is a stale rule."""
+    return [f"{language}: the argument reader {reader} is not in {os.path.relpath(package, ROOT)}; the generator "
+            f"renamed it or the rules are stale; {HELP}"
+            for reader in sorted(set(rules.get("readers", {})) - set(module.functions))]
+
+
 def jvm_findings(language: str, path: str, rules: dict) -> list[str]:
     findings = []
     package = os.path.dirname(os.path.dirname(os.path.dirname(os.path.dirname(os.path.dirname(path)))))
@@ -1482,6 +1537,8 @@ def jvm_findings(language: str, path: str, rules: dict) -> list[str]:
         if name not in module.functions:
             findings.append(f"{language}: the per-message function {name} is not in {os.path.relpath(package, ROOT)}; {HELP}")
     raise_after = raise_after_of(rules)
+    readers = rules.get("readers", {})
+    findings.extend(stale_readers(language, module, rules, package))
     for name in present:
         file, line, head, body, start, code = module.functions[name]
         where = f"{language}: {name} ({os.path.relpath(file, ROOT)}:{line})"
@@ -1495,6 +1552,8 @@ def jvm_findings(language: str, path: str, rules: dict) -> list[str]:
         for kind, at, what in module.forms(name, abi_line):
             if kind in WHY:
                 findings.append(f"{where} {what}: {WHY[kind]}; {HELP}")
+            elif name in readers.get(what, ()) and what in module.functions:
+                findings.extend(typed_reader_findings(module, where, name, at, what))
             else:
                 for k, how in module.reach(what).items():
                     if kind == "call-allowed" and k == "raise":
@@ -1741,6 +1800,8 @@ def dotnet_findings(language: str, path: str, rules: dict) -> list[str]:
         if name not in module.functions:
             findings.append(f"{language}: the per-message function {name} is not in {os.path.relpath(package, ROOT)}; {HELP}")
     raise_after = raise_after_of(rules)
+    readers = rules.get("readers", {})
+    findings.extend(stale_readers(language, module, rules, package))
     for name in present:
         file, line, head, body, start, code = module.functions[name]
         where = f"{language}: {name} ({os.path.relpath(file, ROOT)}:{line})"
@@ -1757,6 +1818,8 @@ def dotnet_findings(language: str, path: str, rules: dict) -> list[str]:
                                 f"the ABI returns, with no task around it; {HELP}")
             elif kind in WHY:
                 findings.append(f"{where} {what}: {WHY[kind]}; {HELP}")
+            elif name in readers.get(what, ()) and what in module.functions:
+                findings.extend(typed_reader_findings(module, where, name, at, what))
             else:
                 for k, how in module.reach(what).items():
                     if kind == "call-allowed" and k == "raise":

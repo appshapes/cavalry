@@ -66,7 +66,11 @@ imports), Go (`go/`, by `generate_go.py`), the JVM (`jvm/`, by `generate_jvm.py`
   The Node addon's readers are held the same way in its C: a reader is called by a
   function the addon gives N-API, which N-API calls with the caller's arguments,
   by that function itself and before its ABI call, and never by a trampoline or a
-  function one calls.
+  function one calls. The JVM and the .NET client have one reader each, of a count
+  below zero, named with the claim and the four polls and held to a line before the
+  method's ABI call
+  ([ADR 0164](../docs/decisions/0164-refuse-a-count-below-zero-in-the-go-the-jvm-and-the-dotnet-client-before-the-abi-is-called.md)).
+  The Go client refuses such a count in its C shim, with no panic.
   A poll's own raise, once its ABI call has returned, is the other one allowed
   (below).
   Generated code of the client in another language on the same path is read
