@@ -50,18 +50,18 @@ use cavalry_shm::counters::generated::{
 use cavalry_shm::counters::generated::{
     CLUSTER_APPEND_POSITION, CLUSTER_COMMIT_POSITION, CLUSTER_CONTROL_TOGGLE,
     CLUSTER_CONTROL_TOGGLE_TAKEN, CLUSTER_ELECTION_CAUSE, CLUSTER_ELECTION_STATE,
-    CLUSTER_ELECTIONS_FAILED, CLUSTER_JOIN_POSITION_MISMATCHES, CLUSTER_LEADER_HEARTBEAT_TIMEOUTS,
-    CLUSTER_LEADER_MEMBER_ID, CLUSTER_LEADER_QUORUM_LOSSES, CLUSTER_LEADERS_WITHHELD,
-    CLUSTER_LEADERSHIP_TERM_ID, CLUSTER_LOG_IMAGES_LOST, CLUSTER_LOG_RECORDINGS_FORGOTTEN,
-    CLUSTER_LOG_RECORDINGS_UNSYNCED, CLUSTER_LOG_RECORDINGS_UNWRITTEN,
-    CLUSTER_LOG_REPLICATIONS_UNAVAILABLE, CLUSTER_MESSAGES_REJECTED, CLUSTER_PROTOCOL_VERSION,
-    CLUSTER_REPLIES_STALE, CLUSTER_ROLE, CLUSTER_SERVICE_ACKS_REJECTED,
-    CLUSTER_SERVICE_SNAPSHOTS_FAILED, CLUSTER_SERVICE_SNAPSHOTS_PASSED_OVER,
-    CLUSTER_SERVICE_TIMER_CANCELS_DROPPED, CLUSTER_SERVICE_TIMERS, CLUSTER_SNAPSHOTS_FAILED,
-    CLUSTER_SNAPSHOTS_PASSED_OVER, CLUSTER_STANDBY, CLUSTER_STANDBY_VOTE_REQUESTS, CLUSTER_TIMERS,
-    CLUSTER_TIMERS_CLEARED, CLUSTER_TRUNCATION_OWED, CLUSTER_TRUNCATIONS_FAULTED,
-    CLUSTER_TRUNCATIONS_REFUSED, CLUSTER_VOTE_FLOOR, CLUSTER_VOTE_FLOORS_CLEARED, CLUSTER_VOTERS,
-    CLUSTER_VOTES_WITHHELD,
+    CLUSTER_ELECTIONS_FAILED, CLUSTER_FLOOR_ANSWER, CLUSTER_FLOOR_ANSWERS_IGNORED,
+    CLUSTER_JOIN_POSITION_MISMATCHES, CLUSTER_LEADER_HEARTBEAT_TIMEOUTS, CLUSTER_LEADER_MEMBER_ID,
+    CLUSTER_LEADER_QUORUM_LOSSES, CLUSTER_LEADERS_WITHHELD, CLUSTER_LEADERSHIP_TERM_ID,
+    CLUSTER_LOG_IMAGES_LOST, CLUSTER_LOG_RECORDINGS_FORGOTTEN, CLUSTER_LOG_RECORDINGS_UNSYNCED,
+    CLUSTER_LOG_RECORDINGS_UNWRITTEN, CLUSTER_LOG_REPLICATIONS_UNAVAILABLE,
+    CLUSTER_MESSAGES_REJECTED, CLUSTER_PROTOCOL_VERSION, CLUSTER_REPLIES_STALE, CLUSTER_ROLE,
+    CLUSTER_SERVICE_ACKS_REJECTED, CLUSTER_SERVICE_SNAPSHOTS_FAILED,
+    CLUSTER_SERVICE_SNAPSHOTS_PASSED_OVER, CLUSTER_SERVICE_TIMER_CANCELS_DROPPED,
+    CLUSTER_SERVICE_TIMERS, CLUSTER_SNAPSHOTS_FAILED, CLUSTER_SNAPSHOTS_PASSED_OVER,
+    CLUSTER_STANDBY, CLUSTER_STANDBY_VOTE_REQUESTS, CLUSTER_TIMERS, CLUSTER_TIMERS_CLEARED,
+    CLUSTER_TRUNCATION_OWED, CLUSTER_TRUNCATIONS_FAULTED, CLUSTER_TRUNCATIONS_REFUSED,
+    CLUSTER_VOTE_FLOOR, CLUSTER_VOTE_FLOORS_CLEARED, CLUSTER_VOTERS, CLUSTER_VOTES_WITHHELD,
 };
 use cavalry_shm::counters::generated::{
     DRIVER_REGISTRY_FULL, PUBLICATION_ADD_DEFERRED_WAITING, SUBSCRIPTION_ADD_DEFERRED_WAITING,
@@ -1172,8 +1172,9 @@ const DOC_SNAPSHOT: &str = "docs/how-to/ask-for-a-snapshot.md#when-it-does-not-w
 /// 0148). After it, two of a service's timers (ADR 0151): a member that removed
 /// every timer it held, its table full with none marked, so that some of them were
 /// pending nowhere, and a cancel that the service beside it dropped, which it
-/// counts under its member's id.
-const MEMBER_COUNTS: [CounterId; 17] = [
+/// counts under its member's id. The last is a floor answer the member read and did
+/// not take, one for another run, term or leader (ADR 0163).
+const MEMBER_COUNTS: [CounterId; 18] = [
     CLUSTER_MESSAGES_REJECTED,
     CLUSTER_LEADER_HEARTBEAT_TIMEOUTS,
     CLUSTER_LOG_IMAGES_LOST,
@@ -1191,6 +1192,7 @@ const MEMBER_COUNTS: [CounterId; 17] = [
     CLUSTER_TRUNCATIONS_FAULTED,
     CLUSTER_TIMERS_CLEARED,
     CLUSTER_SERVICE_TIMER_CANCELS_DROPPED,
+    CLUSTER_FLOOR_ANSWERS_IGNORED,
 ];
 
 /// Where a cluster session's findings are explained.
@@ -1257,6 +1259,11 @@ struct MemberCounters {
     /// record, as for a member of a build before ADR 0161, which never clears its floor
     /// and votes once its log has reached it.
     vote_floors_cleared: Option<i64>,
+    /// `cluster.floor_answer`: the lowest log position of the floor answers the member
+    /// took since it stored its vote floor, −1 for none (ADR 0163); `None` while the
+    /// counters file holds no such record, as for a member of a version before 3 of the
+    /// cluster protocol, which clears its floor with no answer.
+    floor_answer: Option<i64>,
     /// `cluster.timers`: how many timers the member holds, each told to it by the
     /// service beside it (ADR 0151); `None` while the counters file holds no such
     /// record, as for a member of a build that holds none.
@@ -1545,7 +1552,7 @@ fn election_state_name(code: i64) -> String {
 /// (`cluster-commit-waits`); a member that runs with other voters than the members
 /// string doctor was given names (`cluster-voters`; ADR 0134); a voter that holds a vote
 /// floor, which withholds its vote until it has joined a leader's live log at or past
-/// the floor, with where
+/// the floor and, from version 3, past its leader's answer, with where
 /// its log is (`cluster.vote_floor`; ADR 0145, ADR 0161), or, for a member of a build
 /// before ADR 0161, one below its floor, and no standby, which has no vote to withhold; a
 /// member that owes a truncation whose command or write faulted, with the position it
@@ -1676,6 +1683,8 @@ fn cluster_checks(
             member.truncation_owed = Some(value);
         } else if type_id == CLUSTER_VOTE_FLOORS_CLEARED.0 {
             member.vote_floors_cleared = Some(value);
+        } else if type_id == CLUSTER_FLOOR_ANSWER.0 {
+            member.floor_answer = Some(value);
         } else if type_id == CLUSTER_TIMERS.0 {
             member.timers = Some(value);
         } else if type_id == CLUSTER_SERVICE_TIMERS.0 {
@@ -2193,9 +2202,10 @@ fn member_findings(
             doc: DOC_CLUSTER,
         });
     }
-    // A member that holds a vote floor withholds its vote (ADR 0145, ADR 0161) until it
-    // has joined a leader's live log since it stored the floor and in this run, with its
-    // log at or past the floor, which clears it: the gauge's
+    // A member that holds a vote floor withholds its vote (ADR 0145, ADR 0161, ADR 0163)
+    // until it has joined a leader's live log since it stored the floor and in this run,
+    // with its log at or past the floor and, from version 3, past its leader's answer,
+    // which clears it: the gauge's
     // text, with where its log is, while it lasts, and nothing once the floor is
     // cleared. A log at or past the floor is said so, since such a member still
     // withholds: it waits for the live log too, not for the position alone. A standby that starts
@@ -2203,19 +2213,45 @@ fn member_findings(
     // but it has no vote to withhold and its catch-up costs the cluster no tolerance
     // (ADR 0134): nothing.
     // A member of a build before ADR 0161 registers no cluster.vote_floors_cleared: it
-    // never clears its floor, and votes once its log has reached it, so it is named
-    // only while its log is below the floor, as that build's rule has it.
-    let floor_held_withholds = |floor: i64| member.vote_floors_cleared.is_some() || append < floor;
+    // never clears its floor, and votes once its log has reached it. Below its floor it
+    // withholds, as that build's rule has it; at or past it, it votes, and is named all
+    // the same, since a later build reads that floor and withholds until it clears it
+    // (ADR 0161, ADR 0163): an upgrade waits on it.
+    let older_build = member.vote_floors_cleared.is_none();
     if member.standby != Some(1)
         && let Some(floor) = member.vote_floor
         && floor >= 0
-        && floor_held_withholds(floor)
         && let Some(def) = COUNTERS.iter().find(|def| def.id == CLUSTER_VOTE_FLOOR)
     {
+        // A member of version 3 waits for its leader's answer to its present run as
+        // well (ADR 0163): an answer of none, which a leader of an earlier version never
+        // sends, or one its log has not reached, is said so.
         let where_it_is = if append < floor {
             format!(
                 "its cluster.append_position {append}, {} bytes short",
                 floor - append
+            )
+        } else if older_build {
+            format!(
+                "its cluster.append_position {append}, at or past it, in a build before ADR \
+                 0161, which votes now but never clears the floor: a later build reads it at \
+                 its start and withholds until it clears it, so start this member on a build \
+                 of ADR 0161 or later, which clears it once it has joined its leader's live \
+                 log, before an upgrade to version 3 of the cluster protocol"
+            )
+        } else if member.floor_answer.is_some_and(|answer| answer < 0) {
+            format!(
+                "its cluster.append_position {append}, at or past it, and no leader has \
+                 answered it in this run: it clears only once a leader of version 3 or later \
+                 answers it, which a leader of an earlier version never does; if its \
+                 cluster.floor_answers_ignored rises meanwhile, answers come and name \
+                 another run, term or leader"
+            )
+        } else if let Some(answer) = member.floor_answer.filter(|&answer| append < answer) {
+            format!(
+                "its cluster.append_position {append}, {} bytes short of its leader's \
+                 answer at {answer}",
+                answer - append
             )
         } else {
             format!(
@@ -8034,7 +8070,9 @@ mod tests {
     /// its vote floor is named, with where its log is and how far it has to go, and
     /// the requests it left unanswered meanwhile are reported with what they mean
     /// (ADR 0145); one at or past its floor that has not joined the live log since it
-    /// started is named too, since it still withholds (ADR 0161). Once its floor is
+    /// started is named too, since it still withholds (ADR 0161), and one of version 3
+    /// that no leader has answered, or whose log is short of the answer (ADR 0163).
+    /// Once its floor is
     /// cleared, doctor says nothing of it. One that
     /// has taken no leader yet, waiting to hear a voter, is reported with the leaders
     /// it passed over and what to start; once it has a leader, or its log holds
@@ -8125,7 +8163,8 @@ mod tests {
 
         // A member of a build before ADR 0161, which registers no
         // cluster.vote_floors_cleared, votes once its log has reached its floor, which
-        // it never clears: at its floor, doctor names nothing.
+        // it never clears: at its floor, doctor names it all the same, since a later
+        // build withholds on that floor, so that an upgrade waits on it (ADR 0163).
         let older = [
             (CLUSTER_ROLE, 0),
             (CLUSTER_ELECTION_STATE, 17),
@@ -8136,8 +8175,54 @@ mod tests {
             (CLUSTER_VOTES_WITHHELD, 0),
         ];
         let (_, findings) = cluster_findings("vote-floor-older-build", 2, &older);
-        let found: Vec<&str> = findings.iter().map(|finding| finding.check).collect();
-        assert_eq!(found, ["cluster-member"], "{findings:?}");
+        let floor = findings
+            .iter()
+            .find(|finding| finding.check == "cluster.vote_floor")
+            .unwrap_or_else(|| panic!("{findings:?}"));
+        assert_eq!(floor.level, Level::Warn);
+        assert!(
+            floor
+                .message
+                .contains("in a build before ADR 0161, which votes now but never clears the floor"),
+            "{}",
+            floor.message
+        );
+
+        // A member of version 3 waits for its leader's answer to its present run as
+        // well (ADR 0163): none yet, as beside a leader of an earlier version, and one its
+        // log has not reached, are each said so.
+        for (name, answer, says) in [
+            (
+                "vote-floor-unanswered",
+                -1,
+                "and no leader has answered it in this run: it clears only once a leader \
+                 of version 3 or later answers it",
+            ),
+            (
+                "vote-floor-short-of-the-answer",
+                (1 << 20) + 4096,
+                "4096 bytes short of its leader's answer at 1052672",
+            ),
+        ] {
+            let waiting = [
+                (CLUSTER_ROLE, 0),
+                (CLUSTER_ELECTION_STATE, 17),
+                (CLUSTER_LEADERSHIP_TERM_ID, 2),
+                (CLUSTER_LEADER_MEMBER_ID, 1),
+                (CLUSTER_APPEND_POSITION, 1 << 20),
+                (CLUSTER_VOTE_FLOOR, 1 << 19),
+                (CLUSTER_VOTES_WITHHELD, 0),
+                (CLUSTER_VOTE_FLOORS_CLEARED, 0),
+                (CLUSTER_FLOOR_ANSWER, answer),
+            ];
+            let (_, findings) = cluster_findings(name, 2, &waiting);
+            let floor = findings
+                .iter()
+                .find(|finding| finding.check == "cluster.vote_floor")
+                .unwrap_or_else(|| panic!("{name}: {findings:?}"));
+            assert_eq!(floor.level, Level::Warn, "{name}");
+            assert!(floor.message.contains(says), "{name}: {}", floor.message);
+        }
 
         // Its floor cleared, once it joined the live log, it votes as any voter, and
         // doctor names nothing.
@@ -8559,10 +8644,10 @@ mod tests {
                 findings[0].message
             );
         }
-        // The value this build's members store is the one the note reads as version 2.
+        // The value this build's members store is the one the note reads as version 3.
         assert_eq!(
             protocol_version_text(Some(i64::from(PROTOCOL_VERSION))),
-            "; it runs version 2 of the cluster protocol, 0.2.0"
+            "; it runs version 3 of the cluster protocol, 0.3.0"
         );
         // Another major is named in semantic form alone: its page's version is no
         // longer the minor.
@@ -8606,7 +8691,7 @@ mod tests {
 
         // A follower that follows: the note alone, with who it is and what it knows.
         let (checks, findings) = cluster_findings("cluster-follower", 1, &follower);
-        assert_eq!(checks, 27);
+        assert_eq!(checks, 28);
         assert_eq!(findings.len(), 1, "{findings:?}");
         assert_eq!(findings[0].check, "cluster-member");
         assert_eq!(findings[0].level, Level::Note);
@@ -8783,7 +8868,7 @@ mod tests {
         let dir = TestDir::new("cluster-session-member");
         let reader = session_file(&dir, 7, 2, Some((1, &follower)));
         let mut findings = Vec::new();
-        assert_eq!(cluster_checks(&reader, true, None, &mut findings), 28);
+        assert_eq!(cluster_checks(&reader, true, None, &mut findings), 29);
         let found: Vec<&str> = findings.iter().map(|finding| finding.check).collect();
         assert_eq!(
             found,
