@@ -375,7 +375,7 @@ static void cavalry_go_service_trampoline(void *clientd, const uint8_t *buffer, 
   }
   action = cavalryGoClusterEntry(poll->index, (uint8_t *) buffer, length, values.position, values.leadership_term_id,
                                  values.timestamp, values.session_id, values.type, values.leader_member_id,
-                                 values.timed_out ? 1 : 0);
+                                 values.timed_out ? 1 : 0, values.correlation_id);
   if (action == CAVALRY_ACTION_CONTINUE) {
     return;
   }
@@ -563,9 +563,9 @@ func TestTheClusterTrampolinesHandTheValuesOnAndAbortAnEntryNoHandlerTook(t *tes
 	cavalryGoReply(maxSubscriptions+1, nil, 0, 5, 1700000000000)
 	cavalryGoReply(1, nil, 0, 5, 1700000000000)
 	unheld := []int32{
-		int32(cavalryGoClusterEntry(0, nil, 0, 320, 5, 1700000000000, 7, ClusterEntrySessionMessage, -1, 0)),
-		int32(cavalryGoClusterEntry(maxSubscriptions+1, nil, 0, 320, 5, 1700000000000, 7, ClusterEntrySessionMessage, -1, 0)),
-		int32(cavalryGoClusterEntry(1, nil, 0, 320, 5, 1700000000000, 7, ClusterEntrySessionMessage, -1, 0)),
+		int32(cavalryGoClusterEntry(0, nil, 0, 320, 5, 1700000000000, 7, ClusterEntrySessionMessage, -1, 0, 0)),
+		int32(cavalryGoClusterEntry(maxSubscriptions+1, nil, 0, 320, 5, 1700000000000, 7, ClusterEntrySessionMessage, -1, 0, 0)),
+		int32(cavalryGoClusterEntry(1, nil, 0, 320, 5, 1700000000000, 7, ClusterEntrySessionMessage, -1, 0, 0)),
 	}
 	if len(replies) != 0 || unheld[0] != ActionAbort || unheld[1] != ActionAbort || unheld[2] != ActionAbort {
 		t.Fatalf("a slot of 0, of %d and an empty slot called the reply handler %d time(s) and answered %v for an entry; "+
@@ -603,9 +603,9 @@ func TestTheClusterTrampolinesHandTheValuesOnAndAbortAnEntryNoHandlerTook(t *tes
 	}
 	t.Cleanup(func() { unregister(state) })
 	want := ClusterEntryValues{Position: 320, LeadershipTermID: 5, Timestamp: 1700000000000, SessionID: 7,
-		Type: ClusterEntrySessionMessage, LeaderMemberID: -1, TimedOut: true}
+		Type: ClusterEntrySessionMessage, LeaderMemberID: -1, TimedOut: true, CorrelationID: 77}
 	for _, answer = range []int32{ActionContinue, ActionBreak, ActionAbort, 3} {
-		got := int32(cavalryGoClusterEntry(2, nil, 0, 320, 5, 1700000000000, 7, ClusterEntrySessionMessage, -1, 1))
+		got := int32(cavalryGoClusterEntry(2, nil, 0, 320, 5, 1700000000000, 7, ClusterEntrySessionMessage, -1, 1, 77))
 		if got != answer || entries[len(entries)-1] != want {
 			t.Fatalf("a handler that returned %d was answered %d for the entry %+v; expected its own answer and %+v",
 				answer, got, entries[len(entries)-1], want)
@@ -615,12 +615,12 @@ func TestTheClusterTrampolinesHandTheValuesOnAndAbortAnEntryNoHandlerTook(t *tes
 		t.Fatalf("four handlers that returned were counted as %d panics over %d entries", state.raised, len(entries))
 	}
 	answer = -1
-	if got := cavalryGoClusterEntry(2, nil, 0, 416, 5, 1700000000000, 7, ClusterEntrySessionMessage, -1, 0); got != ActionAbort ||
+	if got := cavalryGoClusterEntry(2, nil, 0, 416, 5, 1700000000000, 7, ClusterEntrySessionMessage, -1, 0, 0); got != ActionAbort ||
 		state.raised != 1 || state.first != "the handler's own" {
 		t.Fatalf("a handler that panicked was answered %d and counted %d time(s) with %v kept; expected ActionAbort, "+
 			"one panic and its value", got, state.raised, state.first)
 	}
-	if got := cavalryGoClusterEntry(1, nil, 0, 512, 5, 1700000000000, 7, ClusterEntrySessionMessage, -1, 0); got != ActionAbort ||
+	if got := cavalryGoClusterEntry(1, nil, 0, 512, 5, 1700000000000, 7, ClusterEntrySessionMessage, -1, 0, 0); got != ActionAbort ||
 		session.raised != 1 || session.first == nil {
 		t.Fatalf("an entry to the session's slot was answered %d and counted %d panic(s); expected ActionAbort and "+
 			"one, with its value kept", got, session.raised)
@@ -835,7 +835,7 @@ func cavalryGoReply(slot C.uintptr_t, buffer *C.uint8_t, length C.size_t, leader
 //export cavalryGoClusterEntry
 func cavalryGoClusterEntry(slot C.uintptr_t, buffer *C.uint8_t, length C.size_t, position C.int64_t,
 	leadershipTermID C.int64_t, timestamp C.int64_t, sessionID C.int64_t, entryType C.int32_t,
-	leaderMemberID C.int32_t, timedOut C.int32_t) C.int32_t {
+	leaderMemberID C.int32_t, timedOut C.int32_t, correlationID C.int64_t) C.int32_t {
 	s := held(slot)
 	if s == nil {
 		return ActionAbort
@@ -852,6 +852,7 @@ func cavalryGoClusterEntry(slot C.uintptr_t, buffer *C.uint8_t, length C.size_t,
 	e.Type = int32(entryType)
 	e.LeaderMemberID = int32(leaderMemberID)
 	e.TimedOut = timedOut != 0
+	e.CorrelationID = int64(correlationID)
 	return C.int32_t(s.deliverClusterEntry(body))
 }
 '''
@@ -1628,6 +1629,9 @@ type ClusterEntryValues struct {
 	// TimedOut is whether the leader closed the session of a session close event for the
 	// session timeout.
 	TimedOut bool
+	// CorrelationID is the id of the timer that is handed over, for an entry whose Type
+	// is ClusterEntryTimer, and 0 for every other entry, where it says nothing.
+	CorrelationID int64
 }
 
 // Frame is a frame's header as cavalry_header_values reads it (spec/frame.md).

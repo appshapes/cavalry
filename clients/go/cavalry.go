@@ -880,6 +880,9 @@ type ClusterEntryValues struct {
 	// TimedOut is whether the leader closed the session of a session close event for the
 	// session timeout.
 	TimedOut bool
+	// CorrelationID is the id of the timer that is handed over, for an entry whose Type
+	// is ClusterEntryTimer, and 0 for every other entry, where it says nothing.
+	CorrelationID int64
 }
 
 // Frame is a frame's header as cavalry_header_values reads it (spec/frame.md).

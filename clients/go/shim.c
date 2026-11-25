@@ -176,7 +176,7 @@ static void cavalry_go_service_trampoline(void *clientd, const uint8_t *buffer, 
   }
   action = cavalryGoClusterEntry(poll->index, (uint8_t *) buffer, length, values.position, values.leadership_term_id,
                                  values.timestamp, values.session_id, values.type, values.leader_member_id,
-                                 values.timed_out ? 1 : 0);
+                                 values.timed_out ? 1 : 0, values.correlation_id);
   if (action == CAVALRY_ACTION_CONTINUE) {
     return;
   }

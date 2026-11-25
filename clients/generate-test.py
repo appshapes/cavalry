@@ -112,7 +112,7 @@ class Parse(unittest.TestCase):
         expected = {fn["name"]: (flat(fn["returns"]), [(flat(t), n) for t, n in fn["params"]])
                     for fn in self.vectors["functions"]}
         self.assertEqual(parsed, expected)
-        self.assertEqual(len(self.header.functions), 96)
+        self.assertEqual(len(self.header.functions), 98)
 
     def test_the_defines_are_the_vectors(self):
         parsed = {name: gen.python_value(value) for name, value in self.header.defines if name != "CAVALRY_H"}
@@ -1535,7 +1535,7 @@ class NodePackage(unittest.TestCase):
         for cls, reader, fields in (
                 ("ClusterReplyValues", "replyField", ("leadershipTermId", "timestamp")),
                 ("ClusterEntryValues", "entryField", ("position", "leadershipTermId", "timestamp", "sessionId", "type",
-                                                      "leaderMemberId", "timedOut"))):
+                                                      "leaderMemberId", "timedOut", "correlationId"))):
             body = index.split(f"class {cls} {{", 1)[1].split("\nclass ", 1)[0]
             for i, field in enumerate(fields):
                 self.assertIn(f"  get {field}() {{ return addon.{reader}(this._state, {i}); }}\n", body)
@@ -1547,7 +1547,7 @@ class NodePackage(unittest.TestCase):
         for i, (field, make) in enumerate((("position", "make_int64"), ("leadership_term_id", "make_int64"),
                                            ("timestamp", "make_int64"), ("session_id", "make_int64"),
                                            ("type", "make_int32"), ("leader_member_id", "make_int32"),
-                                           ("timed_out", "make_bool"))):
+                                           ("timed_out", "make_bool"), ("correlation_id", "make_int64"))):
             self.assertIn(f"      case {i}: return {make}(env, s->entry.{field});", entry)
         # Every field of the two structs has its getter: a field the header gains is a
         # getter to add.
@@ -1555,7 +1555,7 @@ class NodePackage(unittest.TestCase):
         self.assertEqual(structs["cavalry_cluster_reply_values_t"], ["leadership_term_id", "timestamp"])
         self.assertEqual(structs["cavalry_cluster_entry_values_t"],
                          ["position", "leadership_term_id", "timestamp", "session_id", "type", "leader_member_id",
-                          "timed_out"])
+                          "timed_out", "correlation_id"])
         # Outside the handler's call, and for another kind of state, a value reads undefined.
         self.assertIn("if (s->current != NULL && s->cluster_values && s->cluster == CLUSTER_SESSION) {", reply)
         self.assertIn("if (s->current != NULL && s->cluster_values && s->cluster == CLUSTER_SERVICE) {", entry)
@@ -1806,7 +1806,7 @@ void cavalryGoEntry(uintptr_t slot, uint8_t *buffer, size_t length, cavalry_head
 void cavalryGoReply(uintptr_t slot, uint8_t *buffer, size_t length, int64_t leadership_term_id, int64_t timestamp);
 int32_t cavalryGoClusterEntry(uintptr_t slot, uint8_t *buffer, size_t length, int64_t position, int64_t leadership_term_id,
                               int64_t timestamp, int64_t session_id, int32_t type, int32_t leader_member_id,
-                              int32_t timed_out);
+                              int32_t timed_out, int64_t correlation_id);
 """
 
 GO_SHIM_HARNESS = r"""
@@ -1892,6 +1892,7 @@ int cavalry_cluster_entry_values(const cavalry_header_t *header, cavalry_cluster
   values->type = CAVALRY_CLUSTER_ENTRY_SESSION_CLOSE;
   values->leader_member_id = -1;
   values->timed_out = true;
+  values->correlation_id = 77;
   return 0;
 }
 static int32_t actions[8], action;
@@ -1926,15 +1927,16 @@ int cavalry_cluster_service_poll(cavalry_cluster_service_t *s, cavalry_t *client
 static int32_t answers[3];
 static int entries_seen;
 static uintptr_t entry_slot;
-static int64_t entry_values[3][4];
+static int64_t entry_values[3][5];
 static int32_t entry_small[3][3];
 int32_t cavalryGoClusterEntry(uintptr_t slot, uint8_t *buffer, size_t length, int64_t position, int64_t term,
                               int64_t timestamp, int64_t session_id, int32_t type, int32_t leader_member_id,
-                              int32_t timed_out) {
+                              int32_t timed_out, int64_t correlation_id) {
   (void) buffer; (void) length;
   entry_slot = slot;
   int at = entries_seen < 3 ? entries_seen : 2;
   entry_values[at][0] = position; entry_values[at][1] = term; entry_values[at][2] = timestamp; entry_values[at][3] = session_id;
+  entry_values[at][4] = correlation_id;
   entry_small[at][0] = type; entry_small[at][1] = leader_member_id; entry_small[at][2] = timed_out;
   return answers[entries_seen++ < 3 ? at : 2];
 }
@@ -1978,7 +1980,8 @@ int main(void) {
           "cavalry_cluster_service_action");
   EXPECT(entry_values[1][0] == 200 && entry_values[1][1] == 5 && entry_values[1][2] == 1700000000000 &&
          entry_values[1][3] == 7 && entry_small[1][0] == CAVALRY_CLUSTER_ENTRY_SESSION_CLOSE && entry_small[1][1] == -1 &&
-         entry_small[1][2] == 1, "the second entry's seven values did not reach the Go side as the ABI gave them");
+         entry_small[1][2] == 1 && entry_values[1][4] == 77,
+         "the second entry's eight values did not reach the Go side as the ABI gave them");
   /* An entry whose values the ABI does not give is aborted unseen, with the ABI's error. */
   values_refused = true;
   service("an entry whose values the ABI refused", go_on, go_on, go_on, 0, 0, leaves, 1, 1, "cavalry_cluster_entry_values");
@@ -2292,7 +2295,7 @@ class GoPackage(unittest.TestCase):
         for field, value in (("Position", "int64(position)"), ("LeadershipTermID", "int64(leadershipTermID)"),
                              ("Timestamp", "int64(timestamp)"), ("SessionID", "int64(sessionID)"),
                              ("Type", "int32(entryType)"), ("LeaderMemberID", "int32(leaderMemberID)"),
-                             ("TimedOut", "timedOut != 0")):
+                             ("TimedOut", "timedOut != 0"), ("CorrelationID", "int64(correlationID)")):
             self.assertIn(f"\te.{field} = {value}\n", entry)
         # Every field of the two structs of the header is a field of the Go struct: a field
         # the header gains is one to hand on.
@@ -2300,7 +2303,7 @@ class GoPackage(unittest.TestCase):
         self.assertEqual(structs["cavalry_cluster_reply_values_t"], ["leadership_term_id", "timestamp"])
         self.assertEqual(structs["cavalry_cluster_entry_values_t"],
                          ["position", "leadership_term_id", "timestamp", "session_id", "type", "leader_member_id",
-                          "timed_out"])
+                          "timed_out", "correlation_id"])
         # The values are read in C, once for each reply and each entry, and nowhere else.
         self.assertEqual(shim.count("cavalry_cluster_reply_values("), 1)
         self.assertEqual(shim.count("cavalry_cluster_entry_values("), 1)
@@ -2809,7 +2812,8 @@ class JvmPackage(unittest.TestCase):
                 ("ClusterEntryValues", "cavalry_cluster_entry_values_t",
                  (("long", "position", "JAVA_LONG"), ("long", "leadershipTermId", "JAVA_LONG"),
                   ("long", "timestamp", "JAVA_LONG"), ("long", "sessionId", "JAVA_LONG"), ("int", "type", "JAVA_INT"),
-                  ("int", "leaderMemberId", "JAVA_INT"), ("boolean", "timedOut", "JAVA_BOOLEAN")))):
+                  ("int", "leaderMemberId", "JAVA_INT"), ("boolean", "timedOut", "JAVA_BOOLEAN"),
+                  ("long", "correlationId", "JAVA_LONG")))):
             code = files[self.BASE + cls + ".java"]
             self.assertEqual(len(getters), len(structs[struct]), struct)
             for (java, getter, layout), field in zip(getters, structs[struct]):
@@ -3125,7 +3129,8 @@ class DotnetPackage(unittest.TestCase):
                  (("long", "Position", "values.position"), ("long", "LeadershipTermId", "values.leadership_term_id"),
                   ("long", "Timestamp", "values.timestamp"), ("long", "SessionId", "values.session_id"),
                   ("int", "Type", "values.type"), ("int", "LeaderMemberId", "values.leader_member_id"),
-                  ("bool", "TimedOut", "values.timed_out != 0")))):
+                  ("bool", "TimedOut", "values.timed_out != 0"),
+                  ("long", "CorrelationId", "values.correlation_id")))):
             code = files[cls + ".cs"]
             self.assertEqual(len(getters), len(structs[struct]), struct)
             for (cs, getter, read), field in zip(getters, structs[struct]):

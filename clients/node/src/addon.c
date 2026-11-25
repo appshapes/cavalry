@@ -927,6 +927,7 @@ static napi_value fn_entryField(napi_env env, napi_callback_info info) {
       case 4: return make_int32(env, s->entry.type);
       case 5: return make_int32(env, s->entry.leader_member_id);
       case 6: return make_bool(env, s->entry.timed_out);
+      case 7: return make_int64(env, s->entry.correlation_id);
       default: break;
     }
   }
