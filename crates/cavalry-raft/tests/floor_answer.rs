@@ -2,14 +2,17 @@
 //! ADR 0163; CLAUDE.md, invariant 1), on one member driven through a stub: a member that
 //! holds a vote floor asks with the floor flag of each append position until it has an
 //! answer for the term it follows, asks again once it follows another term, keeps the
-//! lowest answer it took, and clears its floor once its log reaches it.
+//! lowest answer it took, and clears its floor once its log reaches it. A leader answers
+//! an ask it read with the session of its frame, with its append position as it is when
+//! it writes the answer.
 
 mod common;
 
-use cavalry_proto::cluster::{APPEND_POSITION_FLAG_FLOOR, Message};
+use cavalry_proto::cluster::{APPEND_POSITION_FLAG_FLOOR, Message, Template};
 use cavalry_raft::Consensus;
 use common::{
-    Stub, at, follow_term_unanswered, leadership_term, lose_the_leader, new_leadership_term,
+    Call, Stub, at, follow_term_unanswered, leader_of_term_two, leadership_term, lose_the_leader,
+    new_leadership_term,
 };
 
 /// Member 0 of `[0, 1, 2]`, electing.
@@ -108,4 +111,61 @@ fn a_member_asks_for_a_floor_answer_under_each_term_it_holds_none_from() {
     member.do_work(at(closed + 202), &mut io).expect("no fault");
     assert_eq!(member.vote_floor(), -1, "its log reached the answer");
     assert_eq!(member.counts().vote_floors_cleared, 1);
+}
+
+/// A leader answers a report with the floor flag, read with the session of its frame,
+/// with its append position as it reads it when it writes the answer, and not as its
+/// last duty cycle read it: a replay of its live recording reads up to the recording's
+/// synced position, which can have moved since, and may have served an earlier run of
+/// the member an entry there. The same report read with no session is not answered.
+#[test]
+fn a_leader_answers_a_floor_ask_with_its_append_position_as_it_writes_the_answer() {
+    let mut io = Stub::new();
+    let (mut leader, ms) = leader_of_term_two(&mut io);
+    assert_eq!(leader.append_position(), 96, "as of its last duty cycle");
+
+    // Its recording syncs past that after the cycle, before the next reads it.
+    io.append_position = 160;
+    io.clear();
+    let ask = Message::AppendPosition {
+        leadership_term_id: 2,
+        log_position: 0,
+        follower_member_id: 1,
+        flags: APPEND_POSITION_FLAG_FLOOR,
+    };
+    let answers = |io: &Stub| {
+        io.count(|call| {
+            *call
+                == Call::Send {
+                    to: 1,
+                    template: Template::FloorAnswer,
+                }
+        })
+    };
+
+    // Read with no session, the ask is not answered.
+    leader.on_message(at(ms), &ask, &mut io).expect("no fault");
+    assert_eq!(answers(&io), 0, "no session, no answer");
+    assert_eq!(io.last_floor_answer, None);
+
+    // Read with the session of its frame, it is answered once, with the position now.
+    leader
+        .on_message_in(at(ms), &ask, 4_242, &mut io)
+        .expect("no fault");
+    assert_eq!(answers(&io), 1, "one answer");
+    assert_eq!(
+        io.last_floor_answer,
+        Some((
+            1,
+            Message::FloorAnswer {
+                leadership_term_id: 2,
+                log_position: 160,
+                leader_member_id: 0,
+                follower_member_id: 1,
+                session_id: 4_242,
+            }
+        )),
+        "its term, its append position as it writes the answer, both ids and the session"
+    );
+    assert_eq!(leader.counts().floor_answers_sent, 1);
 }
