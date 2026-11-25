@@ -25,6 +25,9 @@
 //! can have pending, so some of what it holds is pending nowhere: it removes every
 //! timer and takes the new one, and the service beside it sends the pending ones
 //! again within a timer refresh interval.
+//!
+//! This module is the table. The consensus module holds none yet: it reads no
+//! schedule timer and appends no timer event.
 
 use cavalry_proto::cluster::MAX_MEMBER_TIMERS;
 
@@ -37,12 +40,14 @@ pub enum Scheduled {
     /// The member holds the timer with the deadline given.
     Held,
     /// The member holds it in the place of the timer whose event it appended longest
-    /// ago, its table being at its bound, which `cluster.timers_replaced` counts.
+    /// ago, its table being at its bound: what `spec/cluster.md` gives the counter
+    /// `cluster.timers_replaced` for.
     Replaced,
     /// The table was at its bound with no timer in it whose event the member had
-    /// appended: the member removed every timer and holds this one alone, which
-    /// `cluster.timers_cleared` counts. The service beside it sends every pending
-    /// timer again within a timer refresh interval.
+    /// appended: the member removed every timer and holds this one alone, which is
+    /// what `spec/cluster.md` gives the counter `cluster.timers_cleared` for. The
+    /// service beside it sends every pending timer again within a timer refresh
+    /// interval.
     Cleared,
 }
 
@@ -83,7 +88,8 @@ impl MemberTimers {
         }
     }
 
-    /// How many timers the member holds: what `cluster.timers` holds.
+    /// How many timers the member holds: the value `spec/cluster.md` gives the
+    /// counter `cluster.timers`.
     pub fn len(&self) -> usize {
         self.len
     }
