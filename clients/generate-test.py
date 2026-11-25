@@ -2749,14 +2749,18 @@ static char errmsg[128];
 int cavalry_errcode(void) { return errcode; }
 const char *cavalry_errmsg(void) { return errmsg; }
 
+/* How often the ABI's claim and its four polls were called, and the count the last was given. */
+static int counted_calls;
+static size_t counted;
+
 /* The ABI's functions shim.c calls and this harness does not drive. */
-int64_t cavalry_publication_try_claim(cavalry_publication_t *p, size_t n, cavalry_buffer_claim_t *c) { (void) p; (void) n; (void) c; return 0; }
+int64_t cavalry_publication_try_claim(cavalry_publication_t *p, size_t n, cavalry_buffer_claim_t *c) { (void) p; (void) c; counted_calls++; counted = n; return 0; }
 int cavalry_buffer_claim_set_reserved_value(cavalry_buffer_claim_t *c, int64_t v) { (void) c; (void) v; return 0; }
 int64_t cavalry_buffer_claim_commit(cavalry_buffer_claim_t *c) { (void) c; return 0; }
 int64_t cavalry_buffer_claim_abort(cavalry_buffer_claim_t *c) { (void) c; return 0; }
 int64_t cavalry_publication_offer(cavalry_publication_t *p, const uint8_t *b, size_t n) { (void) p; (void) b; (void) n; return 0; }
-int cavalry_subscription_poll(cavalry_subscription_t *s, cavalry_fragment_handler_t h, void *d, size_t n) { (void) s; (void) h; (void) d; (void) n; return 0; }
-int cavalry_committed_log_poll(cavalry_committed_log_t *l, cavalry_fragment_handler_t h, void *d, size_t n) { (void) l; (void) h; (void) d; (void) n; return 0; }
+int cavalry_subscription_poll(cavalry_subscription_t *s, cavalry_fragment_handler_t h, void *d, size_t n) { (void) s; (void) h; (void) d; counted_calls++; counted = n; return 0; }
+int cavalry_committed_log_poll(cavalry_committed_log_t *l, cavalry_fragment_handler_t h, void *d, size_t n) { (void) l; (void) h; (void) d; counted_calls++; counted = n; return 0; }
 int64_t cavalry_committed_log_entry_position(const cavalry_header_t *h) { (void) h; return 0; }
 void cavalryGoFragment(uintptr_t s, uint8_t *b, size_t n, cavalry_header_t *h) { (void) s; (void) b; (void) n; (void) h; }
 void cavalryGoEntry(uintptr_t s, uint8_t *b, size_t n, cavalry_header_t *h, int64_t p) { (void) s; (void) b; (void) n; (void) h; (void) p; }
@@ -2780,7 +2784,7 @@ int cavalry_cluster_reply_values(const cavalry_header_t *header, cavalry_cluster
 }
 static int session_poll_answer;
 int cavalry_cluster_session_poll(cavalry_cluster_session_t *s, cavalry_fragment_handler_t handler, void *clientd, size_t n) {
-  (void) s; (void) n;
+  (void) s; counted_calls++; counted = n;
   if (session_poll_answer < 0) { errcode = CAVALRY_ERR_POLLING; snprintf(errmsg, sizeof errmsg, "polling"); return -1; }
   for (reply_at = 0; reply_at < 2; reply_at++) handler(clientd, (const uint8_t *) "body", 4, NULL);
   return 2;
@@ -2849,7 +2853,7 @@ int cavalry_cluster_service_action(cavalry_cluster_service_t *service, int32_t v
 static cavalry_t *poll_client;
 int cavalry_cluster_service_poll(cavalry_cluster_service_t *s, cavalry_t *client, cavalry_fragment_handler_t handler,
                                  void *clientd, size_t n) {
-  (void) s; (void) n;
+  (void) s; counted_calls++; counted = n;
   poll_client = client;
   int taken = 0;
   for (entry_at = 0; entry_at < 3; entry_at++) {
@@ -2904,7 +2908,62 @@ static void service(const char *what, int32_t a, int32_t b, int32_t c, int count
   EXPECT(poll_client == (cavalry_t *) &actions, "%s: the poll was not given the client", what);
 }
 
+/* A count the shim is given, by each of the five functions that take one from the caller
+ * (ADR 0164): one below zero is refused here, with the client's own code, the ABI function
+ * it would have called and a message that says the value, and the ABI is not called; one
+ * from zero is passed to the ABI as it is. */
+static int64_t count_through(int which, int64_t given, cavalry_go_error_t *kept) {
+  int aborted = 7;
+  switch (which) {
+    case 0: return cavalry_go_try_claim(NULL, given, NULL, kept);
+    case 1: return cavalry_go_poll(NULL, 1, given, kept);
+    case 2: return cavalry_go_committed_log_poll(NULL, 1, given, kept);
+    case 3: return cavalry_go_cluster_session_poll(NULL, 1, given, kept);
+    default: {
+      int64_t answer = cavalry_go_cluster_service_poll(NULL, NULL, 1, given, &aborted, kept);
+      EXPECT(given >= 0 || aborted == 0, "a service's poll that was refused left aborted at %d for a count of %lld",
+             aborted, (long long) given);
+      return answer;
+    }
+  }
+}
+
+static void counts(void) {
+  static const char *const functions[] = { "cavalry_publication_try_claim", "cavalry_subscription_poll",
+    "cavalry_committed_log_poll", "cavalry_cluster_session_poll", "cavalry_cluster_service_poll" };
+  static const int64_t below[] = { -1, -2147483648LL, INT64_MIN };
+  static const int64_t from_zero[] = { 0, 5, 2147483647LL, INT64_MAX };
+  char expected[512];
+  for (int which = 0; which < 5; which++) {
+    const char *parameter = which == 0 ? "length" : "fragmentLimit";
+    for (size_t i = 0; i < sizeof below / sizeof below[0]; i++) {
+      cavalry_go_error_t kept = { 0, "", "" };
+      counted_calls = 0;
+      int64_t answer = count_through(which, below[i], &kept);
+      snprintf(expected, sizeof expected, "%s: an int from 0 expected, a count or a length, and %lld was given; the ABI "
+               "would be passed another count, near 2 ** 64, and was not called. Pass a count that is not below zero. "
+               "See clients/go/README.md#what-it-must-never-do", parameter, (long long) below[i]);
+      EXPECT(answer == (which == 0 ? CAVALRY_PUBLICATION_ERROR : -1) && counted_calls == 0 &&
+             kept.code == CAVALRY_GO_ERR_NEGATIVE && strcmp(kept.function, functions[which]) == 0 &&
+             strcmp(kept.message, expected) == 0,
+             "%s with %lld: answered %lld after %d ABI calls, kept %d %s: %s", functions[which], (long long) below[i],
+             (long long) answer, counted_calls, kept.code, kept.function, kept.message);
+    }
+    for (size_t i = 0; i < sizeof from_zero / sizeof from_zero[0]; i++) {
+      cavalry_go_error_t kept = { 0, "", "" };
+      counted_calls = 0; counted = 77; session_poll_answer = 0;
+      count_through(which, from_zero[i], &kept);
+      EXPECT(counted_calls == 1 && counted == (size_t) from_zero[i] && kept.code != CAVALRY_GO_ERR_NEGATIVE,
+             "%s with %lld: %d ABI calls with a count of %zu, kept %d", functions[which], (long long) from_zero[i],
+             counted_calls, counted, kept.code);
+    }
+  }
+  EXPECT(CAVALRY_GO_ERR_NEGATIVE < 0, "the client's own code is one the ABI could give");
+  replies_seen = 0; /* the session's polls above handed replies over: the rounds below count their own */
+}
+
 int main(void) {
+  counts();
   const int32_t go_on = CAVALRY_ACTION_CONTINUE, stop = CAVALRY_ACTION_BREAK, leave = CAVALRY_ACTION_ABORT;
   const int32_t stops[] = { stop }, leaves[] = { leave }, refused[] = { 3, leave };
   /* CONTINUE makes no call; BREAK and ABORT are passed on, and an ABORT the Go side chose,
@@ -3067,11 +3126,11 @@ class GoPackage(unittest.TestCase):
         files = gen_go.write_go(self.header)
         self.assertIn("cavalryGoFragment((uintptr_t) clientd, (uint8_t *) buffer, length, (cavalry_header_t *) header);",
                       files["shim.c"])
-        self.assertIn("cavalry_subscription_poll(subscription, cavalry_go_trampoline, (void *) index, fragment_limit)",
+        self.assertIn("cavalry_subscription_poll(subscription, cavalry_go_trampoline, (void *) index, (size_t) fragment_limit)",
                       files["shim.c"])
         self.assertEqual(files["shim.c"].count("cavalry_subscription_poll("), 1)
         self.assertIn("//export cavalryGoFragment\n", files["trampoline.go"])
-        self.assertIn("C.cavalry_go_poll(s.handle, C.uintptr_t(s.slot), C.size_t(fragmentLimit), &s.err)", files["cavalry.go"])
+        self.assertIn("C.cavalry_go_poll(s.handle, C.uintptr_t(s.slot), C.int64_t(fragmentLimit), &s.err)", files["cavalry.go"])
         self.assertNotIn("C.cavalry_subscription_poll(", files["cavalry.go"])
 
     def test_a_committed_logs_trampoline_reads_the_position_in_c(self):
@@ -3084,7 +3143,7 @@ class GoPackage(unittest.TestCase):
         entry = shim.split("static void cavalry_go_entry_trampoline(", 1)[1].split("\n}\n", 1)[0]
         self.assertIn("cavalryGoEntry((uintptr_t) clientd, (uint8_t *) buffer, length, (cavalry_header_t *) header,\n"
                       "                 cavalry_committed_log_entry_position(header));", entry)
-        self.assertIn("cavalry_committed_log_poll(log, cavalry_go_entry_trampoline, (void *) index, fragment_limit)", shim)
+        self.assertIn("cavalry_committed_log_poll(log, cavalry_go_entry_trampoline, (void *) index, (size_t) fragment_limit)", shim)
         self.assertEqual(shim.count("cavalry_committed_log_poll("), 1)
         self.assertEqual(shim.count("cavalry_committed_log_entry_position("), 1)
         trampoline = files["trampoline.go"]
@@ -3237,7 +3296,7 @@ class GoPackage(unittest.TestCase):
         # The nested refusal and the poll itself, each with the client's handle, the slot and
         # where the shim writes that it aborted an entry.
         self.assertEqual(service.count("C.cavalry_go_cluster_service_poll(v.handle, v.client.handle, C.uintptr_t(s.slot),\n"), 2)
-        self.assertEqual(service.count("C.size_t(fragmentLimit), &s.aborted, &s.err))"), 2)
+        self.assertEqual(service.count("C.int64_t(fragmentLimit), &s.aborted, &s.err))"), 2)
         self.assertIn("if s.raised == 0 && s.aborted == 0 {\n\t\treturn count, nil\n\t}", service)
         self.assertIn("\tif s.raised == 0 {\n", service)
         self.assertIn("\t\tcause = keptError(&s.err)\n", service)
