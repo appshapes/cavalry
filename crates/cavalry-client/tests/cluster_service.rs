@@ -1581,6 +1581,8 @@ fn a_program_is_handed_each_timer_once_and_its_member_is_told() {
     let seven = ('s', 7, TIME + 100);
     let nine = ('s', 9, TIME + 10_000);
     wait("the member is told of two timers", || {
+        // The service's poll offers a word again that the stream did not take.
+        poll_timers(&mut service, &mut client, &mut seen, &mut refuse_once);
         read_told(&mut told);
         told.contains(&seven) && told.contains(&nine)
     });
@@ -1624,6 +1626,7 @@ fn a_program_is_handed_each_timer_once_and_its_member_is_told() {
     wait(
         "the member is told that the timer is pending no more",
         || {
+            poll_timers(&mut service, &mut client, &mut seen, &mut refuse_once);
             read_told(&mut told);
             told.contains(&('c', 7, 0))
         },
@@ -1656,6 +1659,7 @@ fn a_program_is_handed_each_timer_once_and_its_member_is_told() {
         1
     );
     wait("the member is told of the cancel", || {
+        poll_timers(&mut service, &mut client, &mut seen, &mut refuse_once);
         read_told(&mut told);
         told.contains(&('c', 9, 0))
     });
@@ -1689,19 +1693,23 @@ fn a_program_is_handed_each_timer_once_and_its_member_is_told() {
         read_told(&mut told);
         told.len() >= 2
     });
-    // The words after the first are refreshes, a second apart.
-    let again = Instant::now();
+    // The words after the first are refreshes, a second apart: in any stretch of
+    // time the member is told once for each whole second of it, and once more at the
+    // most. The stretch is measured from before the first of them to after the last,
+    // so a thread that is held makes the bound looser and never tighter.
+    let from = Instant::now();
     let had = told.len();
-    wait("the member is told of the timer once more", || {
+    wait("the member is told of the timer twice more", || {
         poll_timers(&mut service, &mut client, &mut seen, &mut refuse_once);
         read_told(&mut told);
-        told.len() > had
+        told.len() >= had + 2
     });
+    let more = (told.len() - had) as u64;
+    let seconds = from.elapsed().as_secs();
     assert!(told.iter().all(|word| *word == ('s', 11, TIME + 1_000_000)));
     assert!(
-        again.elapsed() >= Duration::from_millis(900),
-        "a refresh comes a second after the one before it: {:?}",
-        again.elapsed()
+        more <= seconds + 1,
+        "{more} refreshes in {seconds} whole seconds: a refresh comes a second after the one before it"
     );
     told.clear();
 
@@ -1750,5 +1758,86 @@ fn a_program_is_handed_each_timer_once_and_its_member_is_told() {
     service.close(&mut client).expect("the service closes");
     client.close().expect("the client closes");
     drop(stream);
+    member.close();
+}
+
+/// A service holds 1,024 pending timers: a schedule of another id beyond them is
+/// refused, and changes nothing. And a program may schedule a timer again inside
+/// that timer's own event: it is pending again, and handed over again at its next
+/// event (`spec/cluster.md`, "The service", "Timers"; ADR 0151).
+#[test]
+fn a_program_is_refused_a_timer_beyond_the_bound_and_schedules_one_again_in_its_event() {
+    let mut member = Member::start("timers-bound");
+    let mut client = Cavalry::connect_to(&member.dir).expect("the service's client connects");
+    let mut service = client.cluster_service();
+    let bound = cavalry_proto::cluster::MAX_SERVICE_TIMERS as i64;
+    // What the program was refused, and each timer it was handed with its event's time.
+    let mut refused: Vec<i64> = Vec::new();
+    let mut handed: Vec<(i64, i64)> = Vec::new();
+    let mut poll = |service: &mut ClusterService, client: &mut Cavalry| {
+        service
+            .poll(
+                client,
+                |committed: &Committed<'_>, replies| {
+                    match committed.entry {
+                        // One message fills the table and asks for one more.
+                        Entry::SessionMessage { .. } => {
+                            for id in 0..=bound {
+                                if replies.schedule_timer(id, TIME + 1_000).is_err() {
+                                    refused.push(id);
+                                }
+                            }
+                        }
+                        // The timer's own event: pending no more, and scheduled again.
+                        Entry::Timer { correlation_id } => {
+                            handed.push((correlation_id, committed.timestamp));
+                            replies
+                                .schedule_timer(correlation_id, committed.timestamp + 1_000)
+                                .expect("the place the timer left");
+                        }
+                        _ => {}
+                    }
+                    Action::Continue
+                },
+                16,
+            )
+            .expect("the service polls")
+    };
+    member.name();
+    wait("the service opens the member's log", || {
+        poll(&mut service, &mut client);
+        dropped(&client).is_some()
+    });
+    member.term(0, MEMBER);
+    member.message(0, -1, b"fill");
+    for timestamp in [TIME + 1_000, TIME + 1_500, TIME + 2_000] {
+        let event = encode(&Message::TimerEvent {
+            leadership_term_id: 0,
+            correlation_id: 3,
+            timestamp,
+        });
+        member.append_bytes(&event);
+    }
+    member.commit();
+    wait("the service reads the log to its end", || {
+        poll(&mut service, &mut client);
+        service.position() == member.end
+    });
+    wait("the service stores what it counted", || {
+        poll(&mut service, &mut client);
+        service_counter(&client, CLUSTER_SERVICE_TIMER_EVENTS_PASSED_OVER.0) == Some(1)
+    });
+    assert_eq!(refused, [bound], "the one beyond the bound, and no other");
+    // Handed at its deadline, scheduled again for a second later, passed over half
+    // a second later, and handed again when that second has passed.
+    assert_eq!(handed, [(3, TIME + 1_000), (3, TIME + 2_000)]);
+    assert_eq!(
+        service_counter(&client, CLUSTER_SERVICE_TIMERS.0),
+        Some(bound),
+        "the table is full still: the timer handed over is pending again"
+    );
+
+    service.close(&mut client).expect("the service closes");
+    client.close().expect("the client closes");
     member.close();
 }
