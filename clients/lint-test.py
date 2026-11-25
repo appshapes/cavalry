@@ -302,7 +302,7 @@ class Clients(unittest.TestCase):
         counts = {"poll": 4, "_on_fragment": 2, "offer": 2}
         for name in ("try_claim", "set_reserved_value", "offer", "commit", "abort", "poll", "_on_fragment", "values",
                      "session_id", "stream_id", "term_id", "term_offset", "frame_length", "flags", "type", "version",
-                     "reserved_value", "_on_reply", "_on_entry", "reply"):
+                     "reserved_value", "_on_reply", "_on_entry", "reply", "schedule_timer", "cancel_timer"):
             self.edit(f"    def {name}(self", f"    def renamed_{name}(self", count=counts.get(name, 1))
         [finding] = lint.findings(self.tmp)
         self.assertIn("none of the per-message functions", finding)

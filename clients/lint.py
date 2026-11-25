@@ -104,13 +104,16 @@ RULES = {
             "CommittedLog._on_fragment",
             # A cluster session and a cluster service (ADR 0124): the session's offer, its
             # poll and its trampoline, which reads each reply's values; the service's
-            # poll, its reply, and its trampoline, which reads each entry's values and
-            # passes the ABI the action the handler returned.
+            # poll, its reply, the schedule and the cancel of a timer, and its trampoline,
+            # which reads each entry's values and passes the ABI the action the handler
+            # returned.
             "ClusterSession.offer",
             "ClusterSession.poll",
             "ClusterSession._on_reply",
             "ClusterService.poll",
             "ClusterService.reply",
+            "ClusterService.schedule_timer",
+            "ClusterService.cancel_timer",
             "ClusterService._on_entry",
             "Header.values",
             "Header.session_id",

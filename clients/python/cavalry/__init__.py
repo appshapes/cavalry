@@ -1022,7 +1022,11 @@ class ClusterService:
     each entry, with its `position`, `leadership_term_id`, `timestamp`, `session_id`,
     `type`, one of `CAVALRY_CLUSTER_ENTRY_*`, `leader_member_id`, `timed_out` and
     `correlation_id`, a timer's id for an entry of the type `CAVALRY_CLUSTER_ENTRY_TIMER`; and
-    `service` is this object, for `service.reply(session_id, message)`. What the handler
+    `service` is this object, for `service.reply(session_id, message)` and for the
+    program's timers, `service.schedule_timer(correlation_id, deadline)` and
+    `service.cancel_timer(correlation_id)`: a timer that is due is handed to the handler
+    as an entry of the type `CAVALRY_CLUSTER_ENTRY_TIMER`, once, at one position beside
+    every member. What the handler
     returns says what becomes of the entry: None or `CONTINUE` takes it and the poll goes
     on, `BREAK` takes it and ends the poll, and `ABORT` leaves it, ends the poll, and has
     the next poll hand it over again. A handler that raises, or returns anything else,
@@ -1063,6 +1067,35 @@ class ClusterService:
         outside the handler it is -1, with `CAVALRY_ERR_CLUSTER_NO_ENTRY`. One ABI call,
         which allocates nothing and waits for nothing."""
         return self._abi.cavalry_cluster_service_reply(self._handle, session_id, message, len(message))
+
+    def schedule_timer(self, correlation_id, deadline):
+        """From inside the handler: schedule the timer `correlation_id`, any int64 the
+        program chooses, for `deadline` in the cluster's time, the clock of
+        `entry.timestamp`, in milliseconds, and return what became of the schedule, never
+        raising for a code. `CAVALRY_CLUSTER_TIMER_SCHEDULED`: the timer is pending with
+        that deadline, a new one or one that was pending, whose deadline this sets.
+        `CAVALRY_CLUSTER_TIMER_REFUSED`: the service holds its 1,024 pending timers and
+        the id is none of them, and nothing changed; a program with more deadlines than
+        that keeps them in its own state and schedules one timer for the earliest. When
+        the deadline has come the handler is handed an entry whose `type` is
+        `CAVALRY_CLUSTER_ENTRY_TIMER` and whose `correlation_id` is this id: once, at one
+        position beside every member, never before its deadline and never after its
+        cancel. A deadline at or before the entry's time is due at once. A handler that
+        returns `ABORT`, or raises, is handed its entry again with every timer as it was
+        before that handling. A program schedules its first timer only once every member
+        of its cluster runs version 2 of the cluster protocol. From outside the handler
+        it is -1, with `CAVALRY_ERR_CLUSTER_NO_ENTRY`. One ABI call, which allocates
+        nothing and waits for nothing: the service tells its member after the handler
+        has taken the entry."""
+        return self._abi.cavalry_cluster_service_schedule_timer(self._handle, correlation_id, deadline)
+
+    def cancel_timer(self, correlation_id):
+        """From inside the handler: the timer `correlation_id` is pending no more, and
+        its event, where the log holds one, is handed to no program. A timer that is not
+        pending is no error. Returns 0, and -1 with `CAVALRY_ERR_CLUSTER_NO_ENTRY` from
+        outside the handler. One ABI call, which allocates nothing and waits for
+        nothing."""
+        return self._abi.cavalry_cluster_service_cancel_timer(self._handle, correlation_id)
 
     def _on_entry(self, clientd, buffer, length, header):
         # As a committed log's trampoline: the body's view is released once the handler
@@ -1105,9 +1138,13 @@ class ClusterService:
             self._interrupt = exc
 
     def poll(self, handler, fragment_limit):
-        """One ABI call, and its result: the count of entries the handler took, 0 while
-        the driver hosts no member that has a log yet, or -1 when the poll stopped on a
-        fault, which `fault()` reads until the next poll. The poll is the service's duty
+        """One ABI call, and its result: the count of entries the service took, 0 while
+        the driver, one that runs, hosts no member that has a log yet, or -1 when the
+        poll stopped, which `fault()` reads until the next poll. A poll with a client
+        that is closed, as when the member's driver has stopped, is -1 with
+        `CAVALRY_ERR_CLOSED` as `fault()`'s code, at every poll: a program's loop ends
+        on it. A timer event whose timer is not pending, or not yet due, is taken and
+        handed to no handler, so the count may be more than the handler was called. The poll is the service's duty
         cycle: it opens the member's log, follows the log's sessions, and holds a
         publication to each open session while the service answers. Those are commands
         sent with the service's client, at a session's opening, where a term's leader
