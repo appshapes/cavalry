@@ -407,7 +407,10 @@ members.
   C's (`pthread_mutex_*`, `pthread_rwlock_*`, `mtx_*`,
   `uv_mutex_*`, `uv_rwlock_*`, `napi_*threadsafe_function*`, and `napi_throw*` and
   `napi_fatal_*` outside the argument readers). `just lint` fails on any of them, in
-  the function's own body or in a function of the package it calls.
+  the function's own body or in a function of the package it calls. An argument
+  reader throws to refuse an argument, so the lint holds where one is called too: by
+  a function N-API calls with the caller's arguments, before its call of the ABI,
+  and never by a trampoline or a function one calls.
 - Never pass the ABI another integer than the caller gave. N-API's own conversions
   change a number that is no integer its parameter holds, and say nothing:
   `napi_get_value_int64` drops a fraction, reads a `NaN` or an infinity as 0 and
@@ -418,23 +421,38 @@ members.
   its readers refuse such a value with a `RangeError` before the ABI is called:
   - An int64 parameter (a position, a recording's id, a replay's length and its
     session, a service's session, the reserved value, a timer's id and its
-    deadline) takes a BigInt in the int64 range, or a number that is an integer
-    from −(2^53 − 1) to 2^53 − 1, the integers a number carries exactly.
+    deadline) takes a number that is an integer from −(2^53 − 1) to 2^53 − 1, the
+    integers a number carries exactly, or a BigInt from −2^63 to 2^63 − 1.
   - A count or a length (a fragment limit, a claim's length, an image's index)
-    takes the same, from 0.
+    takes a number that is an integer from 0 to 2^53 − 1, or a BigInt from 0 to
+    2^63 − 1. A count below zero was a `TypeError` before; it is a `RangeError`.
   - An int32 parameter (a stream id) takes a number that is an integer from −2^31
     to 2^31 − 1, and no BigInt.
 
-  A value of another type throws a `TypeError`. Each message names the parameter,
-  says what to pass and names this section; a timer's names "A service's timers".
-  The readers are the same for a per-message function and for a command, and a
-  number costs the one N-API call its conversion cost ("The call"). The action a
-  service's handler returned is held to an int32 the same way in the trampoline,
-  where one outside it is no action and aborts the entry. `clients/generate-test.py`
-  holds that every integer parameter of the addon is read by one of these readers,
-  and the conformance runner makes fifteen such calls through the built addon,
-  truncates, purges, adds, polls and claims, against a recording that the replay
-  then reads whole.
+  A value of another type throws a `TypeError`. Each message names the parameter
+  as the ABI names it, `recording_id` for `recordingId`, and its range, says what
+  to pass and names this section; a timer's names "A service's timers". The types
+  of `index.d.ts` say `number | bigint` for each int64 and each count, so the
+  follow length, `constants.CAVALRY_FOLLOW_LENGTH`, a BigInt, is a length
+  `startReplay` takes: as the number `2 ** 63` it is refused, where N-API held it
+  to the follow length. The readers are the same for a per-message function and
+  for a command, and cost a number and a BigInt the N-API calls their conversions
+  cost ("The call"). The action a service's handler returned is held to an int32
+  the same way in the trampoline, where one outside it is no action and aborts the
+  entry. `clients/generate-test.py` names every integer the addon reads from an
+  argument with its reader, compiles the readers against a stand-in for N-API and
+  runs them over each kind of value, and the conformance runner makes sixteen such
+  calls through the built addon, truncates, purges, adds, polls and claims,
+  against a recording that the replay then reads whole, and offers a
+  `Float16Array` where the runtime has one.
+- Never give the ABI another length than the bytes the caller offered. `offer`, a
+  session's `offer`, a service's `reply` and its `snapshot` take a `Buffer`, an
+  `ArrayBuffer`, a `DataView` or a typed array, and the length is the bytes it
+  holds: the addon multiplies a typed array's element count by the width of its
+  kind. A kind the addon does not name is refused with a `TypeError` that says to
+  pass a `Uint8Array` over the same bytes. `Float16Array`, which Node 23 added, is
+  such a kind: before, the addon took its elements for 8 bytes wide and handed the
+  ABI four times its length.
 - Never throw for an `Offer` code: `tryClaim` and `offer` return the position after
   the frame or the code below zero (`NOT_CONNECTED`, `BACK_PRESSURED`, `ADMIN_ACTION`,
   `CLOSED`, `MAX_POSITION_EXCEEDED`, `ERROR`), as the ABI does; the caller branches.
@@ -553,8 +571,10 @@ argument is read as strictly, `int64_read` and `int_arg` in the addon: a number 
 be an integer that a number carries exactly and its parameter holds, or it is refused
 the same way ("What it must never do"). A reader makes one N-API call for a number,
 `napi_get_value_double`, where the conversion it replaces made one,
-`napi_get_value_int64` or `napi_get_value_int32`, and asks the value's type, a second
-call, only when that one answers that the value is no number.
+`napi_get_value_int64` or `napi_get_value_int32`. For a BigInt that call answers
+that the value is no number, and the reader makes a second,
+`napi_get_value_bigint_int64`: two calls, as the type's call and the BigInt's were
+two before.
 Node has one
 thread for JavaScript, so a call holds it for the
 call, and an add, a command or a close, which waits on the driver for up to 10 s

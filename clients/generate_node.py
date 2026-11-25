@@ -330,8 +330,9 @@ OPTIONAL_READERS = {
 ''',
 }
 
-ADDON_HELPERS = r'''/* Argument readers. Each sets arg_failed and throws a TypeError naming the parameter when
- * the JS value is not what the ABI's parameter takes; a wrapper returns NULL after one, which
+ADDON_HELPERS = r'''/* Argument readers. Each sets arg_failed and throws, naming the parameter, when the JS value
+ * is not what the ABI's parameter takes, a TypeError for a value of another type and a
+ * RangeError for a number or a size the parameter cannot hold; a wrapper returns NULL after one, which
  * N-API reads as the pending exception. The flags are per thread: each worker thread of the
  * process calls the addon on its own thread (clients/node/README.md, "Threads"). */
 static _Thread_local bool arg_failed;
@@ -383,9 +384,23 @@ static void *bytes_arg(napi_env env, napi_value v, size_t *length, const char *n
   } else if (napi_is_typedarray(env, v, &is) == napi_ok && is) {
     napi_typedarray_type t; napi_value ab; size_t offset; void *base;
     if (napi_get_typedarray_info(env, v, &t, &n, &base, &ab, &offset) != napi_ok) goto bad;
+    /* The elements' width, for the length in bytes. A kind this addon does not name, one a
+     * later runtime added as Node 23 added Float16Array, is refused: a width guessed for it
+     * would hand the ABI another length than the bytes the caller gave. */
     size_t width = (t == napi_int8_array || t == napi_uint8_array || t == napi_uint8_clamped_array) ? 1 :
                    (t == napi_int16_array || t == napi_uint16_array) ? 2 :
-                   (t == napi_int32_array || t == napi_uint32_array || t == napi_float32_array) ? 4 : 8;
+                   (t == napi_int32_array || t == napi_uint32_array || t == napi_float32_array) ? 4 :
+                   (t == napi_float64_array || t == napi_bigint64_array || t == napi_biguint64_array) ? 8 : 0;
+    if (width == 0) {
+      char message[320];
+      snprintf(message, sizeof message, "%s: a typed array of a kind this addon does not know the element width of: "
+               "pass a Uint8Array over the same bytes, new Uint8Array(a.buffer, a.byteOffset, a.byteLength); see "
+               "clients/node/README.md#what-it-must-never-do", name);
+      napi_throw_type_error(env, NULL, message);
+      arg_failed = true;
+      if (length) *length = 0;
+      return NULL;
+    }
     n *= width;
     data = base;
   } else if (napi_is_dataview(env, v, &is) == napi_ok && is) {
@@ -437,43 +452,53 @@ static const char *string_arg(napi_env env, napi_value v, char *buf, size_t cap,
  * the rule: every refusal of a reader below ends with one of these. */
 static const char *const NEXT_INTEGER = "pass an integer in that range; see "
   "clients/node/README.md#what-it-must-never-do";
-static const char *const NEXT_INT64 = "pass an integer in that range, or a BigInt for any int64; see "
+static const char *const NEXT_INT64 = "pass an integer or a BigInt in its range; see "
   "clients/node/README.md#what-it-must-never-do";
 static const char *const NEXT_TIMER = "pass an integer, such as 77 for an id or entry.timestamp + 50 for a deadline "
   "50 ms after the entry, or a BigInt, such as 77n; see clients/node/README.md#a-services-timers";
 
-/* An int64, read exactly: a BigInt in the int64 range, or a number that is an integer from
- * -(2^53 - 1) to 2^53 - 1, the integers a number carries exactly. A number with a fraction,
- * a NaN, an infinity or one outside that range, and a BigInt outside int64, are refused with
- * a RangeError: `napi_get_value_int64` drops a number's fraction, reads a NaN or an infinity
- * as 0 and holds a number past int64 to the nearest int64, `napi_get_value_bigint_int64`
- * keeps a BigInt's low 64 bits, and the ABI would then act on another position, another
- * recording, another session or another timer than the caller named, with nothing said.
- * Any other value is a TypeError. Each refusal ends with `next`, what to pass and where the
- * rule is, and none reaches the ABI. The range is checked before the cast, which is
- * undefined for a double that no int64 holds. A number costs the one N-API call the
- * conversion it replaces cost, `napi_get_value_double`, which answers
- * `napi_number_expected` for anything else: the value's type is asked only then. */
-static int64_t int64_read(napi_env env, napi_value v, const char *name, const char *next) {
-  char message[448];
+/* A value that an addon function hands the ABI as an int64 or as a size, read exactly. */
+_Static_assert(sizeof(size_t) == sizeof(int64_t), "the addon is built for a 64-bit size_t: a count is read as an int64");
+
+/* An int64, or a count when `count` is set, read exactly: a number that is an integer the
+ * parameter holds and a number carries exactly, from -(2^53 - 1), or 0 for a count, to
+ * 2^53 - 1, or a BigInt in the int64 range, from 0n for a count. A number with a fraction, a
+ * NaN, an infinity or one outside that range, and a BigInt outside its range, are refused
+ * with a RangeError: `napi_get_value_int64` drops a number's fraction, reads a NaN or an
+ * infinity as 0 and holds a number past int64 to the nearest int64,
+ * `napi_get_value_bigint_int64` keeps a BigInt's low 64 bits, and the ABI would then act on
+ * another position, another recording, another session, another timer or another count than
+ * the caller named, with nothing said. Any other value is a TypeError. Each refusal says the
+ * range and ends with `next`, what to pass and where the rule is, and none reaches the ABI.
+ * The range is checked before the cast, which is undefined for a double that no int64
+ * holds. A number costs the one N-API call the conversion it replaces cost,
+ * `napi_get_value_double`, which answers `napi_number_expected` for anything else; a BigInt
+ * costs that call and its own, two as before. */
+static int64_t int64_read(napi_env env, napi_value v, const char *name, bool count, const char *next) {
+  const char *const range = count
+    ? "an integer from 0 to 2 ** 53 - 1 expected, or a BigInt from 0n to 2n ** 63n - 1n"
+    : "an integer from -(2 ** 53 - 1) to 2 ** 53 - 1 expected, or a BigInt from -(2n ** 63n) to 2n ** 63n - 1n";
+  char message[512];
   double d = 0;
   if (napi_get_value_double(env, v, &d) == napi_ok) {
-    if (d >= -9007199254740991.0 && d <= 9007199254740991.0 && (double) (int64_t) d == d) return (int64_t) d;
-    snprintf(message, sizeof message, "%s: an integer from -(2 ** 53 - 1) to 2 ** 53 - 1 expected, or a BigInt for "
-             "any int64; a number with a fraction or outside that range would be passed as another value: %s", name, next);
+    if (d >= (count ? 0.0 : -9007199254740991.0) && d <= 9007199254740991.0 && (double) (int64_t) d == d) {
+      return (int64_t) d;
+    }
+    snprintf(message, sizeof message, "%s: %s; a number with a fraction or outside that range would be passed as "
+             "another value: %s", name, range, next);
     napi_throw_range_error(env, NULL, message);
     arg_failed = true;
     return 0;
   }
-  napi_valuetype t = napi_undefined;
-  if (napi_typeof(env, v, &t) == napi_ok && t == napi_bigint) {
-    int64_t n = 0; bool lossless = false;
-    if (napi_get_value_bigint_int64(env, v, &n, &lossless) == napi_ok && lossless) return n;
-    snprintf(message, sizeof message, "%s: a BigInt from -(2n ** 63n) to 2n ** 63n - 1n expected, an int64; one "
-             "outside that range would be passed as another value: %s", name, next);
+  int64_t n = 0; bool lossless = false;
+  if (napi_get_value_bigint_int64(env, v, &n, &lossless) == napi_ok) {
+    if (lossless && (!count || n >= 0)) return n;
+    snprintf(message, sizeof message, "%s: %s; a BigInt outside that range would be passed as another value: %s",
+             name, range, next);
     napi_throw_range_error(env, NULL, message);
   } else {
-    snprintf(message, sizeof message, "%s: a number or a BigInt expected: %s", name, next);
+    snprintf(message, sizeof message, "%s: %s, and the value given is neither a number nor a BigInt: %s", name, range,
+             next);
     napi_throw_type_error(env, NULL, message);
   }
   arg_failed = true;
@@ -482,12 +507,17 @@ static int64_t int64_read(napi_env env, napi_value v, const char *name, const ch
 
 /* An int64 parameter: a position, a recording's id, a session's id, a reserved value. */
 static int64_t int64_arg(napi_env env, napi_value v, const char *name) {
-  return int64_read(env, v, name, NEXT_INT64);
+  return int64_read(env, v, name, false, NEXT_INT64);
 }
 
 /* A timer's id or its deadline (ADR 0157): an int64, with what a timer's caller passes. */
 static int64_t int64_exact_arg(napi_env env, napi_value v, const char *name) {
-  return int64_read(env, v, name, NEXT_TIMER);
+  return int64_read(env, v, name, false, NEXT_TIMER);
+}
+
+/* A count or a length, a `size_t`: an int64 read exactly that is not below zero. */
+static size_t size_arg(napi_env env, napi_value v, const char *name) {
+  return (size_t) int64_read(env, v, name, true, NEXT_INT64);
 }
 
 /* An integer of a narrower C type, read exactly: a number that is an integer from `least`
@@ -501,8 +531,8 @@ static int64_t int_arg(napi_env env, napi_value v, const char *name, int64_t lea
   char message[384];
   double d = 0;
   if (napi_get_value_double(env, v, &d) != napi_ok) {
-    snprintf(message, sizeof message, "%s: a number expected, an integer from %lld to %lld: %s", name,
-             (long long) least, (long long) greatest, NEXT_INTEGER);
+    snprintf(message, sizeof message, "%s: an integer from %lld to %lld expected, and the value given is no number: "
+             "%s", name, (long long) least, (long long) greatest, NEXT_INTEGER);
     napi_throw_type_error(env, NULL, message);
     arg_failed = true;
     return 0;
@@ -518,19 +548,6 @@ static int64_t int_arg(napi_env env, napi_value v, const char *name, int64_t lea
 
 static int32_t int32_arg(napi_env env, napi_value v, const char *name) {
   return (int32_t) int_arg(env, v, name, INT32_MIN, INT32_MAX);
-}
-
-/* A count or a length: an int64 read exactly that is not below zero. */
-static size_t size_arg(napi_env env, napi_value v, const char *name) {
-  int64_t n = int64_arg(env, v, name);
-  if (!arg_failed && n < 0) {
-    char message[256];
-    snprintf(message, sizeof message, "%s: a count or a length expected, an integer from 0: %s", name, NEXT_INT64);
-    napi_throw_range_error(env, NULL, message);
-    arg_failed = true;
-    return 0;
-  }
-  return (size_t) n;
 }
 
 static bool bool_arg(napi_env env, napi_value v, const char *name) {
@@ -2454,15 +2471,15 @@ export class Client {
   addExclusivePublication(channel: string, streamId: number): Publication;
   addSubscription(channel: string, streamId: number): Subscription;
   startRecording(channel: string, streamId: number): Recording;
-  stopRecording(recordingId: number): void;
+  stopRecording(recordingId: number | bigint): void;
   addDestination(publication: Publication, channel: string): void;
   removeDestination(publication: Publication, channel: string): void;
-  truncateRecording(recordingId: number, position: number): void;
-  purgeSegments(recordingId: number, newStartPosition: number): void;
-  purgeRecording(recordingId: number): void;
-  startReplay(recordingId: number, position: number, length: number, replayStreamId: number, channel: string): Replay;
-  stopReplay(replaySessionId: number): void;
-  committedLog(position: number): CommittedLog | null;
+  truncateRecording(recordingId: number | bigint, position: number | bigint): void;
+  purgeSegments(recordingId: number | bigint, newStartPosition: number | bigint): void;
+  purgeRecording(recordingId: number | bigint): void;
+  startReplay(recordingId: number | bigint, position: number | bigint, length: number | bigint, replayStreamId: number, channel: string): Replay;
+  stopReplay(replaySessionId: number | bigint): void;
+  committedLog(position: number | bigint): CommittedLog | null;
   connectCluster(members: string, responseChannel: string): ClusterSession;
   clusterService(): ClusterService;
   [Symbol.dispose](): void;
@@ -2478,7 +2495,7 @@ export class Publication {
   readonly isExclusive: boolean;
   /** The Buffer over the slice the last `tryClaim` reserved, or null. */
   claim: Buffer | null;
-  tryClaim(length: number): number;
+  tryClaim(length: number | bigint): number;
   commit(): number;
   abort(): number;
   /** Any int64: a BigInt exactly, a number below 2^53 in magnitude. */
@@ -2518,10 +2535,10 @@ export class Subscription {
   readonly channel: string;
   readonly registrationId: number;
   readonly streamId: number;
-  poll(handler: FragmentHandler, fragmentLimit: number): number;
+  poll(handler: FragmentHandler, fragmentLimit: number | bigint): number;
   fault(): { code: number; sessionId: number; position: number };
   imageCount(): number;
-  imageAtIndex(index: number): Image | null;
+  imageAtIndex(index: number | bigint): Image | null;
   images(): Image[];
   readonly isConnected: boolean;
   readonly isClosed: boolean;
@@ -2531,7 +2548,7 @@ export class Subscription {
 export class CommittedLog {
   readonly recordingId: number;
   readonly memberId: number;
-  poll(handler: EntryHandler, fragmentLimit: number): number;
+  poll(handler: EntryHandler, fragmentLimit: number | bigint): number;
   fault(): { code: number; sessionId: number; position: number };
   position(): number;
   commitPosition(): number;
@@ -2553,7 +2570,7 @@ export class ClusterSession {
   readonly sessionId: number;
   readonly maxMessageLength: number;
   offer(message: Buffer | Uint8Array): number;
-  poll(handler: ReplyHandler, fragmentLimit: number): number;
+  poll(handler: ReplyHandler, fragmentLimit: number | bigint): number;
   fault(): { code: number; sessionId: number; position: number };
   leadershipTermId(): number;
   leaderMemberId(): number;
@@ -2579,7 +2596,7 @@ export class ClusterEntryValues {
 }
 
 export class ClusterService {
-  poll(handler: ServiceHandler, fragmentLimit: number): number;
+  poll(handler: ServiceHandler, fragmentLimit: number | bigint): number;
   /** One of `constants.CAVALRY_CLUSTER_REPLY_*`, or -1 from outside the handler. */
   reply(sessionId: number | bigint, message: Buffer | Uint8Array): number;
   /** `constants.CAVALRY_CLUSTER_TIMER_SCHEDULED` or `_REFUSED`, or -1 from outside the handler.

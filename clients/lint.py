@@ -37,7 +37,10 @@ read by the same tokenizer for C's forms: a lock, `pthread_mutex_*`, `pthread_rw
 C11's `mtx_*`, libuv's `uv_mutex_*` and `uv_rwlock_*`, and N-API's
 `napi_*threadsafe_function*`; and a raise, `napi_throw*` and `napi_fatal_*`, except in the
 argument readers, which throw a TypeError or a RangeError for an argument the ABI's
-parameter cannot take, before the ABI is called. A call reaches the package's own functions by name: a
+parameter cannot take, before the ABI is called. Where a reader is called is held too: by
+a function N-API calls with the caller's arguments, `fn_*`, before the call of the ABI it
+goes on from. A reader called by a trampoline or by a function one calls, where its throw
+would be raised into the ABI's call-back, or after the ABI's call, is a finding. A call reaches the package's own functions by name: a
 module function, a class's `__init__` or `constructor`, a method of the same class
 through `self` or `this`, and any other method by its name in any class of the package.
 The one raise allowed is in `poll`, a subscription's, a committed log's, a cluster
@@ -892,6 +895,43 @@ class CModule:
             if name in self.functions and name != label and name not in C_WORDS:
                 yield "call", base + body.count("\n", 0, m.start()) + 1, name
 
+    ABI_CALL = re.compile(r"(?<![\w$])cavalry_[a-z0-9_]+\s*\(")
+
+    def misplaced_readers(self, label: str, seen=None) -> list[str]:
+        """Each call of an argument reader that `label` or a function it calls makes where
+        a reader's throw is no refusal of an argument: in a function that N-API does not
+        call with the caller's arguments, a trampoline or what it calls, where the throw
+        would be raised into the ABI's call-back; and in an entry function, `fn_*`, on a
+        line after its first call of the ABI that the function goes on from, where the
+        ABI has already acted. A call of the ABI in a `return` statement is not one: the
+        function ends there, as a poll from inside a handler does at the ABI's refusal. A
+        reader's own calls of other readers are its own."""
+        seen = set() if seen is None else seen
+        if label in seen or label in self.readers:
+            return []
+        seen.add(label)
+        _, body, start = self.functions[label]
+        base = line_of(self.code, start) - 1
+        abi_line = None
+        for abi in self.ABI_CALL.finditer(body):
+            statement = body[max(body.rfind(c, 0, abi.start()) for c in ";{}") + 1:abi.start()]
+            if not re.search(r"(?<![\w$])return(?![\w$])", statement):
+                abi_line = base + body.count("\n", 0, abi.start()) + 1
+                break
+        found = []
+        for kind, line, what in self.forms(label):
+            if kind != "call":
+                continue
+            if what not in self.readers:
+                found.extend(self.misplaced_readers(what, seen))
+            elif not label.startswith("fn_"):
+                found.append(f"{label} calls the argument reader {what} at line {line}, and N-API does not call "
+                             f"{label} with a caller's arguments: a reader's throw there is raised into a call-back")
+            elif abi_line is not None and line > abi_line:
+                found.append(f"{label} calls the argument reader {what} at line {line}, after its call of the ABI at "
+                             f"line {abi_line}: a reader refuses an argument before the ABI is called")
+        return found
+
     def reach(self, label: str) -> dict[str, str]:
         """{kind: how `label` reaches it}, for the first form of each kind in its body or in
         the module's functions it calls; memoized, as `Package.reach`."""
@@ -927,6 +967,8 @@ def c_findings(language: str, path: str, rules: dict) -> list[str]:
                 continue
             for k, how in module.reach(what).items():
                 findings.append(f"{where} calls {what} at line {at}, and {how}: {WHY[k]}; {HELP}")
+        for misplaced in module.misplaced_readers(name):
+            findings.append(f"{where}: {misplaced}; {HELP}")
     return findings
 
 
