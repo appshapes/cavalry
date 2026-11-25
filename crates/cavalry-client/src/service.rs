@@ -1288,7 +1288,8 @@ impl ClusterService {
     /// the [`Replies`] it may answer a session through. The handler's [`Action`]
     /// says whether the entry is taken: [`Action::Abort`] leaves it for the next
     /// poll, which is what a [`Reply::Retry`] asks for. Returns how many entries
-    /// were taken; 0 while the driver hosts no member that has a log yet.
+    /// were taken; 0 while the driver, one that runs, hosts no member that has a
+    /// log yet.
     ///
     /// Which entries a service answers. An entry is answered by one service: the one
     /// beside the member that led the entry's term, which the term's new leadership
@@ -1316,7 +1317,42 @@ impl ClusterService {
     /// recording's end. Nothing is allocated, and no command is sent, for a session
     /// message. An entry the service would answer costs two loads of the member's
     /// counters.
+    ///
+    /// A poll of a closed client is one error, [`ClusterError::Client`] holding
+    /// [`ClientError::Closed`] with the reason [`Cavalry::closed`] gives, whatever
+    /// the service held and whatever the poll was doing when it met the close: the
+    /// read of its log, a command to the driver, or nothing, for a service that had
+    /// no log open (ADR 0155). So a service ends when its member's driver stops, and
+    /// a program's loop needs no other look at its client: it ends on that error, as
+    /// `crates/cavalry/examples/adder-service.rs` does. The entries the handler took
+    /// before the close are taken: [`position`](Self::position) is after the last.
+    /// An error of another kind that a poll meets in the call in which its client
+    /// closes is reported as the close.
     pub fn poll<F>(
+        &mut self,
+        client: &mut Cavalry,
+        handler: F,
+        fragment_limit: usize,
+    ) -> Result<usize, ClusterError>
+    where
+        F: FnMut(&Committed<'_>, &mut Replies<'_>) -> Action,
+    {
+        // A program that reads on has let the snapshot go, whatever the poll finds.
+        self.due = None;
+        let closed = |reason| ClusterError::Client(ClientError::Closed(reason));
+        if let Some(reason) = client.closed() {
+            return Err(closed(reason));
+        }
+        match self.poll_entries(client, handler, fragment_limit) {
+            // What a poll met at a client that is closed now is the close: a fault of
+            // its log's read and a command's refusal say the same thing there.
+            Err(error) => Err(client.closed().map_or(error, closed)),
+            taken => taken,
+        }
+    }
+
+    /// The poll, for a client that was open when it began.
+    fn poll_entries<F>(
         &mut self,
         client: &mut Cavalry,
         mut handler: F,
@@ -1325,8 +1361,6 @@ impl ClusterService {
     where
         F: FnMut(&Committed<'_>, &mut Replies<'_>) -> Action,
     {
-        // A program that reads on has let the snapshot go.
-        self.due = None;
         if self.log.is_none() {
             let Some(log) = client.committed_log(self.position)? else {
                 return Ok(0);
@@ -1738,7 +1772,24 @@ impl ClusterService {
     }
 
     /// Closes the service: its read of the log, its publications and its counter.
+    /// A driver that is gone cannot be told, and that is not an error here, as it
+    /// is none of a publication's close: at a client that is closed, or that the
+    /// close itself finds closed, the service drops what it held and the close is
+    /// `Ok` (ADR 0155).
     pub fn close(mut self, client: &mut Cavalry) -> Result<(), ClusterError> {
+        if client.closed().is_some() {
+            return Ok(());
+        }
+        match self.close_handles(client) {
+            Err(_) if client.closed().is_some() => Ok(()),
+            closed => closed,
+        }
+    }
+
+    /// The close, for a client that was open when it began. What it has not closed
+    /// when it returns an error, the drops of the service's handles close with no
+    /// answer waited for.
+    fn close_handles(&mut self, client: &mut Cavalry) -> Result<(), ClusterError> {
         for session in self.sessions.iter_mut() {
             if let Some(publication) = session.publication.take() {
                 publication.close()?;

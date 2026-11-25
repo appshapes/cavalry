@@ -43,7 +43,7 @@ use std::path::PathBuf;
 use std::process::ExitCode;
 use std::time::Duration;
 
-use cavalry::{Action, Cavalry, Entry, Reply};
+use cavalry::{Action, Cavalry, ClientError, ClusterError, Entry, Reply};
 
 fn main() -> ExitCode {
     match run() {
@@ -101,7 +101,7 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
     // The service's state.
     let mut total: i64 = 0;
     loop {
-        let taken = service.poll(
+        let polled = service.poll(
             &mut client,
             |committed, replies| {
                 let position = committed.position;
@@ -176,22 +176,27 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
                 Action::Continue
             },
             10,
-        )?;
-        if let Some(closed) = client.closed() {
+        );
+        let taken = match polled {
+            Ok(taken) => taken,
             // The member's driver is gone, or dropped this client: there is no log
-            // to read here any more. The total is in the log, on every member that
-            // holds it.
-            return Err(format!(
-                "the driver at {} closed this service's client ({}) with the total at \
-                 {total}, read to position {}; the log is on the members that still \
-                 run; start this member again, then this program, which reads the log \
-                 from its start; see docs/tutorials/run-a-cluster.md",
-                client.dir().display(),
-                closed.reason(),
-                service.position()
-            )
-            .into());
-        }
+            // to read here any more. A poll of a closed client is this one error,
+            // whatever it was doing when it met the close. The total is in the log,
+            // on every member that holds it.
+            Err(ClusterError::Client(ClientError::Closed(closed))) => {
+                return Err(format!(
+                    "the driver at {} closed this service's client ({}) with the total at \
+                     {total}, read to position {}; the log is on the members that still \
+                     run; start this member again, then this program, which reads the log \
+                     from its start; see docs/tutorials/run-a-cluster.md",
+                    client.dir().display(),
+                    closed.reason(),
+                    service.position()
+                )
+                .into());
+            }
+            Err(error) => return Err(error.into()),
+        };
         if taken == 0 {
             std::thread::sleep(Duration::from_millis(1));
         }
