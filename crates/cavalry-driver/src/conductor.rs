@@ -18840,6 +18840,135 @@ mod receiving {
         assert_eq!(h.counter(CHANNEL_OPENED), 2);
     }
 
+    /// A held `add publication` holds a slot of the publications registry, so the
+    /// registry fills with held adds as with registered publications, and one more, on
+    /// `cavalry:udp` or `cavalry:ipc`, is code 10 with nothing registered or held
+    /// (invariant 3); and the held adds go with a client that closes before the receive
+    /// endpoint has closed, so the close registers no publication and opens no send
+    /// endpoint (`spec/client-protocol.md`, "Commands", "Sizes"; ADR 0154).
+    #[test]
+    fn held_publication_adds_hold_registry_slots_and_go_with_their_client() {
+        let mut h = Harness::new("udp-control-behind-receive-full");
+        let port = free_port();
+        let endpoint = format!("cavalry:udp?endpoint=127.0.0.1:{port}");
+        let control = format!("cavalry:udp?control=127.0.0.1:{port}|control-mode=manual");
+        h.conductor
+            .add_subscription(1, 2, STREAM, endpoint.as_bytes(), h.now);
+        assert_eq!(h.last_error(2), None);
+        h.cycle();
+        let now = h.now;
+        h.conductor.remove_subscription(1, 3, 2, now);
+        // The registry filled with held adds, exclusive and shared, the receiver
+        // running no cycle.
+        let capacity = spec::MAX_PUBLICATIONS as i64;
+        for n in 0..capacity {
+            h.conductor
+                .add_publication(1, 10 + n, STREAM, control.as_bytes(), n % 2 == 0, now);
+        }
+        assert_eq!(h.last_error(10), None);
+        assert_eq!(
+            h.conductor.pending_publications.len(),
+            spec::MAX_PUBLICATIONS
+        );
+        assert_eq!(h.counter(PUBLICATION_ADD_DEFERRED), capacity);
+        assert_eq!(h.counter(PUBLICATION_ADD_DEFERRED_WAITING), capacity);
+        assert!(h.conductor.publications.is_empty(), "nothing registered");
+        // One more, on the control channel or on IPC: code 10, nothing registered or
+        // held, and not counted as held.
+        let more: [(i64, &[u8]); 2] = [(9_998, control.as_bytes()), (9_999, IPC_CHANNEL)];
+        for (correlation_id, channel) in more {
+            h.conductor
+                .add_publication(1, correlation_id, STREAM, channel, false, now);
+            let (code, message) = h.last_error(correlation_id).expect("one more is refused");
+            assert_eq!(code, 10, "{message}");
+            assert!(message.contains("publications registry"), "{message}");
+        }
+        assert_eq!(h.counter(DRIVER_REGISTRY_FULL), 2);
+        assert_eq!(
+            h.conductor.pending_publications.len(),
+            spec::MAX_PUBLICATIONS
+        );
+        assert_eq!(h.counter(PUBLICATION_ADD_DEFERRED), capacity);
+        assert!(h.conductor.publications.is_empty());
+        assert_eq!(h.conductor.registration_count, 0);
+        // The client goes: its held adds go with it, and the endpoint's close registers
+        // nothing and binds nothing.
+        h.conductor.remove_client(1, now);
+        assert!(h.conductor.pending_publications.is_empty());
+        assert_eq!(h.counter(PUBLICATION_ADD_DEFERRED_WAITING), 0);
+        assert!(h.cycle_until(|h| h.conductor.receive_endpoints.is_empty()));
+        assert!(h.conductor.publications.is_empty(), "nothing registered");
+        assert_eq!(h.conductor.registration_count, 0);
+        assert!(
+            h.conductor.send_endpoints.is_empty(),
+            "no send endpoint opened"
+        );
+        assert_eq!(h.counter(CHANNEL_OPENED), 1);
+        assert_eq!(h.counter(PUBLICATION_ADD_DEFERRED_TIMED_OUT), 0);
+    }
+
+    /// A `cavalry:ipc` add counts the held `add publication` commands against the
+    /// publications registry as a `cavalry:udp` add does, so it cannot take a slot a
+    /// held add holds: with 1023 publications registered and one add held, the IPC add
+    /// is code 10 with nothing registered, and the receiver's close then registers the
+    /// held add in the slot it held (`spec/client-protocol.md`, "Sizes"; ADR 0154).
+    #[test]
+    fn an_ipc_add_cannot_take_the_publication_slot_a_held_add_holds() {
+        let mut h = Harness::new("udp-control-behind-receive-ipc");
+        // The 1023 are registrations of one shared IPC publication, so one log, of the
+        // smallest term, since every log is made resident when it is created (ADR 0027).
+        h.conductor.term_length = cavalry_shm::log::layout::MIN_TERM_LENGTH;
+        let port = free_port();
+        let endpoint = format!("cavalry:udp?endpoint=127.0.0.1:{port}");
+        let control = format!("cavalry:udp?control=127.0.0.1:{port}|control-mode=manual");
+        h.conductor
+            .add_subscription(1, 2, STREAM, endpoint.as_bytes(), h.now);
+        assert_eq!(h.last_error(2), None);
+        h.cycle();
+        let now = h.now;
+        h.conductor.remove_subscription(1, 3, 2, now);
+        let registered = spec::MAX_PUBLICATIONS as i64 - 1;
+        for n in 0..registered {
+            h.conductor
+                .add_publication(1, 10 + n, STREAM + 1, IPC_CHANNEL, false, now);
+        }
+        assert_eq!(h.last_error(10), None);
+        assert_eq!(h.conductor.publications.len(), 1);
+        assert_eq!(h.conductor.registration_count, spec::MAX_PUBLICATIONS - 1);
+        h.conductor
+            .add_publication(1, 5_000, STREAM, control.as_bytes(), true, now);
+        assert_eq!(h.conductor.pending_publications.len(), 1);
+        // The registry is full, 1023 registered and one held: the IPC add is refused,
+        // with nothing registered.
+        h.conductor
+            .add_publication(1, 6_000, STREAM + 1, IPC_CHANNEL, false, now);
+        let (code, message) = h.last_error(6_000).expect("the IPC add is refused");
+        assert_eq!(code, 10, "{message}");
+        assert!(message.contains("publications registry"), "{message}");
+        assert_eq!(h.conductor.registration_count, spec::MAX_PUBLICATIONS - 1);
+        assert!(
+            !h.conductor.publications[0]
+                .registrations
+                .iter()
+                .any(|registration| registration.correlation_id == 6_000)
+        );
+        // The receiver closes the endpoint: the held add takes the slot it held, and its
+        // publication binds the control address.
+        assert!(h.cycle_until(|h| {
+            h.conductor
+                .publications
+                .iter()
+                .any(|publication| publication.registration_id == 5_000)
+        }));
+        assert_eq!(h.last_error(5_000), None);
+        assert!(h.conductor.pending_publications.is_empty());
+        assert_eq!(h.counter(PUBLICATION_ADD_DEFERRED_WAITING), 0);
+        assert_eq!(h.conductor.registration_count, spec::MAX_PUBLICATIONS);
+        assert!(h.conductor.receive_endpoints.is_empty());
+        assert_eq!(h.conductor.send_endpoints.len(), 1);
+        assert!(h.conductor.send_endpoints[0].target.control);
+    }
+
     /// The receive endpoints registry fills at its capacity, and a 65th is code 10
     /// with nothing registered; a port in use is code 4.
     #[test]
