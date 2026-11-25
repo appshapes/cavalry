@@ -260,7 +260,10 @@ function start() {
   turn();
 }
 function turn() {
-  service.poll(onEntry, 10);
+  if (service.poll(onEntry, 10) < 0) {
+    report(service.fault());                     // the poll stopped: the fault's code
+    return;                                      // says on what
+  }
   if (service.snapshotDue() !== null) {
     try {
       service.snapshot(dump());                  // the program's own: its state to bytes
@@ -272,6 +275,11 @@ function turn() {
 }
 start();
 ```
+
+A poll that returns −1 has stopped, and the loop ends on it: code 102,
+`CAVALRY_ERR_CLOSED`, is the close of the service's client, which every poll after it
+answers again, as when the member's driver has stopped (ADR 0155). A loop that does
+not look at what the poll returned polls a stopped driver for ever.
 
 The state must be a function of the entries the handler was handed, and of nothing
 else: every member's service gives its own, and a start from any of them must reach

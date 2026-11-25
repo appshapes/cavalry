@@ -237,7 +237,11 @@ if (state != null)
 }
 while (running)
 {
-    service.Poll(OnEntry, 10);
+    if (service.Poll(OnEntry, 10) < 0)
+    {
+        Report(service.GetFault());      // the poll stopped: the fault's code says on what
+        break;
+    }
     if (service.SnapshotDue() != null)
     {
         try
@@ -251,6 +255,11 @@ while (running)
     }
 }
 ```
+
+A poll that returns −1 has stopped, and the loop ends on it: code 102,
+`Abi.ERR_CLOSED`, is the close of the service's client, which every poll after it
+answers again, as when the member's driver has stopped (ADR 0155). A loop that does
+not look at what the poll returned polls a stopped driver for ever.
 
 The state must be a function of the entries the handler was handed, and of nothing
 else: every member's service gives its own, and a start from any of them must reach
