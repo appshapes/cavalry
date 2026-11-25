@@ -1131,9 +1131,10 @@ class ClusterService {
    * deadline at or before the entry's time is due at once. A handler that returns ABORT, or
    * throws, is handed its entry again with every timer as it was before that handling. A
    * program schedules its first timer only once every member of its cluster, with the service
-   * beside it, runs version 2 of the cluster protocol, and from that entry on no member is
-   * stepped back: a service of version 1 hands its program no timer, so the two would compute
-   * two states from one log. From outside the handler it is -1, with
+   * beside it, runs version 2 of the cluster protocol or a later one, and from that entry on
+   * no member is stepped back to version 1: a service of version 1 hands its program no
+   * timer, so the two would compute two states from one log. From outside the handler it is
+   * -1, with
    * CAVALRY_ERR_CLUSTER_NO_ENTRY. An id and a deadline are each a BigInt, any int64, or a
    * number that is an integer from -(2 ** 53 - 1) to 2 ** 53 - 1, as `entry.timestamp + 50`
    * is. A BigInt outside int64, and a number with a fraction or outside that range, a NaN
