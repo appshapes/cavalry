@@ -163,7 +163,10 @@ the decision. A change to the format of the durable log passes that gate in the 
 request that makes it. The gate builds each tree that the servers in production have
 run, and keeps one while a server holds a directory that the tree wrote any part of,
 alone or before another tree
-([ADR 0156](../decisions/0156-hold-in-the-upgrade-gate-every-directory-a-server-holds-each-trees-alone-and-the-trees-in-turn.md), work item 441).
+([ADR 0156](../decisions/0156-hold-in-the-upgrade-gate-every-directory-a-server-holds-each-trees-alone-and-the-trees-in-turn.md), work item 441). On CI's macOS runner it builds
+620a2e29 alone and writes server 0.9.0's directory alone for now, as it did before:
+with the three directories written all seven ways, that runner was lost partway
+through `just conformance` (work item 441).
 
 The gate builds the feed's files, `tests/feed/` and the example that drives them, in
 each older tree too. So a change that makes those files use a call that 620a2e29 or

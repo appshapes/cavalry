@@ -25,6 +25,10 @@
 # - d265af823b8311ed878ae1cc3643d52a58737cdc, the pin of server 0.10.0, its tag
 #   `server-v0.10.0`, which both servers run since 2026-11-24.
 #
+# On CI's macOS runner, and there alone, the script builds 620a2e29 alone and writes
+# server 0.9.0's directory alone, as it did before work item 441: the comment above
+# "The older builds" below says why.
+#
 # CAVALRY_DIRECTORY_FROM, when it is set, names one commit, a hash, a tag or a branch,
 # which takes the place of both: one older build, one directory that it writes alone,
 # in the shape CAVALRY_DIRECTORY_SHAPE names, `pinned` when it is not set or
@@ -238,6 +242,18 @@ resolve() {
     fi
 }
 
+# On CI's macOS runner, when no CAVALRY_DIRECTORY_FROM is set, the gate builds 620a2e29
+# alone and writes server 0.9.0's directory alone, stopped and killed, as it did before
+# work item 441. With the three directories written all seven ways, that runner lost
+# communication with GitHub partway through `just conformance` in 2 of its first 4
+# jobs, and in none of the 60 runs before; the job then keeps no log and skips its
+# later steps. Linux, which the servers in production run, writes all seven. Work item
+# 441 stays open until they run on macOS again, or an ADR says why they do not.
+on_macos_ci=
+if [ -z "${CAVALRY_DIRECTORY_FROM:-}" ] && [ "${GITHUB_ACTIONS:-}" = true ] && [ "${RUNNER_OS:-}" = macOS ]; then
+    on_macos_ci=1
+fi
+
 # The older builds, each a full hash, and the directories, each `<name>=<writer>,...`
 # with a writer `<build's first 8 hex digits>:<shape>`, written in that order.
 if [ -n "${CAVALRY_DIRECTORY_FROM:-}" ]; then
@@ -251,6 +267,12 @@ if [ -n "${CAVALRY_DIRECTORY_FROM:-}" ]; then
     trees=$from
     directories="${from:0:8}=${from:0:8}:$named_shape"
     say "the older build is ${from:0:8}, named by CAVALRY_DIRECTORY_FROM: $(git log -1 --format=%s "$from")"
+elif [ -n "$on_macos_ci" ]; then
+    resolve "$zero_nine" "the commit Brigade's server 0.9.0 pins"
+    first=$full
+    trees=$first
+    directories="0.9.0=${first:0:8}:pinned"
+    say "the older build is ${first:0:8} alone, which Brigade's server 0.9.0 pins: on CI's macOS runner the gate writes server 0.9.0's directory alone, because with all seven that runner was lost partway through \`just conformance\` (work item 441)"
 else
     resolve "$zero_nine" "the commit Brigade's server 0.9.0 pins"
     first=$full
