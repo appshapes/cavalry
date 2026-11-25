@@ -364,6 +364,14 @@ unsafe fn probe_from_inside(served: &mut Served, header: *const cavalry_header_t
             "cavalry_cluster_service_action, another service",
             || i64::from(cavalry_cluster_service_action(second, CAVALRY_ACTION_ABORT)),
         ));
+        found.push(probe(
+            "cavalry_cluster_service_schedule_timer, another service",
+            || i64::from(cavalry_cluster_service_schedule_timer(second, 1, 1)),
+        ));
+        found.push(probe(
+            "cavalry_cluster_service_cancel_timer, another service",
+            || i64::from(cavalry_cluster_service_cancel_timer(second, 1)),
+        ));
         // What does not reach the client is allowed: a close with no client, and any
         // call on another handle.
         found.push(probe(
@@ -1123,6 +1131,16 @@ fn a_service_takes_each_entry_answers_its_session_and_holds_its_client_while_it_
         ),
         (
             "cavalry_cluster_service_action, another service",
+            -1,
+            CAVALRY_ERR_CLUSTER_NO_ENTRY,
+        ),
+        (
+            "cavalry_cluster_service_schedule_timer, another service",
+            -1,
+            CAVALRY_ERR_CLUSTER_NO_ENTRY,
+        ),
+        (
+            "cavalry_cluster_service_cancel_timer, another service",
             -1,
             CAVALRY_ERR_CLUSTER_NO_ENTRY,
         ),

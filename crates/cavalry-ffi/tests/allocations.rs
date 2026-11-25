@@ -6,12 +6,13 @@
 //! `cavalry_committed_log_poll`, `cavalry_committed_log_entry_position`,
 //! `cavalry_cluster_session_offer`, `cavalry_cluster_session_poll`,
 //! `cavalry_cluster_reply_values`, `cavalry_cluster_service_poll`,
-//! `cavalry_cluster_entry_values`, `cavalry_cluster_service_reply` and
+//! `cavalry_cluster_entry_values`, `cavalry_cluster_service_reply`,
+//! `cavalry_cluster_service_schedule_timer`, `cavalry_cluster_service_cancel_timer` and
 //! `cavalry_cluster_service_action`, counted with `stats_alloc`, allocations and
 //! reallocations both, over a window after the image has joined, with none at all.
 //! The committed log's two have a window of their own, beside three cluster members
 //! in this process whose duty cycles run inside it (ADR 0070). The cluster service's
-//! four have a third, beside the leader of those members, with a session through the
+//! six have a third, beside the leader of those members, with a session through the
 //! ABI whose every message the service answers (ADR 0123). The cluster session's
 //! three have a fourth as well, against a leader this thread plays (ADR 0122). Alone
 //! in its binary, so that no other test's threads are counted.
@@ -96,7 +97,8 @@ unsafe extern "C" fn count_reply(
 static mut ANSWERED: usize = 0;
 
 /// The service's handler of the third window: it reads the entry's values, answers a
-/// session's message with the message, and says that it continues.
+/// session's message with the message, schedules one timer and cancels another, and
+/// says that it continues.
 unsafe extern "C" fn answer_entry(
     clientd: *mut c_void,
     buffer: *const u8,
@@ -121,6 +123,16 @@ unsafe extern "C" fn answer_entry(
             return;
         }
         assert_eq!(reply, CAVALRY_CLUSTER_REPLY_SENT);
+        // The program's timers, at every message (`spec/c-abi.md`, version 7; ADR
+        // 0157): one of eight is scheduled for a deadline that moves with the entry,
+        // so that the service has a schedule timer to tell its member of after each,
+        // and another of the eight is cancelled.
+        let timer = (values.position >> 5) & 7;
+        assert_eq!(
+            cavalry_cluster_service_schedule_timer(service, timer, values.timestamp + 3_600_000),
+            CAVALRY_CLUSTER_TIMER_SCHEDULED
+        );
+        assert_eq!(cavalry_cluster_service_cancel_timer(service, timer ^ 4), 0);
         assert_eq!(
             cavalry_cluster_service_action(service, CAVALRY_ACTION_CONTINUE),
             0
