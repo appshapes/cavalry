@@ -43,7 +43,7 @@ use std::path::PathBuf;
 use std::process::ExitCode;
 use std::time::Duration;
 
-use cavalry::{Action, Cavalry, Entry, Reply};
+use cavalry::{Action, Cavalry, ClientError, ClusterError, Entry, Reply};
 
 fn main() -> ExitCode {
     match run() {
@@ -101,7 +101,7 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
     // The service's state.
     let mut total: i64 = 0;
     loop {
-        let taken = service.poll(
+        let polled = service.poll(
             &mut client,
             |committed, replies| {
                 let position = committed.position;
@@ -176,7 +176,16 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
                 Action::Continue
             },
             10,
-        )?;
+        );
+        let taken = match polled {
+            Ok(taken) => taken,
+            // The driver closed this client while the poll had a command for it,
+            // as where a member that stops ends its recording: the close that
+            // `closed` gives below, met inside the poll. A service meets one or the
+            // other, by when its member's driver stops, and ends the same way.
+            Err(ClusterError::Client(ClientError::Closed(_))) => 0,
+            Err(error) => return Err(error.into()),
+        };
         if let Some(closed) = client.closed() {
             // The member's driver is gone, or dropped this client: there is no log
             // to read here any more. The total is in the log, on every member that

@@ -1316,6 +1316,17 @@ impl ClusterService {
     /// recording's end. Nothing is allocated, and no command is sent, for a session
     /// message. An entry the service would answer costs two loads of the member's
     /// counters.
+    ///
+    /// A close of the client is an error of a poll only where the poll has one of
+    /// those commands for the driver, as it has at a recording's end when the member
+    /// beside it stops. That poll returns [`ClusterError::Client`] holding
+    /// [`ClientError::Closed`], with the reason [`Cavalry::closed`] gives. A poll
+    /// that has no command returns as it does for a log with nothing new to read, 0
+    /// and no error, for as long as it is called. Which of the two a service meets
+    /// is a matter of when its member's driver stops, so a program's loop asks
+    /// [`Cavalry::closed`] after each poll, takes that error of a poll as the same
+    /// close, and ends one way for both, as
+    /// `crates/cavalry/examples/adder-service.rs` does.
     pub fn poll<F>(
         &mut self,
         client: &mut Cavalry,
