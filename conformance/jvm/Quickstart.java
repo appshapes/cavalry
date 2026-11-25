@@ -402,8 +402,17 @@ public final class Quickstart {
         List<Integer> outer = new ArrayList<>();
         List<int[]> nested = new ArrayList<>();
         FragmentHandler nestedHandler = (body, header) -> fail("a poll from inside a handler of the same subscription delivered a fragment");
+        // The list of the subscription's images, asked for from inside its own handler: the ABI
+        // refuses the count there, and the list is that refusal, where it threw
+        // IllegalArgumentException for a capacity of -1 (work item 468).
+        List<String> listed = new ArrayList<>();
         FragmentHandler outerHandler = (body, header) -> {
             outer.add(indexOf(body));
+            try {
+                listed.add(subscription.imageCount() + " and " + subscription.images().size() + " images");
+            } catch (CavalryException refusedList) {
+                listed.add(subscription.imageCount() + " " + refusedList.function() + " " + refusedList.code());
+            }
             int count = subscription.poll(nestedHandler, 10);
             nested.add(new int[] {count, Abi.errcode()});
         };
@@ -417,6 +426,15 @@ public final class Quickstart {
         if (!outer.equals(List.of(13, 14, 15)) || !refusedEach) {
             fail(name + ": the outer handler saw " + outer + " and the polls from inside it returned " + nested.size()
                 + " results; expected messages 13 to 15, and -1 with ERR_POLLING (" + Abi.ERR_POLLING + ") each time");
+        }
+        String refusedList = "-1 cavalry_subscription_image_count " + Abi.ERR_POLLING;
+        if (!listed.equals(List.of(refusedList, refusedList, refusedList))) {
+            fail(name + ": the image count and the list of images, asked for from inside the handler, gave " + listed
+                + "; expected -1 and a CavalryException of cavalry_subscription_image_count with ERR_POLLING each time");
+        }
+        if (subscription.images().size() != subscription.imageCount() || subscription.imageCount() < 1) {
+            fail(name + ": after the poll the subscription lists " + subscription.images().size() + " images and counts "
+                + subscription.imageCount());
         }
 
         position = claimOrFail(name, publication, 16);
@@ -511,7 +529,8 @@ public final class Quickstart {
                 + " with error " + commitAfterCloseCode + "; expected -1 and ERROR with ERR_NULL (" + Abi.ERR_NULL
                 + "), and -1 with ERR_NO_CLAIM (" + Abi.ERR_NO_CLAIM + ")");
         }
-        say(name + ": a poll from inside a handler of its own subscription returned -1 with ERR_POLLING and the outer handler saw"
+        say(name + ": a poll from inside a handler of its own subscription returned -1 with ERR_POLLING, the image count there"
+            + " was -1 and the list of images threw CavalryException with that code, and the outer handler saw"
             + " messages 13 to 15; a tryClaim with a claim outstanding returned ERROR with ERR_CLAIM_OUTSTANDING, the claim stayed"
             + " the first segment and its commit set it to null; a close with a claim outstanding set the claim to null, and the"
             + " claim's commit, abort and reserved value after it returned -1 with ERR_NO_CLAIM; a close"

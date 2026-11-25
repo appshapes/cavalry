@@ -435,8 +435,16 @@ function edges(client) {
   const outer = [];
   const nested = [];
   const nestedHandler = () => fail(`${name}: a poll from inside a handler of the same subscription delivered a fragment`);
+  // The list of the subscription's images, asked for from inside its own handler: the ABI
+  // refuses the count there, and the list is that refusal and no empty array (work item 468).
+  const listed = [];
   const outerHandler = (fragment) => {
     outer.push(indexOf(fragment));
+    try {
+      listed.push([subscription.imageCount(), `${subscription.images().length} images`, 0]);
+    } catch (refusedList) {
+      listed.push([subscription.imageCount(), refusedList.fn, refusedList.code]);
+    }
     nested.push([subscription.poll(nestedHandler, 10), addon.cavalry_errcode()]);
   };
   until = deadline();
@@ -449,6 +457,16 @@ function edges(client) {
     fail(`${name}: the outer handler saw ${outer} and the polls from inside it returned (result, code) ` +
          `${JSON.stringify(nested)}; expected messages 15 to 17, and -1 with CAVALRY_ERR_POLLING ` +
          `(${constants.CAVALRY_ERR_POLLING}) each time`);
+  }
+  if (listed.length !== 3 || !listed.every(([count, fn, code]) => count === -1 &&
+      fn === "cavalry_subscription_image_count" && code === constants.CAVALRY_ERR_POLLING)) {
+    fail(`${name}: the image count and the list of images, asked for from inside the handler, gave ` +
+         `${JSON.stringify(listed)}; expected -1 and a CavalryError of cavalry_subscription_image_count with ` +
+         `CAVALRY_ERR_POLLING each time`);
+  }
+  if (subscription.images().length !== subscription.imageCount() || subscription.imageCount() < 1) {
+    fail(`${name}: after the poll the subscription lists ${subscription.images().length} images and counts ` +
+         `${subscription.imageCount()}`);
   }
 
   until = deadline();
@@ -544,7 +562,8 @@ function edges(client) {
   pollOrFail(name, subscription, unexpected, 21, 21); // the close aborted the claim: padding, never a fragment
   subscription.close();
   if (subscription.handle !== null) fail(`${name}: the close after the poll left the handle ${subscription.handle}`);
-  say(`${name}: a poll from inside a handler of its own subscription returned -1 with CAVALRY_ERR_POLLING and the ` +
+  say(`${name}: a poll from inside a handler of its own subscription returned -1 with CAVALRY_ERR_POLLING, the ` +
+      `image count there was -1 and the list of images threw CavalryError with that code, and the ` +
       `outer handler saw messages 15 to 17; a tryClaim with a claim outstanding returned ERROR with ` +
       `CAVALRY_ERR_CLAIM_OUTSTANDING, claim stayed the first Buffer and its commit released it; a close from inside a ` +
       `handler of its own subscription was refused with CAVALRY_ERR_POLLING, poll threw HandlerError with that ` +

@@ -344,8 +344,16 @@ def edges(client):
     def nested_handler(body, header):
         fail(f"{name}: a poll from inside a handler of the same subscription delivered a fragment")
 
+    # The list of the subscription's images, asked for from inside its own handler: the ABI
+    # refuses the count there, and the list is that refusal and no empty list (work item 468).
+    listed = []
+
     def outer_handler(body, header):
         outer.append(int.from_bytes(body[:8], "little"))
+        try:
+            listed.append((subscription.image_count(), subscription.images()))
+        except cavalry.CavalryError as refused_list:
+            listed.append((subscription.image_count(), refused_list.function, refused_list.code))
         nested.append((subscription.poll(nested_handler, 10), cavalry.library().cavalry_errcode()))
 
     until = deadline()
@@ -356,6 +364,12 @@ def edges(client):
     if outer != [13, 14, 15] or nested != [(-1, _abi.CAVALRY_ERR_POLLING)] * 3:
         fail(f"{name}: the outer handler saw {outer} and the polls from inside it returned (result, code) {nested}; "
              f"expected messages 13 to 15, and -1 with CAVALRY_ERR_POLLING ({_abi.CAVALRY_ERR_POLLING}) each time")
+    if listed != [(-1, "cavalry_subscription_image_count", _abi.CAVALRY_ERR_POLLING)] * 3:
+        fail(f"{name}: the image count and the list of images, asked for from inside the handler, gave {listed}; expected "
+             f"-1 and a CavalryError of cavalry_subscription_image_count with CAVALRY_ERR_POLLING each time")
+    if len(subscription.images()) != subscription.image_count() or subscription.image_count() < 1:
+        fail(f"{name}: after the poll the subscription lists {len(subscription.images())} images and counts "
+             f"{subscription.image_count()}")
 
     until = deadline()
     while True:
@@ -421,7 +435,8 @@ def edges(client):
     poll_or_fail(name, subscription, unexpected, 17, 17)  # the close aborted the claim: padding, never a fragment
     subscription.close()
     print(f"conformance/python: {name}: a poll from inside a handler of its own subscription returned -1 with "
-          f"CAVALRY_ERR_POLLING and the outer handler saw messages 13 to 15; a try_claim with a claim outstanding "
+          f"CAVALRY_ERR_POLLING, the image count there was -1 and the list of images raised CavalryError with that "
+          f"code, and the outer handler saw messages 13 to 15; a try_claim with a claim outstanding "
           f"returned ERROR with CAVALRY_ERR_CLAIM_OUTSTANDING, claim stayed the first view and its commit released it; "
           f"a close with a claim outstanding released its view")
 
