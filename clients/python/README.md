@@ -519,10 +519,10 @@ Python thread that computes, a poll of 10 messages then took 5.8 to 6.3 ms at it
 the interpreter's switch interval of 5 ms and more, against 4.4 to 4.6 µs with the GIL
 held (ADR 0124 has the measurement, on an Apple M5 Pro laptop with Python 3.14.6). The
 runner's cluster round reports the waits. On that laptop, in each of 10 runs,
-MEASURED_COUNT polls of three services took over 1 ms, where 4 of about 17,900 did in
+7 of about 36,000 polls of three services took over 1 ms, where 4 of about 17,900 did in
 each of 25 runs before the round scheduled a timer. The report names the longest poll
 alone: in every run it was a poll in which a service's program first scheduled a
-timer, MEASURED_LONGEST ms with its six commands, where the longest before took 7.4 to
+timer, 24.5 to 34.0 ms with its six commands, where the longest before took 7.4 to
 12.2 ms. A program whose other threads cannot stop for that long runs its service in a
 process of its own.
 
