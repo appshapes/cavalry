@@ -30,6 +30,11 @@ use cavalry_raft::{
 };
 use cavalry_shm::counters::CountersReader;
 use cavalry_shm::counters::generated::{
+    CLUSTER_ELECTION_CAUSE, CLUSTER_ELECTIONS, CLUSTER_ELECTIONS_CLOSED, CLUSTER_ELECTIONS_FAILED,
+    CLUSTER_LEADER_HEARTBEAT_TIMEOUTS, CLUSTER_LEADER_QUORUM_LOSSES, CLUSTER_LEADER_STEP_DOWNS,
+    CLUSTER_SESSIONS_TIMED_OUT,
+};
+use cavalry_shm::counters::generated::{
     CLUSTER_LOG_PURGE_POSITION, CLUSTER_MESSAGES_REJECTED, CLUSTER_SERVICE_ACKS_REJECTED,
     CLUSTER_SERVICE_SNAPSHOT_POSITION, CLUSTER_SERVICE_SNAPSHOT_RECORDING_ID,
     CLUSTER_SERVICE_SNAPSHOT_START_POSITION, CLUSTER_SERVICE_SNAPSHOTS_FAILED,
@@ -107,15 +112,110 @@ struct Member {
 fn start_member(dir: &Path, members: &str, id: i32) -> Member {
     let driver_dir = dir.join(format!("member-{id}"));
     let log_dir = dir.join(format!("member-{id}-log"));
-    let driver = Driver::start(&driver_dir, &log_dir).expect("the driver starts");
-    let module = ConsensusModule::start(&driver_dir, &log_dir, members, id)
-        .expect("the member starts, on a new log directory or on the one it kept");
+    let driver = timed(&format!("member {id}: Driver::start"), || {
+        Driver::start(&driver_dir, &log_dir).expect("the driver starts")
+    });
+    let module = timed(&format!("member {id}: ConsensusModule::start"), || {
+        ConsensusModule::start(&driver_dir, &log_dir, members, id)
+            .expect("the member starts, on a new log directory or on the one it kept")
+    });
     Member {
         driver,
         module,
         dir: driver_dir,
         log_dir,
     }
+}
+
+thread_local! {
+    /// When this test's members last ran a round of duty cycles.
+    static LAST_ROUND: std::cell::Cell<Option<Instant>> = const { std::cell::Cell::new(None) };
+}
+
+/// Notes a round of the members' duty cycles, and says on standard error when the
+/// members stood still for a second or more before it: one thread drives them all,
+/// so a step of the test that waits, a start, a stop, a replay, a snapshot, stops
+/// every member, and the cluster's timeouts are of real time.
+fn round() {
+    LAST_ROUND.with(|last| {
+        let now = Instant::now();
+        if let Some(before) = last.replace(Some(now))
+            && now.duration_since(before) >= Duration::from_secs(1)
+        {
+            eprintln!(
+                "the members stood still for {:?}",
+                now.duration_since(before)
+            );
+        }
+    });
+}
+
+/// Runs `step`, a step of a test that waits on a driver or a disk, and says on
+/// standard error how long it took when that is 200 ms or more.
+///
+/// `CAVALRY_TEST_STEP_DELAY_MS` makes every such step that much slower, which is a
+/// runner with a slow disk on any machine. At 4000, `cargo test -p cavalry-raft
+/// --test snapshot` takes two minutes, and three such steps in a row on a test's own
+/// thread fail the test, which is how the tests failed on the runner. At 11000,
+/// above the cluster's timeouts of 10 s, one such step fails its test with an
+/// election or a closed session, and so does a session that no keepalive holds
+/// open; the whole file then takes more than half an hour, so name a test (work
+/// item 446).
+fn timed<T>(what: &str, step: impl FnOnce() -> T) -> T {
+    let began = Instant::now();
+    if let Some(delay) = std::env::var("CAVALRY_TEST_STEP_DELAY_MS")
+        .ok()
+        .and_then(|delay| delay.parse::<u64>().ok())
+    {
+        std::thread::sleep(Duration::from_millis(delay));
+    }
+    let out = step();
+    if began.elapsed() >= Duration::from_millis(200) {
+        eprintln!("{what} took {:?}", began.elapsed());
+    }
+    out
+}
+
+/// Runs `step`, a step of a test that waits on a driver or on a disk, on a thread of
+/// its own, and drives `members` and their sessions' keepalives until it returns.
+///
+/// One thread drives every member of a test, and a cluster's timeouts are of real
+/// time: a follower that hears nothing from its leader for the leader heartbeat
+/// timeout holds an election, and a leader closes a session it has heard nothing
+/// from for the session timeout, both 10 s (`spec/cluster.md`, "Values"). A step
+/// that the test's thread waits on stops every duty cycle and every keepalive for
+/// as long as it takes. On a laptop that is milliseconds. On a runner whose disk
+/// takes a second to sync, a member's start is two seconds and a service's
+/// snapshot three, and a few of them in a row are the ten (work item 446). In a
+/// cluster that runs, each member has a thread of its own and no step of another
+/// program stops it: this is that.
+fn meanwhile<T: Send>(members: &mut [Member], step: impl FnOnce() -> T + Send) -> T {
+    std::thread::scope(|scope| {
+        let step = scope.spawn(step);
+        while !step.is_finished() {
+            round();
+            keep_sessions_alive(members);
+            let mut work = 0;
+            for member in members.iter_mut() {
+                work += member.module.do_work().expect("the member's duty cycle");
+            }
+            if work == 0 {
+                std::thread::sleep(Duration::from_micros(200));
+            }
+        }
+        match step.join() {
+            Ok(out) => out,
+            Err(panic) => std::panic::resume_unwind(panic),
+        }
+    })
+}
+
+/// A member and a service are handed to the thread a step runs on.
+#[allow(dead_code)]
+fn handed_to_a_steps_thread() {
+    fn send<T: Send>() {}
+    send::<Member>();
+    send::<Service>();
 }
 
 /// Drives every member's duty cycle until `done`, or fails with `what`.
@@ -125,12 +225,14 @@ fn run_until(members: &mut [Member], what: &str, mut done: impl FnMut(&[Member])
         keep_sessions_alive(members);
         assert!(
             Instant::now() < deadline,
-            "{what}: {:?}",
+            "{what}: {:?}; {}",
             members
                 .iter()
                 .map(|m| format!("{:?} {:?}", m.module, m.module.snapshot_counts()))
-                .collect::<Vec<_>>()
+                .collect::<Vec<_>>(),
+            describe(members)
         );
+        round();
         let mut work = 0;
         for member in members.iter_mut() {
             work += member.module.do_work().expect("the member's duty cycle");
@@ -232,14 +334,44 @@ fn offer_entries(members: &mut [Member], from: i64, count: i64) {
             match members[0].module.offer(&i.to_le_bytes()) {
                 Ok(()) => break,
                 Err(RaftError::Offer(Refused::BackPressured)) => {
+                    round();
                     for member in members.iter_mut() {
                         member.module.do_work().expect("the member's duty cycle");
                     }
                 }
-                Err(other) => panic!("{other}"),
+                Err(other) => panic!("{other}: {}", describe(members)),
             }
         }
     }
+}
+
+/// What each member says of itself and of its elections, for a failure's message:
+/// its role, its election's state, its term and its positions, and the counters
+/// that say why it last held an election (`spec/cluster.md`, "Counters").
+fn describe(members: &[Member]) -> String {
+    members
+        .iter()
+        .map(|member| {
+            format!(
+                "{:?} elections {} closed {} failed {} cause {} heartbeat timeouts {} quorum \
+                 losses {} step downs {} sessions timed out {} snapshots {:?}",
+                member.module,
+                counter(member, CLUSTER_ELECTIONS.0),
+                counter(member, CLUSTER_ELECTIONS_CLOSED.0),
+                counter(member, CLUSTER_ELECTIONS_FAILED.0),
+                counter(member, CLUSTER_ELECTION_CAUSE.0),
+                counter(member, CLUSTER_LEADER_HEARTBEAT_TIMEOUTS.0),
+                counter(member, CLUSTER_LEADER_QUORUM_LOSSES.0),
+                counter(member, CLUSTER_LEADER_STEP_DOWNS.0),
+                counter(member, CLUSTER_SESSIONS_TIMED_OUT.0),
+                listed(member)
+                    .iter()
+                    .map(|entry| (entry.service_id, entry.log_position))
+                    .collect::<Vec<_>>(),
+            )
+        })
+        .collect::<Vec<_>>()
+        .join("; ")
 }
 
 /// The leader, `members[0]`, asks for a snapshot, a back-pressured ask made again once
@@ -249,11 +381,12 @@ fn ask_snapshot(members: &mut [Member]) {
         match members[0].module.snapshot() {
             Ok(()) => break,
             Err(RaftError::Offer(Refused::BackPressured)) => {
+                round();
                 for member in members.iter_mut() {
                     member.module.do_work().expect("the member's duty cycle");
                 }
             }
-            Err(other) => panic!("{other}"),
+            Err(other) => panic!("{other}: {}", describe(members)),
         }
     }
 }
@@ -297,10 +430,33 @@ fn listed(member: &Member) -> Vec<ListedSnapshot> {
         .to_vec()
 }
 
+/// One recording of each member, the one `which` names for it, played back while the
+/// members run: a replay waits on the driver, and three of them in a row are a long
+/// time for a cluster to stand still on a runner with a slow disk.
+fn replayed_each(members: &mut [Member], which: impl Fn(&Member) -> i64) -> Vec<Vec<Vec<u8>>> {
+    let wanted: Vec<(PathBuf, i64)> = members
+        .iter()
+        .map(|member| (member.dir.clone(), which(member)))
+        .collect();
+    meanwhile(members, || {
+        wanted
+            .iter()
+            .map(|(dir, recording_id)| replayed(dir, *recording_id))
+            .collect()
+    })
+}
+
 /// The messages a snapshot's recording holds, each as its bytes: the recording played
-/// back whole through a client of the member's driver.
-fn replayed(member: &Member, recording_id: i64) -> Vec<Vec<u8>> {
-    let mut client = Cavalry::connect_to(&member.dir).expect("a client of the member's driver");
+/// back whole through a client of the driver whose directory is `dir`, a member's.
+fn replayed(dir: &Path, recording_id: i64) -> Vec<Vec<u8>> {
+    timed(&format!("a replay of recording {recording_id}"), || {
+        replayed_whole(dir, recording_id)
+    })
+}
+
+/// [`replayed`], untimed.
+fn replayed_whole(dir: &Path, recording_id: i64) -> Vec<Vec<u8>> {
+    let mut client = Cavalry::connect_to(dir).expect("a client of the member's driver");
     let mut subscription = client
         .add_subscription("cavalry:ipc", REPLAY_STREAM_ID)
         .expect("a subscription for the replay");
@@ -389,6 +545,10 @@ fn every_member_takes_the_snapshot_its_leader_asks_for_and_the_three_hold_the_sa
     let term = members[0].module.leadership_term_id();
     let mut bytes: Vec<Vec<Vec<u8>>> = Vec::new();
     let mut timestamps = Vec::new();
+    // Each member's recording, played back while the members run.
+    let mut replays = std::collections::VecDeque::from(replayed_each(&mut members, |member| {
+        listed(member)[0].recording_id
+    }));
     for (index, member) in members.iter().enumerate() {
         let id = member.module.member_id();
         assert_eq!(
@@ -432,7 +592,7 @@ fn every_member_takes_the_snapshot_its_leader_asks_for_and_the_three_hold_the_sa
         timestamps.push(snapshot.timestamp);
         // The recording holds a marker, the module's own state and a marker: no
         // session is open.
-        let messages = replayed(member, snapshot.recording_id);
+        let messages = replays.pop_front().expect("a replay for each member");
         let parsed: Vec<Message<'_>> = messages
             .iter()
             .map(|bytes| Message::parse(Stream::Snapshot, bytes).expect("a snapshot's message"))
@@ -531,9 +691,10 @@ fn a_member_that_starts_again_begins_at_its_snapshot_and_takes_no_second_one_of_
     let stopped = members.pop().expect("a follower");
     let id = stopped.module.member_id();
     let before = listed(&stopped);
-    stopped.module.close().expect("the member closes");
-    stopped.driver.close().expect("the driver closes");
-    let again = start_member(dir.path(), &members_string, id);
+    meanwhile(&mut members, || stop(stopped));
+    let again = meanwhile(&mut members, || {
+        start_member(dir.path(), &members_string, id)
+    });
     assert_eq!(again.module.snapshot_position(), Some(position));
     assert_eq!(counter(&again, CLUSTER_SNAPSHOT_POSITION.0), position);
     assert_eq!(again.module.session_log_position(), position);
@@ -827,8 +988,10 @@ struct Client {
 impl Client {
     fn start(dir: &Path, name: &str, port: u16, ingress: &str, correlation_id: i64) -> Self {
         let driver_dir = dir.join(name);
-        let driver = Driver::start(&driver_dir, dir.join(format!("{name}-log")))
-            .expect("the client's driver");
+        let driver = timed(&format!("{name}: its driver's start"), || {
+            Driver::start(&driver_dir, dir.join(format!("{name}-log")))
+                .expect("the client's driver")
+        });
         let mut cavalry = Cavalry::connect_to(&driver_dir).expect("connects");
         let response_channel = format!("cavalry:udp?endpoint=127.0.0.1:{port}");
         let egress = cavalry
@@ -944,13 +1107,15 @@ fn a_snapshot_holds_the_open_sessions_in_the_order_of_their_ids_on_every_member(
     // second session 1.
     let mut clients = Vec::new();
     for (index, correlation_id) in [41i64, 42].into_iter().enumerate() {
-        let mut client = Client::start(
-            dir.path(),
-            &format!("client-{index}"),
-            ports[15 + index],
-            &ingress,
-            correlation_id,
-        );
+        let mut client = meanwhile(&mut members, || {
+            Client::start(
+                dir.path(),
+                &format!("client-{index}"),
+                ports[15 + index],
+                &ingress,
+                correlation_id,
+            )
+        });
         let mut sent = false;
         run_until(&mut members, "the client's session opens", |_| {
             sent = sent || client.connect();
@@ -958,6 +1123,8 @@ fn a_snapshot_holds_the_open_sessions_in_the_order_of_their_ids_on_every_member(
             client.session_id.is_some()
         });
         assert_eq!(client.session_id, Some(index as i64));
+        // The session stays open for as long as the test runs, as a client's does.
+        client.keep_alive(&ports);
         clients.push(client);
     }
     // Every member has read both session open events before the action is asked.
@@ -981,11 +1148,15 @@ fn a_snapshot_holds_the_open_sessions_in_the_order_of_their_ids_on_every_member(
     });
     let term = members[0].module.leadership_term_id();
     let mut bytes: Vec<Vec<Vec<u8>>> = Vec::new();
+    // Each member's recording, played back while the members run.
+    let mut replays = std::collections::VecDeque::from(replayed_each(&mut members, |member| {
+        listed(member)[0].recording_id
+    }));
     for member in &members {
         let id = member.module.member_id();
         let list = listed(member);
         assert_eq!(list.len(), 1, "member {id}: {list:?}");
-        let messages = replayed(member, list[0].recording_id);
+        let messages = replays.pop_front().expect("a replay for each member");
         let parsed: Vec<Message<'_>> = messages
             .iter()
             .map(|bytes| Message::parse(Stream::Snapshot, bytes).expect("a snapshot's message"))
@@ -1106,7 +1277,9 @@ fn a_connect_the_leader_accepts_before_it_reads_the_action_is_in_no_members_snap
     let ingress = format!("127.0.0.1:{}", ports[leader * 5]);
 
     // The first client's session, 0, opened and read by every member.
-    let mut first = Client::start(dir.path(), "client-0", ports[15], &ingress, 41);
+    let mut first = meanwhile(&mut members, || {
+        Client::start(dir.path(), "client-0", ports[15], &ingress, 41)
+    });
     let mut sent = false;
     run_until(&mut members, "the first client's session opens", |_| {
         sent = sent || first.connect();
@@ -1114,6 +1287,8 @@ fn a_connect_the_leader_accepts_before_it_reads_the_action_is_in_no_members_snap
         first.session_id.is_some()
     });
     assert_eq!(first.session_id, Some(0));
+    // The session stays open for as long as the test runs, as a client's does.
+    first.keep_alive(&ports);
     run_until(
         &mut members,
         "every member holds the first session",
@@ -1126,7 +1301,9 @@ fn a_connect_the_leader_accepts_before_it_reads_the_action_is_in_no_members_snap
     );
     // The second client's publication is connected to the leader's ingress endpoint
     // before the action is asked, so that its connect goes when it is offered.
-    let mut second = Client::start(dir.path(), "client-1", ports[16], &ingress, 42);
+    let mut second = meanwhile(&mut members, || {
+        Client::start(dir.path(), "client-1", ports[16], &ingress, 42)
+    });
     run_until(
         &mut members,
         "the second client's publication is connected",
@@ -1188,11 +1365,15 @@ fn a_connect_the_leader_accepts_before_it_reads_the_action_is_in_no_members_snap
         app_version: 0,
     };
     let mut bytes: Vec<Vec<Vec<u8>>> = Vec::new();
+    // Each member's recording, played back while the members run.
+    let mut replays = std::collections::VecDeque::from(replayed_each(&mut members, |member| {
+        listed(member)[0].recording_id
+    }));
     for member in &members {
         let id = member.module.member_id();
         let list = listed(member);
         assert_eq!(list.len(), 1, "member {id}: {list:?}");
-        let messages = replayed(member, list[0].recording_id);
+        let messages = replays.pop_front().expect("a replay for each member");
         let parsed: Vec<Message<'_>> = messages
             .iter()
             .map(|bytes| Message::parse(Stream::Snapshot, bytes).expect("a snapshot's message"))
@@ -1270,13 +1451,15 @@ fn led_with_two_sessions(dir: &TestDir) -> (String, Vec<Member>, Vec<Client>, i6
     let ingress = format!("127.0.0.1:{}", ports[leader * 5]);
     let mut clients = Vec::new();
     for (index, correlation_id) in [41i64, 42].into_iter().enumerate() {
-        let mut client = Client::start(
-            dir.path(),
-            &format!("client-{index}"),
-            ports[15 + index],
-            &ingress,
-            correlation_id,
-        );
+        let mut client = meanwhile(&mut members, || {
+            Client::start(
+                dir.path(),
+                &format!("client-{index}"),
+                ports[15 + index],
+                &ingress,
+                correlation_id,
+            )
+        });
         let mut sent = false;
         run_until(&mut members, "the client's session opens", |_| {
             sent = sent || client.connect();
@@ -1341,8 +1524,12 @@ fn snapshot_everywhere(members: &mut [Member]) -> i64 {
 /// Stops `member`, its module and then its driver, and gives back its id.
 fn stop(member: Member) -> i32 {
     let id = member.module.member_id();
-    member.module.close().expect("the member closes");
-    member.driver.close().expect("the driver closes");
+    timed(&format!("member {id}: module close"), || {
+        member.module.close().expect("the member closes");
+    });
+    timed(&format!("member {id}: driver close"), || {
+        member.driver.close().expect("the driver closes");
+    });
     id
 }
 
@@ -1354,18 +1541,20 @@ fn purge(dir: &Path, id: i32, recording_id: i64) {
 
 /// [`purge`] for several recordings, with one driver.
 fn purge_each(dir: &Path, id: i32, recording_ids: &[i64]) {
-    let driver_dir = dir.join(format!("member-{id}"));
-    let log_dir = dir.join(format!("member-{id}-log"));
-    let driver =
-        Driver::start(&driver_dir, &log_dir).expect("a driver on the member's directories");
-    let mut client = Cavalry::connect_to(&driver_dir).expect("a client of it");
-    for recording_id in recording_ids {
-        client
-            .purge_recording(*recording_id)
-            .unwrap_or_else(|error| panic!("recording {recording_id} is purged: {error}"));
-    }
-    client.close().expect("the client closes");
-    driver.close().expect("the driver closes");
+    timed(&format!("member {id}: a purge of its recordings"), || {
+        let driver_dir = dir.join(format!("member-{id}"));
+        let log_dir = dir.join(format!("member-{id}-log"));
+        let driver =
+            Driver::start(&driver_dir, &log_dir).expect("a driver on the member's directories");
+        let mut client = Cavalry::connect_to(&driver_dir).expect("a client of it");
+        for recording_id in recording_ids {
+            client
+                .purge_recording(*recording_id)
+                .unwrap_or_else(|error| panic!("recording {recording_id} is purged: {error}"));
+        }
+        client.close().expect("the client closes");
+        driver.close().expect("the driver closes");
+    });
 }
 
 /// Where the recordings a member's record names divide at `position`: the index of
@@ -1390,34 +1579,40 @@ fn needed_from(recordings: &[(i64, i64)], position: i64) -> usize {
 /// stopped member `id`, as a client's command does on a driver over the member's
 /// directories.
 fn truncate(dir: &Path, id: i32, recording_id: i64, position: i64) {
-    let driver_dir = dir.join(format!("member-{id}"));
-    let log_dir = dir.join(format!("member-{id}-log"));
-    let driver =
-        Driver::start(&driver_dir, &log_dir).expect("a driver on the member's directories");
-    let mut client = Cavalry::connect_to(&driver_dir).expect("a client of it");
-    client
-        .truncate_recording(recording_id, position)
-        .unwrap_or_else(|error| panic!("recording {recording_id} is cut to {position}: {error}"));
-    client.close().expect("the client closes");
-    driver.close().expect("the driver closes");
+    timed(&format!("member {id}: a truncation of a recording"), || {
+        let driver_dir = dir.join(format!("member-{id}"));
+        let log_dir = dir.join(format!("member-{id}-log"));
+        let driver =
+            Driver::start(&driver_dir, &log_dir).expect("a driver on the member's directories");
+        let mut client = Cavalry::connect_to(&driver_dir).expect("a client of it");
+        client
+            .truncate_recording(recording_id, position)
+            .unwrap_or_else(|error| {
+                panic!("recording {recording_id} is cut to {position}: {error}")
+            });
+        client.close().expect("the client closes");
+        driver.close().expect("the driver closes");
+    });
 }
 
 /// The bytes of the newest snapshot each member lists, which must be of `position`.
-fn newest_bytes(members: &[Member], position: i64) -> Vec<Vec<Vec<u8>>> {
-    members
-        .iter()
-        .map(|member| {
-            let list = listed(member);
-            let newest = list.last().expect("a listed snapshot");
-            assert_eq!(
-                newest.log_position,
-                position,
-                "member {}",
-                member.module.member_id()
-            );
-            replayed(member, newest.recording_id)
-        })
-        .collect()
+fn newest_bytes(members: &mut [Member], position: i64) -> Vec<Vec<Vec<u8>>> {
+    for member in members.iter() {
+        let list = listed(member);
+        let newest = list.last().expect("a listed snapshot");
+        assert_eq!(
+            newest.log_position,
+            position,
+            "member {}",
+            member.module.member_id()
+        );
+    }
+    replayed_each(members, |member| {
+        listed(member)
+            .last()
+            .expect("a listed snapshot")
+            .recording_id
+    })
 }
 
 #[test]
@@ -1431,8 +1626,11 @@ fn a_member_that_starts_again_takes_its_sessions_from_its_snapshot_and_reads_wha
 
     // A follower stops and starts again. Before its first duty cycle it has read
     // nothing of its log: it begins at the snapshot's position, and says so.
-    let id = stop(members.pop().expect("a follower"));
-    let again = start_member(dir.path(), &members_string, id);
+    let follower = members.pop().expect("a follower");
+    let id = meanwhile(&mut members, || stop(follower));
+    let again = meanwhile(&mut members, || {
+        start_member(dir.path(), &members_string, id)
+    });
     assert_eq!(again.module.session_log_position(), position);
     assert_eq!(counter(&again, CLUSTER_SNAPSHOT_START_POSITION.0), position);
     assert_eq!(counter(&again, CLUSTER_SNAPSHOTS_PASSED_OVER.0), 0);
@@ -1457,7 +1655,7 @@ fn a_member_that_starts_again_takes_its_sessions_from_its_snapshot_and_reads_wha
     // on the three, the two sessions and the next session id among them.
     run_until_led(&mut members, -1);
     let second = snapshot_everywhere(&mut members);
-    let bytes = newest_bytes(&members, second);
+    let bytes = newest_bytes(&mut members, second);
     assert_eq!(
         bytes[0].len(),
         5,
@@ -1482,9 +1680,13 @@ fn a_member_whose_log_was_purged_below_its_snapshot_starts_from_the_snapshot() {
     // The leader stops: the two others elect one of them, and the first term's log
     // is from then on a recording that each of them has stopped.
     let first_term = members[0].module.leadership_term_id();
-    let old_leader = stop(members.remove(0));
+    let leader = members.remove(0);
+    let old_leader = meanwhile(&mut members, || stop(leader));
     run_until_led(&mut members, first_term);
-    members.push(start_member(dir.path(), &members_string, old_leader));
+    let started = meanwhile(&mut members, || {
+        start_member(dir.path(), &members_string, old_leader)
+    });
+    members.push(started);
     // The next term's first entry is past where the first term's log ended.
     run_until_settled(&mut members, end + FRAME);
     run_until_led(&mut members, first_term);
@@ -1501,7 +1703,7 @@ fn a_member_whose_log_was_purged_below_its_snapshot_starts_from_the_snapshot() {
         .expect("a follower of both terms");
     let stopped = members.remove(follower);
     let log_dir = stopped.log_dir.clone();
-    let id = stop(stopped);
+    let id = meanwhile(&mut members, || stop(stopped));
     let record = RecordingsFile::open_kept(&log_dir, id).expect("the member's record of its log");
     let recordings: Vec<(i64, i64)> = record
         .entries()
@@ -1514,10 +1716,12 @@ fn a_member_whose_log_was_purged_below_its_snapshot_starts_from_the_snapshot() {
     let (kept_id, kept_start) = recordings[kept];
     // An operator purges the recordings before it, which the snapshot covers.
     let purged: Vec<i64> = recordings[..kept].iter().map(|(id, _)| *id).collect();
-    purge_each(dir.path(), id, &purged);
+    meanwhile(&mut members, || purge_each(dir.path(), id, &purged));
 
     // The member starts: from its snapshot, on the log that is left.
-    let again = start_member(dir.path(), &members_string, id);
+    let again = meanwhile(&mut members, || {
+        start_member(dir.path(), &members_string, id)
+    });
     assert_eq!(again.module.session_log_position(), position);
     assert_eq!(counter(&again, CLUSTER_SNAPSHOT_START_POSITION.0), position);
     // A purge below the snapshot is no truncation that the member's stop cut short.
@@ -1541,7 +1745,7 @@ fn a_member_whose_log_was_purged_below_its_snapshot_starts_from_the_snapshot() {
     assert_eq!(counter(&members[2], CLUSTER_SESSIONS.0), 2);
     run_until_led(&mut members, first_term);
     let second = snapshot_everywhere(&mut members);
-    let bytes = newest_bytes(&members, second);
+    let bytes = newest_bytes(&mut members, second);
     assert_eq!(
         bytes[0].len(),
         5,
@@ -1561,9 +1765,9 @@ fn a_member_whose_log_was_purged_below_its_snapshot_starts_from_the_snapshot() {
         .map(|entry| entry.recording_id)
         .collect();
     assert_eq!(snapshots.len(), 2, "{snapshots:?}");
-    let id = stop(member);
+    let id = meanwhile(&mut members, || stop(member));
     for recording_id in snapshots {
-        purge(dir.path(), id, recording_id);
+        meanwhile(&mut members, || purge(dir.path(), id, recording_id));
     }
     let driver_dir = dir.path().join(format!("member-{id}"));
     let driver = Driver::start(&driver_dir, &log_dir).expect("the driver starts");
@@ -1613,7 +1817,7 @@ fn a_member_whose_log_ends_below_its_snapshot_does_not_start() {
         .expect("a follower");
     let stopped = members.remove(follower);
     let log_dir = stopped.log_dir.clone();
-    let id = stop(stopped);
+    let id = meanwhile(&mut members, || stop(stopped));
     let recordings = |log_dir: &Path| -> (i64, Vec<(i64, i64)>) {
         let record =
             RecordingsFile::open_kept(log_dir, id).expect("the member's record of its log");
@@ -1645,16 +1849,18 @@ fn a_member_whose_log_ends_below_its_snapshot_does_not_start() {
     );
     let driver_dir = dir.path().join(format!("member-{id}"));
     let refused_start = || {
-        let driver = Driver::start(&driver_dir, &log_dir).expect("the driver starts");
-        let refused = ConsensusModule::start(&driver_dir, &log_dir, &members_string, id)
-            .expect_err("a log that ends below the member's snapshot");
-        driver.close().expect("the driver closes");
-        refused
+        timed(&format!("member {id}: a start that is refused"), || {
+            let driver = Driver::start(&driver_dir, &log_dir).expect("the driver starts");
+            let refused = ConsensusModule::start(&driver_dir, &log_dir, &members_string, id)
+                .expect_err("a log that ends below the member's snapshot");
+            driver.close().expect("the driver closes");
+            refused
+        })
     };
 
     // The end of the member's log is cut to one entry below the snapshot's position.
-    truncate(dir.path(), id, last_id, cut);
-    let refused = refused_start();
+    meanwhile(&mut members, || truncate(dir.path(), id, last_id, cut));
+    let refused = meanwhile(&mut members, refused_start);
     assert!(
         matches!(
             &refused,
@@ -1668,8 +1874,8 @@ fn a_member_whose_log_ends_below_its_snapshot_does_not_start() {
     assert_eq!(snapshots(&log_dir), listed_snapshots);
 
     // The record's last recording is purged: one recording too many.
-    purge(dir.path(), id, last_id);
-    let refused = refused_start();
+    meanwhile(&mut members, || purge(dir.path(), id, last_id));
+    let refused = meanwhile(&mut members, refused_start);
     assert!(
         matches!(
             &refused,
@@ -1715,13 +1921,15 @@ fn a_start_passes_over_a_snapshot_whose_recording_is_gone_for_the_one_before_it(
         list.iter().map(|s| s.log_position).collect::<Vec<_>>(),
         vec![first, second]
     );
-    let id = stop(stopped);
-    purge(dir.path(), id, list[1].recording_id);
+    let id = meanwhile(&mut members, || stop(stopped));
+    meanwhile(&mut members, || purge(dir.path(), id, list[1].recording_id));
 
     // It starts from the snapshot before, says that it passed one over, and reads
     // the log from there: the second action among its entries, for which it takes
     // no snapshot, since its list still names one at that position.
-    let again = start_member(dir.path(), &members_string, id);
+    let again = meanwhile(&mut members, || {
+        start_member(dir.path(), &members_string, id)
+    });
     assert_eq!(again.module.session_log_position(), first);
     assert_eq!(counter(&again, CLUSTER_SNAPSHOT_START_POSITION.0), first);
     assert_eq!(counter(&again, CLUSTER_SNAPSHOTS_PASSED_OVER.0), 1);
@@ -1737,9 +1945,11 @@ fn a_start_passes_over_a_snapshot_whose_recording_is_gone_for_the_one_before_it(
     // With every snapshot's recording gone it starts from position 0, on a log it
     // holds whole, and reads all of it.
     let stopped = members.pop().expect("the member");
-    let id = stop(stopped);
-    purge(dir.path(), id, list[0].recording_id);
-    let again = start_member(dir.path(), &members_string, id);
+    let id = meanwhile(&mut members, || stop(stopped));
+    meanwhile(&mut members, || purge(dir.path(), id, list[0].recording_id));
+    let again = meanwhile(&mut members, || {
+        start_member(dir.path(), &members_string, id)
+    });
     assert_eq!(again.module.session_log_position(), 0);
     assert_eq!(counter(&again, CLUSTER_SNAPSHOT_START_POSITION.0), -1);
     assert_eq!(counter(&again, CLUSTER_SNAPSHOTS_PASSED_OVER.0), 2);
@@ -1771,10 +1981,15 @@ struct Service {
 
 impl Service {
     fn beside(member: &Member) -> Self {
-        let client = Cavalry::connect_to(&member.dir).expect("the service's client");
+        Self::at(&member.dir, member.module.member_id())
+    }
+
+    /// A service beside the member `id`, whose driver's directory is `dir`.
+    fn at(dir: &Path, id: i32) -> Self {
+        let client = Cavalry::connect_to(dir).expect("the service's client");
         let service = client.cluster_service();
         Self {
-            id: member.module.member_id(),
+            id,
             client,
             service,
             state: Vec::new(),
@@ -1785,17 +2000,27 @@ impl Service {
 
     /// A service beside `member` whose program asks it to start from a snapshot: the
     /// service, with the state its program was given back, and what its start found.
-    /// The member must lead or follow, so that it names a recording of its log.
-    fn restored_beside(member: &Member) -> (Self, Restored) {
-        let mut service = Self::beside(member);
-        let restored = service
-            .service
-            .restore(&mut service.client)
-            .expect("the service's start");
-        if let Restored::State(state) = &restored {
-            service.state.clone_from(state);
-        }
-        (service, restored)
+    /// The member must lead or follow, so that it names a recording of its log. The
+    /// start plays the snapshot's recording back, which waits on the driver: the
+    /// members run meanwhile.
+    fn restored_beside(members: &mut [Member], beside: usize) -> (Self, Restored) {
+        let (dir, id) = (
+            members[beside].dir.clone(),
+            members[beside].module.member_id(),
+        );
+        meanwhile(members, || {
+            let mut service = Self::at(&dir, id);
+            let restored = timed(&format!("member {id}: a service's start"), || {
+                service
+                    .service
+                    .restore(&mut service.client)
+                    .expect("the service's start")
+            });
+            if let Restored::State(state) = &restored {
+                service.state.clone_from(state);
+            }
+            (service, restored)
+        })
     }
 
     /// One poll: the program adds each session message's payload to its state.
@@ -1818,10 +2043,11 @@ impl Service {
     /// The program gives the service its state for the snapshot that is due at
     /// `position`.
     fn give(&mut self, position: i64) {
-        let taken = self
-            .service
-            .snapshot(&mut self.client, &self.state)
-            .expect("the service's snapshot");
+        let taken = timed(&format!("member {}: a service's snapshot", self.id), || {
+            self.service
+                .snapshot(&mut self.client, &self.state)
+                .expect("the service's snapshot")
+        });
         self.taken.push((position, taken));
     }
 
@@ -1837,10 +2063,11 @@ impl Service {
 /// with `what`. A service whose poll ended at a snapshot polls no more until its
 /// program has given its state, so the snapshot stays due. A program that gives its
 /// state does so once every member has listed its own snapshot of that position.
-/// The members and the services share this one thread, where each has a thread of
-/// its own outside a test: a service's `snapshot` waits for the driver, and a
+/// The members and the services' polls share this one thread, where each has a
+/// thread of its own outside a test. A service's `snapshot` waits for the driver, so
+/// it is given on a thread of its own while the members run ([`meanwhile`]): a
 /// member whose duty cycle waited behind three of them would give its own snapshot
-/// up at the snapshot timeout.
+/// up at the snapshot timeout, and behind enough of them would hold an election.
 fn run_with_services(
     members: &mut [Member],
     services: &mut [Service],
@@ -1851,16 +2078,21 @@ fn run_with_services(
     while !done(members, services) {
         assert!(
             Instant::now() < deadline,
-            "{what}: {:?}",
+            "{what}: {:?}; {}",
             members
                 .iter()
                 .map(|m| format!("{:?} {:?}", m.module, m.module.service_snapshot_counts()))
-                .collect::<Vec<_>>()
+                .collect::<Vec<_>>(),
+            describe(members)
         );
+        round();
         let mut work = 0;
         for member in members.iter_mut() {
             work += member.module.do_work().expect("the member's duty cycle");
         }
+        // The sessions' keepalives, as in `run_until`: a test's sessions are open
+        // while its services read and take their snapshots too.
+        keep_sessions_alive(members);
         for service in services.iter_mut() {
             match service.service.snapshot_due() {
                 None => work += service.poll(),
@@ -1872,7 +2104,10 @@ fn run_with_services(
                             .is_some_and(|own| own >= position)
                     });
                     if listed {
-                        service.give(position);
+                        // A service's snapshot waits on its driver's recorder: the
+                        // members run meanwhile, as beside a service of its own
+                        // process.
+                        meanwhile(members, || service.give(position));
                         work += 1;
                     }
                 }
@@ -1931,6 +2166,14 @@ fn a_service_takes_the_snapshot_its_leader_asks_for_and_its_member_lists_it() {
     // Every service gave the same state once, at the position its member's own
     // snapshot is of, and every member lists both with the same term, base and time.
     let mut recordings = Vec::new();
+    // Each member's recording, played back while the members run.
+    let mut replays = std::collections::VecDeque::from(replayed_each(&mut members, |member| {
+        listed(member)
+            .iter()
+            .find(|entry| entry.service_id == 0)
+            .expect("the service's snapshot")
+            .recording_id
+    }));
     for (member, service) in members.iter().zip(&services) {
         assert_eq!(service.state, state);
         assert_eq!(service.taken, [(position, true)]);
@@ -1974,7 +2217,7 @@ fn a_service_takes_the_snapshot_its_leader_asks_for_and_its_member_lists_it() {
                 rejected: 0
             }
         );
-        recordings.push(replayed(member, services.recording_id));
+        recordings.push(replays.pop_front().expect("a replay for each member"));
     }
 
     // What a service wrote: a marker, the two sessions by their ids, a marker, the
@@ -2502,6 +2745,7 @@ fn a_service_counts_a_snapshot_whose_publication_its_driver_refuses() {
             Err(other) => panic!("{other}"),
         }
         assert!(held.len() <= MAX_PUBLICATIONS, "the registry is bounded");
+        round();
         for member in members.iter_mut() {
             member.module.do_work().expect("the member's duty cycle");
         }
@@ -2541,10 +2785,14 @@ fn a_service_counts_a_snapshot_whose_publication_its_driver_refuses() {
     // member lists.
     filler.close().expect("the other client closes");
     drop(held);
-    let taken = service
-        .service
-        .snapshot(&mut service.client, &service.state)
-        .expect("the service's snapshot");
+    let taken = meanwhile(&mut members, || {
+        timed("a service's snapshot", || {
+            service
+                .service
+                .snapshot(&mut service.client, &service.state)
+                .expect("the service's snapshot")
+        })
+    });
     assert!(taken);
     run_with_services(
         &mut members,
@@ -2715,7 +2963,7 @@ fn a_service_that_starts_again_takes_its_state_from_its_snapshot_and_reads_what_
     // program is given the state at the snapshot's position, and the service holds
     // the two sessions and that position before it has read an entry.
     services.pop().expect("a service").close();
-    let (mut again, restored) = Service::restored_beside(&members[2]);
+    let (mut again, restored) = Service::restored_beside(&mut members, 2);
     assert_eq!(restored, Restored::State(entries(3)));
     assert_eq!(again.service.position(), position);
     assert_eq!(again.service.sessions(), 2);
@@ -2742,7 +2990,7 @@ fn a_service_that_starts_again_takes_its_state_from_its_snapshot_and_reads_what_
     // The leader's service starts from its snapshot too, and reads what follows,
     // which its member held when it opened the log: history, answered by none.
     services.remove(0).close();
-    let (leaders, restored) = Service::restored_beside(&members[0]);
+    let (leaders, restored) = Service::restored_beside(&mut members, 0);
     assert_eq!(restored, Restored::State(entries(3)));
     let mut restarted = vec![leaders, again];
     read_to(&mut members, &mut restarted, end);
@@ -2763,10 +3011,7 @@ fn a_service_that_starts_again_takes_its_state_from_its_snapshot_and_reads_what_
     restarted.append(&mut services);
     let second = snapshot_with_services(&mut members, &mut restarted);
     assert!(second > position);
-    let recordings: Vec<Vec<Vec<u8>>> = members
-        .iter()
-        .map(|member| replayed(member, service_recording(member)))
-        .collect();
+    let recordings = replayed_each(&mut members, service_recording);
     assert_eq!(recordings[0], recordings[1]);
     assert_eq!(recordings[0], recordings[2]);
     assert_eq!(
@@ -2794,9 +3039,13 @@ fn a_member_and_its_service_start_from_their_snapshots_on_a_log_purged_below_the
     // The leader stops: the two others elect one of them, and the first term's log
     // is from then on a recording that each of them has stopped.
     let first_term = members[0].module.leadership_term_id();
-    let old_leader = stop(members.remove(0));
+    let leader = members.remove(0);
+    let old_leader = meanwhile(&mut members, || stop(leader));
     run_until_led(&mut members, first_term);
-    members.push(start_member(dir.path(), &members_string, old_leader));
+    let started = meanwhile(&mut members, || {
+        start_member(dir.path(), &members_string, old_leader)
+    });
+    members.push(started);
     run_until_settled(&mut members, end + FRAME);
     run_until_led(&mut members, first_term);
     offer_entries(&mut members, 2, 2);
@@ -2822,7 +3071,7 @@ fn a_member_and_its_service_start_from_their_snapshots_on_a_log_purged_below_the
         .expect("the follower's service");
     services.remove(its_service).close();
     let log_dir = stopped.log_dir.clone();
-    stop(stopped);
+    meanwhile(&mut members, || stop(stopped));
     let record = RecordingsFile::open_kept(&log_dir, id).expect("the member's record of its log");
     let recordings: Vec<(i64, i64)> = record
         .entries()
@@ -2834,15 +3083,24 @@ fn a_member_and_its_service_start_from_their_snapshots_on_a_log_purged_below_the
     // from, the last that begins at or below the position of both snapshots.
     let kept = needed_from(&recordings, position);
     let purged: Vec<i64> = recordings[..kept].iter().map(|(id, _)| *id).collect();
-    purge_each(dir.path(), id, &purged);
+    meanwhile(&mut members, || purge_each(dir.path(), id, &purged));
 
     // The member starts from its snapshot, on the log that is left, and its service
     // from its own: the program is given its state at the snapshot's position.
-    let again = start_member(dir.path(), &members_string, id);
-    assert_eq!(again.module.session_log_position(), position);
+    let again = meanwhile(&mut members, || {
+        start_member(dir.path(), &members_string, id)
+    });
+    assert_eq!(
+        again.module.session_log_position(),
+        position,
+        "the member that started again: {}; the two that ran on: {}; the log ended at {end}",
+        describe(std::slice::from_ref(&again)),
+        describe(&members)
+    );
     members.push(again);
-    assert_eq!(run_until_settled(&mut members, end), end);
-    let (service, restored) = Service::restored_beside(&members[2]);
+    let settled = run_until_settled(&mut members, end);
+    assert_eq!(settled, end, "{}", describe(&members));
+    let (service, restored) = Service::restored_beside(&mut members, 2);
     assert_eq!(restored, Restored::State(entries(4)));
     assert_eq!(service.service.position(), position);
     services.push(service);
@@ -2860,10 +3118,7 @@ fn a_member_and_its_service_start_from_their_snapshots_on_a_log_purged_below_the
     run_until_led(&mut members, first_term);
     let second = snapshot_with_services(&mut members, &mut services);
     assert!(second > position);
-    let written: Vec<Vec<Vec<u8>>> = members
-        .iter()
-        .map(|member| replayed(member, service_recording(member)))
-        .collect();
+    let written = replayed_each(&mut members, service_recording);
     assert_eq!(written[0], written[1]);
     assert_eq!(written[0], written[2]);
     for member in &members {
@@ -2892,7 +3147,7 @@ fn a_service_passes_over_a_snapshot_whose_recording_is_gone_and_reads_from_the_s
     run_until_settled(&mut members, 0);
     // A service whose program asks for a start from a snapshot, beside a member that
     // lists none: it reads from position 0, and adds no counter of its start.
-    let (first, restored) = Service::restored_beside(&members[2]);
+    let (first, restored) = Service::restored_beside(&mut members, 2);
     assert_eq!(restored, Restored::FromStart);
     let mut services = vec![
         Service::beside(&members[0]),
@@ -2911,9 +3166,12 @@ fn a_service_passes_over_a_snapshot_whose_recording_is_gone_and_reads_from_the_s
     services.pop().expect("the service").close();
     let stopped = members.pop().expect("the follower");
     let recording_id = service_recording(&stopped);
-    let id = stop(stopped);
-    purge(dir.path(), id, recording_id);
-    members.push(start_member(dir.path(), &members_string, id));
+    let id = meanwhile(&mut members, || stop(stopped));
+    meanwhile(&mut members, || purge(dir.path(), id, recording_id));
+    let started = meanwhile(&mut members, || {
+        start_member(dir.path(), &members_string, id)
+    });
+    members.push(started);
     assert_eq!(run_until_settled(&mut members, end), end);
     assert_eq!(
         counter(&members[2], CLUSTER_SERVICE_SNAPSHOT_RECORDING_ID.0),
@@ -2923,7 +3181,7 @@ fn a_service_passes_over_a_snapshot_whose_recording_is_gone_and_reads_from_the_s
 
     // The service is told of that snapshot, cannot play it back, and passes it
     // over: its program is told to read from the start, and the log is whole.
-    let (mut again, restored) = Service::restored_beside(&members[2]);
+    let (mut again, restored) = Service::restored_beside(&mut members, 2);
     assert_eq!(restored, Restored::FromStart);
     assert_eq!(again.service.position(), 0);
     assert_eq!(
@@ -3016,6 +3274,7 @@ fn a_service_whose_driver_has_no_room_for_its_replay_has_not_started_and_asks_ag
         }
         assert!(held.len() <= MAX_REPLAYS, "the registry is bounded");
         take_images(&mut subscription);
+        round();
         for member in members.iter_mut() {
             member.module.do_work().expect("the member's duty cycle");
         }
@@ -3055,10 +3314,14 @@ fn a_service_whose_driver_has_no_room_for_its_replay_has_not_started_and_asks_ag
         take_images(&mut subscription);
         freed.ended().is_some()
     });
-    let restored = again
-        .service
-        .restore(&mut again.client)
-        .expect("the service's start, once the driver has room");
+    let restored = meanwhile(&mut members, || {
+        timed("a service's start", || {
+            again
+                .service
+                .restore(&mut again.client)
+                .expect("the service's start, once the driver has room")
+        })
+    });
     assert_eq!(restored, Restored::State(entries(3)));
     if let Restored::State(state) = restored {
         again.state = state;
