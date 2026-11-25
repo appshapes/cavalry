@@ -66,7 +66,13 @@ TIMER = _abi.CAVALRY_CLUSTER_ENTRY_TIMER
 TIMER_MESSAGE = b"timer"   # the message at which each service's program schedules its timers
 TIMER_ID = 77              # the timer that is handed over
 CANCELLED_ID = 78          # the timer that is scheduled and cancelled in the same handling
-TIMER_AFTER_MS = 50        # how long after the message's entry the timer is due
+# How long after the message's entry the timer is due. A second, and not the 50 ms this
+# round had first: a service tells its member of a timer only once the poll that took the
+# entry has sent the six commands of its first timer, some 25 ms on a laptop and more on
+# a busy host, so the event of a timer that was wrongly due at once is stamped about as
+# late as a deadline of 50 ms, 49 ms after the message in one run of this round, and that
+# margin would let it pass. The round prints what it was in its own run.
+TIMER_AFTER_MS = 1000
 HOUR_MS = 3_600_000        # the deadline its first schedule gives it, which the second replaces
 INT64_MIN, INT64_MAX = -(2 ** 63), 2 ** 63 - 1
 REFRESH_SECONDS = 1.2      # a timer refresh interval of spec/cluster.md, "Values", 1 s, and more
@@ -125,6 +131,7 @@ class Served:
         self.timers = []       # every timer handed over: (position, correlation id, the event's time)
         self.timer_at = None   # when the last was handed over, by this process's monotonic clock
         self.timer_codes = []  # what the schedules and the cancel at TIMER_MESSAGE answered
+        self.refused_inside = "no call"  # what a schedule of an id above int64 from inside the handler did
         self.polls = 0         # the report: every poll, those over a millisecond, and the longest
         self.over_a_millisecond = 0
         self.longest = (0, "no poll")
@@ -182,7 +189,13 @@ class Served:
             # timer came. A second timer, due at once, cancelled again: were the cancel
             # to miss, it would be handed over. And the least and the greatest int64 as
             # ids, due at once, which each service must be handed back as they are.
-            # Every member's service makes the same calls at the same entry.
+            # Before them, an id above int64, which is refused here as it is outside
+            # the handler, and schedules nothing. Every member's service makes the same
+            # calls at the same entry.
+            try:
+                self.refused_inside = service.schedule_timer(INT64_MAX + 1, entry.timestamp)
+            except OverflowError as refused:
+                self.refused_inside = refused
             self.timer_codes = [service.schedule_timer(TIMER_ID, entry.timestamp + HOUR_MS),
                                 service.schedule_timer(TIMER_ID, entry.timestamp + TIMER_AFTER_MS),
                                 service.schedule_timer(CANCELLED_ID, entry.timestamp),
@@ -535,6 +548,9 @@ def main():
             fail(f"the service beside member {s.member} was answered {s.timer_codes} for its schedules and its "
                  f"cancel; expected CAVALRY_CLUSTER_TIMER_SCHEDULED, {SCHEDULED}, for each schedule and 0 for the "
                  f"cancel")
+        if not isinstance(s.refused_inside, OverflowError):
+            fail(f"the service beside member {s.member} scheduled an id above int64 from inside its handler and "
+                 f"was answered {s.refused_inside!r}; expected an OverflowError before the ABI was called")
         if sorted(t[1] for t in s.timers) != expected:
             fail(f"the service beside member {s.member} was handed the timers {s.timers}, each a position, an "
                  f"id and a time; expected timer {TIMER_ID}, the least int64 and the greatest once each, and "
@@ -550,12 +566,17 @@ def main():
                      f"{position} and time {timestamp}; it was scheduled at position {scheduled[1]} and time "
                      f"{scheduled[3]} for {after} ms later")
     timer = next(t for t in served[0].timers if t[1] == TIMER_ID)
+    # What a deadline that was ignored would have read: the time of the timers that were
+    # due at once, which the member was told of with timer 77. The deadline check above
+    # proves something for as long as this is below the deadline.
+    at_once = max(t[2] for t in served[0].timers if t[1] != TIMER_ID) - scheduled[3]
+    margin = "" if at_once < TIMER_AFTER_MS else ", so the deadline's check proved nothing in this run"
     print(f"conformance/python: cluster round: timer {TIMER_ID}, scheduled by each service at a message for an "
           f"hour later and then for {TIMER_AFTER_MS} ms later, handed to three services once, at position "
           f"{timer[0]}, {timer[2] - scheduled[3]} ms after the message; the least and the greatest int64 as "
-          f"ids, due at once, handed to each once with those ids; timer {CANCELLED_ID}, due at once and "
-          f"cancelled in the same handling, handed to none; both calls refused from outside the handler, and "
-          f"what is no int64 before the ABI is called")
+          f"ids, due at once, handed to each once with those ids, {at_once} ms after the message{margin}; timer "
+          f"{CANCELLED_ID}, due at once and cancelled in the same handling, handed to none; both calls refused "
+          f"from outside the handler, and what is no int64 before the ABI is called, from inside the handler too")
 
     # 10. The session before its client. Its close is an entry every service is handed,
     # after which the log holds no session open.

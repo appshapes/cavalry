@@ -1,5 +1,5 @@
-// The JVM client's cluster round (spec/c-abi.md, versions 4 and 5; ADR 0122, ADR 0123, ADR
-// 0124): Client.clusterService and ClusterService beside each of three cluster members
+// The JVM client's cluster round (spec/c-abi.md, versions 4, 5 and 7; ADR 0122, ADR 0123,
+// ADR 0124, ADR 0157): Client.clusterService and ClusterService beside each of three cluster members
 // that conformance/jvm/run.sh started with `cavalry run`, and Client.connectCluster and
 // ClusterSession on the runner's first driver, the one at CAVALRY_DIR, as
 // conformance/python/cluster.py runs it through clients/python.
@@ -27,7 +27,14 @@
 // replied, and one that returns what is no action, whose entry is aborted, handed over
 // again by the next poll and answered once; a reply too long for a frame and a reply to a
 // session that is not open; a handler that returns ACTION_BREAK with two entries waiting; a
-// session's handler that throws, whose reply is not handed over again; the session's close
+// session's handler that throws, whose reply is not handed over again; the program's
+// timers, scheduleTimer and cancelTimer from inside the handler, as the C runner's round
+// has one: a timer handed to every service once, as an entry of its own type with the
+// timer's id, at one position and no earlier than the deadline its second schedule set, a
+// second after its entry, where its first was an hour away, and not again within a timer
+// refresh interval and more; a timer due at once and cancelled in the same handling handed
+// to none; the least and the greatest long as ids, handed back as they are; both calls
+// refused from outside the handler; the session's close
 // as an entry every service is handed; a session and a service closed twice, and a service
 // closed after its client.
 //
@@ -66,6 +73,19 @@ public final class ClusterRound {
     static final long WAIT_NANOS = 60_000_000_000L;
     static final long IDLE_NANOS = 200_000; // between duty cycles: the members run in processes of their own
     static final long SETTLE_NANOS = 300_000_000; // the time in which a second reply, or a second entry, would come
+    static final String TIMER_MESSAGE = "timer"; // the message at which each service's program schedules its timers
+    static final long TIMER_ID = 77; // the timer that is handed over
+    static final long CANCELLED_ID = 78; // the timer that is scheduled and cancelled in the same handling
+    // How long after the message's entry the timer is due, in the cluster's milliseconds. A
+    // second: a service tells its member of a timer only once the poll that took the entry
+    // has sent the six commands of its first timer, some 25 ms on a laptop and more on a
+    // busy host, so the event of a timer that was wrongly due at once is stamped tens of
+    // milliseconds after the message, 38 to 61 ms in the five clients' rounds on a laptop,
+    // and a margin of that size would let it pass. The round prints what it was in its own
+    // run.
+    static final long TIMER_AFTER_MS = 1000;
+    static final long HOUR_MS = 3_600_000; // the deadline its first schedule gives it, which the second replaces
+    static final long REFRESH_NANOS = 1_200_000_000L; // a timer refresh interval of spec/cluster.md, "Values", 1 s, and more
 
     private ClusterRound() {
     }
@@ -94,6 +114,10 @@ public final class ClusterRound {
             return new Entry(entry.type(), entry.position(), entry.leadershipTermId(), entry.timestamp(),
                 entry.sessionId(), entry.leaderMemberId(), entry.timedOut());
         }
+    }
+
+    /** A timer that was handed over: where, its id and the event's time. */
+    record Timer(long position, long id, long timestamp) {
     }
 
     /** What one call answered, with the thread's error after it: a call that throws answers
@@ -153,6 +177,9 @@ public final class ClusterRound {
         String edgesOn; // a payload before whose reply a reply too long and one to no session are made
         List<Integer> edges;
         final Set<String> breakOn = new HashSet<>(); // payloads whose entries are taken with ACTION_BREAK
+        final List<Timer> timers = new ArrayList<>(); // every timer handed over
+        long timerAt; // when the last was handed over, by System.nanoTime
+        List<Integer> timerCodes = List.of(); // what the schedules and the cancel at TIMER_MESSAGE answered
         ClusterEntryValues values; // the object of values the handler was handed, the same one for every entry
         int polls; // the report: every poll, those over a millisecond, and the longest
         int over;
@@ -184,8 +211,17 @@ public final class ClusterRound {
                 if (body.byteSize() != 0) {
                     fail("an entry that is no session's message has a payload of " + body.byteSize() + " bytes: " + read);
                 }
+                if (entry.type() == Abi.CLUSTER_ENTRY_TIMER) {
+                    timers.add(new Timer(entry.position(), entry.correlationId(), entry.timestamp()));
+                    timerAt = System.nanoTime();
+                } else if (entry.correlationId() != 0) {
+                    fail("an entry that is no timer has the correlation id " + entry.correlationId() + ": " + read);
+                }
                 entries.add(read);
                 return Abi.ACTION_CONTINUE;
+            }
+            if (entry.correlationId() != 0) {
+                fail("a session's message has the correlation id " + entry.correlationId() + ": " + read);
             }
             String payload = text(body);
             List<Long> positions = handed.computeIfAbsent(payload, key -> new ArrayList<>());
@@ -231,6 +267,23 @@ public final class ClusterRound {
                 // poll after this one would hand the ABI a null client.
                 refusals.add(thrown("Client.close", client::close));
                 refusals.add(asked("Client.isClosed after its close", () -> client.isClosed() ? 1 : 0));
+            }
+            if (payload.equals(TIMER_MESSAGE)) {
+                // The program's state changes at the entry it takes. One timer, scheduled
+                // for an hour later and then again for a second later: were the second
+                // schedule not to set the one timer's deadline, the round's wait would end
+                // before the timer came. A second timer, due at once, cancelled again: were
+                // the cancel to miss, it would be handed over. And the least and the
+                // greatest long as ids, due at once, which each service must be handed back
+                // as they are. Every member's service makes the same calls at the same
+                // entry.
+                timerCodes = List.of(
+                    service.scheduleTimer(TIMER_ID, entry.timestamp() + HOUR_MS),
+                    service.scheduleTimer(TIMER_ID, entry.timestamp() + TIMER_AFTER_MS),
+                    service.scheduleTimer(CANCELLED_ID, entry.timestamp()),
+                    service.cancelTimer(CANCELLED_ID),
+                    service.scheduleTimer(Long.MIN_VALUE, entry.timestamp()),
+                    service.scheduleTimer(Long.MAX_VALUE, entry.timestamp()));
             }
             codes.computeIfAbsent(payload, key -> new ArrayList<>()).add(code);
             messages.computeIfAbsent(payload, key -> new ArrayList<>()).add(read);
@@ -640,6 +693,67 @@ public final class ClusterRound {
             + " answered once; a reply of 1,345 bytes and a reply to no session refused; ACTION_BREAK took one of two"
             + " entries; a reply whose handler threw is not handed over again");
 
+        // 9b. The program's timers (spec/c-abi.md, version 7; spec/cluster.md, "The service",
+        // "Timers"; ADR 0157). Each service's program schedules four timers at one message
+        // and cancels one: the three are handed to every service once each, as entries of
+        // their own type with the timers' ids, at one position each and none earlier than
+        // its deadline, and the cancelled one to none. Step 10 holds the "once" for a timer
+        // refresh interval and more. From outside the handler both calls are refused, the
+        // thread's error having been set to another code first.
+        for (Refusal refusal : List.of(
+                asked("scheduleTimer", () -> served.get(0).service.scheduleTimer(1, 1)),
+                asked("cancelTimer", () -> served.get(0).service.cancelTimer(1)))) {
+            if (refusal.answer() != -1 || refusal.code() != Abi.ERR_CLUSTER_NO_ENTRY) {
+                fail(refusal.call() + " from outside the handler answered " + refusal.answer() + " with error "
+                    + refusal.code() + ", not -1 with ERR_CLUSTER_NO_ENTRY");
+            }
+        }
+        offer(session, TIMER_MESSAGE, served, answered);
+        List<Long> timerIds = List.of(Long.MIN_VALUE, TIMER_ID, Long.MAX_VALUE);
+        await("each service is handed its three timers", () -> every(served, s -> s.timers.size() >= timerIds.size()),
+            served, answered, null);
+        settle(served, answered, null);
+        Entry scheduled = served.get(0).taken(TIMER_MESSAGE).get(0);
+        int scheduledCode = Abi.CLUSTER_TIMER_SCHEDULED;
+        for (Served s : served) {
+            if (!s.timerCodes.equals(List.of(scheduledCode, scheduledCode, scheduledCode, 0, scheduledCode, scheduledCode))) {
+                fail("the service beside member " + s.member + " was answered " + s.timerCodes + " for its schedules and"
+                    + " its cancel; expected CLUSTER_TIMER_SCHEDULED, " + scheduledCode + ", for each schedule and 0 for"
+                    + " the cancel");
+            }
+            if (!s.timers.stream().map(Timer::id).sorted().toList().equals(timerIds)) {
+                fail("the service beside member " + s.member + " was handed the timers " + s.timers + "; expected timer "
+                    + TIMER_ID + ", the least long and the greatest once each, and timer " + CANCELLED_ID
+                    + ", which it cancelled, never");
+            }
+            if (!s.timers.equals(served.get(0).timers)) {
+                fail("the service beside member " + s.member + " was handed its timers as " + s.timers
+                    + " and the service beside member " + served.get(0).member + " as " + served.get(0).timers
+                    + "; expected one position and one time for each");
+            }
+            for (Timer t : s.timers) {
+                long after = t.id() == TIMER_ID ? TIMER_AFTER_MS : 0;
+                if (t.timestamp() < scheduled.timestamp() + after || t.position() <= scheduled.position()) {
+                    fail("the service beside member " + s.member + " was handed timer " + t.id() + " at position "
+                        + t.position() + " and time " + t.timestamp() + "; it was scheduled at position "
+                        + scheduled.position() + " and time " + scheduled.timestamp() + " for " + after + " ms later");
+                }
+            }
+        }
+        // What a deadline that was ignored would have read: the time of the timers that
+        // were due at once, which the member was told of with timer 77. The deadline check
+        // above proves something for as long as this is below the deadline.
+        Timer timer = served.get(0).timers.stream().filter(t -> t.id() == TIMER_ID).findFirst().orElseThrow();
+        long atOnce = served.get(0).timers.stream().filter(t -> t.id() != TIMER_ID).mapToLong(Timer::timestamp).max()
+            .orElseThrow() - scheduled.timestamp();
+        say("timer " + TIMER_ID + ", scheduled by each service at a message for an hour later and then for "
+            + TIMER_AFTER_MS + " ms later, handed to three services once, at position " + timer.position() + ", "
+            + (timer.timestamp() - scheduled.timestamp()) + " ms after the message; the least and the greatest long as"
+            + " ids, due at once, handed to each once with those ids, " + atOnce + " ms after the message"
+            + (atOnce < TIMER_AFTER_MS ? "" : ", so the deadline's check proved nothing in this run") + "; timer "
+            + CANCELLED_ID + ", due at once and cancelled in the same handling, handed to none; both calls refused from"
+            + " outside the handler");
+
         // 10. The session before its client. Its close is an entry every service is handed,
         // after which the log holds no session open.
         session.close();
@@ -661,6 +775,20 @@ public final class ClusterRound {
             if (!s.entries.equals(served.get(0).entries)) {
                 fail("the services beside members 0 and " + s.member + " took different entries: " + served.get(0).entries
                     + " and " + s.entries);
+            }
+        }
+        // The timers of step 9b, once each: a leader gives a timer that is still pending in
+        // its service another event a timer refresh interval after the first, so the
+        // services are polled until that long has passed since the last of them was handed
+        // a timer.
+        long refreshed = served.stream().mapToLong(s -> s.timerAt).max().orElseThrow() + REFRESH_NANOS;
+        while (System.nanoTime() - refreshed < 0) {
+            cycle(served, null, null);
+        }
+        for (Served s : served) {
+            if (s.timers.size() != 3) {
+                fail("the service beside member " + s.member + " was handed the timers " + s.timers + " by "
+                    + REFRESH_NANOS / 1_000_000 + " ms after the last; expected three, once each");
             }
         }
 

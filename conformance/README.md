@@ -17,9 +17,9 @@ bounded at 10 s, and one that runs out says how far it got.
 | --- | --- | --- | --- |
 | `c/` | C11, `quickstart.c` and then `cluster.c`, the cluster round, beside three cluster members that `run.sh` starts with `cavalry run`, then `snapshot.c`, the snapshot round, beside all three, then `closed.c`, a service's poll after its driver's stop (ADR 0155), through `run.sh` | the runner's `cc`, the static library | ADR 0051 (card 204); ADR 0122 and ADR 0123 (work item 229); ADR 0146 and ADR 0149 (work item 335) |
 | `python/` | Python 3, `quickstart.py` and then `readme.py`, the example of `clients/python/README.md`, then `committed_log.py` beside one of three cluster members that `run.sh` starts with `cavalry run`, then `cluster.py`, the cluster round, beside all three, then `snapshot.py`, the snapshot round, beside all three, then `howto.py`, the program of `docs/how-to/take-a-services-snapshot.md`, beside three members of its own, then `closed.py`, a service's poll after its driver's stop (ADR 0155), through `run.sh` over `clients/python` | the runner's `python3`, the shared library | ADR 0046 (card 205); ADR 0124 (work item 229); ADR 0149 (work item 335) |
-| `node/` | Node, `quickstart.js` and then `readme.js`, the example of `clients/node/README.md`, then `committed_log.js` beside one of three cluster members that `run.sh` starts with `cavalry run`, then `cluster.js`, the cluster round, beside all three, then `snapshot.js`, the snapshot round, beside all three, through `run.sh` over `clients/node` | the runner's `node` and `npm`, whose own `node-gyp` builds the addon against the static library | ADR 0046 (card 206); ADR 0124 (work item 229); ADR 0149 (work item 335) |
-| `go/` | Go, the client's own `go test` (its subscription table at the bound), then `quickstart` and then `readme`, the example of `clients/go/README.md`, then, beside one of three cluster members that `run.sh` starts with `cavalry run`, the client's one test that needs a member (a committed log's open with the table full) and `committed_log`, then `cluster`, the cluster round, beside all three, then `snapshot`, the snapshot round, beside all three, through `run.sh` over `clients/go` | the runner's `go`, whose cgo builds the client against the header and the static library | ADR 0046 (card 207); ADR 0124 (work item 229); ADR 0149 (work item 335) |
-| `jvm/` | Java 25, `Quickstart.java` and then `Readme.java`, the example of `clients/jvm/README.md`, then `CommittedLogRound.java` beside one of three cluster members that `run.sh` starts with `cavalry run`, then `ClusterRound.java`, the cluster round, beside all three, then `SnapshotRound.java`, the snapshot round, beside all three, through `run.sh` over `clients/jvm` | the runner's `javac` and `java`, whose `java.lang.foreign` binds the shared library when the client loads | ADR 0046 (card 208); ADR 0124 (work item 229); ADR 0149 (work item 335) |
+| `node/` | Node, `quickstart.js` and then `readme.js`, the example of `clients/node/README.md`, then `committed_log.js` beside one of three cluster members that `run.sh` starts with `cavalry run`, then `cluster.js`, the cluster round, beside all three, then `snapshot.js`, the snapshot round, beside all three, then `closed.js`, a service's poll after its driver's stop (ADR 0155), through `run.sh` over `clients/node` | the runner's `node` and `npm`, whose own `node-gyp` builds the addon against the static library | ADR 0046 (card 206); ADR 0124 (work item 229); ADR 0149 (work item 335) |
+| `go/` | Go, the client's own `go test` (its subscription table at the bound), then `quickstart` and then `readme`, the example of `clients/go/README.md`, then, beside one of three cluster members that `run.sh` starts with `cavalry run`, the client's one test that needs a member (a committed log's open with the table full) and `committed_log`, then `cluster`, the cluster round, beside all three, then `snapshot`, the snapshot round, beside all three, then `closed`, a service's poll after its driver's stop (ADR 0155), through `run.sh` over `clients/go` | the runner's `go`, whose cgo builds the client against the header and the static library | ADR 0046 (card 207); ADR 0124 (work item 229); ADR 0149 (work item 335) |
+| `jvm/` | Java 25, `Quickstart.java` and then `Readme.java`, the example of `clients/jvm/README.md`, then `CommittedLogRound.java` beside one of three cluster members that `run.sh` starts with `cavalry run`, then `ClusterRound.java`, the cluster round, beside all three, then `SnapshotRound.java`, the snapshot round, beside all three, then `ClosedRound.java`, a service's poll after its driver's stop (ADR 0155), through `run.sh` over `clients/jvm` | the runner's `javac` and `java`, whose `java.lang.foreign` binds the shared library when the client loads | ADR 0046 (card 208); ADR 0124 (work item 229); ADR 0149 (work item 335) |
 | `dotnet/` | C#, `Quickstart` and then `Readme`, the example of `clients/dotnet/README.md`, then `CommittedLog` beside one of three cluster members that `run.sh` starts with `cavalry run`, then `Cluster`, the cluster round, beside all three, then `Snapshot`, the snapshot round, beside all three, through `run.sh` over `clients/dotnet` | the runner's `dotnet`, whose SDK builds the client and whose runtime binds the shared library when the client loads | ADR 0046 (card 209); ADR 0124 (work item 229); ADR 0149 (work item 335) |
 
 A committed log round reads beside a member whose log is one recording that begins at
@@ -39,16 +39,28 @@ otherwise.
 
 The cluster round is a runner's check of a cluster's service and of a session with a
 cluster (`spec/c-abi.md`, versions 4 and 5; `spec/cluster.md`, "Sessions", "The service"
-and "Replies"). The C runner's and the Python runner's also hold a program's timer
-(version 7; ADR 0157): each service schedules one at a message it takes, and all
-three are handed it once, as an entry of its own kind with the timer's id, at one
-position and no earlier than its deadline. The Python round holds more of the
-client's own: a second schedule of the timer sets its deadline, where its first
-was an hour away; a second timer, due at once and cancelled in the same handling,
-is handed to none; the least and the greatest int64, scheduled as ids, are
-handed back as they are; both calls are refused from outside the handler, and an
-id or a deadline that is no int64 before the ABI is called; and no timer is
-handed to a service a second time in a timer refresh interval and more. What a runner does not hold of a service's timers rests on the library's
+and "Replies"). The C runner's, the Python runner's, the Node runner's, the Go
+runner's and the JVM runner's also hold a program's timer (version 7; ADR 0157): each service schedules one at a
+message it takes, for a second later, and all three are handed it once, as an
+entry of its own kind with the timer's id, at one position and no earlier than
+its deadline. The second is the check's margin: a service tells its member of a
+timer only once the poll that took the entry has sent the six commands of its
+first timer, some 25 ms on a laptop and more on a busy host, so the event of a
+timer that was wrongly due at once is stamped about as late as a deadline of 50 ms,
+which these rounds had first: 49 ms after the message in a run of the Python
+round. The Python round, the Node round, the Go round and the JVM round print what
+that was in their own run, the time of their timers that were due at once, beside
+the deadline: 38 to 51 ms across them on a laptop. Those four rounds
+hold more of the client's own: a second schedule of the timer sets its deadline,
+where its first was an hour away; a second timer, due at once and cancelled in
+the same handling, is handed to none; the least and the greatest int64, scheduled
+as ids, are handed back as they are, and in the Node round the least and the
+greatest integer a number carries exactly; both calls are refused from outside
+the handler, and, in Python and Node, an id or a deadline that is no int64 before
+the ABI is called, in Node a number with a fraction or outside those integers
+among them, from inside the handler too, where Go's `int64` and Java's `long`
+leave nothing to refuse; and no timer is handed to a service a second time in a
+timer refresh interval and more. What a runner does not hold of a service's timers rests on the library's
 tests, which every client reaches through the same ABI: the bound of 1,024 and
 the refusal at it, a handling that is not taken leaving every timer as it was, a
 timer event passed over and counted, a cancel of a timer whose event is in the
