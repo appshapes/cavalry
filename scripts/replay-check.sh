@@ -21,6 +21,14 @@
 # member's service must be the lines of that member's replay. An entry missing,
 # repeated, out of order or changed on any member, or read differently by a service
 # as it committed, fails it.
+#
+# Then a service's timers (ADR 0151): three more members on the loopback, each with a
+# program beside it that schedules a timer at each message, 200 in all; one program
+# starts again from its snapshot, the leader stops with its service while half the
+# timers are pending, and a last program reads one member's log from position 0. The
+# two members left and that replay must each have been handed the same 200 timers,
+# each once, at the same positions and times. A timer missed, handed twice, or handed
+# at another position or time beside any of them fails it.
 set -euo pipefail
 
 cd "$(dirname "$0")/.."
