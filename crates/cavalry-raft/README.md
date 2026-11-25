@@ -322,6 +322,25 @@ commit path runs per message.
   than the last taken is answered by that one's snapshot. The command is the toggle's one
   writer; the member writes nothing in it. `cavalry snapshot` is that command
   ([Ask a cluster for a snapshot](../../docs/how-to/ask-for-a-snapshot.md)).
+- Has the table of a member's timers and the append of their events, which the
+  consensus module does not use yet (`spec/cluster.md`, "The service", "Timers";
+  ADR 0151). `MemberTimers` keeps what the service beside a member told it with
+  schedule timers and cancel timers, at most 2,048 timers, allocated when the
+  table is made: it gives the timer that is due, the earliest deadline first,
+  marks one whose event the member appended so that it is due no second time, and
+  takes the mark off at a schedule timer that names it again. At its bound a
+  schedule of another id takes the place of the marked timer whose event is
+  oldest, and with none marked the table is emptied for it. `Consensus::timer_event`
+  appends a timer event as a leader with its election closed, and refuses as an
+  offer is refused. What the table holds is in no snapshot and is no state a
+  member computes from the log: which event is handed to a program is the
+  service's to decide, from the log alone (`cavalry_proto::cluster::ServiceTimers`),
+  so a table that is behind or ahead costs an entry that every service passes over
+  and never a timer handed over twice. `tests/timer_search.rs` holds that rule to
+  a search: seeds of a cluster in memory, with members stopped, cut off and
+  started again and services that start again, searched for a timer handed over
+  twice, early, after its cancel or not at all. Until the module reads a
+  service's schedule timers, no log of a cluster that runs holds a timer event.
 - Starts a member from its newest snapshot (`spec/cluster.md`, "A member's start";
   ADR 0130). The start reads the member's snapshots file, plays the newest
   snapshot of the consensus module back through the driver, and takes the sessions
