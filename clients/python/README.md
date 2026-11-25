@@ -242,7 +242,8 @@ ADR 0157):
   was before that handling. The timers are part of what `service.snapshot`
   writes and `service.restore` reads, with no call of the program's.
 - **An id and a deadline are int64.** A value that is no `int` raises `TypeError`,
-  a `float` such as `entry.timestamp + seconds * 1000.0` among them, and an `int`
+  a `float` such as `entry.timestamp + seconds * 1000.0` and a `bool` among them,
+  and an `int`
   outside −2^63 to 2^63 − 1 raises `OverflowError`, before the ABI is called:
   `ctypes` would pass such an `int` as its low 64 bits, another timer or a deadline
   long past, and say nothing. Raised in the handler, it aborts the entry as any
@@ -348,9 +349,10 @@ is the task from its start.
   `Header.values` with the `Header` properties that call it, for Python's forms of each (`threading`'s locks,
   `async def`, `await`, `raise`, and building `CavalryError`), in their own bodies and
   in every function of the package they call, such as `_check`; `just lint` fails on
-  any of them. The one function they may call that raises is `_int64`, the reader
-  of a timer's id and deadline, which refuses a value that is no int64 before the
-  ABI is called ("A service's timers"). `Header.values()` is None when the ABI refuses the header's pointer,
+  any of them. The one raise on that path is in `_int64`, the reader of a timer's
+  id and deadline, which `schedule_timer` and `cancel_timer` alone may call, and
+  which refuses a value that is no int64 before the ABI is called ("A service's
+  timers"). `Header.values()` is None when the ABI refuses the header's pointer,
   which inside the handler's call it cannot. Otherwise it is the one frame struct the
   header keeps, rewritten by each call, so copy a field out to keep it.
 - Never raise for an `Offer` code: `try_claim` and `offer` return the position after
@@ -511,11 +513,13 @@ every entry: through `ctypes.CDLL` each call-back takes the GIL back, and beside
 Python thread that computes, a poll of 10 messages then took 5.8 to 6.3 ms at its p99,
 the interpreter's switch interval of 5 ms and more, against 4.4 to 4.6 µs with the GIL
 held (ADR 0124 has the measurement, on an Apple M5 Pro laptop with Python 3.14.6). The
-runner's cluster round reports the waits. On that laptop, in each of 25 runs, 4 of
-about 17,900 polls of three services took over 1 ms: the three that opened a member's
-log and the leader's at the session's opening. The longest took 7.4 to 12.2 ms. A
-program whose other threads cannot stop for that long runs its service in a process
-of its own.
+runner's cluster round reports the waits. On that laptop, in each of 10 runs, 7 of
+about 26,900 polls of three services took over 1 ms: the three that opened a member's
+log, the leader's at the session's opening, and the three in which each service's
+program first scheduled a timer. The longest poll of each run was one of those
+last, 23.5 to 26.6 ms with its six commands; before the round scheduled a timer the
+longest of each of 25 runs took 7.4 to 12.2 ms. A program whose other threads cannot stop for that long runs its
+service in a process of its own.
 
 ### Threads
 

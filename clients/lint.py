@@ -12,11 +12,17 @@ client, the first that wraps them) and each trampoline that
 calls the user's handler, hold no lock, no `await` and no raise, in the language's
 forms, and so does every function of the package they call. For Python those
 forms are `threading`'s locks and anything else of `threading`, `async def`, `await`,
-`raise`, and building one of the package's own exceptions; a raise in the one argument
-reader, `_int64`, is not one, as a throw in the Node addon's argument readers below is
-none: it refuses a timer's id or deadline that is no int64, which ctypes would pass as
-its low 64 bits, another value, before the ABI is called, and it is held to every other
-form. For JavaScript, read from
+`raise`, and building one of the package's own exceptions. One raise is not one, as a
+throw in the Node addon's argument readers below is none: a `raise` statement in the own
+body of the argument reader, `_int64`, which refuses a timer's id or deadline that is no
+int64, since ctypes would pass an int outside the range as its low 64 bits, another
+value. The allowance is that and no more. The reader is held to every other form,
+building one of the package's exceptions and whatever a function it calls does among
+them; only the functions the rule names beside it may call it, the schedule and the
+cancel of a service's timer, and a trampoline is none of them, since a raise there is
+lost in the call-back; and each call of it is an argument of the function's ABI call or
+on a line before it, so that nothing is refused after the ABI was called. For JavaScript,
+read from
 `clients/node/index.js` without a parser, by a tokenizer that drops comments and strings
 and matches braces, they are `async` on the function, `await`, `Promise`, `.then(`,
 `throw`, building one of the package's own `Error` classes, and `Atomics.wait`, the one
@@ -135,12 +141,13 @@ RULES = {
                         ("CommittedLog.poll", "cavalry_committed_log_poll"),
                         ("ClusterSession.poll", "cavalry_cluster_session_poll"),
                         ("ClusterService.poll", "cavalry_cluster_service_poll")],
-        # The argument reader: it may raise, for an argument the ABI's parameter cannot
-        # take, before the ABI is called, as the Node addon's readers throw. A timer's id
-        # and its deadline are int64, and ctypes passes a Python int outside that range
-        # as its low 64 bits with nothing said (ADR 0157; clients/python/README.md, "A
-        # service's timers").
-        "readers": ["_int64"],
+        # The argument reader, and the per-message functions that may call it: a `raise`
+        # in its own body is none on their path, for an argument the ABI's parameter
+        # cannot take, before the ABI is called, as the Node addon's readers throw. A
+        # timer's id and its deadline are int64, and ctypes passes a Python int outside
+        # that range as its low 64 bits with nothing said (ADR 0157;
+        # clients/python/README.md, "A service's timers").
+        "readers": {"_int64": ["ClusterService.schedule_timer", "ClusterService.cancel_timer"]},
     },
     # The Node client calls the ABI through its addon (clients/node/README.md): the addon's
     # `poll` is the one `cavalry_subscription_poll` call, and the header's fields are read
@@ -532,10 +539,10 @@ def python_findings(language: str, path: str, rules: dict) -> list[str]:
     for name in rules["functions"]:
         if name not in found:
             findings.append(f"{language}: the per-message function {name} is not in {path}; {HELP}")
-    # The argument readers, whose raise is no raise on the path; one the rules name and
-    # the package does not have is a stale rule.
-    readers = set(rules.get("readers", ()))
-    for reader in sorted(readers - set(package.functions)):
+    # The argument readers and who may call each; one the rules name and the package
+    # does not have is a stale rule.
+    readers = rules.get("readers", {})
+    for reader in sorted(set(readers) - set(package.functions)):
         findings.append(f"{language}: the argument reader {reader} is not in {path}; the generator renamed it or "
                         f"the rules are stale; {HELP}")
     # Each poll and the ABI call after which it may raise: a subscription's, and since
@@ -557,12 +564,45 @@ def python_findings(language: str, path: str, rules: dict) -> list[str]:
             if kind in WHY:
                 findings.append(f"{where} {what}: {WHY[kind]}; {HELP}")
                 continue
+            if name in readers.get(what, ()) and what in package.functions:
+                findings.extend(reader_findings(package, where, node, line, what))
+                continue
             for k, how in package.reach(what).items():
                 if kind == "call-allowed" and k == "raise":
                     continue  # a helper poll calls after the ABI has returned may raise the handler's exception
-                if what in readers and k == "raise":
-                    continue  # an argument reader refuses what the ABI's parameter cannot take
                 findings.append(f"{where} calls {what} at line {line}, and {how}: {WHY[k]}; {HELP}")
+    return findings
+
+
+def _abi_calls(node: ast.AST) -> list[ast.Call]:
+    """The calls of the ABI in a function: `self._abi.<function>(...)`."""
+    return [sub for sub in ast.walk(node)
+            if isinstance(sub, ast.Call) and isinstance(sub.func, ast.Attribute)
+            and isinstance(sub.func.value, ast.Attribute) and sub.func.value.attr == "_abi"]
+
+
+def reader_findings(package: "Package", where: str, node: ast.AST, call_line: int, reader: str) -> list[str]:
+    """What a call of an argument reader at `call_line` of the per-message function
+    `node`, one the rules let call it, still breaks. The one thing allowed is a `raise`
+    statement in the reader's own body: an exception of the package's built there, a
+    form in a function the reader calls, and a call of the reader that is neither an
+    argument of the function's ABI call nor on a line before it, are findings."""
+    findings = []
+    for abi in _abi_calls(node):
+        inside = any(isinstance(sub, ast.Call) and isinstance(sub.func, ast.Name) and sub.func.id == reader
+                     and sub.lineno == call_line for sub in ast.walk(abi) if sub is not abi)
+        if not inside and call_line >= abi.lineno:
+            findings.append(f"{where} calls the argument reader {reader} at line {call_line}, after its call of the "
+                            f"ABI at line {abi.lineno}: a reader refuses an argument before the ABI is called; {HELP}")
+    for kind, line, what in package.forms(reader, package.node(reader), None):
+        if kind == "raise" and what.startswith("raises at"):
+            continue  # the reader's own refusal
+        if kind in WHY:
+            findings.append(f"{where} calls {reader} at line {call_line}, and {reader} {what}: {WHY[kind]}; {HELP}")
+            continue
+        for k, how in package.reach(what).items():
+            findings.append(f"{where} calls {reader} at line {call_line}, and {reader} calls {what} at line {line}, "
+                            f"and {how}: {WHY[k]}; {HELP}")
     return findings
 
 

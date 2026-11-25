@@ -43,12 +43,12 @@ and "Replies"). The C runner's and the Python runner's also hold a program's tim
 (version 7; ADR 0157): each service schedules one at a message it takes, and all
 three are handed it once, as an entry of its own kind with the timer's id, at one
 position and no earlier than its deadline. The Python round holds more of the
-client's own: a second schedule of the timer sets its deadline; a second timer,
-cancelled in the same handling, is handed to none; the least and the greatest
-int64 pass through `ctypes` as ids; both calls are refused from outside the
-handler, and an id or a deadline that is no int64 before the ABI is called; and
-the timer is handed to no service a second time in a timer refresh interval and
-more. What a runner does not hold of a service's timers rests on the library's
+client's own: a second schedule of the timer sets its deadline, where its first
+was an hour away; a second timer, due at once and cancelled in the same handling,
+is handed to none; the least and the greatest int64, scheduled as ids, are
+handed back as they are; both calls are refused from outside the handler, and an
+id or a deadline that is no int64 before the ABI is called; and no timer is
+handed to a service a second time in a timer refresh interval and more. What a runner does not hold of a service's timers rests on the library's
 tests, which every client reaches through the same ABI: the bound of 1,024 and
 the refusal at it, a handling that is not taken leaving every timer as it was, a
 timer event passed over and counted, a cancel of a timer whose event is in the

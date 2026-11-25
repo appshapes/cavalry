@@ -239,30 +239,68 @@ class Clients(unittest.TestCase):
         for name in ("ClusterService.schedule_timer", "ClusterService.cancel_timer"):
             self.assertTrue(any(name in f and "raises" in f for f in found), found)
 
+    CANCEL_TIMER = ("        return self._abi.cavalry_cluster_service_cancel_timer(self._handle, "
+                    "_int64(correlation_id, \"correlation_id\"))\n")
+
     def test_the_argument_reader_may_raise_and_no_other_helper_of_a_timer_call_may(self):
         """`_int64` refuses a timer's id or deadline that is no int64 before the ABI is
-        called, and its raise is none on the path, as the Node addon's readers' throw
-        is none. Any other function of the package that a timer call reaches is held to
-        the rule, `_check` among them."""
+        called, and the `raise` in its own body is none on the path, as the Node addon's
+        readers' throw is none. Any other function of the package that a timer call
+        reaches is held to the rule, `_check` among them."""
         self.assertEqual(lint.findings(self.tmp), [])
-        self.edit("        return self._abi.cavalry_cluster_service_cancel_timer(self._handle, "
-                  "_int64(correlation_id, \"correlation_id\"))\n",
-                  "        _check(self._abi, 'cavalry_cluster_service_cancel_timer', 0)\n"
-                  "        return self._abi.cavalry_cluster_service_cancel_timer(self._handle, "
-                  "_int64(correlation_id, \"correlation_id\"))\n")
+        self.edit(self.CANCEL_TIMER,
+                  "        _check(self._abi, 'cavalry_cluster_service_cancel_timer', 0)\n" + self.CANCEL_TIMER)
         [finding] = lint.findings(self.tmp)
         self.assertIn("ClusterService.cancel_timer", finding)
         self.assertIn("calls _check", finding)
 
     def test_the_argument_reader_is_held_to_every_other_form(self):
-        """A reader may raise and nothing else: a lock in it is a lock on the path of
-        each function that calls it."""
-        self.edit("def _int64(value, name):\n", "def _int64(value, name):\n    threading.Lock()\n")
+        """A reader's own `raise` and nothing else: a lock in it, an exception of the
+        package's built in it, and a function it calls that raises, are each on the path
+        of the functions that call it."""
+        for line, said in (("    threading.Lock()\n", "threading"),
+                           ("    CavalryError('cavalry_x', 1, 'no')\n", "builds CavalryError"),
+                           ("    _check(library(), 'cavalry_x', 0)\n", "calls _check")):
+            with self.subTest(line=line):
+                self.setUp()
+                self.edit("def _int64(value, name):\n", "def _int64(value, name):\n" + line)
+                found = lint.findings(self.tmp)
+                for name in ("ClusterService.schedule_timer", "ClusterService.cancel_timer"):
+                    self.assertTrue(any(name in f and "_int64" in f and said in f for f in found), found)
+                self.assertTrue(all("_int64" in f for f in found), found)
+
+    def test_the_argument_reader_is_called_before_the_abi_or_as_its_argument(self):
+        """A reader refuses an argument before the ABI is called: a call of it on a
+        line after the function's ABI call, on the ABI's own answer here, is a
+        finding."""
+        self.edit(self.CANCEL_TIMER,
+                  "        answered = self._abi.cavalry_cluster_service_cancel_timer(self._handle, correlation_id)\n"
+                  "        return _int64(answered, \"correlation_id\")\n")
+        [finding] = lint.findings(self.tmp)
+        self.assertIn("ClusterService.cancel_timer", finding)
+        self.assertIn("after its call of the ABI", finding)
+
+    def test_the_argument_reader_is_for_the_functions_the_rule_names_and_no_trampoline(self):
+        """Only the schedule and the cancel of a timer may call the reader. In a
+        trampoline its raise would be lost in the call-back, and a reply that called it
+        would raise where the rule has named no reader for it."""
+        self.edit("    def _on_entry(self, clientd, buffer, length, header):\n",
+                  "    def _on_entry(self, clientd, buffer, length, header):\n        _int64(length, 'length')\n")
+        self.edit("    def reply(self, session_id, message):\n",
+                  "    def reply(self, session_id, message):\n        _int64(session_id, 'session_id')\n")
         found = lint.findings(self.tmp)
-        self.assertTrue(found)
-        for name in ("ClusterService.schedule_timer", "ClusterService.cancel_timer"):
-            self.assertTrue(any(name in f and "calls _int64" in f and "threading" in f for f in found), found)
-        self.assertTrue(all("calls _int64" in f for f in found), found)
+        self.assertEqual(len(found), 2, found)
+        for name in ("ClusterService._on_entry", "ClusterService.reply"):
+            self.assertTrue(any(name in f and "calls _int64" in f and "raises" in f for f in found), found)
+
+    def test_the_argument_reader_reached_through_a_helper_is_a_raise(self):
+        self.edit("def _int64(value, name):\n",
+                  "def _id(value):\n    return _int64(value, 'correlation_id')\n\n\ndef _int64(value, name):\n")
+        self.edit(self.CANCEL_TIMER,
+                  "        return self._abi.cavalry_cluster_service_cancel_timer(self._handle, _id(correlation_id))\n")
+        [finding] = lint.findings(self.tmp)
+        self.assertIn("ClusterService.cancel_timer", finding)
+        self.assertIn("calls _id", finding)
 
     def test_an_argument_reader_the_package_does_not_have_is_a_stale_rule(self):
         self.edit("def _int64(value, name):\n", "def _int64_argument(value, name):\n")

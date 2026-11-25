@@ -493,16 +493,18 @@ _INT64_MAX = 2 ** 63 - 1
 
 def _int64(value, name):
     # The argument reader of a cluster service's timers: `value` when it is an int64,
-    # and otherwise a raise before the ABI is called. ctypes refuses a value that is no
-    # `int` by itself, and passes an `int` outside the range as its low 64 bits, another
-    # id or another deadline, with nothing said: a schedule would then answer for a
-    # timer the program did not name, or one due at once. Two comparisons on the path
-    # of a call that is given an int64; the message is built on the refusal alone.
-    if not isinstance(value, int):
-        raise TypeError(f"{name}: an int expected, an int64, and {value!r} is a {type(value).__name__}")
+    # and otherwise a raise before the ABI is called. ctypes passes an `int` outside the
+    # range as its low 64 bits, another id or another deadline, with nothing said, and
+    # so it does what an object's `__index__` gives: a schedule would then answer for a
+    # timer the program did not name, or one due at once. A `bool` is no `int` here, as
+    # it is none for a handler's action: `True` would be timer 1. The checks are all
+    # that a call given an int64 pays; a message is built on the refusal alone, and
+    # without the value's digits, which Python refuses to write for a very long int.
+    if not isinstance(value, int) or isinstance(value, bool):
+        raise TypeError(f"{name}: an int expected, an int64, and a {type(value).__name__} was given")
     if not _INT64_MIN <= value <= _INT64_MAX:
-        raise OverflowError(f"{name}: an int from -(2 ** 63) to 2 ** 63 - 1 expected, an int64, and {value} is "
-                            f"outside it; ctypes would pass its low 64 bits, another value")
+        raise OverflowError(f"{name}: an int from -(2 ** 63) to 2 ** 63 - 1 expected, an int64, and the one given "
+                            f"takes {value.bit_length()} bits; ctypes would pass its low 64 bits, another value")
     return value
 
 
@@ -1428,9 +1430,9 @@ class ClusterService:
         1 hands its program no timer, so the two would compute two states from one log.
         From outside the handler it is -1, with `CAVALRY_ERR_CLUSTER_NO_ENTRY`. An id or
         a deadline that is no int64 is refused before the ABI is called, inside the
-        handler or outside it: `TypeError` for a value that is no `int`, a `float`
-        among them, and `OverflowError` for an `int` outside the int64 range, which
-        ctypes would pass as another value. One ABI call, which allocates nothing and
+        handler or outside it: `TypeError` for a value that is no `int`, a `float` and
+        a `bool` among them, and `OverflowError` for an `int` outside the int64 range,
+        which ctypes would pass as another value. One ABI call, which allocates nothing and
         waits for nothing: the service tells its member after the handler has taken the
         entry, in the poll (`poll`)."""
         return self._abi.cavalry_cluster_service_schedule_timer(
@@ -1492,7 +1494,7 @@ class ClusterService:
         that its driver closed, `Client.closed()` giving the reason, as when the
         member's driver has stopped, is -1 with `CAVALRY_ERR_CLOSED` as `fault()`'s
         code, at every poll: a program's loop ends on it. A poll the ABI refuses before
-        it reads is -1 too, with the thread's error and `fault()` left as it was:
+        it reads is -1 too, with the thread's error set and `fault()` left as it was:
         `CAVALRY_ERR_NULL` after the program's own `Client.close()`, which freed the
         client, and `CAVALRY_ERR_POLLING` from a handler, below. A timer event whose
         timer is not pending, or not yet due, is taken and handed to no handler, so the

@@ -390,8 +390,14 @@ class Package(unittest.TestCase):
         self.assertEqual(abi.calls, [("schedule", 2, most, least), ("schedule", 2, 0, 1_700_000_000_050),
                                      ("schedule", 2, 7, 7), ("cancel", 2, least), ("cancel", 2, 7)])
         made = list(abi.calls)
+        class Indexed:
+            def __index__(self):
+                return 7
+
         for refused, error in ((most + 1, OverflowError), (least - 1, OverflowError), (2 ** 64 + 5, OverflowError),
-                               (1.5, TypeError), (7.0, TypeError), ("7", TypeError), (None, TypeError)):
+                               (10 ** 5000, OverflowError),  # no digits in the message: Python writes none this long
+                               (1.5, TypeError), (7.0, TypeError), ("7", TypeError), (None, TypeError),
+                               (True, TypeError), (False, TypeError), (Indexed(), TypeError)):
             for call in (lambda: service.schedule_timer(refused, 7), lambda: service.schedule_timer(7, refused),
                          lambda: service.cancel_timer(refused)):
                 with self.assertRaises(error) as raised:

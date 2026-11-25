@@ -80,6 +80,10 @@ def main():
     # 3. Every poll after it is the same answer: a loop that looks at what its poll
     # returned ends.
     for after in range(1, POLLS_AFTER + 1):
+        # The thread's error to another code first: a success clears nothing, so without
+        # this the code read below could be the first failed poll's.
+        if abi.cavalry_committed_log_entry_position(None) != -1 or abi.cavalry_errcode() != _abi.CAVALRY_ERR_NULL:
+            fail(f"the position of a null header did not answer -1 with CAVALRY_ERR_NULL: {abi.cavalry_errcode()}")
         taken = service.poll(on_entry, 10)
         errcode = abi.cavalry_errcode()
         code = service.fault()[0]
