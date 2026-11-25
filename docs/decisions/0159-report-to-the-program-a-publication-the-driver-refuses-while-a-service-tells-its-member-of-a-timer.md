@@ -46,10 +46,8 @@ commands it refuses, `client_protocol.errors`, counts both.
 The page also says what bounds the messages of one read, which it left to be
 worked out: the cancels a service holds and its timers, 2,048 together, each sent
 once, the cancels first; a read stops at the first message the stream does not
-take, and the rest wait for a later read in the same order. The library had
-stopped at 64 messages a read, a bound that was on no page and that could hold a
-schedule timer back behind cancels on a stream that would have taken it. That
-bound is gone.
+take, and the rest wait for a later read in the same order. The library holds one
+read to that bound and to no other.
 
 `spec/c-abi.md` says what a timer event is on each side: `_OTHER` through the C
 ABI at version 6, every one, and in Rust `Entry::Timer` for the one handed over.

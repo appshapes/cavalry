@@ -171,10 +171,12 @@ fn values_of(committed: &Committed<'_>) -> cavalry_cluster_entry_values_t {
         // The poll ends after it, and the program gives its state once the poll has
         // returned (ADR 0131, ADR 0146).
         Entry::Snapshot => (CAVALRY_CLUSTER_ENTRY_SNAPSHOT, -1, -1, false),
-        // A timer that the program scheduled: no program behind this version of
-        // the C ABI can schedule one, so none is handed over as such, and every
-        // timer event reaches here as `Other`. The version that gives the calls
-        // names the entry (ADR 0151).
+        // A timer event is an entry of no kind at this version of the C ABI,
+        // whichever way it reaches here (`spec/c-abi.md`, "Constants"; ADR 0159).
+        // One the service passes over comes as `Other`. One handed over comes as
+        // `Timer`: no program behind this version can schedule a timer, but a C
+        // service that restored a snapshot holding timers has them pending. The
+        // version that gives the calls names the entry (ADR 0151).
         Entry::Timer { .. } | Entry::Other => (CAVALRY_CLUSTER_ENTRY_OTHER, -1, -1, false),
     };
     cavalry_cluster_entry_values_t {
