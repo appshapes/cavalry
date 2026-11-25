@@ -45,7 +45,11 @@
 //!   is counted, and more than one such seed in twenty fails the test.
 //!
 //! Each run of `just test` searches the seeds of [`SEEDS`]. A wider search names its
-//! own: `TIMER_SEARCH_FROM`, `TIMER_SEARCH_COUNT` and `TIMER_SEARCH_MS`.
+//! own: `TIMER_SEARCH_FROM`, `TIMER_SEARCH_COUNT` and `TIMER_SEARCH_MS`. The test's
+//! last asserts are over all the seeds of a run: that they reach what the search is
+//! for, a service started again among it, and that no more than one in twenty ends
+//! with no settled quorum. A run of one seed may fail them with no check failed, so
+//! read such a run by the lines it prints, the seed's own and the run's summary.
 
 mod elected_cluster;
 
@@ -723,12 +727,14 @@ fn search(seed: u64, length_ms: u64) -> Drawn {
     // one log, every service has read all of it and has told its member everything,
     // and every member has read what it was told.
     //
-    // A member whose election is not closed by now is left out, and counted: seed
-    // 101 leaves one that asks its leader for a catch-up every ten seconds and is
-    // sent none, with nothing cut and nothing lost, which is the cluster's to explain
-    // and no timer's (work item 420). Seed 23 leaves two, beside a leader whose log
-    // no quorum holds: a cluster that commits nothing hands no timer over, so the
-    // seed's last checks are not made, and it is counted.
+    // A member whose election is not closed by now is left out, and counted: that is
+    // the cluster's to explain and no timer's (work item 420). Seeds of earlier forms
+    // of this search left one out, a member that asked its leader for a catch-up every
+    // ten seconds and was sent none, with nothing cut and nothing lost (ADR 0151,
+    // "Evidence"); seed 101 was one of them, and at this form it leaves none. Seed 23
+    // leaves two, beside a leader whose log no quorum holds: a cluster that commits
+    // nothing hands no timer over, so none of the seed's last checks is made, and it
+    // is counted.
     let settled = |cluster: &Cluster, member: i32| {
         cluster.election_state(member) == Some(ElectionState::Closed)
     };
