@@ -705,11 +705,15 @@ service adds its counters ("Counters", the ones a service adds) before its
 publications, at the first of its first snapshot, the first thing it has to
 tell its member of a timer and the first timer event it passes over ("The
 service", "Timers"), so that a
-publication the driver refuses there is counted. A counter that the
-driver refuses is the one failure that is not counted: there is no counter yet to
-count it in, the service reports it to its program, and its next snapshot, or its
-next read with something to tell of a timer or an event to pass over, adds the
-counters again. A
+publication the driver refuses at a snapshot is counted, as that snapshot's
+failure. Two failures are counted in no counter of the service's: a counter that
+the driver refuses, for which there is no counter yet, and the publication on the
+consensus module stream when the driver refuses it at a read, where the service
+has something to tell of a timer or an event to pass over and no snapshot fails.
+The service reports each to its program, as the error of that snapshot or that
+read, and its next snapshot, or its next read with something to tell of a timer or
+an event to pass over, adds what is missing. The driver counts every command it
+refuses (`client_protocol.errors`; ADR 0159). A
 snapshot whose ack the stream took is counted in `cluster.service_snapshots_taken`.
 
 **The member's list of a service's snapshots.** A member subscribes to the consensus

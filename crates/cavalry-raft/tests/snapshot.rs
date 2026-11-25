@@ -1978,6 +1978,8 @@ struct Service {
     gives: bool,
     /// What each call of `snapshot` answered, with the position it was for.
     taken: Vec<(i64, bool)>,
+    /// Each timer the program was handed: the position of its event, and its id.
+    handed: Vec<(i64, i64)>,
 }
 
 impl Service {
@@ -1996,6 +1998,7 @@ impl Service {
             state: Vec::new(),
             gives: true,
             taken: Vec::new(),
+            handed: Vec::new(),
         }
     }
 
@@ -2027,12 +2030,40 @@ impl Service {
     /// One poll: the program adds each session message's payload to its state.
     fn poll(&mut self) -> usize {
         let state = &mut self.state;
+        let handed = &mut self.handed;
         self.service
             .poll(
                 &mut self.client,
-                |committed, _| {
-                    if let Entry::SessionMessage { payload, .. } = committed.entry {
-                        state.extend_from_slice(payload);
+                |committed, replies| {
+                    match committed.entry {
+                        // A message that schedules a timer, `T`, an id and how long
+                        // after the entry's time it is due; one that cancels one,
+                        // `C` and an id; and any other, which is the program's state.
+                        Entry::SessionMessage { payload, .. }
+                            if payload.len() == 17 && payload[0] == b'T' =>
+                        {
+                            let number = |at: usize| {
+                                i64::from_le_bytes(payload[at..at + 8].try_into().unwrap())
+                            };
+                            replies
+                                .schedule_timer(number(1), committed.timestamp + number(9))
+                                .expect("room for a timer");
+                        }
+                        Entry::SessionMessage { payload, .. }
+                            if payload.len() == 9 && payload[0] == b'C' =>
+                        {
+                            replies.cancel_timer(i64::from_le_bytes(
+                                payload[1..9].try_into().unwrap(),
+                            ));
+                        }
+                        Entry::SessionMessage { payload, .. } => state.extend_from_slice(payload),
+                        // A timer handed over is part of the state, as what a program
+                        // does at one is.
+                        Entry::Timer { correlation_id } => {
+                            handed.push((committed.position, correlation_id));
+                            state.extend_from_slice(&correlation_id.to_le_bytes());
+                        }
+                        _ => {}
                     }
                     Action::Continue
                 },
@@ -3913,6 +3944,166 @@ fn a_leader_appends_one_event_for_each_due_timer_it_is_told_of_and_a_follower_no
     client.close().expect("the client closes");
     drop(follower_stream);
     beside_follower.close().expect("the client closes");
+    for member in members {
+        stop(member);
+    }
+}
+
+/// A session message that schedules the timer `id` for `after_ms` past the entry's
+/// own time, as the services of these tests read it.
+fn schedule_timer(id: i64, after_ms: i64) -> Vec<u8> {
+    let mut payload = vec![b'T'];
+    payload.extend_from_slice(&id.to_le_bytes());
+    payload.extend_from_slice(&after_ms.to_le_bytes());
+    payload
+}
+
+/// Offers the leader, `members[0]`, one payload, through back pressure.
+fn offer_payload(members: &mut [Member], payload: &[u8]) {
+    loop {
+        match members[0].module.offer(payload) {
+            Ok(()) => break,
+            Err(RaftError::Offer(Refused::BackPressured)) => {
+                for member in members.iter_mut() {
+                    member.module.do_work().expect("the member's duty cycle");
+                }
+            }
+            Err(other) => panic!("{other}"),
+        }
+    }
+}
+
+/// A timer that a program schedules is handed to it once, at one position beside
+/// every member, with nothing between the program and the cluster but the library
+/// and the members (`spec/cluster.md`, "The service", "Timers"; ADR 0151): the
+/// service tells its member, the leader appends the event when the timer is due,
+/// and every member's service is handed it. A service that starts from a snapshot
+/// holds the timers that were pending at it, and is handed one of them where every
+/// other service is. And a timer that is pending when its leader stops is handed
+/// over under the next leader, whose member was told of it by its own service.
+#[test]
+fn a_timer_is_handed_over_once_at_one_position_across_a_snapshot_and_a_leaders_stop() {
+    let dir = TestDir::new("timers-through");
+    let members_string = members_string();
+    let mut members: Vec<Member> = [1, 0, 2]
+        .into_iter()
+        .map(|id| start_member(dir.path(), &members_string, id))
+        .collect();
+    run_until_led(&mut members, -1);
+    let mut services: Vec<Service> = members.iter().map(Service::beside).collect();
+
+    // A timer due in 200 ms, and one due in 6 s.
+    offer_payload(&mut members, &schedule_timer(7, 200));
+    offer_payload(&mut members, &schedule_timer(9, 6_000));
+    run_with_services(
+        &mut members,
+        &mut services,
+        "every service is handed timer 7",
+        |_, services| services.iter().all(|s| !s.handed.is_empty()),
+    );
+    let first = services[0].handed.clone();
+    assert_eq!(first.len(), 1);
+    assert_eq!(first[0].1, 7);
+    for service in &services {
+        assert_eq!(service.handed, first, "member {}", service.id);
+    }
+    // The leader appended one event, and no follower any.
+    assert_eq!(members[0].module.timer_counts().0.events, 1);
+    for member in &members[1..] {
+        assert_eq!(member.module.timer_counts().0.events, 0);
+    }
+
+    // A snapshot while timer 9 is pending, and a service that starts from it beside
+    // a follower: it holds the timer without having read the entry that scheduled
+    // it, and is handed its event where the others are.
+    let position = snapshot_with_services(&mut members, &mut services);
+    let follower = services.remove(2);
+    let follower_id = follower.id;
+    follower.close();
+    let beside = members
+        .iter()
+        .position(|m| m.module.member_id() == follower_id)
+        .expect("the follower");
+    let (again, restored) = Service::restored_beside(&mut members, beside);
+    assert!(matches!(restored, Restored::State(_)), "{restored:?}");
+    assert_eq!(again.service.position(), position);
+    services.push(again);
+    run_with_services(
+        &mut members,
+        &mut services,
+        "every service is handed timer 9",
+        |_, services| {
+            services
+                .iter()
+                .all(|s| s.handed.iter().any(|(_, id)| *id == 9))
+        },
+    );
+    let ninth = *services[0]
+        .handed
+        .iter()
+        .find(|(_, id)| *id == 9)
+        .expect("timer 9");
+    assert!(ninth.0 >= position, "after the snapshot");
+    for service in &services[..2] {
+        assert_eq!(service.handed, [first[0], ninth], "member {}", service.id);
+    }
+    assert_eq!(
+        services[2].handed,
+        [ninth],
+        "the service that started from the snapshot is handed what follows it"
+    );
+    // Every program is in one state: the restored one took its from the snapshot.
+    assert_eq!(services[0].state, services[1].state);
+    assert_eq!(services[0].state, services[2].state);
+
+    // A timer due in 2 s, and the leader stops with its service once every service
+    // has taken the entry that scheduled it. The next leader's member was told of
+    // the timer by the service beside it, and appends its event.
+    offer_payload(&mut members, &schedule_timer(11, 2_000));
+    let end = run_until_settled(&mut members, 0);
+    read_to(&mut members, &mut services, end);
+    let term = members[0].module.leadership_term_id();
+    let leader = members.remove(0);
+    let leader_id = leader.module.member_id();
+    let leaders = services
+        .iter()
+        .position(|s| s.id == leader_id)
+        .expect("the leader's service");
+    services.remove(leaders).close();
+    meanwhile(&mut members, || stop(leader));
+    run_until_led(&mut members, term);
+    run_with_services(
+        &mut members,
+        &mut services,
+        "both services are handed timer 11 under the next leader",
+        |_, services| {
+            services
+                .iter()
+                .all(|s| s.handed.iter().any(|(_, id)| *id == 11))
+        },
+    );
+    let eleventh: Vec<(i64, i64)> = services
+        .iter()
+        .map(|s| *s.handed.iter().find(|(_, id)| *id == 11).expect("timer 11"))
+        .collect();
+    assert_eq!(eleventh[0], eleventh[1], "one position beside both members");
+    for service in &services {
+        assert_eq!(
+            service.handed.iter().filter(|(_, id)| *id == 11).count(),
+            1,
+            "member {}",
+            service.id
+        );
+    }
+    assert_eq!(
+        members[0].module.timer_counts().0.events,
+        1,
+        "the next leader appended the event"
+    );
+
+    for service in services {
+        service.close();
+    }
     for member in members {
         stop(member);
     }

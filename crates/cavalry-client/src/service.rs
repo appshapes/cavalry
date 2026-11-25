@@ -19,6 +19,16 @@
 //! [`ClusterService::restore`], before the first poll, starts the service from the
 //! newest snapshot its member lists: the program is given its state back, and the
 //! polls read the log from that snapshot's position (ADR 0132).
+//!
+//! A program has timers (`spec/cluster.md`, "Timers"; ADR 0151). Inside a handler
+//! [`Replies::schedule_timer`] and [`Replies::cancel_timer`] change the service's
+//! table of pending timers, and the handler is handed [`Entry::Timer`] for a timer
+//! whose event the log holds at or after its deadline, once. The table is a
+//! function of the entries the handler took, so every member's service decides the
+//! same from the same log. After a poll's entries the service tells the member on
+//! its driver what they changed, and every pending timer again each second; the
+//! member's leader appends the events. The pending timers are in a snapshot, and
+//! a start from one holds them.
 
 use std::sync::Arc;
 use std::time::Duration;
@@ -1014,6 +1024,12 @@ impl Replies<'_> {
     /// changes nothing. A program with more deadlines than that keeps them in its
     /// own state and schedules one timer for the earliest.
     ///
+    /// A program schedules its first timer only once every member of its cluster,
+    /// with the service beside it, runs version 2 of the cluster protocol, and from
+    /// that entry on no member is stepped back to version 1: a service of version 1
+    /// hands its program no timer, so the two would compute two states from one
+    /// log. Nothing in a member checks it (`spec/cluster.md`, "Versions and the upgrade").
+    ///
     /// The call sends nothing and waits for nothing: the service tells its member
     /// after the handler has taken the entry. A handler that answers
     /// [`Action::Abort`] is handed the entry again with every timer as it was
@@ -1499,6 +1515,16 @@ impl ClusterService {
     /// recording's end. Nothing is allocated, and no command is sent, for a session
     /// message. An entry the service would answer costs two loads of the member's
     /// counters.
+    ///
+    /// After its entries the poll tells the member of the program's timers
+    /// (`spec/cluster.md`, "What a service tells its member"). The first time it
+    /// has something to tell, or a timer event it passed over to count, it adds
+    /// the service's five counters and its publication on the consensus module
+    /// stream, six commands to the driver, once in a service's life. A refusal of
+    /// one is this poll's error, returned after the entries the handler took are
+    /// taken, and the next such poll adds what is missing (ADR 0159). A poll then
+    /// offers the stream at most 2,048 messages, and none for a program that
+    /// schedules no timer.
     ///
     /// A poll of a closed client is one error, [`ClusterError::Client`] holding
     /// [`ClientError::Closed`] with the reason [`Cavalry::closed`] gives, whatever

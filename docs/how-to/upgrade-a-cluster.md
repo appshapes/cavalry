@@ -85,6 +85,12 @@ has why.
 To step back to the older build, do the same steps with the older build's binary.
 No file that a member keeps differs between version 0 and version 1.
 
+A cluster whose application schedules timers is not stepped back to a build of
+version 1 of the cluster protocol once the first timer is scheduled, and the
+application schedules none until every member, with the service beside it, runs
+version 2: a service of version 1 hands its program no timer, so its program would
+compute another state from the same log (`spec/cluster.md`, "Versions and the upgrade").
+
 ## How to verify it worked
 
 - `cavalry doctor` on each member's directory prints one `note cluster-member`
