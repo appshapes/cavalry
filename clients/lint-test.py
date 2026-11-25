@@ -1316,7 +1316,7 @@ class Clients(unittest.TestCase):
         self.assertIn("starts a thread", finding)
 
     def test_a_throw_outside_the_compilers_catch_in_jvm_fails(self):
-        self.edit_jvm("    public long tryClaim(int length) {\n        try {\n",
+        self.edit_jvm("    public long tryClaim(int length) {\n        if (length < 0) {\n            Abi.negative(\"length\", length);\n        }\n        try {\n",
                       "    public long tryClaim(int length) {\n        if (length < 0) throw new IllegalArgumentException(\"no\");\n"
                       "        try {\n")
         found = lint.findings(self.tmp)
@@ -1373,8 +1373,8 @@ class Clients(unittest.TestCase):
         self.assertTrue(any(f.startswith("jvm: Header.sessionId ") and "throws" in f for f in found), found)
 
     def test_a_call_to_check_outside_the_compilers_catch_in_jvm_fails(self):
-        self.edit_jvm("    public long tryClaim(int length) {\n        try {\n",
-                      "    public long tryClaim(int length) {\n        Abi.check(\"cavalry_publication_try_claim\", 1);\n        try {\n")
+        self.edit_jvm("    public long tryClaim(int length) {\n        if (length < 0) {\n            Abi.negative(\"length\", length);\n        }\n        try {\n",
+                      "    public long tryClaim(int length) {\n        if (length < 0) {\n            Abi.negative(\"length\", length);\n        }\n        Abi.check(\"cavalry_publication_try_claim\", 1);\n        try {\n")
         [finding] = lint.findings(self.tmp)
         self.assertIn("Publication.tryClaim", finding)
         self.assertIn("calls Abi.check", finding)
@@ -1392,6 +1392,52 @@ class Clients(unittest.TestCase):
         self.assertIn("Header.sessionId", finding)
         self.assertIn("calls Abi.lastError", finding)
         self.assertIn("builds CavalryException", finding)
+
+    def test_the_jvm_reader_of_a_count_is_for_the_functions_named_before_the_abi_call(self):
+        """`Abi.negative` throws for a count or a length below zero, before the ABI is
+        called, and its throw is none on the path of the claim and the four polls, which
+        the rule names with it (ADR 0164). The allowance is that and no more: another
+        per-message method that calls it, a call of it after the method's ABI call, a
+        poll's among them, and any other form in the reader, are findings; and a rule
+        that names a reader the package does not have is stale."""
+        self.assertEqual(lint.findings(self.tmp), [])
+        # Another per-message method, and a trampoline: no reader is named for them.
+        self.edit_jvm("    public long offer(MemorySegment message) {\n        try {\n",
+                      "    public long offer(MemorySegment message) {\n        Abi.negative(\"length\", 0);\n        try {\n")
+        [finding] = lint.findings(self.tmp)
+        self.assertTrue("Publication.offer" in finding and "calls Abi.negative" in finding and "throws" in finding, finding)
+        self.setUp()
+        upcall = "    void onFragment(MemorySegment clientd, MemorySegment buffer, long length, MemorySegment frame) {\n"
+        self.edit_jvm(upcall, upcall + "        Abi.negative(\"length\", 0);\n", file="Subscription.java")
+        found = lint.findings(self.tmp)
+        self.assertTrue(found and all("calls Abi.negative" in f and "throws" in f for f in found), found)
+        # After the ABI's call: in the claim, and in a poll, which may raise there for its
+        # handler and for nothing else.
+        self.setUp()
+        claim = "            long position = (long) Abi.cavalry_publication_try_claim.invokeExact(handle, (long) length, claimStruct);\n"
+        self.edit_jvm(claim, claim + "            Abi.negative(\"length\", length);\n")
+        [finding] = lint.findings(self.tmp)
+        self.assertTrue("Publication.tryClaim" in finding and "calls the argument reader Abi.negative" in finding
+                        and "not before its call of the ABI" in finding, finding)
+        self.setUp()
+        poll = "            count = (int) Abi.cavalry_subscription_poll.invokeExact(handle, stub, MemorySegment.NULL, (long) fragmentLimit);\n"
+        self.edit_jvm(poll, poll + "            Abi.negative(\"fragmentLimit\", fragmentLimit);\n", file="Subscription.java")
+        [finding] = lint.findings(self.tmp)
+        self.assertTrue("Subscription.poll" in finding and "not before its call of the ABI" in finding, finding)
+        # The reader's own throw and nothing else.
+        self.setUp()
+        reader = "    static void negative(String name, int value) {\n"
+        self.edit_jvm(reader, reader + "        synchronized (Abi.class) {\n        }\n", file="Abi.java")
+        found = lint.findings(self.tmp)
+        for name in ("Publication.tryClaim", "Subscription.poll", "CommittedLog.poll", "ClusterSession.poll",
+                     "ClusterService.poll"):
+            self.assertTrue(any(name in f and "Abi.negative" in f and "synchronized" in f for f in found), found)
+        self.assertEqual(len(found), 5, found)
+        # A reader the package does not have.
+        self.setUp()
+        self.edit_jvm(reader, "    static void belowZero(String name, int value) {\n", file="Abi.java")
+        found = lint.findings(self.tmp)
+        self.assertTrue(any("the argument reader Abi.negative is not in" in f for f in found), found)
 
     # A cluster session and a cluster service in the JVM client (ADR 0124).
 
@@ -1529,6 +1575,48 @@ class Clients(unittest.TestCase):
 
 
     # The .NET client's package, read by the tokenizer (clients/dotnet/README.md).
+
+    def test_the_dotnet_reader_of_a_count_is_for_the_functions_named_before_the_abi_call(self):
+        """`Abi.Negative` throws for a count or a length below zero, before the ABI is
+        called, and its throw is none on the path of the claim and the four polls, which
+        the rule names with it (ADR 0164), as the JVM client's `Abi.negative`. Another
+        per-message member that calls it, a call of it after the member's ABI call, a
+        poll's among them, and any other form in the reader, are findings; and a rule
+        that names a reader the package does not have is stale."""
+        self.assertEqual(lint.findings(self.tmp), [])
+        offer = "    public long Offer(ReadOnlySpan<byte> message)\n    {\n"
+        self.edit_dotnet(offer, offer + "        Abi.Negative(\"length\", 0);\n")
+        [finding] = lint.findings(self.tmp)
+        self.assertTrue("Publication.Offer" in finding and "calls Abi.Negative" in finding and "throws" in finding, finding)
+        self.setUp()
+        deliver = "    private void Deliver(byte* buffer, nuint length, void* frame)\n    {\n"
+        self.edit_dotnet(deliver, deliver + "        Abi.Negative(\"length\", 0);\n", file="Subscription.cs")
+        found = lint.findings(self.tmp)
+        self.assertTrue(found and all("calls Abi.Negative" in f and "throws" in f for f in found), found)
+        self.setUp()
+        claim = "        long position = Abi.cavalry_publication_try_claim(handle, (nuint) length, ref claim);\n"
+        self.edit_dotnet(claim, claim + "        Abi.Negative(nameof(length), length);\n")
+        [finding] = lint.findings(self.tmp)
+        self.assertTrue("Publication.TryClaim" in finding and "calls the argument reader Abi.Negative" in finding
+                        and "not before its call of the ABI" in finding, finding)
+        self.setUp()
+        poll = ("        int count = Abi.cavalry_subscription_poll(handle, &OnFragment, GCHandle.ToIntPtr(self), "
+                "(nuint) fragmentLimit);\n")
+        self.edit_dotnet(poll, poll + "        Abi.Negative(nameof(fragmentLimit), fragmentLimit);\n", file="Subscription.cs")
+        [finding] = lint.findings(self.tmp)
+        self.assertTrue("Subscription.Poll" in finding and "not before its call of the ABI" in finding, finding)
+        self.setUp()
+        reader = "    internal static void Negative(string name, int value)\n    {\n"
+        self.edit_dotnet(reader, reader + "        lock (typeof(Abi))\n        {\n        }\n", file="Abi.cs")
+        found = lint.findings(self.tmp)
+        for name in ("Publication.TryClaim", "Subscription.Poll", "CommittedLog.Poll", "ClusterSession.Poll",
+                     "ClusterService.Poll"):
+            self.assertTrue(any(name in f and "Abi.Negative" in f and "lock" in f for f in found), found)
+        self.assertEqual(len(found), 5, found)
+        self.setUp()
+        self.edit_dotnet(reader, "    internal static void BelowZero(string name, int value)\n    {\n", file="Abi.cs")
+        found = lint.findings(self.tmp)
+        self.assertTrue(any("the argument reader Abi.Negative is not in" in f for f in found), found)
 
     def test_a_lock_in_a_dotnet_per_message_method_fails(self):
         self.edit_dotnet("    public long TryClaim(int length)\n    {\n",
