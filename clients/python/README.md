@@ -544,35 +544,38 @@ On macOS on Apple silicon the second command prints
 
 `cavalry_package.py` is the package's build backend, the program a Python installer
 calls to build a package (PEP 517), and `pyproject.toml` beside it, the package's
-manifest, names it. So an installer builds the same wheel, byte for byte under one
-Python:
+manifest, names it. So an installer builds the same wheel, byte for byte:
 
 ```sh
 python3 -m pip wheel --no-deps --no-index --wheel-dir target/package clients/python
 ```
 
-Both files are generated, like the rest of the package, and the backend uses Python's
+Both files are generated, like the rest of the package, and so is `LICENSE` beside
+them, a copy of the repository's, which the wheel carries. The backend uses Python's
 standard library alone: the build installs nothing and asks no package index for
-anything. The library it puts in the wheel is the file at `CAVALRY_FFI_LIBRARY` when
-that is set, and `target/release/libcavalry_ffi` of the checkout otherwise. A pip
-before 21.3 builds from a copy of `clients/python`, from which the checkout's
-`target/` cannot be reached, so with such a pip set the variable to the library's
-path. The package has no source distribution: the library is Rust, and a source
-distribution would hold none.
+anything. Everything the wheel holds but the library is in `clients/python`. The
+library it puts in the wheel is the file at `CAVALRY_FFI_LIBRARY` when that is set,
+and `target/release/libcavalry_ffi` of the checkout otherwise. A pip before 21.3
+builds from a copy of `clients/python`, from which the checkout's `target/` cannot be
+reached, so with such a pip set the variable to the library's path. The package has
+no source distribution: the library is Rust, and a source distribution would hold
+none.
 
 A wheel with a library inside runs on one platform, and the last part of its file
-name, the platform tag, says which. The backend reads the tag from the library, never
-from the machine that builds:
+name, the platform tag, says which. The backend reads the tag from the library's own
+bytes, never from the machine that builds. A shared library is a Mach-O file on macOS
+and an ELF file on Linux, and each format records what the library needs of the
+system it is loaded on:
 
 | Library | Tag | Read from |
 | --- | --- | --- |
-| Mach-O, macOS | `macosx_11_0_arm64` | The least macOS version the library's build-version load command names, and its CPU. From macOS 11 on an installer knows the tags `macosx_<major>_0` alone, so a least version of 11.3 is written as `macosx_12_0`. |
-| ELF, Linux | `manylinux_2_34_x86_64` | The newest `GLIBC_` symbol version the library asks of the libraries it loads, so the oldest glibc, the C library of most Linux systems, that it runs on (PEP 600), and its machine. |
+| Mach-O, macOS | `macosx_11_0_arm64` | The least macOS version the file says it runs on, in the part of its header named `LC_BUILD_VERSION`, and its CPU. A tag has no third number, and from macOS 11 on an installer knows the tags `macosx_<major>_0` alone, so a least version that a tag cannot say is written as the next that it can: 11.3 as `macosx_12_0`. |
+| ELF, Linux | `manylinux_2_34_x86_64` | The newest version of glibc, the C library of most Linux systems, among the versions the file asks its functions in (`GLIBC_2.34` for one that glibc 2.34 added), so the oldest glibc it runs on (PEP 600), and its machine. |
 
 The two tags are those of the wheels CI builds, on its macOS and its Linux runner. A
 library the backend has no tag for is refused, with no wheel written: one built
-for musl, the C library of Alpine Linux, one for Windows, and one for a machine other
-than x86-64 and 64-bit ARM.
+for musl, the C library of Alpine Linux, one for Windows, one for a machine other
+than x86-64 and 64-bit ARM, and a file that is not a shared library.
 
 ### Where the library is found
 
@@ -580,8 +583,9 @@ than x86-64 and 64-bit ARM.
 
 1. `libcavalry_ffi.so`, or `libcavalry_ffi.dylib` on macOS, in the package's own
    directory, beside `__init__.py`. A package installed from a wheel has it there.
-2. The path in `CAVALRY_FFI_LIBRARY`, when that is set. A path with no file is an
-   error, not a reason to look further.
+2. The path in `CAVALRY_FFI_LIBRARY`, when that is set. A path with no file at it is
+   an error, not a reason to look further. A bare name, with no directory in it, is
+   returned as it is, for the system's loader to find where it looks for libraries.
 3. `target/release/libcavalry_ffi.so`, or `.dylib`, under one of the six directories
    above the package's own, the nearest first. That is where `cargo build --release -p
    cavalry-ffi --lib` writes it in the checkout the package sits in.
@@ -600,6 +604,9 @@ from a wheel built for this platform, or build the library in the checkout, or s
 
 ### How it is installed, and how that is checked
 
+A virtual environment is a directory with a Python of its own and the packages
+installed for it alone. These two commands make one and install the wheel into it:
+
 ```sh
 python3 -m venv /tmp/cavalry-client
 /tmp/cavalry-client/bin/python -m pip install --no-index target/package/cavalry_client-*.whl
@@ -614,7 +621,7 @@ and prints the same line.
 pull request and on macOS too for every commit on `master`. It builds the wheel
 through pip, checks that the wheel holds the library `cargo` built under the tag that
 a second reader gives it, `objdump` on Linux and `otool` on macOS, installs it into a
-new environment in a directory outside the checkout, and runs the Example's program
+new virtual environment in a directory outside the checkout, and runs the Example's program
 there with neither `PYTHONPATH` nor `CAVALRY_FFI_LIBRARY` set. It fails unless the
 program prints the Example's line and the library the client names is the one inside
 the environment. Then it runs a control: the same wheel with the library taken out,
@@ -812,7 +819,7 @@ handed its entry twice at one position, and the session reads one reply.
 - `spec/c-abi.md`: the page the package wraps, function for function.
 - `clients/README.md`: how a client is generated and what every client passes.
 - `conformance/python/`: the runner and its report.
-- `docs/decisions/0165-carry-the-native-library-inside-a-clients-package-and-look-for-it-there-first.md`:
+- `docs/decisions/0166-carry-the-native-library-inside-a-clients-package-and-look-for-it-there-first.md`:
   why the wheel holds the library, why the package's own comes before
   `CAVALRY_FFI_LIBRARY`, and why the build uses no packaging tool.
 - `docs/decisions/0046-build-the-c-abi-and-the-clients-fourth.md`: the slice this

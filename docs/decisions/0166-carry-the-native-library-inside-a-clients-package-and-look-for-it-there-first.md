@@ -1,8 +1,8 @@
-# 0165. Carry the native library inside a client's package, and look for it there first
+# 0166. Carry the native library inside a client's package, and look for it there first
 
 - **Status:** Accepted
 - **Date:** 2026-11-25
-- **Invariants affected:** 3, 5, 6
+- **Invariants affected:** 5, 6
 - **Supersedes:** none
 
 ## Context
@@ -10,8 +10,10 @@
 Every client of Cavalry takes its native library, the C ABI's `libcavalry_ffi`, from a
 checkout: a path in the tree or one named in the environment. The Python and the JVM
 client have no package manifest. So nobody has seen a client installed the way a user
-installs one, and the beta's line asks for exactly that: each client's README example
-runs against its built package (ADR 0138, feature 10; work item 369). Work item 369
+installs one, and the beta's line asks for exactly that: the generated clients
+"install as each language's users expect", "with the native library inside", proved
+by "each client README's example run against its published package, on both runners"
+(ADR 0138, condition 1; its feature 10 is work item 369). Work item 369
 asks for one client's package to be built and installed in CI before the others,
 "since nothing here has tried it", and work item 469 is that part. It publishes
 nothing. The names are ruled already, on work item 369 on 2026-11-24: `cavalry-client`
@@ -44,15 +46,19 @@ For the Python client:
   and it does not hold the driver.
 - **The search order is the package's own directory, then `CAVALRY_FFI_LIBRARY`, then
   the checkout the package sits in.** An installed package so loads the library it was
-  built with whatever its environment says. A `CAVALRY_FFI_LIBRARY` that names no file
-  is an error and not a reason to look further. When nothing is found, the error
-  names every path that was tried, in order, and what to do. `Client(library_path=...)`
-  stays the way to give an installed package another library.
+  built with whatever its environment says. A `CAVALRY_FFI_LIBRARY` that is a path
+  with no file at it is an error and not a reason to look further; one that is a bare
+  name, with no directory in it, is handed to the system's loader to find, as it was
+  before. When nothing is found, the error names every path that was tried, in order,
+  and what to do. `Client(library_path=...)` stays the way to give an installed
+  package another library.
 - **The wheel is written by a build backend of the package's own, on Python's standard
   library, generated like the rest of the package.** `clients/python/pyproject.toml`
   names `clients/python/cavalry_package.py` as its PEP 517 backend with nothing to
   install first, so `pip wheel clients/python` builds the wheel and so does the file
-  run as a program. The build takes nothing from a package index.
+  run as a program. The build takes nothing from a package index, and nothing from
+  outside the package's directory but the library: the generator writes a copy of the
+  repository's `LICENSE` there, which the wheel carries.
 - **The wheel's platform tag is read from the library, never from the machine that
   builds it.** The least macOS a Mach-O library names, and the newest `GLIBC_` symbol
   version an ELF library needs. A library the backend has no tag for is refused and
@@ -80,7 +86,7 @@ For the Python client:
   builds. And what auditwheel and delocate do beyond naming the tag, copying in the
   other libraries a library needs, has nothing to copy: on Linux the library needs
   `libc.so.6`, `libgcc_s.so.1` and the loader alone (Evidence), which every glibc
-  system has and which the `manylinux` tags let a wheel leave outside. The cost is about 230 lines of
+  system has and which the `manylinux` tags let a wheel leave outside. The cost is about 260 lines of
   generated Python that read two file formats, held by tests on made-up files and by
   a second reader in the gate.
 - **The build machine's tag.** Python's `sysconfig.get_platform()` says what the
@@ -117,10 +123,13 @@ For the Python client:
 - **After it**, the same script passed there, and passed with the system's Python
   3.9.6 and its pip 21.2.4, which builds from a copy of `clients/python`: without
   `CAVALRY_FFI_LIBRARY` that build stops with the backend's error, and the script
-  names the library to the backend for that reason. The wheel built through pip and
-  the one built by the backend run as a program were the same bytes under one Python;
-  under the two Pythons they differ, 361,183 and 357,030 bytes, since the compression
-  is each Python's own zlib.
+  names the library to the backend for that reason. The copy showed a second thing.
+  The backend first took the licence from the repository's root, which a copy of the
+  package's directory cannot reach, and that pip's wheel came out without it, 357,030
+  bytes against 361,183, with nothing said. An independent read of the change found
+  it. The licence is now a generated file of the package's directory, and a directory
+  without it builds nothing. With that, the wheel is the same 361,232 bytes from both
+  Pythons, through pip and from the backend run as a program.
 - **On CI's two runners**, run 45712527335 of a throwaway branch. Linux, Ubuntu
   24.04 with Python 3.12.3, pip 24.0 and glibc 2.39: the wheel is
   `cavalry_client-0.1.0-py3-none-manylinux_2_34_x86_64.whl`, 401,968 bytes around a
@@ -153,14 +162,16 @@ For the Python client:
 - We maintain the backend's two readers. A new platform is a new tag there, with a
   made-up file in `clients/package-test.py`: Linux on musl, Windows, and a macOS
   library of two architectures are refused today, each with a message that says so.
-- The wheel carries Cavalry's `LICENSE` and no notice for the crates the library is
-  linked from. The release adds what their licences ask.
+- The wheel carries Cavalry's `LICENSE`, from the copy the generator writes into the
+  package's directory, and no notice for the crates the library is linked from. The
+  release adds what their licences ask.
 - The package's version is the workspace's, written as it stands, and the generator
   refuses a version that is not three numbers: a pre-release needs its spelling for
   Python decided first, by the release's ADR.
-- A `CAVALRY_FFI_LIBRARY` that names no file was a failure of the loader with the
-  system's message, and is now the client's error with what to do. A checkout's
-  package that set the variable to an existing file behaves as before.
+- A `CAVALRY_FFI_LIBRARY` that is a path, with a directory in it, and has no file at
+  it was a failure of the loader with the system's message, and is now the client's
+  error with what to do. One that names a file, and one that is a bare name for the
+  system's loader to find, behave as before in a checkout's package.
 - **For the other four clients** the rule is the decision's first sentence, and each
   part of work item 369 says how its package holds it. What this one taught is
   written on work item 469.

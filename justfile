@@ -151,7 +151,7 @@ quickstart:
 
 # The clients' packages, each built with the native library inside and installed as a
 # user installs it (work item 469, the first part of the release's dry run, work item
-# 369; ADR 0165). Today the Python client's: build the driver and the shared library,
+# 369; ADR 0166). Today the Python client's: build the driver and the shared library,
 # start a driver on a directory of its own, build the wheel through the package's own
 # backend, install it into a new environment outside the checkout, run the client
 # README's example there, and fail unless it prints the line the README promises with

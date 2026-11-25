@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """The Python client's package, built and installed as a user installs it, against a
 running driver; `scripts/package.sh` starts the driver and calls this (work item 469;
-ADR 0165; clients/python/README.md, "The package").
+ADR 0166; clients/python/README.md, "The package").
 
 It makes a directory outside the checkout and in it:
 

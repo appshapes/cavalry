@@ -1,17 +1,19 @@
 #!/usr/bin/env python3
-"""The tests of the Python client's package (work item 469; ADR 0165; ADR 0026): the
+"""The tests of the Python client's package (work item 469; ADR 0166; ADR 0026): the
 manifest and the build backend that `generate_python_package.py` writes, and the search
 for the library that the generated client makes.
 
-- The committed `pyproject.toml` and `cavalry_package.py` are what the generator gives,
-  with the workspace's version in both, and a version that is not three numbers is
-  refused when the package is generated.
+- The committed `pyproject.toml`, `cavalry_package.py` and `LICENSE` are what the
+  generator gives, with the workspace's version in the first two and the repository's
+  licence in the third, and a version that is not three numbers is refused when the
+  package is generated.
 - The backend reads the wheel's platform tag from the library: the least macOS of a
   made-up Mach-O library, and the newest glibc symbol version a made-up ELF library
   needs. It refuses what it has no tag for, and what it cannot read, with what to do.
 - The wheel holds the two generated files and the library, each with the hash and the
-  length its RECORD gives; two builds of one input are the same bytes; a library that
-  is not there, and a source distribution, are refused.
+  length its RECORD gives; two builds of one input are the same bytes, from the
+  package's directory in a checkout and from a copy of it alone; a library that is not
+  there, a directory without its licence, and a source distribution are refused.
 - `cavalry.find_library` looks in the package's own directory first, then at
   `CAVALRY_FFI_LIBRARY`, then in a checkout around it, and its error names every path.
 
@@ -26,6 +28,7 @@ import hashlib
 import importlib.util
 import io
 import os
+import shutil
 import struct
 import sys
 import tempfile
@@ -52,44 +55,60 @@ def load(name, path, package=False):
 backend = load("cavalry_package_under_test", os.path.join(HERE, "python", "cavalry_package.py"))
 
 
-def macho(cpu=0x0100000C, commands=((0x32, struct.pack("<IIII", 1, 11 << 16, 15 << 16, 0)),)):
-    """A 64-bit Mach-O header and its load commands, each `(command, body)`."""
+def macho(cpu=0x0100000C, commands=((0x32, struct.pack("<IIII", 1, 11 << 16, 15 << 16, 0)),), kind=6):
+    """A 64-bit Mach-O header, a dynamic library's unless `kind` says otherwise, and its
+    load commands, each `(command, body)`."""
     body = b"".join(struct.pack("<II", command, 8 + len(content)) + content for command, content in commands)
-    return struct.pack("<IiiIIIII", 0xFEEDFACF, cpu - (1 << 32) if cpu >= 1 << 31 else cpu, 0, 6, len(commands),
+    return struct.pack("<IiiIIIII", 0xFEEDFACF, cpu - (1 << 32) if cpu >= 1 << 31 else cpu, 0, kind, len(commands),
                        len(body), 0, 0) + body
 
 
-def elf(machine=62, needs=(("libc.so.6", ("GLIBC_2.2.5", "GLIBC_2.34", "GLIBC_2.17")),), identity=b"\x02\x01"):
-    """A 64-bit ELF file of three sections, the empty first one, a string table and a
-    version-needs section that asks each library of `needs` for its versions."""
+def elf(machine=62, needs=(("libc.so.6", ("GLIBC_2.2.5", "GLIBC_2.34", "GLIBC_2.17")),), identity=b"\x02\x01",
+        kind=3, count=None, last_offset=0):
+    """A 64-bit ELF file, a shared library's unless `kind` says otherwise, of four
+    sections: the empty first one, a string table that is not the version needs' own, a
+    version-needs section that asks each library of `needs` for its versions, and that
+    section's string table, which it names by its link. The entries of the version-needs
+    section lie 8 bytes apart, so that a reader must follow each entry's offset to the
+    next. `count` is the section's count of libraries when it is not the true one, and
+    `last_offset` what the last library's entry gives as the offset to the next."""
+    decoy = b"\0" + b"GLIBC_9.99\0" * 8
     strings = b"\0"
     offsets = {}
     for library, versions in needs:
         for text in (library,) + tuple(versions):
             offsets[text] = len(strings)
             strings += text.encode() + b"\0"
+    gap = b"\xff" * 8
     verneed = b""
     for index, (library, versions) in enumerate(needs):
-        following = 16 + 16 * len(versions) if index + 1 < len(needs) else 0
-        verneed += struct.pack("<HHIII", 1, len(versions), offsets[library], 16, following)
+        size = 16 + len(gap) + (16 + len(gap)) * len(versions)
+        following = size if index + 1 < len(needs) else last_offset
+        verneed += struct.pack("<HHIII", 1, len(versions), offsets[library], 16 + len(gap), following) + gap
         for at, version in enumerate(versions):
-            verneed += struct.pack("<IHHII", 0, 0, 2 + at, offsets[version], 16 if at + 1 < len(versions) else 0)
+            verneed += struct.pack("<IHHII", 0, 0, 2 + at, offsets[version],
+                                   16 + len(gap) if at + 1 < len(versions) else 0) + gap
     header_size, section_size = 64, 64
-    strings_at = header_size
-    verneed_at = strings_at + len(strings)
-    sections_at = verneed_at + len(verneed)
+    decoy_at = header_size
+    verneed_at = decoy_at + len(decoy)
+    strings_at = verneed_at + len(verneed)
+    sections_at = strings_at + len(strings)
     header = (b"\x7fELF" + identity + b"\x01" + b"\0" * 9
-              + struct.pack("<HHIQQQIHHHHHH", 3, machine, 1, 0, 0, sections_at, 0, header_size, 0, 0, section_size, 3, 1))
+              + struct.pack("<HHIQQQIHHHHHH", kind, machine, 1, 0, 0, sections_at, 0, header_size, 0, 0, section_size, 4, 1))
     sections = (struct.pack("<IIQQQQIIQQ", 0, 0, 0, 0, 0, 0, 0, 0, 0, 0)
-                + struct.pack("<IIQQQQIIQQ", 0, 3, 0, 0, strings_at, len(strings), 0, 0, 1, 0)
-                + struct.pack("<IIQQQQIIQQ", 0, 0x6FFFFFFE, 0, 0, verneed_at, len(verneed), 1, len(needs), 8, 0))
-    return header + strings + verneed + sections
+                + struct.pack("<IIQQQQIIQQ", 0, 3, 0, 0, decoy_at, len(decoy), 0, 0, 1, 0)
+                + struct.pack("<IIQQQQIIQQ", 0, 0x6FFFFFFE, 0, 0, verneed_at, len(verneed), 3,
+                              len(needs) if count is None else count, 8, 0)
+                + struct.pack("<IIQQQQIIQQ", 0, 3, 0, 0, strings_at, len(strings), 0, 0, 1, 0))
+    return header + decoy + verneed + strings + sections
 
 
 class Manifest(unittest.TestCase):
     def test_the_committed_files_are_what_the_generator_gives(self):
         files = gen_package.write_python_package()
-        self.assertEqual(sorted(files), ["cavalry_package.py", "pyproject.toml"])
+        self.assertEqual(sorted(files), ["LICENSE", "cavalry_package.py", "pyproject.toml"])
+        with open(os.path.join(HERE, "..", "LICENSE"), encoding="utf-8") as f:
+            self.assertEqual(files["LICENSE"], f.read())
         for name, content in files.items():
             with open(os.path.join(HERE, "python", name), encoding="utf-8") as f:
                 self.assertEqual(f.read(), content, f"run `python3 clients/generate.py python` and commit {name}")
@@ -124,14 +143,20 @@ class PlatformTag(unittest.TestCase):
         among = macho(commands=((0x19, b"\0" * 64), (0x32, struct.pack("<IIII", 1, 14 << 16, 0, 0)), (0x1B, b"\0" * 16)))
         self.assertEqual(backend.library_platform(among, "lib")[1], "macosx_14_0_arm64")
 
-    def test_from_macos_11_a_least_version_with_a_minor_is_the_next_majors_tag(self):
-        """An installer knows `macosx_<major>_0` alone from macOS 11 on: a library that
-        needs 11.3 tagged 11_0 would install on 11.0, where it does not load."""
-        needs_11_3 = macho(commands=((0x32, struct.pack("<IIII", 1, (11 << 16) | (3 << 8), 0, 0)),))
-        self.assertEqual(backend.library_platform(needs_11_3, "lib")[1], "macosx_12_0_arm64")
+    def test_a_least_version_that_a_tag_cannot_say_is_the_next_one_it_can(self):
+        """An installer knows `macosx_<major>_0` alone from macOS 11 on, and no tag has a
+        third number: a library that needs 11.3 tagged 11_0 would install on 11.0, where
+        it does not load."""
+        for least, tag in (((11, 3, 0), "macosx_12_0_arm64"), ((11, 0, 1), "macosx_12_0_arm64"),
+                           ((14, 0, 0), "macosx_14_0_arm64"), ((10, 9, 5), "macosx_10_10_arm64"),
+                           ((10, 9, 0), "macosx_10_9_arm64"), ((10, 15, 7), "macosx_10_16_arm64")):
+            version = (least[0] << 16) | (least[1] << 8) | least[2]
+            library = macho(commands=((0x32, struct.pack("<IIII", 1, version, 0, 0)),))
+            self.assertEqual(backend.library_platform(library, "lib")[1], tag, least)
 
     def test_a_mach_o_library_with_no_tag_is_refused(self):
         for library, said in ((macho(cpu=7), "cpu type 0x7"),
+                              (macho(kind=2), "a Mach-O file of type 2, not a dynamic library (6)"),
                               (macho(commands=((0x32, struct.pack("<IIII", 2, 17 << 16, 0, 0)),)), "names no least macOS version"),
                               (macho(commands=()), "names no least macOS version"),
                               (macho()[:36], "could not be read as a Mach-O library"),
@@ -154,17 +179,27 @@ class PlatformTag(unittest.TestCase):
     def test_an_elf_library_with_no_tag_is_refused(self):
         whole = elf()
         for library, said in ((elf(machine=40), "machine 40"),
+                              (elf(kind=2), "an ELF file of type 2, not a shared library (3)"),
                               (elf(identity=b"\x01\x01"), "not 64-bit little-endian"),
                               (elf(identity=b"\x02\x02"), "not 64-bit little-endian"),
                               (elf(needs=(("libgcc_s.so.1", ("GCC_3.0",)),)), "asks for no GLIBC symbol version"),
                               (elf(needs=()), "asks for no GLIBC symbol version"),
                               (whole[:len(whole) - 70], "could not be read as an ELF library"),
+                              (elf(count=2, last_offset=1 << 30), "could not be read as an ELF library"),
                               (whole[:30], "could not be read as an ELF library")):
             with self.assertRaises(backend.PackageError) as raised:
                 backend.library_platform(library, "target/lib")
             self.assertIn(said, str(raised.exception))
             self.assertIn("target/lib", str(raised.exception))
             self.assertIn("clients/python/README.md#the-package", str(raised.exception))
+
+    def test_a_count_that_is_wrong_does_not_keep_the_reader_past_the_lists_end(self):
+        """An entry whose offset to the next is zero is the last, whatever the section's
+        count says: a count of four thousand million must not be read that many times."""
+        self.assertEqual(backend.library_platform(elf(count=0xFFFFFFFF), "lib")[1], "manylinux_2_34_x86_64")
+        # And a count that is too small ends the list early: the reader trusts neither alone.
+        two = (("libm.so.6", ("GLIBC_2.27",)), ("libc.so.6", ("GLIBC_2.34",)))
+        self.assertEqual(backend.library_platform(elf(needs=two, count=1), "lib")[1], "manylinux_2_27_x86_64")
 
     def test_a_file_that_is_neither_is_refused(self):
         for library in (b"", b"MZ\x90\0" + b"\0" * 60, struct.pack(">I", 0xCAFEBABE) + b"\0" * 60):
@@ -194,6 +229,8 @@ class Wheel(unittest.TestCase):
                 for source in ("__init__.py", "_abi.py"):
                     with open(os.path.join(HERE, "python", "cavalry", source), "rb") as f:
                         self.assertEqual(wheel.read(f"cavalry/{source}"), f.read())
+                with open(os.path.join(HERE, "..", "LICENSE"), "rb") as f:
+                    self.assertEqual(wheel.read(f"{info}/LICENSE"), f.read())
                 self.assertEqual(wheel.read(f"{info}/WHEEL").decode().splitlines(),
                                  ["Wheel-Version: 1.0", f"Generator: cavalry_package {backend.VERSION}",
                                   "Root-Is-Purelib: false", "Tag: py3-none-manylinux_2_34_x86_64"])
@@ -251,9 +288,35 @@ class Wheel(unittest.TestCase):
                 f.write(elf())
             self.assertEqual(backend.library_path(), built)
 
+    def test_a_copy_of_the_packages_directory_alone_builds_the_same_wheel(self):
+        """A pip before 21.3 builds from a copy of clients/python: the copy has no
+        checkout around it, so everything the wheel holds but the library is in it."""
+        with tempfile.TemporaryDirectory() as directory:
+            copy = os.path.join(directory, "copy")
+            shutil.copytree(os.path.join(HERE, "python"), copy, ignore=shutil.ignore_patterns("__pycache__"))
+            copied = load("cavalry_package_copy", os.path.join(copy, "cavalry_package.py"))
+            self.addCleanup(sys.modules.pop, "cavalry_package_copy")
+            library = os.path.join(directory, "made-up-library")
+            with open(library, "wb") as f:
+                f.write(elf())
+            with mock.patch.dict(os.environ, {"CAVALRY_FFI_LIBRARY": library}):
+                name = copied.build_wheel(os.path.join(directory, "from-copy"))
+                self.assertEqual(backend.build_wheel(os.path.join(directory, "in-place")), name)
+            with open(os.path.join(directory, "from-copy", name), "rb") as one, \
+                    open(os.path.join(directory, "in-place", name), "rb") as two:
+                self.assertEqual(one.read(), two.read())
+            # Without its licence the directory builds nothing, and says how to get it back.
+            os.remove(os.path.join(copy, "LICENSE"))
+            with mock.patch.dict(os.environ, {"CAVALRY_FFI_LIBRARY": library}):
+                with self.assertRaisesRegex(copied.PackageError, "LICENSE does not exist, and the wheel carries the "
+                                                                 "licence; `python3 clients/generate.py python`"):
+                    copied.build_wheel(os.path.join(directory, "without"))
+            self.assertFalse(os.path.exists(os.path.join(directory, "without")))
+
     def test_the_build_needs_nothing_installed_and_there_is_no_source_distribution(self):
         self.assertEqual(backend.get_requires_for_build_wheel(), [])
-        with self.assertRaisesRegex(backend.PackageError, "has no source distribution"):
+        # PEP 517's own name for it, which a frontend looks up on the backend.
+        with self.assertRaisesRegex(backend.UnsupportedOperation, "has no source distribution"):
             backend.build_sdist("anywhere")
         with contextlib.redirect_stderr(io.StringIO()) as said:
             self.assertEqual(backend.main(["cavalry_package.py"]), 2)
@@ -294,9 +357,13 @@ class FindLibrary(unittest.TestCase):
         return path
 
     def test_the_packages_own_library_comes_first_whatever_else_there_is(self):
-        packaged = self.put("a", "b", "c", "d", "e", "f", "cavalry", self.name)
+        os.environ["CAVALRY_FFI_LIBRARY"] = named = self.put("elsewhere", self.name)
         self.put("a", "b", "c", "d", "target", "release", self.name)
-        os.environ["CAVALRY_FFI_LIBRARY"] = self.put("elsewhere", self.name)
+        # A directory of the library's name in the package is no library.
+        os.makedirs(os.path.join(self.package, self.name))
+        self.assertEqual(self.cavalry.find_library(), named)
+        os.rmdir(os.path.join(self.package, self.name))
+        packaged = self.put("a", "b", "c", "d", "e", "f", "cavalry", self.name)
         self.assertEqual(self.cavalry.find_library(), packaged)
 
     def test_the_variable_comes_before_a_checkouts_build_and_a_path_with_no_file_is_refused(self):
@@ -309,6 +376,10 @@ class FindLibrary(unittest.TestCase):
         for part in (f"CAVALRY_FFI_LIBRARY is set to {missing}, and no file is there",
                      os.path.join(self.package, self.name), "clients/python/README.md#the-package"):
             self.assertIn(part, raised.exception.message)
+        # A bare name, with no directory in it, is the system loader's to find, as it
+        # was before the package looked anywhere: it is handed on as it is.
+        os.environ["CAVALRY_FFI_LIBRARY"] = "libcavalry_ffi_of_the_system.so"
+        self.assertEqual(self.cavalry.find_library(), "libcavalry_ffi_of_the_system.so")
 
     def test_a_checkouts_build_is_found_from_the_nearest_directory_above(self):
         self.put("a", "target", "release", self.name)

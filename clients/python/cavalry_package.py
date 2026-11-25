@@ -11,7 +11,7 @@ and so does this file run as a program, where there is no pip:
 
 The wheel holds the package `cavalry`, the two generated files, and beside them the
 shared library the package loads, `libcavalry_ffi`, where `cavalry.find_library` looks
-first (clients/python/README.md, "The package"; ADR 0165). The library is the one at
+first (clients/python/README.md, "The package"; ADR 0166). The library is the one at
 `CAVALRY_FFI_LIBRARY` when that is set, else `target/release/libcavalry_ffi` of the
 checkout this file sits in, which `cargo build --release -p cavalry-ffi --lib` writes.
 
@@ -22,8 +22,9 @@ library needs. A library this file cannot read, or cannot name a platform for, i
 refused, and no wheel is written. There is no source distribution: the library is Rust,
 and a source distribution would hold none.
 
-The same library and the same two files give the same wheel, byte for byte: the
-entries are written in one order with one timestamp. Python 3.9 standard library only.
+The entries are written in one order with one timestamp, so one library and one
+package give one wheel, whichever of the two ways builds it. Python 3.9 standard
+library only.
 """
 
 import base64
@@ -47,7 +48,9 @@ HELP = "see clients/python/README.md#the-package"
 
 _ELF_MACHINES = {62: "x86_64", 183: "aarch64"}
 _MACHO_CPUS = {0x0100000C: "arm64", 0x01000007: "x86_64"}
+_ET_DYN = 3
 _SHT_GNU_VERNEED = 0x6FFFFFFE
+_MH_DYLIB = 6
 _LC_VERSION_MIN_MACOSX = 0x24
 _LC_BUILD_VERSION = 0x32
 _PLATFORM_MACOS = 1
@@ -55,6 +58,11 @@ _PLATFORM_MACOS = 1
 
 class PackageError(Exception):
     """The wheel was not built: the message says why and what to do next."""
+
+
+class UnsupportedOperation(Exception):
+    """PEP 517's name for a hook's answer that the backend cannot build that kind of
+    distribution; a frontend looks it up on the backend by this name."""
 
 
 def library_path():
@@ -79,12 +87,18 @@ def library_path():
 def _elf_platform(data, path):
     """`("libcavalry_ffi.so", "manylinux_X_Y_<machine>")` for a 64-bit little-endian ELF
     library: X.Y is the newest `GLIBC_X.Y` among the symbol versions its version-needs
-    section asks of the libraries it loads, so the oldest glibc it runs on (PEP 600)."""
+    section asks of the libraries it loads, so the oldest glibc it runs on (PEP 600). An
+    entry's offset to the next is followed, and an offset of zero ends a list whatever
+    its count says."""
     if data[4:6] != b"\x02\x01":
         raise PackageError(f"{path} is an ELF file that is not 64-bit little-endian, and this backend has a tag "
                            f"for x86_64 and aarch64 alone; build cavalry-ffi for one of them; {HELP}")
     try:
-        machine, = struct.unpack_from("<H", data, 18)
+        kind, machine = struct.unpack_from("<HH", data, 16)
+        if kind != _ET_DYN:
+            raise PackageError(f"{path} is an ELF file of type {kind}, not a shared library (3), and the package "
+                               f"loads a shared library; point CAVALRY_FFI_LIBRARY at the libcavalry_ffi.so that "
+                               f"`cargo build --release -p cavalry-ffi --lib` wrote; {HELP}")
         section_offset, = struct.unpack_from("<Q", data, 40)
         section_size, section_count = struct.unpack_from("<HH", data, 58)
         if machine not in _ELF_MACHINES:
@@ -107,7 +121,11 @@ def _elf_platform(data, path):
                     if version is not None:
                         found = (int(version.group(1)), int(version.group(2)))
                         newest = found if newest is None or found > newest else newest
+                    if aux_following == 0:
+                        break
                     at += aux_following
+                if following == 0:
+                    break
                 offset += following
     except (struct.error, IndexError, ValueError) as error:
         raise PackageError(f"{path} could not be read as an ELF library ({error}); build it again with `cargo "
@@ -121,12 +139,18 @@ def _elf_platform(data, path):
 
 def _macho_platform(data, path):
     """`("libcavalry_ffi.dylib", "macosx_X_Y_<cpu>")` for a 64-bit Mach-O library: X.Y is
-    the least macOS its build-version load command says it runs on. From macOS 11 on an
-    installer knows the tags `macosx_<major>_0` alone, so a least version of 11.3 is
-    written as 12_0, the first tag that does not promise a system the library refuses."""
+    the least macOS its build-version load command says it runs on. A tag has no place
+    for a version's third number, and from macOS 11 on an installer knows the tags
+    `macosx_<major>_0` alone. So a least version that a tag cannot say is written as the
+    next one it can, the first that does not promise a system the library refuses:
+    10.9.5 as 10_10, 11.0.1 and 11.3 as 12_0."""
     try:
-        cpu, _, _, command_count = struct.unpack_from("<iiII", data, 4)
+        cpu, _, kind, command_count = struct.unpack_from("<iiII", data, 4)
         cpu &= 0xFFFFFFFF
+        if kind != _MH_DYLIB:
+            raise PackageError(f"{path} is a Mach-O file of type {kind}, not a dynamic library (6), and the package "
+                               f"loads a dynamic library; point CAVALRY_FFI_LIBRARY at the libcavalry_ffi.dylib "
+                               f"that `cargo build --release -p cavalry-ffi --lib` wrote; {HELP}")
         if cpu not in _MACHO_CPUS:
             raise PackageError(f"{path} is a Mach-O library for cpu type {cpu:#x}, and this backend has a tag for "
                                f"arm64 and x86_64 alone; build cavalry-ffi for one of them; {HELP}")
@@ -150,9 +174,11 @@ def _macho_platform(data, path):
         raise PackageError(f"{path} names no least macOS version, so it was not built for macOS, and this backend "
                            f"has a tag for macOS alone among Apple's systems; build cavalry-ffi for an "
                            f"`-apple-darwin` target; {HELP}")
-    major, minor = least >> 16, (least >> 8) & 0xFF
+    major, minor, patch = least >> 16, (least >> 8) & 0xFF, least & 0xFF
     if major >= 11:
-        major, minor = (major, 0) if minor == 0 else (major + 1, 0)
+        major, minor = (major, 0) if (minor, patch) == (0, 0) else (major + 1, 0)
+    elif patch:
+        minor += 1
     return "libcavalry_ffi.dylib", f"macosx_{major}_{minor}_{_MACHO_CPUS[cpu]}"
 
 
@@ -187,10 +213,12 @@ def build_wheel(wheel_directory, config_settings=None, metadata_directory=None):
         with open(os.path.join(HERE, source), "rb") as f:
             entries.append((source, f.read(), 0o644))
     entries.append((f"cavalry/{library_name}", library, 0o755))
-    license_path = os.path.normpath(os.path.join(HERE, "..", "..", "LICENSE"))
-    if os.path.isfile(license_path):
-        with open(license_path, "rb") as f:
+    try:
+        with open(os.path.join(HERE, "LICENSE"), "rb") as f:
             entries.append((f"{info}/LICENSE", f.read(), 0o644))
+    except FileNotFoundError:
+        raise PackageError(f"{os.path.join(HERE, 'LICENSE')} does not exist, and the wheel carries the licence; "
+                           f"`python3 clients/generate.py python` in a checkout writes it; {HELP}") from None
     entries.append((f"{info}/METADATA", _metadata().encode(), 0o644))
     entries.append((f"{info}/WHEEL", (f"Wheel-Version: 1.0\nGenerator: cavalry_package {VERSION}\n"
                                       f"Root-Is-Purelib: false\nTag: {tag}\n").encode(), 0o644))
@@ -215,7 +243,7 @@ def get_requires_for_build_wheel(config_settings=None):
 
 def build_sdist(sdist_directory, config_settings=None):
     """PEP 517's hook for a source distribution, which this package does not have."""
-    raise PackageError(f"{NAME} has no source distribution: its wheel holds libcavalry_ffi, which cargo builds from "
+    raise UnsupportedOperation(f"{NAME} has no source distribution: its wheel holds libcavalry_ffi, which cargo builds from "
                        f"the Rust in a checkout. Build the wheel alone, `python3 -m pip wheel --no-deps clients/python` "
                        f"or `python3 -m build --wheel clients/python`; {HELP}")
 

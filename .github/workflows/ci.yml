@@ -141,7 +141,7 @@ jobs:
       # acceptance test for the first slice): on Linux for every change, and on macOS
       # too for every commit on master (ADR 0073).
       - run: just quickstart
-      # A client's package as a user installs it (work item 469; ADR 0165): the Python
+      # A client's package as a user installs it (work item 469; ADR 0166): the Python
       # client's wheel, built with the shared library inside by the package's own
       # backend, installed into a new environment outside the checkout, and the
       # client README's example run there; then the same wheel without its library,

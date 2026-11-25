@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # The clients' packages, each built with the native library inside and installed as a
-# user installs it (work item 469, the first part of work item 369; ADR 0165). `just
+# user installs it (work item 469, the first part of work item 369; ADR 0166). `just
 # package` runs it; CI runs it on Linux for every pull request and on Linux and macOS
 # for every commit on `master`, as it runs the other gates (ADR 0073).
 #

@@ -128,10 +128,11 @@ def find_library():
     """The shared library, from the first of three places that holds one. The package's
     own directory, where a package installed from a wheel holds it, so that an installed
     package loads the library it was built with whatever the environment says. Then
-    `CAVALRY_FFI_LIBRARY`, when it is set. Then `target/release/libcavalry_ffi` of the
+    `CAVALRY_FFI_LIBRARY`, when it is set: a path, or a bare name with no directory in
+    it, which is the system loader's to find. Then `target/release/libcavalry_ffi` of the
     checkout this package sits in, which `cargo build --release -p cavalry-ffi --lib`
     writes. When none holds one, the error names every path it tried (README, "The
-    package"; ADR 0165)."""
+    package"; ADR 0166)."""
     name = "libcavalry_ffi" + _SUFFIX
     here = os.path.dirname(os.path.abspath(__file__))
     packaged = os.path.join(here, name)
@@ -139,7 +140,7 @@ def find_library():
         return packaged
     path = os.environ.get("CAVALRY_FFI_LIBRARY")
     if path:
-        if os.path.isfile(path):
+        if os.path.isfile(path) or not os.path.dirname(path):
             return path
         raise CavalryError("find_library", 0,
                            f"CAVALRY_FFI_LIBRARY is set to {path}, and no file is there; this package holds no "

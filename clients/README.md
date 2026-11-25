@@ -103,17 +103,18 @@ imports), Go (`go/`, by `generate_go.py`), the JVM (`jvm/`, by `generate_jvm.py`
 
 A user installs a client from its language's package, with the native library inside,
 and a client finds that library in its own package before it looks anywhere else
-([ADR 0165](../docs/decisions/0165-carry-the-native-library-inside-a-clients-package-and-look-for-it-there-first.md)).
+([ADR 0166](../docs/decisions/0166-carry-the-native-library-inside-a-clients-package-and-look-for-it-there-first.md)).
 The Python client is the first with such a package: the generator writes its manifest,
-`python/pyproject.toml`, and its build backend, `python/cavalry_package.py`
+`python/pyproject.toml`, its build backend, `python/cavalry_package.py`, and
+`python/LICENSE`, a copy of the repository's that the wheel carries
 (`generate_python_package.py` beside `generate.py`), and `python/README.md`, "The
 package", says how the wheel is built and where the library is found. `just package`
 builds the wheel, installs it into a new environment outside the checkout and runs
 the client README's example there, on both CI runners; then it installs the same
 wheel without its library, which must fail. `clients/package-test.py`, which `just
 test` runs, holds the backend and the search to made-up libraries and trees.
-`clients/lint.py` reads neither generated file: nothing in them runs when a message
-does. The other four clients take their library from a checkout until their own part
+`clients/lint.py` reads none of the three generated files: nothing in them runs when a
+message does. The other four clients take their library from a checkout until their own part
 of work item 369.
 
 ## Released together
