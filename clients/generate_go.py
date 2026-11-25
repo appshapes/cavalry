@@ -42,8 +42,10 @@ C_LIMITS = {"INT64_MAX": "math.MaxInt64", "INT64_MIN": "math.MinInt64", "INT32_M
 PER_MESSAGE_GO = ("Publication.TryClaim", "Publication.SetReservedValue", "Publication.Commit", "Publication.Abort",
                   "Publication.Offer", "Subscription.Poll", "Subscription.deliver", "Subscription.deliverEntry",
                   "CommittedLog.Poll", "Header.Values", "cavalryGoFragment", "cavalryGoEntry",
-                  # A cluster session and a cluster service (ADR 0124).
+                  # A cluster session and a cluster service (ADR 0124), and the schedule and
+                  # the cancel of a service's timer (ADR 0157).
                   "ClusterSession.Offer", "ClusterSession.Poll", "ClusterService.Poll", "ClusterService.Reply",
+                  "ClusterService.ScheduleTimer", "ClusterService.CancelTimer",
                   "Subscription.deliverReply", "Subscription.deliverClusterEntry", "cavalryGoReply",
                   "cavalryGoClusterEntry")
 MAX_SUBSCRIPTIONS = 4096

@@ -252,14 +252,17 @@ RULES = {
             "cavalryGoFragment",
             "cavalryGoEntry",
             # A cluster session and a cluster service (ADR 0124): the session's offer and
-            # its poll, the service's poll and its reply, the two functions that call the
-            # handlers and recover their panics, and the two exported functions the C
-            # trampolines call, which write the values those trampolines read into the one
-            # struct the session or the service keeps.
+            # its poll, the service's poll and its reply, the schedule and the cancel of
+            # its timers (ADR 0157), the two functions that call the handlers and recover
+            # their panics, and the two exported functions the C trampolines call, which
+            # write the values those trampolines read into the one struct the session or
+            # the service keeps.
             "ClusterSession.Offer",
             "ClusterSession.Poll",
             "ClusterService.Poll",
             "ClusterService.Reply",
+            "ClusterService.ScheduleTimer",
+            "ClusterService.CancelTimer",
             "Subscription.deliverReply",
             "Subscription.deliverClusterEntry",
             "cavalryGoReply",
@@ -280,10 +283,13 @@ RULES = {
                           # A cluster session's and a cluster service's (ADR 0124): the two
                           # trampolines, which read a reply's values and an entry's, the
                           # second passing the ABI the action the Go handler returned, the
-                          # two polls, and the session's offer and the service's reply.
+                          # two polls, the session's offer and the service's reply, and
+                          # the schedule and the cancel of a service's timer (ADR 0157).
                           "cavalry_go_reply_trampoline", "cavalry_go_service_trampoline",
                           "cavalry_go_cluster_session_poll", "cavalry_go_cluster_service_poll",
-                          "cavalry_go_cluster_session_offer", "cavalry_go_cluster_service_reply"],
+                          "cavalry_go_cluster_session_offer", "cavalry_go_cluster_service_reply",
+                          "cavalry_go_cluster_service_schedule_timer",
+                          "cavalry_go_cluster_service_cancel_timer"],
             "readers": [],
         },
         # The functions that read the calling OS thread's error (spec/c-abi.md, "Error
