@@ -238,7 +238,12 @@ All runs on an Apple M-series laptop, macOS 26, in the in-memory cluster of
     settle, so the floor's change alters nothing there (work item 420).
   - Under the join alone the three gave the same results, the timer search's totals
     the same to the event.
-- **Gates:** GATES_PLACEHOLDER
+- **Gates** at the head merged with `master` (commit 770648f6): `just lint`, `just
+  docs`, `just lint-docs` over `origin/master...HEAD`, the Linux check, `just test` in
+  618 s, `just conformance` in 120 s and `just replay-check` in 21 s, each exit 0.
+- **Twenty runs on both CI runners** at commit e3852142, the rule as it lands:
+  `cavalry-raft --test cluster` and `cavalry-raft --lib module::tests`, 20 of 20 on
+  Linux and on macOS each.
 
 ## Consequences
 
