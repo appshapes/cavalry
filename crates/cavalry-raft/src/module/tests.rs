@@ -4856,8 +4856,7 @@ struct Requested {
 
 fn requests_in_one_poll(test: &str, publications: usize, offsets: &[(usize, i64)]) -> Requested {
     let (dir, mut members, ports) = three_on_ports(test);
-    let follower = &mut members[1].1;
-    let follower_id = follower.member_id();
+    let follower_id = members[1].1.member_id();
     let candidate_member_id = members[2].1.member_id();
     let follower = &mut members[1].1;
     let term = follower.leadership_term_id();
