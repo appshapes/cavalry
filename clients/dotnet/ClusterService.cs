@@ -110,8 +110,10 @@ public sealed unsafe class ClusterService : IDisposable
     /// <see cref="Abi.ERR_CLOSED"/> for a client that its driver closed, as when the
     /// member's driver has stopped, which <c>GetFault</c> reads too and every poll after it
     /// answers again, so that a program's loop ends on it; or, with <c>GetFault</c> left as
-    /// it was, <see cref="Abi.ERR_POLLING"/> for a poll from inside a handler of this
-    /// service, which the ABI refuses and which touches nothing here). A timer event whose
+    /// it was, <see cref="Abi.ERR_NULL"/> for a poll after the program's own
+    /// <see cref="Client.Close"/>, which freed the client, and
+    /// <see cref="Abi.ERR_POLLING"/> for a poll from inside a handler of this service, which
+    /// the ABI refuses and which touches nothing here). A timer event whose
     /// timer is not pending, or not yet due, is taken and handed to no handler, so the count
     /// may be more than the handler was called. The poll is the service's duty
     /// cycle: it opens the member's log, follows the log's sessions, and holds a publication

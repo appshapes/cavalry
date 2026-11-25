@@ -510,7 +510,8 @@ public delegate void ReplyHandler(ReadOnlySpan<byte> body, ClusterReplyValues re
 /// <paramref name="body"/> is a session message's payload, a span over the log's bytes,
 /// valid for the call, and empty for every other entry; <paramref name="entry"/> is the
 /// entry's values; and <paramref name="service"/> is the service that was polled, for its
-/// <see cref="ClusterService.Reply"/>. What it returns is the entry's action:
+/// <see cref="ClusterService.Reply"/>, <see cref="ClusterService.ScheduleTimer"/> and
+/// <see cref="ClusterService.CancelTimer"/>. What it returns is the entry's action:
 /// <see cref="Abi.ACTION_CONTINUE"/> takes the entry and the poll goes on,
 /// <see cref="Abi.ACTION_BREAK"/> takes it and ends the poll, and
 /// <see cref="Abi.ACTION_ABORT"/> leaves it, ends the poll, and has the next poll hand it
@@ -1838,8 +1839,10 @@ public sealed unsafe class ClusterService : IDisposable
     /// <see cref="Abi.ERR_CLOSED"/> for a client that its driver closed, as when the
     /// member's driver has stopped, which <c>GetFault</c> reads too and every poll after it
     /// answers again, so that a program's loop ends on it; or, with <c>GetFault</c> left as
-    /// it was, <see cref="Abi.ERR_POLLING"/> for a poll from inside a handler of this
-    /// service, which the ABI refuses and which touches nothing here). A timer event whose
+    /// it was, <see cref="Abi.ERR_NULL"/> for a poll after the program's own
+    /// <see cref="Client.Close"/>, which freed the client, and
+    /// <see cref="Abi.ERR_POLLING"/> for a poll from inside a handler of this service, which
+    /// the ABI refuses and which touches nothing here). A timer event whose
     /// timer is not pending, or not yet due, is taken and handed to no handler, so the count
     /// may be more than the handler was called. The poll is the service's duty
     /// cycle: it opens the member's log, follows the log's sessions, and holds a publication
