@@ -27,7 +27,14 @@
 // whose entry is aborted, handed over again by the next poll and answered once; a reply too
 // long for a frame and a reply to a session that is not open; a handler that returns
 // ACTION_BREAK with two entries waiting; a session's handler that throws, whose reply is
-// not handed over again; the session's close as an entry every service is handed; a
+// not handed over again; the program's timers, ScheduleTimer and CancelTimer from inside the
+// handler, as the C runner's round has one: a timer handed to every service once, as an
+// entry of its own type with the timer's id, at one position and no earlier than the
+// deadline its second schedule set, a second after its entry, where its first was an hour
+// away, and not again within a timer refresh interval and more; a timer due at once and
+// cancelled in the same handling handed to none; the least and the greatest long as ids,
+// handed back as they are; both calls refused from outside the handler; the session's
+// close as an entry every service is handed; a
 // session and a service closed twice, and a service closed after its client.
 //
 // Then a report, printed and never gated: how many polls the three services made, how many
@@ -54,6 +61,18 @@ public static class ClusterRound
     // sleep Thread.Sleep makes, which counts in milliseconds and yields alone for less.
     const int IDLE_MILLISECONDS = 1;
     const int SETTLE_MILLISECONDS = 300; // the time in which a second reply, or a second entry, would come
+    const string TIMER_MESSAGE = "timer"; // the message at which each service's program schedules its timers
+    const long TIMER_ID = 77; // the timer that is handed over
+    const long CANCELLED_ID = 78; // the timer that is scheduled and cancelled in the same handling
+    // How long after the message's entry the timer is due, in the cluster's milliseconds. A
+    // second: a service tells its member of a timer only once the poll that took the entry
+    // has sent the six commands of its first timer, some 25 ms on a laptop and more on a
+    // busy host, so the event of a timer that was wrongly due at once is stamped tens of
+    // milliseconds after the message, 39 to 49 ms in the other clients' rounds, and a margin
+    // of that size would let it pass. The round prints what it was in its own run.
+    const long TIMER_AFTER_MS = 1000;
+    const long HOUR_MS = 3_600_000; // the deadline its first schedule gives it, which the second replaces
+    const int REFRESH_MILLISECONDS = 1200; // a timer refresh interval of spec/cluster.md, "Values", 1 s, and more
 
     static void Fail(string what)
     {
@@ -90,6 +109,9 @@ public static class ClusterRound
                 entry.LeaderMemberId, entry.TimedOut);
         }
     }
+
+    /// <summary>A timer that was handed over: where, its id and the event's time.</summary>
+    record struct Timer(long Position, long Id, long Timestamp);
 
     /// <summary>What one call answered, with the thread's error after it: a call that throws
     /// answers -1 with the exception's code.</summary>
@@ -155,6 +177,9 @@ public static class ClusterRound
         public string? EdgesOn; // a payload before whose reply a reply too long and one to no session are made
         public List<int>? Edges;
         public readonly HashSet<string> BreakOn = new(); // payloads whose entries are taken with ACTION_BREAK
+        public readonly List<Timer> Timers = new(); // every timer handed over
+        public long TimerAt; // when the last was handed over, by Stopwatch.GetTimestamp
+        public List<int> TimerCodes = new(); // what the schedules and the cancel at TIMER_MESSAGE answered
         public ClusterEntryValues? Values; // the object of values the handler was handed, the same one for every entry
         public int Polls; // the report: every poll, those over a millisecond, and the longest
         public int Over;
@@ -201,8 +226,21 @@ public static class ClusterRound
                 {
                     Fail($"an entry that is no session's message has a payload of {body.Length} bytes: {read}");
                 }
+                if (entry.Type == Abi.CLUSTER_ENTRY_TIMER)
+                {
+                    Timers.Add(new Timer(entry.Position, entry.CorrelationId, entry.Timestamp));
+                    TimerAt = Stopwatch.GetTimestamp();
+                }
+                else if (entry.CorrelationId != 0)
+                {
+                    Fail($"an entry that is no timer has the correlation id {entry.CorrelationId}: {read}");
+                }
                 Entries.Add(read);
                 return Abi.ACTION_CONTINUE;
+            }
+            if (entry.CorrelationId != 0)
+            {
+                Fail($"a session's message has the correlation id {entry.CorrelationId}: {read}");
             }
             string payload = Encoding.Latin1.GetString(body);
             List<long> positions = At(Handed, payload);
@@ -257,6 +295,26 @@ public static class ClusterRound
                     // poll after this one would hand the ABI a null client.
                     Thrown("Client.Close", () => client.Close()),
                     Asked("Client.IsClosed after its Close", () => client.IsClosed() ? 1 : 0),
+                };
+            }
+            if (payload == TIMER_MESSAGE)
+            {
+                // The program's state changes at the entry it takes. One timer, scheduled
+                // for an hour later and then again for a second later: were the second
+                // schedule not to set the one timer's deadline, the round's wait would end
+                // before the timer came. A second timer, due at once, cancelled again: were
+                // the cancel to miss, it would be handed over. And the least and the
+                // greatest long as ids, due at once, which each service must be handed back
+                // as they are. Every member's service makes the same calls at the same
+                // entry.
+                TimerCodes = new List<int>
+                {
+                    service.ScheduleTimer(TIMER_ID, entry.Timestamp + HOUR_MS),
+                    service.ScheduleTimer(TIMER_ID, entry.Timestamp + TIMER_AFTER_MS),
+                    service.ScheduleTimer(CANCELLED_ID, entry.Timestamp),
+                    service.CancelTimer(CANCELLED_ID),
+                    service.ScheduleTimer(long.MinValue, entry.Timestamp),
+                    service.ScheduleTimer(long.MaxValue, entry.Timestamp),
                 };
             }
             At(Codes, payload).Add(code);
@@ -747,6 +805,79 @@ public static class ClusterRound
             + "answered once; a reply of 1,345 bytes and a reply to no session refused; ACTION_BREAK took one of two "
             + "entries; a reply whose handler threw is not handed over again");
 
+        // 9b. The program's timers (spec/c-abi.md, version 7; spec/cluster.md, "The service",
+        // "Timers"; ADR 0157). Each service's program schedules four timers at one message
+        // and cancels one: the three are handed to every service once each, as entries of
+        // their own type with the timers' ids, at one position each and none earlier than
+        // its deadline, and the cancelled one to none. Step 10 holds the "once" for a timer
+        // refresh interval and more. From outside the handler both calls are refused, the
+        // thread's error having been set to another code first.
+        foreach (Refusal refusal in new[]
+        {
+            Asked("ScheduleTimer", () => served[0].Service.ScheduleTimer(1, 1)),
+            Asked("CancelTimer", () => served[0].Service.CancelTimer(1)),
+        })
+        {
+            if (refusal.Answer != -1 || refusal.Code != Abi.ERR_CLUSTER_NO_ENTRY)
+            {
+                Fail($"{refusal.Call} from outside the handler answered {refusal.Answer} with error {refusal.Code}, not -1 "
+                    + "with ERR_CLUSTER_NO_ENTRY");
+            }
+        }
+        Offer(session, TIMER_MESSAGE, served, answered);
+        long[] timerIds = { long.MinValue, TIMER_ID, long.MaxValue };
+        Await("each service is handed its three timers", () => served.All(s => s.Timers.Count >= timerIds.Length), served,
+            answered, null);
+        Settle(served, answered, null);
+        Entry scheduled = served[0].Taken(TIMER_MESSAGE)[0];
+        int[] timerCodes =
+        {
+            Abi.CLUSTER_TIMER_SCHEDULED, Abi.CLUSTER_TIMER_SCHEDULED, Abi.CLUSTER_TIMER_SCHEDULED, 0,
+            Abi.CLUSTER_TIMER_SCHEDULED, Abi.CLUSTER_TIMER_SCHEDULED,
+        };
+        foreach (Served s in served)
+        {
+            if (!s.TimerCodes.SequenceEqual(timerCodes))
+            {
+                Fail($"the service beside member {s.Member} was answered {Show(s.TimerCodes)} for its schedules and its "
+                    + $"cancel; expected CLUSTER_TIMER_SCHEDULED, {Abi.CLUSTER_TIMER_SCHEDULED}, for each schedule and 0 for "
+                    + "the cancel");
+            }
+            if (!s.Timers.Select(t => t.Id).Order().SequenceEqual(timerIds))
+            {
+                Fail($"the service beside member {s.Member} was handed the timers {Show(s.Timers)}; expected timer "
+                    + $"{TIMER_ID}, the least long and the greatest once each, and timer {CANCELLED_ID}, which it cancelled, "
+                    + "never");
+            }
+            if (!s.Timers.SequenceEqual(served[0].Timers))
+            {
+                Fail($"the service beside member {s.Member} was handed its timers as {Show(s.Timers)} and the service "
+                    + $"beside member {served[0].Member} as {Show(served[0].Timers)}; expected one position and one time "
+                    + "for each");
+            }
+            foreach (Timer t in s.Timers)
+            {
+                long after = t.Id == TIMER_ID ? TIMER_AFTER_MS : 0;
+                if (t.Timestamp < scheduled.Timestamp + after || t.Position <= scheduled.Position)
+                {
+                    Fail($"the service beside member {s.Member} was handed timer {t.Id} at position {t.Position} and time "
+                        + $"{t.Timestamp}; it was scheduled at position {scheduled.Position} and time "
+                        + $"{scheduled.Timestamp} for {after} ms later");
+                }
+            }
+        }
+        // What a deadline that was ignored would have read: the time of the timers that
+        // were due at once, which the member was told of with timer 77. The deadline check
+        // above proves something for as long as this is below the deadline.
+        Timer timer = served[0].Timers.First(t => t.Id == TIMER_ID);
+        long atOnce = served[0].Timers.Where(t => t.Id != TIMER_ID).Max(t => t.Timestamp) - scheduled.Timestamp;
+        string margin = atOnce < TIMER_AFTER_MS ? "" : ", so the deadline's check proved nothing in this run";
+        Say($"timer {TIMER_ID}, scheduled by each service at a message for an hour later and then for {TIMER_AFTER_MS} ms "
+            + $"later, handed to three services once, at position {timer.Position}, "
+            + $"{timer.Timestamp - scheduled.Timestamp} ms after the message; the least and the greatest long as ids, due "
+            + $"at once, handed to each once with those ids, {atOnce} ms after the message{margin}; timer {CANCELLED_ID}, "
+            + "due at once and cancelled in the same handling, handed to none; both calls refused from outside the handler");
+
         // 10. The session before its client. Its close is an entry every service is handed,
         // after which the log holds no session open.
         session.Close();
@@ -770,6 +901,23 @@ public static class ClusterRound
             {
                 Fail($"the services beside members 0 and {s.Member} took different entries: {Show(served[0].Entries)} and "
                     + Show(s.Entries));
+            }
+        }
+        // The timers of step 9b, once each: a leader gives a timer that is still pending in
+        // its service another event a timer refresh interval after the first, so the
+        // services are polled until that long has passed since the last of them was handed
+        // a timer.
+        long refreshed = served.Max(s => s.TimerAt) + Stopwatch.Frequency * REFRESH_MILLISECONDS / 1000;
+        while (Stopwatch.GetTimestamp() < refreshed)
+        {
+            Cycle(served, null, null);
+        }
+        foreach (Served s in served)
+        {
+            if (s.Timers.Count != 3)
+            {
+                Fail($"the service beside member {s.Member} was handed the timers {Show(s.Timers)} by "
+                    + $"{REFRESH_MILLISECONDS} ms after the last; expected three, once each");
             }
         }
 
