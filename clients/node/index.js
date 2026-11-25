@@ -1084,13 +1084,18 @@ class ClusterService {
    * quorum has committed, in order: `body` is a session message's payload, a Buffer into the
    * log valid for the call, and empty for every other entry; `entry` is the one
    * `ClusterEntryValues` this object keeps; and `service` is this object, for
-   * `service.reply(sessionId, message)`. What the handler returns says what becomes of the
+   * `service.reply(sessionId, message)` and for the program's timers,
+   * `service.scheduleTimer(correlationId, deadline)` and `service.cancelTimer(correlationId)`:
+   * a timer that is due is handed to the handler as an entry of the type
+   * CAVALRY_CLUSTER_ENTRY_TIMER, once, at one position beside every member. What the handler
+   * returns says what becomes of the
    * entry: nothing or CONTINUE takes it and the poll goes on, BREAK takes it and ends the
    * poll, and ABORT leaves it, ends the poll, and has the next poll hand it over again. A
    * handler that throws, or returns anything else, a promise included, has its entry aborted,
    * and `poll` throws `HandlerError` once the ABI has returned: an entry is taken only by a
    * handler that finished with it. `poll` returns the count of entries taken, or the ABI's -1
-   * when the poll stopped on a fault, which `fault()` reads until the next poll. */
+   * when the poll stopped, on a fault or at a client its driver closed, which `fault()` reads
+   * until the next poll. */
   constructor(handle, client) {
     this.handle = handle;
     this._client = client;
@@ -1112,21 +1117,67 @@ class ClusterService {
    * handler it is -1, with CAVALRY_ERR_CLUSTER_NO_ENTRY. One ABI call, which allocates nothing
    * and waits for nothing. */
   reply(sessionId, message) { return addon.cavalry_cluster_service_reply(this.handle, sessionId, message); }
-  /** One ABI call, and its result: the count of entries the handler took, 0 while the driver
-   * hosts no member that has a log yet, or -1 when the poll stopped on a fault, which
-   * `fault()` reads until the next poll. The poll is the service's duty cycle: it opens the
+  /** From inside the handler: schedule the timer `correlationId`, any int64 the program
+   * chooses, for `deadline` in the cluster's time, the clock of `entry.timestamp`, in
+   * milliseconds, and return what became of the schedule, never throwing for a code.
+   * CAVALRY_CLUSTER_TIMER_SCHEDULED: the timer is pending with that deadline, a new one or
+   * one that was pending, whose deadline this sets. CAVALRY_CLUSTER_TIMER_REFUSED: the
+   * service holds its 1,024 pending timers and the id is none of them, and nothing changed; a
+   * program with more deadlines than that keeps them in its own state and schedules one timer
+   * for the earliest. When the deadline has come the handler is handed an entry whose `type`
+   * is CAVALRY_CLUSTER_ENTRY_TIMER and whose `correlationId` is this id, as a BigInt: once, at
+   * one position beside every member, never before its deadline and never after its cancel. A
+   * deadline at or before the entry's time is due at once. A handler that returns ABORT, or
+   * throws, is handed its entry again with every timer as it was before that handling. A
+   * program schedules its first timer only once every member of its cluster, with the service
+   * beside it, runs version 2 of the cluster protocol, and from that entry on no member is
+   * stepped back: a service of version 1 hands its program no timer, so the two would compute
+   * two states from one log. From outside the handler it is -1, with
+   * CAVALRY_ERR_CLUSTER_NO_ENTRY. An id and a deadline are each a BigInt, any int64, or a
+   * number that is an integer from -(2 ** 53 - 1) to 2 ** 53 - 1, as `entry.timestamp + 50`
+   * is. A BigInt outside int64, and a number with a fraction or outside that range, a NaN
+   * among them, throw a RangeError before the ABI is called, inside the handler or outside
+   * it, since N-API would pass such a number or BigInt as another value; a value that is
+   * neither a number nor a BigInt throws a TypeError there. One ABI call, which allocates
+   * nothing and waits for nothing: the service tells its member after the handler has taken the
+   * entry, in the poll (`poll`). */
+  scheduleTimer(correlationId, deadline) {
+    return addon.cavalry_cluster_service_schedule_timer(this.handle, correlationId, deadline);
+  }
+  /** From inside the handler: the timer `correlationId` is pending no more, and its event,
+   * where the log holds one, is handed to no program. A timer that is not pending is no
+   * error. Returns 0, and -1 with CAVALRY_ERR_CLUSTER_NO_ENTRY from outside the handler. An
+   * id that is no int64 is refused before the ABI is called, as `scheduleTimer` refuses one.
+   * One ABI call, which allocates nothing and waits for nothing. */
+  cancelTimer(correlationId) { return addon.cavalry_cluster_service_cancel_timer(this.handle, correlationId); }
+  /** One ABI call, and its result: the count of entries the service took, 0 while the driver,
+   * one that runs, hosts no member that has a log yet, or -1 when the poll stopped, which
+   * `fault()` reads until the next poll. A poll with a client that its driver closed,
+   * `Client.closed()` giving the reason, as when the member's driver has stopped, is -1 with
+   * CAVALRY_ERR_CLOSED as `fault()`'s code, at every poll: a program's loop ends on it. A
+   * poll the ABI refuses before it reads is -1 too, with the thread's error set and `fault()`
+   * left as it was: CAVALRY_ERR_NULL after the program's own `Client.close()`, which freed
+   * the client, and CAVALRY_ERR_POLLING from a handler, below. A timer event whose timer is
+   * not pending, or not yet due, is taken and handed to no handler, so the count may be more
+   * than the handler was called. The poll is the service's duty cycle: it opens the
    * member's log, follows the log's sessions, and holds a publication to each open session
    * while the service answers. Those are commands sent with the service's client, at a
    * session's opening, where a term's leader changes and at a recording's end, and the poll
    * waits for the driver's answer to each on the calling thread; none is sent for a session
-   * message. When the handler threw, or returned what is no action, or the runtime kept the
-   * entry from it, the addon's trampoline aborted the entry and this throws `HandlerError`
-   * with `cluster` "service" after the ABI call returns: its `fragments` is the count of
-   * entries taken before that entry, and its `cause` the handler's exception, a
-   * `CavalryError` with CAVALRY_ERR_CLUSTER_ACTION for a value that is no action, or the
-   * Error naming the N-API call that failed. The next poll hands the aborted entry over
-   * again. From a handler of this service's own poll the ABI refuses the call: -1 with
-   * CAVALRY_ERR_POLLING, and nothing is touched. */
+   * message. Six more are sent once in a service's life, at the most: its five counters and
+   * its publication to its member, in the poll in which the program first schedules a timer
+   * or the service first passes a timer event over, after that poll's entries, where a
+   * snapshot has not added them already; that poll returns -1 with the driver's refusal of
+   * one of them, after the entries its handler took are taken. After that the poll tells the
+   * member what each taken entry changed, and every pending timer again each second, by
+   * offers that wait for nothing. When the handler threw, or returned what is no action, or the
+   * runtime kept the entry from it, the addon's trampoline aborted the entry and this throws
+   * `HandlerError` with `cluster` "service" after the ABI call returns: its `fragments` is the
+   * count of entries taken before that entry, and its `cause` the handler's exception, a
+   * `CavalryError` with CAVALRY_ERR_CLUSTER_ACTION for a value that is no action, or the Error
+   * naming the N-API call that failed. The next poll hands the aborted entry over again. From a
+   * handler of this service's own poll the ABI refuses the call: -1 with CAVALRY_ERR_POLLING,
+   * and nothing is touched. */
   poll(handler, fragmentLimit) {
     const result = addon.clusterServicePoll(this._state, this.handle, this._client.handle, handler, fragmentLimit, this);
     if (typeof result === "number") return result;

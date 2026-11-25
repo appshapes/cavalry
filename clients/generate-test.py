@@ -1544,6 +1544,8 @@ class NodePackage(unittest.TestCase):
         self.assertIn("the-exception", slugs)
         self.assertIn("the-cluster-session", slugs)
         self.assertIn("the-cluster-service", slugs)
+        # The section the exact reader's refusals name (ADR 0157).
+        self.assertIn("a-services-timers", slugs)
 
     def test_the_cluster_session_and_the_cluster_service_have_the_shape_adr_0124_gives(self):
         """The Node cluster session and cluster service (ADR 0124), read from the generated
@@ -1585,6 +1587,37 @@ class NodePackage(unittest.TestCase):
                       service)
         self.assertIn("  reply(sessionId, message) { return addon.cavalry_cluster_service_reply(this.handle, sessionId, "
                       "message); }\n", service)
+        # A service's timers (ADR 0157): one addon call each, with the arguments as given.
+        # The addon reads a timer's id and its deadline exactly, and every other int64 as
+        # it did: a number that N-API would truncate is another timer or another time.
+        self.assertIn("  scheduleTimer(correlationId, deadline) {\n    return "
+                      "addon.cavalry_cluster_service_schedule_timer(this.handle, correlationId, deadline);\n  }\n", service)
+        self.assertIn("  cancelTimer(correlationId) { return addon.cavalry_cluster_service_cancel_timer(this.handle, "
+                      "correlationId); }\n", service)
+        schedule = addon.split("static napi_value fn_cavalry_cluster_service_schedule_timer(", 1)[1].split("\n}\n", 1)[0]
+        self.assertIn('int64_t correlation_id = (int64_t) int64_exact_arg(env, argv[1], "correlation_id");', schedule)
+        self.assertIn('int64_t deadline = (int64_t) int64_exact_arg(env, argv[2], "deadline");', schedule)
+        cancel = addon.split("static napi_value fn_cavalry_cluster_service_cancel_timer(", 1)[1].split("\n}\n", 1)[0]
+        self.assertIn('int64_t correlation_id = (int64_t) int64_exact_arg(env, argv[1], "correlation_id");', cancel)
+        # Each read comes before the wrapper's ABI call, and a failed one returns before
+        # it; and the reader is called from these three places alone, so from no trampoline.
+        for wrapper, call in ((schedule, "int result = cavalry_cluster_service_schedule_timer("),
+                              (cancel, "int result = cavalry_cluster_service_cancel_timer(")):
+            last = wrapper.rindex("int64_exact_arg(env, argv[")
+            self.assertLess(last, wrapper.index(call))
+            self.assertIn("  if (arg_failed) return NULL;\n", wrapper[last:wrapper.index(call)])
+        self.assertEqual(addon.count("int64_exact_arg(env, argv["), 3)
+        self.assertEqual(addon.count("int64_exact_arg("), 4)
+        # The reader: a number is cast only inside the range a double carries exactly,
+        # each of its three refusals names the README's section, and none returns a value.
+        reader = addon.split("static int64_t int64_exact_arg(", 1)[1].split("\n}\n", 1)[0]
+        self.assertIn("d >= -9007199254740991.0 && d <= 9007199254740991.0 &&\n        (double) (int64_t) d == d", reader)
+        self.assertIn("napi_get_value_bigint_int64(env, v, &n, &lossless) == napi_ok && lossless", reader)
+        self.assertIn("see clients/node/README.md#a-services-timers", reader)
+        self.assertEqual(reader.count('%s", name, next);'), 3)
+        self.assertEqual(reader.count("napi_throw_range_error("), 2)
+        self.assertEqual(reader.count("napi_throw_type_error("), 1)
+        self.assertTrue(reader.rstrip().endswith("arg_failed = true;\n  return 0;"), reader[-80:])
         self.assertIn("    const result = addon.clusterServicePoll(this._state, this.handle, this._client.handle, handler, "
                       "fragmentLimit, this);\n    if (typeof result === \"number\") return result;\n"
                       "    throw new HandlerError(result[0], result[1], result[4] ? noAction(result[2]) : result[2], "
@@ -1941,6 +1974,19 @@ int cavalry_cluster_service_reply(cavalry_cluster_service_t *s, int64_t id, cons
   if (reply_answer < 0) { errcode = CAVALRY_ERR_CLUSTER_NO_ENTRY; snprintf(errmsg, sizeof errmsg, "no entry"); }
   return reply_answer;
 }
+/* A service's timers (ADR 0157): what the ABI answers, and the arguments it was given. */
+static int timer_answer;
+static int64_t timer_id, timer_deadline;
+int cavalry_cluster_service_schedule_timer(cavalry_cluster_service_t *s, int64_t id, int64_t deadline) {
+  (void) s; timer_id = id; timer_deadline = deadline;
+  if (timer_answer < 0) { errcode = CAVALRY_ERR_CLUSTER_NO_ENTRY; snprintf(errmsg, sizeof errmsg, "no entry"); }
+  return timer_answer;
+}
+int cavalry_cluster_service_cancel_timer(cavalry_cluster_service_t *s, int64_t id) {
+  (void) s; timer_id = id; timer_deadline = 0;
+  if (timer_answer < 0) { errcode = CAVALRY_ERR_CLUSTER_NO_ENTRY; snprintf(errmsg, sizeof errmsg, "no entry"); }
+  return timer_answer;
+}
 static int entry_at;
 int cavalry_cluster_entry_values(const cavalry_header_t *header, cavalry_cluster_entry_values_t *values) {
   (void) header;
@@ -2078,6 +2124,28 @@ int main(void) {
   reply_answer = -1;
   EXPECT(cavalry_go_cluster_service_reply(NULL, 7, NULL, 0, &error) == -1 && error.code == CAVALRY_ERR_CLUSTER_NO_ENTRY,
          "a reply from outside the handler kept code %d", (int) error.code);
+  /* The timers' shims pass the id and the deadline on as they are, the least and the
+   * greatest int64 among them, return what the ABI answered, and keep the error of a
+   * call that it refused, and of no other. */
+  memset(&error, 0, sizeof error);
+  timer_answer = CAVALRY_CLUSTER_TIMER_SCHEDULED;
+  EXPECT(cavalry_go_cluster_service_schedule_timer(NULL, INT64_MIN, INT64_MAX, &error) == CAVALRY_CLUSTER_TIMER_SCHEDULED &&
+         error.code == 0 && timer_id == INT64_MIN && timer_deadline == INT64_MAX,
+         "a schedule that was taken kept code %d or passed another id or deadline on", (int) error.code);
+  timer_answer = CAVALRY_CLUSTER_TIMER_REFUSED;
+  EXPECT(cavalry_go_cluster_service_schedule_timer(NULL, 7, 8, &error) == CAVALRY_CLUSTER_TIMER_REFUSED && error.code == 0 &&
+         timer_id == 7 && timer_deadline == 8, "a schedule refused at the bound kept code %d", (int) error.code);
+  timer_answer = 0;
+  EXPECT(cavalry_go_cluster_service_cancel_timer(NULL, INT64_MAX, &error) == 0 && error.code == 0 && timer_id == INT64_MAX,
+         "a cancel kept code %d or passed another id on", (int) error.code);
+  timer_answer = -1;
+  EXPECT(cavalry_go_cluster_service_schedule_timer(NULL, 7, 8, &error) == -1 && error.code == CAVALRY_ERR_CLUSTER_NO_ENTRY &&
+         strcmp(error.function, "cavalry_cluster_service_schedule_timer") == 0,
+         "a schedule from outside the handler kept the error of \"%s\", code %d", error.function, (int) error.code);
+  memset(&error, 0, sizeof error);
+  EXPECT(cavalry_go_cluster_service_cancel_timer(NULL, 7, &error) == -1 && error.code == CAVALRY_ERR_CLUSTER_NO_ENTRY &&
+         strcmp(error.function, "cavalry_cluster_service_cancel_timer") == 0,
+         "a cancel from outside the handler kept the error of \"%s\", code %d", error.function, (int) error.code);
   printf("%d failure(s)\n", failures);
   return failures != 0;
 }
@@ -2250,6 +2318,10 @@ class GoPackage(unittest.TestCase):
                    "cavalry_go_cluster_session_poll": ("cavalry_cluster_session_poll", "count < 0"),
                    "cavalry_go_cluster_service_reply": ("cavalry_cluster_service_reply",
                                                         "code < 0 || code == CAVALRY_CLUSTER_REPLY_TOO_LONG"),
+                   # A service's timers (ADR 0157): -1 alone is a failure; a refusal at the
+                   # bound is an answer.
+                   "cavalry_go_cluster_service_schedule_timer": ("cavalry_cluster_service_schedule_timer", "code < 0"),
+                   "cavalry_go_cluster_service_cancel_timer": ("cavalry_cluster_service_cancel_timer", "code < 0"),
                    "cavalry_go_cluster_service_poll": ("cavalry_cluster_service_poll", "count < 0")}
         for shim_call, (abi, failed) in cluster.items():
             body = shim.split(f" {shim_call}(", 1)[1].split("\n}\n", 1)[0]
@@ -2261,6 +2333,8 @@ class GoPackage(unittest.TestCase):
         for signature, kept in (("func (n *ClusterSession) Offer(", "&n.state.err)"),
                                 ("func (n *ClusterSession) Poll(", "&s.err)"),
                                 ("func (v *ClusterService) Reply(", "&v.state.err)"),
+                                ("func (v *ClusterService) ScheduleTimer(", "&v.state.err)"),
+                                ("func (v *ClusterService) CancelTimer(", "&v.state.err)"),
                                 ("func (v *ClusterService) Poll(", "&s.err)")):
             body = code.split(signature, 1)[1].split("\n}\n", 1)[0]
             self.assertNotIn("cavalry_errcode", body, signature)
@@ -2270,7 +2344,7 @@ class GoPackage(unittest.TestCase):
     def test_a_cluster_services_trampoline_passes_the_action_on_and_aborts_what_the_abi_refuses(self):
         """Invariant 1, for a cluster service in the Go client (ADR 0124). shim.c is compiled
         with the runner's `cc` against GO_SHIM_HARNESS, a stand-in for the ABI and for the
-        Go side. The service's trampoline reads the entry's seven values in C and hands
+        Go side. The service's trampoline reads the entry's eight values in C and hands
         them to the Go side, and passes the ABI the action the Go side returned:
         CAVALRY_ACTION_CONTINUE makes no call, CAVALRY_ACTION_BREAK takes the entry and ends
         the poll, and CAVALRY_ACTION_ABORT, the handler's own or the Go side's answer for a
@@ -2380,6 +2454,7 @@ class GoPackage(unittest.TestCase):
         test = files["cavalry_test.go"]
         self.assertIn("func TestTheClusterTrampolinesHandTheValuesOnAndAbortAnEntryNoHandlerTook(t *testing.T) {", test)
         for name in ("ClusterSession.Offer", "ClusterSession.Poll", "ClusterService.Poll", "ClusterService.Reply",
+                     "ClusterService.ScheduleTimer", "ClusterService.CancelTimer",
                      "Subscription.deliverReply", "Subscription.deliverClusterEntry", "cavalryGoReply",
                      "cavalryGoClusterEntry"):
             self.assertIn(name, gen_go.PER_MESSAGE_GO)

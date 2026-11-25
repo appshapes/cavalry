@@ -158,7 +158,9 @@ What the handler returns says what becomes of the entry. `None` or `cavalry.CONT
 takes it, and the poll goes on. `cavalry.BREAK` takes it and ends the poll.
 `cavalry.ABORT` leaves it and ends the poll, and the next poll hands it over again.
 The poll returns the count of entries taken, or −1 when it stopped, on a fault or at
-a client its driver closed, which `service.fault()` gives until the next poll.
+a client its driver closed, which `service.fault()` gives until the next poll. A poll the ABI refuses before it reads is −1 too, and leaves `service.fault()` as it
+was: a poll after the program's own `client.close()` and a poll from inside a
+handler of the same service among them.
 
 `service.reply(session_id, message)` answers a session from inside the handler and
 returns what became of the reply: `CAVALRY_CLUSTER_REPLY_SENT`;
@@ -515,13 +517,13 @@ every entry: through `ctypes.CDLL` each call-back takes the GIL back, and beside
 Python thread that computes, a poll of 10 messages then took 5.8 to 6.3 ms at its p99,
 the interpreter's switch interval of 5 ms and more, against 4.4 to 4.6 µs with the GIL
 held (ADR 0124 has the measurement, on an Apple M5 Pro laptop with Python 3.14.6). The
-runner's cluster round reports the waits. On that laptop, in each of 10 runs, 7 of
-about 26,900 polls of three services took over 1 ms: the three that opened a member's
-log, the leader's at the session's opening, and the three in which each service's
-program first scheduled a timer. The longest poll of each run was one of those
-last, 25.3 to 36.2 ms with its six commands; before the round scheduled a timer the
-longest of each of 25 runs took 7.4 to 12.2 ms. A program whose other threads cannot stop for that long runs its
-service in a process of its own.
+runner's cluster round reports the waits. On that laptop, in each of 10 runs,
+7 of about 36,000 polls of three services took over 1 ms, where 4 of about 17,900 did in
+each of 25 runs before the round scheduled a timer. The report names the longest poll
+alone: in every run it was a poll in which a service's program first scheduled a
+timer, 24.5 to 34.0 ms with its six commands, where the longest before took 7.4 to
+12.2 ms. A program whose other threads cannot stop for that long runs its service in a
+process of its own.
 
 ### Threads
 
