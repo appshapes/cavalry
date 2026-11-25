@@ -1,8 +1,8 @@
 #!/usr/bin/env node
 "use strict";
 /**
- * The Node client's cluster round (spec/c-abi.md, versions 4 and 5; ADR 0122, ADR 0123, ADR
- * 0124): `Client.clusterService` and `ClusterService` beside each of three cluster members
+ * The Node client's cluster round (spec/c-abi.md, versions 4, 5 and 7; ADR 0122, ADR 0123,
+ * ADR 0124, ADR 0157): `Client.clusterService` and `ClusterService` beside each of three cluster members
  * that `conformance/node/run.sh` started with `cavalry run`, and `Client.connectCluster` and
  * `ClusterSession` on the runner's first driver, the one at CAVALRY_DIR, as
  * `conformance/python/cluster.py` runs it through `clients/python`.
@@ -34,11 +34,13 @@
  * program's timers, `scheduleTimer` and `cancelTimer` from inside the handler, as the C
  * runner's round has one: a timer handed to every service once, as an entry of its own type
  * with the timer's id, a BigInt, at one position and no earlier than the deadline its second
- * schedule set, where its first was an hour away, and not again within a timer refresh
- * interval and more; a timer due at once and cancelled in the same handling handed to none;
- * the least and the greatest int64 as ids, handed back as they are; both calls refused from
- * outside the handler, and an id or a deadline that is no int64, a number with a fraction or
- * past the safe integers among them, refused before the ABI is called; the
+ * schedule set, a second after its entry, where its first was an hour away, and not again
+ * within a timer refresh interval and more; a timer due at once and cancelled in the same
+ * handling handed to none; the least and the greatest int64 as ids, and the least and the
+ * greatest integer a number carries exactly, handed back as they are; both calls refused
+ * from outside the handler, and an id or a deadline that is no int64, a number with a
+ * fraction or outside the safe integers among them, refused before the ABI is called with
+ * a message that names the README's section; the
  * session's close as an entry every service is handed; a session and a service closed twice,
  * and a service closed after its client.
  *
@@ -67,7 +69,13 @@ const SCHEDULED = constants.CAVALRY_CLUSTER_TIMER_SCHEDULED;
 const TIMER_MESSAGE = "timer"; // the message at which each service's program schedules its timers
 const TIMER_ID = 77; // the timer that is handed over, scheduled as a number and handed back as 77n
 const CANCELLED_ID = 78; // the timer that is scheduled and cancelled in the same handling
-const TIMER_AFTER_MS = 50; // how long after the message's entry the timer is due
+// How long after the message's entry the timer is due. A second, and not the C round's 50 ms:
+// a member is told of a timer only once the poll that took the entry has sent its six
+// commands, some 25 ms on a laptop and more on a busy host, so an event for a timer that was
+// wrongly due at once is stamped tens of milliseconds after the message, and a margin of 50
+// would let it pass.
+const TIMER_AFTER_MS = 1000;
+const SAFE = Number.MAX_SAFE_INTEGER; // the greatest integer a number carries exactly, and an id here
 const HOUR_MS = 3600000; // the deadline its first schedule gives it, which the second replaces
 const INT64_MIN = -(2n ** 63n);
 const INT64_MAX = 2n ** 63n - 1n;
@@ -211,9 +219,10 @@ class Served {
       // later and then again for a little later: were the second schedule not to set the one
       // timer's deadline, the round's wait would end before the timer came. A second timer,
       // due at once, cancelled again: were the cancel to miss, it would be handed over. And
-      // the least and the greatest int64 as ids, due at once, which each service must be
-      // handed back as they are. An id and a deadline go as a number here and as a BigInt
-      // there, since the addon reads both. Every member's service makes the same calls at
+      // the least and the greatest int64 as ids, and the least and the greatest integer a
+      // number carries exactly, due at once, which each service must be handed back as they
+      // are. An id and a deadline go as a number here and as a BigInt there, since the addon
+      // reads both. Every member's service makes the same calls at
       // the same entry.
       this.timerCodes = [
         service.scheduleTimer(TIMER_ID, entry.timestamp + HOUR_MS),
@@ -221,7 +230,10 @@ class Served {
         service.scheduleTimer(CANCELLED_ID, entry.timestamp),
         service.cancelTimer(BigInt(CANCELLED_ID)),
         service.scheduleTimer(INT64_MIN, entry.timestamp),
-        service.scheduleTimer(INT64_MAX, BigInt(entry.timestamp))];
+        service.scheduleTimer(INT64_MAX, BigInt(entry.timestamp)),
+        // The bounds of what a number carries exactly, as numbers: the addon takes both.
+        service.scheduleTimer(-SAFE, entry.timestamp),
+        service.scheduleTimer(SAFE, entry.timestamp)];
     }
     this.codes.get(payload).push(code);
     if (!this.messages.has(payload)) this.messages.set(payload, []);
@@ -596,8 +608,8 @@ function main() {
     "entries; a reply whose handler threw is not handed over again");
 
   // 9b. The program's timers (spec/c-abi.md, version 7; spec/cluster.md, "The service",
-  // "Timers"; ADR 0157). Each service's program schedules four timers at one message and
-  // cancels one: the three are handed to every service once each, as entries of their own
+  // "Timers"; ADR 0157). Each service's program schedules six timers at one message and
+  // cancels one: the five are handed to every service once each, as entries of their own
   // type with the timers' ids, at one position each and none earlier than its deadline, and
   // the cancelled one to none. Step 10 holds the "once" for a timer refresh interval and
   // more. An argument that is no int64 never reaches the ABI: the thread's error is as it
@@ -605,8 +617,13 @@ function main() {
   for (const [what, call, error] of [
     ["an id with a fraction", () => served[0].service.scheduleTimer(1.5, 1), RangeError],
     ["an id past the safe integers", () => served[0].service.scheduleTimer(2 ** 53, 1), RangeError],
+    ["an id below the safe integers", () => served[0].service.scheduleTimer(-(2 ** 53), 1), RangeError],
     ["a deadline that is no number", () => served[0].service.scheduleTimer(1, NaN), RangeError],
     ["an infinite deadline", () => served[0].service.scheduleTimer(1, Infinity), RangeError],
+    ["a deadline of minus infinity", () => served[0].service.scheduleTimer(1, -Infinity), RangeError],
+    ["a deadline below every int64", () => served[0].service.scheduleTimer(1, -1e300), RangeError],
+    ["a boolean as an id", () => served[0].service.scheduleTimer(true, 1), TypeError],
+    ["no deadline", () => served[0].service.scheduleTimer(1, undefined), TypeError],
     ["a BigInt above int64 as an id", () => served[0].service.scheduleTimer(INT64_MAX + 1n, 1), RangeError],
     ["a BigInt below int64 as a deadline", () => served[0].service.scheduleTimer(1, INT64_MIN - 1n), RangeError],
     ["a string as an id", () => served[0].service.scheduleTimer("7", 1), TypeError],
@@ -623,6 +640,9 @@ function main() {
       fail(`${what} was not refused with ${error.name} before the ABI was called: it answered ${answeredWith}, and ` +
         `the thread's error went from ${before} to ${addon.cavalry_errcode()}`);
     }
+    if (!answeredWith.message.includes("clients/node/README.md#a-services-timers")) {
+      fail(`the refusal of ${what} does not name the README's section: ${answeredWith.message}`);
+    }
   }
   for (const [name, call] of [["scheduleTimer", () => served[0].service.scheduleTimer(1, 1)],
     ["cancelTimer", () => served[0].service.cancelTimer(1n)]]) {
@@ -633,21 +653,21 @@ function main() {
     }
   }
   offer(session, TIMER_MESSAGE, served, answered);
-  const timerIds = [INT64_MIN, BigInt(TIMER_ID), INT64_MAX];
-  wait("each service is handed its three timers", () => served.every((s) => s.timers.length >= timerIds.length),
+  const timerIds = [INT64_MIN, BigInt(-SAFE), BigInt(TIMER_ID), BigInt(SAFE), INT64_MAX];
+  wait("each service is handed its five timers", () => served.every((s) => s.timers.length >= timerIds.length),
     served, answered);
   settle(served, answered);
   const scheduled = served[0].messages.get(TIMER_MESSAGE)[0];
   for (const s of served) {
-    if (!same(s.timerCodes, [SCHEDULED, SCHEDULED, SCHEDULED, 0, SCHEDULED, SCHEDULED])) {
+    if (!same(s.timerCodes, [SCHEDULED, SCHEDULED, SCHEDULED, 0, SCHEDULED, SCHEDULED, SCHEDULED, SCHEDULED])) {
       fail(`the service beside member ${s.member} was answered ${show(s.timerCodes)} for its schedules and its ` +
         `cancel; expected CAVALRY_CLUSTER_TIMER_SCHEDULED, ${SCHEDULED}, for each schedule and 0 for the cancel`);
     }
     const ids = s.timers.map((t) => t[1]).sort((a, b) => (a < b ? -1 : a > b ? 1 : 0));
     if (!same(ids, timerIds) || s.timers.some((t) => typeof t[1] !== "bigint")) {
       fail(`the service beside member ${s.member} was handed the timers ${show(s.timers)}, each a position, an id ` +
-        `and a time; expected timer ${TIMER_ID}, the least int64 and the greatest once each, each id a BigInt, and ` +
-        `timer ${CANCELLED_ID}, which it cancelled, never`);
+        `and a time; expected timer ${TIMER_ID}, the least int64 and the greatest and the least safe integer and ` +
+        `the greatest once each, each id a BigInt, and timer ${CANCELLED_ID}, which it cancelled, never`);
     }
     if (!same(s.timers, served[0].timers)) {
       fail(`the service beside member ${s.member} was handed its timers as ${show(s.timers)} and the service beside ` +
@@ -665,7 +685,8 @@ function main() {
   const timer = served[0].timers.find((t) => t[1] === BigInt(TIMER_ID));
   say(`timer ${TIMER_ID}, scheduled by each service at a message for an hour later and then for ${TIMER_AFTER_MS} ms ` +
     `later, handed to three services once, at position ${timer[0]}, ${timer[2] - scheduled[3]} ms after the ` +
-    `message; the least and the greatest int64 as ids, due at once, handed to each once with those ids; timer ` +
+    `message; the least and the greatest int64 and the least and the greatest safe integer as ids, due at once, ` +
+    `handed to each once with those ids; timer ` +
     `${CANCELLED_ID}, due at once and cancelled in the same handling, handed to none; both calls refused from ` +
     `outside the handler, and what is no int64 before the ABI is called`);
 
@@ -692,9 +713,9 @@ function main() {
   const refreshed = Math.max(...served.map((s) => s.timerAt)) + REFRESH_MS;
   while (Date.now() < refreshed) cycle(served);
   for (const s of served) {
-    if (s.timers.length !== 3) {
+    if (s.timers.length !== 5) {
       fail(`the service beside member ${s.member} was handed the timers ${show(s.timers)} by ${REFRESH_MS} ms after ` +
-        `the last; expected three, once each`);
+        `the last; expected five, once each`);
     }
   }
 

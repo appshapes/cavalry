@@ -138,25 +138,38 @@ static int64_t int64_arg(napi_env env, napi_value v, const char *name) {
   type_error(env, name, "a number or a BigInt"); return 0;
 }
 
-/* An int64 that is read exactly, a timer's id or its deadline: a BigInt, as int64_arg reads
- * one, or a number that is an integer from -(2^53 - 1) to 2^53 - 1, the integers a number
- * carries exactly. Any other number, one with a fraction, a NaN, an infinity or one past
- * that range, is refused with a RangeError: N-API would truncate it or give another value,
- * and the ABI would then answer for another timer or another time. */
+/* An int64 that is read exactly, a timer's id or its deadline: a BigInt in the int64 range,
+ * or a number that is an integer from -(2^53 - 1) to 2^53 - 1, the integers a number
+ * carries exactly. A number with a fraction, a NaN, an infinity or one outside that range,
+ * and a BigInt outside int64, are refused with a RangeError: N-API would truncate the number
+ * or wrap the BigInt, and the ABI would then answer for another timer or another time. Any
+ * other value is a TypeError. Each refusal says what to pass and where the rule is, and none
+ * reaches the ABI. The range is checked before the cast, which is undefined for a double
+ * that no int64 holds. */
 static int64_t int64_exact_arg(napi_env env, napi_value v, const char *name) {
-  napi_valuetype t;
-  if (napi_typeof(env, v, &t) != napi_ok || t != napi_number) return int64_arg(env, v, name);
-  double d = 0;
-  if (napi_get_value_double(env, v, &d) == napi_ok && d >= -9007199254740991.0 && d <= 9007199254740991.0 &&
-      (double) (int64_t) d == d) {
-    return (int64_t) d;
+  static const char *const next = "pass an integer, such as 77 for an id or entry.timestamp + 50 for a deadline 50 ms "
+    "after the entry, or a BigInt, such as 77n; see clients/node/README.md#a-services-timers";
+  char message[448];
+  napi_valuetype t = napi_undefined;
+  if (napi_typeof(env, v, &t) == napi_ok && t == napi_number) {
+    double d = 0;
+    if (napi_get_value_double(env, v, &d) == napi_ok && d >= -9007199254740991.0 && d <= 9007199254740991.0 &&
+        (double) (int64_t) d == d) {
+      return (int64_t) d;
+    }
+    snprintf(message, sizeof message, "%s: an integer from -(2 ** 53 - 1) to 2 ** 53 - 1 expected, or a BigInt for "
+             "any int64; a number with a fraction or outside that range would be passed as another value: %s", name, next);
+    napi_throw_range_error(env, NULL, message);
+  } else if (t == napi_bigint) {
+    int64_t n = 0; bool lossless = false;
+    if (napi_get_value_bigint_int64(env, v, &n, &lossless) == napi_ok && lossless) return n;
+    snprintf(message, sizeof message, "%s: a BigInt from -(2n ** 63n) to 2n ** 63n - 1n expected, an int64; one "
+             "outside that range would be passed as another value: %s", name, next);
+    napi_throw_range_error(env, NULL, message);
+  } else {
+    snprintf(message, sizeof message, "%s: a number or a BigInt expected: %s", name, next);
+    napi_throw_type_error(env, NULL, message);
   }
-  char message[384];
-  snprintf(message, sizeof message, "%s: an integer from -(2 ** 53 - 1) to 2 ** 53 - 1 expected, or a BigInt for any "
-           "int64; a number with a fraction or outside that range would be passed as another value: pass an "
-           "integer, such as entry.timestamp + 50 for a deadline 50 ms after the entry, or a BigInt; see "
-           "clients/node/README.md#a-services-timers", name);
-  napi_throw_range_error(env, NULL, message);
   arg_failed = true;
   return 0;
 }

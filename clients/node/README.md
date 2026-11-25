@@ -189,7 +189,9 @@ again. The poll returns the count of entries taken, or −1 when it stopped, on 
 or at a client its driver closed, which `service.fault()` gives until the next poll.
 A poll with a client its driver closed, as when the member's driver has stopped, is −1
 with `CAVALRY_ERR_CLOSED` as the fault's code, at every poll, so a program's loop ends
-on it (ADR 0155).
+on it (ADR 0155). A poll the ABI refuses before it reads is −1 too, and leaves
+`service.fault()` as it was: a poll after the program's own `client.close()`, and a
+poll from inside a handler of the same service.
 
 `service.reply(sessionId, message)` answers a session from inside the handler and
 returns what became of the reply: `CAVALRY_CLUSTER_REPLY_SENT`;
@@ -275,19 +277,19 @@ ADR 0157):
 
 - **Only inside the handler.** The timers are then a function of the entries
   taken, as the program's state is, and the same beside every member. From
-  outside the handler both calls return −1, with `CAVALRY_ERR_CLUSTER_NO_ENTRY`
-  as `cavalry.addon.cavalry_errcode()`. A handler that returns `cavalry.ABORT`, or
-  throws,
-  is handed its entry again with every timer as it was before that handling. The
+  outside the handler both calls return −1, as `service.reply` does there, and
+  change nothing. A handler that returns `cavalry.ABORT`, or throws, is handed its
+  entry again with every timer as it was before that handling. The
   timers are part of what `service.snapshot` writes and `service.restore` reads,
   with no call of the program's.
 - **An id and a deadline are int64, and exact.** Each is a BigInt, any int64, or a
   number that is an integer from −(2^53 − 1) to 2^53 − 1, the integers a number
   carries exactly, as `entry.timestamp + 60000` is. A number with a fraction or
   outside that range, a `NaN` among them, and a BigInt outside int64, throw a
-  `RangeError` before the ABI is called, and a value that is neither a
-  `TypeError`: N-API would pass each as another value, another timer or another
-  time, and say nothing. Thrown in the handler, it aborts the entry as any
+  `RangeError` before the ABI is called: N-API would pass such a number or BigInt
+  as another value, another timer or another time, and say nothing. A value that
+  is neither a number nor a BigInt throws a `TypeError` there. Thrown in the
+  handler, it aborts the entry as any
   exception of the handler's does ("The exception"). `entry.correlationId` comes
   back as a BigInt whatever the id was scheduled as: `77n === 77` is false, so a
   program compares it with a BigInt, or reads `Number(entry.correlationId)` where
@@ -537,12 +539,12 @@ took are taken, and the service adds them again at a later poll (ADR 0159). What
 service tells its member of its timers after that, each pending timer again every
 second among it, is offered and waits for nothing. The
 runner's cluster round reports the waits. On an Apple M5 Pro laptop (macOS 26.6.1,
-Node v24.16.0), in each of 10 runs, 7 of about 33,400 polls of three services took
-over 1 ms: the three that opened a member's log, the leader's at the session's
-opening, and the three in which each service's program first scheduled a timer. The
-longest poll of each run was one of those last, 24.9 to 33.3 ms with its six
-commands; before the round scheduled a timer, the longest of each of 25 runs, a
-poll that opened a member's log, took 7.2 to 10.4 ms. A
+Node v24.16.0), in each of 10 runs, MEASURED_COUNT polls of three services took
+over 1 ms, where 4 of about 18,500 did in each of 25 runs before the round scheduled
+a timer. The report names the longest poll alone: in every run it was a poll in which
+a service's program first scheduled a timer, MEASURED_LONGEST ms with its six
+commands, where the longest before, a poll that opened a member's log, took 7.2 to
+10.4 ms. A
 program whose event loop cannot stop for that long runs its service on a
 `worker_threads` worker, with a `Client` of its own.
 
@@ -580,8 +582,9 @@ what the handler returned, and a tenth, `napi_get_value_double`, when that is a
 number. `cavalry.BREAK` and `cavalry.ABORT` cost one ABI call more,
 `cavalry_cluster_service_action`; nothing and `cavalry.CONTINUE` cost none. The
 getters of `reply` and `entry` each call the addon's `replyField` or `entryField`,
-which returns one value of that struct: a number, or a boolean for `entry.timedOut`.
-A timestamp is above 2^31, so each read of `reply.timestamp` or `entry.timestamp`
+which returns one value of that struct: a number, a boolean for `entry.timedOut`,
+or a BigInt for `entry.correlationId`, which V8 makes on its heap at each read, so
+a program reads it once for an entry that is a timer. A timestamp is above 2^31, so each read of `reply.timestamp` or `entry.timestamp`
 makes a `HeapNumber` on V8's heap, as the position of an entry past 2 GiB does. An
 entry that is no session's message has a body of no bytes, and the trampoline makes
 its `Buffer` all the same. `clients/generate-test.py` pins these calls too.

@@ -1135,11 +1135,12 @@ class ClusterService {
    * two states from one log. From outside the handler it is -1, with
    * CAVALRY_ERR_CLUSTER_NO_ENTRY. An id and a deadline are each a BigInt, any int64, or a
    * number that is an integer from -(2 ** 53 - 1) to 2 ** 53 - 1, as `entry.timestamp + 50`
-   * is: a BigInt outside int64, and a number with a fraction or outside that range, a NaN
+   * is. A BigInt outside int64, and a number with a fraction or outside that range, a NaN
    * among them, throw a RangeError before the ABI is called, inside the handler or outside
-   * it, and a value that is neither a TypeError, since either would be passed as another
-   * value. One ABI call, which allocates nothing and waits for nothing: the service tells its
-   * member after the handler has taken the entry, in the poll (`poll`). */
+   * it, since N-API would pass such a number or BigInt as another value; a value that is
+   * neither a number nor a BigInt throws a TypeError there. One ABI call, which allocates
+   * nothing and waits for nothing: the service tells its member after the handler has taken the
+   * entry, in the poll (`poll`). */
   scheduleTimer(correlationId, deadline) {
     return addon.cavalry_cluster_service_schedule_timer(this.handle, correlationId, deadline);
   }
@@ -1169,14 +1170,14 @@ class ClusterService {
    * snapshot has not added them already; that poll returns -1 with the driver's refusal of
    * one of them, after the entries its handler took are taken. After that the poll tells the
    * member what each taken entry changed, and every pending timer again each second, by
-   * offers that wait for nothing. When the handler threw, or returned what is no action, or the runtime kept the
-   * entry from it, the addon's trampoline aborted the entry and this throws `HandlerError`
-   * with `cluster` "service" after the ABI call returns: its `fragments` is the count of
-   * entries taken before that entry, and its `cause` the handler's exception, a
-   * `CavalryError` with CAVALRY_ERR_CLUSTER_ACTION for a value that is no action, or the
-   * Error naming the N-API call that failed. The next poll hands the aborted entry over
-   * again. From a handler of this service's own poll the ABI refuses the call: -1 with
-   * CAVALRY_ERR_POLLING, and nothing is touched. */
+   * offers that wait for nothing. When the handler threw, or returned what is no action, or the
+   * runtime kept the entry from it, the addon's trampoline aborted the entry and this throws
+   * `HandlerError` with `cluster` "service" after the ABI call returns: its `fragments` is the
+   * count of entries taken before that entry, and its `cause` the handler's exception, a
+   * `CavalryError` with CAVALRY_ERR_CLUSTER_ACTION for a value that is no action, or the Error
+   * naming the N-API call that failed. The next poll hands the aborted entry over again. From a
+   * handler of this service's own poll the ABI refuses the call: -1 with CAVALRY_ERR_POLLING,
+   * and nothing is touched. */
   poll(handler, fragmentLimit) {
     const result = addon.clusterServicePoll(this._state, this.handle, this._client.handle, handler, fragmentLimit, this);
     if (typeof result === "number") return result;

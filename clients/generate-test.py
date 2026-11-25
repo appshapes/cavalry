@@ -1483,6 +1483,8 @@ class NodePackage(unittest.TestCase):
         self.assertIn("the-exception", slugs)
         self.assertIn("the-cluster-session", slugs)
         self.assertIn("the-cluster-service", slugs)
+        # The section the exact reader's refusals name (ADR 0157).
+        self.assertIn("a-services-timers", slugs)
 
     def test_the_cluster_session_and_the_cluster_service_have_the_shape_adr_0124_gives(self):
         """The Node cluster session and cluster service (ADR 0124), read from the generated
@@ -1534,12 +1536,27 @@ class NodePackage(unittest.TestCase):
         schedule = addon.split("static napi_value fn_cavalry_cluster_service_schedule_timer(", 1)[1].split("\n}\n", 1)[0]
         self.assertIn('int64_t correlation_id = (int64_t) int64_exact_arg(env, argv[1], "correlation_id");', schedule)
         self.assertIn('int64_t deadline = (int64_t) int64_exact_arg(env, argv[2], "deadline");', schedule)
-        self.assertLess(schedule.index("int64_exact_arg(env, argv[2]"), schedule.index("cavalry_cluster_service_schedule_timer("))
         cancel = addon.split("static napi_value fn_cavalry_cluster_service_cancel_timer(", 1)[1].split("\n}\n", 1)[0]
         self.assertIn('int64_t correlation_id = (int64_t) int64_exact_arg(env, argv[1], "correlation_id");', cancel)
+        # Each read comes before the wrapper's ABI call, and a failed one returns before
+        # it; and the reader is called from these three places alone, so from no trampoline.
+        for wrapper, call in ((schedule, "int result = cavalry_cluster_service_schedule_timer("),
+                              (cancel, "int result = cavalry_cluster_service_cancel_timer(")):
+            last = wrapper.rindex("int64_exact_arg(env, argv[")
+            self.assertLess(last, wrapper.index(call))
+            self.assertIn("  if (arg_failed) return NULL;\n", wrapper[last:wrapper.index(call)])
         self.assertEqual(addon.count("int64_exact_arg(env, argv["), 3)
+        self.assertEqual(addon.count("int64_exact_arg("), 4)
+        # The reader: a number is cast only inside the range a double carries exactly,
+        # each of its three refusals names the README's section, and none returns a value.
         reader = addon.split("static int64_t int64_exact_arg(", 1)[1].split("\n}\n", 1)[0]
-        self.assertIn("clients/node/README.md#a-services-timers", reader)
+        self.assertIn("d >= -9007199254740991.0 && d <= 9007199254740991.0 &&\n        (double) (int64_t) d == d", reader)
+        self.assertIn("napi_get_value_bigint_int64(env, v, &n, &lossless) == napi_ok && lossless", reader)
+        self.assertIn("see clients/node/README.md#a-services-timers", reader)
+        self.assertEqual(reader.count('%s", name, next);'), 3)
+        self.assertEqual(reader.count("napi_throw_range_error("), 2)
+        self.assertEqual(reader.count("napi_throw_type_error("), 1)
+        self.assertTrue(reader.rstrip().endswith("arg_failed = true;\n  return 0;"), reader[-80:])
         self.assertIn("    const result = addon.clusterServicePoll(this._state, this.handle, this._client.handle, handler, "
                       "fragmentLimit, this);\n    if (typeof result === \"number\") return result;\n"
                       "    throw new HandlerError(result[0], result[1], result[4] ? noAction(result[2]) : result[2], "
