@@ -444,9 +444,14 @@ is the task from its start.
   `cavalry.ERROR` with `CAVALRY_ERR_CLAIM_OUTSTANDING`, and `publication.claim` stays
   the outstanding claim's view until its `commit` or `abort` releases it. A `poll`
   from inside a handler of the same subscription returns −1 with
-  `CAVALRY_ERR_POLLING`, `subscription.image_count()` returns −1 there and
-  `subscription.images()` raises `CavalryError` with that code, where it returned an
-  empty list, and the poll in progress goes on with its own handler and
+  `CAVALRY_ERR_POLLING`. `subscription.image_count()` returns −1 there, and
+  `subscription.images()` and `subscription.image_at_index(i)` raise `CavalryError`
+  with that code, where they returned an empty list and `None`: the ABI answers no
+  image for a refusal as for an index past the count, so the client asks the count,
+  and the count's refusal is the answer. The three answer the same way after the
+  subscription's own `close()`, with `CAVALRY_ERR_NULL`. A handler that asks raises
+  at that line, as for any exception of its own ("The exception"). The poll in
+  progress goes on with its own handler and
   its own count of raises. A committed log's handler is held to the same rule. From
   inside it, a `poll` of the same log, `log.position()` and `log.commit_position()`
   return −1, `log.is_ended` is `False`, `log.failed_at()`, `log.withdrawn_at()` and

@@ -427,10 +427,13 @@ that runs every call above beside three members.
   do, and the ABI refuses it with `Abi.ERR_NULL`: a poll answers -1, a claim
   `PUBLICATION_ERROR`, never a delivery and never a frame.
 - Never read a refusal as an answer. A `poll` from inside a handler of the same
-  subscription returns −1 with `Abi.ERR_POLLING`, `subscription.imageCount()` returns
-  −1 there and `subscription.images()` throws `CavalryException` with that code,
-  where it threw `IllegalArgumentException` for a capacity of −1, and the poll in
-  progress goes on. A
+  subscription returns −1 with `Abi.ERR_POLLING`, and the poll in progress goes on.
+  `subscription.imageCount()` returns −1 there, and `subscription.images()` and
+  `subscription.imageAt(i)` throw `CavalryException` with that code, where `images`
+  threw `IllegalArgumentException` for a capacity of −1 and `imageAt` returned
+  `null`: the ABI answers no image for a refusal as for an index past the count, so
+  the client asks the count, and the count's refusal is the answer. The three answer
+  the same way after the subscription's own `close()`, with `Abi.ERR_NULL`. A
   committed log's handler is held to the same rule. From inside it, a `poll` of the
   same log, `log.position()` and `log.commitPosition()` return −1, `log.isEnded()` is
   `false`, `log.failedAt()`, `log.withdrawnAt()` and `log.faulted()` are empty, and
