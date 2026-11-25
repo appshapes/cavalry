@@ -1,0 +1,240 @@
+# 0160. Keep the log directory's gate on one tree on CI's macOS runner, and track the lost runner as a fault of its own
+
+- **Status:** Accepted
+- **Date:** 2026-11-25
+- **Invariants affected:** 3, 6
+- **Supersedes:** ADR 0156 on one point, where the gate runs all seven of its writes:
+  on CI's macOS runner it writes server 0.9.0's directory alone, as it did before
+  work item 441. The rest of ADR 0156 stands, on Linux and in every other run.
+
+## Context
+
+ADR 0156 has the log directory's upgrade gate, `conformance/upgrade/log-directory.sh`,
+write three directories in seven ways: 620a2e29's alone, 620a2e29's and then
+d265af82's in place, and d265af82's alone, each with its last run stopped and again
+killed, and the one written in turn a third time with 620a2e29's last run killed. It
+landed on `master` as 2387b4be on 2026-11-25. On CI's macOS runner, `gates (macos)`,
+two of its first four jobs then lost their runner partway through `just conformance`:
+`master`'s run 45549149085 and the by-hand run 45536715972. GitHub's record for each says
+"The self-hosted runner lost communication with the server", and the job keeps no log
+by any route.
+
+The one-tree form that came before is not free of that loss. The gate first ran on
+`master` at 52c25642, on 2026-11-22. From then to 506246f9, the last commit before
+the seven, `master` ran 36 macOS jobs on 35 of its 37 commits; the runs of the other
+two were cancelled before any job began. Two of those jobs lost their runner the
+same way, partway through `just conformance` with the one-tree form in it: the
+first attempts of run 44989472096 (654037c6, job 137107151456) and of run
+45091169007 (dddd87a9, job 137421344324). Each carries the same annotation.
+`just lint` and `just test` passed, and `just conformance` and every later step
+have no result. Since pull request 352 put that form back, its three jobs to
+2026-11-25, for e7008334, d40bd559 and dd094bfe, lost none. In the 30 runs of
+`master` that GitHub lists before the gate, no macOS job lost its runner.
+
+A lost runner turns `master` red, and it skips the macOS job's later steps:
+`just docs`, `just quickstart`, `just replay-check` and the bench. Over the seven's
+first four jobs, each landing met it at about one chance in two. Over all eight jobs
+measured in CI's own order, those four among them, two lost: about one in four. So
+pull request 352 (e7008334) had the script take its one-tree form on CI's macOS
+runner alone, on the reading that the form had lost no runner in the runs before.
+It had lost two, as above: 2 of 39 jobs, about one in 20, counting the three since
+352. That is a gate weakened on one runner, and until now its reason has been only
+in a commit message. Its pages said that work item 441 stays open "until they run
+on macOS again, or an ADR says why they do not". This is that ADR.
+
+The experiments on throwaway branches, set out under Evidence, did not find the cause,
+and they spent their time box. That box was one round in the job's own order, and one
+more if it lost a runner. It lost none.
+
+## Decision
+
+On CI's macOS runner, when no `CAVALRY_DIRECTORY_FROM` is set, the gate keeps building
+620a2e29 alone and writing server 0.9.0's directory alone, stopped and killed. Linux
+writes all seven, and so does every run that is not CI's macOS runner: a laptop, or a
+run by hand. The servers in production run Linux, and `gates (linux)` is the check a
+pull request requires (ADR 0073).
+
+The ground is each form's record in CI's own order, the order that turns `master`
+red. The seven lost the runner in 2 of 8 jobs, about one in four. The one-tree form
+lost it in 2 of 39, about one in 20. That gap is not shown: a one-sided Fisher exact
+test of those counts gives about 0.13, and Evidence holds every arm to the same
+standard. So the exception is not a remedy, and this ADR does not say that the seven
+cause the loss. It keeps the form with the lower rate seen because, of the two ways
+this choice can be wrong, keeping the exception is the one that costs less:
+
+- If the seven do raise the rate and they run on macOS, `master` turns red at about
+  one landing in four, against one in 20 now, and each such job skips its later
+  steps for that commit.
+- If they do not raise it and the exception stays, macOS goes without d265af82's
+  directories and the directory written in turn. No server runs on macOS, and Linux
+  holds those directories in every pull request and on `master`.
+
+A loss with one tree also points away from the seven as the cause: whatever loses
+the runner is there without them. That is one more reason to track the loss as a
+fault of its own.
+
+The lost runner becomes a fault of its own, work item 456, and work item 441 ends
+with this decision. The script's comment and the line it prints on that runner,
+`conformance/README.md`, `docs/explanation/what-brigades-server-relies-on.md`, row 9 of
+`docs/explanation/where-cavalry-is-and-what-is-left.md`, and work item 441's changelog
+entry name that work item and this ADR, in place of "441 stays open".
+
+## Alternatives considered
+
+- **All seven on macOS, and run a lost job again.** Lost: a lost runner keeps no log.
+  `master` is red until someone runs the job again, and in a lost job, docs,
+  quickstart, replay-check and the bench do not run for that commit. At two losses in
+  eight jobs, about one landing in four would pay that, against one in 20 with one
+  tree. That gap is not shown, so this choice is not ruled out by the counts. It
+  loses on cost: the Decision sets out why keeping the exception is the cheaper error.
+- **Leave work item 441 in Doing until the cause is found.** Lost: a work item parked
+  in Doing reads as taken to the next session, and the experiment has no next step
+  that is cheap. The fault's own work item carries the findings and what was not
+  tried.
+- **Drop the seven from the gate on every runner.** Lost: Linux has run them in every
+  job and in 15 runs in a row with no loss, and Linux is what the servers run. That
+  would give up ADR 0156's hold on the directories the servers have, to spare a
+  runner they do not use.
+- **Keep d265af82's directories on macOS, and drop only the directory written in
+  turn.** Lost: no arm named the part that loses the runner, so this form has no
+  ground of its own. It has no record in CI's own order to set against the seven's
+  or the one-tree form's. In a loop, the directory written in turn passed 24 runs
+  alone, and d265af82 alone passed 12 more, and Evidence says why counts that size
+  show nothing. The one-tree form, 620a2e29 alone, is the form with a record in CI's
+  own order, 2 lost in 39 jobs, and the form `master` ran before work item 441.
+  Under the same doubt, this ADR keeps the form whose rate it has measured.
+
+## Evidence
+
+The runner: Blacksmith's `blacksmith-6vcpu-macos-latest`, a macOS 26.3 virtual
+machine on arm64, with 6 vCPUs, 24 GiB of memory and a 409 GiB disk. Each experiment
+ran on the throwaway branches `441-gate-on-macos` and `441-gate-on-macos-2`. A
+watchdog sampled the runner every 15 or 30 s, and posted each sample off the runner
+as a commit status. Markers, where an arm had them, were posted before each step of
+the gate.
+
+Each arm ran on a runner of its own, so a lost runner ended its own arm and no other.
+Each row is the gate's seven writes, except where the row names a part of them. The
+second row is no experiment: it is `master`'s own record of the one-tree form, read
+from GitHub's record of each job.
+
+| Where the gate ran, and the run | Runs | Runners lost |
+| --- | --- | --- |
+| CI's own job, `just lint`, `just test`, then `just conformance`: run 45536355928's macOS job; 45536715972's, and that job run again; 45549149085's, and that job run again; round 5b's three arms, run 45563204036 | 8 jobs | 2: the first attempts of 45536715972 and 45549149085 |
+| The one-tree form, 620a2e29 alone, in CI's own job on `master`: the 35 commits from 52c25642 to 506246f9 that ran a job, and 654037c6's job run again; e7008334, d40bd559 and dd094bfe since 352 | 39 jobs | 2: the first attempts of 44989472096 and 45091169007 |
+| The gate alone in a loop, no markers: test-times 45553732082 | at most 15 | 1 |
+| The same: round 2's seven arm, run 45556061823 | 4 | 1, in its fourth run |
+| The same: round 3's bare arm, run 45558818935 | 11 | 1, in its eleventh run |
+| The same: round 4's bare arm, on a runner first quiet, run 45560862496 | 20 | 0 |
+| The gate alone, a marker posted and answered before each step: run 45557226906's seven arm | 8 | 0 |
+| The gate alone, a marker sent in the background before each step: run 45558818935's two marker arms | 24 | 0 |
+| The gate alone, 10 ms before every program, or 100 ms where d265af82 starts on what 620a2e29 left: run 45560862496's two pause arms | 40 | 0 |
+| The directory written in turn alone, one arm for each ending, with markers: run 45557226906 | 24 | 0 |
+| 620a2e29 alone, and d265af82 alone in server 0.10.0's shape: run 45556061823 | 24 | 0 |
+| Linux, the gate alone in a loop: test-times 45553732082 | 15 | 0 |
+| This laptop, macOS 26.6.1 on arm64 hardware with 64 GiB, by hand and in `just conformance` | at least 10 | 0, and the machine was none the worse |
+
+The bare gate in a loop lost 3 runners in 36 to 50 runs. Test-times' job kept no
+log, so how many of its 15 runs began is not known. That is a rate of about 1 in 12
+to 1 in 17.
+
+None of the counts where no loss was seen is large enough to show that its arm
+prevents the loss. At that rate, an arm of 24 runs had a 12 to 23% chance of losing
+none, and the 40 paused runs a 3 to 9% chance. Beside the paused arms, in the same
+round, the bare arm also lost none in 20. So neither the markers, nor the pauses, nor
+a single tree, nor the directory written in turn alone is shown to be a remedy or a
+cause. In CI's own order, a single tree is shown to be no remedy: it lost 2 of its
+39 jobs.
+
+In CI's own order the seven lost 2 of 8 jobs, and the one-tree form 2 of 39. A
+one-sided Fisher exact test of those counts gives about 0.13, so the gap between the
+two forms is not shown either. The one-tree form's two losses look like the seven's:
+the same annotation, `just lint` and `just test` passed, `just conformance` and every
+later step with no result, and no log. Since no lost job kept a log, none of the
+four losses in CI's own order shows which program in `just conformance` was running
+when the runner was lost, the gate or another.
+
+Each loss was sudden. In run 45556061823 the seven lost its runner within 15 s of the
+start of its fourth run. In 45558818935 it was lost in the first seconds of its
+eleventh. Every sample before was flat, and the watchdog, a process of its own, went
+silent at the same instant as the gate.
+
+What the samples rule out:
+- **Disk:** 147 to 151 GiB free throughout.
+- **Swap:** 0.
+- **Files:** at most 190 under the gate's directories.
+- **The gate's own memory.** On the laptop the machine's file-backed pages rose at
+  most 182 MiB during the seven, against 161 MiB during the one-tree form. The files
+  alive at once peaked at 4,813 MiB in 116 files against 1,171 MiB in 29, by their
+  lengths, most of them sparse 128 MiB segment files. On the runner, 12 to 15 GiB
+  were free when `just conformance` began, with the compressor near 0.
+- **A quiet machine:** round 4 began each arm at a load average under 3, and the bare
+  seven passed 20 of 20.
+- **A signal to the runner's own processes:** the gate signals only the processes it
+  started, by their process ids, never a process group.
+
+What was not tried, and goes to work item 456:
+- Fresh ports at each start. Every feed of a run, in every directory, binds the same
+  two 127.0.0.1 UDP ports, counted from the script's process id.
+- Another size or image of the runner.
+- The provider's own record of those machines.
+- A watchdog that tells a machine that stopped from a machine whose network stopped.
+  Every sample leaves over the network, so the two look the same here.
+- A record, kept off the runner, of which program `just conformance` was running when
+  a job in CI's own order lost its runner, in either form.
+
+One more finding was not followed here, and goes to work item 457. On the macOS
+runner, `just test` brings free memory down to 304 to 518 MiB of 24 GiB, with one
+test process (`snapshot`) at 16 GiB resident, `image_announced` at about 8 GiB and
+`cluster_service` at 4.5 GiB, swap at 0 and the job passing. The gate
+starts after that, with 12 to 15 GiB free again.
+
+## Consequences
+
+- On every `master` commit, the macOS job holds the gate's one-tree form, as it did
+  before work item 441. It does not hold that a build on macOS opens the directory
+  the servers hold now. Linux holds that in every pull request and on `master`.
+- The macOS job still loses its runner at times, as it did in 2 of 39 jobs with one
+  tree. Each such loss turns `master` red until the job is run again, and it is
+  work item 456's.
+- A change that only macOS would break in d265af82's directories, or in the
+  directory written in turn, goes unseen there. The servers run Linux, and the
+  laptop's runs by hand write all seven.
+- The script's comment, the README and the explanation page say where the exception
+  is tracked. A stranger reading the macOS job's log sees the script's own line about
+  it.
+- **Revisit** when any of these happens:
+  - work item 456 finds the cause;
+  - the runner's image or size changes;
+  - a runner is lost on macOS in a job that does not run this gate;
+  - the servers in production run macOS.
+
+  Work item 456's "Done when" decides it: the cause written with the run that shows
+  it, or a new ADR that says why the exception stays.
+
+  The seven return to CI's macOS runner on a comparison with the one-tree form, not
+  on a count of zero, since that form loses the runner too. At its 2 in 39, the
+  one-tree form itself would lose none in twenty jobs only about 35% of the time.
+  The comparison is one round, from a throwaway branch, of twenty jobs of each form
+  in CI's own order, each job on a runner of its own. The seven return if they lose
+  no more runners than the one-tree form does in that round. If the two forms lose
+  at the same rate, about one in 20, the seven pass about 65% of the time. If the
+  seven lose one in four, as in CI so far, they pass about 5% of the time. Both
+  forms run in the one round so that a change in the runner over time weighs on
+  both alike. The loop of the gate alone is not part of the comparison: the
+  one-tree form has no record there to compare with.
+
+  What the round costs is stated before it runs. Forty jobs in CI's own order, at
+  the 14 to 15 minutes a job in that order took in this ADR's round 5b (run
+  45563204036), come to about 10 hours of macOS runner time. Each runner lost adds
+  up to the job's 30-minute bound.
+
+## References
+
+- Work item 441, which carried this decision; work item 456, the fault, part of
+  feature 8 (work item 368); and work item 457, the memory that `just test`
+  holds on the macOS runner.
+- ADR 0156, the seven directories; ADR 0141, the gate; ADR 0073, which jobs run where.
+- Pull requests 349 (2387b4be), which added the seven, and 352 (e7008334), which put
+  the one-tree form on CI's macOS runner.
+- `conformance/upgrade/log-directory.sh`, the comment above "The older builds".
