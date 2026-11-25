@@ -27,7 +27,14 @@
 // whose entry is aborted, handed over again by the next poll and answered once; a reply too
 // long for a frame and a reply to a session that is not open; a handler that returns
 // ActionBreak with two entries waiting; a session's handler that panics, whose reply is not
-// handed over again; the session's close as an entry every service is handed; a session
+// handed over again; the program's timers, ScheduleTimer and CancelTimer from inside the
+// handler, as the C runner's round has one: a timer handed to every service once, as an
+// entry of its own type with the timer's id, at one position and no earlier than the
+// deadline its second schedule set, a second after its entry, where its first was an hour
+// away, and not again within a timer refresh interval and more; a timer due at once and
+// cancelled in the same handling handed to none; the least and the greatest int64 as ids,
+// handed back as they are; both calls refused from outside the handler; the session's
+// close as an entry every service is handed; a session
 // and a service closed twice, each with its slot in the table freed, and a service closed
 // after its client.
 //
@@ -42,9 +49,12 @@ package main
 import (
 	"errors"
 	"fmt"
+	"math"
 	"os"
 	"path/filepath"
 	"reflect"
+	"runtime"
+	"sort"
 	"strings"
 	"time"
 
@@ -56,6 +66,20 @@ const (
 	wait    = 60 * time.Second
 	idle    = 200 * time.Microsecond // between duty cycles: the members run in processes of their own
 	settled = 300 * time.Millisecond // the time in which a second reply, or a second entry, would come
+
+	timerMessage = "timer"   // the message at which each service's program schedules its timers
+	timerID      = int64(77) // the timer that is handed over
+	cancelledID  = int64(78) // the timer that is scheduled and cancelled in the same handling
+	// How long after the message's entry the timer is due, in the cluster's milliseconds. A
+	// second: a service tells its member of a timer only once the poll that took the entry
+	// has sent the six commands of its first timer, some 25 ms on a laptop and more on a
+	// busy host, so the event of a timer that was wrongly due at once is stamped tens of
+	// milliseconds after the message, 49 ms in the Python round's and the Node round's runs,
+	// and a margin of that size would let it pass. The round prints what it was in its own
+	// run.
+	timerAfterMs = int64(1000)
+	hourMs       = int64(3600000)          // the deadline its first schedule gives it, which the second replaces
+	refresh      = 1200 * time.Millisecond // a timer refresh interval of spec/cluster.md, "Values", 1 s, and more
 )
 
 var errOwn = errors.New("the handler's own")
@@ -136,9 +160,12 @@ type served struct {
 	noActionOn string                                  // a payload whose first handling returns what is no action
 	edgesOn    string                                  // a payload before whose reply a reply too long and one to no session are made
 	edges      []int32
-	breakOn    map[string]bool             // payloads whose entries are taken with ActionBreak
-	values     *cavalry.ClusterEntryValues // the struct of values the handler was handed, the same one for every entry
-	polls      int                         // the report: every poll, those over a millisecond, and the longest
+	breakOn    map[string]bool              // payloads whose entries are taken with ActionBreak
+	timers     []cavalry.ClusterEntryValues // every timer handed over
+	timerAt    time.Time                    // when the last was handed over
+	timerCodes []int32                      // what the schedules and the cancel at timerMessage answered
+	values     *cavalry.ClusterEntryValues  // the struct of values the handler was handed, the same one for every entry
+	polls      int                          // the report: every poll, those over a millisecond, and the longest
 	over       int
 	longest    time.Duration
 	longestOf  string
@@ -169,8 +196,17 @@ func (s *served) onEntry(body []byte, entry *cavalry.ClusterEntryValues, service
 		if body != nil {
 			fail("an entry that is no session's message has a body that is not nil, of %d bytes: %+v", len(body), values)
 		}
+		if entry.Type == cavalry.ClusterEntryTimer {
+			s.timers = append(s.timers, values)
+			s.timerAt = time.Now()
+		} else if entry.CorrelationID != 0 {
+			fail("an entry that is no timer has the correlation id %d: %+v", entry.CorrelationID, values)
+		}
 		s.entries = append(s.entries, values)
 		return cavalry.ActionContinue
+	}
+	if entry.CorrelationID != 0 {
+		fail("a session's message has the correlation id %d: %+v", entry.CorrelationID, values)
 	}
 	payload := string(body)
 	s.handed[payload] = append(s.handed[payload], entry.Position)
@@ -234,6 +270,23 @@ func (s *served) onEntry(body []byte, entry *cavalry.ClusterEntryValues, service
 		if closed {
 			fail("the client of the service beside member %d reads closed after a Close from inside the handler, which "+
 				"the ABI refuses and which frees nothing; the Close returned %v", s.member, err)
+		}
+	}
+	if payload == timerMessage {
+		// The program's state changes at the entry it takes. One timer, scheduled for an
+		// hour later and then again for a second later: were the second schedule not to set
+		// the one timer's deadline, the round's wait would end before the timer came. A
+		// second timer, due at once, cancelled again: were the cancel to miss, it would be
+		// handed over. And the least and the greatest int64 as ids, due at once, which each
+		// service must be handed back as they are. Every member's service makes the same
+		// calls at the same entry.
+		s.timerCodes = []int32{
+			service.ScheduleTimer(timerID, entry.Timestamp+hourMs),
+			service.ScheduleTimer(timerID, entry.Timestamp+timerAfterMs),
+			service.ScheduleTimer(cancelledID, entry.Timestamp),
+			service.CancelTimer(cancelledID),
+			service.ScheduleTimer(math.MinInt64, entry.Timestamp),
+			service.ScheduleTimer(math.MaxInt64, entry.Timestamp),
 		}
 	}
 	s.codes[payload] = append(s.codes[payload], code)
@@ -697,6 +750,90 @@ func main() {
 		"answered once; a reply of 1,345 bytes and a reply to no session refused; ActionBreak took one of two entries; " +
 		"a reply whose handler panicked is not handed over again")
 
+	// 9b. The program's timers (spec/c-abi.md, version 7; spec/cluster.md, "The service",
+	// "Timers"; ADR 0157). Each service's program schedules four timers at one message and
+	// cancels one: the three are handed to every service once each, as entries of their own
+	// type with the timers' ids, at one position each and none earlier than its deadline,
+	// and the cancelled one to none. Step 10 holds the "once" for a timer refresh interval
+	// and more. From outside the handler both calls are refused: the thread's error, set
+	// to another code first, and the service's Err both say so.
+	for _, call := range []struct {
+		name   string
+		answer func() int32
+	}{
+		{"ScheduleTimer", func() int32 { return services[0].service.ScheduleTimer(1, 1) }},
+		{"CancelTimer", func() int32 { return services[0].service.CancelTimer(1) }},
+	} {
+		runtime.LockOSThread()
+		setAnotherError()
+		answer, thread := call.answer(), cavalry.Errcode()
+		runtime.UnlockOSThread()
+		kept := services[0].service.Err()
+		if answer != -1 || thread != cavalry.ErrClusterNoEntry || codeOf(kept) != cavalry.ErrClusterNoEntry ||
+			!strings.Contains(fmt.Sprint(kept), "timer") {
+			fail("%s from outside the handler answered %d with the thread's error %d and Err %v, not -1 with "+
+				"ErrClusterNoEntry as both, Err naming the timer's function", call.name, answer, thread, kept)
+		}
+	}
+	offer(session, timerMessage, services, a)
+	timerIDs := []int64{math.MinInt64, timerID, math.MaxInt64}
+	waitFor("each service is handed its three timers",
+		func() bool { return all(services, func(s *served) bool { return len(s.timers) >= len(timerIDs) }) }, services, a, nil)
+	settle(services, a, nil)
+	scheduled := services[0].messages[timerMessage][0]
+	scheduledCode := int32(cavalry.ClusterTimerScheduled)
+	for _, s := range services {
+		if !reflect.DeepEqual(s.timerCodes, []int32{scheduledCode, scheduledCode, scheduledCode, 0, scheduledCode, scheduledCode}) {
+			fail("the service beside member %d was answered %v for its schedules and its cancel; expected "+
+				"ClusterTimerScheduled, %d, for each schedule and 0 for the cancel", s.member, s.timerCodes, scheduledCode)
+		}
+		var ids []int64
+		for _, t := range s.timers {
+			ids = append(ids, t.CorrelationID)
+		}
+		sort.Slice(ids, func(i, j int) bool { return ids[i] < ids[j] })
+		if !reflect.DeepEqual(ids, timerIDs) {
+			fail("the service beside member %d was handed the timers %+v; expected timer %d, the least int64 and the "+
+				"greatest once each, and timer %d, which it cancelled, never", s.member, s.timers, timerID, cancelledID)
+		}
+		if !reflect.DeepEqual(s.timers, services[0].timers) {
+			fail("the service beside member %d was handed its timers as %+v and the service beside member %d as %+v; "+
+				"expected one position and one time for each", s.member, s.timers, services[0].member, services[0].timers)
+		}
+		for _, t := range s.timers {
+			after := int64(0)
+			if t.CorrelationID == timerID {
+				after = timerAfterMs
+			}
+			if t.Timestamp < scheduled.Timestamp+after || t.Position <= scheduled.Position {
+				fail("the service beside member %d was handed timer %d at position %d and time %d; it was scheduled at "+
+					"position %d and time %d for %d ms later", s.member, t.CorrelationID, t.Position, t.Timestamp,
+					scheduled.Position, scheduled.Timestamp, after)
+			}
+		}
+	}
+	// What a deadline that was ignored would have read: the time of the timers that were
+	// due at once, which the member was told of with timer 77. The deadline check above
+	// proves something for as long as this is below the deadline.
+	var timer cavalry.ClusterEntryValues
+	atOnce := int64(0)
+	for _, t := range services[0].timers {
+		if t.CorrelationID == timerID {
+			timer = t
+		} else if t.Timestamp-scheduled.Timestamp > atOnce {
+			atOnce = t.Timestamp - scheduled.Timestamp
+		}
+	}
+	margin := ""
+	if atOnce >= timerAfterMs {
+		margin = ", so the deadline's check proved nothing in this run"
+	}
+	say("timer %d, scheduled by each service at a message for an hour later and then for %d ms later, handed to three "+
+		"services once, at position %d, %d ms after the message; the least and the greatest int64 as ids, due at once, "+
+		"handed to each once with those ids, %d ms after the message%s; timer %d, due at once and cancelled in the same "+
+		"handling, handed to none; both calls refused from outside the handler", timerID, timerAfterMs, timer.Position,
+		timer.Timestamp-scheduled.Timestamp, atOnce, margin, cancelledID)
+
 	// 10. The session before its client. Its close is an entry every service is handed,
 	// after which the log holds no session open.
 	mustOK(session.Close())
@@ -728,6 +865,24 @@ func main() {
 		if !reflect.DeepEqual(s.entries, services[0].entries) {
 			fail("the services beside members 0 and %d took different entries: %+v and %+v", s.member, services[0].entries,
 				s.entries)
+		}
+	}
+	// The timers of step 9b, once each: a leader gives a timer that is still pending in its
+	// service another event a timer refresh interval after the first, so the services are
+	// polled until that long has passed since the last of them was handed a timer.
+	refreshed := services[0].timerAt
+	for _, s := range services {
+		if s.timerAt.After(refreshed) {
+			refreshed = s.timerAt
+		}
+	}
+	for refreshed = refreshed.Add(refresh); time.Now().Before(refreshed); {
+		mustOK(cycle(services, nil, nil))
+	}
+	for _, s := range services {
+		if len(s.timers) != 3 {
+			fail("the service beside member %d was handed the timers %+v by %v after the last; expected three, once each",
+				s.member, s.timers, refresh)
 		}
 	}
 

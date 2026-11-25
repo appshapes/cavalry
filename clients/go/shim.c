@@ -144,6 +144,24 @@ int cavalry_go_cluster_service_reply(cavalry_cluster_service_t *service, int64_t
   return code;
 }
 
+int cavalry_go_cluster_service_schedule_timer(cavalry_cluster_service_t *service, int64_t correlation_id,
+                                              int64_t deadline, cavalry_go_error_t *error) {
+  int code = cavalry_cluster_service_schedule_timer(service, correlation_id, deadline);
+  if (code < 0) {
+    cavalry_go_keep(error, "cavalry_cluster_service_schedule_timer");
+  }
+  return code;
+}
+
+int cavalry_go_cluster_service_cancel_timer(cavalry_cluster_service_t *service, int64_t correlation_id,
+                                            cavalry_go_error_t *error) {
+  int code = cavalry_cluster_service_cancel_timer(service, correlation_id);
+  if (code < 0) {
+    cavalry_go_keep(error, "cavalry_cluster_service_cancel_timer");
+  }
+  return code;
+}
+
 /* What a cluster service's poll hands its trampoline as clientd: the service's slot in the
  * table, for the Go side, the service's handle, for the entry's action, and where an
  * aborted entry is told. It is C memory, on the stack of the poll that made it, valid for

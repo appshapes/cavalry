@@ -13,9 +13,11 @@
 # full, and then conformance/go/committed_log, the client's committed log against a
 # cluster (spec/c-abi.md, version 2; ADR 0070), and then conformance/go/cluster, the
 # cluster round: the client's service beside each member and its session on the first
-# driver (spec/c-abi.md, versions 4 and 5; ADR 0124), and then conformance/go/snapshot, the
-# snapshot round: a service's snapshot and its start from one beside the same three
-# members, on the log the cluster round left (spec/c-abi.md, version 6; ADR 0149); and
+# driver (spec/c-abi.md, versions 4, 5 and 7; ADR 0124; ADR 0157), and then
+# conformance/go/snapshot, the snapshot round: a service's snapshot and its start from one
+# beside the same three members, on the log the cluster round left (spec/c-abi.md, version
+# 6; ADR 0149); then conformance/go/closed, the closed round: a service's poll after its
+# driver's stop, on the first driver, which the program stops itself (ADR 0155); and
 # cleans up.
 # `just conformance` runs this after conformance/node (clients/README.md; ADR 0046, card
 # 207).
@@ -169,3 +171,10 @@ echo "conformance/go: run snapshot, a service's snapshot and its start from one 
     cat "$cluster"/member-*.out >&2 || true
     exit 1
 }
+
+# The closed round, last, since it stops the first driver: a poll of a service whose
+# client is closed is one answer, -1 with CAVALRY_ERR_CLOSED (spec/c-abi.md, "cluster
+# service"; ADR 0155). The program sends the driver its SIGTERM, by the process id.
+echo "conformance/go: run closed, a service's poll after its driver's stop, on $CAVALRY_DIR"
+(cd conformance/go && go run ./closed "$driver_pid")
+wait "$driver_pid" 2>/dev/null || true

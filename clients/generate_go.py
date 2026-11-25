@@ -183,6 +183,13 @@ int cavalry_go_cluster_session_poll(cavalry_cluster_session_t *session, uintptr_
 int cavalry_go_cluster_service_reply(cavalry_cluster_service_t *service, int64_t session_id, const uint8_t *buffer,
                                      size_t length, cavalry_go_error_t *error);
 
+/* cavalry_cluster_service_schedule_timer and cavalry_cluster_service_cancel_timer, each
+ * with `error` written when it returns -1, for a call from outside the handler. */
+int cavalry_go_cluster_service_schedule_timer(cavalry_cluster_service_t *service, int64_t correlation_id,
+                                              int64_t deadline, cavalry_go_error_t *error);
+int cavalry_go_cluster_service_cancel_timer(cavalry_cluster_service_t *service, int64_t correlation_id,
+                                            cavalry_go_error_t *error);
+
 /* Polls the cluster service `service`, with `client`, for up to `fragment_limit` entries,
  * with `index` the service's slot in the client's table. Its trampoline is the service's
  * own: it reads each entry's values from the header, calls the exported Go function
@@ -339,6 +346,24 @@ int cavalry_go_cluster_service_reply(cavalry_cluster_service_t *service, int64_t
   int code = cavalry_cluster_service_reply(service, session_id, buffer, length);
   if (code < 0 || code == CAVALRY_CLUSTER_REPLY_TOO_LONG) {
     cavalry_go_keep(error, "cavalry_cluster_service_reply");
+  }
+  return code;
+}
+
+int cavalry_go_cluster_service_schedule_timer(cavalry_cluster_service_t *service, int64_t correlation_id,
+                                              int64_t deadline, cavalry_go_error_t *error) {
+  int code = cavalry_cluster_service_schedule_timer(service, correlation_id, deadline);
+  if (code < 0) {
+    cavalry_go_keep(error, "cavalry_cluster_service_schedule_timer");
+  }
+  return code;
+}
+
+int cavalry_go_cluster_service_cancel_timer(cavalry_cluster_service_t *service, int64_t correlation_id,
+                                            cavalry_go_error_t *error) {
+  int code = cavalry_cluster_service_cancel_timer(service, correlation_id);
+  if (code < 0) {
+    cavalry_go_keep(error, "cavalry_cluster_service_cancel_timer");
   }
   return code;
 }
@@ -2225,7 +2250,10 @@ func (n *ClusterSession) Close() error {
 // service, and what the handler returns is the entry's action. A handler that panics, or
 // returns what is no action, has its entry aborted, and Poll returns a *HandlerError once
 // the ABI has returned: an entry is taken only by a handler that finished with it. Reply
-// answers a session from inside the handler. Err is the last Poll or Reply that failed.
+// answers a session from inside the handler, and ScheduleTimer and CancelTimer are the
+// program's timers there: a timer that is due is handed to the handler as an entry of the
+// Type ClusterEntryTimer, once, at one position beside every member. Err is the last Poll,
+// Reply, ScheduleTimer or CancelTimer that failed.
 type ClusterService struct {
 	handle *C.cavalry_cluster_service_t
 	client *Client
@@ -2256,15 +2284,56 @@ func (v *ClusterService) Reply(sessionID int64, message []byte) int32 {
 		&v.state.err))
 }
 
+// ScheduleTimer schedules, from inside the handler, the timer correlationID, any int64 the
+// program chooses, for deadline in the cluster's time, the clock of an entry's Timestamp, in
+// milliseconds, and returns what became of the schedule, never an error.
+// ClusterTimerScheduled: the timer is pending with that deadline, a new one or one that was
+// pending, whose deadline this sets. ClusterTimerRefused: the service holds its 1,024
+// pending timers and the id is none of them, and nothing changed; a program with more
+// deadlines than that keeps them in its own state and schedules one timer for the earliest.
+// When the deadline has come the handler is handed an entry whose Type is ClusterEntryTimer
+// and whose CorrelationID is this id: once, at one position beside every member, never
+// before its deadline and never after its cancel. A deadline at or before the entry's time
+// is due at once. A handler that returns ActionAbort, or panics, is handed its entry again
+// with every timer as it was before that handling. A program schedules its first timer only
+// once every member of its cluster, with the service beside it, runs version 2 of the
+// cluster protocol, and from that entry on no member is stepped back: a service of version 1
+// hands its program no timer, so the two would compute two states from one log. From
+// outside the handler it is -1, and Err says ErrClusterNoEntry. One cgo call, to shim.c's
+// one ABI call, which allocates nothing and waits for nothing: the service tells its member
+// after the handler has taken the entry, in Poll.
+func (v *ClusterService) ScheduleTimer(correlationID, deadline int64) int32 {
+	return int32(C.cavalry_go_cluster_service_schedule_timer(v.handle, C.int64_t(correlationID), C.int64_t(deadline),
+		&v.state.err))
+}
+
+// CancelTimer makes, from inside the handler, the timer correlationID pending no more: its
+// event, where the log holds one, is handed to no program. A timer that is not pending is
+// no error. It returns 0, and -1 from outside the handler, where Err says ErrClusterNoEntry.
+// One cgo call, to shim.c's one ABI call, which allocates nothing and waits for nothing.
+func (v *ClusterService) CancelTimer(correlationID int64) int32 {
+	return int32(C.cavalry_go_cluster_service_cancel_timer(v.handle, C.int64_t(correlationID), &v.state.err))
+}
+
 // Poll hands up to fragmentLimit committed entries to handler: one ABI call, the count of
-// entries the handler took, 0 while the driver hosts no member that has a log yet (or -1,
-// with Err saying why: a fault, which Fault reads, or ErrPolling for a poll from inside a
-// handler of this service, which the ABI refuses and which touches nothing here). The poll
-// is the service's duty cycle: it opens the member's log, follows the log's sessions, and
-// holds a publication to each open session while the service answers. Those are commands
-// sent with the service's client, at a session's opening, where a term's leader changes
-// and at a recording's end, and the poll waits for the driver's answer to each; none is
-// sent for a session message. The poll takes no lock, and it is a call on the client: no
+// entries the service took, 0 while the driver, one that runs, hosts no member that has a
+// log yet (or -1, with Err saying why: a fault, which Fault reads; ErrClosed for a client
+// that its driver closed, as when the member's driver has stopped, which Fault reads too
+// and every poll after it answers again, so that a program's loop ends on it; or, with Fault
+// left as it was, ErrPolling for a poll from inside a handler of this service, which the
+// ABI refuses and which touches nothing here). A timer event whose timer is not pending, or
+// not yet due, is taken and handed to no handler, so the count may be more than the handler
+// was called. The poll is the service's duty cycle: it opens the member's log, follows the
+// log's sessions, and holds a publication to each open session while the service answers.
+// Those are commands sent with the service's client, at a session's opening, where a term's
+// leader changes and at a recording's end, and the poll waits for the driver's answer to
+// each; none is sent for a session message. Six more are sent once in a service's life, at
+// the most: its five counters and its publication to its member, in the poll in which the
+// program first schedules a timer or the service first passes a timer event over, after
+// that poll's entries, where a snapshot has not added them already; that poll returns -1
+// with the driver's refusal of one of them, after the entries its handler took are taken.
+// After that the poll tells the member what each taken entry changed, and every pending
+// timer again each second, by offers that wait for nothing. The poll takes no lock, and it is a call on the client: no
 // other goroutine uses the service's client (Client.ClusterService). When the handler
 // panicked, or returned what is no action, its entry was aborted and Poll returns a
 // *HandlerError: its Fragments is the count of entries taken before that entry, and its
@@ -2297,9 +2366,9 @@ func (v *ClusterService) Poll(handler ServiceHandler, fragmentLimit int) (int, e
 	return count, &HandlerError{Fragments: count, Raised: 1, Cause: cause, Cluster: "service"}
 }
 
-// Err is the failure of this service's last Poll or Reply that failed, as
-// Subscription.Err: an *Error with the ABI function, code and message, kept until the
-// service's next failure; nil before the first.
+// Err is the failure of this service's last Poll, Reply, ScheduleTimer or CancelTimer that
+// failed, as Subscription.Err: an *Error with the ABI function, code and message, kept
+// until the service's next failure; nil before the first.
 func (v *ClusterService) Err() error { return keptError(&v.state.err) }
 
 // Fault is what the last poll stopped on: the code, the session and the position; the
