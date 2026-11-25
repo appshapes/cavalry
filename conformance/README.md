@@ -50,7 +50,7 @@ timer that was wrongly due at once is stamped about as late as a deadline of 50 
 which these rounds had first: 49 ms after the message in a run of the Python
 round. The Python round, the Node round, the Go round and the JVM round print what
 that was in their own run, the time of their timers that were due at once, beside
-the deadline: 38 to 49 ms across them on a laptop. Those four rounds
+the deadline: 38 to 51 ms across them on a laptop. Those four rounds
 hold more of the client's own: a second schedule of the timer sets its deadline,
 where its first was an hour away; a second timer, due at once and cancelled in
 the same handling, is handed to none; the least and the greatest int64, scheduled
