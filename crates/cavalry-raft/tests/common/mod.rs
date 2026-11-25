@@ -276,6 +276,11 @@ impl Io for Stub {
         Ok(())
     }
 
+    fn clear_vote_floor(&mut self) -> Result<(), Self::Fault> {
+        self.vote_floor = -1;
+        Ok(())
+    }
+
     fn record_term(&mut self, term: i64, base: i64) -> Result<(), Self::Fault> {
         self.call(Call::RecordTerm(term, base));
         if self.fail_record {

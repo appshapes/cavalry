@@ -196,8 +196,8 @@ impl std::fmt::Display for RecordingsError {
         let stay_out = "Without the list this member cannot tell its log from the other \
                         recordings in the directory, and it does not start. Start the \
                         member on a new log directory: it replicates the log, and it withholds \
-                        its vote and seeks no leadership until its log reaches what the \
-                        cluster held when it took a leader, the position \
+                        its vote and seeks no leadership until it has caught up and joined \
+                        its leader's live log, which clears the floor \
                         cluster.vote_floor holds. It takes that leader only once it has \
                         heard every other member, and waits while one is stopped. It \
                         catches up only while its leader's \

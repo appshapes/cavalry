@@ -2812,18 +2812,37 @@ pub fn candidate(
 }
 
 /// Whether a member withholds its vote and its candidacy (`spec/cluster.md`, "A member
-/// that lost its log"; ADR 0145). It does while its log is empty, log leadership term
-/// id −1 at position 0, and `log_heard`: a member's report in this election, or the
-/// request it answers, holds a log. Such a member may have lost a log directory that
-/// held entries a quorum committed with its acknowledgement, and with them the record
-/// of its votes. It does too while its append position is below `vote_floor`, the
-/// vote floor its record of terms holds, −1 for none: the end of the log of the leader
-/// it took with its log empty, which holds every entry committed before it came back.
-/// A member whose log is empty while no member holds a log is one of a new cluster,
-/// and it votes.
+/// that lost its log"; ADR 0145, ADR 0161). It does while its log is empty, log
+/// leadership term id −1 at position 0, and `log_heard`: a member's report in this
+/// election, or the request it answers, holds a log. Such a member may have lost a log
+/// directory that held entries a quorum committed with its acknowledgement, and with
+/// them the record of its votes. It does too for as long as it holds a vote floor,
+/// `vote_floor` 0 or more, −1 for none: the floor it stored when it took a leader with
+/// its log empty, which it holds until [`clears_vote_floor`] says it has caught up. A
+/// member whose log is empty while no member holds a log is one of a new cluster, and
+/// it votes.
 pub const fn withholds(own: LogReport, vote_floor: i64, log_heard: bool) -> bool {
     let empty = own.term < 0 && own.position == 0;
-    (empty && log_heard) || own.position < vote_floor
+    (empty && log_heard) || vote_floor >= 0
+}
+
+/// Whether a member clears its vote floor (`spec/cluster.md`, "A member that lost its
+/// log"; ADR 0161): when it holds one, `vote_floor` 0 or more; `joined`, it has joined
+/// the live log of a leader it took by the rules of "Taking a leader", going to
+/// follower ready, since it stored the floor and in this run of its module; and its
+/// `append_position` is at or past the floor. Each of the two holds entries of its
+/// own. The join holds every entry the leader's live sender had sent the member before
+/// it came back: the live image joins at the sender's position, which never goes back,
+/// and a follower goes to follower ready only with its append position there. The
+/// floor holds every entry the leader had appended when it wrote the new leadership
+/// term the member took, one the member acknowledged from a replay of the leader's
+/// recording before the sender sent it among them. A floor from a frame the leader
+/// held back, or a floor of 0, holds less: the join holds what the sender had sent,
+/// and follower catch-up holds the member until its log reaches the commit position it
+/// was told, all but an entry whose acknowledgement the leader counts later still
+/// (work item 463).
+pub const fn clears_vote_floor(vote_floor: i64, joined: bool, append_position: i64) -> bool {
+    vote_floor >= 0 && joined && append_position >= vote_floor
 }
 
 /// Whether a member that withholds votes all the same for a candidate whose log is

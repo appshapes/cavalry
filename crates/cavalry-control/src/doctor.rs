@@ -60,7 +60,8 @@ use cavalry_shm::counters::generated::{
     CLUSTER_SERVICE_TIMER_CANCELS_DROPPED, CLUSTER_SERVICE_TIMERS, CLUSTER_SNAPSHOTS_FAILED,
     CLUSTER_SNAPSHOTS_PASSED_OVER, CLUSTER_STANDBY, CLUSTER_STANDBY_VOTE_REQUESTS, CLUSTER_TIMERS,
     CLUSTER_TIMERS_CLEARED, CLUSTER_TRUNCATION_OWED, CLUSTER_TRUNCATIONS_FAULTED,
-    CLUSTER_TRUNCATIONS_REFUSED, CLUSTER_VOTE_FLOOR, CLUSTER_VOTERS, CLUSTER_VOTES_WITHHELD,
+    CLUSTER_TRUNCATIONS_REFUSED, CLUSTER_VOTE_FLOOR, CLUSTER_VOTE_FLOORS_CLEARED, CLUSTER_VOTERS,
+    CLUSTER_VOTES_WITHHELD,
 };
 use cavalry_shm::counters::generated::{
     DRIVER_REGISTRY_FULL, PUBLICATION_ADD_DEFERRED_WAITING, SUBSCRIPTION_ADD_DEFERRED_WAITING,
@@ -1242,14 +1243,20 @@ struct MemberCounters {
     /// as for a member of a build older than the counter: every build of version 0,
     /// and the first build of version 1.
     protocol_version: Option<i64>,
-    /// `cluster.vote_floor`: the position below which the member withholds its vote,
-    /// −1 for none (ADR 0145); `None` while the counters file holds no such record, as
-    /// for a member of a build older than the counter.
+    /// `cluster.vote_floor`: the vote floor the member holds, which it withholds its vote
+    /// while it holds, −1 for none or once cleared (ADR 0145, ADR 0161); `None` while the
+    /// counters file holds no such record, as for a member of a build older than the
+    /// counter.
     vote_floor: Option<i64>,
     /// `cluster.truncation_owed`: the position of the truncation the member owes, −1
     /// for none (ADR 0148); `None` while the counters file holds no such record, as
     /// for a member of a build older than the counter.
     truncation_owed: Option<i64>,
+    /// `cluster.vote_floors_cleared`: the vote floors the member cleared, having joined a
+    /// leader's live log (ADR 0161); `None` while the counters file holds no such
+    /// record, as for a member of a build before ADR 0161, which never clears its floor
+    /// and votes once its log has reached it.
+    vote_floors_cleared: Option<i64>,
     /// `cluster.timers`: how many timers the member holds, each told to it by the
     /// service beside it (ADR 0151); `None` while the counters file holds no such
     /// record, as for a member of a build that holds none.
@@ -1536,9 +1543,11 @@ fn election_state_name(code: i64) -> String {
 /// the path that needs, a note (`cluster-joining`); a leader that lost its quorum
 /// (`cluster-quorum-lost`); a commit position behind the leader's own append position
 /// (`cluster-commit-waits`); a member that runs with other voters than the members
-/// string doctor was given names (`cluster-voters`; ADR 0134); a voter below its vote
-/// floor, which withholds its vote, with where its log is and how far it has to go
-/// (`cluster.vote_floor`; ADR 0145), and no standby, which has no vote to withhold; a
+/// string doctor was given names (`cluster-voters`; ADR 0134); a voter that holds a vote
+/// floor, which withholds its vote until it has joined a leader's live log at or past
+/// the floor, with where
+/// its log is (`cluster.vote_floor`; ADR 0145, ADR 0161), or, for a member of a build
+/// before ADR 0161, one below its floor, and no standby, which has no vote to withhold; a
 /// member that owes a truncation whose command or write faulted, with the position it
 /// owes and the end it reports (`cluster.truncation_owed`; ADR 0148);
 /// and each of [`MEMBER_COUNTS`] above 0, by its counter's name with its doctor
@@ -1665,6 +1674,8 @@ fn cluster_checks(
             member.vote_floor = Some(value);
         } else if type_id == CLUSTER_TRUNCATION_OWED.0 {
             member.truncation_owed = Some(value);
+        } else if type_id == CLUSTER_VOTE_FLOORS_CLEARED.0 {
+            member.vote_floors_cleared = Some(value);
         } else if type_id == CLUSTER_TIMERS.0 {
             member.timers = Some(value);
         } else if type_id == CLUSTER_SERVICE_TIMERS.0 {
@@ -2182,26 +2193,42 @@ fn member_findings(
             doc: DOC_CLUSTER,
         });
     }
-    // A member below its vote floor withholds its vote (ADR 0145): the gauge's text,
-    // with where its log is and how far it has to go, while it lasts, and nothing once
-    // its log has reached the floor. A standby that starts on an empty log directory
-    // stores a floor too, which applies once it is promoted, but it has no vote to
-    // withhold and its catch-up costs the cluster no tolerance (ADR 0134): nothing.
+    // A member that holds a vote floor withholds its vote (ADR 0145, ADR 0161) until it
+    // has joined a leader's live log since it stored the floor and in this run, with its
+    // log at or past the floor, which clears it: the gauge's
+    // text, with where its log is, while it lasts, and nothing once the floor is
+    // cleared. A log at or past the floor is said so, since such a member still
+    // withholds: it waits for the live log too, not for the position alone. A standby that starts
+    // on an empty log directory stores a floor too, which applies once it is promoted,
+    // but it has no vote to withhold and its catch-up costs the cluster no tolerance
+    // (ADR 0134): nothing.
+    // A member of a build before ADR 0161 registers no cluster.vote_floors_cleared: it
+    // never clears its floor, and votes once its log has reached it, so it is named
+    // only while its log is below the floor, as that build's rule has it.
+    let floor_held_withholds = |floor: i64| member.vote_floors_cleared.is_some() || append < floor;
     if member.standby != Some(1)
         && let Some(floor) = member.vote_floor
         && floor >= 0
-        && append < floor
+        && floor_held_withholds(floor)
         && let Some(def) = COUNTERS.iter().find(|def| def.id == CLUSTER_VOTE_FLOOR)
     {
+        let where_it_is = if append < floor {
+            format!(
+                "its cluster.append_position {append}, {} bytes short",
+                floor - append
+            )
+        } else {
+            format!(
+                "its cluster.append_position {append}, at or past it, and it has not yet \
+                 joined its leader's live log since it last started or stored the floor"
+            )
+        };
         findings.push(Finding {
             check: def.name,
             level: Level::Warn,
             message: format!(
-                "member {id}'s {} is {floor} and its cluster.append_position {append}, {} \
-                 bytes short: {}",
-                def.name,
-                floor - append,
-                def.doctor
+                "member {id}'s {} is {floor} and {where_it_is}: {}",
+                def.name, def.doctor
             ),
             doc: DOC_CLUSTER,
         });
@@ -8006,7 +8033,9 @@ mod tests {
     /// A member that came back on an empty log directory and has not caught up with
     /// its vote floor is named, with where its log is and how far it has to go, and
     /// the requests it left unanswered meanwhile are reported with what they mean
-    /// (ADR 0145). Once its log reaches the floor, doctor says nothing of it. One that
+    /// (ADR 0145); one at or past its floor that has not joined the live log since it
+    /// started is named too, since it still withholds (ADR 0161). Once its floor is
+    /// cleared, doctor says nothing of it. One that
     /// has taken no leader yet, waiting to hear a voter, is reported with the leaders
     /// it passed over and what to start; once it has a leader, or its log holds
     /// anything, in a later election too, those are history and are not reported. A
@@ -8038,7 +8067,7 @@ mod tests {
         assert!(
             floor.message.starts_with(
                 "member 2's cluster.vote_floor is 1048576 and its cluster.append_position \
-                 4096, 1044480 bytes short: This member started on an empty log directory"
+                 4096, 1044480 bytes short: This member took a leader with its log empty"
             ),
             "{}",
             floor.message
@@ -8060,8 +8089,44 @@ mod tests {
             withheld.message
         );
 
-        // At its floor it votes as any voter, and doctor names nothing.
+        // At its floor and still holding it, it withholds until it joins the live log
+        // in this run too, and doctor says so (ADR 0161).
         let reached = [
+            (CLUSTER_ROLE, 0),
+            (CLUSTER_ELECTION_STATE, 1),
+            (CLUSTER_LEADERSHIP_TERM_ID, 2),
+            (CLUSTER_LEADER_MEMBER_ID, 1),
+            (CLUSTER_APPEND_POSITION, 1 << 20),
+            (CLUSTER_VOTE_FLOOR, 1 << 20),
+            (CLUSTER_VOTES_WITHHELD, 0),
+            (CLUSTER_VOTE_FLOORS_CLEARED, 0),
+        ];
+        let (_, findings) = cluster_findings("vote-floor-reached", 2, &reached);
+        let floor = findings
+            .iter()
+            .find(|finding| finding.check == "cluster.vote_floor")
+            .expect("a floor held is named");
+        assert!(
+            floor.message.starts_with(
+                "member 2's cluster.vote_floor is 1048576 and its cluster.append_position \
+                 1048576, at or past it, and it has not yet joined its leader's live log \
+                 since it last started or stored the floor: "
+            ),
+            "{}",
+            floor.message
+        );
+        assert!(
+            floor
+                .message
+                .contains("it waits for the live log too, not for the position alone"),
+            "{}",
+            floor.message
+        );
+
+        // A member of a build before ADR 0161, which registers no
+        // cluster.vote_floors_cleared, votes once its log has reached its floor, which
+        // it never clears: at its floor, doctor names nothing.
+        let older = [
             (CLUSTER_ROLE, 0),
             (CLUSTER_ELECTION_STATE, 17),
             (CLUSTER_LEADERSHIP_TERM_ID, 2),
@@ -8070,7 +8135,22 @@ mod tests {
             (CLUSTER_VOTE_FLOOR, 1 << 20),
             (CLUSTER_VOTES_WITHHELD, 0),
         ];
-        let (_, findings) = cluster_findings("vote-floor-reached", 2, &reached);
+        let (_, findings) = cluster_findings("vote-floor-older-build", 2, &older);
+        let found: Vec<&str> = findings.iter().map(|finding| finding.check).collect();
+        assert_eq!(found, ["cluster-member"], "{findings:?}");
+
+        // Its floor cleared, once it joined the live log, it votes as any voter, and
+        // doctor names nothing.
+        let cleared = [
+            (CLUSTER_ROLE, 0),
+            (CLUSTER_ELECTION_STATE, 17),
+            (CLUSTER_LEADERSHIP_TERM_ID, 2),
+            (CLUSTER_LEADER_MEMBER_ID, 1),
+            (CLUSTER_APPEND_POSITION, 1 << 20),
+            (CLUSTER_VOTE_FLOOR, -1),
+            (CLUSTER_VOTES_WITHHELD, 0),
+        ];
+        let (_, findings) = cluster_findings("vote-floor-cleared", 2, &cleared);
         let found: Vec<&str> = findings.iter().map(|finding| finding.check).collect();
         assert_eq!(found, ["cluster-member"], "{findings:?}");
 
@@ -8109,7 +8189,8 @@ mod tests {
             (CLUSTER_LEADERSHIP_TERM_ID, 2),
             (CLUSTER_LEADER_MEMBER_ID, 1),
             (CLUSTER_APPEND_POSITION, 1 << 20),
-            (CLUSTER_VOTE_FLOOR, 1 << 20),
+            // Joined the live log, its floor is cleared (ADR 0161).
+            (CLUSTER_VOTE_FLOOR, -1),
             (CLUSTER_LEADERS_WITHHELD, 1),
         ];
         let (_, findings) = cluster_findings("vote-floor-joined", 2, &joined);
@@ -8124,7 +8205,7 @@ mod tests {
             (CLUSTER_LEADERSHIP_TERM_ID, 2),
             (CLUSTER_LEADER_MEMBER_ID, -1),
             (CLUSTER_APPEND_POSITION, 1 << 20),
-            (CLUSTER_VOTE_FLOOR, 1 << 20),
+            (CLUSTER_VOTE_FLOOR, -1),
             (CLUSTER_LEADERS_WITHHELD, 1),
         ];
         let (_, findings) = cluster_findings("vote-floor-later-election", 2, &later);

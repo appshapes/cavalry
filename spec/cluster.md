@@ -1099,7 +1099,7 @@ truncation goes on faulting stays in init, where it reads and sends nothing, unt
 its recording not yet given up, canvasses meanwhile, and answers request vote with the
 log it reported before the fault, which holds at least what its recordings hold, so
 that it votes for no candidate whose log is behind its own. A member that owes a
-truncation and is below its vote floor does both: the floor's rule answers a request
+truncation and holds a vote floor does both: the floor's rule answers a request
 vote, and a new leadership term is read by the floor's rule once the truncation has
 finished ("A member that lost its log"). A member started again owes nothing: its
 start makes its log directory agree with itself, as after a stop inside a truncation,
@@ -1335,23 +1335,58 @@ which the `withheld-vote` and `votes-in-term` vectors pin, the voters alone give
   in this election, or the request it answers, holds a log, log leadership term id 0
   or more or a position above 0. A member whose log is empty beside members whose
   logs are empty too is a member of a new cluster, and votes as any voter does.
-- Its append position is below its vote floor.
+- It holds a vote floor.
 
-The **vote floor** is the position below which a member withholds. A member whose log
-is empty that takes a leader on a new leadership term, going to follower replay or to
-follower log replication, stores that message's log position, the leader's append
-position, as its vote floor before it records a term, written and synced in its
-record of terms (`spec/durable-log.md`, "Terms"); a message whose log position is 0
-gives no floor. A leader taken as the next paragraph says holds every entry the
-cluster committed, so once the
-member's append position reaches its floor, its log holds every entry it could have
-acknowledged before it came back, and it votes as any voter does. A member stores
-its floor once, reads it at its start with its candidate term, and keeps it: a member
-that stops below its floor and starts again on that log directory withholds still.
-The leader's log can end in a tail that no quorum has recorded, which a later leader
-cuts, so a floor can lie above the log the cluster then holds; the member withholds
-until the log has grown past its floor again, as the cluster's next entries take it,
-and a floor is never lowered. `cluster.vote_floor` holds it, −1 for none.
+The **vote floor** is the mark a member that took a leader with its log empty holds
+until it has caught up. A member whose log is empty that takes a leader on a new
+leadership term, going to follower replay or to follower log replication, stores that
+message's log position, the leader's append position, as its vote floor before it
+records a term, written and synced in its record of terms (`spec/durable-log.md`,
+"Terms"); a message whose log position is 0 gives a floor of 0, which marks the member
+all the same (ADR 0161). The member withholds for as long as it holds a floor. It
+clears the floor once two things hold, since it stored the floor and in this run of
+its module: it has joined a leader's live log, going to follower ready (state 16), and
+its append position is at or past the floor; the `clears-vote-floor` vectors pin it.
+It clears it by writing the floor's slot as zeros and syncing the file, counted in
+`cluster.vote_floors_cleared`, and it votes as any voter does from then on.
+
+Each of the two holds entries of its own. The leader the member joins is one it took
+by the rules below, or one a later election gave it, so it holds every entry the
+cluster committed, by the vote rule ("Logs compared"); a leader that a later term
+deposed, whose log would give the member nothing, is not taken. The live log reaches
+the member in an image made at that leader's sender position ("Members and streams";
+`spec/udp.md`, "The receiver", steps 1 and 2), and a follower goes to follower ready
+only with its append position at or past its live image's join position (states 13
+and 15).
+So the join holds every entry the leader's sender had sent the member before it came
+back, since a sender's position never goes back, and a later leader's term begins past
+every such entry the cluster committed. The floor holds every entry the leader had
+appended when it wrote the new leadership term the member took. For a message written
+after the member's start, that is every entry of the leader's log the member
+acknowledged before it came back, one it had from a replay of the leader's recording
+among them: the recorder is a spy, which reads the publication's log on the leader's
+own driver (`spec/udp.md`, "The channel URI"), so it may hold an entry the sender has
+not yet sent, and the live image may then join below it. For a
+message the leader's sender held back from the member's earlier image ("Taking a
+leader"), or one at position 0, the floor holds less, and the join holds what the
+sender had sent. Follower catch-up's commit target holds a third set. A member had a
+replay in its earlier run only from a leader whose log was above position 0, and a
+held-back message it reads now was written after the one it followed then, so it is
+above 0 too. The member, its log empty, catches up again, and does not leave follower
+catch-up before its append position reaches the commit position it was told when it
+read the leader's stop catch-up (state 13). None of the three holds an entry the member
+had from a replay before the sender sent it, on the floor of a message held back, when
+the leader counts the member's acknowledgement of it so late that the commit position
+the member was told then does not reach it (work item 463). A
+member reads its floor at its start with its candidate term, so a member that
+stops before it has cleared its floor withholds after its next start until it has
+joined the live log in that run, even with its append position at or past the floor.
+A torn store of the
+floor reads as no floor, in a member that has recorded no term since, or as the floor
+stored. A torn clear reads as no floor, which the clear was to leave, or, when it
+wrote only bytes that were zero already, as the floor before it, which the member
+holds until it has joined the live log in a later run (`spec/durable-log.md`,
+"Terms"). Both are safe. `cluster.vote_floor` holds it, −1 for none.
 
 **Taking a leader.** A leader that a later term deposed, and that has not heard of
 that term, still leads with its election closed, and answers a canvass position whose
@@ -1425,11 +1460,15 @@ before must have read nothing of
 the leader's consensus stream while the leader wrote a receiver window of consensus
 messages to the member. And all that time the member must have gone on acknowledging
 the leader's entries, which it does for at most the leader heartbeat timeout once it
-hears nothing from its leader. This version does not rule that case out, and it
-loses a committed entry: once the member's log reaches that floor, it votes as any
-voter does, and if the leader stops before the member holds the entry, a member that
-lags behind the entry can be voted in without it, while each other member holds the
-log it kept.
+hears nothing from its leader. A member whose log is empty reads such a frame only when
+it answered a report of an empty log, so the member had lost its log once before then
+too. The floor's clear holds that case for an entry the leader's sender had sent the
+member: a member clears its floor only once it has joined the live log as well, whose
+image the sender makes past every entry it sent the member before, so the member votes
+only once its log holds the entry, whatever position the frame gave the floor (ADR
+0161; work item 411). An entry the member had from a replay before the sender sent it,
+whose acknowledgement the leader counts only after the member came back, is work item
+463's ("A member that lost its log").
 
 A member whose election has closed sends no canvass position, so a member that lost
 its log would not hear it. So a member that holds a log, log leadership term id 0 or
@@ -1620,11 +1659,12 @@ member a log shorter than the one it reported, or a module that does not know it
 sessions, and with a member whose log is behind it is a quorum that can elect a
 leader without an entry the cluster committed. A member started on a new log
 directory beside the others is safe while each other member holds the log it kept,
-but for one kind of frame this version does not rule out, a new leadership term its
-leader's sender held back by flow control ("Taking a leader"). Otherwise it takes a
-leader once it has heard every other voter, or voted that leader in, it
-joins and replicates the log, and it withholds its vote until its log reaches its
-vote floor ("A member that lost its log"; ADR 0145). It waits, taking no leader,
+a new leadership term its leader's sender held back by flow control among the
+frames it reads ("Taking a leader"; ADR 0161), but for the one case work item 463
+holds. It takes a leader once it has heard
+every other voter, or voted that leader in, it joins and replicates the log, and it
+withholds its vote until it has caught up past its vote floor and joined the live
+log, which clears the floor ("A member that lost its log"; ADR 0145, ADR 0161). It waits, taking no leader,
 while another voter is stopped. And beside a member that holds no log either, one
 that never caught up, while the member that holds the log is stopped, the two elect
 as a new cluster does, as "A member that lost its log" says. So a cluster that has
@@ -1743,7 +1783,14 @@ start. A follower of a build before ADR 0145 sends no canvass position to a memb
 whose log is empty ("A member that lost its log", "Taking a leader"), so a member of
 a later build started on a new log directory beside it takes no leader until that
 follower canvasses in an election or is upgraded: an upgrade stops no member on a new
-log directory, and a member that lost its log directory during one waits. `conformance/upgrade/` runs this upgrade on the loopback, from the last tree
+log directory, and a member that lost its log directory during one waits. A member of
+a build before ADR 0161 never clears a vote floor, and votes and stands once its log
+is at or past it. A member of a later build holds a floor that an earlier build
+stored, and withholds, until it joins a leader's live log, which an upgrade one member
+at a time gives it once its election closes. A cluster whose members are stopped and
+started on the later build all at once, with a floor held by every member a quorum
+could elect, elects no leader until one of them runs the earlier build again ("A
+member that lost its log"; ADR 0161). `conformance/upgrade/` runs this upgrade on the loopback, from the last tree
 of the version before to the tree under test, and holds every acknowledged entry
 to every member's log (`conformance/README.md`).
 
@@ -2431,9 +2478,10 @@ that a reader of a counters file knows which transition it saw.
 | `cluster.leadership_terms_ignored` | a new leadership term ignored for its term: below the reader's candidate term in canvass, or not the candidate term in a ballot state; or read by a member that owes a truncation it could not then finish (ADR 0148) |
 | `cluster.voters` | a gauge: the members to which the member's own string gives a vote, one bit for each member of the string in the rising order of their ids, the lowest id's bit the lowest, set for a voter: 7 for a string of four members whose highest id is a standby. It does not change while the member runs ("Standbys"; ADR 0134) |
 | `cluster.standby` | a gauge: 1 when the member's own string marks it a standby, 0 when it gives it a vote. It does not change while the member runs ("Standbys") |
-| `cluster.vote_floor` | a gauge: the member's vote floor, the position below which it withholds its vote and seeks no leadership, which it stored when it took a leader with its log empty; −1 for none. It does not change once stored ("A member that lost its log"; ADR 0145) |
+| `cluster.vote_floor` | a gauge: the member's vote floor, the leader's append position when it took that leader with its log empty, 0 included, and for as long as it holds which it withholds its vote and seeks no leadership; −1 for none. It changes once more after it is stored, to −1, when the member clears it, having joined a leader's live log since it stored the floor and in this run of its module with its append position at or past the floor, counted in `cluster.vote_floors_cleared` ("A member that lost its log"; ADR 0145, ADR 0161) |
+| `cluster.vote_floors_cleared` | a vote floor the member cleared, having joined a leader's live log since it stored the floor and in this run of its module with its append position at or past the floor, after which it votes as any voter does ("A member that lost its log"; ADR 0161) |
 | `cluster.standby_vote_requests` | a request vote that the member read as a standby and answered with nothing: the candidate's string gives this member a vote, and the member's own does not ("Standbys", "Changing a standby's mark") |
-| `cluster.votes_withheld` | a request vote that the member answered with nothing because it withholds its vote, its log empty while a member that holds one is heard or below its vote floor, and not every voter had reported a log the candidate's is at least, or a voter other than the candidate had named the request's term or a later one ("A member that lost its log"; ADR 0145) |
+| `cluster.votes_withheld` | a request vote that the member answered with nothing because it withholds its vote, its log empty while a member that holds one is heard or a vote floor held, and not every voter had reported a log the candidate's is at least, or a voter other than the candidate had named the request's term or a later one ("A member that lost its log"; ADR 0145) |
 | `cluster.leaders_withheld` | a new leadership term that a voter whose log is empty ignored, where it would otherwise have taken the sender as its leader: it had not voted that leader in, and had not heard each other voter in this election name a term at most the leader's ("A member that lost its log", "Taking a leader"; ADR 0145) |
 | `cluster.protocol_version` | a gauge: the member's own version of this page in semantic form, 256 for version 1. It does not change while the member runs. A member of a build older than this counter has none: every member of version 0, and one of the first build of version 1 ("Versions and the upgrade"; ADR 0137) |
 | `cluster.sessions` | a gauge: open sessions, on every member, as the snapshot it started from and its log's committed session open and close events since left them |

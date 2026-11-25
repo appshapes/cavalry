@@ -26,9 +26,12 @@ recording a crash left live to it, so that no frame a power loss may have damage
 handed on (ADR 0144). The slots were reserved bytes that a reader of version 4
 ignores, and an index without them is recovered as version 4 recovered it, so a
 directory either version wrote opens under the other in place. Version 6 adds the
-vote floor, a slot of the terms file's header that a cluster member writes once, when
-it takes a leader with its log empty, and below which it withholds its vote (ADR
-0145; `spec/cluster.md`, "A member that lost its log"); the slot was reserved bytes
+vote floor, a slot of the terms file's header that a cluster member writes when it
+takes a leader with its log empty, and that it withholds its vote while it holds (ADR 0145;
+`spec/cluster.md`, "A member that lost its log"); within version 6 the member clears
+the slot to zeros once it has joined a leader's live log,
+which a reader reads as no floor, as a slot a creation left (ADR 0161); the slot was
+reserved bytes
 that a reader of version 5 ignores. Within version 6, a member's consensus module syncs
 the log directory after it creates the terms file, as it does after it creates the log
 recordings file and the snapshots file, and holds the directory by a lock for its
@@ -260,16 +263,32 @@ slot, so a file in which neither checksum matches is damaged, as is one in which
 whose checksum matches holds a value below −1, and the reader refuses both with
 `candidate`.
 
-The **vote floor** is the position below which the member withholds its vote and
-seeks no leadership (`spec/cluster.md`, "A member that lost its log"; ADR 0145). It is
-one slot, the position under its checksum, which the module writes once and never
-again: a creation leaves its bytes zero, and the checksum of eight zero bytes is not
-zero, so the slot reads as no floor until the write. A slot whose checksum does not
-match is no floor, which is also the write a crash tore: the module writes the floor
-before it records a term, so a member whose write was torn holds no term yet, finds
-its log empty at its next start, and writes its floor again then. A slot whose
-checksum matches holds what the writer wrote, so a position below 0 or not a multiple
-of 32 in it is damage, and the reader refuses the file with `vote-floor`. A reader of
+The **vote floor** is what a member that lost its log holds until it has caught up,
+withholding its vote and seeking no leadership for as long as it holds it
+(`spec/cluster.md`, "A member that lost its log"; ADR 0145, ADR 0161). It is one slot,
+the position under its checksum, which the module writes once with each floor it
+stores, and once with zeros when it clears that floor. A creation leaves its bytes zero,
+and the checksum of eight zero bytes is not zero, so the slot reads as no floor until a
+floor is written and after its clear. A slot whose checksum does not match is no
+floor. A write that a crash tore reads as the slot before it or as the slot after
+it, and the member is safe under both:
+
+- A torn store fails its checksum and reads as no floor, the slot before it, unless
+  the bytes it did not reach already held their values, when it reads as the floor it
+  stored. The module writes the floor before it records a term, so a member whose
+  store was torn has recorded no term since, finds its log empty at its next start,
+  and writes its floor again then.
+- A torn clear may have written only position bytes that were already zero, as some
+  bytes of every floor are and all eight bytes of a floor of 0 are, and none of the
+  checksum. The slot is then as it was, its checksum matches, and it reads as the
+  floor before the clear: the member withholds until it has joined a leader's live log
+  again in a later run, and clears the floor then. Any other torn clear fails its
+  checksum and reads as no floor, the slot after it, which is what the clear was to
+  leave: the module clears the floor only once its log holds what the floor guarded.
+
+A slot whose checksum matches holds what the writer wrote, so a position below 0 or
+not a multiple of 32 in it is damage, and the reader refuses the file with
+`vote-floor`. A reader of
 version 5 of this page reads the slot as the reserved bytes it was, and the header's
 version stays 0.
 
@@ -672,14 +691,20 @@ state 3 over each valid entry whose leadership term id is above the term the lea
 named, whatever its base (`spec/cluster.md`, "Messages during an election"; ADR
 0096). It raises the candidate term in one synced write, the other slot's
 value and checksum, before the vote or request vote that raises it is sent. It writes
-the vote floor in one synced write, the position and its checksum, once, when the
-member takes a leader with its log empty and before it records a term
-(`spec/cluster.md`, "A member that lost its log"); asked for a second floor, or for a
-position below 0 or not a multiple of 32, it writes nothing, `floor`, the writer's
-fault. A crash
-leaves at most one write torn, which the reader reads as the state before it: an
-empty entry, a valid entry not yet deleted, or the candidate term stored before the
-raise. At a member's start the module checks the file's length against the bound
+the vote floor in one synced write, the position and its checksum, once for each
+floor, when the member takes a leader with its log empty and before it records a term
+(`spec/cluster.md`, "A member that lost its log"); asked for a position below 0 or not
+a multiple of 32, it writes nothing, `floor`, the writer's fault; a floor asked for
+while it holds one is refused the same way. A member that cleared its floor stores a
+new one the same way, when it takes a leader with its log empty again. It clears the
+floor in one synced write of the slot's twelve bytes as zeros, once for each floor,
+when the member has joined a leader's live log since it stored the floor and in this
+run of its module, with its log at or past the floor (ADR 0161); a file with no floor
+it leaves as it is. A crash leaves at most one write torn, which the reader reads as
+the state before it: an empty entry, a valid entry not yet deleted, or the candidate
+term stored before the raise; or, for a write of the vote floor's slot, as the slot
+before it or as the slot after it, both of which are safe ("Terms"). At a member's
+start the module checks the file's length against the bound
 before it reads a byte of it, so that what it reads is bounded: a file over the bound
 is `length` whatever its header holds, and every other file gets the checks of "What
 a reader rejects" in their order. The recovery pass of this section leaves the file

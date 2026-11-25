@@ -634,11 +634,20 @@ def new_leadership_term_action(log_term, append, msg, candidate_term, in_canvass
 
 
 def withholds(own, vote_floor, log_heard):
-    """spec/cluster.md, "A member that lost its log" (ADR 0145): whether a member withholds its
-    vote and its candidacy: its log `[term, position]` empty, term −1 at position 0, while a log is
-    heard, or its append position below its vote floor, −1 for none."""
+    """spec/cluster.md, "A member that lost its log" (ADR 0145, ADR 0161): whether a member
+    withholds its vote and its candidacy: its log `[term, position]` empty, term −1 at position
+    0, while a log is heard, or a vote floor held, 0 or more, −1 for none."""
     empty = own[0] < 0 and own[1] == 0
-    return {"withholds": (empty and log_heard) or own[1] < vote_floor}
+    return {"withholds": (empty and log_heard) or vote_floor >= 0}
+
+
+def clears_vote_floor(vote_floor, joined, append_position):
+    """spec/cluster.md, "A member that lost its log" (ADR 0161): whether a member clears its vote
+    floor: when it holds one, 0 or more, `joined`, it has joined a leader's live log since it
+    stored the floor and in this run of its module, and its append position is at or past the
+    floor. The join holds what the leader's live sender had sent the member, the floor what the
+    leader had appended when it wrote the new leadership term the member took."""
+    return {"clears": vote_floor >= 0 and joined and append_position >= vote_floor}
 
 
 def withheld_vote(voters, reports, candidate_log):
@@ -909,8 +918,21 @@ VECTORS += [
           ("withholds-not-a-new-clusters-member", [-1, 0], -1, False),
           ("withholds-an-empty-log-beside-a-log", [-1, 0], -1, True),
           ("withholds-below-its-floor", [3, 4096], 8192, False),
-          ("withholds-at-its-floor-not", [3, 8192], 8192, True),
+          ("withholds-at-its-floor-while-it-holds-it", [3, 8192], 8192, True),
           ("withholds-a-log-with-no-floor-not", [3, 4096], -1, True),
+          ("withholds-past-its-floor-while-it-holds-it", [3, 12288], 8192, False),
+          ("withholds-with-a-floor-of-0", [0, 4096], 0, False),
+      ]],
+    *[arithmetic(name, "clears-vote-floor",
+                 {"vote_floor": floor, "joined": joined, "append_position": append},
+                 clears_vote_floor(floor, joined, append))
+      for name, floor, joined, append in [
+          ("clears-vote-floor-once-joined-at-its-floor", 8192, True, 8192),
+          ("clears-vote-floor-once-joined-past-its-floor", 8192, True, 12288),
+          ("clears-vote-floor-of-0-once-joined", 0, True, 0),
+          ("clears-vote-floor-not-before-joined", 8192, False, 12288),
+          ("clears-vote-floor-not-below-its-floor-once-joined", 8192, True, 4096),
+          ("clears-vote-floor-not-with-no-floor", -1, True, 4096),
       ]],
     *[arithmetic(name, "withheld-vote", {"voters": voters, "reports": reports, "candidate": cand},
                  withheld_vote(voters, reports, cand))

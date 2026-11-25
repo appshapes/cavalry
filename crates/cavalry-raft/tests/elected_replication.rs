@@ -3,14 +3,15 @@
 //! log holds when a cluster starts together, what a commit needs, what an offer is
 //! refused for, what a lossy and late consensus stream changes, the bound of the
 //! members table and of the stream, a cluster of one, a member that starts late, a
-//! leader that lost its log directory, and members parted. Every test checks, at
+//! leader that lost its log directory, members parted, and the bound of the new
+//! leadership terms the in-memory cluster holds back. Every test checks, at
 //! every step, that no committed entry is lost, and that the leader commits nothing
 //! a quorum has not synced.
 
 mod elected_cluster;
 
 use cavalry_proto::cluster::{MAX_MEMBERS, Message, Stream, TimeUnit};
-use cavalry_raft::memory::{Cluster, IN_FLIGHT_CAPACITY, MAX_DELAY_MS};
+use cavalry_raft::memory::{Cluster, IN_FLIGHT_CAPACITY, MAX_DELAY_MS, MAX_HELD_BACK};
 use cavalry_raft::{
     Consensus, ElectionCause, ElectionState, MembersRefused, NO_SESSION, Refused, Role,
 };
@@ -604,6 +605,143 @@ fn the_consensus_stream_in_memory_holds_its_bound_and_loses_what_it_cannot_hold(
     assert_eq!(cluster.set_delivery(0, u64::MAX), MAX_DELAY_MS);
     safety.run(&mut cluster, 100);
     assert!(cluster.in_flight() <= IN_FLIGHT_CAPACITY);
+}
+
+/// The new leadership terms the in-memory cluster holds back are bounded (invariant 3;
+/// ADR 0161): at most `MAX_HELD_BACK` pairs armed and at most `MAX_HELD_BACK` frames
+/// held, each bound with its behaviour when full.
+///
+/// The cluster has eight members, as the stream's bound test has, since fewer send too
+/// little to fill the in-flight queue; the first two parts use three of the followers.
+///
+/// - **Arming.** Of `MAX_HELD_BACK + 1` pairs asked, the six between the three
+///   followers and the leader's to two of them are armed, and the leader's to the third,
+///   past the bound, is not. Each of the three starts again and canvasses: the leader's
+///   answers to the first two are held, and its answer to the third is sent as any
+///   message is, and the third follows on it.
+/// - **Sending.** Frames are held up to the bound, and then a pair still armed has its
+///   frame sent as any message is, the frames held staying as they were.
+/// - **Releasing.** A release while the in-flight queue is full loses each frame it hands
+///   over and counts it in `full_queue_losses`, as `send` does, and keeps the frames
+///   held for other members.
+#[test]
+fn the_new_leadership_terms_held_back_in_memory_hold_their_bound() {
+    let ids: Vec<i32> = (0..8).collect();
+    let mut cluster = Cluster::with_election(&ids, 1).expect("eight members");
+    let mut safety = Safety::new(&ids);
+    safety.run_until(&mut cluster, 5_000, "a leader of eight", |cluster| {
+        settled(cluster, &ids)
+    });
+    let leader = cluster.leader().expect("a leader");
+    let others = followers(&ids, leader)[..3].to_vec();
+    let term = cluster
+        .member(leader)
+        .expect("a member")
+        .leadership_term_id();
+
+    // Arming: the six pairs between followers, which see no new leadership term while
+    // the leader leads, and then the leader's three; the last is past the bound.
+    let mut asked = Vec::new();
+    for &from in &others {
+        for &to in &others {
+            if from != to {
+                asked.push((from, to));
+            }
+        }
+    }
+    asked.extend(others.iter().map(|&to| (leader, to)));
+    assert_eq!(asked.len(), MAX_HELD_BACK + 1);
+    for &(from, to) in &asked {
+        cluster.hold_back_new_leadership_term(from, to);
+    }
+    for &member in &others {
+        safety.restart(&mut cluster, member);
+        safety.run_until(&mut cluster, 5_000, "the member follows again", |cluster| {
+            settled(cluster, &ids)
+        });
+    }
+    let held = cluster.held_back();
+    assert_eq!(
+        held.iter().map(|&(_, to, _, _)| to).collect::<Vec<_>>(),
+        others[..2],
+        "the third follower's answer was past the bound and not held: {held:?}"
+    );
+    assert!(
+        held.iter()
+            .all(|&(from, _, _, held_term)| from == leader && held_term == term),
+        "{held:?}"
+    );
+
+    // Sending: one pair armed at a time, beside the six that stay armed, until the
+    // frames held reach the bound.
+    for (round, &member) in others.iter().cycle().take(MAX_HELD_BACK - 2).enumerate() {
+        cluster.hold_back_new_leadership_term(leader, member);
+        safety.restart(&mut cluster, member);
+        safety.run_until(&mut cluster, 5_000, "the member follows again", |cluster| {
+            settled(cluster, &ids)
+        });
+        assert_eq!(
+            cluster.held_back().len(),
+            3 + round,
+            "{:?}",
+            cluster.held_back()
+        );
+    }
+    let full = cluster.held_back();
+    assert_eq!(full.len(), MAX_HELD_BACK);
+    // A pair armed now, with the bound held, has its frame sent: nothing more is held,
+    // and the member follows on it.
+    cluster.hold_back_new_leadership_term(leader, others[2]);
+    safety.restart(&mut cluster, others[2]);
+    safety.run_until(&mut cluster, 5_000, "the member follows again", |cluster| {
+        settled(cluster, &ids)
+    });
+    assert_eq!(cluster.held_back(), full, "nothing past the bound is held");
+
+    // Releasing into a full queue, which messages two seconds late fill, as in the
+    // stream's bound test.
+    assert_eq!(cluster.set_delivery(0, 2_000), 2_000);
+    let mut filled = false;
+    for i in 0..3_000u32 {
+        let _ = cluster.offer(&i.to_le_bytes());
+        safety.run(&mut cluster, 1);
+        assert!(cluster.held_back().len() <= MAX_HELD_BACK);
+        if cluster.in_flight() == IN_FLIGHT_CAPACITY {
+            filled = true;
+            break;
+        }
+    }
+    assert!(filled, "the in-flight queue fills: {cluster:?}");
+    let to_first = u64::try_from(
+        full.iter()
+            .filter(|&&(_, to, _, _)| to == others[0])
+            .count(),
+    )
+    .expect("at most MAX_HELD_BACK");
+    assert!(to_first > 0, "{full:?}");
+    let lost = cluster.full_queue_losses();
+    cluster.release_held_back(others[0]);
+    assert_eq!(
+        cluster.full_queue_losses(),
+        lost + to_first,
+        "each frame released into the full queue is lost and counted"
+    );
+    assert_eq!(cluster.in_flight(), IN_FLIGHT_CAPACITY);
+    let kept = cluster.held_back();
+    assert_eq!(
+        kept,
+        full.iter()
+            .copied()
+            .filter(|&(_, to, _, _)| to != others[0])
+            .collect::<Vec<_>>(),
+        "the frames held for the other members stay held"
+    );
+
+    assert_eq!(cluster.set_delivery(0, 0), 0);
+    safety.run_until(&mut cluster, 30_000, "one leader again", |cluster| {
+        settled(cluster, &ids)
+    });
+    assert!(cluster.held_back().len() <= MAX_HELD_BACK);
 }
 
 /// A cluster of one member is its own quorum: it leads from init, with nobody to

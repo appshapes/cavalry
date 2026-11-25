@@ -82,6 +82,11 @@ const IMAGE_LIVENESS_TIMEOUT_NS: u64 = 10_000_000_000;
 /// connect timeout (`spec/client-protocol.md`, "Values").
 const REPLAY_CONNECT_TIMEOUT_NS: u64 = 5_000_000_000;
 
+/// The most new leadership terms the in-memory cluster holds back at once, and the
+/// most pairs it holds them back for: one for each ordered pair of the most members a
+/// cluster has would be more than a test needs.
+pub const MAX_HELD_BACK: usize = 8;
+
 /// One consensus message between two members.
 struct Flight {
     deliver_at_ns: u64,
@@ -169,7 +174,8 @@ struct Cut {
 struct Disk {
     id: i32,
     candidate_term: i64,
-    /// The vote floor its `terms` file holds, −1 for none (ADR 0145).
+    /// The vote floor its `terms` file holds, −1 for none or once cleared (ADR 0145, ADR
+    /// 0161).
     vote_floor: i64,
     terms: Vec<(i64, i64)>,
     /// Subscribed to the log, with a recording armed.
@@ -277,6 +283,16 @@ struct World {
     net: VecDeque<Flight>,
     /// The messages lost because `net` was full.
     full_queue_losses: u64,
+    /// The pairs, `(from, to)` by member index, whose next new leadership term is held
+    /// back, which [`Cluster::hold_back_new_leadership_term`] arms: at most
+    /// [`MAX_HELD_BACK`].
+    hold_back: Vec<(usize, usize)>,
+    /// The new leadership terms held back, each written by its sender and kept out of
+    /// `net` until [`Cluster::release_held_back`]: at most [`MAX_HELD_BACK`].
+    held_back: Vec<Flight>,
+    /// The most entries a replay brings in one step, which [`Cluster::set_replay_rate`]
+    /// sets: `usize::MAX`, all it can reach, unless a test asks for fewer.
+    replay_rate: usize,
     /// Every log publication a member added, for the cluster's life, in the order
     /// added.
     publications: Vec<Publication>,
@@ -343,6 +359,25 @@ impl Io for MemberIo<'_> {
         let Ok(length) = message.write(&mut buffer) else {
             return false;
         };
+        // The new leadership term a test holds back is written and not sent, as a
+        // sender holds a frame back while its receiver's image is a receiver window
+        // behind, and it reaches the member when the test releases it.
+        if matches!(message, Message::NewLeadershipTerm { .. })
+            && let Some(armed) = self
+                .world
+                .hold_back
+                .iter()
+                .position(|&pair| pair == (self.own, to))
+            && self.world.held_back.len() < MAX_HELD_BACK
+        {
+            self.world.hold_back.swap_remove(armed);
+            self.world.held_back.push(Flight {
+                deliver_at_ns: 0,
+                to,
+                bytes: buffer.get(..length).unwrap_or(&[]).to_vec(),
+            });
+            return true;
+        }
         // A cut or halted member's messages leave it and arrive nowhere, as a
         // datagram's do, and so do the ones between two members a partition parts
         // and the ones the delivery setting loses.
@@ -423,6 +458,13 @@ impl Io for MemberIo<'_> {
     fn store_vote_floor(&mut self, position: i64) -> Result<(), Self::Fault> {
         if let Some(disk) = self.world.disks.get_mut(self.own) {
             disk.vote_floor = position;
+        }
+        Ok(())
+    }
+
+    fn clear_vote_floor(&mut self) -> Result<(), Self::Fault> {
+        if let Some(disk) = self.world.disks.get_mut(self.own) {
+            disk.vote_floor = -1;
         }
         Ok(())
     }
@@ -861,6 +903,9 @@ impl Cluster {
                 disks,
                 net: VecDeque::with_capacity(IN_FLIGHT_CAPACITY),
                 full_queue_losses: 0,
+                hold_back: Vec::with_capacity(MAX_HELD_BACK),
+                held_back: Vec::with_capacity(MAX_HELD_BACK),
+                replay_rate: usize::MAX,
                 publications: Vec::new(),
                 cuts: Vec::new(),
                 replays: Vec::new(),
@@ -1061,8 +1106,10 @@ impl Cluster {
             cuts,
             replays,
             publications,
+            replay_rate,
             ..
         } = &mut self.world;
+        let rate = *replay_rate;
         for replay in replays.iter_mut() {
             if replay.stopped.is_some() || disks.get(replay.from).is_none_or(|disk| disk.halted) {
                 continue;
@@ -1133,7 +1180,7 @@ impl Cluster {
                     if recorded {
                         disk.catchup_image = Some(replay.start);
                     }
-                    for entry in entries {
+                    for entry in entries.into_iter().take(rate) {
                         replay.position = entry.position_after;
                         if recorded && entry.position == disk.received {
                             disk.received = entry.position_after;
@@ -1748,6 +1795,84 @@ impl Cluster {
     /// append writes nothing.
     pub fn back_pressure(&mut self, on: bool) {
         self.world.back_pressured = on;
+    }
+
+    /// Holds back the next new leadership term member `from` sends member `to`: the
+    /// sender writes it and does not send it, as a sender holds a frame back while its
+    /// receiver's image is a receiver window behind, until [`Cluster::release_held_back`]
+    /// hands it to `to`, whatever ran meanwhile, a wipe and a restart of `to` among it.
+    /// That is the frame of `spec/cluster.md`, "Taking a leader", that a member started
+    /// again reads though it was written before its start (ADR 0145, ADR 0161). One is
+    /// held for each pair armed, and a pair armed again while it is armed is armed
+    /// once; past [`MAX_HELD_BACK`] pairs a hold is not armed. Past [`MAX_HELD_BACK`]
+    /// frames held, a pair still armed has its new leadership term sent as any message
+    /// is, and stays armed. [`Cluster::release_held_back`] hands a frame to a full
+    /// in-flight queue as `send` does: lost and counted in
+    /// [`Cluster::full_queue_losses`].
+    pub fn hold_back_new_leadership_term(&mut self, from: i32, to: i32) {
+        let index = |id: i32| self.world.disks.iter().position(|disk| disk.id == id);
+        if let (Some(from), Some(to)) = (index(from), index(to))
+            && !self.world.hold_back.contains(&(from, to))
+            && self.world.hold_back.len() < MAX_HELD_BACK
+        {
+            self.world.hold_back.push((from, to));
+        }
+    }
+
+    /// The new leadership terms held back, each as its sender, its member, its log
+    /// position and its leadership term id, in the order written.
+    pub fn held_back(&self) -> Vec<(i32, i32, i64, i64)> {
+        self.world
+            .held_back
+            .iter()
+            .filter_map(|flight| {
+                let to = self.world.disks.get(flight.to)?.id;
+                match Message::parse(Stream::Consensus, &flight.bytes) {
+                    Ok(Message::NewLeadershipTerm {
+                        log_position,
+                        leadership_term_id,
+                        leader_member_id,
+                        ..
+                    }) => Some((leader_member_id, to, log_position, leadership_term_id)),
+                    _ => None,
+                }
+            })
+            .collect()
+    }
+
+    /// Hands the new leadership terms held back for member `to` to it, due at the next
+    /// step, as the sender sends a frame it held to the image the member has now: a
+    /// member started again since gets it in its new image (`spec/udp.md`, "The
+    /// receiver"). Released to a member in init, one is read as the in-memory cluster
+    /// reads any message there (work item 458), so a test releases them once the member
+    /// canvasses. The holds still armed are disarmed.
+    pub fn release_held_back(&mut self, to: i32) {
+        let Some(to) = self.world.disks.iter().position(|disk| disk.id == to) else {
+            return;
+        };
+        let due = self.world.clock.now_ns.saturating_add(STEP_NS);
+        let mut kept = Vec::with_capacity(MAX_HELD_BACK);
+        for mut flight in self.world.held_back.drain(..) {
+            if flight.to != to {
+                kept.push(flight);
+            } else if self.world.net.len() >= IN_FLIGHT_CAPACITY {
+                // Full: lost, as `send` loses a message the queue has no room for.
+                self.world.full_queue_losses = self.world.full_queue_losses.saturating_add(1);
+            } else {
+                flight.deliver_at_ns = due;
+                self.world.net.push_back(flight);
+            }
+        }
+        self.world.held_back = kept;
+        self.world.hold_back.clear();
+    }
+
+    /// Brings at most `entries_per_step` entries a step in each replay from here on, as a
+    /// replay over a driver brings its frames over time, where by default a replay
+    /// brings all it can reach in one step. A test that stops a leader while a member
+    /// it serves is part way through a span sets it low; 0 is taken as 1.
+    pub fn set_replay_rate(&mut self, entries_per_step: usize) {
+        self.world.replay_rate = entries_per_step.max(1);
     }
 
     /// How the consensus stream delivers from here on: one message in `loss_one_in` is
