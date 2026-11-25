@@ -53,9 +53,15 @@ public sealed unsafe class Publication : IDisposable
     /// <summary>Claims <paramref name="length"/> bytes: the position after the frame, with
     /// <see cref="Claim"/> the writable span over them, or a result code below zero, which
     /// leaves the claim as it was. One ABI call, no allocation: the struct is this
-    /// publication's field, pinned for the call.</summary>
+    /// publication's field, pinned for the call. A <paramref name="length"/> below zero
+    /// throws <see cref="ArgumentOutOfRangeException"/> before the ABI is called (README,
+    /// "What it must never do").</summary>
     public long TryClaim(int length)
     {
+        if (length < 0)
+        {
+            Abi.Negative(nameof(length), length);
+        }
         long position = Abi.cavalry_publication_try_claim(handle, (nuint) length, ref claim);
         if (position >= 0)
         {

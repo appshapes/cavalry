@@ -609,6 +609,19 @@ public static unsafe partial class Abi
             + " see clients/dotnet/README.md");
     }
 
+    /// <summary>The reader of a count or a length a caller gave, for a value below zero: it
+    /// throws, before the ABI is called. The ABI takes a count as a <c>size_t</c>, and a
+    /// negative <c>int</c> cast for it is a count near 2 ** 64: a claim of that many bytes, or
+    /// a poll with no limit, for a caller that asked for neither. A member tests its argument
+    /// in line and calls this only for a value below zero, so a count in range costs no call
+    /// (ADR 0164).</summary>
+    internal static void Negative(string name, int value)
+    {
+        throw new ArgumentOutOfRangeException(name, value, name + ": an int from 0 to " + int.MaxValue + " expected, a"
+            + " count or a length, and " + value + " was given; the ABI would be passed another count, near 2 ** 64."
+            + " Pass a count that is not below zero. See clients/dotnet/README.md#what-it-must-never-do");
+    }
+
     /// <summary>The ABI's error code of this thread's last failed call (<c>cavalry_errcode</c>):
     /// what a result code below zero, such as <see cref="PUBLICATION_ERROR"/>, or a poll's -1
     /// stands for.</summary>

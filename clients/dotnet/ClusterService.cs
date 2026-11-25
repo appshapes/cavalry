@@ -133,9 +133,14 @@ public sealed unsafe class ClusterService : IDisposable
     /// <c>Fragments</c> is the count of entries taken before that entry, and its
     /// <c>InnerException</c> what the handler threw, or a <see cref="CavalryException"/> with
     /// <see cref="Abi.ERR_CLUSTER_ACTION"/> and the ABI's message for the value the handler
-    /// returned. The next poll hands the aborted entry over again.</summary>
+    /// returned. The next poll hands the aborted entry over again. A <paramref name="fragmentLimit"/> below zero throws
+    /// <see cref="ArgumentOutOfRangeException"/> before the ABI is called.</summary>
     public int Poll(ServiceHandler handler, int fragmentLimit)
     {
+        if (fragmentLimit < 0)
+        {
+            Abi.Negative(nameof(fragmentLimit), fragmentLimit);
+        }
         if (polling)
         {
             return Abi.cavalry_cluster_service_poll(handle, client.Handle, &OnClusterEntry, GCHandle.ToIntPtr(self),

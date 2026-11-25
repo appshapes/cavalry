@@ -83,9 +83,14 @@ public sealed unsafe class CommittedLog : IDisposable
     /// <see cref="Faulted"/> keeps it. An entry whose handler call threw was delivered and
     /// is not delivered again: <see cref="Position"/> is past it, and past every entry this
     /// poll delivered after it. After a close, the ABI is handed a null handle and answers
-    /// -1 with <see cref="Abi.ERR_NULL"/>.</summary>
+    /// -1 with <see cref="Abi.ERR_NULL"/>. A <paramref name="fragmentLimit"/> below zero throws
+    /// <see cref="ArgumentOutOfRangeException"/> before the ABI is called.</summary>
     public int Poll(EntryHandler handler, int fragmentLimit)
     {
+        if (fragmentLimit < 0)
+        {
+            Abi.Negative(nameof(fragmentLimit), fragmentLimit);
+        }
         if (polling)
         {
             return Abi.cavalry_committed_log_poll(handle, &OnEntry, GCHandle.ToIntPtr(self), (nuint) fragmentLimit);

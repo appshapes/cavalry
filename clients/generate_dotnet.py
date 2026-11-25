@@ -292,6 +292,19 @@ public static unsafe partial class Abi
             + " see clients/dotnet/README.md");
     }
 
+    /// <summary>The reader of a count or a length a caller gave, for a value below zero: it
+    /// throws, before the ABI is called. The ABI takes a count as a <c>size_t</c>, and a
+    /// negative <c>int</c> cast for it is a count near 2 ** 64: a claim of that many bytes, or
+    /// a poll with no limit, for a caller that asked for neither. A member tests its argument
+    /// in line and calls this only for a value below zero, so a count in range costs no call
+    /// (ADR 0164).</summary>
+    internal static void Negative(string name, int value)
+    {
+        throw new ArgumentOutOfRangeException(name, value, name + ": an int from 0 to " + int.MaxValue + " expected, a"
+            + " count or a length, and " + value + " was given; the ABI would be passed another count, near 2 ** 64."
+            + " Pass a count that is not below zero. See clients/dotnet/README.md#what-it-must-never-do");
+    }
+
     /// <summary>The ABI's error code of this thread's last failed call (<c>cavalry_errcode</c>):
     /// what a result code below zero, such as <see cref="PUBLICATION_ERROR"/>, or a poll's -1
     /// stands for.</summary>
@@ -910,9 +923,15 @@ public sealed unsafe class Publication : IDisposable
     /// <summary>Claims <paramref name="length"/> bytes: the position after the frame, with
     /// <see cref="Claim"/> the writable span over them, or a result code below zero, which
     /// leaves the claim as it was. One ABI call, no allocation: the struct is this
-    /// publication's field, pinned for the call.</summary>
+    /// publication's field, pinned for the call. A <paramref name="length"/> below zero
+    /// throws <see cref="ArgumentOutOfRangeException"/> before the ABI is called (README,
+    /// "What it must never do").</summary>
     public long TryClaim(int length)
     {
+        if (length < 0)
+        {
+            Abi.Negative(nameof(length), length);
+        }
         long position = Abi.cavalry_publication_try_claim(handle, (nuint) length, ref claim);
         if (position >= 0)
         {
@@ -1069,9 +1088,14 @@ public sealed unsafe class Subscription : IDisposable
     /// <see cref="Abi.ERR_POLLING"/> for a poll from inside a handler of this subscription,
     /// which the ABI refuses and which touches nothing here), and a
     /// <see cref="HandlerException"/> when a handler call threw. After a close, the ABI is
-    /// handed a null handle and answers -1 with <see cref="Abi.ERR_NULL"/>.</summary>
+    /// handed a null handle and answers -1 with <see cref="Abi.ERR_NULL"/>. A <paramref name="fragmentLimit"/> below zero throws
+    /// <see cref="ArgumentOutOfRangeException"/> before the ABI is called.</summary>
     public int Poll(FragmentHandler handler, int fragmentLimit)
     {
+        if (fragmentLimit < 0)
+        {
+            Abi.Negative(nameof(fragmentLimit), fragmentLimit);
+        }
         if (polling)
         {
             return Abi.cavalry_subscription_poll(handle, &OnFragment, GCHandle.ToIntPtr(self), (nuint) fragmentLimit);
@@ -1139,9 +1163,14 @@ public sealed unsafe class Subscription : IDisposable
     }
 
     /// <summary>The image at the index, with its constants copied now, or null; valid until the
-    /// next poll or close.</summary>
+    /// next poll or close. An <paramref name="index"/> below zero throws
+    /// <see cref="ArgumentOutOfRangeException"/> before the ABI is called.</summary>
     public Image? ImageAt(int index)
     {
+        if (index < 0)
+        {
+            Abi.Negative(nameof(index), index);
+        }
         nint pointer = Abi.cavalry_subscription_image_at_index(handle, (nuint) index);
         return pointer == 0 ? null : new Image(pointer);
     }
@@ -1292,9 +1321,14 @@ public sealed unsafe class CommittedLog : IDisposable
     /// <see cref="Faulted"/> keeps it. An entry whose handler call threw was delivered and
     /// is not delivered again: <see cref="Position"/> is past it, and past every entry this
     /// poll delivered after it. After a close, the ABI is handed a null handle and answers
-    /// -1 with <see cref="Abi.ERR_NULL"/>.</summary>
+    /// -1 with <see cref="Abi.ERR_NULL"/>. A <paramref name="fragmentLimit"/> below zero throws
+    /// <see cref="ArgumentOutOfRangeException"/> before the ABI is called.</summary>
     public int Poll(EntryHandler handler, int fragmentLimit)
     {
+        if (fragmentLimit < 0)
+        {
+            Abi.Negative(nameof(fragmentLimit), fragmentLimit);
+        }
         if (polling)
         {
             return Abi.cavalry_committed_log_poll(handle, &OnEntry, GCHandle.ToIntPtr(self), (nuint) fragmentLimit);
@@ -1567,9 +1601,14 @@ public sealed unsafe class ClusterSession : IDisposable
     /// <c>Cluster</c> is "session". A stale reply, one of a leadership term below that of a
     /// reply this session has handed over, is passed over and counted in
     /// <see cref="StaleReplies"/>, and is not in the count. Every reply the ABI hands over
-    /// reaches the handler, whether or not an earlier call threw.</summary>
+    /// reaches the handler, whether or not an earlier call threw. A <paramref name="fragmentLimit"/> below zero throws
+    /// <see cref="ArgumentOutOfRangeException"/> before the ABI is called.</summary>
     public int Poll(ReplyHandler handler, int fragmentLimit)
     {
+        if (fragmentLimit < 0)
+        {
+            Abi.Negative(nameof(fragmentLimit), fragmentLimit);
+        }
         if (polling)
         {
             return Abi.cavalry_cluster_session_poll(handle, &OnReply, GCHandle.ToIntPtr(self), (nuint) fragmentLimit);
@@ -1862,9 +1901,14 @@ public sealed unsafe class ClusterService : IDisposable
     /// <c>Fragments</c> is the count of entries taken before that entry, and its
     /// <c>InnerException</c> what the handler threw, or a <see cref="CavalryException"/> with
     /// <see cref="Abi.ERR_CLUSTER_ACTION"/> and the ABI's message for the value the handler
-    /// returned. The next poll hands the aborted entry over again.</summary>
+    /// returned. The next poll hands the aborted entry over again. A <paramref name="fragmentLimit"/> below zero throws
+    /// <see cref="ArgumentOutOfRangeException"/> before the ABI is called.</summary>
     public int Poll(ServiceHandler handler, int fragmentLimit)
     {
+        if (fragmentLimit < 0)
+        {
+            Abi.Negative(nameof(fragmentLimit), fragmentLimit);
+        }
         if (polling)
         {
             return Abi.cavalry_cluster_service_poll(handle, client.Handle, &OnClusterEntry, GCHandle.ToIntPtr(self),
