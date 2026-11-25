@@ -952,6 +952,7 @@ class Clients(unittest.TestCase):
                      "cavalry_go_offer", "cavalry_go_poll", "cavalry_go_committed_log_poll",
                      "cavalry_go_cluster_session_offer", "cavalry_go_cluster_session_poll",
                      "cavalry_go_cluster_service_reply", "cavalry_go_cluster_service_poll",
+                     "cavalry_go_cluster_service_schedule_timer", "cavalry_go_cluster_service_cancel_timer",
                      "cavalry_go_service_trampoline"):
             self.assertTrue(any(f"go: {name} " in f and "calls cavalry_go_keep" in f and "pthread_mutex_*" in f
                                 for f in found), (name, found))
@@ -995,6 +996,25 @@ class Clients(unittest.TestCase):
         self.assertEqual(len(found), 4, found)
         for name in ("ClusterSession.Offer", "ClusterService.Reply", "cavalryGoReply", "cavalryGoClusterEntry"):
             self.assertTrue(any(f"go: {name} (" in f and "panics" in f for f in found), (name, found))
+
+    def test_a_panic_in_a_go_services_timer_calls_fails_and_so_does_a_missing_one(self):
+        """ScheduleTimer and CancelTimer return a code (ADR 0157): neither panics, and
+        both are held to the rules by name."""
+        self.edit_go("func (v *ClusterService) ScheduleTimer(correlationID, deadline int64) int32 {\n",
+                     "func (v *ClusterService) ScheduleTimer(correlationID, deadline int64) int32 {\n\tpanic(\"no\")\n")
+        self.edit_go("func (v *ClusterService) CancelTimer(correlationID int64) int32 {\n",
+                     "func (v *ClusterService) CancelTimer(correlationID int64) int32 {\n\tpanic(\"no\")\n")
+        found = lint.findings(self.tmp)
+        self.assertEqual(len(found), 2, found)
+        for name in ("ClusterService.ScheduleTimer", "ClusterService.CancelTimer"):
+            self.assertTrue(any(f"go: {name} (" in f and "panics" in f for f in found), (name, found))
+        self.setUp()
+        self.edit_go("func (v *ClusterService) ScheduleTimer(", "func (v *ClusterService) Schedule(")
+        self.edit_go("func (v *ClusterService) CancelTimer(", "func (v *ClusterService) Cancel(")
+        found = lint.findings(self.tmp)
+        self.assertEqual(len(found), 2, found)
+        for name in ("ClusterService.ScheduleTimer is not in", "ClusterService.CancelTimer is not in"):
+            self.assertTrue(any(name in f for f in found), (name, found))
 
     def test_an_allocation_where_go_calls_a_cluster_handler_fails(self):
         """deliverReply and deliverClusterEntry call the handlers, once per reply and per

@@ -78,6 +78,13 @@ int cavalry_go_cluster_session_poll(cavalry_cluster_session_t *session, uintptr_
 int cavalry_go_cluster_service_reply(cavalry_cluster_service_t *service, int64_t session_id, const uint8_t *buffer,
                                      size_t length, cavalry_go_error_t *error);
 
+/* cavalry_cluster_service_schedule_timer and cavalry_cluster_service_cancel_timer, each
+ * with `error` written when it returns -1, for a call from outside the handler. */
+int cavalry_go_cluster_service_schedule_timer(cavalry_cluster_service_t *service, int64_t correlation_id,
+                                              int64_t deadline, cavalry_go_error_t *error);
+int cavalry_go_cluster_service_cancel_timer(cavalry_cluster_service_t *service, int64_t correlation_id,
+                                            cavalry_go_error_t *error);
+
 /* Polls the cluster service `service`, with `client`, for up to `fragment_limit` entries,
  * with `index` the service's slot in the client's table. Its trampoline is the service's
  * own: it reads each entry's values from the header, calls the exported Go function

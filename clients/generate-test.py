@@ -1974,6 +1974,19 @@ int cavalry_cluster_service_reply(cavalry_cluster_service_t *s, int64_t id, cons
   if (reply_answer < 0) { errcode = CAVALRY_ERR_CLUSTER_NO_ENTRY; snprintf(errmsg, sizeof errmsg, "no entry"); }
   return reply_answer;
 }
+/* A service's timers (ADR 0157): what the ABI answers, and the arguments it was given. */
+static int timer_answer;
+static int64_t timer_id, timer_deadline;
+int cavalry_cluster_service_schedule_timer(cavalry_cluster_service_t *s, int64_t id, int64_t deadline) {
+  (void) s; timer_id = id; timer_deadline = deadline;
+  if (timer_answer < 0) { errcode = CAVALRY_ERR_CLUSTER_NO_ENTRY; snprintf(errmsg, sizeof errmsg, "no entry"); }
+  return timer_answer;
+}
+int cavalry_cluster_service_cancel_timer(cavalry_cluster_service_t *s, int64_t id) {
+  (void) s; timer_id = id; timer_deadline = 0;
+  if (timer_answer < 0) { errcode = CAVALRY_ERR_CLUSTER_NO_ENTRY; snprintf(errmsg, sizeof errmsg, "no entry"); }
+  return timer_answer;
+}
 static int entry_at;
 int cavalry_cluster_entry_values(const cavalry_header_t *header, cavalry_cluster_entry_values_t *values) {
   (void) header;
@@ -2111,6 +2124,28 @@ int main(void) {
   reply_answer = -1;
   EXPECT(cavalry_go_cluster_service_reply(NULL, 7, NULL, 0, &error) == -1 && error.code == CAVALRY_ERR_CLUSTER_NO_ENTRY,
          "a reply from outside the handler kept code %d", (int) error.code);
+  /* The timers' shims pass the id and the deadline on as they are, the least and the
+   * greatest int64 among them, return what the ABI answered, and keep the error of a
+   * call that it refused, and of no other. */
+  memset(&error, 0, sizeof error);
+  timer_answer = CAVALRY_CLUSTER_TIMER_SCHEDULED;
+  EXPECT(cavalry_go_cluster_service_schedule_timer(NULL, INT64_MIN, INT64_MAX, &error) == CAVALRY_CLUSTER_TIMER_SCHEDULED &&
+         error.code == 0 && timer_id == INT64_MIN && timer_deadline == INT64_MAX,
+         "a schedule that was taken kept code %d or passed another id or deadline on", (int) error.code);
+  timer_answer = CAVALRY_CLUSTER_TIMER_REFUSED;
+  EXPECT(cavalry_go_cluster_service_schedule_timer(NULL, 7, 8, &error) == CAVALRY_CLUSTER_TIMER_REFUSED && error.code == 0 &&
+         timer_id == 7 && timer_deadline == 8, "a schedule refused at the bound kept code %d", (int) error.code);
+  timer_answer = 0;
+  EXPECT(cavalry_go_cluster_service_cancel_timer(NULL, INT64_MAX, &error) == 0 && error.code == 0 && timer_id == INT64_MAX,
+         "a cancel kept code %d or passed another id on", (int) error.code);
+  timer_answer = -1;
+  EXPECT(cavalry_go_cluster_service_schedule_timer(NULL, 7, 8, &error) == -1 && error.code == CAVALRY_ERR_CLUSTER_NO_ENTRY &&
+         strcmp(error.function, "cavalry_cluster_service_schedule_timer") == 0,
+         "a schedule from outside the handler kept the error of \"%s\", code %d", error.function, (int) error.code);
+  memset(&error, 0, sizeof error);
+  EXPECT(cavalry_go_cluster_service_cancel_timer(NULL, 7, &error) == -1 && error.code == CAVALRY_ERR_CLUSTER_NO_ENTRY &&
+         strcmp(error.function, "cavalry_cluster_service_cancel_timer") == 0,
+         "a cancel from outside the handler kept the error of \"%s\", code %d", error.function, (int) error.code);
   printf("%d failure(s)\n", failures);
   return failures != 0;
 }
@@ -2283,6 +2318,10 @@ class GoPackage(unittest.TestCase):
                    "cavalry_go_cluster_session_poll": ("cavalry_cluster_session_poll", "count < 0"),
                    "cavalry_go_cluster_service_reply": ("cavalry_cluster_service_reply",
                                                         "code < 0 || code == CAVALRY_CLUSTER_REPLY_TOO_LONG"),
+                   # A service's timers (ADR 0157): -1 alone is a failure; a refusal at the
+                   # bound is an answer.
+                   "cavalry_go_cluster_service_schedule_timer": ("cavalry_cluster_service_schedule_timer", "code < 0"),
+                   "cavalry_go_cluster_service_cancel_timer": ("cavalry_cluster_service_cancel_timer", "code < 0"),
                    "cavalry_go_cluster_service_poll": ("cavalry_cluster_service_poll", "count < 0")}
         for shim_call, (abi, failed) in cluster.items():
             body = shim.split(f" {shim_call}(", 1)[1].split("\n}\n", 1)[0]
@@ -2294,6 +2333,8 @@ class GoPackage(unittest.TestCase):
         for signature, kept in (("func (n *ClusterSession) Offer(", "&n.state.err)"),
                                 ("func (n *ClusterSession) Poll(", "&s.err)"),
                                 ("func (v *ClusterService) Reply(", "&v.state.err)"),
+                                ("func (v *ClusterService) ScheduleTimer(", "&v.state.err)"),
+                                ("func (v *ClusterService) CancelTimer(", "&v.state.err)"),
                                 ("func (v *ClusterService) Poll(", "&s.err)")):
             body = code.split(signature, 1)[1].split("\n}\n", 1)[0]
             self.assertNotIn("cavalry_errcode", body, signature)
@@ -2303,7 +2344,7 @@ class GoPackage(unittest.TestCase):
     def test_a_cluster_services_trampoline_passes_the_action_on_and_aborts_what_the_abi_refuses(self):
         """Invariant 1, for a cluster service in the Go client (ADR 0124). shim.c is compiled
         with the runner's `cc` against GO_SHIM_HARNESS, a stand-in for the ABI and for the
-        Go side. The service's trampoline reads the entry's seven values in C and hands
+        Go side. The service's trampoline reads the entry's eight values in C and hands
         them to the Go side, and passes the ABI the action the Go side returned:
         CAVALRY_ACTION_CONTINUE makes no call, CAVALRY_ACTION_BREAK takes the entry and ends
         the poll, and CAVALRY_ACTION_ABORT, the handler's own or the Go side's answer for a
@@ -2413,6 +2454,7 @@ class GoPackage(unittest.TestCase):
         test = files["cavalry_test.go"]
         self.assertIn("func TestTheClusterTrampolinesHandTheValuesOnAndAbortAnEntryNoHandlerTook(t *testing.T) {", test)
         for name in ("ClusterSession.Offer", "ClusterSession.Poll", "ClusterService.Poll", "ClusterService.Reply",
+                     "ClusterService.ScheduleTimer", "ClusterService.CancelTimer",
                      "Subscription.deliverReply", "Subscription.deliverClusterEntry", "cavalryGoReply",
                      "cavalryGoClusterEntry"):
             self.assertIn(name, gen_go.PER_MESSAGE_GO)

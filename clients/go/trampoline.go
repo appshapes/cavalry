@@ -100,7 +100,7 @@ func cavalryGoReply(slot C.uintptr_t, buffer *C.uint8_t, length C.size_t, leader
 }
 
 // cavalryGoClusterEntry is the fragment handler of a cluster service's poll: slot is the
-// service's 1-based index in the table, and the seven values are the entry's, which the C
+// service's 1-based index in the table, and the eight values are the entry's, which the C
 // trampoline read from the header before it called here, so this function makes no cgo
 // call. It writes them into the one ClusterEntryValues the service keeps, and returns the
 // entry's action, which the C trampoline passes to the ABI: what the handler returned, or
