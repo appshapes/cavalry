@@ -1450,6 +1450,15 @@ class Clients(unittest.TestCase):
         found = lint.findings(self.tmp)
         self.assertEqual(len(found), 5, found)
         self.assertTrue(all("Abi.negative calls Abi.held" in f and "synchronized" in f for f in found), found)
+        # A poll calls the ABI in two places, the nested poll's refusal and its own: a reader
+        # between them is after the method's first call of the ABI.
+        self.setUp()
+        nested = ("                return (int) Abi.cavalry_subscription_poll.invokeExact(handle, stub, MemorySegment.NULL, "
+                  "(long) fragmentLimit);\n            } catch (Throwable t) {\n                throw "
+                  "Abi.failed(\"cavalry_subscription_poll\", t);\n            }\n        }\n")
+        self.edit_jvm(nested, nested + "        Abi.negative(\"fragmentLimit\", fragmentLimit);\n", file="Subscription.java")
+        [finding] = lint.findings(self.tmp)
+        self.assertTrue("Subscription.poll" in finding and "not before its call of the ABI" in finding, finding)
         # And the rule names the claim and the four polls, and no other method.
         self.assertEqual(lint.RULES["jvm"]["readers"], {"Abi.negative": [
             "Publication.tryClaim", "Subscription.poll", "CommittedLog.poll", "ClusterSession.poll", "ClusterService.poll"]})
@@ -1644,6 +1653,15 @@ class Clients(unittest.TestCase):
         found = lint.findings(self.tmp)
         self.assertEqual(len(found), 5, found)
         self.assertTrue(all("Abi.Negative calls Abi.Held" in f and "lock" in f for f in found), found)
+        # A poll calls the ABI in two places, the nested poll's refusal and its own: a reader
+        # between them is after the member's first call of the ABI.
+        self.setUp()
+        nested = ("            return Abi.cavalry_subscription_poll(handle, &OnFragment, GCHandle.ToIntPtr(self), "
+                  "(nuint) fragmentLimit);\n        }\n")
+        self.edit_dotnet(nested, nested + "        Abi.Negative(nameof(fragmentLimit), fragmentLimit);\n",
+                         file="Subscription.cs")
+        [finding] = lint.findings(self.tmp)
+        self.assertTrue("Subscription.Poll" in finding and "not before its call of the ABI" in finding, finding)
         # And the rule names the claim and the four polls, and no other member.
         self.assertEqual(lint.RULES["dotnet"]["readers"], {"Abi.Negative": [
             "Publication.TryClaim", "Subscription.Poll", "CommittedLog.Poll", "ClusterSession.Poll", "ClusterService.Poll"]})

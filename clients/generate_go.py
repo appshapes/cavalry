@@ -978,9 +978,10 @@ const (
 
 // Error is a call that is not a message failed: Fn is the ABI function, and Code and
 // Message are the ABI's (cavalry_errcode, cavalry_errmsg), the message naming what to
-// do next and its docs anchor. One failure is this client's own, with a Code below zero
-// and its own Message: ErrNegative, for a count the client refused before the ABI was
-// called, where Fn is the ABI function the call would have made.
+// do next and its docs anchor. A failure the client found itself has the ABI's code for
+// it and the client's message. One has a Code below zero, which no ABI code is:
+// ErrNegative, for a count the client refused before the ABI was called, where Fn is the
+// ABI function the call would have made.
 type Error struct {
 	Fn      string
 	Code    int32

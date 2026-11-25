@@ -667,6 +667,11 @@ read another thread's failure, or none. The client never reads the error that wa
   between `runtime.LockOSThread` and `runtime.UnlockOSThread` around both the failing
   call and the read.
 
+One failure of a per-message call is not the ABI's, and is read from no thread: a
+count below zero, which the shim refuses before the ABI is called. The shim writes the
+handle's kept error itself, with the code `ErrNegative`, the ABI function the call
+would have made and its own message ("What it must never do").
+
 ### The call-back, by construction
 
 The ABI calls the C trampoline in `shim.c` with the body's address and length and the

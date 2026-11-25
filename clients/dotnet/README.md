@@ -378,8 +378,9 @@ program that runs every call above beside three members.
   trampoline that calls a handler, for C#'s forms of each: `lock`, `Monitor`, `Mutex`, `Semaphore`,
   `SpinLock` and the other waits of `System.Threading`, `async`, `await`, `Task`,
   `ValueTask`, `.Wait(`, `.Result`, `Thread.Sleep`, a thread started, `throw`, `new`,
-  and an interpolated string. The one exception built on the path after an ABI call is
-  the `HandlerException` that `Poll` throws once its ABI call has returned; a `Span<byte>` or
+  and an interpolated string. An exception is built on the path after an ABI call only
+  by a poll, once its ABI call has returned: the `HandlerException` it throws, and in a
+  service's poll the `CavalryException` for a value that is no action; a `Span<byte>` or
   `ReadOnlySpan<byte>` made with `new` over bytes the ABI handed over is a view, on the
   stack, not an allocation; and `Header`'s guard, `Ensure`, throws for a getter
   called outside its handler call, before the ABI is reached. The reader of a count,
@@ -387,8 +388,9 @@ program that runs every call above beside three members.
   and the four polls, which it names, on a line before the member's ABI call (the
   next rule). A call of it by another per-message member, by a trampoline, or not
   before the ABI call is a finding. The lint reads a member's own text for its ABI
-  call, `Abi.cavalry_*`. `just lint` fails on
-  any other, in the member's own body or in a method of the package it calls.
+  call, `Abi.cavalry_*`. `just lint` fails on any other throw or exception, and on any
+  other of the forms above, in the member's own body or in a method of the package it
+  calls.
 - Never pass the ABI another count than the caller gave
   ([ADR 0164](../../docs/decisions/0164-refuse-a-count-below-zero-in-the-go-the-jvm-and-the-dotnet-client-before-the-abi-is-called.md)).
   The ABI takes a count or a length as a `size_t`, and the client's members take an

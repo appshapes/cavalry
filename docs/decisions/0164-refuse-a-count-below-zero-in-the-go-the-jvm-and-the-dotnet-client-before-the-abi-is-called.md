@@ -82,16 +82,17 @@ the four polls and the image at an index of the Go, the JVM and the .NET client.
    wrote: `length`, `fragmentLimit`, `index`. This is the rule for every client. The
    Python client's names are the ABI's already. The Node client's generated wrappers
    name the ABI's parameter, `recording_id` for `recordingId`; they change to the
-   language's name with the next regeneration of the clients, the second pull request
-   of work item 465.
+   language's name in the second pull request of work item 465, which changes the
+   Node generator.
 7. **The lint.** The JVM and the .NET rules gain a reader rule as narrow as ADR 0162's
    for Python. `Abi.negative` and `Abi.Negative` may throw; the rule names each with
    the claim and the four polls; a call of the reader by one of them is allowed on a
    line before the method's first call of the ABI. A reader called by another
    per-message method, by an upcall, or not before the ABI call, a poll's among them,
-   and any other form in the reader or in a function it calls, is a finding. What a
-   poll may throw once its ABI call has returned is as ADR 0046 left it: a function
-   called there may throw, and the lint does not ask whether a reader is what throws.
+   and any other form in the reader or in a function it calls, is a finding. ADR
+   0046 gives a poll one raise, of its handler's exception, once its ABI call has
+   returned; the lint allows a raise there, by the poll or by a function it calls,
+   as it did before this ADR, and does not ask whether a reader is what throws.
    The lint reads a method's own text for its ABI call, `Abi.cavalry_*`. The image at
    an index is not per-message and is not the lint's. Go's rules do not change: its
    functions gain no panic, and its shim gains no lock.
@@ -170,7 +171,10 @@ item 468.
 
 **What a message's path pays.** Each runner's latency round sends 100,000 messages
 over `cavalry:ipc`, one at a time on one thread, unpinned, and reports the time from
-the publisher's clock read to the handler's first. The clock steps by 41 or 42 ns.
+the publisher's clock read to the handler's first. The publisher reads its clock
+after the claim has returned, so the interval holds the commit, the poll and the
+handler's call: the poll's comparison is in it, and the claim's is not measured here.
+The clock steps by 41 or 42 ns.
 `master`'s client and the changed one ran in turn, five runs each, the lowest and the
 highest run of each:
 
@@ -198,8 +202,9 @@ bench covers these clients; each runner's report is where its cost is seen.
   where it was answered. For a poll that is a breaking change for a program that
   passed −1 to mean no limit; `changelog.d/` says so and says what to pass.
 - A claim and a poll of the JVM and the .NET client gain one comparison of an `int`
-  with zero per call. The Go client's gain it in the shim. The Evidence has each
-  runner's histograms.
+  with zero per call. The Go client's gain it in the shim. The Evidence has, for
+  each runner, four quantiles of the interval that holds the poll's; the claim's is
+  not measured.
 - The JVM and the .NET client now throw from a per-message method for a caller's
   mistake, where before they threw from one only for a handler's exception, after the
   poll. The lint's rule keeps that to the one reader, before the ABI.
@@ -207,8 +212,8 @@ bench covers these clients; each runner's report is where its cost is seen.
   cannot give a negative code without superseding this ADR.
 - The Go client's `Error.Code` may now be below zero, for a failure the ABI did not
   report. Its doc comment and the README say so.
-- The Node client's refusals name the ABI's parameter until the clients are next
-  regenerated.
+- The Node client's refusals name the ABI's parameter until the second pull request
+  of work item 465 changes its generator.
 
 ## References
 
