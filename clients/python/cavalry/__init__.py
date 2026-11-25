@@ -1173,8 +1173,9 @@ class ClusterService:
         returns `ABORT`, or raises, is handed its entry again with every timer as it was
         before that handling. A program schedules its first timer only once every
         member of its cluster, with the service beside it, runs version 2 of the cluster
-        protocol, and from that entry on no member is stepped back: a service of version
-        1 hands its program no timer, so the two would compute two states from one log.
+        protocol or a later one, and from that entry on no member is stepped back to
+        version 1: a service of version 1 hands its program no timer, so the two would
+        compute two states from one log.
         From outside the handler it is -1, with `CAVALRY_ERR_CLUSTER_NO_ENTRY`. An id or
         a deadline that is no int64 is refused before the ABI is called, inside the
         handler or outside it: `TypeError` for a value that is no integer, a `float` and

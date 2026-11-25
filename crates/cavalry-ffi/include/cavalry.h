@@ -1324,8 +1324,8 @@ int cavalry_cluster_service_reply(cavalry_cluster_service_t *service,
  it was before that handling.
 
  A program schedules its first timer only once every member of its cluster, with
- the service beside it, runs version 2 of the cluster protocol (`spec/cluster.md`,
- "Versions and the upgrade").
+ the service beside it, runs version 2 of the cluster protocol or a later one
+ (`spec/cluster.md`, "Versions and the upgrade").
 
  # Safety
 
