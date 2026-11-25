@@ -13,8 +13,9 @@
 //! crosses a roll into the next segment file: the synced position in the middle of
 //! the segment before the roll, and the synced position at the next segment's base
 //! (work item 405). A segment file is 128 MiB, and those tests cross one by padding
-//! frames, whose bytes the recorder writes as their 32-byte header alone, so the
-//! files stay sparse and each test writes a few kilobytes.
+//! frames, whose bytes the recorder writes as their 32-byte header alone: each test
+//! writes a few hundred kilobytes, and its two segment files take no more of the disk
+//! on a file system that keeps a file sparse, as APFS and ext4 do.
 
 use std::fs::{self, OpenOptions};
 use std::os::unix::fs::FileExt;
@@ -193,21 +194,44 @@ fn write_blocks(writer: &mut RecordingWriter, found: &Descriptor, blocks: usize,
 /// the position moving by the frame's length. The time does not move, so no index
 /// entry is appended for them.
 fn padded_to(writer: &mut RecordingWriter, found: &Descriptor, to: i64, now: i64) {
+    assert!(
+        to >= writer.position() && to % 32 == 0,
+        "padding goes forward to a frame's alignment"
+    );
     while writer.position() < to {
         let position = writer.position();
         let left_in_term = i64::from(TERM) - position % i64::from(TERM);
         let length = left_in_term.min(to - position) as usize;
-        let located = locate(found, position).expect("a position of the recording");
-        let header = DataFrameHeader::new(FrameType::Pad, Flags::UNFRAGMENTED, length)
-            .expect("a header")
-            .with_term_offset(located.term_offset)
-            .with_term_id(located.term_id)
-            .with_session_id(found.session_id())
-            .with_stream_id(found.stream_id())
-            .to_bytes();
         writer
-            .write(&header, length, now)
+            .write(&pad(found, position, length), length, now)
             .expect("the padding is written");
+    }
+    assert_eq!(writer.position(), to);
+}
+
+/// The header of a padding frame of `length` bytes at `position`.
+fn pad(found: &Descriptor, position: i64, length: usize) -> [u8; 32] {
+    let located = locate(found, position).expect("a position of the recording");
+    DataFrameHeader::new(FrameType::Pad, Flags::UNFRAGMENTED, length)
+        .expect("a header")
+        .with_term_offset(located.term_offset)
+        .with_term_id(located.term_id)
+        .with_session_id(found.session_id())
+        .with_stream_id(found.stream_id())
+        .to_bytes()
+}
+
+/// Holds that the whole-term padding frames from position 0 to `to`, a term's start,
+/// are as the recorder wrote them: recovery left the segment below the cut alone.
+fn padding_kept(dir: &TestDir, found: &Descriptor, to: i64) {
+    let mut position = 0;
+    while position < to {
+        assert_eq!(
+            dir.read(found, position, 32),
+            pad(found, position, TERM as usize),
+            "the padding frame at {position} is kept"
+        );
+        position += i64::from(TERM);
     }
 }
 
@@ -512,11 +536,17 @@ fn a_tail_that_rolled_into_the_next_segment_is_cut_in_its_segment_and_the_next_i
             ..CUT
         }
     );
-    assert_eq!(
-        dir.read(&found, last_term, FRAME),
-        [0u8; FRAME],
-        "the bytes past the stop are zeroed to the segment's end"
-    );
+    padding_kept(&dir, &found, middle);
+    // Every padding frame past the stop, at each term's start to the segment's end.
+    let mut position = middle + i64::from(TERM);
+    while position < SEGMENT {
+        assert_eq!(
+            dir.read(&found, position, 32),
+            [0u8; 32],
+            "the bytes past the stop are zeroed to the segment's end, at {position}"
+        );
+        position += i64::from(TERM);
+    }
     assert!(
         !next.exists(),
         "the next segment lay past the stop and is gone"
@@ -559,6 +589,7 @@ fn a_tail_past_a_sync_at_the_next_segments_base_removes_that_segment_and_keeps_t
             ..CUT
         }
     );
+    padding_kept(&dir, &found, last_term);
     assert!(
         !next.exists(),
         "the next segment began at the stop and is gone"
