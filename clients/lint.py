@@ -142,13 +142,16 @@ RULES = {
             "Subscription.poll",
             "CommittedLog.poll",
             # A cluster session and a cluster service (ADR 0124): the session's offer and
-            # its poll, the service's poll and its reply, and the getters of a reply's
-            # values and an entry's, which read through the addon's `replyField` and
-            # `entryField` what its trampoline read with one ABI call.
+            # its poll, the service's poll and its reply, the schedule and the cancel of
+            # its timers (ADR 0157), and the getters of a reply's values and an entry's,
+            # which read through the addon's `replyField` and `entryField` what its
+            # trampoline read with one ABI call.
             "ClusterSession.offer",
             "ClusterSession.poll",
             "ClusterService.poll",
             "ClusterService.reply",
+            "ClusterService.scheduleTimer",
+            "ClusterService.cancelTimer",
             "ClusterReplyValues.leadershipTermId",
             "ClusterReplyValues.timestamp",
             "ClusterEntryValues.position",
@@ -196,7 +199,10 @@ RULES = {
                 # which passes the ABI the action a service's handler returned and aborts
                 # an entry that did not get through its handler, the readers of a reply's
                 # values and an entry's, and the wrappers of the session's offer and the
-                # service's reply and action (ADR 0124).
+                # service's reply and action (ADR 0124), and of the schedule and the
+                # cancel of a service's timer (ADR 0157), whose id and deadline
+                # `int64_exact_arg` reads: a number that is no integer a number carries
+                # exactly is refused before the ABI is called, as a BigInt outside int64 is.
                 "cluster_trampoline",
                 "fn_clusterSessionPoll",
                 "fn_clusterServicePoll",
@@ -205,9 +211,11 @@ RULES = {
                 "fn_cavalry_cluster_session_offer",
                 "fn_cavalry_cluster_service_reply",
                 "fn_cavalry_cluster_service_action",
+                "fn_cavalry_cluster_service_schedule_timer",
+                "fn_cavalry_cluster_service_cancel_timer",
             ],
             "readers": ["read_args", "type_error", "is_nullish", "external_arg", "bytes_arg", "struct_arg",
-                        "string_arg", "int64_arg", "int32_arg", "size_arg", "bool_arg"],
+                        "string_arg", "int64_arg", "int64_exact_arg", "int32_arg", "size_arg", "bool_arg"],
         },
     },
     # The Go client calls the ABI through cgo (clients/go/README.md): the per-message

@@ -457,6 +457,28 @@ class Clients(unittest.TestCase):
                            ("ClusterReplyValues.timestamp", "throws"), ("ClusterEntryValues.timedOut", "throws")):
             self.assertTrue(any(f.startswith(f"node: {name} (") and form in f for f in found), found)
 
+    def test_a_throw_in_a_node_services_timer_calls_fails(self):
+        """The schedule and the cancel of a timer return a code, never throw, in their own
+        bodies (ADR 0157): what refuses an id or a deadline that is no int64 is the
+        addon's argument reader, before the ABI is called."""
+        self.edit_node("  scheduleTimer(correlationId, deadline) {\n",
+                       "  scheduleTimer(correlationId, deadline) {\n    if (deadline < 0) throw new RangeError(\"no\");\n")
+        self.edit_node("  cancelTimer(correlationId) { return addon.cavalry_cluster_service_cancel_timer(this.handle, "
+                       "correlationId); }\n",
+                       "  cancelTimer(correlationId) { check(\"cavalry_cluster_service_cancel_timer\", -1); }\n")
+        found = lint.findings(self.tmp)
+        self.assertEqual(len(found), 2, found)
+        for name, form in (("ClusterService.scheduleTimer", "throws"), ("ClusterService.cancelTimer", "calls check")):
+            self.assertTrue(any(f.startswith(f"node: {name} (") and form in f for f in found), found)
+
+    def test_a_missing_node_timer_function_fails(self):
+        self.edit_node("  scheduleTimer(correlationId, deadline) {", "  schedule(correlationId, deadline) {")
+        self.edit_node("  cancelTimer(correlationId) {", "  cancel(correlationId) {")
+        found = lint.findings(self.tmp)
+        self.assertEqual(len(found), 2, found)
+        for name in ("ClusterService.scheduleTimer", "ClusterService.cancelTimer"):
+            self.assertTrue(any(f"{name} is not in" in f for f in found), found)
+
     def test_a_missing_node_cluster_function_fails(self):
         """A cluster session's and a cluster service's per-message functions are held to the
         rules by name, as the others are (ADR 0124)."""
@@ -601,6 +623,30 @@ class Clients(unittest.TestCase):
         self.assertEqual(len(found), 3, found)
         for wrapper in wrappers:
             self.assertTrue(any(f.startswith(f"node: {wrapper} (") and "throws, `napi_throw*`" in f for f in found), found)
+
+    def test_a_throw_in_a_timer_wrapper_fails_and_its_exact_reader_may_throw(self):
+        """The addon's wrappers of the schedule and the cancel of a timer are on the path
+        (ADR 0157). `int64_exact_arg`, which refuses a number that is no integer a number
+        carries exactly, is an argument reader: its throw, before the ABI is called, is
+        none on the path, and the committed addon has no finding. The same reader with
+        another name is no reader, and its throw is one."""
+        self.assertEqual(lint.findings(self.tmp), [])
+        wrappers = ("fn_cavalry_cluster_service_schedule_timer", "fn_cavalry_cluster_service_cancel_timer")
+        for wrapper in wrappers:
+            self.add_to_addon(wrapper, "napi_throw_error(env, NULL, \"no\");")
+        found = lint.findings(self.tmp)
+        self.assertEqual(len(found), 2, found)
+        for wrapper in wrappers:
+            self.assertTrue(any(f.startswith(f"node: {wrapper} (") and "throws, `napi_throw*`" in f for f in found), found)
+        self.setUp()
+        with open(self.addon, encoding="utf-8") as f:
+            text = f.read()
+        self.assertEqual(text.count("int64_exact_arg("), 4)  # its definition and the three arguments it reads
+        with open(self.addon, "w", encoding="utf-8") as f:
+            f.write(text.replace("int64_exact_arg(", "int64_strict("))
+        found = lint.findings(self.tmp)
+        for wrapper in wrappers:
+            self.assertTrue(any(f.startswith(f"node: {wrapper} (") and "calls int64_strict" in f for f in found), found)
 
     def test_a_missing_addon_cluster_function_fails(self):
         self.edit("static void cluster_trampoline(", "static void cluster_handler(", file=self.addon)

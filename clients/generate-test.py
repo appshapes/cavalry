@@ -1524,6 +1524,22 @@ class NodePackage(unittest.TestCase):
                       service)
         self.assertIn("  reply(sessionId, message) { return addon.cavalry_cluster_service_reply(this.handle, sessionId, "
                       "message); }\n", service)
+        # A service's timers (ADR 0157): one addon call each, with the arguments as given.
+        # The addon reads a timer's id and its deadline exactly, and every other int64 as
+        # it did: a number that N-API would truncate is another timer or another time.
+        self.assertIn("  scheduleTimer(correlationId, deadline) {\n    return "
+                      "addon.cavalry_cluster_service_schedule_timer(this.handle, correlationId, deadline);\n  }\n", service)
+        self.assertIn("  cancelTimer(correlationId) { return addon.cavalry_cluster_service_cancel_timer(this.handle, "
+                      "correlationId); }\n", service)
+        schedule = addon.split("static napi_value fn_cavalry_cluster_service_schedule_timer(", 1)[1].split("\n}\n", 1)[0]
+        self.assertIn('int64_t correlation_id = (int64_t) int64_exact_arg(env, argv[1], "correlation_id");', schedule)
+        self.assertIn('int64_t deadline = (int64_t) int64_exact_arg(env, argv[2], "deadline");', schedule)
+        self.assertLess(schedule.index("int64_exact_arg(env, argv[2]"), schedule.index("cavalry_cluster_service_schedule_timer("))
+        cancel = addon.split("static napi_value fn_cavalry_cluster_service_cancel_timer(", 1)[1].split("\n}\n", 1)[0]
+        self.assertIn('int64_t correlation_id = (int64_t) int64_exact_arg(env, argv[1], "correlation_id");', cancel)
+        self.assertEqual(addon.count("int64_exact_arg(env, argv["), 3)
+        reader = addon.split("static int64_t int64_exact_arg(", 1)[1].split("\n}\n", 1)[0]
+        self.assertIn("clients/node/README.md#a-services-timers", reader)
         self.assertIn("    const result = addon.clusterServicePoll(this._state, this.handle, this._client.handle, handler, "
                       "fragmentLimit, this);\n    if (typeof result === \"number\") return result;\n"
                       "    throw new HandlerError(result[0], result[1], result[4] ? noAction(result[2]) : result[2], "
