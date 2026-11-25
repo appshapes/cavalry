@@ -1,5 +1,5 @@
-// The JVM client's cluster round (spec/c-abi.md, versions 4 and 5; ADR 0122, ADR 0123, ADR
-// 0124): Client.clusterService and ClusterService beside each of three cluster members
+// The JVM client's cluster round (spec/c-abi.md, versions 4, 5 and 7; ADR 0122, ADR 0123,
+// ADR 0124, ADR 0157): Client.clusterService and ClusterService beside each of three cluster members
 // that conformance/jvm/run.sh started with `cavalry run`, and Client.connectCluster and
 // ClusterSession on the runner's first driver, the one at CAVALRY_DIR, as
 // conformance/python/cluster.py runs it through clients/python.

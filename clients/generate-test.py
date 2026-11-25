@@ -2680,7 +2680,7 @@ class JvmPackage(unittest.TestCase):
         self.assertEqual(gen_jvm.CRITICAL, ("cavalry_publication_offer", "cavalry_cluster_session_offer",
                                             "cavalry_cluster_service_reply"))
         self.assertEqual(abi.count("Linker.Option.critical("), 3)
-        # A service's timers (ADR 0157) take two longs and no bytes, so they are plain
+        # A service's timers (ADR 0157) take longs and no bytes, so they are plain
         # downcalls, and each method is one of them with its arguments as given.
         service = files[self.BASE + "ClusterService.java"]
         for name, descriptor, method, call in (

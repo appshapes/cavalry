@@ -1220,8 +1220,9 @@ class Clients(unittest.TestCase):
             self.assertTrue(any(f"jvm: {name} (" in f and form in f for f in found), (name, found))
 
     def test_a_throw_in_a_jvm_services_timer_methods_fails_and_so_does_a_missing_one(self):
-        """scheduleTimer and cancelTimer return a code (ADR 0157): neither checks and
-        throws, and both are held to the rules by name."""
+        """scheduleTimer and cancelTimer return a code (ADR 0157): a check that throws in
+        the one and an allocation in the other are findings, and both are held to the
+        rules by name."""
         self.edit_jvm("    public int scheduleTimer(long correlationId, long deadline) {\n",
                       "    public int scheduleTimer(long correlationId, long deadline) {\n        Abi.check(\"x\", -1);\n",
                       file="ClusterService.java")

@@ -569,7 +569,8 @@ import java.lang.foreign.MemorySegment;
  * Receives each committed entry a cluster service's poll hands over: {@code body} is a
  * session message's payload, a segment into the log, valid for the call, and of no bytes
  * for every other entry; {@code entry} is the entry's values; and {@code service} is the
- * service that was polled, for its {@link ClusterService#reply}. What it returns is the
+ * service that was polled, for its {@link ClusterService#reply},
+ * {@link ClusterService#scheduleTimer} and {@link ClusterService#cancelTimer}. What it returns is the
  * entry's action: {@link Abi#ACTION_CONTINUE} takes the entry and the poll goes on,
  * {@link Abi#ACTION_BREAK} takes it and ends the poll, and {@link Abi#ACTION_ABORT} leaves
  * it, ends the poll, and has the next poll hand it over again.
@@ -2126,9 +2127,10 @@ public final class ClusterService implements AutoCloseable {
      * {@link #fault()} reads until the next poll; {@link Abi#ERR_CLOSED} for a client that
      * its driver closed, as when the member's driver has stopped, which {@code fault()}
      * reads too and every poll after it answers again, so that a program's loop ends on it;
-     * or, with {@code fault()} left as it was, {@link Abi#ERR_POLLING} for a poll from
-     * inside a handler of this service, which the ABI refuses and which touches nothing
-     * here). A timer event whose timer is not pending, or not yet due, is taken and handed
+     * or, with {@code fault()} left as it was, {@link Abi#ERR_NULL} for a poll after the
+     * program's own {@link Client#close}, which freed the client, and
+     * {@link Abi#ERR_POLLING} for a poll from inside a handler of this service, which the
+     * ABI refuses and which touches nothing here). A timer event whose timer is not pending, or not yet due, is taken and handed
      * to no handler, so the count may be more than the handler was called. The
      * poll is the service's duty cycle: it opens the member's log, follows the log's
      * sessions, and holds a publication to each open session while the service answers.
