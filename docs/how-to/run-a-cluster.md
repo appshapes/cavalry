@@ -155,12 +155,17 @@ committed once a quorum, two of three, has it on disk.
    with the id of the member that leads now in place of 0.
 
    Do the same for a member that was stopped, whose process was ended, or whose host
-   lost power or whose operating system crashed while it ran. After a crash its
+   lost power or whose operating system crashed while it ran. After such a crash its
    driver cuts each recording that was being made to the position the recording had
-   synced, counts each cut in `recording.cut_to_synced`, and `cavalry doctor` explains
-   it. "When it does not work", under "The member's host lost power", says what that
-   means, and names the one member that starts on a new log directory instead: one
-   that ran a driver of an earlier version when the power was lost.
+   synced, and counts each cut in `recording.cut_to_synced`. While that driver runs,
+   `cavalry doctor` on it prints a `WARN` line for the counter, which explains the
+   cut and asks nothing of you. A host that lost power starts again, and the
+   directories of this page are under `/tmp`, which macOS and many Linux systems
+   empty when a host starts. A member whose log directory is gone starts as one whose
+   directory has no `log-recordings` file, under "When it does not work". That
+   section, under "The member's host lost power", also names the one member that
+   starts on a new log directory instead: one that ran a driver of an earlier version
+   when the power was lost.
 
 ## How to verify it worked
 
@@ -370,10 +375,11 @@ committed once a quorum, two of three, has it on disk.
   ([ADR 0144](../decisions/0144-keep-a-recordings-synced-position-in-its-time-index-and-cut-a-recording-a-crash-left-live-to-it.md)).
   This holds for a recording that this version's driver was making. A driver of an
   earlier version, version 4 of the durable log or before, kept no synced position,
-  so a recording it was making when the power was lost cannot be cut. When the member
-  ran such a driver at the loss, do not start it on that log directory again, even
-  under a newer driver: start it on a new log directory, as for a directory with
-  no `log-recordings` file, above.
+  so a recording it was making when the power was lost cannot be cut. No release of
+  Cavalry carries such a driver: it is a build of `master` from before 2026-11-22.
+  When the member ran such a driver at the loss, do not start it on that log
+  directory again, even under a newer driver: start it on a new log directory, as
+  for a directory with no `log-recordings` file, above.
 - `cavalry run: the cluster member stopped, so the driver stops`, and the process
   exits with 1. The member could not go on, so `cavalry run` gave it up and closed
   its driver: a driver that runs on with the cluster's keys set and no member is
