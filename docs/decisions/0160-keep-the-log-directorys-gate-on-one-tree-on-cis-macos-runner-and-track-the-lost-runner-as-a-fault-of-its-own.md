@@ -21,13 +21,12 @@ by any route. In `master`'s 60 runs before, no macOS job lost its runner.
 
 A lost runner turns `master` red, and it skips the macOS job's later steps:
 `just docs`, `just quickstart`, `just replay-check` and the bench. Over those first
-four jobs, each landing met it at about one chance in two; over the eight measured in
-CI's own order since, two lost, about one in four. So pull request 352 (e7008334) had
-the script take its
-one-tree form on CI's macOS runner alone. That is a gate weakened on one runner, and
-until now its reason has been only in a commit message. Its pages said that work item
-441 stays open "until they run on macOS again, or an ADR says why they do not". This
-is that ADR.
+four jobs, each landing met it at about one chance in two. Over all eight jobs
+measured in CI's own order, those four among them, two lost: about one in four. So
+pull request 352 (e7008334) had the script take its one-tree form on CI's macOS
+runner alone. That is a gate weakened on one runner, and until now its reason has
+been only in a commit message. Its pages said that work item 441 stays open "until
+they run on macOS again, or an ADR says why they do not". This is that ADR.
 
 The experiments on throwaway branches, set out under Evidence, did not find the cause,
 and they spent their time box. That box was one round in the job's own order, and one
@@ -93,12 +92,16 @@ Each arm ran on a runner of its own, so a lost runner ended its own arm and no o
 | Linux, the gate alone in a loop: test-times 45553732082 | 15 | 0 |
 | This laptop, macOS 26.6.1 on arm64 hardware with 64 GiB, by hand and in `just conformance` | at least 10 | 0, and the machine was none the worse |
 
-The bare gate in a loop lost 3 runners in at most 50 runs.
+The bare gate in a loop lost 3 runners in 36 to 50 runs. Test-times' job kept no
+log, so how many of its 15 runs began is not known. That is a rate of about 1 in 12
+to 1 in 17.
 
 None of the counts where no loss was seen is large enough to show that its arm
-prevents the loss. At the bare loop's rate, about 3 in 50, zero losses in 24 or 40
-runs is within chance. So neither the markers, nor the pauses, nor a single tree, nor
-the directory written in turn alone is a remedy or a cause.
+prevents the loss. At that rate, an arm of 24 runs had a 12 to 23% chance of losing
+none, and the 40 paused runs a 3 to 9% chance. Beside the paused arms, in the same
+round, the bare arm also lost none in 20. So neither the markers, nor the pauses, nor
+a single tree, nor the directory written in turn alone is shown to be a remedy or a
+cause.
 
 Each loss was sudden. In run 45556061823 the seven lost its runner within 15 s of the
 start of its fourth run. In 45558818935 it was lost in the first seconds of its
