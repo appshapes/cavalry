@@ -58,7 +58,11 @@ imports), Go (`go/`, by `generate_go.py`), the JVM (`jvm/`, by `generate_jvm.py`
   and each
   trampoline that calls the user's handler: no lock, no `await`, no raise, in
   the language's forms, in the function's own body or in any function of the package
-  it calls. Generated code of the client in another language on the same path is read
+  it calls. One raise is allowed on that path: in an argument reader the rule names,
+  for the functions it names with it, before the function's ABI call, where the
+  reader refuses an integer argument that its parameter cannot hold
+  ([ADR 0162](../docs/decisions/0162-refuse-in-a-generated-client-an-integer-argument-its-parameter-cannot-hold-before-the-abi-is-called.md)).
+  Generated code of the client in another language on the same path is read
   in that language's forms, as the Node addon's C is. It fails on generated code in a
   language it has no rules for, on a package in which it finds none of the
   per-message functions, and on one that is missing.

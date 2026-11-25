@@ -1617,8 +1617,8 @@ class ClusterService:
                 body.release()
             if action is None or (type(action) is int and action == CONTINUE):
                 return
-            if type(action) is not int or not _INT32_MIN <= action <= _INT32_MAX \
-                    or self._abi.cavalry_cluster_service_action(self._handle, action) != 0:
+            if (type(action) is not int or not _INT32_MIN <= action <= _INT32_MAX
+                    or self._abi.cavalry_cluster_service_action(self._handle, action) != 0):
                 self._refused = action
                 self._raised += 1
                 self._abi.cavalry_cluster_service_action(self._handle, ABORT)
