@@ -213,3 +213,4 @@ under `docs/` is listed here; `just lint-docs` fails on one that is not.
 - [0155. Give a poll of a closed client one error, and close the client at a command that finds the driver gone](decisions/0155-give-a-poll-of-a-closed-client-one-error-and-close-the-client-at-a-command-that-finds-the-driver-gone.md)
 - [0156. Hold in the upgrade gate every directory a server holds: each tree's alone, and the trees in turn](decisions/0156-hold-in-the-upgrade-gate-every-directory-a-server-holds-each-trees-alone-and-the-trees-in-turn.md)
 - [0158. Append the timer event of the lower correlation id first, of two timers with one deadline](decisions/0158-append-the-timer-event-of-the-lower-correlation-id-first-of-two-timers-with-one-deadline.md)
+- [0159. Report to the program a publication the driver refuses while a service tells its member of a timer](decisions/0159-report-to-the-program-a-publication-the-driver-refuses-while-a-service-tells-its-member-of-a-timer.md)

@@ -1606,3 +1606,82 @@ fn a_subscriptions_header_carries_no_entrys_values() {
     );
     driver.close().expect("the driver closes");
 }
+
+/// A timer event reaches a service of this version of the ABI as an entry of no
+/// kind, `CAVALRY_CLUSTER_ENTRY_OTHER`, every one of them, as it did before the
+/// Rust library had timers: the Rust library hands its program the event of a timer
+/// that is pending and due as `Entry::Timer` and passes every other over, and the
+/// service that the C ABI makes is handed those too (`spec/c-abi.md`, "Constants";
+/// ADR 0159). The timer here is one that no program scheduled: the leader is told
+/// of it by hand on the consensus module stream, and appends its event.
+#[test]
+fn a_timer_event_reaches_a_service_as_an_entry_of_no_kind() {
+    use cavalry_proto::cluster::{CONSENSUS_MODULE_STREAM_ID, Message};
+
+    let mut cluster = Cluster::start("timer-event");
+    let leader = cluster.members[0].id;
+    let leader_dir = cluster._dir.path().join(format!("member-{leader}"));
+    let mut beside =
+        cavalry_client::Cavalry::connect_to(&leader_dir).expect("a client of the leader's driver");
+    let mut stream = beside
+        .add_exclusive_publication("cavalry:ipc", CONSENSUS_MODULE_STREAM_ID)
+        .expect("a publication on the consensus module stream");
+    let mut bytes = [0u8; 64];
+    let length = Message::ScheduleTimer {
+        correlation_id: 77,
+        deadline: 1,
+    }
+    .write(&mut bytes)
+    .expect("a schedule timer");
+    cluster.run_until(
+        "the consensus module stream takes the schedule timer",
+        |_| stream.offer(&bytes[..length]).is_ok(),
+    );
+    let others = |cluster: &Cluster, member: usize| {
+        cluster.members[member]
+            .served
+            .handed
+            .iter()
+            .filter(|handed| handed.r#type == CAVALRY_CLUSTER_ENTRY_OTHER)
+            .count()
+    };
+    cluster.run_until("every service is handed the timer's event", |cluster| {
+        (0..cluster.members.len()).all(|member| others(cluster, member) == 1)
+    });
+    // One event, handed once to each service, with no payload and no session.
+    for member in &cluster.members {
+        let event: Vec<&Handed> = member
+            .served
+            .handed
+            .iter()
+            .filter(|handed| handed.r#type == CAVALRY_CLUSTER_ENTRY_OTHER)
+            .collect();
+        assert_eq!(event.len(), 1, "member {}", member.id);
+        assert!(event[0].payload.is_empty(), "member {}", member.id);
+        assert_eq!(
+            event[0].position, event[0].entry_position,
+            "member {}",
+            member.id
+        );
+    }
+    let positions: Vec<i64> = cluster
+        .members
+        .iter()
+        .filter_map(|member| {
+            member
+                .served
+                .handed
+                .iter()
+                .find(|handed| handed.r#type == CAVALRY_CLUSTER_ENTRY_OTHER)
+                .map(|handed| handed.position)
+        })
+        .collect();
+    assert!(
+        positions.windows(2).all(|pair| pair[0] == pair[1]),
+        "one position beside every member: {positions:?}"
+    );
+
+    drop(stream);
+    beside.close().expect("the client closes");
+    cluster.stop();
+}

@@ -227,6 +227,38 @@ The client API implementation, re-exported by the `cavalry` crate. Data plane.
   `Entry::Snapshot` an arm that does nothing, as
   `crates/cavalry/examples/adder-service.rs` does. A service written through the C
   ABI takes none yet (ADR 0131).
+- Gives a service's program timers (`spec/cluster.md`, "The service", "Timers";
+  ADR 0151). While it handles an entry the program calls
+  `Replies::schedule_timer(correlation_id, deadline)`, with any id it chooses and a
+  deadline in the cluster's time, the clock of `Committed::timestamp`, and
+  `Replies::cancel_timer(correlation_id)`. When the deadline has come the leader
+  appends a timer event, and the program is handed `Entry::Timer` with that id:
+  once, at one position beside every member, never before its deadline and never
+  after its cancel, whatever timer events the log holds. The service decides that
+  from the log alone, so a replay hands over the same timers at the same entries.
+  A handler that answers `Action::Abort` is handed its entry again with every
+  timer as it was before that handling. A service holds at most 1,024 pending
+  timers, and a schedule of another id beyond them is refused with `TimersFull`,
+  beside every member alike: a program with more deadlines than that keeps them in
+  its own state and schedules one timer for the earliest. A timer that repeats is
+  scheduled again by the handling of its own `Entry::Timer`. The calls send
+  nothing and wait for nothing. After a poll's entries the service tells the
+  member on its driver what they changed, on the consensus module stream, for as
+  long as the stream takes its messages, and every pending timer again each
+  second, so that a member that started again, or one that leads next, holds
+  them: 2,048 messages in a poll at the most, the poll after a refresh of a full
+  table. A driver that refuses the service's publication on that stream is the
+  poll's error (ADR 0159). The pending
+  timers are in the service's snapshot and come back with `restore`. A program
+  that schedules none pays a few compares for each entry and for each poll, and
+  no copy, no clock's reading and no message. `cluster.service_timers`,
+  `cluster.service_timer_events_passed_over` and
+  `cluster.service_timer_cancels_dropped` count it. A program schedules its first
+  timer only once every member of its cluster, with the service beside it, runs
+  version 2 of the cluster protocol, and from that entry on no member is stepped
+  back: a service of version 1 hands its program no timer, so the two would
+  compute two states from one log (`spec/cluster.md`, "Versions and the upgrade"). A service
+  written through the C ABI has no timer yet.
 - Starts a service from its snapshot: `ClusterService::restore(client)`, called
   before the first poll, asks the member for the newest snapshot of a service that
   it lists, plays its recording back through the member's driver, and answers
