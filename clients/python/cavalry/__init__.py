@@ -664,19 +664,29 @@ class Subscription:
     def image_count(self):
         """How many images the subscription has, or -1 where the ABI refuses the call: from
         inside a handler of this subscription's own poll, with `CAVALRY_ERR_POLLING` as
-        the thread's error, and for a subscription that is closed."""
+        the thread's error, and after this subscription's own `close()`, with
+        `CAVALRY_ERR_NULL`."""
         return self._abi.cavalry_subscription_image_count(self._handle)
 
     def image_at_index(self, index):
+        """The image at `index`, or None for an index past the count. Where the ABI
+        refuses the call, from inside a handler of this subscription's own poll or after
+        this subscription's own `close()`, it raises `CavalryError`, as `images` does.
+        The ABI answers a refusal and an index past the count alike, with no image, and a
+        success clears no error, so the count is asked: its refusal is the answer."""
         pointer = self._abi.cavalry_subscription_image_at_index(self._handle, index)
-        return Image(self._abi, pointer) if pointer else None
+        if pointer:
+            return Image(self._abi, pointer)
+        if self.image_count() < 0:
+            raise _error(self._abi, "cavalry_subscription_image_count")
+        return None
 
     def images(self):
         """Every image, valid until the next poll or close. Where the ABI refuses the
-        count, from inside a handler of this subscription's own poll or for a
-        subscription that is closed, it raises `CavalryError` with the ABI's code,
-        `CAVALRY_ERR_POLLING` from inside the handler: a refusal is no empty list
-        (README, "What it must never do")."""
+        count, from inside a handler of this subscription's own poll or after this
+        subscription's own `close()`, it raises `CavalryError` with the ABI's code,
+        `CAVALRY_ERR_POLLING` or `CAVALRY_ERR_NULL`: a refusal is no empty list (README,
+        "What it must never do")."""
         count = self.image_count()
         if count < 0:
             raise _error(self._abi, "cavalry_subscription_image_count")

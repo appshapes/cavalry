@@ -1106,11 +1106,14 @@ func (s *Subscription) Fault() (code int32, sessionID int32, position int64, err
 
 // ImageCount is how many images the subscription has, or -1 where the ABI refuses the
 // call: from inside a handler of this subscription's own poll, with ErrPolling as the
-// thread's error, and for a subscription that is closed.
+// thread's error, and after this subscription's own Close, with ErrNull.
 func (s *Subscription) ImageCount() int { return int(C.cavalry_subscription_image_count(s.handle)) }
 
-// ImageAt is the image at index, with its constants copied now, or nil. An index below
-// zero is an *Error whose Code is ErrNegative, and the ABI is not called.
+// ImageAt is the image at index, with its constants copied now, or nil for an index past
+// the count. An index below zero is an *Error whose Code is ErrNegative, and the ABI is
+// not called. Where the ABI refuses the call, from inside a handler of this subscription's
+// own poll or after this subscription's own Close, it returns the ABI's *Error, as Images
+// does, and no image.
 func (s *Subscription) ImageAt(index int) (*Image, error) {
 	if index < 0 {
 		return nil, &Error{Fn: "cavalry_subscription_image_at_index", Code: ErrNegative, Message: fmt.Sprintf(
@@ -1122,6 +1125,11 @@ func (s *Subscription) ImageAt(index int) (*Image, error) {
 	defer runtime.UnlockOSThread()
 	ptr := C.cavalry_subscription_image_at_index(s.handle, C.size_t(index))
 	if ptr == nil {
+		// The ABI answers a refusal and an index past the count alike, with no image, and a
+		// success clears no error: the count is asked, and its refusal is the answer.
+		if C.cavalry_subscription_image_count(s.handle) < 0 {
+			return nil, lastError("cavalry_subscription_image_count")
+		}
 		return nil, nil
 	}
 	var k C.cavalry_image_constants_t
@@ -1134,10 +1142,10 @@ func (s *Subscription) ImageAt(index int) (*Image, error) {
 }
 
 // Images is every image, valid until the next poll or close. Where the ABI refuses the
-// count, from inside a handler of this subscription's own poll or for a subscription that
-// is closed, it returns the ABI's *Error, with ErrPolling from inside the handler, and no
-// slice: a refusal is no empty slice (README, "What it must never do"). The goroutine is
-// held to its OS thread for the call, so that the error read is the count's own.
+// count, from inside a handler of this subscription's own poll or after this
+// subscription's own Close, it returns the ABI's *Error, with ErrPolling or ErrNull, and
+// no slice: a refusal is no empty slice (README, "What it must never do"). The goroutine
+// is held to its OS thread for the call, so that the error read is the count's own.
 func (s *Subscription) Images() ([]*Image, error) {
 	runtime.LockOSThread()
 	defer runtime.UnlockOSThread()

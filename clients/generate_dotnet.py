@@ -1158,16 +1158,21 @@ public sealed unsafe class Subscription : IDisposable
 
     /// <summary>How many images the subscription has, or -1 where the ABI refuses the call:
     /// from inside a handler of this subscription's own poll, with
-    /// <see cref="Abi.ERR_POLLING"/> as the thread's error, and for a subscription that is
-    /// closed.</summary>
+    /// <see cref="Abi.ERR_POLLING"/> as the thread's error, and after this subscription's own
+    /// <c>Close()</c>, with <see cref="Abi.ERR_NULL"/>.</summary>
     public int ImageCount()
     {
         return Abi.cavalry_subscription_image_count(handle);
     }
 
-    /// <summary>The image at the index, with its constants copied now, or null; valid until the
-    /// next poll or close. An <paramref name="index"/> below zero throws
-    /// <see cref="ArgumentOutOfRangeException"/> before the ABI is called.</summary>
+    /// <summary>The image at the index, with its constants copied now, or null for an index
+    /// past the count; valid until the next poll or close. An <paramref name="index"/> below
+    /// zero throws <see cref="ArgumentOutOfRangeException"/> before the ABI is called. Where
+    /// the ABI refuses the call, from inside a handler of this subscription's own poll or
+    /// after this subscription's own <c>Close()</c>, it throws
+    /// <see cref="CavalryException"/>, as <see cref="Images"/> does: the ABI answers a
+    /// refusal and an index past the count alike, and a success clears no error, so the
+    /// count is asked, and its refusal is the answer.</summary>
     public Image? ImageAt(int index)
     {
         if (index < 0)
@@ -1175,14 +1180,22 @@ public sealed unsafe class Subscription : IDisposable
             Abi.Negative(nameof(index), index);
         }
         nint pointer = Abi.cavalry_subscription_image_at_index(handle, (nuint) index);
-        return pointer == 0 ? null : new Image(pointer);
+        if (pointer != 0)
+        {
+            return new Image(pointer);
+        }
+        if (ImageCount() < 0)
+        {
+            throw Abi.LastError("cavalry_subscription_image_count");
+        }
+        return null;
     }
 
     /// <summary>Every image, valid until the next poll or close. Where the ABI refuses the
-    /// count, from inside a handler of this subscription's own poll or for a subscription
-    /// that is closed, it throws <see cref="CavalryException"/> with the ABI's code,
-    /// <see cref="Abi.ERR_POLLING"/> from inside the handler: a refusal is no empty list
-    /// (README, "What it must never do").</summary>
+    /// count, from inside a handler of this subscription's own poll or after this
+    /// subscription's own <c>Close()</c>, it throws <see cref="CavalryException"/> with the
+    /// ABI's code, <see cref="Abi.ERR_POLLING"/> or <see cref="Abi.ERR_NULL"/>: a refusal is
+    /// no empty list (README, "What it must never do").</summary>
     public List<Image> Images()
     {
         int count = ImageCount();
