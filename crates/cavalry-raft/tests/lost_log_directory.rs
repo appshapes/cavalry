@@ -478,9 +478,9 @@ fn a_new_clusters_member_that_holds_nothing_when_its_leader_stops_waits_for_the_
 /// entries, and replicates the log from the leader, one entry a step as a replay over a
 /// driver does over time. The leader stops once the member's log has passed `f`. Under ADR 0145's rule a member at its floor votes, and it and the third,
 /// neither holding the entries, would elect one of them and lose what was committed.
-/// Under ADR 0161's it withholds until it has joined a leader's live log, so no leader
-/// is elected until the leader comes back; then the member catches up, joins, clears its
-/// floor, and every member holds the entries.
+/// Under ADR 0161's it withholds until it has joined a leader's live log as well, so no
+/// leader is elected until the leader comes back; then the member catches up, joins,
+/// clears its floor, and every member holds the entries.
 #[test]
 fn a_held_back_new_leadership_term_gives_a_member_that_lost_its_log_no_vote_until_it_joins_the_live_log()
  {

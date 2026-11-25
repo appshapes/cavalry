@@ -121,8 +121,8 @@ const DOC_HOLD: &str = "docs/reference/durable-log.md#the-driver";
 /// "A member that lost its log"; ADR 0145), the words of each refusal that leaves a
 /// member out of the cluster for want of the log directory it had.
 const ON_A_NEW_LOG_DIRECTORY: &str = "start the member on a new log directory: it replicates \
-     the log, and it withholds its vote and seeks no leadership until it has caught up and \
-     joined its leader's live log, which clears the floor cluster.vote_floor holds. It takes \
+     the log, and it withholds its vote and seeks no leadership until it has caught up past \
+     the floor cluster.vote_floor holds and joined its leader's live log, which clears it. It takes \
      that leader only once it has heard every other member, so while one is stopped it \
      waits, and cluster.leaders_withheld rises: start the stopped member on the log \
      directory it kept. It catches up only while its leader's log begins at position 0. Where it no longer does, recordings purged \
@@ -2798,7 +2798,7 @@ struct Counters {
     /// `cluster.vote_floor`: the vote floor the member holds, which it withholds its
     /// vote while it holds, −1 for none, stored each cycle, since the member stores it
     /// once when it takes a leader with its log empty and clears it once it has joined a
-    /// leader's live log (ADR 0145, ADR 0161).
+    /// leader's live log with its log at or past the floor (ADR 0145, ADR 0161).
     vote_floor: Stored,
     /// `cluster.truncation_owed`: the position of the truncation the member owes, −1
     /// while it owes none (ADR 0148).

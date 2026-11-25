@@ -641,11 +641,13 @@ def withholds(own, vote_floor, log_heard):
     return {"withholds": (empty and log_heard) or vote_floor >= 0}
 
 
-def clears_vote_floor(vote_floor, joined):
+def clears_vote_floor(vote_floor, joined, append_position):
     """spec/cluster.md, "A member that lost its log" (ADR 0161): whether a member clears its vote
-    floor: when it holds one, 0 or more, and `joined`, it has joined a leader's live log in this
-    run of its module, whatever position the floor holds."""
-    return {"clears": vote_floor >= 0 and joined}
+    floor: when it holds one, 0 or more, `joined`, it has joined a leader's live log since it
+    stored the floor and in this run of its module, and its append position is at or past the
+    floor. The join holds what the leader's live sender had sent the member, the floor what the
+    leader had appended when it wrote the new leadership term the member took."""
+    return {"clears": vote_floor >= 0 and joined and append_position >= vote_floor}
 
 
 def withheld_vote(voters, reports, candidate_log):
@@ -921,13 +923,16 @@ VECTORS += [
           ("withholds-past-its-floor-while-it-holds-it", [3, 12288], 8192, False),
           ("withholds-with-a-floor-of-0", [0, 4096], 0, False),
       ]],
-    *[arithmetic(name, "clears-vote-floor", {"vote_floor": floor, "joined": joined},
-                 clears_vote_floor(floor, joined))
-      for name, floor, joined in [
-          ("clears-vote-floor-once-joined", 8192, True),
-          ("clears-vote-floor-of-0-once-joined", 0, True),
-          ("clears-vote-floor-not-before-joined", 8192, False),
-          ("clears-vote-floor-not-with-no-floor", -1, True),
+    *[arithmetic(name, "clears-vote-floor",
+                 {"vote_floor": floor, "joined": joined, "append_position": append},
+                 clears_vote_floor(floor, joined, append))
+      for name, floor, joined, append in [
+          ("clears-vote-floor-once-joined-at-its-floor", 8192, True, 8192),
+          ("clears-vote-floor-once-joined-past-its-floor", 8192, True, 12288),
+          ("clears-vote-floor-of-0-once-joined", 0, True, 0),
+          ("clears-vote-floor-not-before-joined", 8192, False, 12288),
+          ("clears-vote-floor-not-joined-below-its-floor", 8192, True, 4096),
+          ("clears-vote-floor-not-with-no-floor", -1, True, 4096),
       ]],
     *[arithmetic(name, "withheld-vote", {"voters": voters, "reports": reports, "candidate": cand},
                  withheld_vote(voters, reports, cand))

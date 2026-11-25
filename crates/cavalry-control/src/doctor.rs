@@ -1544,7 +1544,8 @@ fn election_state_name(code: i64) -> String {
 /// (`cluster-quorum-lost`); a commit position behind the leader's own append position
 /// (`cluster-commit-waits`); a member that runs with other voters than the members
 /// string doctor was given names (`cluster-voters`; ADR 0134); a voter that holds a vote
-/// floor, which withholds its vote until it has joined a leader's live log, with where
+/// floor, which withholds its vote until it has joined a leader's live log at or past
+/// the floor, with where
 /// its log is (`cluster.vote_floor`; ADR 0145, ADR 0161), or, for a member of a build
 /// before ADR 0161, one below its floor, and no standby, which has no vote to withhold; a
 /// member that owes a truncation whose command or write faulted, with the position it
@@ -2193,10 +2194,11 @@ fn member_findings(
         });
     }
     // A member that holds a vote floor withholds its vote (ADR 0145, ADR 0161) until it
-    // has joined a leader's live log in this run, which clears the floor: the gauge's
+    // has joined a leader's live log since it stored the floor and in this run, with its
+    // log at or past the floor, which clears it: the gauge's
     // text, with where its log is, while it lasts, and nothing once the floor is
     // cleared. A log at or past the floor is said so, since such a member still
-    // withholds: it waits for the live log, not for the position. A standby that starts
+    // withholds: it waits for the live log too, not for the position alone. A standby that starts
     // on an empty log directory stores a floor too, which applies once it is promoted,
     // but it has no vote to withhold and its catch-up costs the cluster no tolerance
     // (ADR 0134): nothing.
@@ -8088,7 +8090,7 @@ mod tests {
         );
 
         // At its floor and still holding it, it withholds until it joins the live log
-        // in this run, and doctor says so (ADR 0161).
+        // in this run too, and doctor says so (ADR 0161).
         let reached = [
             (CLUSTER_ROLE, 0),
             (CLUSTER_ELECTION_STATE, 1),
@@ -8116,7 +8118,7 @@ mod tests {
         assert!(
             floor
                 .message
-                .contains("it waits for the live log, not for the position"),
+                .contains("it waits for the live log too, not for the position alone"),
             "{}",
             floor.message
         );

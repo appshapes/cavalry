@@ -2827,16 +2827,19 @@ pub const fn withholds(own: LogReport, vote_floor: i64, log_heard: bool) -> bool
 }
 
 /// Whether a member clears its vote floor (`spec/cluster.md`, "A member that lost its
-/// log"; ADR 0161): when it holds one, `vote_floor` 0 or more, and `joined`: in this
-/// run of its module it has joined the live log of a leader it took by the rules of
-/// "Taking a leader", going to follower ready. That leader holds every entry the
-/// cluster committed, its live log's image joins at its sender's position, past every
-/// entry it sent the member before it came back, and a follower goes to follower ready
-/// only with its append position at that join position. So a member that clears its
-/// floor holds every committed entry it could have acknowledged, whatever position the
-/// floor holds, and whenever the message that gave it was written.
-pub const fn clears_vote_floor(vote_floor: i64, joined: bool) -> bool {
-    vote_floor >= 0 && joined
+/// log"; ADR 0161): when it holds one, `vote_floor` 0 or more; `joined`, it has joined
+/// the live log of a leader it took by the rules of "Taking a leader", going to
+/// follower ready, since it stored the floor and in this run of its module; and its
+/// `append_position` is at or past the floor. Each of the two holds entries of its
+/// own. The join holds every entry the leader's live sender had sent the member before
+/// it came back: the live image joins at the sender's position, which never goes back,
+/// and a follower goes to follower ready only with its append position there. The
+/// floor holds every entry the leader had appended when it wrote the new leadership
+/// term the member took, one the member acknowledged from a replay of the leader's
+/// recording before the sender sent it among them. A floor from a frame the leader
+/// held back, or a floor of 0, holds less, and the join holds the rest.
+pub const fn clears_vote_floor(vote_floor: i64, joined: bool, append_position: i64) -> bool {
+    vote_floor >= 0 && joined && append_position >= vote_floor
 }
 
 /// Whether a member that withholds votes all the same for a candidate whose log is

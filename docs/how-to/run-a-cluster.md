@@ -579,15 +579,29 @@ committed once a quorum, two of three, has it on disk.
   an older string prints no `WARN cluster-voters`. The count stays until this
   member starts again: [Promote a standby to a voter](promote-a-standby.md).
 - `WARN cluster.vote_floor`: this member took a leader with its log empty, and it has
-  not joined its leader's live log since it started; the line says how many bytes
+  not both caught up past its vote floor and joined its leader's live log since it
+  started; the line says how many bytes
   its `cluster.append_position` is short of its vote floor, or that it is at or past
   it. It lost its log directory, it joined a new cluster after the first term began,
   or it is a new cluster's follower that has not joined yet. Until it joins the live
   log, it withholds its vote and seeks no leadership, so the cluster elects a leader
   only while both other members run. A member at or past its floor withholds still
-  after a start that came before it joined: it waits for the live log, not for the
-  position. It catches up and joins from its leader by itself, and the line goes once
-  it has. If the bytes short stay the same while the cluster appends, its leader's log
+  after a start that came before it joined: it waits for the live log too, not for
+  the position alone. It catches up and joins from its leader by itself, and the line goes once
+  it has. If its leader is lost for good before it joins, no member that prints this
+  line can stand in the election that follows:
+  - When every member still running prints it with a `cluster.append_position` of 0,
+    as a new cluster's followers do whose first leader was lost, no running member
+    holds an entry: whatever the cluster committed is on the lost leader alone. Start
+    the cluster again as a new cluster, every member on a new log directory, which
+    gives up what that leader held.
+  - When the members were upgraded all at once from a build before ADR 0161, each
+    holds the floor that build stored and never cleared. Start one of them again on
+    the build before, which votes and stands once its log is at or past its floor.
+    Once the others have joined its live log, upgrade it again
+    ([Upgrade a cluster](upgrade-a-cluster.md)).
+
+  If the bytes short stay the same while the cluster appends, its leader's log
   no longer begins at position 0, and it cannot catch up: start the cluster again as a
   new cluster, every member on a new log directory
   ([ADR 0145](../decisions/0145-withhold-the-vote-of-a-member-that-lost-its-log-until-it-holds-what-the-cluster-held.md),

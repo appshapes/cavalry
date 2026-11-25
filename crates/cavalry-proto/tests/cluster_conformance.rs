@@ -697,7 +697,12 @@ fn arithmetic_vector(name: &str, vector: &Value) {
         }
         "clears-vote-floor" => {
             let joined = inputs["joined"].as_bool().expect("joined");
-            json!({"clears": clears_vote_floor(int(inputs, "vote_floor"), joined)})
+            let clears = clears_vote_floor(
+                int(inputs, "vote_floor"),
+                joined,
+                int(inputs, "append_position"),
+            );
+            json!({"clears": clears})
         }
         "withheld-vote" => {
             let voters = usize::try_from(int(inputs, "voters")).expect("voters");

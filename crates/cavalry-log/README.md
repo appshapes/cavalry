@@ -12,7 +12,7 @@ The durable log: recording and replay. Data plane.
   and its vote floor, `TermsFile::set_vote_floor`, one synced write once, which a
   member that came back with its log empty withholds its vote while it holds, and
   `TermsFile::clear_vote_floor`, one synced write of the slot as zeros once it has
-  caught up, which every reader reads as no floor (ADR 0145, ADR 0161). A creation syncs the file and then the log directory, by the one
+  caught up past the floor and joined its leader's live log, which every reader reads as no floor (ADR 0145, ADR 0161). A creation syncs the file and then the log directory, by the one
   function that ends the creation of the two files below, and an open of a whole
   file syncs the directory once too, for a creation cut off before its directory
   sync, so that a power loss does not take the file's name once the member has

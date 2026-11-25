@@ -241,9 +241,11 @@ pub trait Io {
     fn store_vote_floor(&mut self, position: i64) -> Result<(), Self::Fault>;
 
     /// Clears the member's vote floor, durably: once, when in this run the member has
-    /// joined a leader's live log after it stored the floor, so that its log holds every
-    /// committed entry it could have acknowledged before it came back (ADR 0161). [`Io::vote_floor`] reads −1 from then on. A clear that a crash tore
-    /// reads as no floor too, which is what it was to leave.
+    /// joined a leader's live log after it stored the floor, with its append position at
+    /// or past the floor, so that its log holds every committed entry it could have
+    /// acknowledged before it came back (ADR 0161). [`Io::vote_floor`] reads −1 from
+    /// then on. A clear that a crash tore reads as no floor too, which is what it was to
+    /// leave.
     fn clear_vote_floor(&mut self) -> Result<(), Self::Fault>;
 
     /// The leader's log for `term`: its publication on stream 100 at position `base`
@@ -658,7 +660,9 @@ pub struct Counts {
     /// finished; once for each truncation that became owed (ADR 0148).
     pub truncations_faulted: u64,
     /// `cluster.vote_floors_cleared`: a vote floor the member cleared, having joined a
-    /// leader's live log in this run, after which it votes as any voter does (ADR 0161).
+    /// leader's live log since it stored the floor and in this run of its module, with
+    /// its append position at or past the floor, after which it votes as any voter does
+    /// (ADR 0161).
     pub vote_floors_cleared: u64,
 }
 
@@ -1007,7 +1011,8 @@ pub struct Consensus {
     vote_floor: i64,
     /// Whether, in this run and since it last stored a vote floor, this member has joined
     /// a leader's live log, going to follower ready, with its append position at the
-    /// live image's join position: what clears its vote floor (ADR 0161).
+    /// live image's join position: what clears its vote floor, with its append position
+    /// at or past the floor (ADR 0161).
     live_joined: bool,
     /// The position of the truncation this member owes, −1 for none: one whose command
     /// or write faulted, from the fault until a truncation to that position finishes,
@@ -1293,15 +1298,17 @@ impl Consensus {
         self.append_position = self.append_position.max(io.append_position());
         // A member in follower ready joined the live log of a leader it took by the
         // rules of "Taking a leader", at its append position, which the leader's sender
-        // made past every entry it sent the member before. So it holds every committed
-        // entry it could have acknowledged before it came back, and clears its vote
-        // floor, durably, before it votes by it (`spec/cluster.md`, "A member that lost
-        // its log"; ADR 0161). A clear that faults leaves the floor, and the next cycle
+        // made past every entry it sent the member before. With its append position at
+        // or past its floor too, past every entry the leader had appended when it wrote
+        // the new leadership term the member took, it holds every committed entry it
+        // could have acknowledged before it came back, and clears its vote floor,
+        // durably, before it votes by it (`spec/cluster.md`, "A member that lost its
+        // log"; ADR 0161). A clear that faults leaves the floor, and the next cycle
         // clears it again.
         if self.state == ElectionState::FollowerReady {
             self.live_joined = true;
         }
-        if clears_vote_floor(self.vote_floor, self.live_joined) {
+        if clears_vote_floor(self.vote_floor, self.live_joined, self.append_position) {
             io.clear_vote_floor()?;
             self.vote_floor = -1;
             count(&mut self.counts.vote_floors_cleared);
@@ -2555,7 +2562,7 @@ impl Consensus {
     /// "A member that lost its log"; ADR 0145): its log empty while a member's report
     /// in this election, or `candidate`, the log of a request it answers, holds a log;
     /// or a vote floor held, which it clears once it has joined a leader's live log in
-    /// this run (ADR 0161).
+    /// this run with its append position at or past the floor (ADR 0161).
     fn withholds(&self, candidate: Option<LogReport>) -> bool {
         let holds = |log: &LogReport| log.term >= 0 || log.position > 0;
         let reported = self
@@ -2577,7 +2584,8 @@ impl Consensus {
     /// The vote floor this member holds, −1 for none: the end of the log of the leader
     /// it took with its log empty (`spec/cluster.md`, "A member that lost its log"; ADR
     /// 0145), 0 included, stored in its record of terms, and held, the member
-    /// withholding, until in one run it has joined a leader's live log (ADR 0161).
+    /// withholding, until in one run it has joined a leader's live log with its append
+    /// position at or past the floor (ADR 0161).
     pub fn vote_floor(&self) -> i64 {
         self.vote_floor
     }

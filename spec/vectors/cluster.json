@@ -3251,11 +3251,25 @@
     },
     {
       "kind": "arithmetic",
-      "name": "clears-vote-floor-once-joined",
+      "name": "clears-vote-floor-once-joined-at-its-floor",
       "rule": "clears-vote-floor",
       "inputs": {
         "vote_floor": 8192,
-        "joined": true
+        "joined": true,
+        "append_position": 8192
+      },
+      "fields": {
+        "clears": true
+      }
+    },
+    {
+      "kind": "arithmetic",
+      "name": "clears-vote-floor-once-joined-past-its-floor",
+      "rule": "clears-vote-floor",
+      "inputs": {
+        "vote_floor": 8192,
+        "joined": true,
+        "append_position": 12288
       },
       "fields": {
         "clears": true
@@ -3267,7 +3281,8 @@
       "rule": "clears-vote-floor",
       "inputs": {
         "vote_floor": 0,
-        "joined": true
+        "joined": true,
+        "append_position": 0
       },
       "fields": {
         "clears": true
@@ -3279,7 +3294,21 @@
       "rule": "clears-vote-floor",
       "inputs": {
         "vote_floor": 8192,
-        "joined": false
+        "joined": false,
+        "append_position": 12288
+      },
+      "fields": {
+        "clears": false
+      }
+    },
+    {
+      "kind": "arithmetic",
+      "name": "clears-vote-floor-not-joined-below-its-floor",
+      "rule": "clears-vote-floor",
+      "inputs": {
+        "vote_floor": 8192,
+        "joined": true,
+        "append_position": 4096
       },
       "fields": {
         "clears": false
@@ -3291,7 +3320,8 @@
       "rule": "clears-vote-floor",
       "inputs": {
         "vote_floor": -1,
-        "joined": true
+        "joined": true,
+        "append_position": 4096
       },
       "fields": {
         "clears": false

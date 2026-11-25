@@ -266,10 +266,10 @@ whose checksum matches holds a value below −1, and the reader refuses both wit
 The **vote floor** is what a member that lost its log holds until it has caught up,
 withholding its vote and seeking no leadership for as long as it holds it
 (`spec/cluster.md`, "A member that lost its log"; ADR 0145, ADR 0161). It is one slot,
-the position under its checksum, which the module writes at most twice: once with the
-floor, and once with zeros when it clears the floor. A creation leaves its bytes zero,
-and the checksum of eight zero bytes is not zero, so the slot reads as no floor until
-the first write and after the second. A slot whose checksum does not match is no
+the position under its checksum, which the module writes once with each floor it
+stores, and once with zeros when it clears that floor. A creation leaves its bytes zero,
+and the checksum of eight zero bytes is not zero, so the slot reads as no floor until a
+floor is written and after its clear. A slot whose checksum does not match is no
 floor, which is also either write that a crash tore. The module writes the floor
 before it records a term, so a member whose first write was torn holds no term yet,
 finds its log empty at its next start, and writes its floor again then. It clears the
@@ -683,9 +683,10 @@ the vote floor in one synced write, the position and its checksum, once, when th
 member takes a leader with its log empty and before it records a term
 (`spec/cluster.md`, "A member that lost its log"); asked for a second floor, or for a
 position below 0 or not a multiple of 32, it writes nothing, `floor`, the writer's
-fault. It clears the floor in one synced write of the slot's twelve bytes as zeros,
-once, when the member has joined a leader's live log in one run of its module (ADR
-0161); a file with no floor it leaves as it is. A crash
+fault; a floor asked for while it holds one is refused the same way. It clears the
+floor in one synced write of the slot's twelve bytes as zeros, once for each floor,
+when the member has joined a leader's live log since it stored the floor and in this
+run of its module, with its log at or past the floor (ADR 0161); a file with no floor it leaves as it is. A crash
 leaves at most one write torn, which the reader reads as the state before it: an
 empty entry, a valid entry not yet deleted, or the candidate term stored before the
 raise; or, for the floor's clear, as no floor, which the clear leaves too. At a member's start the module checks the file's length against the bound

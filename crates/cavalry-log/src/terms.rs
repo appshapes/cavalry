@@ -62,8 +62,8 @@ const SLOT_OFFSETS: [usize; 2] = [16, 32];
 /// A candidate slot's length: the term, an i64, and its CRC32.
 const SLOT_LENGTH: usize = 12;
 /// Where the vote floor slot begins in the header, a position and its CRC32, written
-/// once and cleared to zeros once (`spec/durable-log.md`, version 6, "Terms"; ADR 0145,
-/// ADR 0161).
+/// once with each floor and cleared to zeros once after it (`spec/durable-log.md`,
+/// version 6, "Terms"; ADR 0145, ADR 0161).
 const FLOOR_OFFSET: usize = 48;
 /// The recording id of a term that has no recording yet.
 pub const NO_RECORDING: i64 = -1;
@@ -833,8 +833,8 @@ impl TermsFile {
     /// Clears the vote floor in one synced write of its slot as zeros, which every
     /// reader reads as no floor, as it reads a slot a creation left (`spec/durable-log.md`,
     /// "Terms"; ADR 0161). The member clears it once it has joined a leader's live
-    /// log, so a write a crash tears reads as no floor too, which is what the clear
-    /// was to leave. A file with no floor is left as it is.
+    /// log with its log at or past the floor, so a write a crash tears reads as no
+    /// floor too, which is what the clear was to leave. A file with no floor is left as it is.
     pub fn clear_vote_floor(&mut self) -> Result<(), TermsError> {
         if self.header.vote_floor.is_none() {
             return Ok(());
