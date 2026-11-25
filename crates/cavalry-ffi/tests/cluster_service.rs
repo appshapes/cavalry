@@ -78,6 +78,8 @@ use ports::free_ports;
 
 /// How long any wait of this test may last.
 const DEADLINE: Duration = Duration::from_secs(60);
+/// How long after its entry a program's timer is due, in the cluster's milliseconds.
+const TIMER_AFTER_MS: i64 = 1_000;
 
 /// One entry as a service's handler was handed it, and what the handler did with it.
 #[derive(Clone, Debug, PartialEq)]
@@ -526,15 +528,18 @@ unsafe extern "C" fn serve(
                     errmsg()
                 );
             }
-            // A program's timers, by its messages: `timer` schedules timer 77 for
-            // 50 ms after the entry; `cancel` schedules timer 78 and cancels it;
+            // A program's timers, by its messages: `timer` schedules timer 77 for a
+            // second after the entry, the margin by which an event for a timer that
+            // was wrongly due at once would be told from it, since a member is told
+            // of a timer tens of milliseconds after the entry; `cancel` schedules
+            // timer 78 and cancels it;
             // `fill` schedules 1,024 timers that are due in no test's time, and one
             // more.
             if payload == b"timer" {
                 served.timers.push(cavalry_cluster_service_schedule_timer(
                     served.service,
                     77,
-                    values.timestamp + 50,
+                    values.timestamp + TIMER_AFTER_MS,
                 ));
             } else if payload == b"cancel" {
                 served.timers.push(cavalry_cluster_service_schedule_timer(
@@ -1735,10 +1740,10 @@ fn a_program_schedules_a_timer_and_is_handed_it_once_beside_every_member() {
     assert_eq!(first.len(), 1, "{first:?}");
     assert_eq!(first[0].1, 77, "the id the program gave it");
     assert!(
-        first[0].2 >= scheduled_at + 50,
+        first[0].2 >= scheduled_at + TIMER_AFTER_MS,
         "never before its deadline: the event's time is {} and the deadline {}",
         first[0].2,
-        scheduled_at + 50
+        scheduled_at + TIMER_AFTER_MS
     );
     for member in &cluster.members {
         assert_eq!(timers(member), first, "member {}", member.id);

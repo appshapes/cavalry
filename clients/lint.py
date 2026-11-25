@@ -8,7 +8,7 @@ the committed log's poll and an entry's position, ADR 0070, and the seven of a c
 session and a cluster service, the session's offer, its poll and a reply's values, and
 the service's poll, an entry's values, its reply and its action, ADR 0124, in every
 client, and the schedule and the cancel of a service's timer, ADR 0157, in the Python
-client, the first that wraps them) and each trampoline that
+client and the Node client, the two that wrap them) and each trampoline that
 calls the user's handler, hold no lock, no `await` and no raise, in the language's
 forms, and so does every function of the package they call. For Python those
 forms are `threading`'s locks and anything else of `threading`, `async def`, `await`,
@@ -33,7 +33,7 @@ and the wrappers of the claim, the reserved value, the commit, the abort and the
 and for a cluster session and a cluster service the trampoline of their polls,
 `cluster_trampoline`, the addon's own `clusterSessionPoll`, `clusterServicePoll`,
 `replyField` and `entryField`, and the wrappers of the session's offer and the service's
-reply and action, are
+reply and action and of the schedule and the cancel of its timer, are
 read by the same tokenizer for C's forms: a lock, `pthread_mutex_*`, `pthread_rwlock_*`,
 C11's `mtx_*`, libuv's `uv_mutex_*` and `uv_rwlock_*`, and N-API's
 `napi_*threadsafe_function*`; and a raise, `napi_throw*` and `napi_fatal_*`, except in the

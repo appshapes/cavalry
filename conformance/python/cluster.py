@@ -66,7 +66,12 @@ TIMER = _abi.CAVALRY_CLUSTER_ENTRY_TIMER
 TIMER_MESSAGE = b"timer"   # the message at which each service's program schedules its timers
 TIMER_ID = 77              # the timer that is handed over
 CANCELLED_ID = 78          # the timer that is scheduled and cancelled in the same handling
-TIMER_AFTER_MS = 50        # how long after the message's entry the timer is due
+# How long after the message's entry the timer is due. A second, and not the 50 ms this
+# round had first: a service tells its member of a timer only once the poll that took the
+# entry has sent the six commands of its first timer, 25 ms and more with the GIL held, so
+# the event of a timer that was wrongly due at once is stamped tens of milliseconds after
+# the message, and a margin of 50 would let it pass.
+TIMER_AFTER_MS = 1000
 HOUR_MS = 3_600_000        # the deadline its first schedule gives it, which the second replaces
 INT64_MIN, INT64_MAX = -(2 ** 63), 2 ** 63 - 1
 REFRESH_SECONDS = 1.2      # a timer refresh interval of spec/cluster.md, "Values", 1 s, and more
