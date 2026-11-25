@@ -255,6 +255,10 @@ static int OnEntry(ReadOnlySpan<byte> body, ClusterEntryValues entry, ClusterSer
 }
 ```
 
+The block is a fragment, and nothing runs it: `Expire` is the program's own. A whole
+program, in Python, which `just conformance` runs, is in [Schedule a timer in a
+cluster's service](../../docs/how-to/schedule-a-services-timer.md).
+
 Three rules come with them (`spec/cluster.md`, "The service", "Timers"; ADR 0151;
 ADR 0157). An id and a deadline are `long`, which is the ABI's own type, so the
 compiler holds what the Python and the Node clients check at the call.

@@ -40,9 +40,11 @@ otherwise.
 The cluster round is a runner's check of a cluster's service and of a session with a
 cluster (`spec/c-abi.md`, versions 4 and 5; `spec/cluster.md`, "Sessions", "The service"
 and "Replies"). Every runner's round also holds a program's timer (version 7; ADR
-0157): each service schedules one at a message it takes, for a second later, and all three are handed it once, as an
-entry of its own kind with the timer's id, at one position and no earlier than
-its deadline. The second is the check's margin: a service tells its member of a
+0157): each service schedules one at a message it takes, for a second later, and
+all three are handed it once, as an entry of its own kind with the timer's id, at
+one position and no earlier than its deadline; and each schedules a second timer,
+due at once, and cancels it in the same handling, and none is handed it. The
+second before the first timer is the check's margin: a service tells its member of a
 timer only once the poll that took the entry has sent the six commands of its
 first timer, some 25 ms on a laptop and more on a busy host, so the event of a
 timer that was wrongly due at once is stamped about as late as a deadline of 50 ms,
@@ -53,8 +55,7 @@ laptop for work item 419 it was 38 to 68 ms, the .NET
 round's the latest, since it sleeps a millisecond between its duty cycles; no
 run's number is a bound. Those five rounds
 hold more of the client's own: a second schedule of the timer sets its deadline,
-where its first was an hour away; a second timer, due at once and cancelled in
-the same handling, is handed to none; the least and the greatest int64, scheduled
+where its first was an hour away; the least and the greatest int64, scheduled
 as ids, are handed back as they are, and in the Node round the least and the
 greatest integer a number carries exactly; both calls are refused from outside
 the handler, and, in Python and Node, an id or a deadline that is no int64 before
