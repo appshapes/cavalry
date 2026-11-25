@@ -384,6 +384,12 @@ RULES = {
                         ("ClusterSession.poll", "cavalry_cluster_session_poll.invokeExact"),
                         ("ClusterService.poll", "cavalry_cluster_service_poll.invokeExact")],
         "guards": ["Header.ensure"],
+        # The reader of a count or a length a caller gave, and the per-message functions that
+        # may call it: its throw, for a count below zero, before the ABI is called, is none on
+        # their path (ADR 0164). The ABI takes a count as a size_t, and a negative int cast
+        # for it is a count near 2 ** 64.
+        "readers": {"Abi.negative": ["Publication.tryClaim", "Subscription.poll", "CommittedLog.poll",
+                                     "ClusterSession.poll", "ClusterService.poll"]},
     },
     # The .NET client calls the ABI through LibraryImport stubs (clients/dotnet/README.md):
     # the per-message members are in Publication.cs, Subscription.cs and Header.cs, the
@@ -452,6 +458,9 @@ RULES = {
                         ("ClusterSession.Poll", "Abi.cavalry_cluster_session_poll"),
                         ("ClusterService.Poll", "Abi.cavalry_cluster_service_poll")],
         "guards": ["Header.Ensure"],
+        # The reader of a count or a length a caller gave, as the JVM client's (ADR 0164).
+        "readers": {"Abi.Negative": ["Publication.TryClaim", "Subscription.Poll", "CommittedLog.Poll",
+                                     "ClusterSession.Poll", "ClusterService.Poll"]},
     },
 }
 HELP = "see clients/README.md, \"What every client must pass\""
@@ -1462,6 +1471,43 @@ class JavaModule:
         return found
 
 
+TYPED_ABI_CALL = re.compile(r"(?<![\w$.])Abi\s*\.\s*cavalry_\w+")
+
+
+def typed_reader_findings(module, where: str, name: str, call_line: int, reader: str) -> list[str]:
+    """What a call of an argument reader at `call_line` of the per-message function
+    `name` of the JVM or the .NET client, one the rules let call it, still breaks (ADR
+    0164, as ADR 0162's rule for Python). The one thing allowed is the throw in the
+    reader's own body. A form of another kind in the reader, a form in a function the
+    reader calls, and a call of the reader on a line that is not before the function's
+    first call of the ABI, `Abi.cavalry_*`, are findings."""
+    findings = []
+    file, line, head, body, start, code = module.functions[name]
+    abi = TYPED_ABI_CALL.search(body)
+    if abi is not None:
+        abi_line = line_of(code, start) - 1 + body.count("\n", 0, abi.start()) + 1
+        if call_line >= abi_line:
+            findings.append(f"{where} calls the argument reader {reader} at line {call_line}, not before its call of "
+                            f"the ABI at line {abi_line}: a reader refuses an argument before the ABI is called; {HELP}")
+    for kind, at, what in module.forms(reader, None):
+        if kind == "raise":
+            continue  # the reader's own refusal
+        if kind in WHY:
+            findings.append(f"{where} calls {reader} at line {call_line}, and {reader} {what}: {WHY[kind]}; {HELP}")
+            continue
+        for k, how in module.reach(what).items():
+            findings.append(f"{where} calls {reader} at line {call_line}, and {reader} calls {what} at line {at}, "
+                            f"and {how}: {WHY[k]}; {HELP}")
+    return findings
+
+
+def stale_readers(language: str, module, rules: dict, package: str) -> list[str]:
+    """A reader the rules name and the package does not have is a stale rule."""
+    return [f"{language}: the argument reader {reader} is not in {os.path.relpath(package, ROOT)}; the generator "
+            f"renamed it or the rules are stale; {HELP}"
+            for reader in sorted(set(rules.get("readers", {})) - set(module.functions))]
+
+
 def jvm_findings(language: str, path: str, rules: dict) -> list[str]:
     findings = []
     package = os.path.dirname(os.path.dirname(os.path.dirname(os.path.dirname(os.path.dirname(path)))))
@@ -1482,6 +1528,8 @@ def jvm_findings(language: str, path: str, rules: dict) -> list[str]:
         if name not in module.functions:
             findings.append(f"{language}: the per-message function {name} is not in {os.path.relpath(package, ROOT)}; {HELP}")
     raise_after = raise_after_of(rules)
+    readers = rules.get("readers", {})
+    findings.extend(stale_readers(language, module, rules, package))
     for name in present:
         file, line, head, body, start, code = module.functions[name]
         where = f"{language}: {name} ({os.path.relpath(file, ROOT)}:{line})"
@@ -1495,10 +1543,12 @@ def jvm_findings(language: str, path: str, rules: dict) -> list[str]:
         for kind, at, what in module.forms(name, abi_line):
             if kind in WHY:
                 findings.append(f"{where} {what}: {WHY[kind]}; {HELP}")
+            elif name in readers.get(what, ()) and what in module.functions:
+                findings.extend(typed_reader_findings(module, where, name, at, what))
             else:
                 for k, how in module.reach(what).items():
-                    if kind == "call-allowed" and k == "raise":
-                        continue
+                    if kind == "call-allowed" and k == "raise" and what not in readers:
+                        continue  # a reader is no helper of a poll's own raise: it refuses before the ABI
                     findings.append(f"{where} calls {what} at line {at}, and {how}: {WHY[k]}; {HELP}")
     return findings
 
@@ -1741,6 +1791,8 @@ def dotnet_findings(language: str, path: str, rules: dict) -> list[str]:
         if name not in module.functions:
             findings.append(f"{language}: the per-message function {name} is not in {os.path.relpath(package, ROOT)}; {HELP}")
     raise_after = raise_after_of(rules)
+    readers = rules.get("readers", {})
+    findings.extend(stale_readers(language, module, rules, package))
     for name in present:
         file, line, head, body, start, code = module.functions[name]
         where = f"{language}: {name} ({os.path.relpath(file, ROOT)}:{line})"
@@ -1757,10 +1809,12 @@ def dotnet_findings(language: str, path: str, rules: dict) -> list[str]:
                                 f"the ABI returns, with no task around it; {HELP}")
             elif kind in WHY:
                 findings.append(f"{where} {what}: {WHY[kind]}; {HELP}")
+            elif name in readers.get(what, ()) and what in module.functions:
+                findings.extend(typed_reader_findings(module, where, name, at, what))
             else:
                 for k, how in module.reach(what).items():
-                    if kind == "call-allowed" and k == "raise":
-                        continue
+                    if kind == "call-allowed" and k == "raise" and what not in readers:
+                        continue  # a reader is no helper of a poll's own raise: it refuses before the ABI
                     findings.append(f"{where} calls {what} at line {at}, and {how}: {WHY[k]}; {HELP}")
     return findings
 

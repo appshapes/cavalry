@@ -242,7 +242,9 @@ of a service at or past the position already, the Rust call's `true` and `false`
 `cavalry_errcode` is the calling thread's last error, one of the values the header
 defines as `CAVALRY_ERR_*`. A success clears nothing: the error is the last failure's
 until the next. With no failure yet on the thread, the code is 0 and the message the
-empty string.
+empty string. No code is below zero, in this version or a later one. A value below zero
+is a client's to give a failure of its own that the ABI did not report: the Go client
+gives −1 to a count below zero that it refused before the ABI was called (ADR 0164).
 
 | Range | Values | What they are |
 | --- | --- | --- |
