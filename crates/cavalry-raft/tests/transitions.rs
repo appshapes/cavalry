@@ -362,6 +362,19 @@ fn after_term_zero(watch: &mut Watch, io: &mut Stub, seed: u64) -> (Consensus, u
     watch.work(&mut member, io, ms);
     watch.work(&mut member, io, ms + 1);
     assert_eq!(member.election_state(), ElectionState::Closed);
+    // It took its leader with its log empty, so it holds a vote floor of 0 until its
+    // leader answers its present run (ADR 0163): the answer, for the session of its
+    // publication to member 1 in this stub.
+    let answer = Message::FloorAnswer {
+        leadership_term_id: 0,
+        log_position: 0,
+        leader_member_id: 1,
+        follower_member_id: member.member_id(),
+        session_id: 1001,
+    };
+    watch.read(&mut member, io, ms + 1, &answer);
+    watch.work(&mut member, io, ms + 1);
+    assert_eq!(member.vote_floor(), -1, "the answer clears the floor");
     let ms = ms + 1 + 10_000;
     watch.work(&mut member, io, ms);
     assert_eq!(member.election_state(), ElectionState::Init);

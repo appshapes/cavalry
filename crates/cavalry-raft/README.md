@@ -462,13 +462,20 @@ commit path runs per message.
   `Io::store_vote_floor`, in its `terms` file before it records a term, 0 included;
   `Consensus::vote_floor()` and the gauge `cluster.vote_floor` hold it. It clears the
   floor, through `Io::clear_vote_floor`, once in one run it has joined a leader's
-  live log, going to follower ready, with its append position at or past the floor,
-  counted in `cluster.vote_floors_cleared`. The live log's image joins past every
+  live log, going to follower ready, with its append position at or past the floor
+  and at or past its leader's floor answer to that run, counted in
+  `cluster.vote_floors_cleared`. The live log's image joins past every
   entry the leader's sender sent it before it came back, so a new leadership term the
   sender held back, written before an entry it had acknowledged, gives it no vote
   before it holds the entry; the floor holds what the leader had appended when it
   wrote the term the member took, an entry the member had from a replay before the
-  sender sent it among them (ADR 0161). A voter
+  sender sent it among them (ADR 0161). While it holds a floor it asks its leader with
+  the floor flag of each append position, and a leader answers with a floor answer
+  that names the session the report came in, read through `Consensus::on_message_in`;
+  the member takes one for its own session, `Io::consensus_session`, keeps the lowest
+  in `Consensus::floor_answer()` and the gauge `cluster.floor_answer`, and so holds,
+  once it clears, every entry a late report of its earlier run can commit (ADR 0163).
+  A voter
   whose log is empty takes a leader only when it voted it in, or when every other
   voter has named a term in this election and none named one above the leader's
   ("Taking a leader"): a leader that a later term deposed answers it too. It

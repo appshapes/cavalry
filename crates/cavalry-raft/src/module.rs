@@ -51,12 +51,12 @@ use cavalry_proto::udp::UDP_TERM_LENGTH;
 use cavalry_shm::counters::CounterId;
 use cavalry_shm::counters::generated::{
     CLUSTER_APPEND_POSITION, CLUSTER_COMMIT_POSITION, CLUSTER_ELECTION_CAUSE,
-    CLUSTER_ELECTION_STATE, CLUSTER_LEADER_MEMBER_ID, CLUSTER_LEADERSHIP_TERM_ID,
-    CLUSTER_LOG_RECORDING_ID, CLUSTER_LOG_RECORDINGS_FORGOTTEN, CLUSTER_LOG_RECORDINGS_LISTED,
-    CLUSTER_LOG_RECORDINGS_UNSYNCED, CLUSTER_LOG_RECORDINGS_UNWRITTEN, CLUSTER_MESSAGES_REJECTED,
-    CLUSTER_PROTOCOL_VERSION, CLUSTER_ROLE, CLUSTER_SESSIONS, CLUSTER_STANDBY,
-    CLUSTER_TRUNCATION_OWED, CLUSTER_TRUNCATIONS_FINISHED, CLUSTER_VOTE_FLOOR, CLUSTER_VOTERS,
-    COUNTERS,
+    CLUSTER_ELECTION_STATE, CLUSTER_FLOOR_ANSWER, CLUSTER_LEADER_MEMBER_ID,
+    CLUSTER_LEADERSHIP_TERM_ID, CLUSTER_LOG_RECORDING_ID, CLUSTER_LOG_RECORDINGS_FORGOTTEN,
+    CLUSTER_LOG_RECORDINGS_LISTED, CLUSTER_LOG_RECORDINGS_UNSYNCED,
+    CLUSTER_LOG_RECORDINGS_UNWRITTEN, CLUSTER_MESSAGES_REJECTED, CLUSTER_PROTOCOL_VERSION,
+    CLUSTER_ROLE, CLUSTER_SESSIONS, CLUSTER_STANDBY, CLUSTER_TRUNCATION_OWED,
+    CLUSTER_TRUNCATIONS_FINISHED, CLUSTER_VOTE_FLOOR, CLUSTER_VOTERS, COUNTERS,
 };
 
 use crate::consensus::{
@@ -122,7 +122,8 @@ const DOC_HOLD: &str = "docs/reference/durable-log.md#the-driver";
 /// member out of the cluster for want of the log directory it had.
 const ON_A_NEW_LOG_DIRECTORY: &str = "start the member on a new log directory: it replicates \
      the log, and it withholds its vote and seeks no leadership until it has caught up past \
-     the floor cluster.vote_floor holds and joined its leader's live log, which clears it. It takes \
+     the floor cluster.vote_floor holds and past its leader's answer, and joined its leader's \
+     live log, which clears it. It takes \
      that leader only once it has heard every other member, so while one is stopped it \
      waits, and cluster.leaders_withheld rises: start the stopped member on the log \
      directory it kept. It catches up only while its leader's log begins at position 0. Where it no longer does, recordings purged \
@@ -1795,6 +1796,15 @@ impl Io for ClientIo {
         Ok(self.terms.set_candidate_term(term)?)
     }
 
+    /// The session of this run's exclusive consensus publication to `member`, added once
+    /// at the module's start (ADR 0163).
+    fn consensus_session(&mut self, member: i32) -> Option<i32> {
+        self.peers
+            .iter()
+            .find(|peer| peer.id == member)
+            .map(|peer| peer.consensus.session_id())
+    }
+
     fn record_term(&mut self, term: i64, base: i64) -> Result<(), Self::Fault> {
         Ok(self.terms.append(term, base, NO_RECORDING)?)
     }
@@ -2798,8 +2808,13 @@ struct Counters {
     /// `cluster.vote_floor`: the vote floor the member holds, which it withholds its
     /// vote while it holds, −1 for none, stored each cycle, since the member stores it
     /// once when it takes a leader with its log empty and clears it once it has joined a
-    /// leader's live log with its log at or past the floor (ADR 0145, ADR 0161).
+    /// leader's live log with its log at or past the floor (ADR 0145, ADR 0161), and
+    /// past an answer of its leader's to its present run (ADR 0163).
     vote_floor: Stored,
+    /// `cluster.floor_answer`: the lowest log position of the floor answers the member
+    /// took since it stored its vote floor, in this run, −1 for none, stored each cycle
+    /// (ADR 0163).
+    floor_answer: Stored,
     /// `cluster.truncation_owed`: the position of the truncation the member owes, −1
     /// while it owes none (ADR 0148).
     truncation_owed: Stored,
@@ -2873,6 +2888,11 @@ impl Counters {
                 i64::from(PROTOCOL_VERSION),
             )?,
             vote_floor: add(CLUSTER_VOTE_FLOOR, "cluster.vote_floor", core.vote_floor())?,
+            floor_answer: add(
+                CLUSTER_FLOOR_ANSWER,
+                "cluster.floor_answer",
+                core.floor_answer(),
+            )?,
             truncation_owed: add(
                 CLUSTER_TRUNCATION_OWED,
                 "cluster.truncation_owed",
@@ -2984,6 +3004,7 @@ impl Counters {
         self.election_cause
             .store(i64::from(core.election_cause().code()));
         self.vote_floor.store(core.vote_floor());
+        self.floor_answer.store(core.floor_answer());
         self.truncation_owed.store(core.truncation_owed());
         self.append_position.store(core.append_position());
         if self.log_recording_id.store(log_recording_id) {
@@ -3498,7 +3519,10 @@ impl ConsensusModule {
                                 // cycle would have read, and a message taken from the
                                 // stream and handed to nobody is lost with no count
                                 // (invariant 4). The first fault is the one returned.
-                                if let Err(error) = core.on_message(clock, &message, io)
+                                // With the session of the frame it came in, which a leader
+                                // names in a floor answer (ADR 0163).
+                                if let Err(error) =
+                                    core.on_message_in(clock, &message, header.session_id(), io)
                                     && fault.is_none()
                                 {
                                     fault = Some(error);

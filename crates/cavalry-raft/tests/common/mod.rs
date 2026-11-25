@@ -281,6 +281,11 @@ impl Io for Stub {
         Ok(())
     }
 
+    /// One session for each peer, 1000 above its id: the stub's run never changes.
+    fn consensus_session(&mut self, member: i32) -> Option<i32> {
+        Some(member.saturating_add(1000))
+    }
+
     fn record_term(&mut self, term: i64, base: i64) -> Result<(), Self::Fault> {
         self.call(Call::RecordTerm(term, base));
         if self.fail_record {
@@ -540,8 +545,42 @@ pub fn hear_the_others(member: &mut Consensus, io: &mut Stub, ms: u64, leader: i
 /// Takes `member` from canvass to closed as a follower of the leader whose new
 /// leadership term is `term`, with the image of the leader's log joining at `join`,
 /// from `ms` on; returns the millisecond its election closed at. The member has heard
-/// every other member first ([`hear_the_others`]).
+/// every other member first ([`hear_the_others`]). A member that took its leader with its
+/// log empty holds a vote floor until its leader answers its present run (ADR 0163): it
+/// is given the leader's answer, naming the session of its publication to the leader in
+/// this stub, at the join, and its floor clears.
 pub fn follow_term(
+    member: &mut Consensus,
+    io: &mut Stub,
+    ms: u64,
+    term: &Message<'_>,
+    join: i64,
+) -> u64 {
+    let ms = follow_term_unanswered(member, io, ms, term, join);
+    if member.vote_floor() >= 0
+        && let Message::NewLeadershipTerm {
+            leader_member_id,
+            leadership_term_id,
+            ..
+        } = *term
+    {
+        let answer = Message::FloorAnswer {
+            leadership_term_id,
+            log_position: join,
+            leader_member_id,
+            follower_member_id: member.member_id(),
+            session_id: leader_member_id.saturating_add(1000),
+        };
+        member.on_message(at(ms), &answer, io).expect("no fault");
+        member.do_work(at(ms), io).expect("no fault");
+        assert_eq!(member.vote_floor(), -1, "the answer clears the floor");
+    }
+    ms
+}
+
+/// [`follow_term`] with no floor answer: a member that took its leader with its log
+/// empty still holds its vote floor when its election closes (ADR 0163).
+pub fn follow_term_unanswered(
     member: &mut Consensus,
     io: &mut Stub,
     ms: u64,

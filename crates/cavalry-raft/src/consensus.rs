@@ -16,8 +16,8 @@
 //! [`MAX_MEMBERS`].
 
 use cavalry_proto::cluster::{
-    APPEND_POSITION_FLAG_CATCHUP, CanvassAction, CanvassTerms, ClusterAction,
-    ELECTION_STATUS_INTERVAL_NS, ELECTION_TIMEOUT_NS, LEADER_HEARTBEAT_INTERVAL_NS,
+    APPEND_POSITION_FLAG_CATCHUP, APPEND_POSITION_FLAG_FLOOR, CanvassAction, CanvassTerms,
+    ClusterAction, ELECTION_STATUS_INTERVAL_NS, ELECTION_TIMEOUT_NS, LEADER_HEARTBEAT_INTERVAL_NS,
     LEADER_HEARTBEAT_TIMEOUT_NS, LIVE_ADD_MAX_WINDOW, LogReport, MAX_MEMBERS, MemberPosition,
     Message, PROTOCOL_VERSION, STARTUP_CANVASS_TIMEOUT_NS, TermAction, TermFields, TermSpan,
     TimeUnit, Vote, VoteRequest, ballot, candidate, canvass_position_action, clears_vote_floor,
@@ -28,7 +28,8 @@ use cavalry_shm::counters::CounterId;
 use cavalry_shm::counters::generated::{
     CLUSTER_BALLOTS_LOST, CLUSTER_CANDIDACIES, CLUSTER_CATCHUPS, CLUSTER_ELECTION_STEPS,
     CLUSTER_ELECTIONS, CLUSTER_ELECTIONS_CLOSED, CLUSTER_ELECTIONS_FAILED,
-    CLUSTER_HIGHER_TERMS_SEEN, CLUSTER_JOIN_POSITION_MISMATCHES, CLUSTER_LEADER_HEARTBEAT_TIMEOUTS,
+    CLUSTER_FLOOR_ANSWERS_IGNORED, CLUSTER_FLOOR_ANSWERS_SENT, CLUSTER_HIGHER_TERMS_SEEN,
+    CLUSTER_JOIN_POSITION_MISMATCHES, CLUSTER_LEADER_HEARTBEAT_TIMEOUTS,
     CLUSTER_LEADER_QUORUM_LOSSES, CLUSTER_LEADER_STEP_DOWNS, CLUSTER_LEADERS_WITHHELD,
     CLUSTER_LEADERSHIP_TERMS_IGNORED, CLUSTER_LOG_IMAGES_LOST, CLUSTER_LOG_REPLICATIONS,
     CLUSTER_LOG_REPLICATIONS_UNAVAILABLE, CLUSTER_LOG_TRUNCATIONS, CLUSTER_STANDBY_VOTE_REQUESTS,
@@ -242,11 +243,18 @@ pub trait Io {
 
     /// Clears the member's vote floor, durably: once, when in this run the member has
     /// joined a leader's live log after it stored the floor, with its append position at
-    /// or past the floor, so that its log holds every committed entry it could have
-    /// acknowledged before it came back (ADR 0161). [`Io::vote_floor`] reads −1 from
+    /// or past the floor and at or past a floor answer of its leader to this run, so that its
+    /// log holds every committed entry it could have acknowledged before it came back
+    /// (ADR 0161, ADR 0163). [`Io::vote_floor`] reads −1 from
     /// then on. A clear that a crash tore reads as no floor too, which is what it was to
     /// leave.
     fn clear_vote_floor(&mut self) -> Result<(), Self::Fault>;
+
+    /// The session id of this member's consensus publication to the member with
+    /// `member`, the session a floor answer for this run names, `None` while it has
+    /// none (ADR 0163). A run adds each such publication once, an exclusive one, so a
+    /// session id is this run's alone.
+    fn consensus_session(&mut self, member: i32) -> Option<i32>;
 
     /// The leader's log for `term`: its publication on stream 100 at position `base`
     /// with every other member's `log` endpoint as a destination, and its recording.
@@ -661,14 +669,20 @@ pub struct Counts {
     pub truncations_faulted: u64,
     /// `cluster.vote_floors_cleared`: a vote floor the member cleared, having joined a
     /// leader's live log since it stored the floor and in this run of its module, with
-    /// its append position at or past the floor, after which it votes as any voter does
-    /// (ADR 0161).
+    /// its append position at or past the floor and at or past a floor answer, after which it
+    /// votes as any voter does (ADR 0161, ADR 0163).
     pub vote_floors_cleared: u64,
+    /// `cluster.floor_answers_sent`: a floor answer the member sent as leader, to a
+    /// member that holds a vote floor and asked (ADR 0163).
+    pub floor_answers_sent: u64,
+    /// `cluster.floor_answers_ignored`: a floor answer the member read and did not
+    /// take, one that was not for its present run with its leader (ADR 0163).
+    pub floor_answers_ignored: u64,
 }
 
 impl Counts {
     /// How many counts a member keeps: one counter of `counters.toml` each.
-    pub const LEN: usize = 27;
+    pub const LEN: usize = 29;
 
     /// Each count with the id of its counter in `counters.toml`, the constant
     /// `cavalry-shm` generates from it: what the consensus module stores, each as a
@@ -727,6 +741,8 @@ impl Counts {
             (CLUSTER_LEADERS_WITHHELD, self.leaders_withheld),
             (CLUSTER_TRUNCATIONS_FAULTED, self.truncations_faulted),
             (CLUSTER_VOTE_FLOORS_CLEARED, self.vote_floors_cleared),
+            (CLUSTER_FLOOR_ANSWERS_SENT, self.floor_answers_sent),
+            (CLUSTER_FLOOR_ANSWERS_IGNORED, self.floor_answers_ignored),
         ]
     }
 }
@@ -756,6 +772,9 @@ fn sender(message: &Message<'_>) -> Option<i32> {
             leader_member_id, ..
         }
         | Message::CommitPosition {
+            leader_member_id, ..
+        }
+        | Message::FloorAnswer {
             leader_member_id, ..
         } => Some(leader_member_id),
         _ => None,
@@ -864,6 +883,20 @@ struct Peer {
     /// Whether the last report was an append position, which a member sends once it
     /// has joined its leader's log, and not a canvass position.
     appended: bool,
+    /// When this member, as leader, last sent this peer a floor answer: at most one
+    /// each leader heartbeat interval (ADR 0163).
+    answered_ns: Option<u64>,
+}
+
+/// A floor answer's fields, as a member reads them (`spec/cluster.md`, "Floor answer,
+/// template 58"; ADR 0163).
+#[derive(Clone, Copy, Debug)]
+struct FloorAnswer {
+    leadership_term_id: i64,
+    log_position: i64,
+    leader_member_id: i32,
+    follower_member_id: i32,
+    session_id: i32,
 }
 
 /// What a leader holds of one member that is behind: the replays of its own recordings
@@ -1012,8 +1045,21 @@ pub struct Consensus {
     /// Whether, in this run and since it last stored a vote floor, this member has joined
     /// a leader's live log, going to follower ready, with its append position at the
     /// live image's join position: what clears its vote floor, with its append position
-    /// at or past the floor (ADR 0161).
+    /// at or past the floor and at or past a floor answer (ADR 0161, ADR 0163).
     live_joined: bool,
+    /// The lowest log position of the floor answers this member took since it last
+    /// stored a vote floor, in this run, −1 for none: its append position must reach
+    /// it before the floor clears (ADR 0163).
+    answered: i64,
+    /// The term of the last floor answer this member took, −1 for none: it asks again
+    /// once it follows a term it holds no answer from, so that a deposed leader's
+    /// answer, which a later leader's log may never reach, holds it no longer than the
+    /// next answer (ADR 0163).
+    answered_term: i64,
+    /// The session id of the data frame the message being read came in, `None`
+    /// outside [`Consensus::on_message_in`]: what a leader names in a floor answer
+    /// (ADR 0163).
+    reading_session: Option<i32>,
     /// The position of the truncation this member owes, −1 for none: one whose command
     /// or write faulted, from the fault until a truncation to that position finishes,
     /// in memory alone (ADR 0148).
@@ -1127,6 +1173,7 @@ impl Consensus {
             term: -1,
             at_ns: 0,
             appended: false,
+            answered_ns: None,
         }; MAX_MEMBERS];
         let mut own = None;
         // The voters first, then the standbys: a place below `count` is a voter's.
@@ -1167,6 +1214,9 @@ impl Consensus {
             candidate_term: -1,
             vote_floor: -1,
             live_joined: false,
+            answered: -1,
+            answered_term: -1,
+            reading_session: None,
             truncation_owed: -1,
             log_term: -1,
             term: -1,
@@ -1301,14 +1351,22 @@ impl Consensus {
         // made past every entry it sent the member before. With its append position at
         // or past its floor too, past every entry the leader had appended when it wrote
         // the new leadership term the member took, it holds every committed entry it
-        // could have acknowledged before it came back, and clears its vote floor,
-        // durably, before it votes by it (`spec/cluster.md`, "A member that lost its
-        // log"; ADR 0161). A clear that faults leaves the floor, and the next cycle
-        // clears it again.
+        // could have acknowledged before it came back, but for an entry it had from a
+        // replay before the leader's sender sent it. With its append position at or
+        // past a floor answer of its present run too, past every entry the leader had
+        // appended after it read that run, it holds that one as well, and clears its
+        // vote floor, durably, before it votes by it (`spec/cluster.md`, "A member that
+        // lost its log", "The floor answer"; ADR 0161, ADR 0163). A clear that faults
+        // leaves the floor, and the next cycle clears it again.
         if self.state == ElectionState::FollowerReady {
             self.live_joined = true;
         }
-        if clears_vote_floor(self.vote_floor, self.live_joined, self.append_position) {
+        if clears_vote_floor(
+            self.vote_floor,
+            self.live_joined,
+            self.append_position,
+            self.answered,
+        ) {
             io.clear_vote_floor()?;
             self.vote_floor = -1;
             count(&mut self.counts.vote_floors_cleared);
@@ -1356,6 +1414,24 @@ impl Consensus {
         Ok(work.max(served?))
     }
 
+    /// Reads a consensus message that came in a data frame of session `session_id`, the
+    /// session of its sender's publication to this member, as [`Consensus::on_message`]
+    /// reads it. A leader names that session in the floor answer it sends a member that
+    /// asked, and so answers only a report it read here (`spec/cluster.md`, "The floor
+    /// answer"; ADR 0163).
+    pub fn on_message_in<I: Io>(
+        &mut self,
+        clock: Clock,
+        message: &Message<'_>,
+        session_id: i32,
+        io: &mut I,
+    ) -> Result<(), I::Fault> {
+        self.reading_session = Some(session_id);
+        let read = self.on_message(clock, message, io);
+        self.reading_session = None;
+        read
+    }
+
     /// One message of the consensus stream, read at `clock`. A member in init reads
     /// nothing. In every other state it notes the sender of whatever it reads as
     /// heard, for its ballot (ADR 0077), and answers a request vote, for or against
@@ -1372,6 +1448,11 @@ impl Consensus {
     /// init, on a request vote or a commit position of a term above its own from
     /// another member, and a leader on a canvass position with either term above its
     /// own too (`spec/cluster.md`, "Messages outside an election"; ADR 0082).
+    ///
+    /// A message read here comes with no session id, so a leader answers no floor ask
+    /// it carries: a reader that knows the session of each message's frame, as the
+    /// module does, reads with [`Consensus::on_message_in`], and a leader read only here
+    /// leaves every member that holds a vote floor withholding (ADR 0163).
     pub fn on_message<I: Io>(
         &mut self,
         clock: Clock,
@@ -1500,6 +1581,16 @@ impl Consensus {
                     if flags & APPEND_POSITION_FLAG_CATCHUP != 0 && leadership_term_id == self.term
                     {
                         self.stop_catchup(index, io)?;
+                    }
+                    // A member that holds a vote floor asks, and is answered with this
+                    // leader's append position and the session the report came in, at
+                    // most once each heartbeat interval: an answer that names its
+                    // present run's session was written after this leader read that run
+                    // (ADR 0163).
+                    if flags & APPEND_POSITION_FLAG_FLOOR != 0
+                        && let Some(session_id) = self.reading_session
+                    {
+                        self.answer_floor(index, follower_member_id, session_id, clock, io);
                     }
                 }
                 Ok(())
@@ -1763,6 +1854,25 @@ impl Consensus {
                 }
                 Ok(())
             }
+            Message::FloorAnswer {
+                leadership_term_id,
+                log_position,
+                leader_member_id,
+                follower_member_id,
+                session_id,
+            } => {
+                self.take_floor_answer(
+                    FloorAnswer {
+                        leadership_term_id,
+                        log_position,
+                        leader_member_id,
+                        follower_member_id,
+                        session_id,
+                    },
+                    io,
+                );
+                Ok(())
+            }
             Message::StopCatchup {
                 leadership_term_id,
                 follower_member_id,
@@ -1898,6 +2008,7 @@ impl Consensus {
             term: -1,
             at_ns: 0,
             appended: false,
+            answered_ns: None,
         })
     }
 
@@ -2562,7 +2673,8 @@ impl Consensus {
     /// "A member that lost its log"; ADR 0145): its log empty while a member's report
     /// in this election, or `candidate`, the log of a request it answers, holds a log;
     /// or a vote floor held, which it clears once it has joined a leader's live log in
-    /// this run with its append position at or past the floor (ADR 0161).
+    /// this run with its append position at or past the floor and at or past a floor
+    /// answer (ADR 0161, ADR 0163).
     fn withholds(&self, candidate: Option<LogReport>) -> bool {
         let holds = |log: &LogReport| log.term >= 0 || log.position > 0;
         let reported = self
@@ -2581,11 +2693,84 @@ impl Consensus {
         withholds(self.own_report(), self.vote_floor, log_heard)
     }
 
+    /// The lowest log position of the floor answers this member took since it last
+    /// stored a vote floor, in this run, −1 for none: what `cluster.floor_answer` holds,
+    /// and what the member's append position reaches before its floor clears
+    /// (`spec/cluster.md`, "The floor answer"; ADR 0163).
+    pub fn floor_answer(&self) -> i64 {
+        self.answered
+    }
+
+    /// As leader, answers the member at `index` with id `member`, which asked with the
+    /// floor flag in a report that came in a data frame of `session_id`: its term, its
+    /// append position, the two ids and that session, once each leader heartbeat
+    /// interval at most, counted in `cluster.floor_answers_sent` (`spec/cluster.md`,
+    /// "The floor answer"; ADR 0163).
+    fn answer_floor<I: Io>(
+        &mut self,
+        index: usize,
+        member: i32,
+        session_id: i32,
+        clock: Clock,
+        io: &mut I,
+    ) {
+        let Some(peer) = self.peers.get(index) else {
+            return;
+        };
+        if !Self::due(peer.answered_ns, LEADER_HEARTBEAT_INTERVAL_NS, clock) {
+            return;
+        }
+        let sent = io.send(
+            member,
+            &Message::FloorAnswer {
+                leadership_term_id: self.term,
+                log_position: self.append_position,
+                leader_member_id: self.member_id(),
+                follower_member_id: member,
+                session_id,
+            },
+        );
+        if sent {
+            if let Some(peer) = self.peers.get_mut(index) {
+                peer.answered_ns = Some(clock.now_ns);
+            }
+            count(&mut self.counts.floor_answers_sent);
+        }
+    }
+
+    /// Takes a floor answer that names this member, from the leader it follows, for
+    /// that leader's term, with the session id of this member's own consensus
+    /// publication to that leader: an answer to this run, written after the leader read
+    /// a report of it. Any other is ignored, counted in `cluster.floor_answers_ignored`.
+    /// A member that holds no vote floor has nothing to take, and ignores one uncounted,
+    /// as one still on its way when the floor cleared is. The lowest position taken
+    /// since the floor was stored is kept: any answer will do, an earlier term's among
+    /// them (`spec/cluster.md`, "The floor answer"; ADR 0163).
+    fn take_floor_answer<I: Io>(&mut self, answer: FloorAnswer, io: &mut I) {
+        if self.vote_floor < 0 {
+            return;
+        }
+        let ours = answer.follower_member_id == self.member_id()
+            && answer.leader_member_id == self.leader_id
+            && answer.leadership_term_id == self.term
+            && io.consensus_session(answer.leader_member_id) == Some(answer.session_id);
+        if !ours {
+            count(&mut self.counts.floor_answers_ignored);
+            return;
+        }
+        self.answered = if self.answered < 0 {
+            answer.log_position
+        } else {
+            self.answered.min(answer.log_position)
+        };
+        self.answered_term = answer.leadership_term_id;
+    }
+
     /// The vote floor this member holds, −1 for none: the end of the log of the leader
     /// it took with its log empty (`spec/cluster.md`, "A member that lost its log"; ADR
     /// 0145), 0 included, stored in its record of terms, and held, the member
     /// withholding, until in one run it has joined a leader's live log with its append
-    /// position at or past the floor (ADR 0161).
+    /// position at or past the floor and at or past a floor answer (ADR 0161, ADR 0163).
     pub fn vote_floor(&self) -> i64 {
         self.vote_floor
     }
@@ -2603,9 +2788,11 @@ impl Consensus {
         if self.log_empty() && self.vote_floor < 0 && leader_log_position >= 0 {
             io.store_vote_floor(leader_log_position)?;
             self.vote_floor = leader_log_position;
-            // A join before the floor was stored, in this run, holds nothing of it:
-            // only the join that follows clears it.
+            // A join or an answer before the floor was stored, in this run, holds
+            // nothing of it: only the ones that follow clear it.
             self.live_joined = false;
+            self.answered = -1;
+            self.answered_term = -1;
         }
         Ok(())
     }
@@ -3436,6 +3623,13 @@ impl Consensus {
     /// The member's append position to its leader, with `flags`: the catch-up flag
     /// for a member in follower catch-up that is on the live log, and none otherwise.
     fn send_append_position_flagged<I: Io>(&mut self, clock: Clock, flags: u8, io: &mut I) -> bool {
+        // A member that holds a vote floor and has no answer for the term it follows,
+        // in this run, asks for one in every report it sends (ADR 0163).
+        let flags = if self.vote_floor >= 0 && self.answered_term != self.term {
+            flags | APPEND_POSITION_FLAG_FLOOR
+        } else {
+            flags
+        };
         let sent = io.send(
             self.leader_id,
             &Message::AppendPosition {
