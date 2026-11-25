@@ -150,8 +150,10 @@ last recording is still live in the catalog.
 every run of `just conformance` and has them write three such directories: 620a2e29's
 alone, 620a2e29's and then d265af82's in place, as production's are, and d265af82's
 alone, as a server first installed at 0.10.0 would hold. It writes each once with the
-last run stopped and once with it killed. It then holds that this tree's `cavalry run` starts on each,
-that the feed begins at the last position the older trees answered and reads back every
+last run stopped and once with it killed. It writes the one that both trees write in
+turn a third time, with 620a2e29's last run killed and d265af82's stopped, so that
+d265af82 recovers the recording that 620a2e29 left live. It then holds that this
+tree's `cavalry run` starts on each, that the feed begins at the last position the older trees answered and reads back every
 record they left, that what was purged stays gone, and that the feed takes a new
 recording in each shape.
 [`conformance/README.md`](../../conformance/README.md), "The log directory's upgrade

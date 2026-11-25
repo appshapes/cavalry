@@ -266,7 +266,7 @@ each. Their state today:
 | 8. Redundancy is restored while the cluster runs, and the cluster runs for days | Not started: no start from a peer's snapshot, no purge while running, no job across hosts, no cluster soak |
 | 9. What Brigade's server runs is a gate here, and the release carries its data | The three gates are in since 2026-11-22 (feature 2): the feed's shape in `just test`, a log directory of 620a2e29 opened in place in `just conformance`, and since work item 441 those that 620a2e29 and d265af82 wrote alone and in turn, and the server's suite against `master` each night. Left for features 10 and 12: the server builds from the published crates, the candidate's soak, and the notice of work item 312 |
 
-Row 9 is the state on 2026-11-22, when feature 2 landed. Row 3 is the state on
+Row 9 is the state on 2026-11-25, when work item 441 landed. Row 3 is the state on
 2026-11-22, when work item 286's vote floor landed, and row 6 on 2026-11-23, when work
 item 277 landed. Every other row is the state at
 20741de3.

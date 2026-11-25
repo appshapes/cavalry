@@ -241,17 +241,18 @@ production have run, constants of the script: 620a2e29, the pin of Brigade's ser
 0.9.0, which they ran until 2026-11-24, and d265af82, the pin of server 0.10.0, which
 they run since. `CAVALRY_DIRECTORY_FROM=<commit>` names one other in their place, which
 writes one directory alone, in the pinned shape or, with
-`CAVALRY_DIRECTORY_SHAPE=moved-to`, in server 0.10.0's. ADR
-0141 says when a tree is added, and
-[ADR 0156](../docs/decisions/0156-hold-in-the-upgrade-gate-every-directory-a-server-holds-each-trees-alone-and-the-trees-in-turn.md),
-which takes the place of ADR 0141's rule on that point, when it goes.
+`CAVALRY_DIRECTORY_SHAPE=moved-to`, in server 0.10.0's. ADR 0141 says when a tree is
+added.
+[ADR 0156](../docs/decisions/0156-hold-in-the-upgrade-gate-every-directory-a-server-holds-each-trees-alone-and-the-trees-in-turn.md)
+says when it goes, in place of ADR 0141's rule for that.
 Each older tree is exported with `git archive` into `target/upgrade/<its first 8 hex
 digits>/` and built there on every run, as `upgrade/run.sh` builds its own. Each build
-is `cavalry` and one example, `feed-directory`. The older trees have no such example:
-the script copies this tree's `crates/cavalry/examples/feed-directory.rs` and
-`crates/cavalry/tests/feed/` into each exported tree first. Those files are the
-server's use of Cavalry, which `just test` runs, and they use no call that either tree
-lacks. So the script fails at an older build when a change makes them use one, and
+is `cavalry` and one example, `feed-directory`. 620a2e29 has no such example, and
+d265af82 has an older copy of it and of `crates/cavalry/tests/feed/`. The script puts
+this tree's `crates/cavalry/examples/feed-directory.rs` and `crates/cavalry/tests/feed/`
+in place in each exported tree first, over the older copy in d265af82's. Those files
+are the server's use of Cavalry, which `just test` runs, and they use no call that
+either tree lacks. So the script fails at an older build when a change makes them use one, and
 says what to do then.
 
 The older builds write three log directories as a server writes its own, each one a

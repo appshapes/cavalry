@@ -33,12 +33,14 @@
 # Each older tree is exported with `git archive` to target/upgrade/<its first 8 hex
 # digits>/src and built into target/upgrade/<the same>/target, as
 # conformance/upgrade/run.sh exports and builds its own N. Each build is the binary
-# and one example: `cavalry` and `feed-directory`. The older trees have no such
-# example. The script copies this tree's crates/cavalry/examples/feed-directory.rs and
-# crates/cavalry/tests/feed/ into each exported tree and builds them there: the feed's
-# files use the calls of 620a2e29 and no later one, as the server's own file does in
-# its releases 0.9.0 and 0.10.0. So this script also fails, at an older build, when
-# those files stop compiling against that tree; step 2's message says what to do then.
+# and one example: `cavalry` and `feed-directory`. 620a2e29 has no such example, and
+# d265af82 has an older copy of it and of crates/cavalry/tests/feed/. The script puts
+# this tree's crates/cavalry/examples/feed-directory.rs and crates/cavalry/tests/feed/
+# in place in each exported tree, over the older copy where there is one, and builds
+# them there: the feed's files use the calls of 620a2e29 and no later one, as the
+# server's own file does in its releases 0.9.0 and 0.10.0. So this script also fails,
+# at an older build, when those files stop compiling against that tree; step 2's
+# message says what to do then.
 #
 # The directories
 #
