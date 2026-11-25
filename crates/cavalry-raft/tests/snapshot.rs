@@ -21,8 +21,8 @@ use cavalry_log::snapshots::{CONSENSUS_MODULE, ListedSnapshot, SnapshotsFile};
 use cavalry_proto::client_protocol::ErrorCode;
 use cavalry_proto::cluster::{
     CLOSE_REASON_NONE, CONSENSUS_MODULE_STREAM_ID, EGRESS_STREAM_ID, INGRESS_STREAM_ID,
-    MAX_SERVICE_SNAPSHOT_STATE_LENGTH, Message, SERVICE_SNAPSHOT_TYPE_ID, SNAPSHOT_TYPE_ID,
-    SnapshotMark, Stream,
+    MAX_MEMBER_TIMERS, MAX_SERVICE_SNAPSHOT_STATE_LENGTH, Message, SERVICE_SNAPSHOT_TYPE_ID,
+    SNAPSHOT_TYPE_ID, SnapshotMark, Stream,
 };
 use cavalry_raft::{
     ConsensusModule, ElectionState, ListedFound, RaftError, Refused, Role, ServiceSnapshotCounts,
@@ -3760,7 +3760,7 @@ fn a_leader_appends_one_event_for_each_due_timer_it_is_told_of_and_a_follower_no
     end = run_until_settled(&mut members, end + TIMER_EVENT_FRAME);
     assert_eq!(end, base + 2 * FRAME + 2 * TIMER_EVENT_FRAME);
 
-    // A cancel timer removes a timer with its mark, and one without.
+    // A cancel timer removes a timer with its mark.
     send(&mut members, &Message::CancelTimer { correlation_id: 7 });
     run_until(&mut members, "the leader holds one timer", |members| {
         members[0].module.timer_counts().1 == 1
@@ -3813,6 +3813,98 @@ fn a_leader_appends_one_event_for_each_due_timer_it_is_told_of_and_a_follower_no
     );
     assert_eq!(counter(&members[1], CLUSTER_TIMERS.0), 1);
     assert_eq!(counter(&members[1], CLUSTER_TIMER_EVENTS.0), 0);
+
+    // At its bound, with no timer in its table that it has marked, a member removes
+    // every timer for a schedule timer of another id, keeps that one, and counts it.
+    // The follower marks none: it holds timer 5 and is told of 2,047 more.
+    let tell = |members: &mut [Member], stream: &mut Publication, message: &Message<'_>| {
+        let mut bytes = [0u8; 64];
+        let length = message.write(&mut bytes).expect("a message");
+        run_until(
+            members,
+            "the consensus module stream takes a message",
+            |_| stream.offer(&bytes[..length]).is_ok(),
+        );
+    };
+    let more = MAX_MEMBER_TIMERS as i64 - 1;
+    for id in 0..more {
+        tell(
+            &mut members,
+            &mut follower_stream,
+            &schedule(1_000 + id, far),
+        );
+    }
+    run_until(&mut members, "the follower's table is full", |members| {
+        members[1].module.timer_counts().1 == MAX_MEMBER_TIMERS
+    });
+    assert_eq!(members[1].module.timer_counts().0, TimerCounts::default());
+    tell(&mut members, &mut follower_stream, &schedule(9_000, far));
+    run_until(&mut members, "the follower clears its table", |members| {
+        members[1].module.timer_counts().0.cleared == 1
+    });
+    assert_eq!(
+        members[1].module.timer_counts(),
+        (
+            TimerCounts {
+                cleared: 1,
+                ..TimerCounts::default()
+            },
+            1
+        ),
+        "the one it was sent is the one it holds"
+    );
+    assert_eq!(counter(&members[1], CLUSTER_TIMERS.0), 1);
+    assert_eq!(counter(&members[1], CLUSTER_TIMERS_CLEARED.0), 1);
+    assert_eq!(counter(&members[1], CLUSTER_TIMERS_REPLACED.0), 0);
+
+    // At its bound with a marked timer in its table, a member gives that one up for
+    // a schedule timer of another id, and counts it. The leader appends an event
+    // for timer 1, which marks it, and is told of 2,047 more that are not due.
+    tell(&mut members, &mut stream, &schedule(1, 1));
+    run_until(
+        &mut members,
+        "the leader appends a fourth event",
+        |members| members[0].module.timer_counts().0.events == 4,
+    );
+    end = run_until_settled(&mut members, end + TIMER_EVENT_FRAME);
+    assert_eq!(end, base + 4 * FRAME + 4 * TIMER_EVENT_FRAME);
+    for id in 0..more {
+        tell(&mut members, &mut stream, &schedule(2_000 + id, far));
+    }
+    run_until(&mut members, "the leader's table is full", |members| {
+        members[0].module.timer_counts().1 == MAX_MEMBER_TIMERS
+    });
+    tell(&mut members, &mut stream, &schedule(9_001, far));
+    run_until(
+        &mut members,
+        "the leader gives its marked timer up",
+        |members| members[0].module.timer_counts().0.replaced == 1,
+    );
+    assert_eq!(
+        members[0].module.timer_counts(),
+        (
+            TimerCounts {
+                events: 4,
+                replaced: 1,
+                cleared: 0,
+            },
+            MAX_MEMBER_TIMERS
+        ),
+        "the table stays full, and no timer in it is due"
+    );
+    assert_eq!(
+        counter(&members[0], CLUSTER_TIMERS.0),
+        MAX_MEMBER_TIMERS as i64
+    );
+    assert_eq!(counter(&members[0], CLUSTER_TIMERS_REPLACED.0), 1);
+    assert_eq!(counter(&members[0], CLUSTER_TIMERS_CLEARED.0), 0);
+    assert_eq!(counter(&members[0], CLUSTER_TIMER_EVENTS.0), 4);
+    assert_eq!(
+        run_until_settled(&mut members, end),
+        end,
+        "no event for a timer that is not due"
+    );
+
     // No message here was rejected: the stream carries all three.
     assert_eq!(counter(&members[0], CLUSTER_MESSAGES_REJECTED.0), 0);
     assert_eq!(counter(&members[1], CLUSTER_MESSAGES_REJECTED.0), 0);

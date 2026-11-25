@@ -331,10 +331,12 @@ commit path runs per message.
   member starts. A leader with its election closed appends a timer event for each
   timer whose deadline its wall clock has reached, the earliest first and at most
   10 in a duty cycle, marks the timer, and appends no second event for it until a
-  schedule timer names it again. A duty cycle with no timer due costs one compare.
+  schedule timer names it again. A duty cycle with no timer due costs one compare
+  while the table has not changed, and one scan of it, 2,048 slots at the most,
+  after a timer message or an append.
   What the member holds is in no snapshot and is no state it computes from the
-  log: a member that starts holds none, and the service sends every pending timer
-  again each second. Which event is handed to a program is the service's to
+  log: a member that starts holds none, and the page has a service send every
+  pending timer again each second. Which event is handed to a program is the service's to
   decide, from the log alone, so a table that is behind or ahead costs an entry
   that every service passes over and never a timer handed over twice.
   `cluster.timers`, `cluster.timer_events`, `cluster.timers_replaced` and

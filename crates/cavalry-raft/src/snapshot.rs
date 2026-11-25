@@ -190,7 +190,8 @@ pub(crate) struct ModuleSnapshot {
     counts: SnapshotCounts,
     service_counts: ServiceSnapshotCounts,
     /// The member's subscription on the consensus module stream, added at its start
-    /// and kept for its life: the service acks of the services on its driver.
+    /// and kept for its life: the service acks, the schedule timers and the cancel
+    /// timers of the services on its driver.
     acks: Subscription,
     /// The member's counters of its snapshots, each with the value it last stored:
     /// eleven in the order of [`ModuleSnapshot::values`], then the two of its start,

@@ -2,7 +2,7 @@
 
 - **Status:** Accepted
 - **Date:** 2026-11-24
-- **Invariants affected:** 1, 6
+- **Invariants affected:** 6
 - **Supersedes:** none. Amends one sentence of `spec/cluster.md`, "The service",
   "Timers", "The leader's timer events", within version 2. Nothing on the wire
   changes.
@@ -27,9 +27,12 @@ so it has always appended the lower id first.
 
 ## Decision
 
-Of two timers with one deadline, a leader appends the event of the lower correlation
-id first. The page says so in the sentence that gives the order, and the member's
-table is held to it by its unit test.
+Of two timers that are due with one deadline, a leader appends the event of the
+lower correlation id first. The page says so in the sentence that gives the order,
+and the member's table is held to it by its unit test. The rule orders what a
+leader holds when it looks: two timers that it was told of before their deadline
+came. It says nothing of a timer the leader is told of after the other's event is
+appended.
 
 ## Alternatives considered
 
@@ -56,13 +59,19 @@ besides its deadline.
 
 ## Consequences
 
-- A program may rely on the order of two timers it scheduled for one deadline: the
-  lower id is handed over first, where both events are in the log and both timers
-  are pending when their events are read.
+- A program may rely on the order of two timers of one deadline only where the
+  leader was told of both before the deadline came, as it is of timers scheduled
+  for a time more than a refresh ahead: the lower id's event is then first in the
+  log. Two timers scheduled for a time already past, in two entries, are appended
+  in the order the leader is told of them, the earlier entry's first, whatever
+  their ids; and a leader that is told of one late appends it late.
 - It is an order of appending, and not a promise that two such events are next to
   each other in the log: a leader appends at most 10 timer events in a duty cycle,
   and other entries may lie between two of them.
 - A second implementation of a member has one more rule to hold.
+- A reason to revisit: a program that needs the order of its schedules kept for
+  timers of one deadline whenever they were scheduled. That is a field in the
+  schedule timer, and a change of the wire.
 
 ## References
 

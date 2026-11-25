@@ -1168,8 +1168,8 @@ const DOC_SNAPSHOT: &str = "docs/how-to/ask-for-a-snapshot.md#when-it-does-not-w
 /// log is still empty and it has no leader, since the core counts it only then and the
 /// count does not fall ([`cluster_checks`]). The last is a truncation of the member's
 /// log whose command or write faulted, which the member owed until one finished (ADR
-/// 0148). After it, a member that removed every timer it held, its table full of
-/// timers that were pending nowhere (ADR 0151).
+/// 0148). After it, a member that removed every timer it held: its table was full
+/// with none marked, so some of them were pending nowhere (ADR 0151).
 const MEMBER_COUNTS: [CounterId; 16] = [
     CLUSTER_MESSAGES_REJECTED,
     CLUSTER_LEADER_HEARTBEAT_TIMEOUTS,
@@ -7802,8 +7802,8 @@ mod tests {
         );
     }
 
-    /// A member that removed every timer it held, its table full of timers that are
-    /// pending in no service, is reported with what that means and what it costs
+    /// A member that removed every timer it held, its table full with no timer
+    /// marked, is reported with what that means, what it costs and what to check
     /// (ADR 0151); a member that never did is told of in nothing.
     #[test]
     fn a_member_that_cleared_its_timers_is_reported() {
@@ -7826,8 +7826,8 @@ mod tests {
         assert_eq!(cleared.level, Level::Warn);
         assert!(
             cleared.message.starts_with(
-                "member 1's cluster.timers_cleared is 1: This member's table of timers \
-                 filled with timers that are pending in no service"
+                "member 1's cluster.timers_cleared is 1: This member's table of timers was \
+                 full, 2,048, with no timer in it whose event the member had appended"
             ),
             "{}",
             cleared.message

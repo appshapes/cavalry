@@ -3651,19 +3651,22 @@ impl ConsensusModule {
     /// Appends a timer event for each timer this member holds whose deadline its
     /// wall clock has reached, the earliest first and at most
     /// [`MAX_TIMER_EVENTS_PER_DUTY_CYCLE`], while it leads with its election closed
-    /// and its read of its own log has passed its term's base (`spec/cluster.md`,
-    /// "The service", "Timers", "The leader's timer events"; ADR 0151). It marks
-    /// each, so that it appends no second event for it until a schedule timer names
-    /// it again. An event the back-pressured log does not take is appended on a
-    /// later cycle. A member that does not lead appends none.
+    /// (`spec/cluster.md`, "The service", "Timers", "The leader's timer events";
+    /// ADR 0151), and of two that are due with one deadline the lower correlation
+    /// id first (ADR 0158). It marks each with the position at which its event
+    /// begins, so that it appends no second event for it until a schedule timer
+    /// names it again. An event the back-pressured log does not take is appended on
+    /// a later cycle, and its timer is not marked. A member that does not lead
+    /// appends none.
     ///
-    /// A cycle with no timer due costs one compare: the table keeps its earliest
-    /// deadline.
+    /// A cycle with no timer due costs one compare while the table has not changed
+    /// since the last look: the table keeps its earliest deadline. After a timer
+    /// message or an append, the next look scans the table once, 2,048 slots at the
+    /// most.
     fn append_timer_events(&mut self) -> Result<usize, RaftError> {
-        let serves = self.core.role() == Role::Leader
-            && self.core.election_state() == ElectionState::Closed
-            && self.session_log_position >= self.core.term_base_log_position();
-        if !serves {
+        let leads =
+            self.core.role() == Role::Leader && self.core.election_state() == ElectionState::Closed;
+        if !leads {
             return Ok(0);
         }
         let mut appended = 0;
@@ -3671,6 +3674,13 @@ impl ConsensusModule {
             let Some(correlation_id) = self.timers.due(self.clock.time_ms) else {
                 break;
             };
+            // Where the event begins, if the log takes it.
+            let begins = self
+                .io
+                .log_publication
+                .as_ref()
+                .and_then(|publication| publication.position().ok())
+                .unwrap_or(0);
             if self
                 .core
                 .timer_event(self.clock, correlation_id, &mut self.io)?
@@ -3678,13 +3688,7 @@ impl ConsensusModule {
             {
                 break;
             }
-            let position = self
-                .io
-                .log_publication
-                .as_ref()
-                .and_then(|publication| publication.position().ok())
-                .unwrap_or(0);
-            self.timers.appended(correlation_id, position);
+            self.timers.appended(correlation_id, begins);
             appended += 1;
         }
         Ok(appended)
