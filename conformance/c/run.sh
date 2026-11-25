@@ -8,8 +8,9 @@
 # versions 4 and 5; ADR 0122; ADR 0123), and then conformance/c/snapshot.c, the snapshot
 # round: a service's snapshot and its start from one beside the same three members, on
 # the log the cluster round left (spec/c-abi.md, version 6; ADR 0146; ADR 0149); and
-# cleans up. `just conformance` runs this after the Rust vector suites (spec/c-abi.md;
-# ADR 0051).
+# then conformance/c/closed.c, the closed round: a service's poll after its driver's
+# stop, on the first driver, which the program stops itself (ADR 0155); and cleans up.
+# `just conformance` runs this after the Rust vector suites (spec/c-abi.md; ADR 0051).
 set -euo pipefail
 cd "$(dirname "$0")/../.."
 
@@ -135,3 +136,15 @@ target/conformance/snapshot-c "$cluster" target/release/cavalry || {
     cat "$cluster"/member-*.out >&2 || true
     exit 1
 }
+
+# The closed round, last, since it stops the first driver: a poll of a service whose
+# client is closed is one answer, −1 with CAVALRY_ERR_CLOSED (spec/c-abi.md, "cluster
+# service"; ADR 0155). The program sends the driver its SIGTERM, by the process id.
+echo "conformance/c: compile closed.c with ${CC:-cc} against crates/cavalry-ffi/include/cavalry.h"
+# shellcheck disable=SC2086
+"${CC:-cc}" -std=c11 -Wall -Wextra -Werror -I crates/cavalry-ffi/include \
+    conformance/c/closed.c target/release/libcavalry_ffi.a $libs \
+    -o target/conformance/closed-c
+echo "conformance/c: run the closed round, a service's poll after its driver's stop, on $CAVALRY_DIR"
+target/conformance/closed-c "$driver_pid"
+wait "$driver_pid" 2>/dev/null || true
