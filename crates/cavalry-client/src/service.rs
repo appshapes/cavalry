@@ -1317,17 +1317,37 @@ impl ClusterService {
     /// message. An entry the service would answer costs two loads of the member's
     /// counters.
     ///
-    /// A close of the client is an error of a poll only where the poll has one of
-    /// those commands for the driver, as it has at a recording's end when the member
-    /// beside it stops. That poll returns [`ClusterError::Client`] holding
-    /// [`ClientError::Closed`], with the reason [`Cavalry::closed`] gives. A poll
-    /// that has no command returns as it does for a log with nothing new to read, 0
-    /// and no error, for as long as it is called. Which of the two a service meets
-    /// is a matter of when its member's driver stops, so a program's loop asks
-    /// [`Cavalry::closed`] after each poll, takes that error of a poll as the same
-    /// close, and ends one way for both, as
-    /// `crates/cavalry/examples/adder-service.rs` does.
+    /// A poll of a closed client is one error, [`ClusterError::Client`] holding
+    /// [`ClientError::Closed`] with the reason [`Cavalry::closed`] gives, whatever
+    /// the service held and whatever the poll was doing when it met the close: the
+    /// read of its log, a command to the driver, or nothing, for a service that had
+    /// no log open (ADR 0155). So a service ends when its member's driver stops, and
+    /// a program's loop needs no other look at its client: it ends on that error, as
+    /// `crates/cavalry/examples/adder-service.rs` does. The entries the handler took
+    /// before the close are taken: [`position`](Self::position) is after the last.
     pub fn poll<F>(
+        &mut self,
+        client: &mut Cavalry,
+        handler: F,
+        fragment_limit: usize,
+    ) -> Result<usize, ClusterError>
+    where
+        F: FnMut(&Committed<'_>, &mut Replies<'_>) -> Action,
+    {
+        let closed = |reason| ClusterError::Client(ClientError::Closed(reason));
+        if let Some(reason) = client.closed() {
+            return Err(closed(reason));
+        }
+        match self.poll_entries(client, handler, fragment_limit) {
+            // What a poll met at a client that is closed now is the close: a fault of
+            // its log's read and a command's refusal say the same thing there.
+            Err(error) => Err(client.closed().map_or(error, closed)),
+            taken => taken,
+        }
+    }
+
+    /// The poll, for a client that was open when it began.
+    fn poll_entries<F>(
         &mut self,
         client: &mut Cavalry,
         mut handler: F,

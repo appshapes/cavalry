@@ -5,7 +5,7 @@
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
-use cavalry_client::{Cavalry, Closed};
+use cavalry_client::{Cavalry, ClientError, Closed};
 use cavalry_driver::Driver;
 use cavalry_shm::counters::CountersReader;
 use cavalry_shm::counters::generated::CLIENT_TIMED_OUT;
@@ -285,6 +285,30 @@ fn a_client_connects_while_the_driver_creates_its_files() {
         assert_eq!(client.closed(), None, "round {round}");
         client.close().expect("closes");
         driver.close().expect("the driver closes");
+    }
+}
+
+/// A command sent in the millisecond between a driver's close and the conductor's
+/// next look at the heartbeat finds the close itself, on the command ring. It is the
+/// client's close then, as it is a millisecond later, and not the ring's refusal
+/// (ADR 0155).
+#[test]
+fn a_command_that_finds_the_driver_closed_is_the_clients_close() {
+    for round in 0..20 {
+        let dir = TestDir::new(&format!("command-finds-the-close-{round}"));
+        let driver = Driver::start(dir.path(), dir.path().join("log")).expect("the driver starts");
+        let mut client = Cavalry::connect_to(dir.path()).expect("the client connects");
+        driver.close().expect("the driver closes");
+        let refused = client.add_subscription("cavalry:ipc", 7).err();
+        assert!(
+            matches!(refused, Some(ClientError::Closed(Closed::DriverClosed))),
+            "round {round}: {refused:?}"
+        );
+        assert_eq!(
+            client.closed(),
+            Some(Closed::DriverClosed),
+            "round {round}: the client is closed when the command says so"
+        );
     }
 }
 

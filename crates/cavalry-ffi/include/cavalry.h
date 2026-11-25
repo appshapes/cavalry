@@ -1212,12 +1212,10 @@ int cavalry_cluster_service(cavalry_cluster_service_t **service,
  `client`, which the poll holds for its run: none of them is sent, and nothing is
  allocated, for a session message.
 
- A close of `client`, as when the member's driver stops, is −1 with
- `CAVALRY_ERR_CLOSED` from a poll that has one of those commands for the driver, as
- a poll has at a recording's end, and 0 from a poll that has none. Which of the
- two a service meets is a matter of when the driver stops: a program's loop asks
- `cavalry_is_closed` after each poll, takes that error of a poll as the same
- close, and ends one way for both.
+ A poll with a closed `client`, as when the member's driver has stopped, is −1 with
+ `CAVALRY_ERR_CLOSED`, whatever the service held and whatever the poll was doing
+ when it met the close (ADR 0155): a program's loop ends on that code, and
+ `cavalry_closed` gives the reason.
 
  # Safety
 

@@ -194,11 +194,11 @@ The client API implementation, re-exported by the `cavalry` crate. Data plane.
   `poll` allocates for an entry or a reply, and its commands to the driver are at a
   session's opening, at a change of the term's leader and at a recording's end
   (ADR 0118). A service ends when its client closes, as when its member's driver
-  stops. A poll that has one of those commands then returns
-  `ClusterError::Client(ClientError::Closed(reason))`, and a poll that has none
-  returns 0, so a program's loop asks `Cavalry::closed()` after each poll and takes
-  that error of a poll as the same close: it ends one way whichever it meets, as
-  `crates/cavalry/examples/adder-service.rs` does.
+  stops: a poll of a closed client is one error,
+  `ClusterError::Client(ClientError::Closed(reason))`, whatever the service held and
+  whatever the poll was doing when it met the close, so a program's loop ends on
+  that error and needs no other look at its client, as
+  `crates/cavalry/examples/adder-service.rs` does (ADR 0155).
 - Takes a snapshot of a service's state: the leader asks every member for a
   snapshot with an entry of the log, which a service hands its program as
   `Entry::Snapshot`. The poll that hands it over ends after it, so the program's

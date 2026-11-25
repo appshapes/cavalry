@@ -210,3 +210,4 @@ under `docs/` is listed here; `just lint-docs` fails on one that is not.
 - [0153. End a closed control publication's linger for a subscription on its control address](decisions/0153-end-a-closed-control-publications-linger-for-a-subscription-on-its-control-address.md)
 - [0154. Hold an add publication while a receive endpoint that holds its control address closes](decisions/0154-hold-an-add-publication-while-a-receive-endpoint-that-holds-its-control-address-closes.md)
 - [0151. Give a cluster's service timers that every service decides from the log](decisions/0151-give-a-clusters-service-timers-that-every-service-decides-from-the-log.md)
+- [0155. Give a poll of a closed client one error, and close the client at a command that finds the driver gone](decisions/0155-give-a-poll-of-a-closed-client-one-error-and-close-the-client-at-a-command-that-finds-the-driver-gone.md)

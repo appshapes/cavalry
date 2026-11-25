@@ -1194,7 +1194,8 @@ impl Cavalry {
 
     /// Sends `command` and waits for its answer: the event with its correlation id, up
     /// to the response timeout. An `error` event is [`ClientError::Refused`]; a client
-    /// closed meanwhile is [`ClientError::Closed`]; no answer is
+    /// closed before or meanwhile, and a command that finds the driver gone and so
+    /// closes the client (ADR 0155), is [`ClientError::Closed`]; no answer is
     /// [`ClientError::ResponseTimeout`], and the command may have been unblocked or
     /// rejected before it was decoded (`spec/client-protocol.md`, "Liveness and
     /// timeouts"). Answers to earlier commands the caller gave up on are dropped.
@@ -1251,13 +1252,32 @@ impl Cavalry {
     /// Encodes and writes `command` on the ring, and notes the time for the keepalive.
     fn send(&mut self, command: &Command<'_>) -> Result<(), ClientError> {
         let length = command.write(&mut self.scratch)?;
-        self.producer.write(
+        match self.producer.write(
             command.command_type() as i32,
             &self.scratch[..length],
             epoch_time(),
-        )?;
-        self.shared.sent(nano_time());
-        Ok(())
+        ) {
+            Ok(()) => {
+                self.shared.sent(nano_time());
+                Ok(())
+            }
+            // The ring's own look at the driver's heartbeat, which the conductor
+            // takes within its next millisecond: the same finding, so the same
+            // close, and one error for a driver that is gone whichever looks first
+            // (ADR 0155).
+            Err(CommandRingError::DriverClosed) => Err(self.closed_for(Closed::DriverClosed)),
+            Err(CommandRingError::DriverTimeout { .. }) => {
+                Err(self.closed_for(Closed::DriverTimeout))
+            }
+            Err(error) => Err(error.into()),
+        }
+    }
+
+    /// Closes the client for `reason`, unless it is closed, and gives the close as
+    /// the error of the command that found it.
+    fn closed_for(&self, reason: Closed) -> ClientError {
+        self.shared.close(reason);
+        ClientError::Closed(self.shared.closed().unwrap_or(reason))
     }
 
     /// The driver directory this client is attached to.
@@ -1272,7 +1292,9 @@ impl Cavalry {
 
     /// Why the client is closed, or `None` while it is open. A client closes when
     /// [`Cavalry::close`] is called, and when the conductor finds the driver gone, this
-    /// client timed out, or the broadcast buffer lapped.
+    /// client timed out, or the broadcast buffer lapped. A command that finds the
+    /// driver gone, on the command ring, before the conductor's next look, closes
+    /// the client for the same reason and returns [`ClientError::Closed`] (ADR 0155).
     pub fn closed(&self) -> Option<Closed> {
         self.shared.closed()
     }
