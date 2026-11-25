@@ -111,7 +111,23 @@ On the laptop that wrote this ADR, an Apple M5 Pro running macOS 26.6.1, at `mas
   alone.
 - `CAVALRY_DIRECTORY_FROM=d265af82` printed `ok` in 6 s with both builds kept.
 
-CI_PLACEHOLDER
+What the added build costs on CI's runners, from `ci` run by hand on this change's
+branch, runs 45536355928 and 45536715972, beside `master`'s run 45533266831 at
+4b07404e:
+
+| Runner | 620a2e29's build | d265af82's build | The whole gate | The gate on `master` |
+| --- | --- | --- | --- | --- |
+| Linux, `gates (linux)` | 6 s | 9 s and 10 s | 29 s and 30 s | 12 s |
+| macOS, `gates (macos)` | 5 s and 6 s | 8 s and 9 s | 30 s and 32 s | 10 s |
+
+So `just conformance` takes about 18 to 20 s more on each runner. Half of that is
+d265af82's build, which the cache never holds, as it never holds 620a2e29's. The
+other half is the added directories. The jobs of the first run took 14.5 minutes on
+Linux and 15.5 on macOS, as `master`'s do, well inside their 30-minute bound. The
+second run's macOS job lost its runner partway through `just conformance`; run again,
+its gate passed. A run by hand checks `lint-docs` over the last commit alone, so both
+second runs failed there on this ADR, which the branch's first commit had added.
+Over the pull request's range, which CI checks, the ADR is new.
 
 ## Consequences
 
