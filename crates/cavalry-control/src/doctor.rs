@@ -61,6 +61,9 @@ use cavalry_shm::counters::generated::{
     CLUSTER_STANDBY_VOTE_REQUESTS, CLUSTER_TRUNCATION_OWED, CLUSTER_TRUNCATIONS_FAULTED,
     CLUSTER_TRUNCATIONS_REFUSED, CLUSTER_VOTE_FLOOR, CLUSTER_VOTERS, CLUSTER_VOTES_WITHHELD,
 };
+use cavalry_shm::counters::generated::{
+    DRIVER_REGISTRY_FULL, PUBLICATION_ADD_DEFERRED_WAITING, SUBSCRIPTION_ADD_DEFERRED_WAITING,
+};
 use cavalry_shm::counters::{CounterId, CountersError, CountersReader, Scope};
 
 use crate::config::Config;
@@ -83,6 +86,9 @@ const DOC_DIRECTORY: &str = "docs/reference/client-protocol.md#the-driver-direct
 const DOC_RING_FULL: &str = "docs/reference/command-ring.md#when-the-ring-is-full";
 const DOC_RING_REJECTS: &str = "docs/reference/command-ring.md#what-a-reader-rejects";
 const DOC_COUNTERS_FULL: &str = "docs/reference/counters-file.md#when-the-file-is-full";
+/// Where a registry refused as full and the adds held in it are explained, with what
+/// to do (work item 452).
+const DOC_HELD_ADDS: &str = "docs/how-to/publish-between-two-hosts.md#when-it-does-not-work";
 const DOC_COUNTERS: &str = "docs/reference/counters.md";
 /// Where a consensus module's hold on its log directory is stated (ADR 0152).
 const DOC_LOG_DIRECTORY_HELD: &str = "docs/reference/durable-log.md#the-driver";
@@ -1010,6 +1016,85 @@ fn counters_checks(
                 level: Level::Warn,
                 message: format!("{} is {value}: {}", def.name, def.doctor),
                 doc: DOC_COUNTERS,
+            });
+        }
+    }
+    // The adds held behind an endpoint that is closing each take a slot of their
+    // registry until they run (ADR 0049, ADR 0153, ADR 0154), so a registry can refuse
+    // an add with code 10 while fewer are registered than it holds. A wait is a
+    // receiver or sender cycle or a few while the driver keeps up, so a held add seen
+    // here at all is a thread that is behind. The gauges say what holds now, so a driver
+    // that has stopped has nothing held, whatever it left in them. And they say nothing
+    // of what was held at an earlier refusal: `driver.registry_full` counts every
+    // code 10 since the driver started, so the finding never says a held add took a
+    // slot from a past refusal, only that one can have.
+    if running {
+        let mut registry_full = None;
+        for (name, id, command, registry, holder) in [
+            (
+                "subscription.add_deferred_waiting",
+                SUBSCRIPTION_ADD_DEFERRED_WAITING,
+                "add subscription",
+                "subscriptions",
+                "a receive endpoint whose last subscription was removed, or the control \
+                 socket of a closed publication on the endpoint's address,",
+            ),
+            (
+                "publication.add_deferred_waiting",
+                PUBLICATION_ADD_DEFERRED_WAITING,
+                "add publication",
+                "publications",
+                "a receive endpoint on the publication's control address whose last \
+                 subscription was removed",
+            ),
+        ] {
+            checks += 1;
+            let Some(held) = read(name, id, findings) else {
+                continue;
+            };
+            if held <= 0 {
+                continue;
+            }
+            // Read once, and only for a held add: the static loop above reports it too.
+            let full = *registry_full.get_or_insert_with(|| {
+                read_static(
+                    &reader,
+                    "driver.registry_full",
+                    DRIVER_REGISTRY_FULL,
+                    &mut Vec::new(),
+                )
+                .unwrap_or(0)
+            });
+            let refused = if full > 0 {
+                format!(
+                    "; driver.registry_full is {full}, so an add was refused with code 10 since \
+                     the driver started: if its message named the {registry} registry, that \
+                     refusal may have come while fewer were registered than the registry \
+                     holds, since held adds take slots too, but the counters do not say \
+                     whether an add was held when it came; closing what is not used frees \
+                     slots either way"
+                )
+            } else {
+                String::new()
+            };
+            let (commands, wait, holding) = if held == 1 {
+                ("command", "waits", "holding")
+            } else {
+                ("commands", "wait", "each holding")
+            };
+            findings.push(Finding {
+                check: name,
+                level: Level::Warn,
+                message: format!(
+                    "{held} `{command}` {commands} {wait} now for {holder} to close, {holding} a \
+                     slot of the {registry} registry{refused}; a wait lasts a receiver or \
+                     sender cycle or a few while the driver keeps up, and is refused with \
+                     code 4 at the closing endpoint wait, so a held add seen here is a driver \
+                     thread that is behind: give the driver's threads the CPU they need; if a \
+                     recording of a retired image or of a closed publication has not stopped, \
+                     check recording.write_failed and the log directory's disk"
+                ),
+                doc: DOC_HELD_ADDS,
             });
         }
     }
@@ -5255,6 +5340,103 @@ mod tests {
             )
             .expect("another publication's position");
         assert!(stalled(&examine(&dir.0)).is_empty());
+    }
+
+    /// The adds held behind a closing endpoint (ADR 0049, ADR 0153, ADR 0154; work item
+    /// 452): none held, no finding; held in either registry, a warning that names how
+    /// many, what holds them, the registry slot each takes and what to do; with
+    /// `driver.registry_full` above 0 beside them, the warning says that a code 10 naming
+    /// that registry may have come while fewer were registered, and that the counters do
+    /// not say whether an add was held then, since the gauges count what is held now and
+    /// `driver.registry_full` every refusal since the driver started; and nothing once the
+    /// driver has stopped.
+    #[test]
+    fn held_adds_are_a_warning_that_names_their_registry_and_what_to_do() {
+        let dir = TestDir::new("held-adds");
+        let counters = CountersFile::create(&dir.0, 256).expect("counters");
+        let ring = CommandRing::create(&dir.0, 4096).expect("ring");
+        let consumer = ring.consumer(Duration::from_secs(10)).expect("consumer");
+        let held = |report: &Report| -> Vec<Finding> {
+            report
+                .findings
+                .iter()
+                .filter(|finding| finding.check.ends_with(".add_deferred_waiting"))
+                .cloned()
+                .collect()
+        };
+        assert!(held(&examine(&dir.0)).is_empty(), "none held, no finding");
+
+        counters
+            .counter(SUBSCRIPTION_ADD_DEFERRED_WAITING.record())
+            .expect("static")
+            .set(3);
+        let found = held(&examine(&dir.0));
+        assert_eq!(found.len(), 1, "{found:?}");
+        assert_eq!(found[0].check, "subscription.add_deferred_waiting");
+        assert_eq!(found[0].level, Level::Warn);
+        assert_eq!(found[0].doc, DOC_HELD_ADDS);
+        let message = &found[0].message;
+        assert!(
+            message.starts_with("3 `add subscription` commands wait now for a receive endpoint")
+                && message.contains("the control socket of a closed publication")
+                && message.contains("each holding a slot of the subscriptions registry")
+                && message.contains("give the driver's threads the CPU they need")
+                && !message.contains("driver.registry_full"),
+            "{message}"
+        );
+
+        counters
+            .counter(PUBLICATION_ADD_DEFERRED_WAITING.record())
+            .expect("static")
+            .set(1);
+        counters
+            .counter(DRIVER_REGISTRY_FULL.record())
+            .expect("static")
+            .add(2);
+        let found = held(&examine(&dir.0));
+        assert_eq!(found.len(), 2, "{found:?}");
+        let publications = found
+            .iter()
+            .find(|finding| finding.check == "publication.add_deferred_waiting")
+            .expect("the publications registry's finding");
+        assert!(
+            publications.message.starts_with(
+                "1 `add publication` command waits now for a receive endpoint on the \
+                 publication's control address whose last subscription was removed to close, \
+                 holding a slot of the publications registry; driver.registry_full is 2"
+            ) && publications.message.contains(
+                "if its message named the publications registry, that refusal may have come \
+                 while fewer were registered than the registry holds, since held adds take \
+                 slots too, but the counters do not say whether an add was held when it came; \
+                 closing what is not used frees slots either way"
+            ) && !publications.message.contains("took part of its slots"),
+            "{}",
+            publications.message
+        );
+        assert!(
+            found
+                .iter()
+                .all(|finding| finding.message.contains("driver.registry_full is 2")),
+            "both registries say it"
+        );
+        // driver.registry_full is read once more here and reported once, by its own check.
+        let report = examine(&dir.0);
+        assert_eq!(
+            report
+                .findings
+                .iter()
+                .filter(|finding| finding.check == "driver.registry_full")
+                .count(),
+            1
+        );
+
+        // A driver that has stopped holds nothing, whatever its gauges were left at.
+        consumer.close();
+        assert!(
+            held(&examine(&dir.0)).is_empty(),
+            "a stopped driver holds nothing"
+        );
+        drop(counters);
     }
 
     /// `recording-write-failed` and `recording-invalid`, the latter naming the catalog's
