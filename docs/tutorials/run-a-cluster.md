@@ -83,7 +83,7 @@ CAVALRY_CLUSTER_MEMBER_ID=2 target/release/cavalry doctor --dir /tmp/cavalry-tut
 You will see one line from each. One member says that it leads, here member 2:
 
 ```text
-  note cluster-member         this driver is cluster member 2, the leader in term 0, election closed: append position 96, commit position 96; its last election began because the member started; its members string gives a vote to members 0, 1 and 2; it runs version 2 of the cluster protocol, 0.2.0; see docs/how-to/run-a-cluster.md#when-it-does-not-work
+  note cluster-member         this driver is cluster member 2, the leader in term 0, election closed: append position 96, commit position 96; its last election began because the member started; its members string gives a vote to members 0, 1 and 2; it runs version 3 of the cluster protocol, 0.3.0; see docs/how-to/run-a-cluster.md#when-it-does-not-work
 ```
 
 The other two say `a follower in term 0, election closed` and `it follows member 2`.

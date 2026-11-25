@@ -33,9 +33,11 @@ use elected_cluster::Safety;
 const IDS: [i32; 3] = [0, 1, 2];
 
 /// The seeds `just test` runs: seed 1; seed 35, which truncates and faults more than
-/// most; and seeds 13 and 96, at which the search, with the rule of ADR 0148 taken out,
+/// most; and seeds 96 and 482, at which the search, with the rule of ADR 0148 taken out,
 /// finds a member that joins a log while its log is cut short of the end it reports.
-const SEEDS: [u64; 4] = [1, 13, 35, 96];
+/// Seed 13 did so too until the floor answer of ADR 0163 moved its paths, and 482, the
+/// first such seed above 300 on that rule, took its place.
+const SEEDS: [u64; 4] = [1, 35, 96, 482];
 
 /// A xorshift generator: the search is the seed's alone.
 struct Draw(u64);

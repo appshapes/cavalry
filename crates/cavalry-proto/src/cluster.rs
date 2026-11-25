@@ -56,8 +56,9 @@ use core::fmt;
 /// The schema id every message of `spec/cluster.md` carries.
 pub const SCHEMA_ID: u16 = 1;
 
-/// The version of `spec/cluster.md` this crate reads and writes.
-pub const VERSION: u16 = 2;
+/// The version of `spec/cluster.md` this crate reads and writes: 3, which adds the
+/// floor answer, template 58, and the floor bit of append position's flags (ADR 0163).
+pub const VERSION: u16 = 3;
 
 /// The version every message's header carries: the version of the page's layouts,
 /// which is 0 in every version of the page whose major is 0, since none of them
@@ -69,7 +70,7 @@ pub const HEADER_VERSION: u16 = 0;
 pub const HEADER_LENGTH: usize = 8;
 
 /// A protocol version field's value for this version, in semantic form: the major
-/// times 65536, the minor times 256 and the patch, added. It is 0.2.0, the page's
+/// times 65536, the minor times 256 and the patch, added. It is 0.3.0, the page's
 /// version being the minor while the major is 0. A reader reads every version of its
 /// major (`spec/cluster.md`, "Encoding").
 pub const PROTOCOL_VERSION: i32 = (VERSION as i32) << 8;
@@ -317,6 +318,7 @@ impl Stream {
                     | Template::CommitPosition
                     | Template::CatchupPosition
                     | Template::StopCatchup
+                    | Template::FloorAnswer
             ),
             Stream::Ingress => matches!(
                 template,
@@ -389,6 +391,9 @@ pub enum Template {
     CatchupPosition = 56,
     /// The leader's word that a catch-up is over.
     StopCatchup = 57,
+    /// The leader's answer to a follower that holds a vote floor and asked, from
+    /// version 3 (ADR 0163).
+    FloorAnswer = 58,
     /// A snapshot's begin, section or end.
     SnapshotMarker = 100,
     /// An open session in a consensus module's snapshot.
@@ -432,6 +437,7 @@ impl Template {
             55 => Template::CommitPosition,
             56 => Template::CatchupPosition,
             57 => Template::StopCatchup,
+            58 => Template::FloorAnswer,
             100 => Template::SnapshotMarker,
             103 => Template::ClusterSession,
             105 => Template::ConsensusModule,
@@ -469,6 +475,7 @@ impl Template {
             Template::AppendPosition => 21,
             Template::CommitPosition | Template::CatchupPosition => 20,
             Template::StopCatchup => 12,
+            Template::FloorAnswer => 28,
             Template::SnapshotMarker | Template::ClusterSession => 40,
             Template::ConsensusModule => 28,
             Template::ClientSession => 12,
@@ -501,6 +508,7 @@ impl Template {
             Template::CommitPosition => "commit-position",
             Template::CatchupPosition => "catchup-position",
             Template::StopCatchup => "stop-catchup",
+            Template::FloorAnswer => "floor-answer",
             Template::SnapshotMarker => "snapshot-marker",
             Template::ClusterSession => "cluster-session",
             Template::ConsensusModule => "consensus-module",
@@ -1045,7 +1053,8 @@ pub enum Message<'a> {
         log_position: i64,
         /// The follower's member id.
         follower_member_id: i32,
-        /// Bit 0 catch-up, [`APPEND_POSITION_FLAG_CATCHUP`]; the other bits reserved.
+        /// Bit 0 catch-up, [`APPEND_POSITION_FLAG_CATCHUP`]; bit 1 floor, from
+        /// version 3, [`APPEND_POSITION_FLAG_FLOOR`]; the other bits reserved.
         flags: u8,
     },
     /// Template 55.
@@ -1074,6 +1083,21 @@ pub enum Message<'a> {
         leadership_term_id: i64,
         /// The follower's member id.
         follower_member_id: i32,
+    },
+    /// Template 58, from version 3: the leader's answer to an append position with the
+    /// floor flag (ADR 0163).
+    FloorAnswer {
+        /// The leader's term.
+        leadership_term_id: i64,
+        /// The leader's append position, read as it wrote the answer.
+        log_position: i64,
+        /// The leader's member id.
+        leader_member_id: i32,
+        /// The follower's member id, as the append position named it.
+        follower_member_id: i32,
+        /// The session id of the data frame the append position came in: the session
+        /// of the follower's consensus publication to the leader.
+        session_id: i32,
     },
     /// Template 100.
     SnapshotMarker {
@@ -1182,6 +1206,13 @@ pub const CLOSE_REASON_NONE: i32 = i32::MIN;
 /// image joined at, so its leader may stop its catch-up replay (`spec/cluster.md`,
 /// "Append position, template 54").
 pub const APPEND_POSITION_FLAG_CATCHUP: u8 = 0x01;
+
+/// The floor bit of an append position's flags, from version 3: the follower holds a
+/// vote floor and has taken no floor answer for the term it follows, in this run, and
+/// asks its leader for one
+/// (`spec/cluster.md`, "Append position, template 54", "The floor answer"; ADR 0163).
+/// A reader of an earlier version ignores it, as it ignores every reserved bit.
+pub const APPEND_POSITION_FLAG_FLOOR: u8 = 0x02;
 
 /// A reader of little-endian fields from a message, every read bounds-checked.
 struct Reader<'a> {
@@ -1379,6 +1410,7 @@ impl<'a> Message<'a> {
             Message::CommitPosition { .. } => Template::CommitPosition,
             Message::CatchupPosition { .. } => Template::CatchupPosition,
             Message::StopCatchup { .. } => Template::StopCatchup,
+            Message::FloorAnswer { .. } => Template::FloorAnswer,
             Message::SnapshotMarker { .. } => Template::SnapshotMarker,
             Message::ClusterSession { .. } => Template::ClusterSession,
             Message::ConsensusModule { .. } => Template::ConsensusModule,
@@ -1824,6 +1856,25 @@ impl<'a> Message<'a> {
                     follower_member_id,
                 }
             }
+            Template::FloorAnswer => {
+                let leadership_term_id = reader.i64()?;
+                let log_position = reader.i64()?;
+                let leader_member_id = reader.i32()?;
+                let follower_member_id = reader.i32()?;
+                let session_id = reader.i32()?;
+                reader.done()?;
+                member_id("leader member id", leader_member_id, false)?;
+                member_id("follower member id", follower_member_id, false)?;
+                position("log position", log_position, false)?;
+                term("leadership term id", leadership_term_id)?;
+                Message::FloorAnswer {
+                    leadership_term_id,
+                    log_position,
+                    leader_member_id,
+                    follower_member_id,
+                    session_id,
+                }
+            }
             Template::SnapshotMarker => {
                 let type_id = reader.i64()?;
                 let log_position = reader.i64()?;
@@ -2266,6 +2317,19 @@ impl<'a> Message<'a> {
             } => {
                 writer.i64(leadership_term_id)?;
                 writer.i32(follower_member_id)?;
+            }
+            Message::FloorAnswer {
+                leadership_term_id,
+                log_position,
+                leader_member_id,
+                follower_member_id,
+                session_id,
+            } => {
+                writer.i64(leadership_term_id)?;
+                writer.i64(log_position)?;
+                writer.i32(leader_member_id)?;
+                writer.i32(follower_member_id)?;
+                writer.i32(session_id)?;
             }
             Message::SnapshotMarker {
                 type_id,
@@ -2827,22 +2891,30 @@ pub const fn withholds(own: LogReport, vote_floor: i64, log_heard: bool) -> bool
 }
 
 /// Whether a member clears its vote floor (`spec/cluster.md`, "A member that lost its
-/// log"; ADR 0161): when it holds one, `vote_floor` 0 or more; `joined`, it has joined
-/// the live log of a leader it took by the rules of "Taking a leader", going to
-/// follower ready, since it stored the floor and in this run of its module; and its
-/// `append_position` is at or past the floor. Each of the two holds entries of its
-/// own. The join holds every entry the leader's live sender had sent the member before
-/// it came back: the live image joins at the sender's position, which never goes back,
-/// and a follower goes to follower ready only with its append position there. The
-/// floor holds every entry the leader had appended when it wrote the new leadership
-/// term the member took, one the member acknowledged from a replay of the leader's
-/// recording before the sender sent it among them. A floor from a frame the leader
-/// held back, or a floor of 0, holds less: the join holds what the sender had sent,
-/// and follower catch-up holds the member until its log reaches the commit position it
-/// was told, all but an entry whose acknowledgement the leader counts later still
-/// (work item 463).
-pub const fn clears_vote_floor(vote_floor: i64, joined: bool, append_position: i64) -> bool {
-    vote_floor >= 0 && joined && append_position >= vote_floor
+/// log"; ADR 0161, ADR 0163): when it holds one, `vote_floor` 0 or more; `joined`, it
+/// has joined the live log of a leader it took by the rules of "Taking a leader",
+/// going to follower ready, since it stored the floor and in this run of its module;
+/// its `append_position` is at or past the floor; and it is at or past `answered`, the
+/// lowest log position of the floor answers it took since it stored the floor, in this
+/// run, −1 for none. Every entry an earlier run of the member held came from the
+/// leader's recordings, by a replay, or from the leader's sender, on the live log. The
+/// answer, written after the leader read a report of the member's present run, holds
+/// the first: a replay reads no further than a recording's synced position, and the
+/// leader's append position, read as it writes the answer, counts that position as it
+/// is then. The join holds
+/// the second: the live image joins at the sender's position, which never goes back,
+/// and a follower goes to follower ready only with its append position there.
+pub const fn clears_vote_floor(
+    vote_floor: i64,
+    joined: bool,
+    append_position: i64,
+    answered: i64,
+) -> bool {
+    vote_floor >= 0
+        && joined
+        && append_position >= vote_floor
+        && answered >= 0
+        && append_position >= answered
 }
 
 /// Whether a member that withholds votes all the same for a candidate whose log is

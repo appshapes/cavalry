@@ -525,7 +525,7 @@ fn a_member_that_elects_follows_the_member_whose_term_it_reads() {
 /// candidate of version 0 and for one of a later minor, each by the logs alone.
 #[test]
 fn a_member_writes_its_version_and_reads_every_version_of_its_major() {
-    assert_eq!(PROTOCOL_VERSION, 512, "version 2 in semantic form, 0.2.0");
+    assert_eq!(PROTOCOL_VERSION, 768, "version 3 in semantic form, 0.3.0");
 
     // The canvass positions of `common::canvass_position` carry version 0.
     let mut io = Stub::new();

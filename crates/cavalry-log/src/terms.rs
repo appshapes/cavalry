@@ -10,7 +10,8 @@
 //! the candidate term is sent, [`TermsFile::set_vote_floor`] once for each floor,
 //! when the member takes a leader with its log empty, before it records a term, and
 //! [`TermsFile::clear_vote_floor`] once after each floor, when the member has joined a
-//! leader's live log with its log at or past the floor; each write syncs before it
+//! leader's live log with its log at or past the floor and its leader's answer (ADR
+//! 0163); each write syncs before it
 //! returns. The vote floor is one slot, bytes 48 to 60 of the header, under its own
 //! checksum, and a write of it a crash tears reads as the slot before it or the slot
 //! after it. A torn store reads as no floor, which the member then stores again, since
@@ -251,8 +252,9 @@ impl std::fmt::Display for TermsError {
                                 file, so the member does not start without it. Start the \
                                 member on a new log directory: it replicates the log, and \
                                 it withholds its vote and seeks no leadership until it has \
-                                caught up and joined its leader's live log, which clears \
-                                the floor cluster.vote_floor holds. It takes that leader \
+                                caught up, past its leader's answer, and joined its \
+                                leader's live log, which clears the floor \
+                                cluster.vote_floor holds. It takes that leader \
                                 only once it has heard every other member, and waits while \
                                 one is stopped. It catches up only \
                                 while its leader's log begins at position 0; where it no \
@@ -840,10 +842,12 @@ impl TermsFile {
     /// Clears the vote floor in one synced write of its slot as zeros, which every
     /// reader reads as no floor, as it reads a slot a creation left (`spec/durable-log.md`,
     /// "Terms"; ADR 0161). The member clears it once it has joined a leader's live
-    /// log with its log at or past the floor. A write a crash tears reads as no floor,
+    /// log with its log at or past the floor and its leader's answer (ADR 0163). A write
+    /// a crash tears reads as no floor,
     /// which is what the clear was to leave, or, when it wrote only position bytes that
     /// were zero already and none of the checksum, as the floor before it, which the
-    /// member holds until it joins a live log again in a later run and clears then.
+    /// member holds until it meets the clear's conditions again in a later run and
+    /// clears then.
     /// Both are safe. A file with no floor is left as it is.
     pub fn clear_vote_floor(&mut self) -> Result<(), TermsError> {
         if self.header.vote_floor.is_none() {
@@ -1137,7 +1141,7 @@ mod tests {
         // already, and none of the checksum: all eight of a floor of 0, and the bytes of
         // 1 << 20 other than its third, little-endian. The slot is as it was, its
         // checksum matches, and it reads as the floor before the clear, which the member
-        // holds until it joins a live log again.
+        // holds until it meets the clear's conditions again.
         let unchanged = dir("vote-floor-clear-torn-unchanged");
         for (floor, zero) in [(0, 0..8), (1 << 20, 3..8)] {
             let mut file = TermsFile::create(&unchanged).expect("created");

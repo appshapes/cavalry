@@ -92,6 +92,26 @@ struct Flight {
     deliver_at_ns: u64,
     to: usize,
     bytes: Vec<u8>,
+    /// The run of its sender that sent it, 0 at the cluster's start and one more at
+    /// each wipe and each start again.
+    run: i64,
+    /// The session id of the frame it travels in: its sender's consensus publication
+    /// to its receiver in the run that sent it, one of that run's own, as an exclusive
+    /// publication on a new driver gives (ADR 0163).
+    session: i32,
+}
+
+/// Which message a held pair holds back.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Hold {
+    /// The next new leadership term, as a sender holds a frame back for an image a
+    /// receiver window behind (ADR 0161).
+    NewLeadershipTerm,
+    /// The next append position, a report that reaches its leader late (ADR 0163).
+    AppendPosition,
+    /// The next floor answer, one that reaches its member late, in a later run's
+    /// image (ADR 0163).
+    FloorAnswer,
 }
 
 /// One entry of a log: its bytes and the positions it lies between.
@@ -116,6 +136,11 @@ struct Publication {
     /// ([`Cluster::wipe`]) or on the one it kept ([`Cluster::restart`]), or gave its log
     /// up to hold an election ([`Io::remove_log`]).
     closed: bool,
+    /// Where its live sender stands while a test holds it there
+    /// ([`Cluster::hold_sender`]), `None` when it sends all that is appended: an image
+    /// joins at it, and no entry at or past it reaches an image, while the member's
+    /// recording, which a replay reads, holds every entry (ADR 0163).
+    sender_held_at: Option<i64>,
 }
 
 /// A member's image of a log publication.
@@ -283,13 +308,20 @@ struct World {
     net: VecDeque<Flight>,
     /// The messages lost because `net` was full.
     full_queue_losses: u64,
-    /// The pairs, `(from, to)` by member index, whose next new leadership term is held
-    /// back, which [`Cluster::hold_back_new_leadership_term`] arms: at most
-    /// [`MAX_HELD_BACK`].
-    hold_back: Vec<(usize, usize)>,
-    /// The new leadership terms held back, each written by its sender and kept out of
-    /// `net` until [`Cluster::release_held_back`]: at most [`MAX_HELD_BACK`].
+    /// The pairs, `(from, to)` by member index, whose next message of a kind is held
+    /// back, which [`Cluster::hold_back_new_leadership_term`] and
+    /// [`Cluster::hold_back_append_position`] arm: at most [`MAX_HELD_BACK`] of any kind.
+    hold_back: Vec<(usize, usize, Hold)>,
+    /// The messages held back, each written by its sender and kept out of `net` until
+    /// [`Cluster::release_held_back`]: at most [`MAX_HELD_BACK`].
     held_back: Vec<Flight>,
+    /// Each member's run, by member index: 0 at the cluster's start, and one more at
+    /// each [`Cluster::wipe`] and each start again, as a new core adds its consensus
+    /// publications anew, each with a session id of its own (ADR 0163).
+    runs: Vec<i64>,
+    /// The members, by index, to which every floor answer is lost on its way, which
+    /// [`Cluster::lose_floor_answers_to`] sets: one flag for each member.
+    answers_lost: Vec<bool>,
     /// The most entries a replay brings in one step, which [`Cluster::set_replay_rate`]
     /// sets: `usize::MAX`, all it can reach, unless a test asks for fewer.
     replay_rate: usize,
@@ -348,8 +380,24 @@ struct MemberIo<'a> {
     own: usize,
 }
 
+/// The session id of member `from`'s consensus publication to member `to` in `from`'s
+/// run `run`, by member index: one of that run's own, distinct for every pair and every
+/// run below 2¹⁶, as a new driver's random start makes it in practice (ADR 0163).
+fn session_of(from: usize, to: usize, run: i64) -> i32 {
+    let from = i32::try_from(from).unwrap_or(0) & 0xFF;
+    let to = i32::try_from(to).unwrap_or(0) & 0xFF;
+    let run = i32::try_from(run & 0xFFFF).unwrap_or(0);
+    (from << 24) | (to << 16) | run
+}
+
 impl Io for MemberIo<'_> {
     type Fault = Faulted;
+
+    fn consensus_session(&mut self, member: i32) -> Option<i32> {
+        let to = self.world.disks.iter().position(|disk| disk.id == member)?;
+        let run = self.world.runs.get(self.own).copied().unwrap_or(0);
+        Some(session_of(self.own, to, run))
+    }
 
     fn send(&mut self, member: i32, message: &Message<'_>) -> bool {
         let Some(to) = self.world.disks.iter().position(|disk| disk.id == member) else {
@@ -359,15 +407,23 @@ impl Io for MemberIo<'_> {
         let Ok(length) = message.write(&mut buffer) else {
             return false;
         };
-        // The new leadership term a test holds back is written and not sent, as a
-        // sender holds a frame back while its receiver's image is a receiver window
-        // behind, and it reaches the member when the test releases it.
-        if matches!(message, Message::NewLeadershipTerm { .. })
+        let run = self.world.runs.get(self.own).copied().unwrap_or(0);
+        let session = session_of(self.own, to, run);
+        // The message a test holds back is written and not sent, as a sender holds a
+        // frame back while its receiver's image is a receiver window behind, and it
+        // reaches the member when the test releases it.
+        let kind = match message {
+            Message::NewLeadershipTerm { .. } => Some(Hold::NewLeadershipTerm),
+            Message::AppendPosition { .. } => Some(Hold::AppendPosition),
+            Message::FloorAnswer { .. } => Some(Hold::FloorAnswer),
+            _ => None,
+        };
+        if let Some(kind) = kind
             && let Some(armed) = self
                 .world
                 .hold_back
                 .iter()
-                .position(|&pair| pair == (self.own, to))
+                .position(|&held| held == (self.own, to, kind))
             && self.world.held_back.len() < MAX_HELD_BACK
         {
             self.world.hold_back.swap_remove(armed);
@@ -375,7 +431,16 @@ impl Io for MemberIo<'_> {
                 deliver_at_ns: 0,
                 to,
                 bytes: buffer.get(..length).unwrap_or(&[]).to_vec(),
+                run,
+                session,
             });
+            return true;
+        }
+        // A floor answer to a member a test cuts off from its answers is lost on its
+        // way, as a datagram is.
+        if matches!(message, Message::FloorAnswer { .. })
+            && self.world.answers_lost.get(to).copied().unwrap_or(false)
+        {
             return true;
         }
         // A cut or halted member's messages leave it and arrive nowhere, as a
@@ -415,6 +480,8 @@ impl Io for MemberIo<'_> {
                 .saturating_add(STEP_NS.saturating_mul(delay_ms.saturating_add(1))),
             to,
             bytes: buffer.get(..length).unwrap_or(&[]).to_vec(),
+            run,
+            session,
         });
         true
     }
@@ -480,6 +547,7 @@ impl Io for MemberIo<'_> {
             position: base,
             entries: Vec::new(),
             closed: false,
+            sender_held_at: None,
         });
         Ok(Some(Log {
             session_id,
@@ -507,11 +575,28 @@ impl Io for MemberIo<'_> {
         else {
             return Ok(None);
         };
-        let (leader, position, entries) = (
-            publication.leader,
-            publication.position,
-            publication.entries.len(),
-        );
+        // A sender a test holds is where an image joins: at the end of the last entry
+        // it sent whole, at or below where it is held, as a sender sends whole frames,
+        // or at the term's base, its first entry's position, when it sent none whole.
+        // The entries it has not sent are the ones that reach the image once it sends
+        // them.
+        let held = publication.sender_held_at.unwrap_or(i64::MAX);
+        let entries = publication
+            .entries
+            .iter()
+            .take_while(|entry| entry.position_after <= held)
+            .count();
+        let position = if publication.sender_held_at.is_none() {
+            publication.position
+        } else {
+            entries
+                .checked_sub(1)
+                .and_then(|last| publication.entries.get(last))
+                .map(|entry| entry.position_after)
+                .or_else(|| publication.entries.first().map(|entry| entry.position))
+                .unwrap_or(publication.position)
+        };
+        let leader = publication.leader;
         let parted = unheard_since(&self.world.disks, &self.world.cuts, leader, self.own);
         let Some(disk) = self.world.disks.get_mut(self.own) else {
             return Ok(None);
@@ -905,6 +990,8 @@ impl Cluster {
                 full_queue_losses: 0,
                 hold_back: Vec::with_capacity(MAX_HELD_BACK),
                 held_back: Vec::with_capacity(MAX_HELD_BACK),
+                runs: vec![0; member_ids.len()],
+                answers_lost: vec![false; member_ids.len()],
                 replay_rate: usize::MAX,
                 publications: Vec::new(),
                 cuts: Vec::new(),
@@ -990,13 +1077,21 @@ impl Cluster {
                 // gap: the member's log is then not the publication's, which is what
                 // the safety check of a test finds. The election's truncation cuts the
                 // member's log to where it joins.
-                for entry in publication.entries.iter().skip(image.next) {
+                let held = publication.sender_held_at.unwrap_or(i64::MAX);
+                let mut next = image.next;
+                for entry in publication
+                    .entries
+                    .iter()
+                    .skip(image.next)
+                    .take_while(|entry| entry.position_after <= held)
+                {
                     if entry.position >= disk.received {
                         disk.received = entry.position_after;
                         disk.log.push(entry.clone());
                     }
+                    next = next.saturating_add(1);
                 }
-                image.next = publication.entries.len();
+                image.next = next;
                 disk.image = Some(image);
             }
             if let Some(disk) = self.world.disks.get_mut(index)
@@ -1059,7 +1154,9 @@ impl Cluster {
                 // the I/O left it. The rest of the step's messages are read, as the rest
                 // of a poll's batch is, and the member's own work waits for the next
                 // step, as `cavalry run` runs its next cycle.
-                if core.on_message(clock, &message, &mut io).is_err()
+                if core
+                    .on_message_in(clock, &message, flight.session, &mut io)
+                    .is_err()
                     && let Some(slot) = faulted.get_mut(flight.to)
                 {
                     *slot = true;
@@ -1532,6 +1629,9 @@ impl Cluster {
             return;
         };
         self.lose_in_flight_to(index);
+        if let Some(run) = self.world.runs.get_mut(index) {
+            *run = run.saturating_add(1);
+        }
         let ids: Vec<i32> = self.world.disks.iter().map(|disk| disk.id).collect();
         let standbys = self.standbys.get(index).cloned().unwrap_or_default();
         let led = self
@@ -1547,11 +1647,10 @@ impl Cluster {
         if let Some(disk) = self.world.disks.get_mut(index) {
             *disk = Disk::empty(member);
         }
-        // Its replays are gone with its recordings, and the ones to it with its
-        // subscription.
-        self.world
-            .replays
-            .retain(|replay| replay.from != index && replay.to != index);
+        // Its replays are gone with its recordings. The ones to it end with its
+        // subscription, and the member that runs each reads that it stopped, as a
+        // driver ends a replay whose subscriber went and its member reads the stop.
+        self.end_replays_of(index);
         if led {
             for publication in &mut self.world.publications {
                 if publication.leader == index {
@@ -1605,6 +1704,9 @@ impl Cluster {
             *core = new;
         }
         self.lose_in_flight_to(index);
+        if let Some(run) = self.world.runs.get_mut(index) {
+            *run = run.saturating_add(1);
+        }
         if let Some(marks) = self.standbys.get_mut(index) {
             *marks = standby_ids.to_vec();
         }
@@ -1634,9 +1736,7 @@ impl Cluster {
             disk.catchup_armed = false;
             disk.catchup_image = None;
         }
-        self.world
-            .replays
-            .retain(|replay| replay.from != index && replay.to != index);
+        self.end_replays_of(index);
         if led {
             for publication in &mut self.world.publications {
                 if publication.leader == index {
@@ -1812,11 +1912,114 @@ impl Cluster {
     pub fn hold_back_new_leadership_term(&mut self, from: i32, to: i32) {
         let index = |id: i32| self.world.disks.iter().position(|disk| disk.id == id);
         if let (Some(from), Some(to)) = (index(from), index(to))
-            && !self.world.hold_back.contains(&(from, to))
+            && !self
+                .world
+                .hold_back
+                .contains(&(from, to, Hold::NewLeadershipTerm))
             && self.world.hold_back.len() < MAX_HELD_BACK
         {
-            self.world.hold_back.push((from, to));
+            self.world
+                .hold_back
+                .push((from, to, Hold::NewLeadershipTerm));
         }
+    }
+
+    /// Holds back the next append position member `from` sends to member `to`: it is
+    /// written, kept out of the in-flight queue, and reaches `to` when the test
+    /// releases it with [`Cluster::release_held_back`], with the run of `from` that
+    /// wrote it, as a report of a run that ended reaches its leader late, held behind
+    /// flow control on a publication that lingers or on the network (`spec/udp.md`,
+    /// "The sender"; ADR 0163). Armed as [`Cluster::hold_back_new_leadership_term`]
+    /// arms its frame, under the one bound of [`MAX_HELD_BACK`] for both kinds.
+    pub fn hold_back_append_position(&mut self, from: i32, to: i32) {
+        let index = |id: i32| self.world.disks.iter().position(|disk| disk.id == id);
+        if let (Some(from), Some(to)) = (index(from), index(to))
+            && !self
+                .world
+                .hold_back
+                .contains(&(from, to, Hold::AppendPosition))
+            && self.world.hold_back.len() < MAX_HELD_BACK
+        {
+            self.world.hold_back.push((from, to, Hold::AppendPosition));
+        }
+    }
+
+    /// The append positions held back, each as its sender, its member, its log position
+    /// and the run of its sender that wrote it, in the order written.
+    pub fn held_back_reports(&self) -> Vec<(i32, i32, i64, i64)> {
+        self.world
+            .held_back
+            .iter()
+            .filter_map(|flight| {
+                let to = self.world.disks.get(flight.to)?.id;
+                match Message::parse(Stream::Consensus, &flight.bytes) {
+                    Ok(Message::AppendPosition {
+                        log_position,
+                        follower_member_id,
+                        ..
+                    }) => Some((follower_member_id, to, log_position, flight.run)),
+                    _ => None,
+                }
+            })
+            .collect()
+    }
+
+    /// The replays of the member at `index`, which starts again: the ones it ran are
+    /// gone with its recordings, and the ones to it end, each read as stopped by the
+    /// member that ran it, so that that member serves the new run's requests and does
+    /// not wait for a stop that would never come. This is a model's shortcut: a driver
+    /// ends such a replay at its member's stop, or once the replay connect timeout has
+    /// passed with no subscriber, and until then its image can reach the new run's
+    /// catch-up subscription, which costs time and no entry. The model leaves that out
+    /// (ADR 0163).
+    fn end_replays_of(&mut self, index: usize) {
+        self.world.replays.retain(|replay| replay.from != index);
+        for replay in &mut self.world.replays {
+            if replay.to == index {
+                replay.stopping = true;
+            }
+        }
+    }
+
+    /// Holds the live sender of `leader`'s open log publication at `at`, or lets it send
+    /// everything again with `None`, as a sender stands when no receiver has answered
+    /// it while its publisher appended, which `spec/udp.md`, "The sender", allows for up
+    /// to the connection timeout: an image joins at it, and no entry at or past it
+    /// reaches an image until it is let go. The leader's recording, which a replay
+    /// reads, holds every entry, so a member that catches up has from a replay what
+    /// the live log has not sent (ADR 0163). An id that leads no open publication does
+    /// nothing.
+    pub fn hold_sender(&mut self, leader: i32, at: Option<i64>) {
+        let Some(index) = self.index(leader) else {
+            return;
+        };
+        for publication in &mut self.world.publications {
+            if publication.leader == index && !publication.closed {
+                publication.sender_held_at = at;
+            }
+        }
+    }
+
+    /// Loses every floor answer sent to `member` from here on, as a lossy path would, or
+    /// lets them reach it again with `lost` false, so that a test can hold a member
+    /// that has caught up with its floor still unanswered (ADR 0163). An id no member
+    /// has does nothing.
+    pub fn lose_floor_answers_to(&mut self, member: i32, lost: bool) {
+        if let Some(slot) = self
+            .index(member)
+            .and_then(|index| self.world.answers_lost.get_mut(index))
+        {
+            *slot = lost;
+        }
+    }
+
+    /// The member's run: 0 at the cluster's start and one more at each
+    /// [`Cluster::wipe`] and each start again; `None` for an id no member has. A
+    /// message a member sends travels in the session of that run's publication to its
+    /// receiver, which a floor answer names (ADR 0163).
+    pub fn run(&self, member: i32) -> Option<i64> {
+        self.index(member)
+            .and_then(|index| self.world.runs.get(index).copied())
     }
 
     /// The new leadership terms held back, each as its sender, its member, its log
@@ -1840,12 +2043,14 @@ impl Cluster {
             .collect()
     }
 
-    /// Hands the new leadership terms held back for member `to` to it, due at the next
-    /// step, as the sender sends a frame it held to the image the member has now: a
-    /// member started again since gets it in its new image (`spec/udp.md`, "The
-    /// receiver"). Released to a member in init, one is read as the in-memory cluster
-    /// reads any message there (work item 458), so a test releases them once the member
-    /// canvasses. The holds still armed are disarmed.
+    /// Hands every message held back for member `to` to it, new leadership terms,
+    /// append positions and floor answers, due at the next step and in the order held,
+    /// as the sender sends a frame it held to the image the member has now: a member
+    /// started again since gets it in its new image (`spec/udp.md`, "The receiver").
+    /// Released to a member in init, one is read as the in-memory cluster reads any
+    /// message there (work item 458), so a test releases them once the member
+    /// canvasses. The holds still armed for `to` are disarmed, and those for other
+    /// members stay armed.
     pub fn release_held_back(&mut self, to: i32) {
         let Some(to) = self.world.disks.iter().position(|disk| disk.id == to) else {
             return;
@@ -1864,7 +2069,50 @@ impl Cluster {
             }
         }
         self.world.held_back = kept;
-        self.world.hold_back.clear();
+        self.world
+            .hold_back
+            .retain(|&(_, armed_to, _)| armed_to != to);
+    }
+
+    /// Holds back the next floor answer member `from` sends to member `to`: it is
+    /// written, kept out of the in-flight queue, and reaches `to` when the test releases
+    /// it with [`Cluster::release_held_back`], naming the session of the run it
+    /// answered, as a frame the sender held reaches the image a member has after it
+    /// started again (`spec/udp.md`, "The receiver"; ADR 0163). Armed as
+    /// [`Cluster::hold_back_new_leadership_term`] arms its frame, under the one bound
+    /// of [`MAX_HELD_BACK`] for every kind.
+    pub fn hold_back_floor_answer(&mut self, from: i32, to: i32) {
+        let index = |id: i32| self.world.disks.iter().position(|disk| disk.id == id);
+        if let (Some(from), Some(to)) = (index(from), index(to))
+            && !self
+                .world
+                .hold_back
+                .contains(&(from, to, Hold::FloorAnswer))
+            && self.world.hold_back.len() < MAX_HELD_BACK
+        {
+            self.world.hold_back.push((from, to, Hold::FloorAnswer));
+        }
+    }
+
+    /// The floor answers held back, each as its leader, its member, its log position and
+    /// the session it names, in the order written.
+    pub fn held_back_answers(&self) -> Vec<(i32, i32, i64, i32)> {
+        self.world
+            .held_back
+            .iter()
+            .filter_map(|flight| {
+                let to = self.world.disks.get(flight.to)?.id;
+                match Message::parse(Stream::Consensus, &flight.bytes) {
+                    Ok(Message::FloorAnswer {
+                        log_position,
+                        leader_member_id,
+                        session_id,
+                        ..
+                    }) => Some((leader_member_id, to, log_position, session_id)),
+                    _ => None,
+                }
+            })
+            .collect()
     }
 
     /// Brings at most `entries_per_step` entries a step in each replay from here on, as a

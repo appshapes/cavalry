@@ -270,6 +270,17 @@ fn fields(message: &Message<'_>) -> Value {
         } => json!({
             "leadership_term_id": leadership_term_id, "follower_member_id": follower_member_id,
         }),
+        Message::FloorAnswer {
+            leadership_term_id,
+            log_position,
+            leader_member_id,
+            follower_member_id,
+            session_id,
+        } => json!({
+            "leadership_term_id": leadership_term_id, "log_position": log_position,
+            "leader_member_id": leader_member_id, "follower_member_id": follower_member_id,
+            "session_id": session_id,
+        }),
         Message::SnapshotMarker {
             type_id,
             log_position,
@@ -701,6 +712,7 @@ fn arithmetic_vector(name: &str, vector: &Value) {
                 int(inputs, "vote_floor"),
                 joined,
                 int(inputs, "append_position"),
+                int(inputs, "answered"),
             );
             json!({"clears": clears})
         }

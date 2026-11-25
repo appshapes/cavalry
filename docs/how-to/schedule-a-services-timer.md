@@ -22,9 +22,9 @@ In Aeron, these are a service's `scheduleTimer` and `cancelTimer`, and its
 - A cluster that runs, started as [Run a cluster of three members](run-a-cluster.md)
   starts one: three members on one host, with the directories `/tmp/cavalry-member-0`,
   `-1` and `-2`.
-- Every member of it runs version 2 of the cluster protocol, with the service
-  beside it. `cavalry doctor` says so in each member's `note cluster-member` line:
-  `it runs version 2 of the cluster protocol`. In a cluster that is being upgraded
+- Every member of it runs version 2 of the cluster protocol or a later one, with the
+  service beside it. `cavalry doctor` says so in each member's `note cluster-member`
+  line: `it runs version 2 of the cluster protocol`, or version 3. In a cluster that is being upgraded
   from version 1, finish [the upgrade](upgrade-a-cluster.md) before a program
   schedules its first timer, and do not step a member back after it: a service of
   version 1 hands its program no timer, so it would compute another state from the

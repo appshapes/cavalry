@@ -255,7 +255,7 @@ The client API implementation, re-exported by the `cavalry` crate. Data plane.
   `cluster.service_timer_events_passed_over` and
   `cluster.service_timer_cancels_dropped` count it. A program schedules its first
   timer only once every member of its cluster, with the service beside it, runs
-  version 2 of the cluster protocol, and from that entry on no member is stepped
+  version 2 of the cluster protocol or a later one, and from that entry on no member is stepped
   back: a service of version 1 hands its program no timer, so the two would
   compute two states from one log (`spec/cluster.md`, "Versions and the upgrade"). A service
   written through the C ABI has the same timers at version 7 of the ABI

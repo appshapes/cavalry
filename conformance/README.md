@@ -240,7 +240,7 @@ and commit position. At the same moments it asks the newer build's `cavalry doct
 of each running member, whatever build the member is of, and holds what the end of
 the member's `note cluster-member` line says of the member's
 `cluster.protocol_version` to the build the script started the member from (ADR
-0137). A member at N+1 is named `it runs version 2 of the cluster protocol, 0.2.0`,
+0137). A member at N+1 is named `it runs version 3 of the cluster protocol, 0.3.0`,
 the number read from the first line of this tree's `spec/cluster.md`. Whether a
 member at N has the counter is read from N's `counters.toml` alone, in N's exported
 tree, and not from the version of N's page: every tree of version 0 lacks it, and so

@@ -29,8 +29,9 @@ directory either version wrote opens under the other in place. Version 6 adds th
 vote floor, a slot of the terms file's header that a cluster member writes when it
 takes a leader with its log empty, and that it withholds its vote while it holds (ADR 0145;
 `spec/cluster.md`, "A member that lost its log"); within version 6 the member clears
-the slot to zeros once it has joined a leader's live log,
-which a reader reads as no floor, as a slot a creation left (ADR 0161); the slot was
+the slot to zeros once it has joined a leader's live log, and from version 3 of
+`spec/cluster.md` once its leader has answered its present run too, which a reader reads
+as no floor, as a slot a creation left (ADR 0161, ADR 0163); the slot was
 reserved bytes
 that a reader of version 5 ignores. Within version 6, a member's consensus module syncs
 the log directory after it creates the terms file, as it does after it creates the log
@@ -281,8 +282,8 @@ it, and the member is safe under both:
 - A torn clear may have written only position bytes that were already zero, as some
   bytes of every floor are and all eight bytes of a floor of 0 are, and none of the
   checksum. The slot is then as it was, its checksum matches, and it reads as the
-  floor before the clear: the member withholds until it has joined a leader's live log
-  again in a later run, and clears the floor then. Any other torn clear fails its
+  floor before the clear: the member withholds until it has met the clear's
+  conditions again in a later run, and clears the floor then. Any other torn clear fails its
   checksum and reads as no floor, the slot after it, which is what the clear was to
   leave: the module clears the floor only once its log holds what the floor guarded.
 
@@ -699,7 +700,9 @@ while it holds one is refused the same way. A member that cleared its floor stor
 new one the same way, when it takes a leader with its log empty again. It clears the
 floor in one synced write of the slot's twelve bytes as zeros, once for each floor,
 when the member has joined a leader's live log since it stored the floor and in this
-run of its module, with its log at or past the floor (ADR 0161); a file with no floor
+run of its module, with its log at or past the floor and, from version 3 of
+`spec/cluster.md`, at or past its leader's answer to that run (ADR 0161, ADR 0163); a
+file with no floor
 it leaves as it is. A crash leaves at most one write torn, which the reader reads as
 the state before it: an empty entry, a valid entry not yet deleted, or the candidate
 term stored before the raise; or, for a write of the vote floor's slot, as the slot
