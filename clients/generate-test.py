@@ -356,6 +356,67 @@ class Package(unittest.TestCase):
                      "cavalry_cluster_service_action"):
             self.assertIn(name, gen.PER_MESSAGE)
 
+    def test_a_cluster_services_timer_calls_are_one_abi_call_each_and_return_its_answer(self):
+        """The Python cluster service's timers (ADR 0157): `schedule_timer` and
+        `cancel_timer` are one ABI call each, with the service's handle, the id and the
+        deadline as they were given, any int64, and each returns what the ABI answered,
+        a timer code, 0 or -1, raising for none of them. An id or a deadline that is no
+        int64 is refused before the ABI is called: ctypes would pass an `int` outside
+        the range as its low 64 bits, another timer or another deadline."""
+        cavalry = load_package()
+
+        class Abi:
+            def __init__(self):
+                self.calls = []
+                self.answers = [cavalry.CAVALRY_CLUSTER_TIMER_SCHEDULED, cavalry.CAVALRY_CLUSTER_TIMER_REFUSED, -1,
+                                0, -1]
+
+            def cavalry_cluster_service_schedule_timer(self, handle, correlation_id, deadline):
+                self.calls.append(("schedule", handle, correlation_id, deadline))
+                return self.answers.pop(0)
+
+            def cavalry_cluster_service_cancel_timer(self, handle, correlation_id):
+                self.calls.append(("cancel", handle, correlation_id))
+                return self.answers.pop(0)
+
+        abi = Abi()
+        service = cavalry.ClusterService(abi, 2, object())
+        most, least = 2 ** 63 - 1, -(2 ** 63)
+        self.assertEqual(service.schedule_timer(most, least), cavalry.CAVALRY_CLUSTER_TIMER_SCHEDULED)
+        self.assertEqual(service.schedule_timer(0, 1_700_000_000_050), cavalry.CAVALRY_CLUSTER_TIMER_REFUSED)
+        self.assertEqual(service.schedule_timer(7, 7), -1)
+        self.assertEqual(service.cancel_timer(least), 0)
+        self.assertEqual(service.cancel_timer(7), -1)
+        self.assertEqual(abi.calls, [("schedule", 2, most, least), ("schedule", 2, 0, 1_700_000_000_050),
+                                     ("schedule", 2, 7, 7), ("cancel", 2, least), ("cancel", 2, 7)])
+        made = list(abi.calls)
+        class Indexed:
+            def __index__(self):
+                return 7
+
+        for refused, error in ((most + 1, OverflowError), (least - 1, OverflowError), (2 ** 64 + 5, OverflowError),
+                               (10 ** 5000, OverflowError),  # no digits in the message: Python writes none this long
+                               (1.5, TypeError), (7.0, TypeError), ("7", TypeError), (None, TypeError),
+                               (True, TypeError), (False, TypeError), (Indexed(), TypeError)):
+            for call in (lambda: service.schedule_timer(refused, 7), lambda: service.schedule_timer(7, refused),
+                         lambda: service.cancel_timer(refused)):
+                with self.assertRaises(error) as raised:
+                    call()
+                message = str(raised.exception)
+                self.assertIn("an int64", message)
+                # CLAUDE.md: the message says what to do next and names the anchor that
+                # explains it, a heading of the README.
+                self.assertIn("Pass an int from -(2 ** 63) to 2 ** 63 - 1", message)
+                self.assertTrue(message.endswith("See clients/python/README.md#a-services-timers"), message)
+        self.assertEqual(abi.calls, made)  # nothing reached the ABI
+        with open(os.path.join(gen.ROOT, "clients", "python", "README.md"), encoding="utf-8") as f:
+            slugs = {re.sub(r"[^a-z0-9 -]", "", line.lstrip("#").strip().lower()).replace(" ", "-")
+                     for line in f if line.startswith("#")}
+        self.assertIn("a-services-timers", slugs)
+        # What the reader is for: through ctypes itself such an int is another value.
+        self.assertEqual(ctypes.c_int64(most + 1).value, least)
+        self.assertEqual(ctypes.c_int64(2 ** 64 + 5).value, 5)
+
     def test_a_cluster_sessions_poll_hands_every_reply_over_and_raises_after_it(self):
         """The Python cluster session (ADR 0124): the trampoline reads each reply's values
         into the one struct the session keeps before the handler runs, every reply the
