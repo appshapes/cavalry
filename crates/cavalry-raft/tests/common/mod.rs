@@ -87,6 +87,8 @@ pub struct Stub {
     pub last_append: Option<(i32, i64, i64)>,
     /// The flags of that append position.
     pub last_append_flags: u8,
+    /// The last floor answer sent, with the member it was for (ADR 0163).
+    pub last_floor_answer: Option<(i32, Message<'static>)>,
     /// The candidate term the log directory holds: what a test gave it, as a
     /// directory kept from an earlier start, or what the member stored since.
     pub candidate_term: i64,
@@ -138,6 +140,7 @@ impl Stub {
             catchup_image: None,
             last_append: None,
             last_append_flags: 0,
+            last_floor_answer: None,
             candidate_term: -1,
             vote_floor: -1,
             log_term: -1,
@@ -248,6 +251,26 @@ impl Io for Stub {
             self.last_append = Some((member, leadership_term_id, log_position));
             self.last_append_flags = flags;
         }
+        if let Message::FloorAnswer {
+            leadership_term_id,
+            log_position,
+            leader_member_id,
+            follower_member_id,
+            session_id,
+        } = *message
+            && !self.refuse_send
+        {
+            self.last_floor_answer = Some((
+                member,
+                Message::FloorAnswer {
+                    leadership_term_id,
+                    log_position,
+                    leader_member_id,
+                    follower_member_id,
+                    session_id,
+                },
+            ));
+        }
         !self.refuse_send
     }
 
@@ -279,6 +302,11 @@ impl Io for Stub {
     fn clear_vote_floor(&mut self) -> Result<(), Self::Fault> {
         self.vote_floor = -1;
         Ok(())
+    }
+
+    /// One session for each peer, 1000 above its id: the stub's run never changes.
+    fn consensus_session(&mut self, member: i32) -> Option<i32> {
+        Some(member.saturating_add(1000))
     }
 
     fn record_term(&mut self, term: i64, base: i64) -> Result<(), Self::Fault> {
@@ -540,8 +568,42 @@ pub fn hear_the_others(member: &mut Consensus, io: &mut Stub, ms: u64, leader: i
 /// Takes `member` from canvass to closed as a follower of the leader whose new
 /// leadership term is `term`, with the image of the leader's log joining at `join`,
 /// from `ms` on; returns the millisecond its election closed at. The member has heard
-/// every other member first ([`hear_the_others`]).
+/// every other member first ([`hear_the_others`]). A member that took its leader with its
+/// log empty holds a vote floor until its leader answers its present run (ADR 0163): it
+/// is given the leader's answer, naming the session of its publication to the leader in
+/// this stub, at the join, and its floor clears.
 pub fn follow_term(
+    member: &mut Consensus,
+    io: &mut Stub,
+    ms: u64,
+    term: &Message<'_>,
+    join: i64,
+) -> u64 {
+    let ms = follow_term_unanswered(member, io, ms, term, join);
+    if member.vote_floor() >= 0
+        && let Message::NewLeadershipTerm {
+            leader_member_id,
+            leadership_term_id,
+            ..
+        } = *term
+    {
+        let answer = Message::FloorAnswer {
+            leadership_term_id,
+            log_position: join,
+            leader_member_id,
+            follower_member_id: member.member_id(),
+            session_id: leader_member_id.saturating_add(1000),
+        };
+        member.on_message(at(ms), &answer, io).expect("no fault");
+        member.do_work(at(ms), io).expect("no fault");
+        assert_eq!(member.vote_floor(), -1, "the answer clears the floor");
+    }
+    ms
+}
+
+/// [`follow_term`] with no floor answer: a member that took its leader with its log
+/// empty still holds its vote floor when its election closes (ADR 0163).
+pub fn follow_term_unanswered(
     member: &mut Consensus,
     io: &mut Stub,
     ms: u64,

@@ -286,12 +286,12 @@ fn three_members_replicate_a_hundred_thousand_entries_and_their_recordings_are_e
         assert_eq!(counter(member, CLUSTER_LEADER_MEMBER_ID.0), -1);
         assert_eq!(counter(member, CLUSTER_ELECTION_CAUSE.0), 0);
         // It holds its own version of the cluster protocol from its start, in
-        // semantic form: 512 for version 2, 0.2.0 (ADR 0137).
+        // semantic form: 768 for version 3, 0.3.0 (ADR 0137, ADR 0163).
         assert_eq!(
             counter(member, CLUSTER_PROTOCOL_VERSION.0),
             i64::from(PROTOCOL_VERSION)
         );
-        assert_eq!(counter(member, CLUSTER_PROTOCOL_VERSION.0), 512);
+        assert_eq!(counter(member, CLUSTER_PROTOCOL_VERSION.0), 768);
         // No member adds a counter of type 113, which was
         // `cluster.appointed_leader_behind` until it was retired (ADR 0107).
         assert!(
