@@ -4879,15 +4879,27 @@ fn requests_in_one_poll(test: &str, publications: usize, offsets: &[(usize, i64)
     let mut beside = peer
         .add_subscription(&channel, CONSENSUS_STREAM_ID)
         .expect("the peer reads the follower's stream");
-    // Each publication is joined by the follower's subscription before it sends.
+    // Each publication is an image of the follower's own subscription before it
+    // sends. A connected publication is not enough: `beside` connects it too, and the
+    // follower's client learns of the image in a later duty cycle, so a poll before
+    // that reads nothing of it (macOS, master's run 45598311008).
+    let sessions: Vec<i32> = sent.iter().map(Publication::session_id).collect();
     wait_for(
-        "the follower's stream takes the peer's publications",
+        "the follower's subscription holds an image of each publication",
         || {
             follower.do_work().expect("the follower's duty cycle");
-            sent.iter().all(Publication::is_connected).then_some(())
+            sessions
+                .iter()
+                .all(|&session| {
+                    follower
+                        .consensus
+                        .images()
+                        .iter()
+                        .any(|image| image.session_id() == session)
+                })
+                .then_some(())
         },
     );
-    let sessions: Vec<i32> = sent.iter().map(Publication::session_id).collect();
     let mut bytes = [0u8; 128];
     for &(publication, above) in offsets {
         let request = Message::RequestVote {
