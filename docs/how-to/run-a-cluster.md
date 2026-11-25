@@ -154,10 +154,13 @@ committed once a quorum, two of three, has it on disk.
    192; it follows member 0; its last election began because the member started`,
    with the id of the member that leads now in place of 0.
 
-   Do this for a member that was stopped, or whose process was ended. Do not do it
-   for a member whose host lost power, or whose operating system crashed, while the
-   member ran: "When it does not work" says why, under "The member's host lost
-   power".
+   Do the same for a member that was stopped, whose process was ended, or whose host
+   lost power or whose operating system crashed while it ran. After a crash its
+   driver cuts each recording that was being made to the position the recording had
+   synced, counts each cut in `recording.cut_to_synced`, and `cavalry doctor` explains
+   it. "When it does not work", under "The member's host lost power", says what that
+   means, and names the one member that starts on a new log directory instead: one
+   that ran a driver of an earlier version when the power was lost.
 
 ## How to verify it worked
 
