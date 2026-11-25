@@ -119,11 +119,15 @@ the only implementation and the C ABI is a thin layer over it
   `cavalry_committed_log_entry_position`, `cavalry_cluster_session_offer`,
   `cavalry_cluster_session_poll`, `cavalry_cluster_reply_values`,
   `cavalry_cluster_service_poll`, `cavalry_cluster_entry_values`,
-  `cavalry_cluster_service_reply` and `cavalry_cluster_service_action`. The
+  `cavalry_cluster_service_reply`, `cavalry_cluster_service_schedule_timer`,
+  `cavalry_cluster_service_cancel_timer` and `cavalry_cluster_service_action`. The
   thread-local error is a fixed buffer, and `tests/allocations.rs` counts across
-  all sixteen. A service's poll sends a command to the driver at a session's
+  all eighteen. A service's poll sends a command to the driver at a session's
   opening, where its answering changes and at a recording's end, and none for a
-  session message.
+  session message. Once in a service's life it sends six more, at the poll after
+  its program first schedules a timer or the service first passes a timer event
+  over: its five counters and its publication to its member (`spec/cluster.md`,
+  "What a service tells its member").
 - Hand a function a header's values that the header does not carry. A header is of
   four kinds, by the poll that made it, and a function asked for what a kind lacks
   sets `CAVALRY_ERR_WRONG_HEADER` or `CAVALRY_ERR_NO_POSITION` and fills nothing

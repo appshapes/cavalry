@@ -154,7 +154,9 @@ service)` for each committed entry, in order:
   call. It is empty for every other entry.
 - `entry` is a `ClusterEntryValues`: `entry.Type`, one of
   `Abi.CLUSTER_ENTRY_SESSION_MESSAGE`, `_SESSION_OPEN`, `_SESSION_CLOSE`,
-  `_NEW_LEADERSHIP_TERM`, `_OTHER` and `_SNAPSHOT`; `entry.Position`;
+  `_NEW_LEADERSHIP_TERM`, `_OTHER`, `_SNAPSHOT` and `_TIMER`, a timer of the program's
+  with its id in `entry.CorrelationId`, which this package's programs are handed
+  none of yet, since it does not wrap the calls that schedule one; `entry.Position`;
   `entry.LeadershipTermId`;
   `entry.Timestamp`, the cluster's time, the one clock a service reads, so that every
   member's service reaches the same state; `entry.SessionId`, −1 where the entry has

@@ -140,7 +140,9 @@ service)` for each committed entry, in order:
   is empty for every other entry.
 - `entry` carries the entry's values: `entry.type`, one of
   `CAVALRY_CLUSTER_ENTRY_SESSION_MESSAGE`, `_SESSION_OPEN`, `_SESSION_CLOSE`,
-  `_NEW_LEADERSHIP_TERM`, `_OTHER` and `_SNAPSHOT`; `entry.position`;
+  `_NEW_LEADERSHIP_TERM`, `_OTHER`, `_SNAPSHOT` and `_TIMER`, a timer of the program's
+  with its id in `entry.correlation_id`, which this package's programs are handed
+  none of yet, since it does not wrap the calls that schedule one; `entry.position`;
   `entry.leadership_term_id`;
   `entry.timestamp`, the cluster's time, the one clock a service reads, so that every
   member's service reaches the same state; `entry.session_id`, −1 where the entry has

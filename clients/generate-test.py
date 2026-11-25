@@ -152,7 +152,7 @@ class Package(unittest.TestCase):
         self.assertIn("cavalry_fragment_handler_t = CFUNCTYPE(None, c_void_p, c_void_p, c_size_t, c_void_p)", abi)
 
     def test_the_per_message_functions_are_the_allocation_tests_and_load_through_pydll(self):
-        """The sixteen functions `crates/cavalry-ffi/tests/allocations.rs` counts are the ones
+        """The eighteen functions `crates/cavalry-ffi/tests/allocations.rs` counts are the ones
         the binding keeps the GIL held across; every other function releases it, so an add
         that waits on the driver does not stop the process's other threads."""
         with open(os.path.join(gen.ROOT, "crates", "cavalry-ffi", "tests", "allocations.rs"), encoding="utf-8") as f:

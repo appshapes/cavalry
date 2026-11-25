@@ -287,7 +287,9 @@ int main(int argc, char **argv) {
         if (passed(&until)) wrong("the timer was not handed to three services in 60 s");
         cycle(served, session, &answered);
     }
-    /* A second handing would come in this time. */
+    /* A second handing of the same event would come in this time. A second event,
+     * which a refresh of the leader's member can make a second later, is passed over
+     * by every service, the timer being pending no more. */
     until = after(300);
     while (!passed(&until)) cycle(served, session, &answered);
     for (int i = 0; i < MEMBERS; i++) {

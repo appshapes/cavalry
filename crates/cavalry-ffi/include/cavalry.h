@@ -1237,7 +1237,13 @@ int cavalry_cluster_service(cavalry_cluster_service_t **service,
  opens the member's log, follows the log's sessions, and holds a publication to
  each open session while the service answers. Those are commands sent with
  `client`, which the poll holds for its run: none of them is sent, and nothing is
- allocated, for a session message.
+ allocated, for a session message. Once in a service's life the poll sends six
+ more, its five counters and its publication to its member, after its program
+ first schedules a timer or the service first passes a timer event over; the
+ driver's refusal of one is that poll's error, after the entries the handler took
+ are taken. A timer event whose timer is not pending, or not yet due, is handed to
+ no handler: the service takes it, so it is among the entries the poll's count
+ holds, and a poll may return more than its handler was called.
 
  A poll with a closed `client`, as when the member's driver has stopped, is −1 with
  `CAVALRY_ERR_CLOSED`, whatever the service held and whatever the poll was doing

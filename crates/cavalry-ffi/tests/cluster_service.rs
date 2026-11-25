@@ -1742,7 +1742,8 @@ fn a_program_schedules_a_timer_and_is_handed_it_once_beside_every_member() {
     );
     for member in &cluster.members {
         assert_eq!(timers(member), first, "member {}", member.id);
-        // Scheduled, then scheduled and cancelled: what each call answered.
+        // In the order of the log: the timer of `cancel` scheduled and cancelled, then
+        // the timer of `timer` scheduled. What each call answered.
         assert_eq!(
             member.served.timers,
             [

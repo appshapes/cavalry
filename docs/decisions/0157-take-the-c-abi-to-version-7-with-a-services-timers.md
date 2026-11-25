@@ -93,6 +93,10 @@ declaration is a new version.
 - `conformance/c/cluster.c`, the C runner's cluster round: each service's program
   schedules a timer at the message it takes, and all three are handed it once, with
   its id, at one position and no earlier than its deadline.
+- `crates/cavalry-ffi/tests/allocations.rs`, `the_message_path_allocates_nothing`:
+  the service's handler schedules one timer and cancels another at every message
+  of its counted window, beside the leader of three members, and nothing is
+  allocated.
 - The rule itself is held by `crates/cavalry-raft/tests/timer_search.rs` and by
   `just replay-check`'s timers; the two calls here reach the same `Replies`.
 

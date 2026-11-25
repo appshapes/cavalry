@@ -53,6 +53,8 @@ PER_MESSAGE = (
     "cavalry_cluster_service_poll",
     "cavalry_cluster_entry_values",
     "cavalry_cluster_service_reply",
+    "cavalry_cluster_service_schedule_timer",
+    "cavalry_cluster_service_cancel_timer",
     "cavalry_cluster_service_action",
 )
 

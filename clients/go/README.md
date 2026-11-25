@@ -156,7 +156,10 @@ service)` for each committed entry, in order:
   `nil` for every other entry.
 - `entry` is a `*ClusterEntryValues`: `entry.Type`, one of `ClusterEntrySessionMessage`,
   `ClusterEntrySessionOpen`, `ClusterEntrySessionClose`, `ClusterEntryNewLeadershipTerm`,
-  `ClusterEntryOther` and `ClusterEntrySnapshot`; `entry.Position`;
+  `ClusterEntryOther`, `ClusterEntrySnapshot` and `ClusterEntryTimer`, a timer of the
+  program's with its id in `entry.CorrelationID`, which this package's programs are
+  handed none of yet, since it does not wrap the calls that schedule one;
+  `entry.Position`;
   `entry.LeadershipTermID`;
   `entry.Timestamp`, the cluster's time, the one clock a service reads, so that every
   member's service reaches the same state; `entry.SessionID`, −1 where the entry has
