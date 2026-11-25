@@ -169,9 +169,10 @@ highest run of each:
 
 The Go runner's median read 83 or 84 ns in two of `master`'s five runs and 125 ns in
 all five of the changed client's: one step of the clock, in a statistic that sits on a
-step's edge. One .NET run of the changed client read a median one step higher. The
-p99.99 and the max of each changed client are inside the spread of `master`'s runs but
-for the Go client's lowest max. Five runs of a laptop do not tell a comparison with
+step's edge. One .NET run of the changed client read a median one step higher. No
+changed client's p99.99 or max is above the highest of `master`'s runs. The highest
+p99 is the changed client's for the JVM, 2,208 against 1,708 ns, and for .NET, 292
+against 209 ns, one run each. Five runs of a laptop do not tell a comparison with
 zero from the clock's step, and no run's number is a bound. No row of the nightly
 bench covers these clients; each runner's report is where its cost is seen.
 
