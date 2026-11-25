@@ -5347,7 +5347,7 @@ mod tests {
         let dir = TestDir::new("held-adds");
         let counters = CountersFile::create(&dir.0, 256).expect("counters");
         let ring = CommandRing::create(&dir.0, 4096).expect("ring");
-        let mut consumer = ring.consumer(Duration::from_secs(10)).expect("consumer");
+        let consumer = ring.consumer(Duration::from_secs(10)).expect("consumer");
         let held = |report: &Report| -> Vec<Finding> {
             report
                 .findings
