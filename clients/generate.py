@@ -59,6 +59,32 @@ PER_MESSAGE = (
 )
 
 
+# Who reads each integer parameter of a per-message function in the Python client, where
+# the binding's checking types are not used, so that a message's path gains no call it
+# does not need (work item 460). `_size` and `_int64` are the client's argument readers,
+# which refuse what the parameter cannot hold before the ABI is called; "the client's own"
+# is a value the client computes itself, a message's `len`, which is in range by
+# construction; "the trampoline" is the action a handler returned, which the trampoline
+# holds to its range and refuses as no action. A per-message function with an integer
+# parameter that has no line here fails the generator: say who reads it.
+PER_MESSAGE_INTEGERS = {
+    ("cavalry_publication_try_claim", "length"): "_size",
+    ("cavalry_buffer_claim_set_reserved_value", "value"): "_int64",
+    ("cavalry_publication_offer", "length"): "the client's own",
+    ("cavalry_subscription_poll", "fragment_limit"): "_size",
+    ("cavalry_committed_log_poll", "fragment_limit"): "_size",
+    ("cavalry_cluster_session_offer", "length"): "the client's own",
+    ("cavalry_cluster_session_poll", "fragment_limit"): "_size",
+    ("cavalry_cluster_service_poll", "fragment_limit"): "_size",
+    ("cavalry_cluster_service_reply", "session_id"): "_int64",
+    ("cavalry_cluster_service_reply", "length"): "the client's own",
+    ("cavalry_cluster_service_schedule_timer", "correlation_id"): "_int64",
+    ("cavalry_cluster_service_schedule_timer", "deadline"): "_int64",
+    ("cavalry_cluster_service_cancel_timer", "correlation_id"): "_int64",
+    ("cavalry_cluster_service_action", "action"): "the trampoline",
+}
+
+
 @dataclass
 class Param:
     type: str
@@ -210,6 +236,61 @@ def python_value(value: str) -> str:
     raise SystemExit(f"generate: cannot read the define's value {value!r}")
 
 
+# The C integer types a caller can give a value outside of: a Python int has no bounds, and
+# ctypes passes one that a parameter cannot hold as its low bits, another value, with
+# nothing said (work item 460). `bool` is not one: no function takes one from a caller.
+INTEGER_CTYPES = ("c_int", "c_int8", "c_int32", "c_int64", "c_uint8", "c_uint16", "c_size_t")
+
+
+def python_argtype(param: Param, header: Header, checked: bool) -> str:
+    """The ctypes argument type of a function's parameter: its `ctype`, or, for an integer
+    parameter of a function that is not per-message, the checking type made for it, which
+    carries the parameter's name for its refusal."""
+    plain = ctype(param.type, header, function_param=True)
+    if checked and plain in INTEGER_CTYPES:
+        return f'_checked({plain}, "{param.name}")'
+    return plain
+
+
+# The checking argument type of the generated binding, written into `_abi.py` as it is.
+CHECKED = '''# What a refusal tells the caller to do next, and the section that explains it.
+_NEXT = "Pass an int in that range. See clients/python/README.md#what-it-must-never-do"
+
+
+def _checked(ctype, name):
+    """The argument type of the integer parameter `name`, whose C type is `ctype`: what
+    ctypes hands the ABI for an `int` the parameter can hold, and a refusal, before the ABI
+    is called, for anything else. ctypes itself passes an `int` outside the range as its
+    low bits, another value, with nothing said: a position, a recording's id or a stream's
+    id that the caller did not name. A `bool` is no `int` here, and neither is an object
+    that only has an `__index__`. ctypes reports the refusal as `ctypes.ArgumentError`,
+    whose text holds the `TypeError` or the `OverflowError` raised here, the parameter's
+    name first. The message is built on the refusal alone, and without the value's digits,
+    which Python refuses to write for a very long int."""
+    bits = 8 * ctypes.sizeof(ctype)
+    signed = ctype(-1).value < 0
+    least, greatest = (-(1 << (bits - 1)), (1 << (bits - 1)) - 1) if signed else (0, (1 << bits) - 1)
+    kind = f"{'a signed' if signed else 'an unsigned'} {bits}-bit integer"
+    held = f"an int from {least} to {greatest} expected, {kind}"
+
+    class Checked:
+        @staticmethod
+        def from_param(value):
+            if not isinstance(value, int) or isinstance(value, bool):
+                raise TypeError(f"{name}: {held}, and a {type(value).__name__} was given. {_NEXT}")
+            if not least <= value <= greatest:
+                raise OverflowError(f"{name}: {held}, and the one given takes {value.bit_length()} bits"
+                                    f"{' and is below zero' if value < 0 else ''}; ctypes would pass its low "
+                                    f"{bits} bits, another value. {_NEXT}")
+            return ctype(value)
+
+    Checked.ctype, Checked.parameter, Checked.least, Checked.greatest = ctype, name, least, greatest
+    Checked.__name__ = Checked.__qualname__ = f"_checked_{name}_{'i' if signed else 'u'}{bits}"
+    return Checked
+
+'''
+
+
 def write_python(header: Header) -> dict[str, str]:
     """The Python package: `cavalry/_abi.py`, the ctypes binding, and
     `cavalry/__init__.py`, the client's own code, from PYTHON_CLIENT below."""
@@ -220,7 +301,9 @@ def write_python(header: Header) -> dict[str, str]:
     out.append("hand, `just lint` regenerates and compares (clients/README.md). Every define is a module")
     out.append("constant, every struct a `ctypes.Structure`, the fragment handler a `CFUNCTYPE`, and every")
     out.append("function has its `restype` and `argtypes` set by `load`, the per-message ones through")
-    out.append("`ctypes.PyDLL` and the rest through `ctypes.CDLL`.")
+    out.append("`ctypes.PyDLL` and the rest through `ctypes.CDLL`. An integer parameter of a function")
+    out.append("that is not per-message has a checking type, `_checked`, which refuses a value the")
+    out.append("parameter cannot hold before the ABI is called.")
     out.append('"""')
     out.append("")
     out.append("import ctypes")
@@ -254,14 +337,28 @@ def write_python(header: Header) -> dict[str, str]:
         out.append(f"# `{cb.name}`: ({', '.join(p.type + ' ' + p.name for p in cb.params)}).")
         out.append(f"{cb.name} = CFUNCTYPE({args})")
         out.append("")
-    out.append("# Every function: name -> (restype, argtypes), in the header's order.")
+    out.extend(CHECKED.split("\n"))
+    out.append("# Every function: name -> (restype, argtypes), in the header's order. An integer")
+    out.append("# parameter is `_checked` in every function but the per-message ones below, where the")
+    out.append("# client's own code reads what the caller gives (clients/python/README.md, \"What it")
+    out.append("# must never do\").")
     out.append("FUNCTIONS = {")
     for fn in header.functions:
-        argtypes = ", ".join(ctype(p.type, header, function_param=True) for p in fn.params)
+        argtypes = ", ".join(python_argtype(p, header, checked=fn.name not in PER_MESSAGE) for p in fn.params)
         out.append(f'    "{fn.name}": ({ctype(fn.ret, header)}, [{argtypes}]),')
     out.append("}")
     out.append("")
     names = [fn.name for fn in header.functions]
+    unread = [f"{fn.name}'s {p.name}" for fn in header.functions if fn.name in PER_MESSAGE for p in fn.params
+              if ctype(p.type, header, function_param=True) in INTEGER_CTYPES
+              and (fn.name, p.name) not in PER_MESSAGE_INTEGERS]
+    stale = [f"{name}'s {param}" for name, param in PER_MESSAGE_INTEGERS
+             if not any(fn.name == name and any(p.name == param for p in fn.params) for fn in header.functions)]
+    if unread or stale:
+        raise SystemExit(f"generate: PER_MESSAGE_INTEGERS in clients/generate.py does not say who reads "
+                         f"{', '.join(unread) or 'nothing'}, and names {', '.join(stale) or 'nothing'} that the header "
+                         f"does not have: a per-message function's integer parameter is read by one of the "
+                         f"client's argument readers, or the list says why it needs none")
     missing = [name for name in PER_MESSAGE if name not in names]
     if missing:
         raise SystemExit(f"generate: the per-message function(s) {', '.join(missing)} are not in the header; update "
@@ -496,9 +593,35 @@ _INT64_NEXT = ("Pass an int from -(2 ** 63) to 2 ** 63 - 1: for a timer's id, on
                "entry.timestamp + round(seconds * 1000). See clients/python/README.md#a-services-timers")
 
 
-def _int64(value, name):
-    # The argument reader of a cluster service's timers: `value` when it is an int64,
-    # and otherwise a raise before the ABI is called. ctypes passes an `int` outside the
+_SIZE_MAX = (1 << (8 * ctypes.sizeof(ctypes.c_size_t))) - 1
+_INT32_MIN = -(2 ** 31)
+_INT32_MAX = 2 ** 31 - 1
+# What any other refused argument of a per-message call tells the caller to do next.
+_RANGE_NEXT = "Pass an int in that range. See clients/python/README.md#what-it-must-never-do"
+
+
+def _size(value, name):
+    # The argument reader of a length or a count that a per-message call takes from its
+    # caller, a claim's length and a poll's fragment limit: `value` when it is an int
+    # that a `size_t` holds, and otherwise a raise before the ABI is called. ctypes
+    # passes a negative int as a count near 2 ** 64, and an int above the range as its
+    # low bits. A command's and an add's integer arguments are read by the binding's own
+    # checking types (`_abi._checked`); a per-message function's are read here, by a call
+    # the function makes, so that no other argument of a message's path gains one.
+    if not isinstance(value, int) or isinstance(value, bool):
+        raise TypeError(f"{name}: an int from 0 to {_SIZE_MAX} expected, and a {type(value).__name__} was given. "
+                        f"{_RANGE_NEXT}")
+    if not 0 <= value <= _SIZE_MAX:
+        raise OverflowError(f"{name}: an int from 0 to {_SIZE_MAX} expected, and the one given takes "
+                            f"{value.bit_length()} bits{' and is below zero' if value < 0 else ''}; ctypes would "
+                            f"pass another value. {_RANGE_NEXT}")
+    return value
+
+
+def _int64(value, name, next=_INT64_NEXT):
+    # The argument reader of an int64 that a per-message call takes from its caller, a
+    # timer's id and its deadline, a reply's session and a claim's reserved value: `value`
+    # when it is an int64, and otherwise a raise before the ABI is called. ctypes passes an `int` outside the
     # range as its low 64 bits, another id or another deadline, with nothing said, and
     # so it does what an object's `__index__` gives: a schedule would then answer for a
     # timer the program did not name, or one due at once. A `bool` is no `int` here, as
@@ -506,11 +629,11 @@ def _int64(value, name):
     # that a call given an int64 pays; a message is built on the refusal alone, and
     # without the value's digits, which Python refuses to write for a very long int.
     if not isinstance(value, int) or isinstance(value, bool):
-        raise TypeError(f"{name}: an int expected, an int64, and a {type(value).__name__} was given. {_INT64_NEXT}")
+        raise TypeError(f"{name}: an int expected, an int64, and a {type(value).__name__} was given. {next}")
     if not _INT64_MIN <= value <= _INT64_MAX:
         raise OverflowError(f"{name}: an int from -(2 ** 63) to 2 ** 63 - 1 expected, an int64, and the one given "
                             f"takes {value.bit_length()} bits; ctypes would pass its low 64 bits, another value. "
-                            f"{_INT64_NEXT}")
+                            f"{next}")
     return value
 
 
@@ -699,7 +822,7 @@ class Publication:
         `self.claim` stays its view, which its `commit` or `abort` still releases
         (spec/c-abi.md, "Calls during a claim or a poll"). One ABI call; the view is this
         client's one allocation per message (README, "The runtime's side")."""
-        result = self._abi.cavalry_publication_try_claim(self._handle, length, self._claim_ref)
+        result = self._abi.cavalry_publication_try_claim(self._handle, _size(length, "length"), self._claim_ref)
         if result >= 0:
             self.claim = memoryview((ctypes.c_uint8 * self._claim.length).from_address(self._claim.data)).cast("B")
         return result
@@ -729,7 +852,12 @@ class Publication:
         return self._abi.cavalry_buffer_claim_abort(self._claim_ref)
 
     def set_reserved_value(self, value):
-        return self._abi.cavalry_buffer_claim_set_reserved_value(self._claim_ref, value)
+        """Set the claimed frame's reserved value, any int64 the publisher chooses, such as
+        a timestamp in nanoseconds: 0, or -1 with `CAVALRY_ERR_NO_CLAIM` when no claim is
+        outstanding. A value that is no int64 raises before the ABI is called, `TypeError`
+        for what is no `int` and `OverflowError` for an `int` outside the range, which
+        ctypes would pass as another value."""
+        return self._abi.cavalry_buffer_claim_set_reserved_value(self._claim_ref, _int64(value, "value", _RANGE_NEXT))
 
     def offer(self, message):
         """Offer `message`, `bytes` or a `ctypes` `c_char` array such as
@@ -910,6 +1038,7 @@ class Subscription:
         refuses it with -1 and `CAVALRY_ERR_POLLING`, and touches nothing, so the poll in
         progress goes on with its own handler and its own count of raises (spec/c-abi.md,
         "Calls during a claim or a poll")."""
+        fragment_limit = _size(fragment_limit, "fragment_limit")
         if self._handler is not None:
             return self._abi.cavalry_subscription_poll(self._handle, self._trampoline, None, fragment_limit)
         self._handler = handler
@@ -1088,6 +1217,7 @@ class CommittedLog:
         this log's own poll, it passes the call to the ABI, which refuses it with -1 and
         `CAVALRY_ERR_POLLING`, and touches nothing (spec/c-abi.md, "Calls during a claim
         or a poll")."""
+        fragment_limit = _size(fragment_limit, "fragment_limit")
         if self._handler is not None:
             return self._abi.cavalry_committed_log_poll(self._handle, self._trampoline, None, fragment_limit)
         self._handler = handler
@@ -1290,6 +1420,7 @@ class ClusterSession:
         poll, it passes the call to the ABI, which refuses it with -1 and
         `CAVALRY_ERR_POLLING`, and touches nothing (spec/c-abi.md, "Calls during a claim
         or a poll")."""
+        fragment_limit = _size(fragment_limit, "fragment_limit")
         if self._handler is not None:
             return self._abi.cavalry_cluster_session_poll(self._handle, self._trampoline, None, fragment_limit)
         self._handler = handler
@@ -1414,7 +1545,8 @@ class ClusterService:
         change the service's state, since an aborted entry is handed over again. From
         outside the handler it is -1, with `CAVALRY_ERR_CLUSTER_NO_ENTRY`. One ABI call,
         which allocates nothing and waits for nothing."""
-        return self._abi.cavalry_cluster_service_reply(self._handle, session_id, message, len(message))
+        return self._abi.cavalry_cluster_service_reply(
+            self._handle, _int64(session_id, "session_id", _RANGE_NEXT), message, len(message))
 
     def schedule_timer(self, correlation_id, deadline):
         """From inside the handler: schedule the timer `correlation_id`, any int64 the
@@ -1475,7 +1607,8 @@ class ClusterService:
                 body.release()
             if action is None or (type(action) is int and action == CONTINUE):
                 return
-            if type(action) is not int or self._abi.cavalry_cluster_service_action(self._handle, action) != 0:
+            if type(action) is not int or not _INT32_MIN <= action <= _INT32_MAX \
+                    or self._abi.cavalry_cluster_service_action(self._handle, action) != 0:
                 self._refused = action
                 self._raised += 1
                 self._abi.cavalry_cluster_service_action(self._handle, ABORT)
@@ -1529,6 +1662,7 @@ class ClusterService:
         service's own poll, it passes the call to the ABI, which refuses it with -1 and
         `CAVALRY_ERR_POLLING`, and touches nothing (spec/c-abi.md, "Calls during a claim
         or a poll")."""
+        fragment_limit = _size(fragment_limit, "fragment_limit")
         client = self._client._handle
         if self._handler is not None:
             return self._abi.cavalry_cluster_service_poll(self._handle, client, self._trampoline, None, fragment_limit)
