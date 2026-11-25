@@ -8,7 +8,8 @@ the committed log's poll and an entry's position, ADR 0070, and the seven of a c
 session and a cluster service, the session's offer, its poll and a reply's values, and
 the service's poll, an entry's values, its reply and its action, ADR 0124, in every
 client, and the schedule and the cancel of a service's timer, ADR 0157, in the Python
-client, the Node client and the Go client, the three that wrap them) and each trampoline that
+client, the Node client, the Go client and the JVM client, the four that wrap them) and each
+trampoline that
 calls the user's handler, hold no lock, no `await` and no raise, in the language's
 forms, and so does every function of the package they call. For Python those
 forms are `threading`'s locks and anything else of `threading`, `async def`, `await`,
