@@ -1939,7 +1939,7 @@ id = 201
 name = "cluster.floor_answers_sent"
 kind = "counter"
 scope = "client"
-doc = "Floor answers one cluster member sent as leader, from version 3 of the cluster protocol: each answers an append position whose floor flag a member set, a member that holds a cluster.vote_floor and has taken no answer for the term it follows in its present run, at most one each leader heartbeat interval for each member. The answer carries the leader's append position and the session id of the report's frame, so that the member clears its floor only once its log holds what the leader had appended when it read a report of the member's present run (spec/cluster.md, A member that lost its log, The floor answer; ADR 0163). key and label as cluster.elections."
+doc = "Floor answers one cluster member sent as leader, from version 3 of the cluster protocol: each answers an append position whose floor flag a member set, a member that holds a cluster.vote_floor and has taken no answer for the term it follows in its present run, at most one each leader heartbeat interval for each member. The answer carries the leader's append position and the session id of the report's frame, so that the member clears its floor only once its log holds what the leader's recordings had synced when it answered a report of the member's present run, read as it writes the answer (spec/cluster.md, A member that lost its log, The floor answer; ADR 0163). key and label as cluster.elections."
 doctor = "This member led while a member that holds a vote floor caught up, and answered it. Nothing to do."
 
 [[counter]]

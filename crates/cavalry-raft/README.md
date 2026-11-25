@@ -467,9 +467,10 @@ commit path runs per message.
   `cluster.vote_floors_cleared`. The live log's image joins past every
   entry the leader's sender sent it before it came back, so a new leadership term the
   sender held back, written before an entry it had acknowledged, gives it no vote
-  before it holds the entry; the floor holds what the leader had appended when it
-  wrote the term the member took, an entry the member had from a replay before the
-  sender sent it among them (ADR 0161). While it holds a floor it asks its leader with
+  before it holds the entry; the floor holds what the leader's duty cycle had read as
+  its append position before it wrote the term the member took, and an entry the
+  recording synced after that read, which a replay may have brought the member's
+  earlier run, stands above it (ADR 0163, which corrects ADR 0161 here). While it holds a floor it asks its leader with
   the floor flag of each append position, and a leader answers with a floor answer
   that names the session the report came in, read through `Consensus::on_message_in`;
   the member takes one for its own session, `Io::consensus_session`, keeps the lowest

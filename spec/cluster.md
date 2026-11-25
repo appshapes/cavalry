@@ -1410,23 +1410,28 @@ only with its append position at or past its live image's join position (states 
 and 15).
 So the join holds every entry the leader's sender had sent the member before it came
 back, since a sender's position never goes back, and a later leader's term begins past
-every such entry the cluster committed. The floor holds every entry the leader had
-appended when it wrote the new leadership term the member took. For a message written
-after the member's start, that is every entry of the leader's log the member
-acknowledged before it came back, one it had from a replay of the leader's recording
-among them: the recorder is a spy, which reads the publication's log on the leader's
+every such entry the cluster committed. The floor holds every entry up to the append
+position the leader's duty cycle had read before it wrote the new leadership term the
+member took, what its recordings had synced by that read, and no more: a leader's
+module reads consensus messages before its duty cycle, so a message it writes carries
+the position as the cycle before read it. Even for a message written after the
+member's start, an entry the recording synced after that read, which a replay may have
+brought the member's earlier run, stands above the floor, and so may an entry the
+sender sent before the recording synced it, which the join holds. ADR 0161 said that
+the floor of such a message held every entry the member had from a replay; ADR 0163
+corrects it. The recorder is a spy, which reads the publication's log on the leader's
 own driver (`spec/udp.md`, "The channel URI"), so it may hold an entry the sender has
-not yet sent, and the live image may then join below it. For a
-message the leader's sender held back from the member's earlier image ("Taking a
-leader"), or one at position 0, the floor holds less, and the join holds what the
-sender had sent. Follower catch-up's commit target holds a third set. A member had a
+not yet sent, and the live image may then join below it. For a message the leader's
+sender held back from the member's earlier image ("Taking a leader"), or one at
+position 0, the floor holds less still, and the join holds what the sender had sent. Follower catch-up's commit target holds a third set. A member had a
 replay in its earlier run only from a leader whose log was above position 0, and a
 held-back message it reads now was written after the one it followed then, so it is
 above 0 too. The member, its log empty, catches up again, and does not leave follower
 catch-up before its append position reaches the commit position it was told when it
 read the leader's stop catch-up (state 13). None of the three holds an entry the member
-had from a replay before the sender sent it, on the floor of a message held back, when
-the leader counts the member's acknowledgement of it so late that the commit position
+had from a replay before the sender sent it, above the floor, as on the floor of a
+message held back or of one whose duty cycle read the position before the recording
+synced the entry, when the leader counts the member's acknowledgement of it so late that the commit position
 the member was told then does not reach it: a leader keeps each member's last report,
 whichever run of the member sent it. The floor answer holds it. Every entry an earlier
 run of the member held came to it in one of two ways: from the leader's recordings, by

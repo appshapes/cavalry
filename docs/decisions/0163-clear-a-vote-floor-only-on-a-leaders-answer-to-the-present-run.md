@@ -47,6 +47,18 @@ happen. The pages say both can.
   (`docs/how-to/run-a-cluster.md`, `start-stop-timeout`). The network can also deliver
   a datagram of the earlier run late.
 
+**ADR 0161's floor held less than it said.** ADR 0161 placed its last case on the floor
+of a message held back, and said that the floor of a new leadership term written after
+the member's start holds every entry the member had from a replay. That is untrue, and
+this decision corrects it, since an accepted ADR is not edited. A leader's module reads
+consensus messages before its duty cycle, so a new leadership term carries the append
+position as the cycle before read it. An entry the recording syncs after that read, and
+a replay brings the member's earlier run, stands above the floor of a term written after
+the member's start too, when the leader's module is held between the two by an fsync, a
+throttle or a pause. So the case did not need the held-back frame: the hole was a
+little wider than ADR 0161 said. The floor answer, read as it is written (Decision),
+holds such an entry either way.
+
 **What was tried first.** A rule that a member reads a peer's consensus messages from
 the newest image of that peer's stream alone, ordered by the registration ids its driver
 gives images, so that the leader drops the late report. An independent read found that
@@ -255,6 +267,23 @@ All runs were on an Apple M-series laptop, macOS 26, in the in-memory cluster of
   frame, it is answered once, with 160, the leader's term, both ids and that session.
   With the answer taken from the position the last duty cycle read, it fails: the answer
   carries 96.
+- **A stalled leader**, in the whole cluster:
+  `a_floor_answer_holds_what_the_leaders_recording_synced_after_its_last_duty_cycle` in
+  `crates/cavalry-raft/tests/lost_log_directory.rs`. It runs the eight steps with the
+  entries appended after the leader's duty cycle has read its append position, and the
+  leader's module then stalled (`Cluster::stall`) while its driver runs on:
+  - its recording syncs the entries, and its catch-up replay brings them to the member's
+    earlier run, whose report of them is held;
+  - the member loses its log again and takes the leader on the held frame;
+  - the leader's module runs again and reads the ask before its duty cycle.
+
+  With the answer taken from the position the last duty cycle read, the check of every
+  step fails: "member 2 leads with a log that differs from what was committed". With
+  the answer read as it is written, no leader is elected while the leader is stopped.
+  The model needed no change for it: `Cluster::offer` between steps and `Cluster::stall`
+  give the gap between what a leader's recording has synced and what its core last read.
+  No search stalls a member, which is why none found the case; work item 467 gives the
+  lost-log search stalls.
 - **A lost answer**: `a_floor_answer_lost_on_its_way_is_sent_again_in_the_next_interval`.
   A new cluster's followers hold their floors for two seconds while every answer is
   lost and the leader keeps answering each interval, and no more than once an interval
@@ -295,6 +324,10 @@ All runs were on an Apple M-series laptop, macOS 26, in the in-memory cluster of
 
 - ADR 0161's last case is held: the eight steps end with no leader elected without the
   entry.
+- ADR 0161's claim that the floor of a new leadership term written after the member's
+  start holds every entry the member had from a replay is corrected (Context):
+  `spec/cluster.md`, "A member that lost its log", now says the floor holds what the
+  leader's duty cycle had read before it wrote the term.
 - ADR 0161's Revisit is answered: the floor's comparison and the join are kept, and the
   answer is added. Each holds entries of its own.
 - A report of a member's earlier run still counts toward a commit when it reaches the

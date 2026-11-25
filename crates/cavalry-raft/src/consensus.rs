@@ -1351,10 +1351,11 @@ impl Consensus {
         // A member in follower ready joined the live log of a leader it took by the
         // rules of "Taking a leader", at its append position, which the leader's sender
         // made past every entry it sent the member before. With its append position at
-        // or past its floor too, past every entry the leader had appended when it wrote
-        // the new leadership term the member took, it holds every committed entry it
-        // could have acknowledged before it came back, but for an entry it had from a
-        // replay before the leader's sender sent it. With its append position at or
+        // or past its floor too, the leader's append position as its duty cycle read it
+        // before it wrote the new leadership term the member took, it holds every
+        // committed entry it could have acknowledged before it came back, but for an
+        // entry it had from a replay, above that read, before the leader's sender sent
+        // it. With its append position at or
         // past a floor answer of its present run too, past every entry the leader's
         // recordings had synced when it answered a report of that run, and so past
         // every entry a replay had read to an earlier run, it holds that one as well,
