@@ -1,33 +1,40 @@
 #!/usr/bin/env python3
-"""The book's index of the decisions, and the check of the book's search index (work
-item 474; ADR 0165).
+"""The book's index of the decisions, and the check of the built book that holds it
+(work item 474; ADR 0165).
 
 The book's search leaves the decisions' own pages out (`book.toml`,
 `[output.html.search.chapter]`): they were two thirds of an index at mdBook's warning,
 and they are what grows. This script puts what a reader searches a decision for back,
-at a tenth of the cost: pages that hold, for each decision, its number, its title and
-its Decision section, with a link to the decision's page. It has two uses.
+at a sixth of the cost: pages that hold, for each decision, its number, its title and
+its Decision section, with a link to the decision's page. It has four uses.
 
     decisions-index.py                      mdBook's preprocessor (book.toml)
     decisions-index.py supports <renderer>  mdBook's question before it; always yes
     decisions-index.py --check <book>       what `just docs` runs on the built book
+    decisions-index.py --write              writes docs/reference/decisions.md
 
 **The preprocessor.** mdBook gives it the book on standard input, every chapter with
-its text, and takes the book back on standard output. It finds the decisions among the
-chapters, by their path under `decisions/` and a name that begins with four digits,
-and gives the chapter `reference/decisions.md` one chapter below it for each
-`PER_PAGE` numbers, 0001 to 0025 and so on, so that no page grows without bound and
-the decisions of a page never change. Nothing it writes is in the repository, so
-nothing can fall behind the decisions: the pages are made from them at every build. A
-decision with no Decision section stops the build.
+its text, and takes the book back on standard output. For the HTML book it finds the
+decisions among the chapters, by a path `decisions/NNNN-<words>.md`, and gives the
+chapter `reference/decisions.md` one chapter below it for each `PER_PAGE` numbers,
+0001 to 0025 and so on, so that no page grows without bound and a decision is on one
+page for good. None of those pages is in the repository, so none can fall behind a
+decision: they are made from the decisions at every build. A decision that does not
+begin with `# NNNN. <title>`, or has no Decision section, stops the build. For any
+other renderer, `mdbook test` among them, it hands the book back as it came, so that
+a decision's code block is tested once, on the decision's own page.
 
-**The check.** It reads `searchindex-*.js` of the built book and fails unless: every
-decision under `docs/decisions/` is in a generated page's search document by its
-number and title and by the words of its Decision section; no decision's own page is
-a search document; and the file is under the early bound, `EARLY_BOUND` bytes, which
-is set well under the size at which mdBook warns and `just docs` fails. It prints the
-file's size on every run. Passing the early bound is not a fault of the change that
-passes it: the message says the two things to do, and ADR 0165 why.
+**The check.** It reads the built book, not the Markdown, so it shares nothing with
+the preprocessor but the pages' names. For every decision under `docs/decisions/` it
+reads the Decision section of the decision's own built page and the decision's entry
+on its generated page, and fails unless the two hold the same text and the same
+links, each link read from the page it is on. It fails unless the generated page is a
+document of the search index with the decision's number and title in it, when a
+decision's own page is in the index, when `docs/reference/decisions.md` is not what
+`--write` gives, and when the index's file passes the early bound, `EARLY_BOUND`
+bytes, which is set well under the size at which mdBook warns and `just docs` fails.
+It prints the file's size on every run. Passing the early bound is not a fault of the
+change that passes it: the message says the two things to do, and ADR 0165 why.
 
 Python 3.9 standard library only (ADR 0003).
 """
@@ -35,24 +42,60 @@ Python 3.9 standard library only (ADR 0003).
 from __future__ import annotations
 
 import glob
+import html.parser
 import json
 import os
+import posixpath
 import re
 import sys
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 DECISIONS = os.path.join(ROOT, "docs", "decisions")
 INDEX_PATH = "reference/decisions.md"
-MARKER = "<!-- decisions-index: scripts/decisions-index.py writes the list of pages here -->"
+INDEX_NAME = "Decisions, by what each decided"
+MARKER = "<!-- decisions-index: scripts/decisions-index.py writes the list of pages here at every build -->"
 PER_PAGE = 25
-HELP = "see docs/reference/decisions.md and docs/decisions/0165-index-the-decisions-in-the-books-search-by-what-each-decided-and-leave-their-pages-out.md"
+ADR = "docs/decisions/0165-index-the-decisions-in-the-books-search-by-what-each-decided-and-leave-their-pages-out.md"
+HELP = f"see docs/reference/decisions.md and {ADR}"
 
 # mdBook warns when its count of the index passes this, and `just docs` denies a warning.
 MDBOOK_WARNS_AT = 10_000_000
-# The early bound on the file `target/book/searchindex-<hash>.js`, and the one value it
-# may be raised to, once, by the change that passes it (ADR 0165, "The early bound").
-EARLY_BOUND = 7_000_000
+# The early bound on the file `target/book/searchindex-<hash>.js` (ADR 0165, "The early
+# bound"). The change that passes EARLY_BOUND adds a work item and sets EARLY_BOUND to
+# RAISED_BOUND, once. RAISED_BOUND is the ADR's and does not move without a new one.
 RAISED_BOUND = 8_500_000
+EARLY_BOUND = 7_000_000
+
+# The page the generated ones go below. It is a reference page, so it is generated too
+# (CLAUDE.md, gate 6): `--write` writes it and the check holds the file to this text.
+INDEX_PAGE = f"""<!-- Generated by scripts/decisions-index.py. Do not edit this page: change INDEX_PAGE there and run `python3 scripts/decisions-index.py --write`. -->
+# {INDEX_NAME}
+
+Every decision of Cavalry is a page of its own under "Decisions" in the contents, an
+ADR (architecture decision record): its context, the decision, the alternatives that
+lost, the evidence and the consequences. The pages below this one hold the Decision
+section of each, {PER_PAGE} numbers to a page. `scripts/decisions-index.py` makes them from the
+decisions at every build of the book, so none of them is a file of the repository.
+
+The book's search finds a decision through these pages, by its number, by its title
+and by the text of its Decision section. A result opens one of the pages, with the
+words that were searched for marked, and the link under a decision's heading opens
+the decision's own page.
+
+The search does not index the decisions' own pages. So it does not find a word that a
+decision has only in its Context, its Alternatives considered, its Evidence, its
+Consequences or its References. Such a word is found in the files, in a checkout or
+with the search of the repository's site:
+
+```sh
+git grep -n -i "the words" -- docs/decisions/
+```
+
+[ADR 0165](../decisions/{os.path.basename(ADR)})
+has the reason and the measurements.
+
+{MARKER}
+"""
 
 
 def fail(what):
@@ -60,27 +103,87 @@ def fail(what):
     sys.exit(1)
 
 
+# --- The preprocessor: Markdown in, Markdown out. ---
+
+def fenced(lines):
+    """For each line, whether it is inside a fenced code block or is a fence's own line:
+    a line that looks like a heading or a link there is neither."""
+    inside, fence = [], None
+    for line in lines:
+        if fence is None:
+            opening = re.match(r" {0,3}(`{3,}|~{3,})", line)
+            fence = opening.group(1) if opening else None
+            inside.append(opening is not None)
+        else:
+            inside.append(True)
+            if re.fullmatch(r" {0,3}" + re.escape(fence[0]) + "{" + str(len(fence)) + r",}[ \t]*", line):
+                fence = None
+    return inside
+
+
 def decision_section(text, where):
-    """The body of a decision's `## Decision` section, without the heading."""
-    section = re.search(r"^## Decision[ \t]*\n(.*?)(?=^## |\Z)", text, flags=re.S | re.M)
-    if section is None or not section.group(1).strip():
+    """The body of a decision's `## Decision` section, without the heading: from that
+    heading to the next heading of the first or second level, neither read from inside
+    a code block."""
+    lines = text.split("\n")
+    inside = fenced(lines)
+    start = end = None
+    for at, line in enumerate(lines):
+        if inside[at]:
+            continue
+        if start is None:
+            if re.fullmatch(r"## Decision[ \t]*", line):
+                start = at + 1
+        elif re.match(r"#{1,2} ", line):
+            end = at
+            break
+    section = "\n".join(lines[start:end]).strip() if start is not None else ""
+    if not section:
         fail(f"{where} has no `## Decision` section with text in it, and the book's search finds a decision by "
              f"that section; write it as docs/decisions/0000-template.md has it; {HELP}")
-    return section.group(1).strip()
+    return section
 
 
 def moved(section, file):
     """A Decision section's text as it reads on a page of `reference/`: a relative link
     is written from the decision's own directory, so it gets that directory in front,
-    and a link to a heading of the decision's page gets the page."""
-    def target(match):
-        opening, link = match.group(1), match.group(2)
+    and a link to a heading of the decision's own page gets the page. The links are the
+    inline ones, images among them, and a link definition's; text inside a code block
+    or a code span is left as it is. A link written another way is not moved, and the
+    check then names it."""
+    def target(link):
         if re.match(r"[a-zA-Z][a-zA-Z0-9+.-]*:|/", link):
-            return match.group(0)
-        if link.startswith("#"):
-            return f"{opening}../decisions/{file}{link})"
-        return f"{opening}../decisions/{link})"
-    return re.sub(r"(\]\()([^)\s]+)\)", target, section)
+            return link
+        return f"../decisions/{file}{link}" if link.startswith("#") else f"../decisions/{link}"
+
+    def destination(match):
+        opening, link = match.group(1), match.group(2)
+        return f"{opening}<{target(link[1:-1])}>" if link.startswith("<") else f"{opening}{target(link)}"
+
+    def prose(text):
+        text = re.sub(r"(\]\([ \t]*)(<[^>\n]*>|[^)\s]+)", destination, text)
+        return re.sub(r"^( {0,3}\[[^\]\n]+\]:[ \t]*)(<[^>\n]*>|\S+)", destination, text, flags=re.M)
+
+    def outside_spans(text):
+        out, last = [], 0
+        for span in re.finditer(r"(`+)[\s\S]*?\1", text):
+            out += [prose(text[last:span.start()]), span.group(0)]
+            last = span.end()
+        return "".join(out + [prose(text[last:])])
+
+    lines = section.split("\n")
+    inside = fenced(lines)
+    out, block = [], []
+    for at, line in enumerate(lines + [None]):
+        if line is None or inside[at]:
+            if block:
+                out.append(outside_spans("\n".join(block)))
+                block = []
+            if line is not None:
+                out.append(line)
+        else:
+            block.append(line)
+    return "\n".join(out)
 
 
 def chapters(items):
@@ -94,15 +197,20 @@ def chapters(items):
 
 def decisions_of(book):
     """`(number, title, file, section)` for each decision among the book's chapters, in
-    the order of their numbers."""
+    the order of their numbers. A decision is a chapter at `decisions/NNNN-<words>.md`
+    whose number is not the template's 0000."""
     found = []
     for chapter in chapters(book["items"]):
         path = chapter.get("path") or ""
-        name = re.fullmatch(r"(\d{4})\. (.+)", chapter.get("name", ""))
-        if not path.startswith("decisions/") or name is None or name.group(1) == "0000":
+        named = re.fullmatch(r"decisions/((\d{4})-[^/]*\.md)", path)
+        if named is None or named.group(2) == "0000":
             continue
-        file = path[len("decisions/"):]
-        found.append((int(name.group(1)), name.group(2), file,
+        file, number = named.group(1), int(named.group(2))
+        heading = re.match(r"# (\d{4})\. (.+)\n", chapter["content"])
+        if heading is None or int(heading.group(1)) != number:
+            fail(f"docs/{path} does not begin with `# {number:04d}. <title>`, the heading the book's index of the "
+                 f"decisions reads its number and title from; {HELP}")
+        found.append((number, heading.group(2).strip(), file,
                       moved(decision_section(chapter["content"], f"docs/{path}"), file)))
     found.sort()
     numbers = [number for number, _, _, _ in found]
@@ -128,10 +236,10 @@ def page_name(first, last):
 
 def page_content(first, last, entries):
     out = [f"# {page_name(first, last)}", "",
-           "This page is generated at every build from the decisions it names "
-           "(`scripts/decisions-index.py`). It holds each one's Decision section and nothing else of it, so "
-           "that the book's search finds a decision by what it decided. Follow the link under a heading for "
-           "the decision's context, the alternatives that lost, its evidence and its consequences.", ""]
+           "This page is made at every build from the decisions it names (`scripts/decisions-index.py`). It holds "
+           "each one's Decision section and nothing else of it, so that the book's search finds a decision by what "
+           "it decided. Follow the link under a heading for the decision's context, the alternatives that lost, "
+           "its evidence and its consequences.", ""]
     for number, title, file, section in entries:
         out += [f"## {number:04d}. {title}", "", f"[The page of decision {number:04d}](../decisions/{file}).", "",
                 section, ""]
@@ -146,7 +254,7 @@ def preprocess(book):
              f"docs/SUMMARY.md; {HELP}")
     if index["content"].count(MARKER) != 1:
         fail(f"docs/{INDEX_PATH} does not hold the line `{MARKER}` once, which is where the list of pages is "
-             f"written; restore it; {HELP}")
+             f"written; run `python3 scripts/decisions-index.py --write`; {HELP}")
     pages = {}
     for entry in decisions_of(book):
         pages.setdefault(page_of(entry[0]), []).append(entry)
@@ -158,7 +266,7 @@ def preprocess(book):
         below.append({"Chapter": {
             "name": page_name(first, last),
             "content": page_content(first, last, entries),
-            "number": (index.get("number") or []) + [at] if index.get("number") is not None else None,
+            "number": index["number"] + [at] if index.get("number") else None,
             "sub_items": [],
             "path": page_path(first, last),
             # The page a reader who follows "edit" is given: the one that says these are made.
@@ -170,40 +278,80 @@ def preprocess(book):
     return book
 
 
+# --- The check: the built book in, a verdict out. ---
+
+class Sections(html.parser.HTMLParser):
+    """The second-level sections of a built page's `<main>`: for each, its heading's
+    text, its own text, where its first paragraph ends, and its links, each with the
+    place in the text it stands at. A heading's own anchor is no link of the text."""
+
+    def __init__(self):
+        super().__init__()
+        self.sections, self.main, self.heading = [], False, None
+
+    def handle_starttag(self, tag, attributes):
+        attributes = dict(attributes)
+        if tag == "main":
+            self.main = True
+        elif self.main and tag == "h2":
+            self.heading = []
+        elif self.main and self.sections and self.heading is None:
+            link = attributes.get("href") if tag == "a" else attributes.get("src") if tag == "img" else None
+            if link is not None and "header" not in (attributes.get("class") or "").split():
+                section = self.sections[-1]
+                section["links"].append((len(section["text"]), link))
+
+    def handle_endtag(self, tag):
+        if tag == "main":
+            self.main = False
+        elif self.main and tag == "h2" and self.heading is not None:
+            self.sections.append({"heading": " ".join("".join(self.heading).split()), "text": [], "links": [],
+                                  "first_paragraph": None})
+            self.heading = None
+        elif self.main and tag == "p" and self.sections and self.sections[-1]["first_paragraph"] is None:
+            self.sections[-1]["first_paragraph"] = len(self.sections[-1]["text"])
+
+    def handle_data(self, data):
+        if self.heading is not None:
+            self.heading.append(data)
+        elif self.main and self.sections:
+            self.sections[-1]["text"].append(data)
+
+
+def sections_of(path):
+    reader = Sections()
+    with open(path, encoding="utf-8") as f:
+        reader.feed(f.read())
+    return reader.sections
+
+
+def read(section, url, skip_first_paragraph=False):
+    """A section's text, with every run of white space one space, and its links as the
+    book's pages they open, each read from the page `url` that the section is on."""
+    start = section["first_paragraph"] or 0 if skip_first_paragraph else 0
+    text = " ".join("".join(section["text"][start:]).split())
+    links = []
+    for at, link in section["links"]:
+        if at < start:
+            continue
+        if re.match(r"[a-zA-Z][a-zA-Z0-9+.-]*:|/", link):
+            links.append(link)
+            continue
+        path, mark, fragment = link.partition("#")
+        page = posixpath.normpath(posixpath.join(posixpath.dirname(url), path)) if path else url
+        links.append(page + mark + fragment)
+    return text, links
+
+
 def tokens(text):
-    """A text's runs of letters and digits, lower case: how a search document and a
-    Decision section are compared, since mdBook stores a page's text without the marks
-    of Markdown and with typographic quotes."""
+    """A text's runs of letters and digits, lower case: how a heading is looked for in a
+    search document, which mdBook stores without the marks of Markdown and with
+    typographic quotes."""
     return re.findall(r"[a-z0-9]+", text.lower())
 
 
-def words(markdown):
-    """The words a reader would search a Decision section for: the runs of four letters
-    or more in its prose. What is in a code span, a code block, a tag or a link's
-    target is left out, since each is written another way in a search document."""
-    prose = re.sub(r"^```.*?^```[ \t]*$", " ", markdown, flags=re.S | re.M)
-    # A code span may run over a line's end, and may be fenced by more than one backtick.
-    prose = re.sub(r"(`+).*?\1", " ", prose, flags=re.S)
-    prose = re.sub(r"<[^>\n]*>|\]\([^)\s]*\)", " ", prose)
-    return sorted({token for token in tokens(prose) if token.isalpha() and len(token) >= 4})
-
-
-def entries_of(body):
-    """`{number: (tokens before, tokens of the entry)}` for a generated page's search
-    document: an entry runs from the line the preprocessor writes under its heading,
-    "The page of decision NNNN", to the next such line."""
-    all_tokens = tokens(body)
-    starts = [(at, int(all_tokens[at + 4])) for at in range(len(all_tokens) - 4)
-              if all_tokens[at:at + 4] == ["the", "page", "of", "decision"] and re.fullmatch(r"\d{4}", all_tokens[at + 4])]
-    found = {}
-    for place, (at, number) in enumerate(starts):
-        end = starts[place + 1][0] if place + 1 < len(starts) else len(all_tokens)
-        found.setdefault(number, (all_tokens[:at], set(all_tokens[at + 5:end])))
-    return found
-
-
 def search_documents(book_directory):
-    """The built book's search index: its file, and `{url: body}` for its documents."""
+    """The built book's search index: its file, and `{page: body}` for its documents."""
     files = glob.glob(os.path.join(book_directory, "searchindex-*.js")) + \
         glob.glob(os.path.join(book_directory, "searchindex.js"))
     if len(files) != 1:
@@ -228,7 +376,17 @@ def search_documents(book_directory):
     return files[0], documents
 
 
+def differ(one, other):
+    """Where two texts first differ, with a little of each around it."""
+    at = next((i for i, (a, b) in enumerate(zip(one, other)) if a != b), min(len(one), len(other)))
+    return f"`{one[max(0, at - 40):at + 40]}` on the decision's page and `{other[max(0, at - 40):at + 40]}` in its entry"
+
+
 def check(book_directory):
+    with open(os.path.join(ROOT, "docs", INDEX_PATH), encoding="utf-8") as f:
+        if f.read() != INDEX_PAGE:
+            fail(f"docs/{INDEX_PATH} is not what scripts/decisions-index.py writes; it is a generated page: change "
+                 f"INDEX_PAGE in the script and run `python3 scripts/decisions-index.py --write`")
     file, documents = search_documents(book_directory)
     size = os.path.getsize(file)
     own = sorted(url for url in documents if url.startswith("decisions/"))
@@ -236,34 +394,55 @@ def check(book_directory):
         fail(f"the search index holds {len(own)} of the decisions' own pages, {own[0]} among them; book.toml "
              f"leaves the chapters under `decisions` out of the search, under [output.html.search.chapter], "
              f"and the generated pages are how a decision is found; restore that table; {HELP}")
-    files = sorted(glob.glob(os.path.join(DECISIONS, "[0-9][0-9][0-9][0-9]-*.md")))
+    pages = {}
     count = 0
-    for path in files:
-        number = int(os.path.basename(path)[:4])
+    for path in sorted(glob.glob(os.path.join(DECISIONS, "[0-9][0-9][0-9][0-9]-*.md"))):
+        name = os.path.basename(path)
+        number = int(name[:4])
         if number == 0:
             continue
+        where = f"docs/decisions/{name}"
         with open(path, encoding="utf-8") as f:
-            text = f.read()
-        where = f"docs/decisions/{os.path.basename(path)}"
-        title = re.match(r"# (\d{4})\. (.+)\n", text)
+            title = re.match(r"# (\d{4})\. (.+)\n", f.read())
         if title is None or int(title.group(1)) != number:
             fail(f"{where} does not begin with `# {number:04d}. <title>`, the heading the index reads; {HELP}")
-        first, last = page_of(number)
-        url = page_path(first, last)[:-3] + ".html"
-        body = documents.get(url)
-        if body is None:
-            fail(f"the search index has no document for {url}, the generated page that holds decision "
-                 f"{number:04d}: is {where} listed in docs/SUMMARY.md, and is the preprocessor in book.toml? {HELP}")
-        heading = tokens(f"{number:04d}. {title.group(2)}")
-        before, entry = entries_of(body).get(number, ([], set()))
-        if before[-len(heading):] != heading:
-            fail(f"the search document of {url} does not hold `{number:04d}. {title.group(2)}`, the heading of "
-                 f"{where}, with the decision's entry under it: is it listed in docs/SUMMARY.md under that title? "
-                 f"{HELP}")
-        missing = [word for word in words(decision_section(text, where)) if word not in entry]
-        if missing:
-            fail(f"the search document of {url} lacks {len(missing)} of the words of {where}'s Decision section, "
-                 f"{', '.join(missing[:8])} among them, so a search for them does not find the decision; {HELP}")
+        heading = f"{number:04d}. {title.group(2).strip()}"
+        own_url = f"decisions/{name[:-3]}.html"
+        url = page_path(*page_of(number))[:-3] + ".html"
+        for built in (own_url, url):
+            if not os.path.isfile(os.path.join(book_directory, built)):
+                fail(f"the built book has no page {built} for {where}: is the decision listed in docs/SUMMARY.md, "
+                     f"and is the preprocessor `decisions-index` in book.toml? {HELP}")
+        decided = [section for section in sections_of(os.path.join(book_directory, own_url))
+                   if section["heading"] == "Decision"]
+        if url not in pages:
+            pages[url] = sections_of(os.path.join(book_directory, url))
+        entry = [section for section in pages[url] if tokens(section["heading"])[:1] == [f"{number:04d}"]]
+        if len(decided) != 1 or len(entry) != 1:
+            fail(f"{where} has {len(decided)} sections headed `Decision` on its built page and {len(entry)} entries "
+                 f"on {url}, and one of each is what the book's index of the decisions is made of; {HELP}")
+        if tokens(entry[0]["heading"]) != tokens(heading):
+            fail(f"the entry of {where} on {url} is headed `{entry[0]['heading']}`, not `{heading}`, the file's own "
+                 f"heading; {HELP}")
+        text, links = read(decided[0], own_url)
+        shown, shown_links = read(entry[0], url, skip_first_paragraph=True)
+        if not text:
+            fail(f"{where}'s section `Decision` is empty on its built page; write the decision under it; {HELP}")
+        if text != shown:
+            fail(f"the Decision section of {where} does not read on {url} as it reads on the decision's own page: "
+                 f"{differ(text, shown)}. The section is shown on both pages, so it cannot use what Markdown takes "
+                 f"from elsewhere in the file: write a footnote as a sentence, and a link with its target beside "
+                 f"it, `[words](target)`; {HELP}")
+        if links != shown_links:
+            wrong = next((pair for pair in zip(links, shown_links) if pair[0] != pair[1]),
+                         ((links[len(shown_links):] + [None])[0], (shown_links[len(links):] + [None])[0]))
+            fail(f"a link of {where}'s Decision section opens {wrong[0]} on the decision's own page and {wrong[1]} "
+                 f"on {url}, where the section is shown too. Write the link as `[words](target)`, the one form "
+                 f"that is moved with the section; {HELP}")
+        document = " ".join(tokens(documents.get(url, "")))
+        if f" {' '.join(tokens(heading))} " not in f" {document} ":
+            fail(f"the search index has no document for {url} with `{heading}` in it, so the book's search does "
+                 f"not find {where}: is the chapter docs/{INDEX_PATH} left out of the search in book.toml? {HELP}")
         count += 1
     share = 100 * size // MDBOOK_WARNS_AT
     if size > EARLY_BOUND:
@@ -271,17 +450,20 @@ def check(book_directory):
             fail(f"the book's search index, {os.path.relpath(file, ROOT)}, is {size:,} bytes, past the early bound "
                  f"of {EARLY_BOUND:,}. Nothing is wrong with this change: the bound is set well under the "
                  f"{MDBOOK_WARNS_AT:,} at which mdBook warns and `just docs` fails, so that the crossing is seen "
-                 f"while there is room. Do two things in this change. Add a work item tagged `cavalry` and "
-                 f"`decision`, \"Decide what the book's search indexes\", with this size in it (`brigade work-item "
-                 f"add --tag cavalry --tag decision`). Then set EARLY_BOUND in scripts/decisions-index.py to "
-                 f"RAISED_BOUND, {RAISED_BOUND:,}, and name the work item in the commit message; {HELP}")
+                 f"while there is room. Do two things in this change. First, add a work item: `brigade work-item "
+                 f"add --tag cavalry,decision`, with the title \"Decide what the book's search indexes\", a blank "
+                 f"line and this message on its standard input. Second, in scripts/decisions-index.py change the "
+                 f"line `EARLY_BOUND = {EARLY_BOUND:_}` to `EARLY_BOUND = RAISED_BOUND`, and name the work item in "
+                 f"the commit message. Change nothing else there: RAISED_BOUND is ADR 0165's; {HELP}")
         fail(f"the book's search index, {os.path.relpath(file, ROOT)}, is {size:,} bytes, past the early bound "
-             f"after its one raise, {EARLY_BOUND:,}. The work item that the first crossing added, \"Decide what "
-             f"the book's search indexes\", is due before this change lands: the next bound is mdBook's own "
-             f"warning at {MDBOOK_WARNS_AT:,}, which stops every change that adds a page; {HELP}")
-    print(f"decisions-index: {count} decisions are in the book's search by number, title and the words of their "
-          f"Decision sections, none by its own page; the search index is {size:,} bytes, {share}% of the "
-          f"{MDBOOK_WARNS_AT:,} at which mdBook warns, and the early bound is {EARLY_BOUND:,}")
+             f"after its one raise, {EARLY_BOUND:,}. This change cannot land as it is. The work item that the first "
+             f"crossing added, \"Decide what the book's search indexes\" (`brigade work-item list --tag decision "
+             f"--all` finds it), is due first: it decides what is indexed, in an ADR that supersedes ADR 0165's "
+             f"bounds. The next bound is mdBook's own warning at {MDBOOK_WARNS_AT:,}, which stops every change "
+             f"that adds a page; {HELP}")
+    print(f"decisions-index: {count} decisions read on the pages below docs/{INDEX_PATH} as on their own, text and "
+          f"links, and the search finds each there and none by its own page; the search index is {size:,} bytes, "
+          f"{share}% of the {MDBOOK_WARNS_AT:,} at which mdBook warns, and the early bound is {EARLY_BOUND:,}")
     return 0
 
 
@@ -290,11 +472,16 @@ def main(argv):
         return 0
     if len(argv) == 3 and argv[1] == "--check":
         return check(argv[2])
+    if len(argv) == 2 and argv[1] == "--write":
+        with open(os.path.join(ROOT, "docs", INDEX_PATH), "w", encoding="utf-8") as f:
+            f.write(INDEX_PAGE)
+        print(f"decisions-index: wrote docs/{INDEX_PATH}")
+        return 0
     if len(argv) != 1:
-        sys.stderr.write("usage: decisions-index.py [supports <renderer> | --check <built book's directory>]\n")
+        sys.stderr.write("usage: decisions-index.py [supports <renderer> | --check <built book's directory> | --write]\n")
         return 2
-    _, book = json.load(sys.stdin)
-    json.dump(preprocess(book), sys.stdout)
+    context, book = json.load(sys.stdin)
+    json.dump(preprocess(book) if context.get("renderer") == "html" else book, sys.stdout)
     return 0
 
 

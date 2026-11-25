@@ -33,7 +33,7 @@ test *ARGS: test-scripts
 # sentence of counters.toml names (work item 230), and the script that points Brigade's
 # server at this tree, against a made-up checkout and a fake `cargo`, with the nightly
 # workflow that runs it (work item 362), and the book's pages of the decisions and the
-# check of its search index, on a made-up book and made-up indexes (work item 474).
+# check of the built book, on a made-up book and made-up built pages (work item 474).
 # Standard library only, no network.
 test-scripts:
     python3 scripts/release-notes-email-test.py
@@ -231,16 +231,17 @@ lint-config:
     python3 scripts/gen-config.py --check
 
 # rustdoc with warnings denied; the mdBook under target/book with any warning denied;
-# the built book's search index (scripts/decisions-index.py --check; ADR 0165): every
-# decision is found by its number, its title and the words of its Decision section,
-# through the pages the book's preprocessor makes, no decision's own page is in the
-# index, and the index's file is under an early bound set well under the size at which
-# mdBook warns, with the size printed on every run; the book's Rust code blocks; and
-# every relative link and anchor in docs/ and the READMEs (scripts/lint-docs.py links).
+# the book's Rust code blocks; every relative link and anchor in docs/ and the READMEs
+# (scripts/lint-docs.py links); and last, so that it hides no other result, the built
+# book's index of the decisions (scripts/decisions-index.py --check; ADR 0165): every
+# decision reads on the page the book's preprocessor makes for it as its Decision
+# section reads on its own page, text and links, the search index holds those pages
+# and none of the decisions' own, and the index's file is under an early bound set
+# well under the size at which mdBook warns, with the size printed on every run.
 # External links are `just docs-links`, not a gate: a site going down is not a bug in
 # this repository (ADR 0006). The mdbook version named below is the one CI pins in
 # .github/workflows/ci.yml; bump both, and scripts/decisions-index.py reads that
-# version's search index.
+# version's pages and search index.
 docs:
     #!/usr/bin/env bash
     set -euo pipefail
@@ -249,9 +250,9 @@ docs:
     out=$(mdbook build 2>&1) || { printf '%s\n' "$out" >&2; exit 1; }
     printf '%s\n' "$out"
     if grep -qE '(^ *|\[)(WARN|ERROR)(\]| )' <<<"$out"; then echo "docs: mdbook warned; warnings are denied" >&2; exit 1; fi
-    python3 scripts/decisions-index.py --check target/book
     mdbook test
     python3 scripts/lint-docs.py links
+    python3 scripts/decisions-index.py --check target/book
 
 # Fail if a public item, counter, config key or spec/ changed without docs, a page is
 # missing from docs/SUMMARY.md, an ADR is malformed, or an accepted ADR was edited. The

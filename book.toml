@@ -28,10 +28,11 @@ command = "python3 scripts/decisions-index.py"
 heading-split-level = 1
 
 # The decisions' own pages are left out of the search, and the generated pages above
-# are how the search finds a decision (ADR 0165): with them in, the index was at the
-# 10 MB at which mdBook warns that it is very large, and `just docs` denies a warning.
-# `scripts/decisions-index.py --check`, which `just docs` runs on the built book, fails
-# when a decision is missing from the generated pages or one of these pages is back in
-# the index, and holds the index's file to an early bound well under the warning.
+# are how the search finds a decision (ADR 0165): with them in, the index was 24 KB
+# under the 10 MB at which mdBook warns that it is very large, and `just docs` denies
+# a warning. `scripts/decisions-index.py --check`, which `just docs` runs on the built
+# book, fails when a decision's entry on a generated page does not read as its own
+# page's Decision section does, or one of these pages is back in the index, and holds
+# the index's file to an early bound well under the warning.
 [output.html.search.chapter]
 "decisions" = { enable = false }

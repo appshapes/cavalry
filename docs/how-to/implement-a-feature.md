@@ -181,16 +181,23 @@ feature that followed this page, commit by commit.
   accepted ADRs are immutable. Write a new one that supersedes it.
 - `just docs` fails on the README example: the example is the doctest. Fix the code or
   the example, never mark the block `ignore`.
-- `just docs` says, after `decisions-index:`, that an ADR has no Decision section, or that the
-  search document of a page `does not hold` a decision's heading or `lacks` words of
-  its Decision section: the book's search finds a decision through pages made from
-  its Decision section ([Decisions, by what each decided](../reference/decisions.md)).
-  Give the ADR the template's `## Decision` heading with text under it, and list the
-  ADR in `docs/SUMMARY.md` under its title.
-- `just docs` says the book's search index is `past the early bound`: nothing is
+- `just docs` ends with a line that begins `decisions-index:` and names your ADR. The
+  book's search finds a decision through a page that the build makes from its
+  Decision section ([Decisions, by what each decided](../reference/decisions.md)), and
+  the check holds that page to the decision's own. "has no `## Decision` section" or
+  "does not begin with": give the ADR the template's first line and its `## Decision`
+  heading, with text under it. "the built book has no page": list the ADR in
+  `docs/SUMMARY.md`. "does not read on ... as it reads on the decision's own page", or
+  "a link ... opens": the Decision section uses something Markdown takes from
+  elsewhere in the file. Write a footnote as a sentence, and every link as
+  `[words](target)`.
+- `just docs` says the book's search index is `past the early bound of`: nothing is
   wrong with your change. Do the two things the message names, in the same change:
-  add the work item, and raise `EARLY_BOUND` in `scripts/decisions-index.py`
+  add the work item, and change the one line of `scripts/decisions-index.py`
   ([ADR 0165](../decisions/0165-index-the-decisions-in-the-books-search-by-what-each-decided-and-leave-their-pages-out.md)).
+- `just docs` says the index is `past the early bound after its one raise`: your
+  change cannot land yet. The work item that the first crossing added decides what
+  the search indexes, and it lands first. Do not raise a bound.
 - `just lint` reports a dependency that is not on the allowlist: a data-plane crate's
   dependencies are listed in its `Cargo.toml` metadata, and a new one needs the entry,
   a justification in the commit message and an ADR (step 2).
