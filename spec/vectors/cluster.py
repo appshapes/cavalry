@@ -16,9 +16,9 @@ import json
 import struct
 from pathlib import Path
 
-SCHEMA_ID, VERSION = 1, 2
+SCHEMA_ID, VERSION = 1, 3
 HEADER_VERSION = 0  # every header's, in every version of major 0 ("Versions and the upgrade")
-PROTOCOL_VERSION = VERSION << 8  # this page's version in semantic form, 0.2.0
+PROTOCOL_VERSION = VERSION << 8  # this page's version in semantic form, 0.3.0
 LATER_MINOR = (7 << 8) + 3  # 0.7.3, a later minor of major 0, which a reader of this version reads
 HEADER = struct.Struct("<HHHH")  # block length, template id, schema id, version
 NULL = -1
@@ -85,6 +85,9 @@ TEMPLATES = {
          [("leadership_term_id", "q"), ("log_position", "q"), ("follower_member_id", "i")],
          [("catchup_endpoint", "ascii")]),
     57: ("stop-catchup", 12, ("consensus",), [("leadership_term_id", "q"), ("follower_member_id", "i")], []),
+    58: ("floor-answer", 28, ("consensus",),
+         [("leadership_term_id", "q"), ("log_position", "q"), ("leader_member_id", "i"), ("follower_member_id", "i"),
+          ("session_id", "i")], []),
     100: ("snapshot-marker", 40, ("snapshot",),
           [("type_id", "q"), ("log_position", "q"), ("leadership_term_id", "q"), ("index", "i"), ("mark", "i"),
            ("time_unit", "i"), ("app_version", "i")], []),
@@ -106,7 +109,7 @@ TEMPLATES = {
     104: ("timer", 16, ("snapshot",), [("correlation_id", "q"), ("deadline", "q")], []),
 }
 STREAMS = {
-    "log": (1, 20, 21, 22, 23, 24, 25), "consensus": tuple(range(50, 58)), "ingress": (1, 3, 4, 5),
+    "log": (1, 20, 21, 22, 23, 24, 25), "consensus": tuple(range(50, 59)), "ingress": (1, 3, 4, 5),
     "egress": (1, 2, 6), "snapshot": (100, 102, 103, 104, 105), "consensus-module": (31, 32, 33),
 }
 # which fields allow -1 (spec/cluster.md, each table)
@@ -203,6 +206,8 @@ APPEND = dict(leadership_term_id=3, log_position=98304, follower_member_id=1, fl
 COMMIT = dict(leadership_term_id=3, log_position=98304, leader_member_id=0)
 CATCHUP = dict(leadership_term_id=3, log_position=65536, follower_member_id=2)
 STOP_CATCHUP = dict(leadership_term_id=3, follower_member_id=2)
+FLOOR_ANSWER = dict(leadership_term_id=3, log_position=98304, leader_member_id=1, follower_member_id=2,
+                    session_id=-1517388001)
 SNAPSHOT = dict(type_id=1, log_position=98304, leadership_term_id=3, index=0, mark=0, time_unit=0, app_version=0)
 CLOSE_REASON_NONE = -(1 << 31)  # the null of an enumeration of an i32: a session in a snapshot is open
 CLUSTER_SESSION = dict(cluster_session_id=7, correlation_id=41, opened_log_position=65632,
@@ -279,6 +284,8 @@ VECTORS = [
     message("commit-position", 55, "consensus", COMMIT),
     message("catchup-position", 56, "consensus", CATCHUP, {"catchup_endpoint": "10.0.0.3:20003"}),
     message("stop-catchup", 57, "consensus", STOP_CATCHUP),
+    message("floor-answer", 58, "consensus", FLOOR_ANSWER),
+    message("append-position-floor", 54, "consensus", dict(APPEND, flags=2)),
     message("snapshot-marker-begin", 100, "snapshot", SNAPSHOT),
     message("snapshot-marker-section", 100, "snapshot", dict(SNAPSHOT, index=2, mark=1)),
     message("snapshot-marker-end", 100, "snapshot", dict(SNAPSHOT, mark=2)),
@@ -641,13 +648,15 @@ def withholds(own, vote_floor, log_heard):
     return {"withholds": (empty and log_heard) or vote_floor >= 0}
 
 
-def clears_vote_floor(vote_floor, joined, append_position):
-    """spec/cluster.md, "A member that lost its log" (ADR 0161): whether a member clears its vote
-    floor: when it holds one, 0 or more, `joined`, it has joined a leader's live log since it
-    stored the floor and in this run of its module, and its append position is at or past the
-    floor. The join holds what the leader's live sender had sent the member, the floor what the
-    leader had appended when it wrote the new leadership term the member took."""
-    return {"clears": vote_floor >= 0 and joined and append_position >= vote_floor}
+def clears_vote_floor(vote_floor, joined, append_position, answered):
+    """spec/cluster.md, "A member that lost its log" (ADR 0161, ADR 0163): whether a member clears
+    its vote floor: when it holds one, 0 or more, `joined`, it has joined a leader's live log since
+    it stored the floor and in this run of its module, its append position is at or past the floor,
+    and it is at or past `answered`, the lowest log position of the floor answers it took since it
+    stored the floor, in this run, -1 for none. The join holds what the leader's live sender had
+    sent the member, the answer what the leader's recordings held."""
+    return {"clears": vote_floor >= 0 and joined and append_position >= vote_floor
+            and answered >= 0 and append_position >= answered}
 
 
 def withheld_vote(voters, reports, candidate_log):
@@ -924,15 +933,17 @@ VECTORS += [
           ("withholds-with-a-floor-of-0", [0, 4096], 0, False),
       ]],
     *[arithmetic(name, "clears-vote-floor",
-                 {"vote_floor": floor, "joined": joined, "append_position": append},
-                 clears_vote_floor(floor, joined, append))
-      for name, floor, joined, append in [
-          ("clears-vote-floor-once-joined-at-its-floor", 8192, True, 8192),
-          ("clears-vote-floor-once-joined-past-its-floor", 8192, True, 12288),
-          ("clears-vote-floor-of-0-once-joined", 0, True, 0),
-          ("clears-vote-floor-not-before-joined", 8192, False, 12288),
-          ("clears-vote-floor-not-below-its-floor-once-joined", 8192, True, 4096),
-          ("clears-vote-floor-not-with-no-floor", -1, True, 4096),
+                 {"vote_floor": floor, "joined": joined, "append_position": append, "answered": answered},
+                 clears_vote_floor(floor, joined, append, answered))
+      for name, floor, joined, append, answered in [
+          ("clears-vote-floor-once-joined-at-its-floor-and-answer", 8192, True, 8192, 8192),
+          ("clears-vote-floor-once-joined-past-its-floor-and-answer", 8192, True, 12288, 10240),
+          ("clears-vote-floor-of-0-once-joined-and-answered", 0, True, 4096, 4096),
+          ("clears-vote-floor-not-before-joined", 8192, False, 12288, 8192),
+          ("clears-vote-floor-not-below-its-floor-once-joined", 8192, True, 4096, 4096),
+          ("clears-vote-floor-not-with-no-floor", -1, True, 4096, 4096),
+          ("clears-vote-floor-not-unanswered", 8192, True, 12288, -1),
+          ("clears-vote-floor-not-below-its-answer", 8192, True, 12288, 16384),
       ]],
     *[arithmetic(name, "withheld-vote", {"voters": voters, "reports": reports, "candidate": cand},
                  withheld_vote(voters, reports, cand))
