@@ -64,9 +64,15 @@ besides its deadline.
   has appended no event for either: the lower id's event is then first in the
   log. A leader that holds one of them marked, by an event that its log no longer
   holds, appends the other alone until its service's refresh takes the mark off.
-  Two timers scheduled for a time already past, in two entries, are appended
-  in the order the leader is told of them, the earlier entry's first, whatever
-  their ids; and a leader that is told of one late appends it late.
+  Two timers scheduled for a time already past, in two entries, come in no order a
+  program can rely on. In each duty cycle the leader reads up to 10 messages of the
+  consensus module stream before it looks for a due timer. Two that it reads in one
+  duty cycle are appended the lower id first, whatever their entries. So are two of
+  which it still holds the first unmarked when it reads the second: its log refused
+  the first's event, it had appended 10 events in that duty cycle, or it did not yet
+  lead with its election closed. Two whose first event it appended before it read the
+  second are appended in the order it read them, whatever their ids. A leader that is
+  told of one late appends it late.
 - It is an order of appending, and not a promise that two such events are next to
   each other in the log: a leader appends at most 10 timer events in a duty cycle,
   and other entries may lie between two of them.
