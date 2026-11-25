@@ -411,7 +411,9 @@ members.
   reader throws to refuse an argument, so the lint holds where one is called too: by
   a function N-API calls with the caller's arguments, before its call of the ABI,
   and never by a trampoline or a function one calls.
-- Never pass the ABI another integer than the caller gave. N-API's own conversions
+- Never pass the ABI another integer than the caller gave
+  ([ADR 0162](../../docs/decisions/0162-refuse-in-a-generated-client-an-integer-argument-its-parameter-cannot-hold-before-the-abi-is-called.md)).
+  N-API's own conversions
   change a number that is no integer its parameter holds, and say nothing:
   `napi_get_value_int64` drops a fraction, reads a `NaN` or an infinity as 0 and
   holds a number past int64 to the nearest int64, and `napi_get_value_int32` drops

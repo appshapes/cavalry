@@ -63,6 +63,10 @@ imports), Go (`go/`, by `generate_go.py`), the JVM (`jvm/`, by `generate_jvm.py`
   that the ABI's parameter cannot take, in the Python client an integer its
   parameter cannot hold
   ([ADR 0162](../docs/decisions/0162-refuse-in-a-generated-client-an-integer-argument-its-parameter-cannot-hold-before-the-abi-is-called.md)).
+  The Node addon's readers are held the same way in its C: a reader is called by a
+  function the addon gives N-API, which N-API calls with the caller's arguments,
+  by that function itself and before its ABI call, and never by a trampoline or a
+  function one calls.
   A poll's own raise, once its ABI call has returned, is the other one allowed
   (below).
   Generated code of the client in another language on the same path is read
