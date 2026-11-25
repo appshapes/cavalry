@@ -208,4 +208,5 @@ under `docs/` is listed here; `just lint-docs` fails on one that is not.
 - [0148. Keep a member whose truncation faulted out of the log until it finishes the truncation](decisions/0148-keep-a-member-whose-truncation-faulted-out-of-the-log-until-it-finishes-the-truncation.md)
 - [0152. Sync the log directory when a member's terms file is created, and hold the directory for the consensus module's life](decisions/0152-sync-the-log-directory-when-a-members-terms-file-is-created-and-hold-the-directory-for-the-consensus-modules-life.md)
 - [0153. End a closed control publication's linger for a subscription on its control address](decisions/0153-end-a-closed-control-publications-linger-for-a-subscription-on-its-control-address.md)
+- [0154. Hold an add publication while a receive endpoint that holds its control address closes](decisions/0154-hold-an-add-publication-while-a-receive-endpoint-that-holds-its-control-address-closes.md)
 - [0151. Give a cluster's service timers that every service decides from the log](decisions/0151-give-a-clusters-service-timers-that-every-service-decides-from-the-log.md)
