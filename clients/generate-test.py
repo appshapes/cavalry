@@ -2755,6 +2755,23 @@ class JvmPackage(unittest.TestCase):
         self.assertEqual(gen_jvm.CRITICAL, ("cavalry_publication_offer", "cavalry_cluster_session_offer",
                                             "cavalry_cluster_service_reply"))
         self.assertEqual(abi.count("Linker.Option.critical("), 3)
+        # A service's timers (ADR 0157) take longs and no bytes, so they are plain
+        # downcalls, and each method is one of them with its arguments as given.
+        service = files[self.BASE + "ClusterService.java"]
+        for name, descriptor, method, call in (
+                ("cavalry_cluster_service_schedule_timer", "JAVA_INT, ADDRESS, JAVA_LONG, JAVA_LONG",
+                 "    public int scheduleTimer(long correlationId, long deadline) {\n",
+                 "return (int) Abi.cavalry_cluster_service_schedule_timer.invokeExact(handle, correlationId, deadline);"),
+                ("cavalry_cluster_service_cancel_timer", "JAVA_INT, ADDRESS, JAVA_LONG",
+                 "    public int cancelTimer(long correlationId) {\n",
+                 "return (int) Abi.cavalry_cluster_service_cancel_timer.invokeExact(handle, correlationId);")):
+            self.assertIn(f'{name} = LINKER.downcallHandle(LOOKUP.findOrThrow("{name}"), '
+                          f"FunctionDescriptor.of({descriptor}));", abi)
+            body = service.split(method, 1)[1].split("\n    }\n", 1)[0]
+            self.assertIn(call, body)
+            self.assertEqual(body.count("invokeExact("), 1)
+            self.assertIn(f'throw Abi.failed("{name}", t);', body)
+            self.assertNotIn("Abi.check(", body)
         self.assertEqual(subscription.count("Abi.LINKER.upcallStub("), 1)
         self.assertIn('findVirtual(Subscription.class, "onFragment"', subscription)
         self.assertIn(".bindTo(this)", subscription)
