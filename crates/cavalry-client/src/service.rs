@@ -96,11 +96,6 @@ const SNAPSHOT_PAUSE: Duration = Duration::from_micros(50);
 /// program's bytes are offered as they are.
 const SNAPSHOT_SCRATCH_LENGTH: usize = 512;
 
-/// How many schedule timers and cancel timers a service offers its member in one
-/// poll: what is left is offered in the polls after it, so that telling a member of
-/// 1,024 timers, as each timer refresh interval does, costs no poll more than this.
-const TIMER_WORDS_PER_POLL: usize = 64;
-
 /// How long a service's start waits for the first message of its snapshot's
 /// recording, and for each message after one, before it passes the snapshot over
 /// (`spec/cluster.md`, "Values", service snapshot load timeout).
@@ -748,7 +743,7 @@ impl SnapshotReader {
                 log_position: 0,
                 leadership_term_id: 0,
                 sessions: Vec::with_capacity(MAX_SESSIONS),
-                timers: Vec::new(),
+                timers: Vec::with_capacity(MAX_SERVICE_TIMERS),
                 state: Vec::new(),
             },
             last: Vec::with_capacity(SERVICE_SNAPSHOT_STATE_MESSAGE_LENGTH),
@@ -867,8 +862,6 @@ impl SnapshotReader {
         };
     }
 
-    /// The snapshot, when the recording held one whole: the last message is its end
-    /// marker.
     /// One timer of the snapshot: above the one before it, and no more than a
     /// service holds (`spec/cluster.md`, "A service's start").
     fn timer(&mut self, correlation_id: i64, deadline: i64) -> Reading {
@@ -885,6 +878,8 @@ impl SnapshotReader {
         }
     }
 
+    /// The snapshot, when the recording held one whole: the last message is its end
+    /// marker.
     fn finish(self) -> Option<Snapshot> {
         let whole = self.reading == Reading::Bytes
             && self.held
@@ -1172,13 +1167,21 @@ pub struct ClusterService {
     sessions: Box<[Session; MAX_SESSIONS]>,
     /// The snapshot the last poll's last entry asked for, until the next poll.
     due: Option<Due>,
-    /// The two counters of the service's snapshots, from the first call of
-    /// [`snapshot`](Self::snapshot) that writes one.
+    /// The two counters of the service's snapshots, added with the three of its
+    /// timers at the first of its first snapshot that writes one, the first thing
+    /// it has to tell its member of a timer and the first timer event it passes
+    /// over ([`ClusterService::add_counters`]).
     snapshot_counters: Option<SnapshotCounters>,
-    /// The two publications of the service's snapshots, from the first call whose
-    /// adds the driver took: held apart from the counters, so that a refused add is
-    /// counted, and a call after it adds no counter twice.
-    snapshot_publications: Option<SnapshotPublications>,
+    /// The service's publication on the service snapshot stream, from its first
+    /// snapshot whose add the driver took: each snapshot is a recording of a span
+    /// of it. Held apart from the counters, so that a refused add is counted, and a
+    /// call after it adds no counter twice.
+    snapshot_stream: Option<Publication>,
+    /// The service's publication on the consensus module stream, from the first of
+    /// its first snapshot, the first thing it has to tell its member of a timer
+    /// and the first timer event it passes over: its service acks, schedule timers
+    /// and cancel timers go to the member on it.
+    member_stream: Option<Publication>,
     /// Whether the service has begun: a poll has opened its member's log, or
     /// [`ClusterService::restore`] has answered where it starts.
     started: bool,
@@ -1258,23 +1261,12 @@ impl SnapshotCounters {
     }
 }
 
-/// The two publications of a service's snapshots, kept from the first snapshot whose
-/// adds the driver took to the service's close: the publication each snapshot is a
-/// recording of a span of, and the publication its service acks go to the member on.
+/// The two publications a snapshot is written through, the service's own, taken for
+/// the writing and given back after it: the publication each snapshot is a recording
+/// of a span of, and the publication its service acks go to the member on.
 struct SnapshotPublications {
     publication: Publication,
     acks: Publication,
-}
-
-impl SnapshotPublications {
-    /// Adds both: two commands to the driver. A refusal of the second gives the
-    /// first back.
-    fn add(client: &mut Cavalry) -> Result<Self, ClientError> {
-        let publication =
-            client.add_exclusive_publication(IPC_CHANNEL, SERVICE_SNAPSHOT_STREAM_ID)?;
-        let acks = client.add_exclusive_publication(IPC_CHANNEL, CONSENSUS_MODULE_STREAM_ID)?;
-        Ok(Self { publication, acks })
-    }
 }
 
 impl ClusterService {
@@ -1289,7 +1281,8 @@ impl ClusterService {
             sessions: Box::new(core::array::from_fn(|_| Session::closed())),
             due: None,
             snapshot_counters: None,
-            snapshot_publications: None,
+            snapshot_stream: None,
+            member_stream: None,
             started: false,
             start: None,
             timers: {
@@ -1759,16 +1752,20 @@ impl ClusterService {
                 // A timer event is handed over only when its timer is pending with a
                 // deadline at or before the event's time. Every other one is passed
                 // over: taken, counted, and no handler's.
+                let mut passed_over_as_entry = false;
                 let entry = match entry {
                     Entry::Timer { correlation_id }
                         if timers.begin_event(correlation_id, timestamp)
                             != TimerEventIs::Handed =>
                     {
                         timers.end_entry(true);
-                        timer_counts.passed_over = timer_counts.passed_over.saturating_add(1);
                         if !*passed_over_as_other {
+                            timer_counts.passed_over = timer_counts.passed_over.saturating_add(1);
                             return Action::Continue;
                         }
+                        // Handed to the program as an entry of no kind, and counted
+                        // when the program takes it: one it aborts is read again.
+                        passed_over_as_entry = true;
                         timers.begin_entry();
                         Entry::Other
                     }
@@ -1806,6 +1803,9 @@ impl ClusterService {
                     .cancels_dropped
                     .saturating_add(i64::try_from(dropped).unwrap_or(i64::MAX));
                 if action != Action::Abort {
+                    if passed_over_as_entry {
+                        timer_counts.passed_over = timer_counts.passed_over.saturating_add(1);
+                    }
                     for session in sessions.iter_mut().filter(|session| session.open) {
                         session.taken();
                     }
@@ -1853,19 +1853,58 @@ impl ClusterService {
         Ok(polled)
     }
 
+    /// Adds the counters a service adds, the two of its snapshots and the three of
+    /// its timers, each with its member's id as the key, where it holds them not
+    /// yet: before its publications, so that a publication the driver refuses at a
+    /// snapshot is counted (`spec/cluster.md`, "A service's snapshot"). A refusal
+    /// of a counter is the caller's error, and the next call adds what is missing.
+    fn add_counters(
+        client: &mut Cavalry,
+        member: &Member,
+        snapshots: &mut Option<SnapshotCounters>,
+        timers: &mut Option<TimerCounters>,
+    ) -> Result<(), ClientError> {
+        if snapshots.is_none() {
+            *snapshots = Some(SnapshotCounters::add(client, member)?);
+        }
+        if timers.is_none() {
+            let (key, id) = (member.key, member.id);
+            let mut add = |counter: CounterId, name: &str| {
+                client.add_counter(counter.0, &key, &format!("{name} {id}"))
+            };
+            *timers = Some(TimerCounters {
+                pending: add(CLUSTER_SERVICE_TIMERS, "cluster.service_timers")?,
+                passed_over: add(
+                    CLUSTER_SERVICE_TIMER_EVENTS_PASSED_OVER,
+                    "cluster.service_timer_events_passed_over",
+                )?,
+                cancels_dropped: add(
+                    CLUSTER_SERVICE_TIMER_CANCELS_DROPPED,
+                    "cluster.service_timer_cancels_dropped",
+                )?,
+            });
+        }
+        Ok(())
+    }
+
     /// Tells the member on this service's driver of its timers, on the consensus
     /// module stream, and stores the service's counters of them (`spec/cluster.md`,
     /// "The service", "Timers", "What a service tells its member"; ADR 0151): a
     /// cancel timer for each timer that an entry left pending no more, a schedule
     /// timer for each that an entry scheduled, and a schedule timer for every
-    /// pending timer again each timer refresh interval, 1 s. At most
-    /// [`TIMER_WORDS_PER_POLL`] messages in a poll, each offered once: one that the
-    /// stream does not take is offered in a later poll.
+    /// pending timer again each timer refresh interval, 1 s. Each message is
+    /// offered once in a poll, for as long as the stream takes them: one that the
+    /// stream does not take, and those after it, are offered in a later poll. So a
+    /// poll offers 2,048 messages at the most, the 1,024 cancels a service holds
+    /// and its 1,024 timers, which is what the poll after a refresh of a full table
+    /// costs.
     ///
-    /// It adds the service's counters, and then its two publications, the first
-    /// time there is something to tell or to count. A driver that refuses them
-    /// fails no call of the program's and changes no timer: the error is this
-    /// poll's, and the next poll adds them again.
+    /// It adds the service's counters, and then its publication on the consensus
+    /// module stream, the first time there is something to tell or a passed-over
+    /// event to count. A driver that refuses one of them fails no call of the
+    /// program's inside a handler and changes no timer: the error is this poll's,
+    /// reported to the program, and the next poll with something to tell or to
+    /// count adds what is missing (ADR 0159).
     ///
     /// A poll of a service with no timer pending, nothing to tell and nothing new
     /// to count costs a few compares here, and reads no clock.
@@ -1889,52 +1928,31 @@ impl ClusterService {
         let Some(member) = self.member.as_ref() else {
             return Ok(());
         };
-        // The counters before the publications, so that a publication the driver
-        // refuses is counted where a snapshot counts it.
-        if self.snapshot_counters.is_none() {
-            self.snapshot_counters = Some(SnapshotCounters::add(client, member)?);
-        }
-        let counters = match self.timer_counters.take() {
-            Some(counters) => counters,
-            None => {
-                let (key, id) = (member.key, member.id);
-                let mut add = |counter: CounterId, name: &str| {
-                    client.add_counter(counter.0, &key, &format!("{name} {id}"))
-                };
-                TimerCounters {
-                    pending: add(CLUSTER_SERVICE_TIMERS, "cluster.service_timers")?,
-                    passed_over: add(
-                        CLUSTER_SERVICE_TIMER_EVENTS_PASSED_OVER,
-                        "cluster.service_timer_events_passed_over",
-                    )?,
-                    cancels_dropped: add(
-                        CLUSTER_SERVICE_TIMER_CANCELS_DROPPED,
-                        "cluster.service_timer_cancels_dropped",
-                    )?,
-                }
-            }
-        };
-        let counters = &*self.timer_counters.insert(counters);
+        // The counters before the publication (`spec/cluster.md`, "A service's
+        // snapshot").
+        Self::add_counters(
+            client,
+            member,
+            &mut self.snapshot_counters,
+            &mut self.timer_counters,
+        )?;
         if counts != self.timer_counts.stored
+            && let Some(counters) = self.timer_counters.as_ref()
             && counters.pending.store_release(counts.0).is_ok()
             && counters.passed_over.store_release(counts.1).is_ok()
             && counters.cancels_dropped.store_release(counts.2).is_ok()
         {
             self.timer_counts.stored = counts;
         }
-        if !telling {
-            return Ok(());
-        }
-        let publications = match self.snapshot_publications.take() {
-            Some(publications) => publications,
-            None => SnapshotPublications::add(client)?,
+        // The publication, from the first thing to tell and the first event passed
+        // over.
+        let stream = match self.member_stream.take() {
+            Some(stream) => stream,
+            None => client.add_exclusive_publication(IPC_CHANNEL, CONSENSUS_MODULE_STREAM_ID)?,
         };
-        let publications = self.snapshot_publications.insert(publications);
+        let stream = self.member_stream.insert(stream);
         let mut scratch = [0u8; 64];
-        for _ in 0..TIMER_WORDS_PER_POLL {
-            let Some(word) = self.timers.next_word() else {
-                break;
-            };
+        while let Some(word) = self.timers.next_word() {
             let Ok(length) = word.message().write(&mut scratch) else {
                 break;
             };
@@ -1943,7 +1961,7 @@ impl ClusterService {
             };
             // A stream that takes nothing now, as while no member reads it, keeps
             // the word for a later poll.
-            if publications.acks.offer(bytes).is_err() {
+            if stream.offer(bytes).is_err() {
                 break;
             }
             self.timers.told(word);
@@ -2059,32 +2077,56 @@ impl ClusterService {
             self.due = None;
             return Ok(false);
         }
-        // The two counters first, so that every step after them that fails is
-        // counted, the driver's refusal of a publication among them.
-        let counters = match self.snapshot_counters.take() {
-            Some(counters) => counters,
-            None => SnapshotCounters::add(client, member)?,
+        // The counters first, so that every step after them that fails is counted,
+        // the driver's refusal of a publication among them.
+        Self::add_counters(
+            client,
+            member,
+            &mut self.snapshot_counters,
+            &mut self.timer_counters,
+        )?;
+        let Some(counters) = self.snapshot_counters.as_ref() else {
+            // Added above, or the call returned.
+            return Err(ClusterError::NoSnapshotDue);
         };
-        let counters = &*self.snapshot_counters.insert(counters);
-        let publications = match self.snapshot_publications.take() {
-            Some(publications) => publications,
-            None => match SnapshotPublications::add(client) {
-                Ok(publications) => publications,
+        // The service's two publications, each added where the service holds it not
+        // yet, and taken for the writing: a refusal of the second leaves the first
+        // the service's.
+        let publication = match self.snapshot_stream.take() {
+            Some(publication) => publication,
+            None => match client.add_exclusive_publication(IPC_CHANNEL, SERVICE_SNAPSHOT_STREAM_ID)
+            {
+                Ok(publication) => publication,
                 Err(error) => {
                     let _ = counters.failed.increment();
                     return Err(error.into());
                 }
             },
         };
-        let publications = self.snapshot_publications.insert(publications);
-        match write_snapshot(
+        let acks = match self.member_stream.take() {
+            Some(acks) => acks,
+            None => match client.add_exclusive_publication(IPC_CHANNEL, CONSENSUS_MODULE_STREAM_ID)
+            {
+                Ok(acks) => acks,
+                Err(error) => {
+                    self.snapshot_stream = Some(publication);
+                    let _ = counters.failed.increment();
+                    return Err(error.into());
+                }
+            },
+        };
+        let mut publications = SnapshotPublications { publication, acks };
+        let written = write_snapshot(
             client,
-            publications,
+            &mut publications,
             &self.sessions,
             &self.timers,
             due,
             state,
-        ) {
+        );
+        self.snapshot_stream = Some(publications.publication);
+        self.member_stream = Some(publications.acks);
+        match written {
             Ok(()) => {
                 let _ = counters.taken.increment();
                 self.due = None;
@@ -2145,9 +2187,11 @@ impl ClusterService {
             counters.passed_over.close();
             counters.cancels_dropped.close();
         }
-        if let Some(publications) = self.snapshot_publications.take() {
-            publications.publication.close()?;
-            publications.acks.close()?;
+        if let Some(publication) = self.snapshot_stream.take() {
+            publication.close()?;
+        }
+        if let Some(stream) = self.member_stream.take() {
+            stream.close()?;
         }
         if let Some((started_at, passed_over)) = self.start.take() {
             started_at.close();
