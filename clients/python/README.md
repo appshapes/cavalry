@@ -22,7 +22,9 @@ The package loads the library at its first use, `cavalry.Client()` or
 library of another ABI version than the header the package was generated from raises
 `cavalry.CavalryError` with code `CAVALRY_ERR_ABI_VERSION` and both numbers: load the
 library built from the same checkout, or run `just generate-clients` against the
-library's header (`spec/c-abi.md`, "Versions and what a reader rejects").
+library's header (`spec/c-abi.md`, "Versions and what a reader rejects"). Where the
+package looks for the library, and how the package a user installs carries one, is
+"The package" below.
 
 ### The committed log
 
@@ -520,6 +522,106 @@ You will see `1000 messages over cavalry:ipc, position 64000`.
 `conformance/python/readme.py`, against the runner's driver, and fails unless it prints
 that line within 10 s: change the program or the line, and the run says which.
 
+## The package
+
+A user installs the client from a wheel, the file format of a built Python package.
+The wheel is named `cavalry-client`, since the name `cavalry` on PyPI, Python's package
+index, is another project's; the import stays `cavalry`. It holds the two generated
+files and, beside them, the shared library they load, so a program that uses it needs
+no checkout and no Rust toolchain. It does not hold the driver: `cavalry run` still
+comes from a checkout. No wheel is published yet. The release publishes one for each
+platform (work item 369), and until then a wheel is built from a checkout.
+
+### How it is built
+
+```sh
+cargo build --release -p cavalry-ffi --lib                  # libcavalry_ffi, which the wheel will hold
+python3 clients/python/cavalry_package.py target/package    # writes the wheel and prints its path
+```
+
+On macOS on Apple silicon the second command prints
+`target/package/cavalry_client-0.1.0-py3-none-macosx_11_0_arm64.whl`.
+
+`cavalry_package.py` is the package's build backend, the program a Python installer
+calls to build a package (PEP 517), and `pyproject.toml` beside it, the package's
+manifest, names it. So an installer builds the same wheel, byte for byte under one
+Python:
+
+```sh
+python3 -m pip wheel --no-deps --no-index --wheel-dir target/package clients/python
+```
+
+Both files are generated, like the rest of the package, and the backend uses Python's
+standard library alone: the build installs nothing and asks no package index for
+anything. The library it puts in the wheel is the file at `CAVALRY_FFI_LIBRARY` when
+that is set, and `target/release/libcavalry_ffi` of the checkout otherwise. A pip
+before 21.3 builds from a copy of `clients/python`, from which the checkout's
+`target/` cannot be reached, so with such a pip set the variable to the library's
+path. The package has no source distribution: the library is Rust, and a source
+distribution would hold none.
+
+A wheel with a library inside runs on one platform, and the last part of its file
+name, the platform tag, says which. The backend reads the tag from the library, never
+from the machine that builds:
+
+| Library | Tag | Read from |
+| --- | --- | --- |
+| Mach-O, macOS | `macosx_11_0_arm64` | The least macOS version the library's build-version load command names, and its CPU. From macOS 11 on an installer knows the tags `macosx_<major>_0` alone, so a least version of 11.3 is written as `macosx_12_0`. |
+| ELF, Linux | `manylinux_2_34_x86_64` | The newest `GLIBC_` symbol version the library asks of the libraries it loads, so the oldest glibc, the C library of most Linux systems, that it runs on (PEP 600), and its machine. |
+
+The two tags are those of the wheels CI builds, on its macOS and its Linux runner. A
+library the backend has no tag for is refused, with no wheel written: one built
+for musl, the C library of Alpine Linux, one for Windows, and one for a machine other
+than x86-64 and 64-bit ARM.
+
+### Where the library is found
+
+`cavalry.find_library()` returns the first of these that is a file:
+
+1. `libcavalry_ffi.so`, or `libcavalry_ffi.dylib` on macOS, in the package's own
+   directory, beside `__init__.py`. A package installed from a wheel has it there.
+2. The path in `CAVALRY_FFI_LIBRARY`, when that is set. A path with no file is an
+   error, not a reason to look further.
+3. `target/release/libcavalry_ffi.so`, or `.dylib`, under one of the six directories
+   above the package's own, the nearest first. That is where `cargo build --release -p
+   cavalry-ffi --lib` writes it in the checkout the package sits in.
+
+The package's own library comes first so that an installed package loads the library
+it was built with, whatever the environment it runs in says: a variable left in a
+shell cannot give it another one. The package from a checkout holds no library, so
+there the variable decides, and then the checkout's build. To run an installed
+package over another library, pass the path to the first client the program makes,
+`cavalry.Client(library_path=...)`.
+
+When none of the three is a file, `find_library` raises `cavalry.CavalryError` whose
+message names every path it tried, in this order, and what to do: install the package
+from a wheel built for this platform, or build the library in the checkout, or set
+`CAVALRY_FFI_LIBRARY`.
+
+### How it is installed, and how that is checked
+
+```sh
+python3 -m venv /tmp/cavalry-client
+/tmp/cavalry-client/bin/python -m pip install --no-index target/package/cavalry_client-*.whl
+```
+
+The Example's program then runs from any directory with `/tmp/cavalry-client/bin/python
+- <<'PY'` as its first line, in place of `PYTHONPATH=clients/python python3 - <<'PY'`,
+and prints the same line.
+
+`just package` does all of this with a driver of its own
+(`scripts/package.sh`, `scripts/package-python.py`), and CI runs it on Linux for every
+pull request and on macOS too for every commit on `master`. It builds the wheel
+through pip, checks that the wheel holds the library `cargo` built under the tag that
+a second reader gives it, `objdump` on Linux and `otool` on macOS, installs it into a
+new environment in a directory outside the checkout, and runs the Example's program
+there with neither `PYTHONPATH` nor `CAVALRY_FFI_LIBRARY` set. It fails unless the
+program prints the Example's line and the library the client names is the one inside
+the environment. Then it runs a control: the same wheel with the library taken out,
+in a second new environment, must fail with the error above. A control that passed
+would mean a library could be reached by another path, and the first run would have
+proven nothing.
+
 ## The runtime's side of the boundary
 
 What `ctypes` does per message, and what `conformance/python/quickstart.py`'s report
@@ -710,6 +812,9 @@ handed its entry twice at one position, and the session reads one reply.
 - `spec/c-abi.md`: the page the package wraps, function for function.
 - `clients/README.md`: how a client is generated and what every client passes.
 - `conformance/python/`: the runner and its report.
+- `docs/decisions/0165-carry-the-native-library-inside-a-clients-package-and-look-for-it-there-first.md`:
+  why the wheel holds the library, why the package's own comes before
+  `CAVALRY_FFI_LIBRARY`, and why the build uses no packaging tool.
 - `docs/decisions/0046-build-the-c-abi-and-the-clients-fourth.md`: the slice this
   client is the second feature of, and what the boundary's three parts are.
 - `docs/decisions/0124-give-each-client-a-session-object-and-a-service-object-whose-handlers-failure-aborts-its-entry.md`:

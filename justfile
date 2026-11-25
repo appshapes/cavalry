@@ -32,7 +32,10 @@ test *ARGS: test-scripts
 # and a fake `gh` (card 262), and the counters lint's reading of the counters that a
 # sentence of counters.toml names (work item 230), and the script that points Brigade's
 # server at this tree, against a made-up checkout and a fake `cargo`, with the nightly
-# workflow that runs it (work item 362). Standard library only, no network.
+# workflow that runs it (work item 362), and the Python client's package: its manifest,
+# its build backend's reading of made-up libraries, the wheel it writes and the client's
+# search for its library in a made-up tree (work item 469). Standard library only, no
+# network.
 test-scripts:
     python3 scripts/release-notes-email-test.py
     python3 scripts/release-notes-test.py
@@ -46,6 +49,7 @@ test-scripts:
     python3 scripts/gen-counters-test.py
     python3 clients/generate-test.py
     python3 clients/lint-test.py
+    python3 clients/package-test.py
 
 # Latency and throughput harness (CLAUDE.md, gate 2; ADR 0015): HdrHistogram p50, p99,
 # p99.99 and max of claim and commit, of publish to delivery, and of the slot-padding
@@ -144,6 +148,18 @@ replay-check:
 quickstart:
     bash scripts/quickstart.sh
     bash scripts/run-a-cluster.sh
+
+# The clients' packages, each built with the native library inside and installed as a
+# user installs it (work item 469, the first part of the release's dry run, work item
+# 369; ADR 0165). Today the Python client's: build the driver and the shared library,
+# start a driver on a directory of its own, build the wheel through the package's own
+# backend, install it into a new environment outside the checkout, run the client
+# README's example there, and fail unless it prints the line the README promises with
+# the library the package holds; then the control, the same wheel without its library,
+# which must fail. Nothing comes from a package index and nothing is published. What CI
+# runs on Linux and macOS. clients/python/README.md, "The package", is the page.
+package:
+    bash scripts/package.sh
 
 # clippy with workspace lints, fmt, the workspace lint, the counters lint and the
 # configuration lint below.

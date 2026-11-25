@@ -125,22 +125,43 @@ class HandlerError(Exception):
 
 
 def find_library():
-    """The shared library: `CAVALRY_FFI_LIBRARY` when set, else `target/release/libcavalry_ffi`
-    of the checkout this package sits in, which `cargo build --release -p cavalry-ffi --lib`
-    writes."""
+    """The shared library, from the first of three places that holds one. The package's
+    own directory, where a package installed from a wheel holds it, so that an installed
+    package loads the library it was built with whatever the environment says. Then
+    `CAVALRY_FFI_LIBRARY`, when it is set. Then `target/release/libcavalry_ffi` of the
+    checkout this package sits in, which `cargo build --release -p cavalry-ffi --lib`
+    writes. When none holds one, the error names every path it tried (README, "The
+    package"; ADR 0165)."""
+    name = "libcavalry_ffi" + _SUFFIX
+    here = os.path.dirname(os.path.abspath(__file__))
+    packaged = os.path.join(here, name)
+    if os.path.isfile(packaged):
+        return packaged
     path = os.environ.get("CAVALRY_FFI_LIBRARY")
     if path:
-        return path
-    here = os.path.dirname(os.path.abspath(__file__))
+        if os.path.isfile(path):
+            return path
+        raise CavalryError("find_library", 0,
+                           f"CAVALRY_FFI_LIBRARY is set to {path}, and no file is there; this package holds no "
+                           f"library of its own at {packaged}. Set CAVALRY_FFI_LIBRARY to the path of {name}, or "
+                           f"unset it to load the one of the checkout this package sits in; see "
+                           f"clients/python/README.md#the-package")
+    tried = []
     for _ in range(6):
-        here = os.path.dirname(here)
-        candidate = os.path.join(here, "target", "release", "libcavalry_ffi" + _SUFFIX)
-        if os.path.exists(candidate):
+        above = os.path.dirname(here)
+        if above == here:
+            break
+        here = above
+        candidate = os.path.join(here, "target", "release", name)
+        if os.path.isfile(candidate):
             return candidate
+        tried.append(candidate)
     raise CavalryError("find_library", 0,
-                       "libcavalry_ffi" + _SUFFIX + " was not found: build it with `cargo build --release -p"
-                       " cavalry-ffi --lib` in the checkout, or set CAVALRY_FFI_LIBRARY to its path;"
-                       " see clients/python/README.md")
+                       f"{name} was not found. Tried, in order: {packaged}, where a package installed from a "
+                       f"wheel holds it; CAVALRY_FFI_LIBRARY, which is not set; and a checkout's build, at "
+                       f"{', '.join(tried)}. Install the package from a wheel built for this platform, or build "
+                       f"the library with `cargo build --release -p cavalry-ffi --lib` in the checkout, or set "
+                       f"CAVALRY_FFI_LIBRARY to its path; see clients/python/README.md#the-package")
 
 
 _library = None
