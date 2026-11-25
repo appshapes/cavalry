@@ -517,7 +517,7 @@ runner's cluster round reports the waits. On that laptop, in each of 10 runs, 7 
 about 26,900 polls of three services took over 1 ms: the three that opened a member's
 log, the leader's at the session's opening, and the three in which each service's
 program first scheduled a timer. The longest poll of each run was one of those
-last, 23.5 to 26.6 ms with its six commands; before the round scheduled a timer the
+last, 25.3 to 36.2 ms with its six commands; before the round scheduled a timer the
 longest of each of 25 runs took 7.4 to 12.2 ms. A program whose other threads cannot stop for that long runs its
 service in a process of its own.
 
