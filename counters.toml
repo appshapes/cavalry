@@ -1900,7 +1900,7 @@ name = "cluster.timers_cleared"
 kind = "counter"
 scope = "client"
 doc = "Schedule timers at which one cluster member removed every timer it held: its table held 2,048 with no timer in it whose event the member had appended, so that it held more than its service has pending and could not tell which. It kept the timer it was sent, and its service sends the pending ones again within a second (spec/cluster.md, The service, Timers, The member's timers; ADR 0151). key and label as cluster.elections."
-doctor = "This member's table of timers was full, 2,048, with no timer in it whose event the member had appended: more than the service beside it can have pending, so some of them pending nowhere. It removed them all and kept the one it was sent. No timer is lost: the page has a service send every pending timer again each second, and a timer may be late by that much. A count that keeps rising is a service whose cancels do not reach this member: check that the service beside it runs, and that cluster.messages_rejected on this host does not rise."
+doctor = "This member's table of timers was full, 2,048, with no timer in it whose event the member had appended: more than the service beside it can have pending, so some of them pending nowhere. It removed them all and kept the one it was sent. No timer is lost: a service sends every pending timer again each second (spec/cluster.md, The service, Timers), and a timer may be late by that much. A count that keeps rising is a service whose cancels do not reach this member: check that the service beside it runs and reads its log."
 
 # A cluster member's role (spec/cluster.md, "Roles and the election"; ADR 0052, feature
 # 3). A member is a candidate (ADR 0077, ADR 0081) from its nomination until it

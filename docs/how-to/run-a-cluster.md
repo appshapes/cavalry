@@ -613,8 +613,8 @@ committed once a quorum, two of three, has it on disk.
   the member could not tell which: it removed them all and kept the one it was
   sent. No timer is lost: a service sends every pending timer again each second,
   and a timer may be late by that much. A count that keeps rising is a service
-  whose cancels do not reach this member: check that the service beside it runs,
-  and that `cluster.messages_rejected` on this host does not rise
+  whose cancels do not reach this member: check that the service beside it runs
+  and reads its log
   ([ADR 0151](../decisions/0151-give-a-clusters-service-timers-that-every-service-decides-from-the-log.md)).
 - `WARN cluster.service_snapshots_passed_over`: the service beside this member was
   told of a snapshot when it started, and could not take it. It read the log from
