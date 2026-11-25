@@ -104,8 +104,11 @@ that no server runs, such as this tree's own last commit.
 
 ## Evidence
 
-On the laptop that wrote this ADR, an Apple M5 Pro running macOS 26.6.1, at `master`
-4b07404e with this change:
+On the laptop that wrote this ADR, an Apple M5 Pro running macOS 26.6.1, at fc67cb84,
+this change's first commit, made on `master` 4b07404e. That commit's gate wrote six
+directories: each of the three with its last run stopped, and again killed. The
+seventh, the directory written in turn with 620a2e29's last run killed, came with
+80e9289e after a review, and CI's run 45536715972 below holds it.
 
 - `conformance/upgrade/log-directory.sh` printed `ok` in 35 s. 620a2e29 built in 6 s
   and d265af82 in 7 s, each into a new target directory, and the six directories took
@@ -123,15 +126,18 @@ On the laptop that wrote this ADR, an Apple M5 Pro running macOS 26.6.1, at `mas
 - `CAVALRY_DIRECTORY_FROM=d265af82` printed `ok` in 6 s with both builds kept.
 
 What the added build costs on CI's runners, from `ci` run by hand on this change's
-branch, runs 45536355928 and 45536715972, beside `master`'s run 45533266831 at
-4b07404e:
+branch, beside `master`'s run 45533266831 at 4b07404e. Run 45536355928 was at
+fc67cb84 and wrote the six directories. Run 45536715972 was at 80e9289e and wrote
+all seven: its `gates (linux)` printed seven lines of step a, the seventh
+`0.9.0-then-0.10.0, first-killed`, and then `ok`. In each cell of two figures below,
+the first is run 45536355928's and the second run 45536715972's:
 
 | Runner | 620a2e29's build | d265af82's build | The whole gate | The gate on `master` |
 | --- | --- | --- | --- | --- |
-| Linux, `gates (linux)` | 6 s | 9 s and 10 s | 29 s and 30 s | 12 s |
-| macOS, `gates (macos)` | 5 s and 6 s | 8 s and 9 s | 30 s and 32 s | 10 s |
+| Linux, `gates (linux)` | 6 s, then 6 s | 10 s, then 9 s | 29 s, then 30 s | 12 s |
+| macOS, `gates (macos)` | 6 s, then 5 s | 8 s, then 9 s | 30 s, then 32 s | 10 s |
 
-So `just conformance` takes about 18 to 20 s more on each runner. Half of that is
+So `just conformance` takes 17 to 22 s more on each runner. About half of that is
 d265af82's build, which the cache never holds, as it never holds 620a2e29's. The
 other half is the added directories. The jobs of the first run took 14.5 minutes on
 Linux and 15.5 on macOS, as `master`'s do, well inside their 30-minute bound. The
@@ -145,8 +151,8 @@ Over the pull request's range, which CI checks, the ADR is new.
 - Every pull request holds the three directories the servers hold or may hold. A
   change to the durable log's format that d265af82 cannot be followed by, or that
   cannot follow 620a2e29 and then d265af82, fails there.
-- `just conformance` builds one more older tree, and the gate writes four more
-  directories.
+- `just conformance` builds one more older tree, and the gate writes five more
+  directories: seven, where `master`'s gate wrote two.
 - The feed's files must compile against each older tree. When they cannot, ADR 0141's
   way applies to that tree: keep the files as they last compiled against it, under
   `conformance/upgrade/feed-at-<its first 8 hex digits>/`.
