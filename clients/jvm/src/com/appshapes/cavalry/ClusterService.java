@@ -172,8 +172,13 @@ public final class ClusterService implements AutoCloseable {
      * before that entry, and its cause what the handler threw, or a
      * {@link CavalryException} with {@link Abi#ERR_CLUSTER_ACTION} and the ABI's message
      * for the value the handler returned. The next poll hands the aborted entry over
-     * again. */
+     * again. A
+     * {@code fragmentLimit} below zero throws {@link IllegalArgumentException} before the
+     * ABI is called. */
     public int poll(ServiceHandler handler, int fragmentLimit) {
+        if (fragmentLimit < 0) {
+            Abi.negative("fragmentLimit", fragmentLimit);
+        }
         if (polling) {
             try {
                 return (int) Abi.cavalry_cluster_service_poll.invokeExact(handle, client.handle(), stub, MemorySegment.NULL,

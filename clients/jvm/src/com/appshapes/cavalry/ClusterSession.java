@@ -122,8 +122,13 @@ public final class ClusterSession implements AutoCloseable {
      * "session". A stale reply, one of a leadership term below that of a reply this session
      * has handed over, is passed over and counted in {@link #staleReplies()}, and is not in
      * the count. Every reply the ABI hands over reaches the handler, whether or not an
-     * earlier call threw. */
+     * earlier call threw. A
+     * {@code fragmentLimit} below zero throws {@link IllegalArgumentException} before the
+     * ABI is called. */
     public int poll(ReplyHandler handler, int fragmentLimit) {
+        if (fragmentLimit < 0) {
+            Abi.negative("fragmentLimit", fragmentLimit);
+        }
         if (polling) {
             try {
                 return (int) Abi.cavalry_cluster_session_poll.invokeExact(handle, stub, MemorySegment.NULL, (long) fragmentLimit);

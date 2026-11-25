@@ -106,8 +106,13 @@ public final class CommittedLog implements AutoCloseable {
      * check or could not join: the log is ended short of its entries, and the next poll
      * returns 0 and clears the fault here; {@link #faulted()} keeps it. An entry
      * whose handler call threw was delivered and is not delivered again:
-     * {@link #position()} is past it, and past every entry this poll delivered after it. */
+     * {@link #position()} is past it, and past every entry this poll delivered after it. A
+     * {@code fragmentLimit} below zero throws {@link IllegalArgumentException} before the
+     * ABI is called. */
     public int poll(EntryHandler handler, int fragmentLimit) {
+        if (fragmentLimit < 0) {
+            Abi.negative("fragmentLimit", fragmentLimit);
+        }
         if (polling) {
             try {
                 return (int) Abi.cavalry_committed_log_poll.invokeExact(handle, stub, MemorySegment.NULL, (long) fragmentLimit);

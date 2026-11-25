@@ -585,6 +585,18 @@ public final class Abi {
         }
     }
 
+    /** The reader of a count or a length a caller gave, for a value below zero: it throws,
+     * before the ABI is called. The ABI takes a count as a {@code size_t}, and a negative
+     * {@code int} cast for it is a count near 2 ** 64: a claim of that many bytes, or a poll
+     * with no limit, for a caller that asked for neither. A function tests its argument in
+     * line and calls this only for a value below zero, so a count in range costs no call
+     * (ADR 0164). */
+    static void negative(String name, int value) {
+        throw new IllegalArgumentException(name + ": an int from 0 to " + Integer.MAX_VALUE + " expected, a count or a "
+            + "length, and " + value + " was given; the ABI would be passed another count, near 2 ** 64. Pass a count "
+            + "that is not below zero. See clients/jvm/README.md#what-it-must-never-do");
+    }
+
     /** What a {@code catch (Throwable)} around {@code invokeExact} rethrows: the exception as it
      * is when it is this package's own, else a {@link CavalryException} naming the call, which
      * a handle that was bound cannot raise at run time. */
