@@ -168,9 +168,8 @@ service)` for each committed entry, in order:
 - `entry` carries the entry's values: `entry.type`, one of
   `constants.CAVALRY_CLUSTER_ENTRY_SESSION_MESSAGE`, `_SESSION_OPEN`,
   `_SESSION_CLOSE`, `_NEW_LEADERSHIP_TERM`, `_OTHER`, `_SNAPSHOT` and `_TIMER`, a timer
-  of the program's with its id in `entry.correlationId`, a BigInt, which this package's programs
-  are handed none of yet, since it does not wrap the calls that schedule one;
-  `entry.position`;
+  of the program's that is due, with its id in `entry.correlationId`, a BigInt, which
+  is `0n` for every other entry ("A service's timers", below); `entry.position`;
   `entry.leadershipTermId`; `entry.timestamp`, the cluster's time, the one clock a
   service reads, so that every member's service reaches the same state;
   `entry.sessionId`, −1 where the entry has no session; `entry.leaderMemberId`, for a
@@ -180,13 +179,17 @@ service)` for each committed entry, in order:
   `_SNAPSHOT` is the leader's request for a snapshot: the poll ends after it, and
   the program gives its state to `service.snapshot` before its next poll ("A
   service's snapshot and its start", below).
-- `service` is the service that was polled, for `service.reply`.
+- `service` is the service that was polled, for `service.reply`,
+  `service.scheduleTimer` and `service.cancelTimer`.
 
 What the handler returns says what becomes of the entry. Nothing, or
 `cavalry.CONTINUE`, takes it, and the poll goes on. `cavalry.BREAK` takes it and ends
 the poll. `cavalry.ABORT` leaves it and ends the poll, and the next poll hands it over
-again. The poll returns the count of entries taken, or −1 when it stopped on a fault,
-which `service.fault()` gives until the next poll.
+again. The poll returns the count of entries taken, or −1 when it stopped, on a fault
+or at a client its driver closed, which `service.fault()` gives until the next poll.
+A poll with a client its driver closed, as when the member's driver has stopped, is −1
+with `CAVALRY_ERR_CLOSED` as the fault's code, at every poll, so a program's loop ends
+on it (ADR 0155).
 
 `service.reply(sessionId, message)` answers a session from inside the handler and
 returns what became of the reply: `CAVALRY_CLUSTER_REPLY_SENT`;
@@ -225,6 +228,87 @@ frees the service, and a second close does nothing; close a service before its c
 (`spec/c-abi.md`, "Functions", cluster service; ADR 0123; ADR 0124).
 `conformance/node/cluster.js` is a program that runs three services and a session
 through every call above.
+
+### A service's timers
+
+A program that must act at a time, a session it gives up on or an order that
+expires, asks for a timer. It never reads a clock of its own: every member's
+service must reach the same state, and the cluster's time is the one clock they
+share. From inside the handler:
+
+- `service.scheduleTimer(correlationId, deadline)` schedules the timer
+  `correlationId`, any int64 the program chooses, for `deadline`, in the cluster's
+  time, the clock of `entry.timestamp`, in milliseconds. It returns
+  `constants.CAVALRY_CLUSTER_TIMER_SCHEDULED`: the timer is pending with that
+  deadline, whether the id was pending before or not. Or it returns
+  `constants.CAVALRY_CLUSTER_TIMER_REFUSED`: the service holds its 1,024 pending
+  timers, the id is none of them, and nothing changed.
+- `service.cancelTimer(correlationId)` makes the timer pending no more, and returns
+  0, whether it was pending or not.
+
+When the deadline has come, the handler is handed an entry whose `entry.type` is
+`constants.CAVALRY_CLUSTER_ENTRY_TIMER` and whose `entry.correlationId` is the
+timer's id, with an empty `body`. Every member's service is handed it once, at one
+position of the log, never before its deadline and never after its cancel.
+`entry.timestamp` is the leader's clock when it appended the timer's entry, at or
+after the deadline: later by as long as the leader's member took to be told of the
+timer and to reach it, and by more where the cluster had no leader meanwhile. The
+handler is called later again, once the entry is committed and read. A timer that
+repeats is scheduled again by the handling of its own entry. A deadline at or
+before the entry's time is due at once.
+
+```js
+function onEntry(body, entry, service) {
+  if (entry.type === constants.CAVALRY_CLUSTER_ENTRY_SESSION_OPEN) {
+    // Give the session a minute, by the cluster's clock, under an id of its own.
+    service.scheduleTimer(entry.sessionId, entry.timestamp + 60000);
+  } else if (entry.type === constants.CAVALRY_CLUSTER_ENTRY_SESSION_CLOSE) {
+    service.cancelTimer(entry.sessionId);
+  } else if (entry.type === constants.CAVALRY_CLUSTER_ENTRY_TIMER) {
+    expire(Number(entry.correlationId)); // the program's own: the minute is over
+  }
+}
+```
+
+Four rules come with them (`spec/cluster.md`, "The service", "Timers"; ADR 0151;
+ADR 0157):
+
+- **Only inside the handler.** The timers are then a function of the entries
+  taken, as the program's state is, and the same beside every member. From
+  outside the handler both calls return −1, with `CAVALRY_ERR_CLUSTER_NO_ENTRY`
+  as `cavalry.addon.cavalry_errcode()`. A handler that returns `cavalry.ABORT`, or
+  throws,
+  is handed its entry again with every timer as it was before that handling. The
+  timers are part of what `service.snapshot` writes and `service.restore` reads,
+  with no call of the program's.
+- **An id and a deadline are int64, and exact.** Each is a BigInt, any int64, or a
+  number that is an integer from −(2^53 − 1) to 2^53 − 1, the integers a number
+  carries exactly, as `entry.timestamp + 60000` is. A number with a fraction or
+  outside that range, a `NaN` among them, and a BigInt outside int64, throw a
+  `RangeError` before the ABI is called, and a value that is neither a
+  `TypeError`: N-API would pass each as another value, another timer or another
+  time, and say nothing. Thrown in the handler, it aborts the entry as any
+  exception of the handler's does ("The exception"). `entry.correlationId` comes
+  back as a BigInt whatever the id was scheduled as: `77n === 77` is false, so a
+  program compares it with a BigInt, or reads `Number(entry.correlationId)` where
+  its ids are safe integers.
+- **At most 1,024 pending.** A program with more deadlines than that keeps them
+  in its own state and schedules one timer, for the earliest: when it is handed
+  that timer it acts on every deadline that has come and schedules the timer
+  again for the earliest that is left.
+- **Every member at version 2 first.** A program schedules its first timer only
+  once every member of its cluster, with the service beside it, runs version 2 of
+  the cluster protocol, and from that entry on no member is stepped back to
+  version 1 (`docs/how-to/upgrade-a-cluster.md`): a service of version 1 hands its
+  program no timer, so its program would compute another state from the same log.
+
+Both calls are one ABI call each, which allocates nothing and waits for nothing.
+What they changed is told to the service's member by the poll, once the handler
+has taken the entry, and the poll in which a program first schedules a timer
+sends six commands more, once in a service's life ("The call").
+`conformance/node/cluster.js` schedules timers and cancels one beside three
+members; what it holds, and what rests on the library's own tests, is in
+`conformance/README.md`.
 
 ### A service's snapshot and its start
 
@@ -311,7 +395,8 @@ members.
   `headerField`, `view`, `detach` and the wrappers of the claim, the reserved value, the commit, the abort
   and the offer, and for a cluster session and a cluster service the trampoline of
   their polls, `clusterSessionPoll`, `clusterServicePoll`, `replyField`, `entryField`
-  and the wrappers of the session's offer and of the service's reply and action, for
+  and the wrappers of the session's offer and of the service's reply, its action and
+  the schedule and the cancel of its timers, for
   C's (`pthread_mutex_*`, `pthread_rwlock_*`, `mtx_*`,
   `uv_mutex_*`, `uv_rwlock_*`, `napi_*threadsafe_function*`, and `napi_throw*` and
   `napi_fatal_*` outside the argument readers). `just lint` fails on any of them, in
@@ -320,7 +405,8 @@ members.
   the frame or the code below zero (`NOT_CONNECTED`, `BACK_PRESSURED`, `ADMIN_ACTION`,
   `CLOSED`, `MAX_POSITION_EXCEEDED`, `ERROR`), as the ABI does; the caller branches.
   A cluster session's `offer` returns the same codes, and a cluster service's `reply`
-  returns its `CAVALRY_CLUSTER_REPLY_*` code, or −1 from outside the handler.
+  returns its `CAVALRY_CLUSTER_REPLY_*` code, `scheduleTimer` its
+  `CAVALRY_CLUSTER_TIMER_*` code and `cancelTimer` 0, or −1 from outside the handler.
 - Never swallow the handler's exception, or a fragment: a fragment handler that throws
   keeps every later fragment of that poll reaching the handler, a fragment the runtime
   keeps from the handler is counted, and `poll` throws a `HandlerError` once the ABI
@@ -428,7 +514,10 @@ timestamp in nanoseconds or a CRC-64. So `header.reservedValue` comes back as a
 `BigInt` ("The call-back, by construction"), and `setReservedValue` takes a `BigInt`
 or a number. A `BigInt` carries every int64 exactly, and a number carries those below
 2^53 in magnitude. A `BigInt` outside the int64 range is refused with a `RangeError`,
-since N-API would otherwise wrap it to another value. Node has one
+since N-API would otherwise wrap it to another value. A timer's id and its deadline
+are read more strictly, `int64_exact_arg` in the addon: a number must be an integer
+that a number carries exactly, or it is refused the same way ("A service's timers").
+Node has one
 thread for JavaScript, so a call holds it for the
 call, and an add, a command or a close, which waits on the driver for up to 10 s
 (`spec/c-abi.md`, "Threads"), holds it as long: the client is synchronous, and a
@@ -438,8 +527,15 @@ most.
 
 A cluster service's poll is the one per-message function that can wait for the driver.
 It sends commands with the service's client when it opens the member's log, at a
-session's opening, where a term's leader changes and at a recording's end, and it
-waits for each answer on the calling thread; a session message costs no command. The
+session's opening, where a term's leader changes and at a recording's end, and six
+more once in a service's life, at the most, its five counters and its publication
+to its member, in the poll in which its program first schedules a timer or the
+service first passes a timer event over. It
+waits for each answer on the calling thread; a session message costs no command. A
+driver that refuses one of the six is that poll's −1, after the entries its handler
+took are taken, and the service adds them again at a later poll (ADR 0159). What a
+service tells its member of its timers after that, each pending timer again every
+second among it, is offered and waits for nothing. The
 runner's cluster round reports the waits. On an Apple M5 Pro laptop (macOS 26.6.1,
 Node v24.16.0), in each of 25 runs, 4 of about 18,500 polls of three services took
 over 1 ms. The longest, a poll that opened a member's log, took 7.2 to 10.4 ms. A

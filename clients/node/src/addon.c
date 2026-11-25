@@ -151,9 +151,11 @@ static int64_t int64_exact_arg(napi_env env, napi_value v, const char *name) {
       (double) (int64_t) d == d) {
     return (int64_t) d;
   }
-  char message[224];
+  char message[384];
   snprintf(message, sizeof message, "%s: an integer from -(2 ** 53 - 1) to 2 ** 53 - 1 expected, or a BigInt for any "
-           "int64; a number with a fraction or outside that range would be passed as another value", name);
+           "int64; a number with a fraction or outside that range would be passed as another value: pass an "
+           "integer, such as entry.timestamp + 50 for a deadline 50 ms after the entry, or a BigInt; see "
+           "clients/node/README.md#a-services-timers", name);
   napi_throw_range_error(env, NULL, message);
   arg_failed = true;
   return 0;
