@@ -1915,7 +1915,7 @@ id = 198
 name = "cluster.service_timer_events_passed_over"
 kind = "counter"
 scope = "client"
-doc = "Timer events the service beside one cluster member read and did not hand to its program: the timer was not pending, or was pending with a deadline after the event's timestamp. Every service passes the same events over (spec/cluster.md, The service, Timers, A timer event; ADR 0151). The service adds the counter, with its member's id as the key and in the label, when it adds its other counters (spec/cluster.md, Snapshots, A service's snapshot)."
+doc = "Timer events the service beside one cluster member read and did not hand to its program: the timer was not pending, or was pending with a deadline after the event's timestamp. Every service passes the same events over (spec/cluster.md, The service, Timers, A timer event; ADR 0151). The service adds the counter, with its member's id as the key and in the label, when it adds its other counters (spec/cluster.md, Snapshots, A service's snapshot). A service that version 6 of the C ABI makes hands such an event to its program as an entry of no kind, and counts it the same when the program takes it."
 doctor = ""
 
 [[counter]]

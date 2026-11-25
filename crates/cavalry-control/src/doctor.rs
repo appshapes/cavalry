@@ -2233,8 +2233,9 @@ fn member_findings(
     // tells its member nothing while it reads its history after a start, so one run
     // may catch that: the finding asks for a second. A leader beside which no
     // service has added the gauge is told of in nothing: an application that
-    // schedules no timer looks the same in the counters file, and a service adds
-    // the gauge only with its first timer.
+    // schedules no timer looks the same in the counters file: a service adds the
+    // gauge with its first snapshot, its first timer or the first timer event it
+    // passes over, whichever comes first.
     if leads
         && closed
         && member.timers == Some(0)

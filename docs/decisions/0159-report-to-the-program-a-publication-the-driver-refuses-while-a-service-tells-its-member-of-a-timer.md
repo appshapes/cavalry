@@ -4,8 +4,9 @@
 - **Date:** 2026-11-25
 - **Invariants affected:** 4, 6
 - **Supersedes:** none. Corrects one sentence that ADR 0151 gave `spec/cluster.md`,
-  "A service's snapshot", within version 2, and one of `spec/c-abi.md`, "Constants",
-  within version 6. Nothing on the wire changes, and no declaration of the header.
+  "A service's snapshot", and two of its "What a service tells its member", within
+  version 2, and one of `spec/c-abi.md`, "Constants", within version 6. Nothing on
+  the wire changes, and no declaration of the header.
 
 ## Context
 
@@ -18,7 +19,9 @@ the snapshot's failure and `cluster.service_snapshots_failed` counts it. ADR 015
 carried the sentence over to the two new moments, the first thing a service has to
 tell of a timer and the first timer event it passes over. Neither is a snapshot. A
 refusal there fails no snapshot, and a service has no counter that it would be
-true to count it in.
+true to count it in. The page's own "What a service tells its member" said the
+other thing of the same refusal, that the service "reports the refusal to its
+program from that read": the two sentences disagreed.
 
 The independent read of the service library, before work item 419's pull request
 for it opened, found the library returning the refusal from the read and counting
@@ -40,6 +43,14 @@ pass over adds the publication again. The page says so, beside the one failure i
 already named as not counted, a refused counter. The driver's own counter of the
 commands it refuses, `client_protocol.errors`, counts both.
 
+The page also says what bounds the messages of one read, which it left to be
+worked out: the cancels a service holds and its timers, 2,048 together, each sent
+once, the cancels first; a read stops at the first message the stream does not
+take, and the rest wait for a later read in the same order. The library had
+stopped at 64 messages a read, a bound that was on no page and that could hold a
+schedule timer back behind cancels on a stream that would have taken it. That
+bound is gone.
+
 `spec/c-abi.md` says what a timer event is on each side: `_OTHER` through the C
 ABI at version 6, every one, and in Rust `Entry::Timer` for the one handed over.
 
@@ -58,7 +69,8 @@ silently that a counter would find.
 **Hold the words and return no error.** The service would then tell its member
 nothing for as long as the driver refuses, with no sign of it but a leader that
 holds no timer. The error is the sign, and the program's to act on: the driver's
-registry of publications is full.
+registry of publications is full, for one cause, and the error names the driver's
+own.
 
 ## Evidence
 
@@ -70,7 +82,14 @@ registry of publications is full.
 - `crates/cavalry-ffi/src/cluster_service.rs`: `Entry::Timer` and `Entry::Other`
   both map to `CAVALRY_CLUSTER_ENTRY_OTHER`, and the service that the C ABI makes
   is handed the timer events that the Rust library passes over, as entries of that
-  kind. `just conformance` runs every client's cluster round against it.
+  kind. `crates/cavalry-ffi/tests/cluster_service.rs`,
+  `a_timer_event_reaches_a_service_as_an_entry_of_no_kind`, holds it: a timer that
+  no program scheduled, told to the leader by hand, and its event handed to the
+  three services as `_OTHER`.
+- `crates/cavalry-client/tests/cluster_service.rs`,
+  `a_program_is_refused_a_timer_beyond_the_bound_and_schedules_one_again_in_its_event`:
+  a full table of 1,024 timers, told to nobody while no member reads the stream,
+  and then every one of them told once, in the order of their ids, when one does.
 
 ## Consequences
 

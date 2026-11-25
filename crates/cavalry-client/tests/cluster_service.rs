@@ -1827,15 +1827,45 @@ fn a_program_is_refused_a_timer_beyond_the_bound_and_schedules_one_again_in_its_
         poll(&mut service, &mut client);
         service_counter(&client, CLUSTER_SERVICE_TIMER_EVENTS_PASSED_OVER.0) == Some(1)
     });
-    assert_eq!(refused, [bound], "the one beyond the bound, and no other");
-    // Handed at its deadline, scheduled again for a second later, passed over half
-    // a second later, and handed again when that second has passed.
-    assert_eq!(handed, [(3, TIME + 1_000), (3, TIME + 2_000)]);
     assert_eq!(
         service_counter(&client, CLUSTER_SERVICE_TIMERS.0),
         Some(bound),
         "the table is full still: the timer handed over is pending again"
     );
+
+    // No member has read the consensus module stream, so the service has told
+    // nobody: every word waits. Once a member reads it, the service tells it of
+    // the whole table, every timer once before any a second time, in the order of
+    // their ids (`spec/cluster.md`, "What a service tells its member").
+    let mut stream = member
+        .client
+        .add_subscription("cavalry:ipc", CONSENSUS_MODULE_STREAM_ID)
+        .expect("the member's subscription");
+    let mut told: Vec<i64> = Vec::new();
+    wait("the member is told of every timer", || {
+        poll(&mut service, &mut client);
+        stream
+            .poll(
+                |bytes, _| match Message::parse(Stream::ConsensusModule, bytes) {
+                    Ok(Message::ScheduleTimer { correlation_id, .. }) => told.push(correlation_id),
+                    other => panic!("a schedule timer and nothing else: {other:?}"),
+                },
+                64,
+            )
+            .expect("the stream is read");
+        told.len() >= bound as usize
+    });
+    let first: Vec<i64> = told.iter().copied().take(bound as usize).collect();
+    assert_eq!(
+        first,
+        (0..bound).collect::<Vec<i64>>(),
+        "each timer once, in the order of the ids, before any refresh"
+    );
+    drop(stream);
+    assert_eq!(refused, [bound], "the one beyond the bound, and no other");
+    // Handed at its deadline, scheduled again for a second later, passed over half
+    // a second later, and handed again when that second has passed.
+    assert_eq!(handed, [(3, TIME + 1_000), (3, TIME + 2_000)]);
 
     service.close(&mut client).expect("the service closes");
     client.close().expect("the client closes");

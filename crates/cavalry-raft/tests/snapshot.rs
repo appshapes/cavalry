@@ -3992,9 +3992,10 @@ fn a_timer_is_handed_over_once_at_one_position_across_a_snapshot_and_a_leaders_s
     run_until_led(&mut members, -1);
     let mut services: Vec<Service> = members.iter().map(Service::beside).collect();
 
-    // A timer due in 200 ms, and one due in 6 s.
+    // A timer due in 200 ms, and one due in 12 s: long enough for the snapshot
+    // below to be taken while it is pending, on a runner whose steps take seconds.
     offer_payload(&mut members, &schedule_timer(7, 200));
-    offer_payload(&mut members, &schedule_timer(9, 6_000));
+    offer_payload(&mut members, &schedule_timer(9, 12_000));
     run_with_services(
         &mut members,
         &mut services,
@@ -4007,8 +4008,10 @@ fn a_timer_is_handed_over_once_at_one_position_across_a_snapshot_and_a_leaders_s
     for service in &services {
         assert_eq!(service.handed, first, "member {}", service.id);
     }
-    // The leader appended one event, and no follower any.
-    assert_eq!(members[0].module.timer_counts().0.events, 1);
+    // The leader appended the event, and no follower any. It may have appended a
+    // second: a refresh's schedule timer that reached it before its service took the
+    // event takes the mark off, and every service passes the second event over.
+    assert!(members[0].module.timer_counts().0.events >= 1);
     for member in &members[1..] {
         assert_eq!(member.module.timer_counts().0.events, 0);
     }
@@ -4095,9 +4098,8 @@ fn a_timer_is_handed_over_once_at_one_position_across_a_snapshot_and_a_leaders_s
             service.id
         );
     }
-    assert_eq!(
-        members[0].module.timer_counts().0.events,
-        1,
+    assert!(
+        members[0].module.timer_counts().0.events >= 1,
         "the next leader appended the event"
     );
 

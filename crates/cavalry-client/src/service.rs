@@ -37,10 +37,10 @@ use cavalry_proto::client_protocol::{ErrorCode, ReplayStopReason};
 use cavalry_proto::cluster::{
     CONSENSUS_MODULE_STREAM_ID, CloseReason, ClusterAction, EGRESS_STREAM_ID,
     KEEPALIVE_INTERVAL_NS, MAX_SERVICE_SNAPSHOT_STATE_LENGTH, MAX_SERVICE_TIMERS, MAX_SESSIONS,
-    Message, SERVICE_ID, SERVICE_SNAPSHOT_REPLAY_STREAM_ID, SERVICE_SNAPSHOT_STATE_INDEX,
-    SERVICE_SNAPSHOT_STATE_MESSAGE_LENGTH, SERVICE_SNAPSHOT_STREAM_ID, SERVICE_SNAPSHOT_TYPE_ID,
-    ServiceTimers, SnapshotMark, Stream, TIMER_REFRESH_INTERVAL_NS, TimeUnit, TimerEventIs,
-    TimersFull,
+    MAX_UNSENT_TIMER_CANCELS, Message, SERVICE_ID, SERVICE_SNAPSHOT_REPLAY_STREAM_ID,
+    SERVICE_SNAPSHOT_STATE_INDEX, SERVICE_SNAPSHOT_STATE_MESSAGE_LENGTH,
+    SERVICE_SNAPSHOT_STREAM_ID, SERVICE_SNAPSHOT_TYPE_ID, ServiceTimers, SnapshotMark, Stream,
+    TIMER_REFRESH_INTERVAL_NS, TimeUnit, TimerEventIs, TimersFull,
 };
 use cavalry_proto::frame::{self, DataFrameHeader, Flags};
 use cavalry_proto::udp::MTU_LENGTH_DEFAULT;
@@ -1978,7 +1978,12 @@ impl ClusterService {
         };
         let stream = self.member_stream.insert(stream);
         let mut scratch = [0u8; 64];
-        while let Some(word) = self.timers.next_word() {
+        // Each word is told once, so the cancels a service holds and its timers
+        // bound the loop.
+        for _ in 0..MAX_UNSENT_TIMER_CANCELS + MAX_SERVICE_TIMERS {
+            let Some(word) = self.timers.next_word() else {
+                break;
+            };
             let Ok(length) = word.message().write(&mut scratch) else {
                 break;
             };

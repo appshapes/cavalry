@@ -2213,9 +2213,10 @@ close. What it has to tell is a timer that an entry it took left pending, a
 cancel, or the timers of the snapshot it started from, which it has to tell when
 it has read its history, though it reads no entry. A driver that refuses that
 publication, or the counters the service adds before it ("Snapshots", "A
-service's snapshot"), fails no call of the program and changes no timer: the
-service reports the refusal to its program from that read, and adds them again at
-its next read while it has something to tell.
+service's snapshot"), fails no call that the program makes in a handler and
+changes no timer: the service reports the refusal to its program as the error of
+that read, and adds them again at its next read while it has something to tell
+(ADR 0159).
 
 On that publication the service tells the member on its driver what its timers
 are. What it tells follows from the entries its program has taken, and from
@@ -2240,8 +2241,11 @@ holds, the oldest first, before any schedule timer: a cancel it holds is of an
 entry before the last one that scheduled its id, so for each id the member is told
 in the order of the entries. A service holds at most the unsent cancels of
 "Values", drops the oldest for the next, and counts it in
-`cluster.service_timer_cancels_dropped`. A timer event that a service passes over
-tells its member nothing.
+`cluster.service_timer_cancels_dropped`. So one read sends at most the unsent
+cancels and the service's timers of "Values" together, 2,048 messages, each once;
+it stops at the first that the stream does not take, and that one and those after
+it wait for a later read, the cancels before the schedule timers again. A timer
+event that a service passes over tells its member nothing.
 
 Rule 1 tells a member soon, and rule 2 is what the member's table rests on: a
 timer that a service holds and the member beside it lacks, or holds with another
