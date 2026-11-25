@@ -120,10 +120,11 @@ tests' twenty runs on both runners among it.
   second or more in which its members stood still; and the message of a refused
   offer, of a refused request for a snapshot and of a wait that ran out says what
   each member counted of its elections, their cause, and its sessions timed out.
-  Read those lines first. To be a slow runner on any machine, run the file with
-  every such step slowed past the timeouts: with
-  `CAVALRY_TEST_STEP_DELAY_MS=11000 cargo test -p cavalry-raft --test snapshot`,
-  one step that stands a running cluster still fails its test. The other test
+  Read those lines first. To be a slow runner on any machine, slow every such
+  step: `CAVALRY_TEST_STEP_DELAY_MS=4000 cargo test -p cavalry-raft --test snapshot`
+  takes two minutes and fails a test that takes three such steps in a row on its
+  own thread. With 11000, above the timeouts, one such step fails its test; name
+  the test, since the whole file then takes more than half an hour. The other test
   programs that drive three members from one thread have the same loops and no
   such helper yet (work item 446).
 - A job ends without success and with no `test-times: N of N runs passed` line, and

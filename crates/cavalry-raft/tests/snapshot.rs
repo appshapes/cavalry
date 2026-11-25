@@ -154,12 +154,13 @@ fn round() {
 /// standard error how long it took when that is 200 ms or more.
 ///
 /// `CAVALRY_TEST_STEP_DELAY_MS` makes every such step that much slower, which is a
-/// runner with a slow disk on any machine. At 11000, above the cluster's timeouts of
-/// 10 s, one step that stands a running cluster still fails its test with an
-/// election or a closed session, so `CAVALRY_TEST_STEP_DELAY_MS=11000 cargo test -p
-/// cavalry-raft --test snapshot` passes only while every such step is run through
-/// [`meanwhile`]. At 4000 it takes three steps in a row, which is how the tests
-/// failed on the runner (work item 446).
+/// runner with a slow disk on any machine. At 4000, `cargo test -p cavalry-raft
+/// --test snapshot` takes two minutes, and three such steps in a row on a test's own
+/// thread fail the test, which is how the tests failed on the runner. At 11000,
+/// above the cluster's timeouts of 10 s, one such step fails its test with an
+/// election or a closed session, and so does a session that no keepalive holds
+/// open; the whole file then takes more than half an hour, so name a test (work
+/// item 446).
 fn timed<T>(what: &str, step: impl FnOnce() -> T) -> T {
     let began = Instant::now();
     if let Some(delay) = std::env::var("CAVALRY_TEST_STEP_DELAY_MS")
@@ -1122,6 +1123,8 @@ fn a_snapshot_holds_the_open_sessions_in_the_order_of_their_ids_on_every_member(
             client.session_id.is_some()
         });
         assert_eq!(client.session_id, Some(index as i64));
+        // The session stays open for as long as the test runs, as a client's does.
+        client.keep_alive(&ports);
         clients.push(client);
     }
     // Every member has read both session open events before the action is asked.
@@ -1284,6 +1287,8 @@ fn a_connect_the_leader_accepts_before_it_reads_the_action_is_in_no_members_snap
         first.session_id.is_some()
     });
     assert_eq!(first.session_id, Some(0));
+    // The session stays open for as long as the test runs, as a client's does.
+    first.keep_alive(&ports);
     run_until(
         &mut members,
         "every member holds the first session",
