@@ -815,6 +815,170 @@ fn a_floor_answer_keeps_a_member_from_voting_before_it_holds_what_a_late_report_
     assert_eq!(cluster.member(member).expect("a member").vote_floor(), -1);
 }
 
+/// Work item 463, ADR 0163: the floor answer carries the leader's append position as it
+/// reads it when it writes the answer, and not as its last duty cycle read it.
+///
+/// The eight steps above, with the entries appended while the leader's module stands
+/// still. The leader appends them after its duty cycle has read its append position,
+/// and its module then stalls, as one does that an fsync, a throttle or a pause holds,
+/// while its driver runs on: its recording syncs the entries and its catch-up replay
+/// brings them to the member's earlier run, whose report of them is held on its way. The
+/// member loses its log again and takes the leader on the held frame. When the leader's
+/// module runs again, it reads the member's ask before its duty cycle. An answer at the
+/// position its last duty cycle read lies below the entries, and the member would clear
+/// its floor at the join, below them, and vote, as under ADR 0161's rule alone. The
+/// answer is at the position its recording has synced, past the entries, so no leader
+/// is elected until the leader comes back.
+#[test]
+fn a_floor_answer_holds_what_the_leaders_recording_synced_after_its_last_duty_cycle() {
+    let ids = [0, 1, 2];
+    let mut safety = Safety::new(&ids);
+    let (mut cluster, first) = elected(7, &mut safety);
+    offer(&mut cluster, &mut safety, 0, 10);
+    safety.run(&mut cluster, 1_000);
+
+    // A new term, as in the eight steps.
+    let others = followers(&ids, first);
+    cluster.cut_between(first, others[0]);
+    cluster.cut_between(first, others[1]);
+    safety.run_until(
+        &mut cluster,
+        30_000,
+        "a leader of the next term",
+        |cluster| {
+            cluster
+                .leader()
+                .is_some_and(|leader| leader != first && settled(cluster, &others))
+        },
+    );
+    let leader = cluster.leader().expect("a leader");
+    let member = followers(&others, leader)[0];
+    let third = first;
+    cluster.heal_between(third, others[0]);
+    cluster.heal_between(third, others[1]);
+    safety.run_until(&mut cluster, 30_000, "the three settle", |cluster| {
+        settled(cluster, &ids)
+    });
+    let floor = cluster.append_position(leader).expect("a member");
+
+    // 1. The member loses its log, and the leader's answer to its empty log, at the
+    // floor, is held back.
+    cluster.hold_back_new_leadership_term(leader, member);
+    safety.wipe(&mut cluster, member);
+    safety.run_until(&mut cluster, 5_000, "the answer held", |cluster| {
+        !cluster.held_back().is_empty()
+    });
+
+    // 2. The member follows on a later answer and catches up from a replay, one entry a
+    // step, while the live sender stands still at the floor. Its reports stop reaching
+    // the leader, so that the leader never stops the replay, which goes on following
+    // the leader's recording.
+    cluster.set_replay_rate(1);
+    cluster.hold_sender(leader, Some(floor));
+    safety.run_until(
+        &mut cluster,
+        30_000,
+        "the member catches up in the leader's term",
+        |cluster| {
+            cluster.election_state(member) == Some(cavalry_raft::ElectionState::FollowerCatchup)
+        },
+    );
+    cluster.cut_one_way(member, leader);
+    safety.run_until(
+        &mut cluster,
+        30_000,
+        "the member replays to the floor",
+        |cluster| cluster.append_position(member) >= Some(floor),
+    );
+
+    // 3. The leader appends the entries after its duty cycle, and its module stalls.
+    // Its recording syncs them and the replay brings them to the member, one report of
+    // which is held on its way.
+    let mut end = 0;
+    for i in 10..40_u32 {
+        end = cluster.offer(&i.to_le_bytes()).expect("the leader appends");
+    }
+    cluster.stall(leader);
+    safety.run_until(
+        &mut cluster,
+        5_000,
+        "the member replays the entries",
+        |cluster| cluster.append_position(member) >= Some(end),
+    );
+    cluster.hold_back_append_position(member, leader);
+    safety.run_until(&mut cluster, 5_000, "a report held", |cluster| {
+        !cluster.held_back_reports().is_empty()
+    });
+    let reported = cluster.held_back_reports()[0].2;
+    assert_eq!(reported, end, "a report of every entry");
+    assert!(cluster.commit_position(leader) <= Some(floor));
+
+    // 4 and 5. The member loses its log again and takes the leader on the held frame,
+    // with a floor below the entries, and asks for a floor answer, which waits for the
+    // leader's module.
+    cluster.cut_between(member, leader);
+    safety.wipe(&mut cluster, member);
+    safety.run_until(&mut cluster, 5_000, "the member canvasses", |cluster| {
+        cluster.election_state(member) == Some(cavalry_raft::ElectionState::Canvass)
+    });
+    safety.run(&mut cluster, 300);
+    cluster.release_held_back(member);
+    cluster.heal_between(member, leader);
+    safety.run_until(
+        &mut cluster,
+        5_000,
+        "the member takes the leader on the held frame",
+        |cluster| {
+            cluster
+                .member(member)
+                .is_some_and(|core| core.leadership_term_id() >= 0 && core.vote_floor() >= 0)
+        },
+    );
+    safety.run(&mut cluster, 50);
+    assert_eq!(
+        cluster.member(member).expect("a member").vote_floor(),
+        floor,
+        "a floor below the entries"
+    );
+
+    // The leader's module runs again: it reads the ask before its duty cycle.
+    cluster.unstall(leader);
+
+    // 6. The member catches up to where the live sender stands and joins the live log
+    // there, below the report.
+    safety.run_until(
+        &mut cluster,
+        10_000,
+        "the member joins the live log below the report",
+        |cluster| cluster.election_state(member) == Some(cavalry_raft::ElectionState::Closed),
+    );
+    safety.run(&mut cluster, 200);
+    assert!(
+        cluster.append_position(member) < Some(reported),
+        "its log lacks what its earlier run reported"
+    );
+
+    // 7. The report reaches the leader, which commits the entries with it.
+    cluster.release_held_back(leader);
+    safety.run_until(
+        &mut cluster,
+        2_000,
+        "the leader commits with it",
+        |cluster| cluster.commit_position(leader) >= Some(reported),
+    );
+
+    // 8. The leader stops: the member withholds, and the third alone elects nobody.
+    cluster.halt(leader);
+    safety.run(&mut cluster, 30_000);
+    assert_eq!(cluster.leader(), None, "no leader without the entries");
+    let core = cluster.member(member).expect("a member");
+    assert_eq!(core.vote_floor(), floor, "it still holds its floor");
+    assert!(
+        core.floor_answer() >= reported,
+        "its leader answered at what its recording had synced"
+    );
+}
+
 /// Work item 463, ADR 0163: a member that holds a vote floor and reaches follower ready
 /// with no catch-up is answered all the same, and clears its floor. A new cluster's
 /// follower stores a floor of 0 when it takes its first leader. With every answer to it
