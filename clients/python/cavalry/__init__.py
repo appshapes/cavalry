@@ -189,8 +189,10 @@ def _size(value, name):
     # that a `size_t` holds, and otherwise a raise before the ABI is called. ctypes
     # passes a negative int as a count near 2 ** 64, and an int above the range as its
     # low bits. A command's and an add's integer arguments are read by the binding's own
-    # checking types (`_abi._checked`); a per-message function's are read here, by a call
-    # the function makes, so that no other argument of a message's path gains one.
+    # checking types (`_abi._checked`). A per-message function tests its own argument in
+    # line, a type and two comparisons, and calls a reader only for a value that fails
+    # them, so that a message's path gains no call: the reader then raises, or returns a
+    # value that is an `int`'s subclass in range, such as an `IntEnum`'s.
     if not isinstance(value, int) or isinstance(value, bool):
         raise TypeError(f"{name}: an int from 0 to {_SIZE_MAX} expected, and a {type(value).__name__} was given. "
                         f"{_RANGE_NEXT}")
@@ -405,7 +407,9 @@ class Publication:
         `self.claim` stays its view, which its `commit` or `abort` still releases
         (spec/c-abi.md, "Calls during a claim or a poll"). One ABI call; the view is this
         client's one allocation per message (README, "The runtime's side")."""
-        result = self._abi.cavalry_publication_try_claim(self._handle, _size(length, "length"), self._claim_ref)
+        if type(length) is not int or not 0 <= length <= _SIZE_MAX:
+            _size(length, "length")  # raises, unless it is an int's subclass in range
+        result = self._abi.cavalry_publication_try_claim(self._handle, length, self._claim_ref)
         if result >= 0:
             self.claim = memoryview((ctypes.c_uint8 * self._claim.length).from_address(self._claim.data)).cast("B")
         return result
@@ -440,7 +444,9 @@ class Publication:
         outstanding. A value that is no int64 raises before the ABI is called, `TypeError`
         for what is no `int` and `OverflowError` for an `int` outside the range, which
         ctypes would pass as another value."""
-        return self._abi.cavalry_buffer_claim_set_reserved_value(self._claim_ref, _int64(value, "value", _RANGE_NEXT))
+        if type(value) is not int or not _INT64_MIN <= value <= _INT64_MAX:
+            _int64(value, "value", _RANGE_NEXT)  # raises, unless it is an int's subclass in range
+        return self._abi.cavalry_buffer_claim_set_reserved_value(self._claim_ref, value)
 
     def offer(self, message):
         """Offer `message`, `bytes` or a `ctypes` `c_char` array such as
@@ -621,7 +627,8 @@ class Subscription:
         refuses it with -1 and `CAVALRY_ERR_POLLING`, and touches nothing, so the poll in
         progress goes on with its own handler and its own count of raises (spec/c-abi.md,
         "Calls during a claim or a poll")."""
-        fragment_limit = _size(fragment_limit, "fragment_limit")
+        if type(fragment_limit) is not int or not 0 <= fragment_limit <= _SIZE_MAX:
+            _size(fragment_limit, "fragment_limit")  # raises, unless it is an int's subclass in range
         if self._handler is not None:
             return self._abi.cavalry_subscription_poll(self._handle, self._trampoline, None, fragment_limit)
         self._handler = handler
@@ -800,7 +807,8 @@ class CommittedLog:
         this log's own poll, it passes the call to the ABI, which refuses it with -1 and
         `CAVALRY_ERR_POLLING`, and touches nothing (spec/c-abi.md, "Calls during a claim
         or a poll")."""
-        fragment_limit = _size(fragment_limit, "fragment_limit")
+        if type(fragment_limit) is not int or not 0 <= fragment_limit <= _SIZE_MAX:
+            _size(fragment_limit, "fragment_limit")  # raises, unless it is an int's subclass in range
         if self._handler is not None:
             return self._abi.cavalry_committed_log_poll(self._handle, self._trampoline, None, fragment_limit)
         self._handler = handler
@@ -1003,7 +1011,8 @@ class ClusterSession:
         poll, it passes the call to the ABI, which refuses it with -1 and
         `CAVALRY_ERR_POLLING`, and touches nothing (spec/c-abi.md, "Calls during a claim
         or a poll")."""
-        fragment_limit = _size(fragment_limit, "fragment_limit")
+        if type(fragment_limit) is not int or not 0 <= fragment_limit <= _SIZE_MAX:
+            _size(fragment_limit, "fragment_limit")  # raises, unless it is an int's subclass in range
         if self._handler is not None:
             return self._abi.cavalry_cluster_session_poll(self._handle, self._trampoline, None, fragment_limit)
         self._handler = handler
@@ -1128,8 +1137,9 @@ class ClusterService:
         change the service's state, since an aborted entry is handed over again. From
         outside the handler it is -1, with `CAVALRY_ERR_CLUSTER_NO_ENTRY`. One ABI call,
         which allocates nothing and waits for nothing."""
-        return self._abi.cavalry_cluster_service_reply(
-            self._handle, _int64(session_id, "session_id", _RANGE_NEXT), message, len(message))
+        if type(session_id) is not int or not _INT64_MIN <= session_id <= _INT64_MAX:
+            _int64(session_id, "session_id", _RANGE_NEXT)  # raises, unless it is an int's subclass in range
+        return self._abi.cavalry_cluster_service_reply(self._handle, session_id, message, len(message))
 
     def schedule_timer(self, correlation_id, deadline):
         """From inside the handler: schedule the timer `correlation_id`, any int64 the
@@ -1244,7 +1254,8 @@ class ClusterService:
         service's own poll, it passes the call to the ABI, which refuses it with -1 and
         `CAVALRY_ERR_POLLING`, and touches nothing (spec/c-abi.md, "Calls during a claim
         or a poll")."""
-        fragment_limit = _size(fragment_limit, "fragment_limit")
+        if type(fragment_limit) is not int or not 0 <= fragment_limit <= _SIZE_MAX:
+            _size(fragment_limit, "fragment_limit")  # raises, unless it is an int's subclass in range
         client = self._client._handle
         if self._handler is not None:
             return self._abi.cavalry_cluster_service_poll(self._handle, client, self._trampoline, None, fragment_limit)

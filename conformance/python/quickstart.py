@@ -604,6 +604,33 @@ def main():
         recording.close()
         ipc_pub.close()
 
+        # An integer argument that its parameter cannot hold never reaches the ABI (work
+        # item 460; clients/python/README.md, "What it must never do"). ctypes would pass
+        # 2 ** 64 + 96 as 96, its low 64 bits: the truncate would cut the stopped recording
+        # after its first frame, and the replay of step 3, which reads all of it at its
+        # positions, would end there. Each call is refused with the parameter's name.
+        for what, parameter, call in (
+                ("a truncate at 2 ** 64 + 96", "position", lambda: client.truncate_recording(recording_id, 2 ** 64 + 96)),
+                ("a purge of the segments below 2 ** 64 + 96", "new_start_position",
+                 lambda: client.purge_segments(recording_id, 2 ** 64 + 96)),
+                ("a purge of recording 2 ** 64 + its id", "recording_id",
+                 lambda: client.purge_recording(2 ** 64 + recording_id)),
+                ("a subscription to stream 2 ** 32 + its id", "stream_id",
+                 lambda: client.add_subscription("cavalry:ipc", 2 ** 32 + STREAM)),
+                ("a truncate at a float", "position", lambda: client.truncate_recording(recording_id, 96.0))):
+            try:
+                answered = call()
+            except ctypes.ArgumentError as refused:
+                said = str(refused)
+                if f": {parameter}: an int from " not in said or \
+                        not said.endswith("See clients/python/README.md#what-it-must-never-do"):
+                    fail(f"{what} was refused with a message that does not name {parameter} and the README's "
+                         f"section: {said}")
+            else:
+                fail(f"{what} was not refused before the ABI was called: it answered {answered!r}")
+        print("conformance/python: a truncate, two purges and an add whose position, recording id or stream id is "
+              "outside its parameter's range, and a truncate at a float, refused before the ABI was called")
+
         edges(client)
 
         # The report's two rounds, which check nothing else.

@@ -312,10 +312,18 @@ class Clients(unittest.TestCase):
         dropped its reader would pass ctypes an int that it wraps."""
         with open(self.file, encoding="utf-8") as f:
             text = f.read()
-        self.assertEqual(text.count('fragment_limit = _size(fragment_limit, "fragment_limit")\n'), 4)
-        self.assertEqual(text.count('_size(length, "length")'), 1)
-        self.assertEqual(text.count('_int64(session_id, "session_id", _RANGE_NEXT)'), 1)
-        self.assertEqual(text.count('_int64(value, "value", _RANGE_NEXT)'), 1)
+        for guard, reader, count in (
+                ("        if type(fragment_limit) is not int or not 0 <= fragment_limit <= _SIZE_MAX:\n",
+                 '            _size(fragment_limit, "fragment_limit")', 4),
+                ("        if type(length) is not int or not 0 <= length <= _SIZE_MAX:\n",
+                 '            _size(length, "length")', 1),
+                ("        if type(session_id) is not int or not _INT64_MIN <= session_id <= _INT64_MAX:\n",
+                 '            _int64(session_id, "session_id", _RANGE_NEXT)', 1),
+                ("        if type(value) is not int or not _INT64_MIN <= value <= _INT64_MAX:\n",
+                 '            _int64(value, "value", _RANGE_NEXT)', 1)):
+            # The test in line, and the reader on the line after it: a call for a value
+            # that fails the test, and none for one that passes.
+            self.assertEqual(text.count(guard + reader), count, guard)
         self.assertEqual(text.count('_int64(correlation_id, "correlation_id")'), 2)
         self.assertEqual(text.count('_int64(deadline, "deadline")'), 1)
 
