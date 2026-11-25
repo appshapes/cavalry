@@ -1932,7 +1932,7 @@ name = "cluster.vote_floors_cleared"
 kind = "counter"
 scope = "client"
 doc = "Vote floors one cluster member cleared: it held a cluster.vote_floor, having taken a leader with its log empty, and it joined a leader's live log since it stored the floor and in this run of its module, going to follower ready, with its append position at or past the floor, so its log held every committed entry it could have acknowledged before it came back, but for the one case work item 463 holds. It wrote the floor's slot of its record of terms as zeros and synced it, and votes as any voter does from then on (spec/cluster.md, A member that lost its log; ADR 0161). key and label as cluster.elections."
-doctor = "This member came back with its log empty, caught up, and joined its leader's live log: it no longer withholds its vote. Nothing to do."
+doctor = "This member took a leader with its log empty, as one that lost its log directory does and as each of a new cluster's followers does at its first term, caught up, and joined its leader's live log: it no longer withholds its vote. Nothing to do."
 
 # A cluster member's role (spec/cluster.md, "Roles and the election"; ADR 0052, feature
 # 3). A member is a candidate (ADR 0077, ADR 0081) from its nomination until it
