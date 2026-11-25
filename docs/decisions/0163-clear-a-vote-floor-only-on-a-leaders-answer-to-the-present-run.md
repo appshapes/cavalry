@@ -72,9 +72,10 @@ first, for the floor alone and with no layout changed.
 - **The answer.** A leader of version 3 answers an append position with the flag with a
   floor answer, template 58, to that member alone, in whatever state it reads one, at
   most once each leader heartbeat interval for each member, counted in
-  `cluster.floor_answers_sent`. It carries the leader's term, its append position, the
-  two member ids, and the session id of the data frame the report came in: the session
-  of the member's consensus publication to the leader. No member of an earlier version
+  `cluster.floor_answers_sent`. It carries the leader's term, its append position, read
+  as it writes the answer and not as its last duty cycle read it, the two member ids,
+  and the session id of the data frame the report came in: the session of the member's
+  consensus publication to the leader. No member of an earlier version
   sets the flag, so none is sent an answer.
 - **The take.** A member takes an answer that names it, from the leader it follows, for
   that leader's term, with the session id of its own consensus publication to that
@@ -92,9 +93,22 @@ first, for the floor alone and with no layout changed.
 
 **Why it holds.** Every entry an earlier run of the member held came to it in one of two
 ways: from the leader's recordings, by a replay, or from the leader's sender, on the live
-log. The answer holds the first, since the leader's recorder reads its publication's log
-and never passes the leader's append position. ADR 0161's join holds the second. So
-neither condition can go while the argument rests on both.
+log. The answer holds the first. A replay of a recording reads no further than its
+extent, which for a live recording is its synced position (`spec/client-protocol.md`,
+"Commands", start replay). The leader's append position, read as it writes the answer,
+is the end of what its recordings hold synced then (`spec/cluster.md`, "The log"), so it
+is at or past every position a replay had read before. ADR 0161's join holds the second.
+So neither condition can go while the argument rests on both.
+
+The answer reads the append position afresh. The recorder writes past the synced
+position before each sync, and a catch-up replay follows the live recording as its
+synced position moves. A leader's module reads consensus messages before its duty
+cycle, so the position that cycle's core held is as of the cycle before. An fsync, or a
+module that is throttled or paused between the two, lets the recording sync an entry
+and a replay serve it to the member's earlier run in the meantime. An answer with that
+older position would stand below the entry. Reading it as the answer is written costs
+one read of the recording's synced position, at most once each heartbeat interval for
+each member that asks.
 
 An answer's session id is the member's present run's. A member that held any of the log
 and starts on a new log directory starts on a new driver (`spec/cluster.md`, "What the
@@ -105,8 +119,8 @@ on has session ids of its own too. An answer to an earlier run, held back as in 
 item 411 or late, names that run's session and is ignored.
 
 So an answer the member takes was written after the leader read a report of the
-present run, and its log position is at or past every entry the leader had appended
-then. An append position counts toward a commit only for the term it names
+present run, and its log position is at or past every entry a replay of the leader's
+recordings had read then, to any run of the member. An append position counts toward a commit only for the term it names
 (`spec/cluster.md`, "Roles and the election", the quorum position), so an earlier run's
 acknowledgement commits only at the leader it was sent to, while that leader leads that
 term. Any leader the present run follows before its first vote holds every entry such an
@@ -138,7 +152,8 @@ header's version stays 0. A member and a client of version 3 write 768.
 
 **What the code does.** `cavalry-proto` reads and writes template 58 and names the flag;
 `VERSION` is 3. The core sets the flag, answers through `Consensus::on_message_in`, which
-gives a message the session id of the frame it came in, takes an answer by
+gives a message the session id of the frame it came in, with `Io::append_position` read
+as it writes the answer, takes an answer by
 `Io::consensus_session`, and clears by the three conditions. The module reads each
 consensus message with its frame's session id and stores the gauge. `cavalry doctor`
 names a member of version 3 that holds a floor no leader has answered, and one whose
@@ -175,6 +190,13 @@ log is short of its leader's answer.
   cleared is routine, and would make `cluster.floor_answers_ignored`, which `doctor`
   reports, rise for nothing. It is ignored uncounted; one ignored while the member holds
   its floor is counted.
+- **Answer with the append position the last duty cycle read.** The first build did
+  so, and the review of the pull request found that it could stand below an entry a
+  replay had served since (Decision, "Why it holds"). The answer reads the position as
+  it is written.
+- **Queue the ask, and answer in the next duty cycle after its read.** It is as fresh,
+  but it keeps an ask for each member between the read and the cycle, and the answer
+  waits a cycle. Reading the position as the answer is written needs no state.
 - **An answer that carries the leader's log publication position.** The recorder and
   the sender both stand at or below it, so the join would no longer be needed. The
   join stays, as ADR 0161's condition: it costs nothing more, and dropping it is a
@@ -226,6 +248,13 @@ All runs were on an Apple M-series laptop, macOS 26, in the in-memory cluster of
   clears at it. With the ask tied to the run alone, as in the first build, it fails:
   "under a term it holds no answer from, it asks again". With the latest answer kept in
   place of the lowest, it fails: "the lowest answer it took".
+- **The leader's side**: `a_leader_answers_a_floor_ask_with_its_append_position_as_it_writes_the_answer`
+  in `crates/cavalry-raft/tests/floor_answer.rs`, a leader through the stub. Its
+  recording syncs from 96, where its last duty cycle read it, to 160 before it reads an
+  ask. Read with no session, the ask is not answered; read with the session of its
+  frame, it is answered once, with 160, the leader's term, both ids and that session.
+  With the answer taken from the position the last duty cycle read, it fails: the answer
+  carries 96.
 - **A lost answer**: `a_floor_answer_lost_on_its_way_is_sent_again_in_the_next_interval`.
   A new cluster's followers hold their floors for two seconds while every answer is
   lost and the leader keeps answering each interval, and no more than once an interval
@@ -279,7 +308,7 @@ All runs were on an Apple M-series laptop, macOS 26, in the in-memory cluster of
   (`spec/udp.md`, "The receiver", step 1), and its chance is about 2⁻³² for each start.
 - A member that holds a floor asks in every report, and its leader answers at most once
   each heartbeat interval: one consensus message more each interval for each such
-  member, while it holds its floor.
+  member, and one read of the leader's append position, while it holds its floor.
 - A new cluster's followers hold a floor of 0 until their first leader answers them,
   which it does in the same election.
 - The in-memory cluster gains a live sender a test holds (`Cluster::hold_sender`), a

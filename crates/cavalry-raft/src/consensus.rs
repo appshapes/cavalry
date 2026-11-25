@@ -317,7 +317,9 @@ pub trait Io {
 
     /// The member's append position: the end of the contiguous span its recordings of
     /// the log hold from position 0, as a sync has made it durable (ADR 0060). 0 for a
-    /// member with no recording.
+    /// member with no recording. The core reads it at the start of each duty cycle, and
+    /// as leader again as it writes a floor answer, which must be at or past every
+    /// position a replay of its recordings had read before (ADR 0163).
     fn append_position(&mut self) -> i64;
 
     /// Appends `entry` to the leader's log. `Ok(false)` when the publication is
@@ -1353,11 +1355,12 @@ impl Consensus {
         // the new leadership term the member took, it holds every committed entry it
         // could have acknowledged before it came back, but for an entry it had from a
         // replay before the leader's sender sent it. With its append position at or
-        // past a floor answer of its present run too, past every entry the leader had
-        // appended after it read that run, it holds that one as well, and clears its
-        // vote floor, durably, before it votes by it (`spec/cluster.md`, "A member that
-        // lost its log", "The floor answer"; ADR 0161, ADR 0163). A clear that faults
-        // leaves the floor, and the next cycle clears it again.
+        // past a floor answer of its present run too, past every entry the leader's
+        // recordings had synced when it answered a report of that run, and so past
+        // every entry a replay had read to an earlier run, it holds that one as well,
+        // and clears its vote floor, durably, before it votes by it (`spec/cluster.md`,
+        // "A member that lost its log", "The floor answer"; ADR 0161, ADR 0163). A
+        // clear that faults leaves the floor, and the next cycle clears it again.
         if self.state == ElectionState::FollowerReady {
             self.live_joined = true;
         }
@@ -1583,10 +1586,10 @@ impl Consensus {
                         self.stop_catchup(index, io)?;
                     }
                     // A member that holds a vote floor asks, and is answered with this
-                    // leader's append position and the session the report came in, at
-                    // most once each heartbeat interval: an answer that names its
-                    // present run's session was written after this leader read that run
-                    // (ADR 0163).
+                    // leader's append position, read now, and the session the report
+                    // came in, at most once each heartbeat interval: an answer that
+                    // names its present run's session was written after this leader
+                    // read that run (ADR 0163).
                     if flags & APPEND_POSITION_FLAG_FLOOR != 0
                         && let Some(session_id) = self.reading_session
                     {
@@ -2703,9 +2706,9 @@ impl Consensus {
 
     /// As leader, answers the member at `index` with id `member`, which asked with the
     /// floor flag in a report that came in a data frame of `session_id`: its term, its
-    /// append position, the two ids and that session, once each leader heartbeat
-    /// interval at most, counted in `cluster.floor_answers_sent` (`spec/cluster.md`,
-    /// "The floor answer"; ADR 0163).
+    /// append position read as it writes the answer, the two ids and that session, once
+    /// each leader heartbeat interval at most, counted in `cluster.floor_answers_sent`
+    /// (`spec/cluster.md`, "The floor answer"; ADR 0163).
     fn answer_floor<I: Io>(
         &mut self,
         index: usize,
@@ -2720,11 +2723,18 @@ impl Consensus {
         if !Self::due(peer.answered_ns, LEADER_HEARTBEAT_INTERVAL_NS, clock) {
             return;
         }
+        // The append position as of now, and not as of the last duty cycle: a replay of
+        // the leader's live recording reads up to the recording's synced position, which
+        // can have moved since that cycle read it, and a replay may have served an
+        // earlier run of the member an entry there. Read after the report of the present
+        // run, the position is at or past every entry any replay had read before it
+        // (`spec/cluster.md`, "A member that lost its log"; ADR 0163).
+        let log_position = self.append_position.max(io.append_position());
         let sent = io.send(
             member,
             &Message::FloorAnswer {
                 leadership_term_id: self.term,
-                log_position: self.append_position,
+                log_position,
                 leader_member_id: self.member_id(),
                 follower_member_id: member,
                 session_id,

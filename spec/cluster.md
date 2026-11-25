@@ -451,7 +451,7 @@ log"; ADR 0163). No member of an earlier version sets the flag, so none is sent 
 | Offset | Size | Field | Type | Meaning |
 | --- | --- | --- | --- | --- |
 | 8 | 8 | leadership term id | i64 | the leader's term |
-| 16 | 8 | log position | i64 | the leader's append position when it wrote the answer |
+| 16 | 8 | log position | i64 | the leader's append position, read as it writes the answer and not as an earlier read left it ("A member that lost its log") |
 | 24 | 4 | leader member id | i32 | the leader's |
 | 28 | 4 | follower member id | i32 | the follower's, as the append position named it |
 | 32 | 4 | session id | i32 | the session id of the data frame the append position came in (`spec/frame.md`): the session of the follower's consensus publication to the leader |
@@ -1383,7 +1383,8 @@ with the flag, from a member of its members string, whatever term the report nam
 answers it with a floor answer to that member alone, in every state in which it reads
 append positions, at most once each leader heartbeat interval for each member,
 counted in
-`cluster.floor_answers_sent`: its term, its append position, the two member ids, and
+`cluster.floor_answers_sent`: its term, its append position, read as it writes the
+answer and not as an earlier read left it, the two member ids, and
 the session id of the data frame the append position came in, the session of the
 member's consensus publication to the leader. A member takes a floor answer that names
 it, from the leader it follows, for that leader's term, with the session id of its own
@@ -1430,8 +1431,13 @@ the member was told then does not reach it: a leader keeps each member's last re
 whichever run of the member sent it. The floor answer holds it. Every entry an earlier
 run of the member held came to it in one of two ways: from the leader's recordings, by
 a replay, or from the leader's sender, on the live log. The answer holds the first,
-since the leader's recorder reads its publication's log and never passes the leader's
-append position, and the join holds the second. So neither condition can go while the
+since a replay of a recording reads no further than its extent, which for a live
+recording is its synced position (`spec/client-protocol.md`, "Commands", start replay),
+and the leader's append position, read as it writes the answer, is the end of what its
+recordings hold synced then ("The log"): at or past every position a replay had read
+before. The recorder writes past the synced position before each sync, so an append
+position an earlier read left, as of the leader's last duty cycle, can stand below an
+entry a replay has read since. The join holds the second. So neither condition can go while the
 argument rests on both. An answer's session id is the member's present run's: a member
 that held any of the log and starts on a new log directory starts on a new driver ("What
 the second case rests on"), whose session ids begin at a random value
@@ -1442,7 +1448,8 @@ that run's session and is ignored. Two drivers' random ids that meet would name 
 runs alike, and would also merge the two runs' frames into one session at the leader's
 receiver (`spec/udp.md`, "The receiver", step 1). So an answer the member takes was
 written after the leader read a report of the member's present run, and its log
-position is at or past every entry the leader had appended then. An append position
+position is at or past every entry a replay of the leader's recordings had read then,
+to any run of the member. An append position
 counts toward a commit only for the term it names ("Roles and the election", the quorum
 position), so an acknowledgement of the member's earlier run commits only at the
 leader it was sent to, while that leader leads that term. Any leader the member's

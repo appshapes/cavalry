@@ -87,6 +87,8 @@ pub struct Stub {
     pub last_append: Option<(i32, i64, i64)>,
     /// The flags of that append position.
     pub last_append_flags: u8,
+    /// The last floor answer sent, with the member it was for (ADR 0163).
+    pub last_floor_answer: Option<(i32, Message<'static>)>,
     /// The candidate term the log directory holds: what a test gave it, as a
     /// directory kept from an earlier start, or what the member stored since.
     pub candidate_term: i64,
@@ -138,6 +140,7 @@ impl Stub {
             catchup_image: None,
             last_append: None,
             last_append_flags: 0,
+            last_floor_answer: None,
             candidate_term: -1,
             vote_floor: -1,
             log_term: -1,
@@ -247,6 +250,26 @@ impl Io for Stub {
         {
             self.last_append = Some((member, leadership_term_id, log_position));
             self.last_append_flags = flags;
+        }
+        if let Message::FloorAnswer {
+            leadership_term_id,
+            log_position,
+            leader_member_id,
+            follower_member_id,
+            session_id,
+        } = *message
+            && !self.refuse_send
+        {
+            self.last_floor_answer = Some((
+                member,
+                Message::FloorAnswer {
+                    leadership_term_id,
+                    log_position,
+                    leader_member_id,
+                    follower_member_id,
+                    session_id,
+                },
+            ));
         }
         !self.refuse_send
     }

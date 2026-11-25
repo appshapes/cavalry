@@ -1089,7 +1089,7 @@ pub enum Message<'a> {
     FloorAnswer {
         /// The leader's term.
         leadership_term_id: i64,
-        /// The leader's append position when it wrote the answer.
+        /// The leader's append position, read as it wrote the answer.
         log_position: i64,
         /// The leader's member id.
         leader_member_id: i32,
@@ -2899,7 +2899,9 @@ pub const fn withholds(own: LogReport, vote_floor: i64, log_heard: bool) -> bool
 /// run, −1 for none. Every entry an earlier run of the member held came from the
 /// leader's recordings, by a replay, or from the leader's sender, on the live log. The
 /// answer, written after the leader read a report of the member's present run, holds
-/// the first: the recorder never passes the leader's append position. The join holds
+/// the first: a replay reads no further than a recording's synced position, and the
+/// leader's append position, read as it writes the answer, counts that position as it
+/// is then. The join holds
 /// the second: the live image joins at the sender's position, which never goes back,
 /// and a follower goes to follower ready only with its append position there.
 pub const fn clears_vote_floor(
