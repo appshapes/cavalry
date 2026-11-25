@@ -17,12 +17,12 @@
 const path = require("path");
 const addon = require(path.join(__dirname, "build", "Release", "cavalry_addon.node"));
 
-const ABI_VERSION = 6;
+const ABI_VERSION = 7;
 
 /** The header's constants, as the ABI names them (spec/c-abi.md). */
 const constants = {
   CAVALRY_DIR_ENV: "CAVALRY_DIR",
-  CAVALRY_ABI_VERSION: 6,
+  CAVALRY_ABI_VERSION: 7,
   CAVALRY_MAX_IMAGES: 256,
   CAVALRY_SERVICE_LOG_STREAM_ID: 104,
   CAVALRY_NULL_POSITION: -1,
@@ -106,6 +106,9 @@ const constants = {
   CAVALRY_CLUSTER_ENTRY_NEW_LEADERSHIP_TERM: 4,
   CAVALRY_CLUSTER_ENTRY_OTHER: 5,
   CAVALRY_CLUSTER_ENTRY_SNAPSHOT: 6,
+  CAVALRY_CLUSTER_ENTRY_TIMER: 7,
+  CAVALRY_CLUSTER_TIMER_SCHEDULED: 1,
+  CAVALRY_CLUSTER_TIMER_REFUSED: 2,
   CAVALRY_CLUSTER_RESTORED_NO_MEMBER: 1,
   CAVALRY_CLUSTER_RESTORED_FROM_START: 2,
   CAVALRY_CLUSTER_RESTORED_STATE: 3,
@@ -147,7 +150,7 @@ const CONTINUE = constants.CAVALRY_ACTION_CONTINUE;
 /** The structs' sizes and field offsets, as C lays them out on the 64-bit targets. */
 const LAYOUT = {
   "cavalry_cluster_entry_values_t": {
-    "size": 48,
+    "size": 56,
     "fields": {
       "position": {
         "offset": 0,
@@ -176,6 +179,10 @@ const LAYOUT = {
       "timed_out": {
         "offset": 40,
         "kind": "bool"
+      },
+      "correlation_id": {
+        "offset": 48,
+        "kind": "int64_t"
       }
     }
   },
