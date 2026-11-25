@@ -115,10 +115,17 @@ tests' twenty runs on both runners among it.
   2.2 s and a service's snapshot 1.7 s to 2.9 s, where a laptop takes a few
   milliseconds; three snapshots in a row stood a cluster still for 7.5 s. In
   `crates/cavalry-raft/tests/snapshot.rs`, `meanwhile` runs such a step on a thread
-  of its own while the members and the keepalives go on, and a failure's message
-  says how long the members stood still and what each member counted of its
-  elections and its sessions. Use it for a step that waits, and read those lines
-  first (work item 446).
+  of its own while the members and the keepalives go on. A failing test of that
+  file prints, on standard error, each step that took 200 ms or more and each
+  second or more in which its members stood still; and the message of a refused
+  offer, of a refused request for a snapshot and of a wait that ran out says what
+  each member counted of its elections, their cause, and its sessions timed out.
+  Read those lines first. To be a slow runner on any machine, run the file with
+  every such step slowed past the timeouts: with
+  `CAVALRY_TEST_STEP_DELAY_MS=11000 cargo test -p cavalry-raft --test snapshot`,
+  one step that stands a running cluster still fails its test. The other test
+  programs that drive three members from one thread have the same loops and no
+  such helper yet (work item 446).
 - A job ends without success and with no `test-times: N of N runs passed` line, and
   its log ends with GitHub's notice that the job has exceeded the maximum execution
   time of 90 minutes: the runs did not fit in the job's bound. Each job stops at 90
