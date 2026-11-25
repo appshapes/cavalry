@@ -1136,7 +1136,7 @@ static napi_value fn_cavalry_add_publication(napi_env env, napi_callback_info in
   if (arg_failed) return NULL;
   char channel_buf[4096]; const char *channel = string_arg(env, argv[1], channel_buf, sizeof channel_buf, "channel");
   if (string_failed) return NULL;
-  int32_t stream_id = (int32_t) int32_arg(env, argv[2], "stream_id");
+  int32_t stream_id = (int32_t) int32_arg(env, argv[2], "streamId");
   if (arg_failed) return NULL;
   int result = cavalry_add_publication(&publication, client, channel, stream_id);
   napi_value tuple; napi_create_array_with_length(env, 2, &tuple);
@@ -1153,7 +1153,7 @@ static napi_value fn_cavalry_add_exclusive_publication(napi_env env, napi_callba
   if (arg_failed) return NULL;
   char channel_buf[4096]; const char *channel = string_arg(env, argv[1], channel_buf, sizeof channel_buf, "channel");
   if (string_failed) return NULL;
-  int32_t stream_id = (int32_t) int32_arg(env, argv[2], "stream_id");
+  int32_t stream_id = (int32_t) int32_arg(env, argv[2], "streamId");
   if (arg_failed) return NULL;
   int result = cavalry_add_exclusive_publication(&publication, client, channel, stream_id);
   napi_value tuple; napi_create_array_with_length(env, 2, &tuple);
@@ -1170,7 +1170,7 @@ static napi_value fn_cavalry_add_subscription(napi_env env, napi_callback_info i
   if (arg_failed) return NULL;
   char channel_buf[4096]; const char *channel = string_arg(env, argv[1], channel_buf, sizeof channel_buf, "channel");
   if (string_failed) return NULL;
-  int32_t stream_id = (int32_t) int32_arg(env, argv[2], "stream_id");
+  int32_t stream_id = (int32_t) int32_arg(env, argv[2], "streamId");
   if (arg_failed) return NULL;
   int result = cavalry_add_subscription(&subscription, client, channel, stream_id);
   napi_value tuple; napi_create_array_with_length(env, 2, &tuple);
@@ -1187,7 +1187,7 @@ static napi_value fn_cavalry_start_recording(napi_env env, napi_callback_info in
   if (arg_failed) return NULL;
   char channel_buf[4096]; const char *channel = string_arg(env, argv[1], channel_buf, sizeof channel_buf, "channel");
   if (string_failed) return NULL;
-  int32_t stream_id = (int32_t) int32_arg(env, argv[2], "stream_id");
+  int32_t stream_id = (int32_t) int32_arg(env, argv[2], "streamId");
   if (arg_failed) return NULL;
   int result = cavalry_start_recording(&recording, client, channel, stream_id);
   napi_value tuple; napi_create_array_with_length(env, 2, &tuple);
@@ -1201,7 +1201,7 @@ static napi_value fn_cavalry_stop_recording(napi_env env, napi_callback_info inf
   if (!read_args(env, info, 2, &argc, argv, "cavalry_stop_recording")) return NULL;
   cavalry_t *client = (cavalry_t *) external_arg(env, argv[0], "client");
   if (arg_failed) return NULL;
-  int64_t recording_id = (int64_t) int64_arg(env, argv[1], "recording_id");
+  int64_t recording_id = (int64_t) int64_arg(env, argv[1], "recordingId");
   if (arg_failed) return NULL;
   int result = cavalry_stop_recording(client, recording_id);
   return make_int32(env, (int32_t) result);
@@ -1238,7 +1238,7 @@ static napi_value fn_cavalry_truncate_recording(napi_env env, napi_callback_info
   if (!read_args(env, info, 3, &argc, argv, "cavalry_truncate_recording")) return NULL;
   cavalry_t *client = (cavalry_t *) external_arg(env, argv[0], "client");
   if (arg_failed) return NULL;
-  int64_t recording_id = (int64_t) int64_arg(env, argv[1], "recording_id");
+  int64_t recording_id = (int64_t) int64_arg(env, argv[1], "recordingId");
   if (arg_failed) return NULL;
   int64_t position = (int64_t) int64_arg(env, argv[2], "position");
   if (arg_failed) return NULL;
@@ -1251,9 +1251,9 @@ static napi_value fn_cavalry_purge_segments(napi_env env, napi_callback_info inf
   if (!read_args(env, info, 3, &argc, argv, "cavalry_purge_segments")) return NULL;
   cavalry_t *client = (cavalry_t *) external_arg(env, argv[0], "client");
   if (arg_failed) return NULL;
-  int64_t recording_id = (int64_t) int64_arg(env, argv[1], "recording_id");
+  int64_t recording_id = (int64_t) int64_arg(env, argv[1], "recordingId");
   if (arg_failed) return NULL;
-  int64_t new_start_position = (int64_t) int64_arg(env, argv[2], "new_start_position");
+  int64_t new_start_position = (int64_t) int64_arg(env, argv[2], "newStartPosition");
   if (arg_failed) return NULL;
   int result = cavalry_purge_segments(client, recording_id, new_start_position);
   return make_int32(env, (int32_t) result);
@@ -1264,7 +1264,7 @@ static napi_value fn_cavalry_purge_recording(napi_env env, napi_callback_info in
   if (!read_args(env, info, 2, &argc, argv, "cavalry_purge_recording")) return NULL;
   cavalry_t *client = (cavalry_t *) external_arg(env, argv[0], "client");
   if (arg_failed) return NULL;
-  int64_t recording_id = (int64_t) int64_arg(env, argv[1], "recording_id");
+  int64_t recording_id = (int64_t) int64_arg(env, argv[1], "recordingId");
   if (arg_failed) return NULL;
   int result = cavalry_purge_recording(client, recording_id);
   return make_int32(env, (int32_t) result);
@@ -1276,13 +1276,13 @@ static napi_value fn_cavalry_start_replay(napi_env env, napi_callback_info info)
   cavalry_replay_t *replay = NULL;
   cavalry_t *client = (cavalry_t *) external_arg(env, argv[0], "client");
   if (arg_failed) return NULL;
-  int64_t recording_id = (int64_t) int64_arg(env, argv[1], "recording_id");
+  int64_t recording_id = (int64_t) int64_arg(env, argv[1], "recordingId");
   if (arg_failed) return NULL;
   int64_t position = (int64_t) int64_arg(env, argv[2], "position");
   if (arg_failed) return NULL;
   int64_t length = (int64_t) int64_arg(env, argv[3], "length");
   if (arg_failed) return NULL;
-  int32_t replay_stream_id = (int32_t) int32_arg(env, argv[4], "replay_stream_id");
+  int32_t replay_stream_id = (int32_t) int32_arg(env, argv[4], "replayStreamId");
   if (arg_failed) return NULL;
   char channel_buf[4096]; const char *channel = string_arg(env, argv[5], channel_buf, sizeof channel_buf, "channel");
   if (string_failed) return NULL;
@@ -1298,7 +1298,7 @@ static napi_value fn_cavalry_stop_replay(napi_env env, napi_callback_info info) 
   if (!read_args(env, info, 2, &argc, argv, "cavalry_stop_replay")) return NULL;
   cavalry_t *client = (cavalry_t *) external_arg(env, argv[0], "client");
   if (arg_failed) return NULL;
-  int64_t replay_session_id = (int64_t) int64_arg(env, argv[1], "replay_session_id");
+  int64_t replay_session_id = (int64_t) int64_arg(env, argv[1], "replaySessionId");
   if (arg_failed) return NULL;
   int result = cavalry_stop_replay(client, replay_session_id);
   return make_int32(env, (int32_t) result);
@@ -1333,9 +1333,9 @@ static napi_value fn_cavalry_cluster_service_reply(napi_env env, napi_callback_i
   if (!read_args(env, info, 3, &argc, argv, "cavalry_cluster_service_reply")) return NULL;
   cavalry_cluster_service_t *service = (cavalry_cluster_service_t *) external_arg(env, argv[0], "service");
   if (arg_failed) return NULL;
-  int64_t session_id = (int64_t) int64_arg(env, argv[1], "session_id");
+  int64_t session_id = (int64_t) int64_arg(env, argv[1], "sessionId");
   if (arg_failed) return NULL;
-  size_t length = 0; const uint8_t *buffer = (const uint8_t *) bytes_arg(env, argv[2], &length, "buffer");
+  size_t length = 0; const uint8_t *buffer = (const uint8_t *) bytes_arg(env, argv[2], &length, "message");
   if (arg_failed) return NULL;
   int result = cavalry_cluster_service_reply(service, session_id, buffer, length);
   return make_int32(env, (int32_t) result);
@@ -1346,7 +1346,7 @@ static napi_value fn_cavalry_cluster_service_schedule_timer(napi_env env, napi_c
   if (!read_args(env, info, 3, &argc, argv, "cavalry_cluster_service_schedule_timer")) return NULL;
   cavalry_cluster_service_t *service = (cavalry_cluster_service_t *) external_arg(env, argv[0], "service");
   if (arg_failed) return NULL;
-  int64_t correlation_id = (int64_t) int64_exact_arg(env, argv[1], "correlation_id");
+  int64_t correlation_id = (int64_t) int64_exact_arg(env, argv[1], "correlationId");
   if (arg_failed) return NULL;
   int64_t deadline = (int64_t) int64_exact_arg(env, argv[2], "deadline");
   if (arg_failed) return NULL;
@@ -1359,7 +1359,7 @@ static napi_value fn_cavalry_cluster_service_cancel_timer(napi_env env, napi_cal
   if (!read_args(env, info, 2, &argc, argv, "cavalry_cluster_service_cancel_timer")) return NULL;
   cavalry_cluster_service_t *service = (cavalry_cluster_service_t *) external_arg(env, argv[0], "service");
   if (arg_failed) return NULL;
-  int64_t correlation_id = (int64_t) int64_exact_arg(env, argv[1], "correlation_id");
+  int64_t correlation_id = (int64_t) int64_exact_arg(env, argv[1], "correlationId");
   if (arg_failed) return NULL;
   int result = cavalry_cluster_service_cancel_timer(service, correlation_id);
   return make_int32(env, (int32_t) result);
@@ -1493,7 +1493,7 @@ static napi_value fn_cavalry_cluster_session_offer(napi_env env, napi_callback_i
   if (!read_args(env, info, 2, &argc, argv, "cavalry_cluster_session_offer")) return NULL;
   cavalry_cluster_session_t *session = (cavalry_cluster_session_t *) external_arg(env, argv[0], "session");
   if (arg_failed) return NULL;
-  size_t length = 0; const uint8_t *buffer = (const uint8_t *) bytes_arg(env, argv[1], &length, "buffer");
+  size_t length = 0; const uint8_t *buffer = (const uint8_t *) bytes_arg(env, argv[1], &length, "message");
   if (arg_failed) return NULL;
   int64_t result = cavalry_cluster_session_offer(session, buffer, length);
   return make_int64(env, result);
@@ -1702,7 +1702,7 @@ static napi_value fn_cavalry_context_init_v(napi_env env, napi_callback_info inf
   size_t argc = 1; napi_value argv[1];
   if (!read_args(env, info, 1, &argc, argv, "cavalry_context_init_v")) return NULL;
   cavalry_context_t *context = NULL;
-  int abi_version = (int) int32_arg(env, argv[0], "abi_version");
+  int abi_version = (int) int32_arg(env, argv[0], "abiVersion");
   if (arg_failed) return NULL;
   int result = cavalry_context_init_v(&context, abi_version);
   napi_value tuple; napi_create_array_with_length(env, 2, &tuple);
@@ -1801,7 +1801,7 @@ static napi_value fn_cavalry_publication_offer(napi_env env, napi_callback_info 
   if (!read_args(env, info, 2, &argc, argv, "cavalry_publication_offer")) return NULL;
   cavalry_publication_t *publication = (cavalry_publication_t *) external_arg(env, argv[0], "publication");
   if (arg_failed) return NULL;
-  size_t length = 0; const uint8_t *buffer = (const uint8_t *) bytes_arg(env, argv[1], &length, "buffer");
+  size_t length = 0; const uint8_t *buffer = (const uint8_t *) bytes_arg(env, argv[1], &length, "message");
   if (arg_failed) return NULL;
   int64_t result = cavalry_publication_offer(publication, buffer, length);
   return make_int64(env, result);

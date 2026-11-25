@@ -2226,10 +2226,10 @@ class NodePackage(unittest.TestCase):
         self.assertIn("  cancelTimer(correlationId) { return addon.cavalry_cluster_service_cancel_timer(this.handle, "
                       "correlationId); }\n", service)
         schedule = addon.split("static napi_value fn_cavalry_cluster_service_schedule_timer(", 1)[1].split("\n}\n", 1)[0]
-        self.assertIn('int64_t correlation_id = (int64_t) int64_exact_arg(env, argv[1], "correlation_id");', schedule)
+        self.assertIn('int64_t correlation_id = (int64_t) int64_exact_arg(env, argv[1], "correlationId");', schedule)
         self.assertIn('int64_t deadline = (int64_t) int64_exact_arg(env, argv[2], "deadline");', schedule)
         cancel = addon.split("static napi_value fn_cavalry_cluster_service_cancel_timer(", 1)[1].split("\n}\n", 1)[0]
-        self.assertIn('int64_t correlation_id = (int64_t) int64_exact_arg(env, argv[1], "correlation_id");', cancel)
+        self.assertIn('int64_t correlation_id = (int64_t) int64_exact_arg(env, argv[1], "correlationId");', cancel)
         # Each read comes before the wrapper's ABI call, and a failed one returns before
         # it; and the reader is called from these three places alone, so from no trampoline.
         for wrapper, call in ((schedule, "int result = cavalry_cluster_service_schedule_timer("),
@@ -2535,15 +2535,23 @@ class NodePackage(unittest.TestCase):
                            r"\"(\w+)\"[^\n]*\n([^\n]*)\n", addon, re.M)
         self.assertEqual(sorted({(reader, name): sum(1 for r in reads if r[:2] == (reader, name))
                                  for reader, name, _ in reads}.items()), sorted({
-            ("int32_arg", "abi_version"): 1, ("int32_arg", "action"): 1, ("int32_arg", "index"): 3,
-            ("int32_arg", "replay_stream_id"): 1, ("int32_arg", "stream_id"): 4,
-            ("int64_arg", "length"): 1, ("int64_arg", "new_start_position"): 1, ("int64_arg", "offset"): 1,
-            ("int64_arg", "position"): 3, ("int64_arg", "recording_id"): 5, ("int64_arg", "replay_session_id"): 1,
-            ("int64_arg", "session_id"): 1, ("int64_arg", "value"): 1,
-            ("int64_exact_arg", "correlation_id"): 2, ("int64_exact_arg", "deadline"): 1,
+            ("int32_arg", "abiVersion"): 1, ("int32_arg", "action"): 1, ("int32_arg", "index"): 3,
+            ("int32_arg", "replayStreamId"): 1, ("int32_arg", "streamId"): 4,
+            ("int64_arg", "length"): 1, ("int64_arg", "newStartPosition"): 1, ("int64_arg", "offset"): 1,
+            ("int64_arg", "position"): 3, ("int64_arg", "recordingId"): 5, ("int64_arg", "replaySessionId"): 1,
+            ("int64_arg", "sessionId"): 1, ("int64_arg", "value"): 1,
+            ("int64_exact_arg", "correlationId"): 2, ("int64_exact_arg", "deadline"): 1,
             ("size_arg", "fragmentLimit"): 4, ("size_arg", "index"): 1, ("size_arg", "length"): 1}.items()))
         for reader, name, after in reads:
             self.assertEqual(after, "  if (arg_failed) return NULL;", (reader, name))
+        # A refusal names the parameter as the package's method names it, the name the
+        # caller wrote (ADR 0164): camel case for the ABI's, and `message` for the bytes
+        # the ABI calls `buffer`.
+        self.assertEqual(gen_node.said("new_start_position"), "newStartPosition")
+        self.assertEqual(gen_node.said("buffer"), "message")
+        self.assertEqual(sorted(re.findall(r'bytes_arg\(env, argv\[\d\], &length, "(\w+)"\);', addon)),
+                         ["message", "message", "message", "state"])
+        self.assertNotRegex(addon, r'_arg\(env, argv\[\d\], (?:&length, )?"[a-z]+_[a-z_]+"')
         self.assertEqual(len(reads), len(re.findall(r"\b(?:int64_arg|int64_exact_arg|int32_arg|size_arg|int_arg)"
                                                     r"\(env, argv\[", addon)))
         # A narrower integer type, which the header has none of today, is read with its

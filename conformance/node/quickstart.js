@@ -923,16 +923,16 @@ function main(udpPort) {
       ["a truncate at a BigInt past int64", "position", RangeError,
         () => client.truncateRecording(recordingId, 2n ** 64n + 96n)],
       ["a truncate at a string", "position", TypeError, () => client.truncateRecording(recordingId, "96")],
-      ["a purge of the segments below Infinity", "new_start_position", RangeError,
+      ["a purge of the segments below Infinity", "newStartPosition", RangeError,
         () => client.purgeSegments(recordingId, Infinity)],
-      ["a purge of recording NaN", "recording_id", RangeError, () => client.purgeRecording(NaN)],
-      ["a purge of a recording whose id has a fraction", "recording_id", RangeError,
+      ["a purge of recording NaN", "recordingId", RangeError, () => client.purgeRecording(NaN)],
+      ["a purge of a recording whose id has a fraction", "recordingId", RangeError,
         () => client.purgeRecording(recordingId + 0.5)],
-      ["a subscription to stream 2 ** 32 + its id", "stream_id", RangeError,
+      ["a subscription to stream 2 ** 32 + its id", "streamId", RangeError,
         () => client.addSubscription("cavalry:ipc", 2 ** 32 + STREAM)],
-      ["a subscription to a stream id with a fraction", "stream_id", RangeError,
+      ["a subscription to a stream id with a fraction", "streamId", RangeError,
         () => client.addSubscription("cavalry:ipc", STREAM + 0.5)],
-      ["a subscription to a stream id that is a BigInt", "stream_id", TypeError,
+      ["a subscription to a stream id that is a BigInt", "streamId", TypeError,
         () => client.addSubscription("cavalry:ipc", BigInt(STREAM))],
       ["a poll with a fragment limit of 1.5", "fragmentLimit", RangeError, () => ipcSub.poll(() => {}, 1.5)],
       ["a poll with a fragment limit below zero", "fragmentLimit", RangeError, () => ipcSub.poll(() => {}, -1)],
@@ -942,7 +942,7 @@ function main(udpPort) {
       // A typed array of a kind the addon does not name: its length in bytes would be a
       // guess, and for a Float16Array the guess was four times its bytes. Node has it from 24.
       ...(typeof Float16Array === "function"
-        ? [["an offer of a Float16Array", "buffer", TypeError, () => ipcPub.offer(new Float16Array(5))]] : [])]) {
+        ? [["an offer of a Float16Array", "message", TypeError, () => ipcPub.offer(new Float16Array(5))]] : [])]) {
       let answered;
       try {
         answered = call();
