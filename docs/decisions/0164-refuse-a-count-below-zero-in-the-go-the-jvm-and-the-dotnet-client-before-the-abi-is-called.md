@@ -89,9 +89,12 @@ the four polls and the image at an index of the Go, the JVM and the .NET client.
    the claim and the four polls; a call of the reader by one of them is allowed on a
    line before the method's first call of the ABI. A reader called by another
    per-message method, by an upcall, or not before the ABI call, a poll's among them,
-   and any other form in the reader, is a finding. The image at an index is not
-   per-message and is not the lint's. Go's rules do not change: its functions gain no
-   panic, and its shim gains no lock.
+   and any other form in the reader or in a function it calls, is a finding. What a
+   poll may throw once its ABI call has returned is as ADR 0046 left it: a function
+   called there may throw, and the lint does not ask whether a reader is what throws.
+   The lint reads a method's own text for its ABI call, `Abi.cavalry_*`. The image at
+   an index is not per-message and is not the lint's. Go's rules do not change: its
+   functions gain no panic, and its shim gains no lock.
 
 ## Alternatives considered
 
@@ -128,8 +131,8 @@ bench hosts.
 `master`'s library, through the Python client's plain `ctypes` types for the
 per-message functions.
 
-**That each client refuses, through its real runtime.** The quickstart runner of each
-of the three clients makes a claim of −1 bytes, a poll with a fragment limit of −1
+**That each client refuses, through its real runtime.** Of the six refusals, the
+quickstart runner of each of the three clients makes three: a claim of −1 bytes, a poll with a fragment limit of −1
 whose handler fails the run if it is called, and a lookup of the image at index −1,
 against a driver, with a publication and a subscription that have just carried 1,000
 messages. The Go runner reads the ABI's code for an error from the claim and −1 from
@@ -148,9 +151,22 @@ the ABI once with that count.
 
 **That the lint holds the allowance.** `clients/lint-test.py` has one test for each of
 the JVM and the .NET client: the committed package passes; the reader called by
-another per-message method, by an upcall, after the claim's ABI call and after a
-poll's, and a lock in the reader, are each a finding; a renamed reader is a stale
-rule.
+another per-message method, by an upcall, after the claim's ABI call, on its line or
+the next, and after a poll's, a lock in the reader and a lock in a function the reader
+calls, are each a finding; a renamed reader is a stale rule; and the rule's list of
+callers is the claim and the four polls. Eight changes to the rule, each of which
+should fail a test, each did.
+
+**That the spec's promise holds.** `clients/generate-test.py` reads every
+`CAVALRY_ERR_*` of the header and fails on one below zero.
+
+**An independent read** of the change found no count that still reaches the ABI
+converted. It found the Go client's doc comments still saying that an `Error` holds
+the ABI's code and message alone, sentences that claimed more than the lint and the
+runners do, and edges of the lint's rule that no test held; each is as this ADR says
+now. It also found, outside this change, that the Go client's `Images` panics when the
+ABI answers −1 for the image count, as it does from inside a handler; that is work
+item 468.
 
 **What a message's path pays.** Each runner's latency round sends 100,000 messages
 over `cavalry:ipc`, one at a time on one thread, unpinned, and reports the time from

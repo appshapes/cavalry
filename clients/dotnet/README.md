@@ -378,14 +378,16 @@ program that runs every call above beside three members.
   trampoline that calls a handler, for C#'s forms of each: `lock`, `Monitor`, `Mutex`, `Semaphore`,
   `SpinLock` and the other waits of `System.Threading`, `async`, `await`, `Task`,
   `ValueTask`, `.Wait(`, `.Result`, `Thread.Sleep`, a thread started, `throw`, `new`,
-  and an interpolated string. The one exception built on the path is the
-  `HandlerException` that `Poll` throws after its ABI call; a `Span<byte>` or
+  and an interpolated string. The one exception built on the path after an ABI call is
+  the `HandlerException` that `Poll` throws once its ABI call has returned; a `Span<byte>` or
   `ReadOnlySpan<byte>` made with `new` over bytes the ABI handed over is a view, on the
   stack, not an allocation; and `Header`'s guard, `Ensure`, throws for a getter
   called outside its handler call, before the ABI is reached. The reader of a count,
-  `Abi.Negative`, throws for one below zero: the lint allows its throw for the claim
-  and the four polls, which it names, on a line before the member's ABI call, and
-  nowhere else (the next rule). `just lint` fails on
+  `Abi.Negative`, throws for one below zero: the lint allows a call of it by the claim
+  and the four polls, which it names, on a line before the member's ABI call (the
+  next rule). A call of it by another per-message member, by a trampoline, or not
+  before the ABI call is a finding. The lint reads a member's own text for its ABI
+  call, `Abi.cavalry_*`. `just lint` fails on
   any other, in the member's own body or in a method of the package it calls.
 - Never pass the ABI another count than the caller gave
   ([ADR 0164](../../docs/decisions/0164-refuse-a-count-below-zero-in-the-go-the-jvm-and-the-dotnet-client-before-the-abi-is-called.md)).
@@ -402,7 +404,8 @@ program that runs every call above beside three members.
   loop that takes nothing for ever would say nothing. An `int` and a `long` that the ABI takes as
   an int32 or an int64, a stream id, a position, a timer's id, are held to their
   type by the compiler. `clients/generate-test.py` holds the test in each member,
-  and the conformance runner makes each refusal through the built library.
+  and the conformance runner makes three of the refusals through the built library: a
+  claim, a subscription's poll and the image at an index.
 - Never throw for an `Offer` code: `TryClaim` and `Offer` return the position after
   the frame or the code below zero (`Abi.PUBLICATION_NOT_CONNECTED`,
   `PUBLICATION_BACK_PRESSURED`, `PUBLICATION_ADMIN_ACTION`, `PUBLICATION_CLOSED`,

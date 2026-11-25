@@ -60,7 +60,8 @@ public static class Quickstart
     }
 
     /// <summary>A call with a count below zero: it must throw ArgumentOutOfRangeException,
-    /// for the parameter, with the README's section last in its message.</summary>
+    /// for the parameter, with the client's text first in its message and the README's
+    /// section in it. The runtime adds the parameter and the value after.</summary>
     static void RefusedCount(string what, string parameter, Action call)
     {
         try

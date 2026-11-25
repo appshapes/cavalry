@@ -962,7 +962,8 @@ func main() {
 	// A count below zero never reaches the ABI (work item 465; clients/go/README.md, "What
 	// it must never do"; ADR 0164). As a size_t it would be a count near 2 ** 64: the claim
 	// would be refused for a length nobody gave, and the poll would run with no limit. The
-	// shim refuses each with the client's own code, and nothing is claimed or read.
+	// client refuses each with its own code, the claim and the poll in its shim and the
+	// image's index in Go, and nothing is claimed or read.
 	refusedCount := func(what string, answer int64, wanted int64, err error, parameter string) {
 		var refused *cavalry.Error
 		if answer != wanted || !errors.As(err, &refused) || refused.Code != cavalry.ErrNegative ||

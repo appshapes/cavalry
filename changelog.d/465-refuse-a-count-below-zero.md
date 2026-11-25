@@ -8,7 +8,8 @@
   function's own failure, the ABI's code for an error from `TryClaim` and −1 from a
   poll, with an `Err` whose `Code` is the new `ErrNegative`, and an error from
   `ImageAt`; it does not panic. A program that passed −1 as a fragment limit to mean
-  no limit now passes the count it means
+  no limit now passes a count that says so, such as the greatest `int`: the ABI reads
+  a limit above 2^31 − 1 as 2^31 − 1
   ([ADR 0164](docs/decisions/0164-refuse-a-count-below-zero-in-the-go-the-jvm-and-the-dotnet-client-before-the-abi-is-called.md)).
 - `spec/c-abi.md` now says that no error code of the ABI is below zero, in this
   version or a later one, so that a client can give a failure of its own a code the

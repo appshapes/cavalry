@@ -1438,6 +1438,21 @@ class Clients(unittest.TestCase):
         self.edit_jvm(reader, "    static void belowZero(String name, int value) {\n", file="Abi.java")
         found = lint.findings(self.tmp)
         self.assertTrue(any("the argument reader Abi.negative is not in" in f for f in found), found)
+        # On the ABI call's own line, after it: not before it.
+        self.setUp()
+        self.edit_jvm(claim, claim.rstrip("\n") + " Abi.negative(\"length\", length);\n")
+        [finding] = lint.findings(self.tmp)
+        self.assertTrue("Publication.tryClaim" in finding and "not before its call of the ABI" in finding, finding)
+        # What a function the reader calls does is on the path of the reader's callers.
+        self.setUp()
+        self.edit_jvm(reader, "    static void held() {\n        synchronized (Abi.class) {\n        }\n    }\n\n" + reader
+                      + "        held();\n", file="Abi.java")
+        found = lint.findings(self.tmp)
+        self.assertEqual(len(found), 5, found)
+        self.assertTrue(all("Abi.negative calls Abi.held" in f and "synchronized" in f for f in found), found)
+        # And the rule names the claim and the four polls, and no other method.
+        self.assertEqual(lint.RULES["jvm"]["readers"], {"Abi.negative": [
+            "Publication.tryClaim", "Subscription.poll", "CommittedLog.poll", "ClusterSession.poll", "ClusterService.poll"]})
 
     # A cluster session and a cluster service in the JVM client (ADR 0124).
 
@@ -1617,6 +1632,21 @@ class Clients(unittest.TestCase):
         self.edit_dotnet(reader, "    internal static void BelowZero(string name, int value)\n    {\n", file="Abi.cs")
         found = lint.findings(self.tmp)
         self.assertTrue(any("the argument reader Abi.Negative is not in" in f for f in found), found)
+        # On the ABI call's own line, after it: not before it.
+        self.setUp()
+        self.edit_dotnet(claim, claim.rstrip("\n") + " Abi.Negative(nameof(length), length);\n")
+        [finding] = lint.findings(self.tmp)
+        self.assertTrue("Publication.TryClaim" in finding and "not before its call of the ABI" in finding, finding)
+        # What a function the reader calls does is on the path of the reader's callers.
+        self.setUp()
+        self.edit_dotnet(reader, "    internal static void Held()\n    {\n        lock (typeof(Abi))\n        {\n        }\n    }\n\n"
+                         + reader + "        Held();\n", file="Abi.cs")
+        found = lint.findings(self.tmp)
+        self.assertEqual(len(found), 5, found)
+        self.assertTrue(all("Abi.Negative calls Abi.Held" in f and "lock" in f for f in found), found)
+        # And the rule names the claim and the four polls, and no other member.
+        self.assertEqual(lint.RULES["dotnet"]["readers"], {"Abi.Negative": [
+            "Publication.TryClaim", "Subscription.Poll", "CommittedLog.Poll", "ClusterSession.Poll", "ClusterService.Poll"]})
 
     def test_a_lock_in_a_dotnet_per_message_method_fails(self):
         self.edit_dotnet("    public long TryClaim(int length)\n    {\n",

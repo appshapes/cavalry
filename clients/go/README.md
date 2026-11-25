@@ -384,8 +384,8 @@ beside three members.
   and the shim refuses one below zero before the ABI is called. The refusal is the
   function's own failure, with no panic: `TryClaim` returns the ABI's code for an
   error, and each of the four `Poll`s −1, and `Err` is an `*Error` whose `Code` is
-  `ErrNegative`. That code is the client's own and none of the ABI's, whose codes
-  are above zero (`spec/c-abi.md`, "Error codes"); `Fn` is the ABI function the call
+  `ErrNegative`. That code is the client's own and none of the ABI's, no code of
+  which is below zero (`spec/c-abi.md`, "Error codes"); `Fn` is the ABI function the call
   would have made, and `Message` names the parameter as the function names it,
   `length` or `fragmentLimit`, the value given, what to pass and this section.
   `ImageAt` with an index below zero returns the same `*Error` as its error. A count
@@ -394,8 +394,9 @@ beside three members.
   say nothing. An `int32` and an `int64` that the ABI takes as such, a
   stream id, a position, a timer's id, are held to their type by the compiler.
   `clients/generate-test.py` compiles `shim.c` against a stand-in for the ABI and
-  drives each count below zero and from zero, and the conformance runner makes each
-  refusal through the built library.
+  drives each of the five counts below zero and from zero, and the conformance runner
+  makes three of the refusals through the built library: a claim, a subscription's
+  poll and the image at an index.
 - Never return an error for an `Offer` code: `TryClaim` and `Offer` return the position
   after the frame or the code below zero (`PublicationNotConnected`,
   `PublicationBackPressured`, `PublicationAdminAction`, `PublicationClosed`,
@@ -447,8 +448,9 @@ beside three members.
   after it answer -1 with `ErrNoClaim` in `Err` and the ABI reads no freed handle
   through the struct's `publication` (`spec/c-abi.md`, "Which claim a struct names").
 - Never read a refusal as an answer. A `Poll` from inside a handler of the same
-  subscription returns −1 with `ErrPolling` in `Err`, and the poll in progress goes
-  on. A committed log's handler is held to the same rule. From inside it, a `Poll` of
+  subscription returns −1 with `ErrPolling` in `Err`, or with `ErrNegative` for a
+  fragment limit below zero, which the client refuses first, and the poll in progress
+  goes on. A committed log's handler is held to the same rule. From inside it, a `Poll` of
   the same log, `log.Position()` and `log.CommitPosition()` return −1, `log.IsEnded()`
   is `false`, `log.FailedAt()`, `log.WithdrawnAt()` and `log.Faulted()` are zeros and
   `false`, and `log.Fault()` and `log.Close()` return an `*Error`, each with

@@ -125,7 +125,10 @@ SHIM_H = r'''/* The C side of the Go client (clients/go/README.md): the one
  * (clients/go/README.md, "The thread's error"): the ABI function that failed,
  * cavalry_errcode's code and cavalry_errmsg's message, whole, since the ABI's buffer is
  * 512 bytes with its NUL too (spec/c-abi.md, "The message"). A code of 0 is no failure
- * yet. The handle keeps one, and the shim writes it only when the call failed. */
+ * yet. The handle keeps one, and the shim writes it only when the call failed. One
+ * failure is not the ABI's: a count or a length below zero, which the shim refuses before
+ * the ABI is called, with CAVALRY_GO_ERR_NEGATIVE as the code, the ABI function it would
+ * have called, and a message of its own. */
 typedef struct cavalry_go_error_s {
   int32_t code;
   char function[48];
@@ -133,12 +136,13 @@ typedef struct cavalry_go_error_s {
 } cavalry_go_error_t;
 
 /* The code of a failure that is this client's own refusal, before the ABI was called, of a
- * count or a length below zero (ADR 0164). It is none of the ABI's: the ABI's codes are
- * above zero (spec/c-abi.md, "Error codes"). */
+ * count or a length below zero (ADR 0164). It is none of the ABI's: no code of the ABI is
+ * below zero (spec/c-abi.md, "Error codes"). */
 #define CAVALRY_GO_ERR_NEGATIVE (-1)
 
 /* cavalry_publication_try_claim, with `error` written when it returns
- * CAVALRY_PUBLICATION_ERROR. */
+ * CAVALRY_PUBLICATION_ERROR. A `length` below zero is refused here, before the ABI is
+ * called: CAVALRY_PUBLICATION_ERROR, with `error` written as this client's own (ADR 0164). */
 int64_t cavalry_go_try_claim(cavalry_publication_t *publication, int64_t length, cavalry_buffer_claim_t *claim,
                              cavalry_go_error_t *error);
 
@@ -159,7 +163,8 @@ int64_t cavalry_go_offer(cavalry_publication_t *publication, const uint8_t *buff
 /* Polls `subscription` for up to `fragment_limit` fragments, calling the exported Go
  * function cavalryGoFragment for each with `index`, the subscription's 1-based index in
  * the client's table, as clientd. The ABI's result: the count, or -1, with `error`
- * written. */
+ * written. A `fragment_limit` below zero is refused here,
+ * before the ABI is called: -1, with `error` written as this client's own (ADR 0164). */
 int cavalry_go_poll(cavalry_subscription_t *subscription, uintptr_t index, int64_t fragment_limit,
                     cavalry_go_error_t *error);
 
@@ -167,7 +172,8 @@ int cavalry_go_poll(cavalry_subscription_t *subscription, uintptr_t index, int64
  * polls a subscription, with `index` the log's slot in the client's table. Its
  * trampoline is the log's own: it reads each entry's position in the log and calls the
  * exported Go function cavalryGoEntry with it. The ABI's result: the count, or -1, with
- * `error` written. */
+ * `error` written. A `fragment_limit` below zero is refused here,
+ * before the ABI is called: -1, with `error` written as this client's own (ADR 0164). */
 int cavalry_go_committed_log_poll(cavalry_committed_log_t *log, uintptr_t index, int64_t fragment_limit,
                                   cavalry_go_error_t *error);
 
@@ -180,7 +186,8 @@ int64_t cavalry_go_cluster_session_offer(cavalry_cluster_session_t *session, con
  * channel, as cavalry_go_poll polls a subscription, with `index` the session's slot in the
  * client's table. Its trampoline is the session's own: it reads each reply's values from
  * the header and calls the exported Go function cavalryGoReply with them. The ABI's
- * result: the count of replies handed over, or -1, with `error` written. */
+ * result: the count of replies handed over, or -1, with `error` written. A `fragment_limit` below zero is refused here,
+ * before the ABI is called: -1, with `error` written as this client's own (ADR 0164). */
 int cavalry_go_cluster_session_poll(cavalry_cluster_session_t *session, uintptr_t index, int64_t fragment_limit,
                                     cavalry_go_error_t *error);
 
@@ -204,7 +211,9 @@ int cavalry_go_cluster_service_cancel_timer(cavalry_cluster_service_t *service, 
  * unless it is CAVALRY_ACTION_CONTINUE, which the ABI does with no call. An action the ABI
  * refuses, and an entry whose values it does not give, abort the entry: the ABI's error is
  * copied into `error` in that call, and `*aborted` is 1 when the poll returns, else 0. The
- * ABI's result: the count of entries the handler took, or -1, with `error` written. */
+ * ABI's result: the count of entries the handler took, or -1, with `error` written. A
+ * `fragment_limit` below zero is refused here, before the ABI is called: -1, with `error`
+ * written as this client's own and `*aborted` 0 (ADR 0164). */
 int cavalry_go_cluster_service_poll(cavalry_cluster_service_t *service, cavalry_t *client, uintptr_t index,
                                     int64_t fragment_limit, int *aborted, cavalry_go_error_t *error);
 
@@ -246,8 +255,8 @@ static void cavalry_go_keep(cavalry_go_error_t *error, const char *function) {
  * int converted for it is a count near 2 ** 64: a claim of that many bytes, or a poll with
  * no limit, for a caller that asked for neither. So the count crosses to this file as an
  * int64, which holds every Go int, and is refused here, before the ABI is called. The
- * code is CAVALRY_GO_ERR_NEGATIVE, this client's own and none of the ABI's, whose codes
- * are above zero (spec/c-abi.md, "Error codes"; ADR 0164). */
+ * code is CAVALRY_GO_ERR_NEGATIVE, this client's own and none of the ABI's, no code of
+ * which is below zero (spec/c-abi.md, "Error codes"; ADR 0164). */
 static void cavalry_go_refuse(cavalry_go_error_t *error, const char *function, const char *parameter, int64_t given) {
   error->code = CAVALRY_GO_ERR_NEGATIVE;
   cavalry_go_copy(error->function, sizeof error->function, function);
@@ -969,7 +978,9 @@ const (
 
 // Error is a call that is not a message failed: Fn is the ABI function, and Code and
 // Message are the ABI's (cavalry_errcode, cavalry_errmsg), the message naming what to
-// do next and its docs anchor.
+// do next and its docs anchor. One failure is this client's own, with a Code below zero
+// and its own Message: ErrNegative, for a count the client refused before the ABI was
+// called, where Fn is the ABI function the call would have made.
 type Error struct {
 	Fn      string
 	Code    int32
@@ -982,7 +993,7 @@ func (e *Error) Error() string {
 
 // ErrNegative is the Code of an *Error for a count or a length below zero, which this
 // client refused before the ABI was called: TryClaim's length, a poll's fragment limit,
-// ImageAt's index. It is no code of the ABI's, whose codes are above zero
+// ImageAt's index. It is no code of the ABI's, none of which is below zero
 // (spec/c-abi.md, "Error codes"); Fn is the ABI function the call would have made. As a
 // size_t, which is what the ABI takes, a negative int is a count near 2 ** 64: a claim of
 // that many bytes, or a poll with no limit (README, "What it must never do"; ADR 0164).
@@ -1617,7 +1628,8 @@ func (p *Publication) Offer(message []byte) int64 {
 // PublicationError of TryClaim or Offer, or a -1 of Commit, Abort or SetReservedValue:
 // an *Error with the ABI function, code and message, which shim.c copied from the
 // thread's error in the C call that failed, kept until the next failure; nil before the
-// first (README, "The thread's error").
+// first (README, "The thread's error"). For a length below zero that TryClaim refused,
+// the shim wrote it itself, with the code ErrNegative, and the ABI was not called.
 func (p *Publication) Err() error { return keptError(&p.err) }
 
 // Position is the publication's position, or NullPosition.
@@ -1904,7 +1916,8 @@ func (s *Subscription) recovered() {
 // Err is the failure of this subscription's last poll that returned -1: an *Error with
 // the ABI function, code and message, which shim.c copied from the thread's error in the
 // C call that failed, kept until the next failure; nil before the first (README, "The
-// thread's error").
+// thread's error"). For a fragment limit below zero that the poll refused, the shim wrote
+// it itself, with the code ErrNegative, and the ABI was not called.
 func (s *Subscription) Err() error { return keptError(&s.err) }
 
 // Fault is what the last poll stopped on: the code (0 for none), the session and the

@@ -149,7 +149,9 @@ const (
 
 // Error is a call that is not a message failed: Fn is the ABI function, and Code and
 // Message are the ABI's (cavalry_errcode, cavalry_errmsg), the message naming what to
-// do next and its docs anchor.
+// do next and its docs anchor. One failure is this client's own, with a Code below zero
+// and its own Message: ErrNegative, for a count the client refused before the ABI was
+// called, where Fn is the ABI function the call would have made.
 type Error struct {
 	Fn      string
 	Code    int32
@@ -162,7 +164,7 @@ func (e *Error) Error() string {
 
 // ErrNegative is the Code of an *Error for a count or a length below zero, which this
 // client refused before the ABI was called: TryClaim's length, a poll's fragment limit,
-// ImageAt's index. It is no code of the ABI's, whose codes are above zero
+// ImageAt's index. It is no code of the ABI's, none of which is below zero
 // (spec/c-abi.md, "Error codes"); Fn is the ABI function the call would have made. As a
 // size_t, which is what the ABI takes, a negative int is a count near 2 ** 64: a claim of
 // that many bytes, or a poll with no limit (README, "What it must never do"; ADR 0164).
@@ -797,7 +799,8 @@ func (p *Publication) Offer(message []byte) int64 {
 // PublicationError of TryClaim or Offer, or a -1 of Commit, Abort or SetReservedValue:
 // an *Error with the ABI function, code and message, which shim.c copied from the
 // thread's error in the C call that failed, kept until the next failure; nil before the
-// first (README, "The thread's error").
+// first (README, "The thread's error"). For a length below zero that TryClaim refused,
+// the shim wrote it itself, with the code ErrNegative, and the ABI was not called.
 func (p *Publication) Err() error { return keptError(&p.err) }
 
 // Position is the publication's position, or NullPosition.
@@ -1084,7 +1087,8 @@ func (s *Subscription) recovered() {
 // Err is the failure of this subscription's last poll that returned -1: an *Error with
 // the ABI function, code and message, which shim.c copied from the thread's error in the
 // C call that failed, kept until the next failure; nil before the first (README, "The
-// thread's error").
+// thread's error"). For a fragment limit below zero that the poll refused, the shim wrote
+// it itself, with the code ErrNegative, and the ABI was not called.
 func (s *Subscription) Err() error { return keptError(&s.err) }
 
 // Fault is what the last poll stopped on: the code (0 for none), the session and the

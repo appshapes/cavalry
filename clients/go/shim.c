@@ -33,8 +33,8 @@ static void cavalry_go_keep(cavalry_go_error_t *error, const char *function) {
  * int converted for it is a count near 2 ** 64: a claim of that many bytes, or a poll with
  * no limit, for a caller that asked for neither. So the count crosses to this file as an
  * int64, which holds every Go int, and is refused here, before the ABI is called. The
- * code is CAVALRY_GO_ERR_NEGATIVE, this client's own and none of the ABI's, whose codes
- * are above zero (spec/c-abi.md, "Error codes"; ADR 0164). */
+ * code is CAVALRY_GO_ERR_NEGATIVE, this client's own and none of the ABI's, no code of
+ * which is below zero (spec/c-abi.md, "Error codes"; ADR 0164). */
 static void cavalry_go_refuse(cavalry_go_error_t *error, const char *function, const char *parameter, int64_t given) {
   error->code = CAVALRY_GO_ERR_NEGATIVE;
   cavalry_go_copy(error->function, sizeof error->function, function);

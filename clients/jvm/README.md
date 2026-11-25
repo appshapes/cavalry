@@ -364,13 +364,15 @@ that runs every call above beside three members.
   classes of `java.util.concurrent` and a lock taken on any receiver (`.lock(`,
   `.tryLock(`, `.acquire(`), a blocking wait (`wait`, `join`, `await`, `park`, `sleep`,
   `take`), a future or an executor, a thread started, `throw` and `new`. The one
-  exception built on the path is the `HandlerException` that `poll` throws after its
-  ABI call; a `throw` inside the `catch (Throwable)` that the compiler demands around
+  exception built on the path after an ABI call is the `HandlerException` that `poll`
+  throws once its ABI call has returned; a `throw` inside the `catch (Throwable)` that the compiler demands around
   `invokeExact`, a block that cannot run once the handle is bound, is not one; and
   `Header`'s guard, `ensure`, throws for a getter called outside its handler call,
   before the ABI is reached. The reader of a count, `Abi.negative`, throws for one
-  below zero: the lint allows its throw for the claim and the four polls, which it
-  names, on a line before the method's ABI call, and nowhere else (the next rule).
+  below zero: the lint allows a call of it by the claim and the four polls, which it
+  names, on a line before the method's ABI call (the next rule). A call of it by
+  another per-message method, by an upcall, or not before the ABI call is a finding.
+  The lint reads a method's own text for its ABI call, `Abi.cavalry_*`.
   `just lint` fails on any other, in the method's own body or in a method of the
   package it calls.
 - Never pass the ABI another count than the caller gave
@@ -388,7 +390,8 @@ that runs every call above beside three members.
   An `int` and a `long` that the ABI takes as an int32 or an int64, a stream id, a
   position, a timer's id, are held to their type by the compiler.
   `clients/generate-test.py` holds the test in each method, and the conformance
-  runner makes each refusal through the built library.
+  runner makes three of the refusals through the built library: a claim, a
+  subscription's poll and the image at an index.
 - Never throw for an `Offer` code: `tryClaim` and `offer` return the position after
   the frame or the code below zero (`Abi.PUBLICATION_NOT_CONNECTED`,
   `PUBLICATION_BACK_PRESSURED`, `PUBLICATION_ADMIN_ACTION`, `PUBLICATION_CLOSED`,

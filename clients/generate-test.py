@@ -2753,7 +2753,7 @@ const char *cavalry_errmsg(void) { return errmsg; }
 static int counted_calls;
 static size_t counted;
 
-/* The ABI's functions shim.c calls and this harness does not drive. */
+/* The ABI's functions shim.c calls whose answers this harness does not script. */
 int64_t cavalry_publication_try_claim(cavalry_publication_t *p, size_t n, cavalry_buffer_claim_t *c) { (void) p; (void) c; counted_calls++; counted = n; return 0; }
 int cavalry_buffer_claim_set_reserved_value(cavalry_buffer_claim_t *c, int64_t v) { (void) c; (void) v; return 0; }
 int64_t cavalry_buffer_claim_commit(cavalry_buffer_claim_t *c) { (void) c; return 0; }
@@ -3121,6 +3121,19 @@ class GoPackage(unittest.TestCase):
         self.assertEqual(gen_go.go_name("CAVALRY_ERR_NOT_UTF8"), "ErrNotUTF8")
         self.assertEqual(gen_go.go_name("CAVALRY_PUBLICATION_BACK_PRESSURED"), "PublicationBackPressured")
         self.assertEqual(gen_go.go_value("INT64_MAX"), "math.MaxInt64")
+
+    def test_no_error_code_of_the_abi_is_below_zero(self):
+        """`spec/c-abi.md`, "Error codes", promises that no code of the ABI is below zero,
+        so that a client can give a failure of its own a code the ABI never gives (ADR
+        0164): the Go client's is -1. The header's codes are held to it here, and the
+        ABI's own page says it."""
+        codes = {name: int(value) for name, value in self.header.defines if name.startswith("CAVALRY_ERR_")}
+        self.assertGreaterEqual(len(codes), 40)
+        self.assertEqual(sorted(name for name, code in codes.items() if code < 0), [])
+        self.assertEqual(codes["CAVALRY_ERR_NONE"], 0)
+        with open(os.path.join(gen.ROOT, "spec", "c-abi.md"), encoding="utf-8") as f:
+            self.assertIn("No code is below zero, in this version or a later one.", f.read().replace("\n", " "))
+        self.assertIn("#define CAVALRY_GO_ERR_NEGATIVE (-1)\n", gen_go.write_go(self.header)["shim.h"])
 
     def test_a_count_below_zero_is_refused_in_the_shim_before_the_abi_is_called(self):
         """Work item 465 (ADR 0164). The ABI takes a count as a size_t, and a Go int below
@@ -3916,9 +3929,9 @@ class JvmPackage(unittest.TestCase):
         and the image at an index test their int in line, as the method's first statement
         and before its `try`, and call `Abi.negative` for one below zero, which throws
         IllegalArgumentException with the parameter's name as the method names it, the
-        range, the value, what to pass and the README's section. No other cast of an int
-        to the ABI's size_t is in the package. The conformance runner makes each refusal
-        through the built library."""
+        range, the value, what to pass and the README's section. No other cast of a name
+        to a `long` for the ABI is in the package. The conformance runner makes three of
+        the refusals through the built library."""
         files = gen_jvm.write_jvm(self.header)
         source = lambda name: files[f"src/com/appshapes/cavalry/{name}.java"]  # noqa: E731
         abi = source("Abi")
@@ -3942,8 +3955,7 @@ class JvmPackage(unittest.TestCase):
             self.assertIn(f"(long) {parameter}", body, (name, signature))
             calls += 1
         casts = sorted(m for name in files if name.endswith(".java") for m in re.findall(r"\(long\) (\w+)[,)]", files[name]))
-        self.assertEqual([c for c in casts if c in ("length", "fragmentLimit", "index")],
-                         ["fragmentLimit"] * 8 + ["index", "length"])
+        self.assertEqual(casts, ["fragmentLimit"] * 8 + ["index", "length"])
         self.assertEqual(sum(files[name].count("Abi.negative(") for name in files if name.endswith(".java")), calls)
         with open(os.path.join(gen.ROOT, "clients", "jvm", "README.md"), encoding="utf-8") as f:
             slugs = {re.sub(r"[^a-z0-9 -]", "", line.lstrip("#").strip().lower()).replace(" ", "-")
@@ -4285,9 +4297,9 @@ class DotnetPackage(unittest.TestCase):
         polls and the image at an index test their int in line, as the member's first
         statement, and call `Abi.Negative` for one below zero, which throws
         ArgumentOutOfRangeException for the parameter as the member names it, with the
-        range, the value, what to pass and the README's section. No other cast of an int
-        to nuint for a caller's count is in the package. The conformance runner makes each
-        refusal through the built library."""
+        range, the value, what to pass and the README's section. No other cast of a name
+        to `nuint` is in the package. The conformance runner makes three of the refusals
+        through the built library."""
         files = gen_dotnet.write_dotnet(self.header)
         abi = files["Abi.cs"]
         reader = abi.split("    internal static void Negative(string name, int value)\n    {\n", 1)[1].split("\n    }\n", 1)[0]
@@ -4310,8 +4322,7 @@ class DotnetPackage(unittest.TestCase):
             self.assertIn(f"(nuint) {parameter}", body, (name, signature))
             calls += 1
         casts = sorted(m for name in files if name.endswith(".cs") for m in re.findall(r"\(nuint\) (\w+)[,)]", files[name]))
-        self.assertEqual([c for c in casts if c in ("length", "fragmentLimit", "index")],
-                         ["fragmentLimit"] * 8 + ["index", "length"])
+        self.assertEqual(casts, ["fragmentLimit"] * 8 + ["index", "length"])
         self.assertEqual(sum(files[name].count("Abi.Negative(") for name in files if name.endswith(".cs")), calls)
         with open(os.path.join(gen.ROOT, "clients", "dotnet", "README.md"), encoding="utf-8") as f:
             slugs = {re.sub(r"[^a-z0-9 -]", "", line.lstrip("#").strip().lower()).replace(" ", "-")

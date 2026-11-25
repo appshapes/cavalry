@@ -69,8 +69,8 @@ the same tokenizer, the forms are `synchronized`, as a modifier or a block, the 
 `java.util.concurrent` and a lock taken on any receiver, `.lock(`, `.tryLock(` or
 `.acquire(`, a blocking wait, `wait`, `join`, `await`, `park`, `sleep` or `take`, a future
 or an executor, a thread started, `throw`, building an exception, and `new`, Java's
-allocation; the one exception built on the per-message path is the `HandlerException`
-that `poll` throws after its ABI call; the compiler demands a `catch (Throwable)` around
+allocation; the one exception built on the per-message path after an ABI call is the
+`HandlerException` that `poll` throws once its ABI call has returned; the compiler demands a `catch (Throwable)` around
 every `invokeExact`, a block that cannot run once the handle is bound, so what that block
 throws is not a raise on the path; and `Header.ensure` is the guard that throws for a
 header read outside its handler call, before the ABI is reached, as the Node addon's
@@ -85,8 +85,8 @@ For C#, read from the files of `clients/dotnet` by the same tokenizer, the forms
 `System.Threading`, `async`, `await`, `Task`, `ValueTask`, `.Wait(`, `.Result`,
 `Thread.Sleep`, a thread started, `throw`, building an exception, `new`, C#'s allocation,
 except a `Span` or `ReadOnlySpan` made over bytes the ABI handed over, which is a struct on
-the stack, and an interpolated string; the one exception built on the per-message path is
-the `HandlerException` that `Poll` throws after its ABI call, and `Header.Ensure` is the
+the stack, and an interpolated string; the one exception built on the per-message path
+after an ABI call is the `HandlerException` that `Poll` throws once its call has returned, and `Header.Ensure` is the
 guard that throws for a header read outside its handler call, before the ABI is reached.
 `Abi.Negative` is the reader of a count below zero, allowed and held as the JVM client's.
 The Go client refuses such a count in `shim.c`, with no panic, so its rules have no reader.
@@ -1554,8 +1554,8 @@ def jvm_findings(language: str, path: str, rules: dict) -> list[str]:
                 findings.extend(typed_reader_findings(module, where, name, at, what))
             else:
                 for k, how in module.reach(what).items():
-                    if kind == "call-allowed" and k == "raise" and what not in readers:
-                        continue  # a reader is no helper of a poll's own raise: it refuses before the ABI
+                    if kind == "call-allowed" and k == "raise":
+                        continue
                     findings.append(f"{where} calls {what} at line {at}, and {how}: {WHY[k]}; {HELP}")
     return findings
 
@@ -1820,8 +1820,8 @@ def dotnet_findings(language: str, path: str, rules: dict) -> list[str]:
                 findings.extend(typed_reader_findings(module, where, name, at, what))
             else:
                 for k, how in module.reach(what).items():
-                    if kind == "call-allowed" and k == "raise" and what not in readers:
-                        continue  # a reader is no helper of a poll's own raise: it refuses before the ABI
+                    if kind == "call-allowed" and k == "raise":
+                        continue
                     findings.append(f"{where} calls {what} at line {at}, and {how}: {WHY[k]}; {HELP}")
     return findings
 
