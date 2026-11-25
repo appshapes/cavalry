@@ -74,7 +74,12 @@ that `poll` throws after its ABI call; the compiler demands a `catch (Throwable)
 every `invokeExact`, a block that cannot run once the handle is bound, so what that block
 throws is not a raise on the path; and `Header.ensure` is the guard that throws for a
 header read outside its handler call, before the ABI is reached, as the Node addon's
-argument readers throw for an argument the ABI cannot take.
+argument readers throw for an argument the ABI cannot take. One reader is allowed its
+throw as Python's readers are, and held as narrowly: `Abi.negative`, which refuses a count
+or a length below zero, since a negative `int` cast for the ABI's `size_t` is a count near
+2 ** 64 (ADR 0164). Only the methods the rule names beside it may call it, the claim and
+the four polls; each call of it is on a line before the method's first call of the ABI;
+and the reader is held to every other form.
 For C#, read from the files of `clients/dotnet` by the same tokenizer, the forms are
 `lock`, `Monitor`, `Mutex`, `Semaphore`, `SpinLock` and the other waits of
 `System.Threading`, `async`, `await`, `Task`, `ValueTask`, `.Wait(`, `.Result`,
@@ -83,6 +88,8 @@ except a `Span` or `ReadOnlySpan` made over bytes the ABI handed over, which is 
 the stack, and an interpolated string; the one exception built on the per-message path is
 the `HandlerException` that `Poll` throws after its ABI call, and `Header.Ensure` is the
 guard that throws for a header read outside its handler call, before the ABI is reached.
+`Abi.Negative` is the reader of a count below zero, allowed and held as the JVM client's.
+The Go client refuses such a count in `shim.c`, with no panic, so its rules have no reader.
 
 It fails on generated code under `clients/` in a language it has no rules for, and on a
 package in which it finds none of the per-message functions, so that a client cannot slip
