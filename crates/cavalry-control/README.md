@@ -17,8 +17,14 @@ is allowed here.
   it (ADR 0020).
 - Explains a driver from its directory: `doctor` opens the counters file and the command
   ring read-only, as their pages say a reader does, and every finding names the docs
-  anchor that explains it (`CLAUDE.md`, invariant 4). The checks of the configuration
-  keys are here: the filesystem under the driver directory (`driver-directory-backing`)
+  anchor that explains it (`CLAUDE.md`, invariant 4). The adds held behind an endpoint
+  that is closing, which take slots of the subscriptions and publications registries,
+  are a warning each on a running driver (`subscription.add_deferred_waiting`,
+  `publication.add_deferred_waiting`) that says what holds them and what to do, and,
+  when `driver.registry_full` is above 0, that a code 10 naming that registry may have
+  come while fewer were registered, though the counters do not say whether an add was
+  held when it came (ADR 0049, ADR 0153, ADR 0154; work item 452). The checks of the
+  configuration keys are here: the filesystem under the driver directory (`driver-directory-backing`)
   and under the log directory (`log-directory-backing`), on Linux the pid of the
   cluster member's consensus module that holds the log directory, read from
   `/proc/locks` without trying the lock, and for a member's directory with no holder
