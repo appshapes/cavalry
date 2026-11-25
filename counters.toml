@@ -1876,7 +1876,7 @@ name = "cluster.timers"
 kind = "gauge"
 scope = "client"
 doc = "How many timers one cluster member holds: each told to it by the service beside it in a schedule timer on the consensus module stream, and not since removed by a cancel timer, replaced or cleared. At most 2,048. What a member holds is no state it computes from the log: it is in no snapshot, a member that starts holds none, and the service sends every pending timer again each second (spec/cluster.md, The service, Timers; ADR 0151). key and label as cluster.elections."
-doctor = ""
+doctor = "Read it beside cluster.service_timers on the same host. 0 on a member that leads, while cluster.service_timers is above 0 or no service runs beside it, is a leader that was told of no timer: timers wait while it leads. Check that the service beside this member runs and reads its log. Above cluster.service_timers is timers the member was sent no cancel for, which it keeps until their places are needed, and nothing to act on."
 
 [[counter]]
 id = 194
@@ -1884,7 +1884,7 @@ name = "cluster.timer_events"
 kind = "counter"
 scope = "client"
 doc = "Timer events one cluster member appended while it led with its election closed, each for a timer it held whose deadline its wall clock had reached, at most 10 in a duty cycle. The member keeps the timer, marked, and appends no second event for it until a schedule timer names it again (spec/cluster.md, The service, Timers, The leader's timer events; ADR 0151). key and label as cluster.elections."
-doctor = ""
+doctor = "Read it beside cluster.service_timer_events_passed_over on the same host. Both rising together is a leader that appends events its service passes over: its service is more than a second behind its log, or a second process of the program tells this member what it read later. Nothing is handed to a program twice. Check what holds the service's reading back."
 
 [[counter]]
 id = 195
@@ -1900,7 +1900,31 @@ name = "cluster.timers_cleared"
 kind = "counter"
 scope = "client"
 doc = "Schedule timers at which one cluster member removed every timer it held: its table held 2,048 with no timer in it whose event the member had appended, so that it held more than its service has pending and could not tell which. It kept the timer it was sent, and its service sends the pending ones again within a second (spec/cluster.md, The service, Timers, The member's timers; ADR 0151). key and label as cluster.elections."
-doctor = "This member's table of timers was full, 2,048, with no timer in it whose event the member had appended: more than the service beside it can have pending, so some of them pending nowhere. It removed them all and kept the one it was sent. No timer is lost: a service sends every pending timer again each second (spec/cluster.md, The service, Timers), and a timer may be late by that much. A count that keeps rising is a service whose cancels do not reach this member: check that the service beside it runs and reads its log."
+doctor = "This member's table of timers was full, 2,048, with no timer in it whose event the member had appended: more than the service beside it can have pending, so some of them pending nowhere. It removed them all and kept the one it was sent. No timer is lost: a service sends every pending timer again each second (spec/cluster.md, The service, Timers), and a timer may be late by that much. A count that keeps rising is a service whose cancels do not reach this member: check that the service beside it runs and reads its log, and read cluster.service_timer_cancels_dropped on this host."
+
+[[counter]]
+id = 197
+name = "cluster.service_timers"
+kind = "gauge"
+scope = "client"
+doc = "How many timers are pending in the service beside one cluster member: scheduled by its program while it took an entry, and not since cancelled or handed over. At most 1,024, and a schedule of another id beyond them is refused to the program. It is a function of the log, so it is the same beside every member at the same position. The service adds the counter, with its member's id as the key and in the label, when it adds its other counters (spec/cluster.md, Snapshots, A service's snapshot)."
+doctor = "1,024 is the bound: the program's next schedule of a new id is refused. A program with more deadlines than that keeps them in its own state and schedules one timer for the earliest."
+
+[[counter]]
+id = 198
+name = "cluster.service_timer_events_passed_over"
+kind = "counter"
+scope = "client"
+doc = "Timer events the service beside one cluster member read and did not hand to its program: the timer was not pending, or was pending with a deadline after the event's timestamp. Every service passes the same events over (spec/cluster.md, The service, Timers, A timer event; ADR 0151). The service adds the counter, with its member's id as the key and in the label, when it adds its other counters (spec/cluster.md, Snapshots, A service's snapshot)."
+doctor = "The log holds timer events that no program was handed, each 64 bytes. A few after a change of leader or a start are the rule at work. A count that rises steadily is a leader whose service reads behind its log, or two processes of the program beside one member: read cluster.timer_events on the leader's host."
+
+[[counter]]
+id = 199
+name = "cluster.service_timer_cancels_dropped"
+kind = "counter"
+scope = "client"
+doc = "Cancel timers the service beside one cluster member never sent: the consensus module stream took none while 1,024 waited, and the oldest was dropped for the next. The member keeps that timer until it appends an event for it, which every service passes over, or needs its place (spec/cluster.md, The service, Timers, What a service tells its member; ADR 0151). The service adds the counter, with its member's id as the key and in the label, when it adds its other counters (spec/cluster.md, Snapshots, A service's snapshot)."
+doctor = "The service beside this member could not tell it of cancels for long enough to hold 1,024: the member is stopped or does not read its consensus module stream. No timer is handed to a program wrongly. Check that the member runs."
 
 # A cluster member's role (spec/cluster.md, "Roles and the election"; ADR 0052, feature
 # 3). A member is a candidate (ADR 0077, ADR 0081) from its nomination until it

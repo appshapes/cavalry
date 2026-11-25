@@ -171,7 +171,11 @@ fn values_of(committed: &Committed<'_>) -> cavalry_cluster_entry_values_t {
         // The poll ends after it, and the program gives its state once the poll has
         // returned (ADR 0131, ADR 0146).
         Entry::Snapshot => (CAVALRY_CLUSTER_ENTRY_SNAPSHOT, -1, -1, false),
-        Entry::Other => (CAVALRY_CLUSTER_ENTRY_OTHER, -1, -1, false),
+        // A timer that the program scheduled: no program behind this version of
+        // the C ABI can schedule one, so none is handed over as such, and every
+        // timer event reaches here as `Other`. The version that gives the calls
+        // names the entry (ADR 0151).
+        Entry::Timer { .. } | Entry::Other => (CAVALRY_CLUSTER_ENTRY_OTHER, -1, -1, false),
     };
     cavalry_cluster_entry_values_t {
         position: committed.position,
@@ -237,7 +241,12 @@ pub unsafe extern "C" fn cavalry_cluster_service(
     }
     // SAFETY: `client` is non-null, checked above, a live handle used from one thread
     // at a time ("Threads"), and held by no poll, checked above.
-    let made = unsafe { cavalry_mut(client) }.cluster_service();
+    let mut made = unsafe { cavalry_mut(client) }.cluster_service();
+    // A program behind this version of the C ABI has no call that schedules a
+    // timer, and the page says a timer event is an entry of no kind it knows
+    // (`spec/c-abi.md`, "Codes"): it is handed every one as `_OTHER`, as before
+    // the service's library had timers (ADR 0151).
+    made.hand_passed_over_timer_events_as_other();
     // SAFETY: `service` is non-null and writable.
     unsafe {
         *service = handle::give(cavalry_cluster_service_t {

@@ -57,10 +57,10 @@ use cavalry_shm::counters::generated::{
     CLUSTER_LOG_REPLICATIONS_UNAVAILABLE, CLUSTER_MESSAGES_REJECTED, CLUSTER_PROTOCOL_VERSION,
     CLUSTER_REPLIES_STALE, CLUSTER_ROLE, CLUSTER_SERVICE_ACKS_REJECTED,
     CLUSTER_SERVICE_SNAPSHOTS_FAILED, CLUSTER_SERVICE_SNAPSHOTS_PASSED_OVER,
-    CLUSTER_SNAPSHOTS_FAILED, CLUSTER_SNAPSHOTS_PASSED_OVER, CLUSTER_STANDBY,
-    CLUSTER_STANDBY_VOTE_REQUESTS, CLUSTER_TIMERS_CLEARED, CLUSTER_TRUNCATION_OWED,
-    CLUSTER_TRUNCATIONS_FAULTED, CLUSTER_TRUNCATIONS_REFUSED, CLUSTER_VOTE_FLOOR, CLUSTER_VOTERS,
-    CLUSTER_VOTES_WITHHELD,
+    CLUSTER_SERVICE_TIMER_CANCELS_DROPPED, CLUSTER_SERVICE_TIMERS, CLUSTER_SNAPSHOTS_FAILED,
+    CLUSTER_SNAPSHOTS_PASSED_OVER, CLUSTER_STANDBY, CLUSTER_STANDBY_VOTE_REQUESTS, CLUSTER_TIMERS,
+    CLUSTER_TIMERS_CLEARED, CLUSTER_TRUNCATION_OWED, CLUSTER_TRUNCATIONS_FAULTED,
+    CLUSTER_TRUNCATIONS_REFUSED, CLUSTER_VOTE_FLOOR, CLUSTER_VOTERS, CLUSTER_VOTES_WITHHELD,
 };
 use cavalry_shm::counters::generated::{
     DRIVER_REGISTRY_FULL, PUBLICATION_ADD_DEFERRED_WAITING, SUBSCRIPTION_ADD_DEFERRED_WAITING,
@@ -1168,9 +1168,11 @@ const DOC_SNAPSHOT: &str = "docs/how-to/ask-for-a-snapshot.md#when-it-does-not-w
 /// log is still empty and it has no leader, since the core counts it only then and the
 /// count does not fall ([`cluster_checks`]). The last is a truncation of the member's
 /// log whose command or write faulted, which the member owed until one finished (ADR
-/// 0148). After it, a member that removed every timer it held: its table was full
-/// with none marked, so some of them were pending nowhere (ADR 0151).
-const MEMBER_COUNTS: [CounterId; 16] = [
+/// 0148). After it, two of a service's timers (ADR 0151): a member that removed
+/// every timer it held, its table full with none marked, so that some of them were
+/// pending nowhere, and a cancel that the service beside it dropped, which it
+/// counts under its member's id.
+const MEMBER_COUNTS: [CounterId; 17] = [
     CLUSTER_MESSAGES_REJECTED,
     CLUSTER_LEADER_HEARTBEAT_TIMEOUTS,
     CLUSTER_LOG_IMAGES_LOST,
@@ -1187,6 +1189,7 @@ const MEMBER_COUNTS: [CounterId; 16] = [
     CLUSTER_LEADERS_WITHHELD,
     CLUSTER_TRUNCATIONS_FAULTED,
     CLUSTER_TIMERS_CLEARED,
+    CLUSTER_SERVICE_TIMER_CANCELS_DROPPED,
 ];
 
 /// Where a cluster session's findings are explained.
@@ -1247,6 +1250,14 @@ struct MemberCounters {
     /// for none (ADR 0148); `None` while the counters file holds no such record, as
     /// for a member of a build older than the counter.
     truncation_owed: Option<i64>,
+    /// `cluster.timers`: how many timers the member holds, each told to it by the
+    /// service beside it (ADR 0151); `None` while the counters file holds no such
+    /// record, as for a member of a build that holds none.
+    timers: Option<i64>,
+    /// `cluster.service_timers`: how many timers are pending in the service beside
+    /// the member, which the service stores under its member's id; `None` while no
+    /// service beside the member has added it.
+    service_timers: Option<i64>,
     /// The highest id among the control toggles beside the member that ask for a
     /// snapshot, each a counter that a `cavalry snapshot` adds and removes
     /// (`spec/cluster.md`, "The control toggle"; ADR 0147); `None` while there is
@@ -1654,6 +1665,10 @@ fn cluster_checks(
             member.vote_floor = Some(value);
         } else if type_id == CLUSTER_TRUNCATION_OWED.0 {
             member.truncation_owed = Some(value);
+        } else if type_id == CLUSTER_TIMERS.0 {
+            member.timers = Some(value);
+        } else if type_id == CLUSTER_SERVICE_TIMERS.0 {
+            member.service_timers = Some(value);
         } else if type_id == CLUSTER_CONTROL_TOGGLE_TAKEN.0 {
             member.toggle_taken = Some(value);
         } else if let Some(count) = MEMBER_COUNTS
@@ -2209,6 +2224,47 @@ fn member_findings(
             ),
             doc: DOC_CLUSTER,
         });
+    }
+    // A leader that holds no timer appends no timer event, so an application's timers
+    // wait while it leads (`spec/cluster.md`, "The service", "Timers"; ADR 0151). A
+    // service that has timers pending sends each to its member again every second, so
+    // a leader with none beside a service with some is a member that is not told, or
+    // does not read what it is told: the gauge's text, with both counts. A leader
+    // with no service beside it that has added the service's gauge may have an
+    // application that schedules none, which nothing in the counters file tells from
+    // a service that does not run: a note, which says what to check and for whom.
+    if leads
+        && closed
+        && member.timers == Some(0)
+        && let Some(def) = COUNTERS.iter().find(|def| def.id == CLUSTER_TIMERS)
+    {
+        match member.service_timers {
+            Some(pending) if pending > 0 => findings.push(Finding {
+                check: def.name,
+                level: Level::Warn,
+                message: format!(
+                    "the leader, member {id}, holds no timer, its {} is 0, and the service \
+                     beside it has {pending} pending, its cluster.service_timers: where a \
+                     second run of doctor says the same, the member is not told of them, \
+                     and they wait while it leads. {}",
+                    def.name, def.doctor
+                ),
+                doc: DOC_CLUSTER,
+            }),
+            Some(_) => {}
+            None => findings.push(Finding {
+                check: "cluster-leader-told-of-no-timer",
+                level: Level::Note,
+                message: format!(
+                    "the leader, member {id}, holds no timer, and no service beside it has \
+                     added cluster.service_timers: where the application schedules timers, \
+                     they wait while this member leads, so check that the service beside it \
+                     runs and reads its log. Where the application schedules none, there is \
+                     nothing to act on"
+                ),
+                doc: DOC_CLUSTER,
+            }),
+        }
     }
     for (counter, value) in MEMBER_COUNTS.iter().zip(member.counts) {
         let Some(def) = COUNTERS.iter().find(|def| def.id == *counter) else {
@@ -7802,6 +7858,137 @@ mod tests {
         );
     }
 
+    /// A leader that holds no timer is named when the service beside it has timers
+    /// pending, with both counts and what to check; one beside which no service has
+    /// added its gauge is told of in a note; a leader that holds timers, a leader
+    /// beside a service with none pending, a follower and a member of a build
+    /// without the gauge are told of in nothing (ADR 0151). A member that removed
+    /// every timer it held, and a service that dropped a cancel, are reported with
+    /// what they mean.
+    #[test]
+    fn a_leader_that_was_told_of_no_timer_is_named() {
+        let leader = |more: &[(CounterId, i64)]| {
+            let mut counters = vec![
+                (CLUSTER_ROLE, 2),
+                (CLUSTER_ELECTION_STATE, 17),
+                (CLUSTER_LEADERSHIP_TERM_ID, 3),
+                (CLUSTER_LEADER_MEMBER_ID, 1),
+                (CLUSTER_APPEND_POSITION, 4096),
+                (CLUSTER_COMMIT_POSITION, 4096),
+            ];
+            counters.extend_from_slice(more);
+            counters
+        };
+        let checks = |name: &str, counters: &[(CounterId, i64)]| {
+            let (_, findings) = cluster_findings(name, 1, counters);
+            findings
+        };
+        // The service has timers and the leader none: a warning with both counts.
+        let findings = checks(
+            "timers-untold",
+            &leader(&[(CLUSTER_TIMERS, 0), (CLUSTER_SERVICE_TIMERS, 3)]),
+        );
+        let untold = findings
+            .iter()
+            .find(|finding| finding.check == "cluster.timers")
+            .unwrap_or_else(|| panic!("{findings:?}"));
+        assert_eq!(untold.level, Level::Warn);
+        assert!(
+            untold.message.starts_with(
+                "the leader, member 1, holds no timer, its cluster.timers is 0, and the \
+                 service beside it has 3 pending, its cluster.service_timers: where a second \
+                 run of doctor says the same, the member is not told of them, and they wait \
+                 while it leads. Read it beside cluster.service_timers on the same host."
+            ),
+            "{}",
+            untold.message
+        );
+        assert_eq!(untold.doc, DOC_CLUSTER);
+        // No service beside the leader has added its gauge: a note.
+        let findings = checks("timers-no-service", &leader(&[(CLUSTER_TIMERS, 0)]));
+        let note = findings
+            .iter()
+            .find(|finding| finding.check == "cluster-leader-told-of-no-timer")
+            .unwrap_or_else(|| panic!("{findings:?}"));
+        assert_eq!(note.level, Level::Note);
+        assert!(
+            note.message.starts_with(
+                "the leader, member 1, holds no timer, and no service beside it has added \
+                 cluster.service_timers: where the application schedules timers, they wait \
+                 while this member leads"
+            ),
+            "{}",
+            note.message
+        );
+        // Nothing of timers for: a leader that holds some, a leader beside a service
+        // with none pending, a member of a build without the gauge, and a follower.
+        let follower = [
+            (CLUSTER_ROLE, 0),
+            (CLUSTER_ELECTION_STATE, 17),
+            (CLUSTER_LEADERSHIP_TERM_ID, 3),
+            (CLUSTER_LEADER_MEMBER_ID, 2),
+            (CLUSTER_APPEND_POSITION, 4096),
+            (CLUSTER_COMMIT_POSITION, 4096),
+            (CLUSTER_TIMERS, 0),
+            (CLUSTER_SERVICE_TIMERS, 3),
+        ];
+        for (name, counters) in [
+            (
+                "timers-held",
+                leader(&[(CLUSTER_TIMERS, 3), (CLUSTER_SERVICE_TIMERS, 3)]),
+            ),
+            (
+                "timers-none-pending",
+                leader(&[(CLUSTER_TIMERS, 0), (CLUSTER_SERVICE_TIMERS, 0)]),
+            ),
+            ("timers-older-build", leader(&[(CLUSTER_SERVICE_TIMERS, 3)])),
+            ("timers-follower", follower.to_vec()),
+        ] {
+            let findings = checks(name, &counters);
+            assert!(
+                !findings
+                    .iter()
+                    .any(|finding| finding.check == "cluster.timers"
+                        || finding.check == "cluster-leader-told-of-no-timer"),
+                "{name}: {findings:?}"
+            );
+        }
+        // A table that the member cleared, and a cancel its service dropped.
+        let findings = checks(
+            "timers-counts",
+            &leader(&[
+                (CLUSTER_TIMERS, 2),
+                (CLUSTER_SERVICE_TIMERS, 2),
+                (CLUSTER_TIMERS_CLEARED, 1),
+                (CLUSTER_SERVICE_TIMER_CANCELS_DROPPED, 4),
+            ]),
+        );
+        let cleared = findings
+            .iter()
+            .find(|finding| finding.check == "cluster.timers_cleared")
+            .unwrap_or_else(|| panic!("{findings:?}"));
+        assert!(
+            cleared.message.starts_with(
+                "member 1's cluster.timers_cleared is 1: This member's table of timers was \
+                 full, 2,048, with no timer in it whose event the member had appended"
+            ),
+            "{}",
+            cleared.message
+        );
+        let dropped = findings
+            .iter()
+            .find(|finding| finding.check == "cluster.service_timer_cancels_dropped")
+            .unwrap_or_else(|| panic!("{findings:?}"));
+        assert!(
+            dropped.message.starts_with(
+                "member 1's cluster.service_timer_cancels_dropped is 4: The service beside \
+                 this member could not tell it of cancels"
+            ),
+            "{}",
+            dropped.message
+        );
+    }
+
     /// A member that removed every timer it held, its table full with no timer
     /// marked, is reported with what that means, what it costs and what to check
     /// (ADR 0151); a member that never did is told of in nothing.
@@ -8363,7 +8550,7 @@ mod tests {
 
         // A follower that follows: the note alone, with who it is and what it knows.
         let (checks, findings) = cluster_findings("cluster-follower", 1, &follower);
-        assert_eq!(checks, 25);
+        assert_eq!(checks, 26);
         assert_eq!(findings.len(), 1, "{findings:?}");
         assert_eq!(findings[0].check, "cluster-member");
         assert_eq!(findings[0].level, Level::Note);
@@ -8540,7 +8727,7 @@ mod tests {
         let dir = TestDir::new("cluster-session-member");
         let reader = session_file(&dir, 7, 2, Some((1, &follower)));
         let mut findings = Vec::new();
-        assert_eq!(cluster_checks(&reader, true, None, &mut findings), 26);
+        assert_eq!(cluster_checks(&reader, true, None, &mut findings), 27);
         let found: Vec<&str> = findings.iter().map(|finding| finding.check).collect();
         assert_eq!(
             found,
